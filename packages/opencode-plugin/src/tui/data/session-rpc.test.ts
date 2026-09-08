@@ -118,4 +118,39 @@ describe("TUI context RPC data", () => {
         expect(replayed.memoryState).toBe("available");
         expect(replayed.projectIdentity).toBe("git:proj");
     });
+
+    test("sticky snapshots are scoped by directory as well as session", async () => {
+        const dataHome = makeDataHome();
+        const sessionId = "ses_two_roots";
+        const rootA = "/repo-root-a";
+        const rootB = "/repo-root-b";
+        let responseA: Record<string, unknown> = {
+            ...snapshot(sessionId, 100),
+            projectIdentity: "git:a",
+        } as unknown as Record<string, unknown>;
+        let responseB: Record<string, unknown> = { error: "database busy" };
+        await startServer(dataHome, rootA, () => responseA);
+        await startServer(dataHome, rootB, () => responseB);
+
+        initRpcClient(rootA);
+        expect((await loadSidebarSnapshot(sessionId, rootA)).projectIdentity).toBe("git:a");
+
+        // An error under the second root must not replay the first root's snapshot.
+        closeRpc();
+        initRpcClient(rootB);
+        const fromB = await loadSidebarSnapshot(sessionId, rootB);
+        expect(fromB.projectIdentity).toBeNull();
+        expect(fromB.inputTokens).toBe(0);
+
+        // A success under the second root must not overwrite the first root's fallback.
+        responseB = { ...snapshot(sessionId, 5), projectIdentity: "git:b" } as unknown as Record<
+            string,
+            unknown
+        >;
+        expect((await loadSidebarSnapshot(sessionId, rootB)).projectIdentity).toBe("git:b");
+        closeRpc();
+        initRpcClient(rootA);
+        responseA = { error: "database busy" };
+        expect((await loadSidebarSnapshot(sessionId, rootA)).projectIdentity).toBe("git:a");
+    });
 });

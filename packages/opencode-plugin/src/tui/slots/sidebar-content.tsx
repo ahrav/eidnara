@@ -4,7 +4,7 @@ import type { TuiPluginApi, TuiSlotPlugin, TuiThemeCurrent } from "@opencode-ai/
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import packageJson from "../../../package.json";
 import { formatThresholdPercent } from "../../shared/format-threshold";
-import { formatMemoryCount } from "../../shared/rpc-types";
+import { formatMemoryCount, formatMemoryStatus } from "../../shared/rpc-types";
 import { formatTailHygiene } from "../../shared/tail-hygiene-status";
 import {
     computeEffectiveOrder,
@@ -136,7 +136,6 @@ const COLORS = {
 };
 
 interface TokenSegment {
-    key: string;
     tokens: number;
     color: string;
     label: string;
@@ -156,7 +155,6 @@ const TokenBreakdown = (props: {
 
         if (s.systemPromptTokens > 0) {
             result.push({
-                key: "sys",
                 tokens: s.systemPromptTokens,
                 color: COLORS.system,
                 label: "System",
@@ -166,7 +164,6 @@ const TokenBreakdown = (props: {
         // Docs represents the injected `<project-docs>` block.
         if (s.docsTokens > 0) {
             result.push({
-                key: "docs",
                 tokens: s.docsTokens,
                 color: COLORS.docs,
                 label: "Docs",
@@ -176,7 +173,6 @@ const TokenBreakdown = (props: {
         // Compartments (blue)
         if (s.compartmentTokens > 0) {
             result.push({
-                key: "comp",
                 tokens: s.compartmentTokens,
                 color: COLORS.compartments,
                 label: "Compartments",
@@ -186,7 +182,6 @@ const TokenBreakdown = (props: {
         // Facts (yellow/orange)
         if (s.factTokens > 0) {
             result.push({
-                key: "fact",
                 tokens: s.factTokens,
                 color: COLORS.facts,
                 label: "Facts",
@@ -196,7 +191,6 @@ const TokenBreakdown = (props: {
         // Memories (green)
         if (s.memoryTokens > 0) {
             result.push({
-                key: "mem",
                 tokens: s.memoryTokens,
                 color: COLORS.memories,
                 label: "Memories",
@@ -206,7 +200,6 @@ const TokenBreakdown = (props: {
         // The injected `<user-profile>` block contains promoted user memories.
         if (s.profileTokens > 0) {
             result.push({
-                key: "profile",
                 tokens: s.profileTokens,
                 color: COLORS.profile,
                 label: "User Profile",
@@ -218,7 +211,6 @@ const TokenBreakdown = (props: {
         //
         // The `Conversation` row remains visible when its token count is zero.
         result.push({
-            key: "conv",
             tokens: s.conversationTokens,
             color: COLORS.conversation,
             label: "Conversation*",
@@ -227,7 +219,6 @@ const TokenBreakdown = (props: {
         // `Tool Calls` includes `tool_use`, `tool_result`, `tool`, and `tool-invocation` message parts.
         if (s.toolCallTokens > 0) {
             result.push({
-                key: "tool-calls",
                 tokens: s.toolCallTokens,
                 color: COLORS.toolCalls,
                 label: "Tool Calls",
@@ -240,7 +231,6 @@ const TokenBreakdown = (props: {
         // `toolDefinitionTokens` remains zero until the first turn measures the active agent's tool set.
         if (s.toolDefinitionTokens > 0) {
             result.push({
-                key: "tool-defs",
                 tokens: s.toolDefinitionTokens,
                 color: COLORS.toolDefs,
                 label: "Tool Defs",
@@ -266,7 +256,6 @@ const TokenBreakdown = (props: {
             <box width="100%" flexDirection="row" height={1}>
                 {barSegments().map((seg) => (
                     <box
-                        key={seg.key}
                         flexGrow={Math.max(1, seg.tokens)}
                         flexBasis={0}
                         height={1}
@@ -281,12 +270,7 @@ const TokenBreakdown = (props: {
                     {segments().map((seg) => {
                         const pct = ((seg.tokens / totalTokens()) * 100).toFixed(0);
                         return (
-                            <box
-                                key={seg.key}
-                                width="100%"
-                                flexDirection="row"
-                                justifyContent="space-between"
-                            >
+                            <box width="100%" flexDirection="row" justifyContent="space-between">
                                 <text fg={seg.color}>{seg.label}</text>
                                 <text fg={props.theme.textMuted}>
                                     {compactTokens(seg.tokens)} ({pct}%)
@@ -868,11 +852,7 @@ const SidebarContent = (props: {
                                     <StatRow
                                         theme={props.theme}
                                         label="Memories"
-                                        value={
-                                            s()?.memoryState && s()?.memoryState !== "available"
-                                                ? String(s()!.memoryState)
-                                                : formatMemoryCount(s() ?? { memoryCount: 0 })
-                                        }
+                                        value={formatMemoryStatus(s()!)}
                                         accent
                                     />
                                     {(s()?.memoryBlockCount ?? 0) > 0 && (
@@ -890,10 +870,11 @@ const SidebarContent = (props: {
 
                     {/* Queue & Status */}
                     {sections().status &&
-                        (compactionOff() ||
-                            (s()?.pendingOpsCount ?? 0) > 0 ||
-                            (s()?.sessionNoteCount ?? 0) > 0 ||
-                            (s()?.readySmartNoteCount ?? 0) > 0) && (
+                        (compactionOff()
+                            ? compactionOffSidebarRows(s()!).some((row) => row.label !== "Memories")
+                            : (s()?.pendingOpsCount ?? 0) > 0 ||
+                              (s()?.sessionNoteCount ?? 0) > 0 ||
+                              (s()?.readySmartNoteCount ?? 0) > 0) && (
                             <>
                                 <SectionHeader theme={props.theme} title="Status" />
                                 {compactionOff() ? (

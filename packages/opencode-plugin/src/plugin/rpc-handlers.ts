@@ -24,6 +24,7 @@ import {
 } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
 import { calibrateBuckets, resolveModelCalibration } from "../hooks/context/tokenizer-calibration";
+import { BoundedSessionMap } from "../shared/bounded-session-map";
 import {
     disabled,
     isServedMemoryDecisionRow,
@@ -40,12 +41,12 @@ import {
 } from "../shared/tail-hygiene-status";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 
-// Each poll processes only assistant rows newer than its watermark because the long-lived RPC server retains each session's carry across polls.
-// A restart discards the in-memory carry; the next poll re-reads the session's assistant rows from the start.
-const workMetricsCarryBySession = new Map<string, WorkMetricsCarry>();
 const RUST_STATUS_CACHE_TTL_MS = 2_000;
 /** Live entries per poll cache. Each open sidebar pane polls one `(session, directory)` pair, so the cap covers concurrent panes while bounding growth across sessions and projects. commentlint: allow(JUDGE) */
 const POLL_CACHE_MAX_ENTRIES = 32;
+// Each poll processes only assistant rows newer than its watermark because the long-lived RPC server retains each session's carry across polls.
+// A restart or an eviction discards the in-memory carry; the next poll re-reads the session's assistant rows from the start.
+const workMetricsCarryBySession = new BoundedSessionMap<WorkMetricsCarry>(POLL_CACHE_MAX_ENTRIES);
 
 /** Every `get` and `set` sweeps expired entries, and a full cache evicts its oldest entry before inserting, so a long-lived RPC server polling many sessions never accumulates dead snapshots. commentlint: allow(JUDGE) */
 export class BoundedTtlCache<V> {
