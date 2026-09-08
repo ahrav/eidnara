@@ -107,6 +107,32 @@ describe("resolveSessionDirectory", () => {
         expect(internalChildSessions.has("ses-restored-child")).toBe(true);
     });
 
+    it("catches a synchronous SDK throw and preserves the bounded metadata retry", async () => {
+        __sessionDirectoryTest.setRetryDelayMs(0);
+        let calls = 0;
+        const get = mock(() => {
+            calls++;
+            if (calls === 1) throw new Error("synchronous SDK failure");
+            return Promise.resolve({
+                data: { directory: "/from/sdk", parentID: "ses-parent" },
+            });
+        });
+        const subagentSessions = new Set<string>();
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+            sessionMetadataReadStateBySession: new Map<string, SessionMetadataReadState>(),
+            subagentSessions,
+        };
+
+        expect(await resolveSessionDirectory(deps, "ses-sync-throw")).toBe("/launch");
+        expect(await resolveSessionDirectory(deps, "ses-sync-throw")).toBe("/launch");
+
+        expect(get).toHaveBeenCalledTimes(2);
+        expect(subagentSessions.has("ses-sync-throw")).toBe(true);
+    });
+
     it("stops retrying metadata after the bounded second failure", async () => {
         __sessionDirectoryTest.setRetryDelayMs(0);
         const get = mock(async () => Promise.reject(new Error("still unavailable")));

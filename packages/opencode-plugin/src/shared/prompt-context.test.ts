@@ -122,4 +122,31 @@ describe("resolvePromptContext", () => {
 
         expect(await resolvePromptContext(client, "ses-1")).toBeNull();
     });
+
+    it("propagates message read failures instead of reporting an empty context", async () => {
+        const messages = mock(async () => {
+            throw new Error("message read failed");
+        });
+
+        await expect(
+            resolvePromptContext({ session: { messages } }, "ses-read-error"),
+        ).rejects.toThrow("message read failed");
+    });
+
+    it("propagates message read timeouts instead of reporting an empty context", async () => {
+        const originalSetTimeout = globalThis.setTimeout;
+        globalThis.setTimeout = ((handler: Parameters<typeof setTimeout>[0]) => {
+            if (typeof handler === "function") handler();
+            return 0 as never;
+        }) as typeof setTimeout;
+        try {
+            const messages = mock(() => new Promise<never>(() => {}));
+
+            await expect(
+                resolvePromptContext({ session: { messages } }, "ses-read-timeout"),
+            ).rejects.toThrow("prompt context read timed out");
+        } finally {
+            globalThis.setTimeout = originalSetTimeout;
+        }
+    });
 });

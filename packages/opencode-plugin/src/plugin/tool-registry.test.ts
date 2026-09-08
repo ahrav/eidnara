@@ -1,6 +1,9 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { EidnaraPluginConfig } from "../config";
 import { resetCtxReduceRegisteredGloballyForTest } from "../hooks/context/ctx-reduce-availability";
@@ -34,6 +37,13 @@ function registeredCatalogToolIds(): PromptSurfaceToolId[] {
 }
 
 const REGISTERED_TOOL_IDS = ["ctx_reduce", "ctx_search", "ctx_note", "ctx_memory"] as const;
+const A1_GUIDANCE_SECTION_HEADING = "## 1. System-prompt guidance section";
+const DAEMON_GUIDANCE_ASSETS = [
+    ["PRIMARY full (reduce=on)", "guidance_primary.txt"],
+    ["PRIMARY full (reduce=off)", "guidance_no_reduce.txt"],
+    ["PRIMARY light (reduce=on)", "guidance_light_primary.txt"],
+    ["PRIMARY light (reduce=off)", "guidance_light_no_reduce.txt"],
+] as const;
 
 function buildRegistry(
     config: Partial<EidnaraPluginConfig>,
@@ -152,6 +162,30 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
 });
 
 type GoldenTool = { description: string; parameters: Record<string, unknown> };
+type GoldenHashBaseline = { bytes: number; md5: string };
+
+function readA1GoldenGuidance(document: string): Record<string, string> {
+    const guidanceSection = document.slice(
+        a1GoldenSectionOffset(document, A1_GUIDANCE_SECTION_HEADING),
+        a1GoldenSectionOffset(document, A1_TOOL_SECTION_HEADING),
+    );
+    return Object.fromEntries(
+        [
+            ...guidanceSection.matchAll(
+                /^### (.+?): \d+ chars, ~\d+ tokens\n\n```markdown\n([\s\S]*?)\n```$/gm,
+            ),
+        ].map((match) => [match[1], match[2]]),
+    );
+}
+
+function readA1GoldenHashBaselines(document: string): Record<string, GoldenHashBaseline> {
+    const hashSection = document.slice(a1GoldenSectionOffset(document, A1_HASH_BASELINE_HEADING));
+    return Object.fromEntries(
+        [...hashSection.matchAll(/^\| ([^|]+?) \| (\d+) \| `([0-9a-f]{32})` \|$/gm)].map(
+            (match) => [match[1], { bytes: Number(match[2]), md5: match[3] }],
+        ),
+    );
+}
 
 function readA1GoldenTools(): Record<string, GoldenTool> {
     const document = readA1GoldenDocument();
@@ -198,6 +232,35 @@ function providerParameters(definition: ToolDefinition): Record<string, unknown>
         }),
     );
 }
+
+describe("A1 prompt-surface golden", () => {
+    it("matches current daemon guidance assets and their hash baselines", () => {
+        const document = readA1GoldenDocument();
+        const guidance = readA1GoldenGuidance(document);
+        const baselines = readA1GoldenHashBaselines(document);
+        const expectedVariants = DAEMON_GUIDANCE_ASSETS.map(([variant]) => variant);
+
+        expect(Object.keys(guidance)).toEqual(expectedVariants);
+        expect(Object.keys(baselines)).toEqual(expectedVariants);
+        for (const [variant, asset] of DAEMON_GUIDANCE_ASSETS) {
+            const source = readFileSync(
+                join(import.meta.dir, "../../../../crates/daemon/assets", asset),
+                "utf8",
+            );
+            expect(
+                source.endsWith("\n") && !source.endsWith("\n\n"),
+                `${asset} must end with exactly one source newline`,
+            ).toBe(true);
+            const composedGuidance = [source.slice(0, -1)].join("\n");
+
+            expect(guidance[variant]).toBe(composedGuidance);
+            expect(baselines[variant]).toEqual({
+                bytes: Buffer.byteLength(composedGuidance),
+                md5: createHash("md5").update(composedGuidance, "utf8").digest("hex"),
+            });
+        }
+    });
+});
 
 describe("createToolRegistry — prompt-surface registration", () => {
     it("links canonical prompt-surface IDs to light descriptions and registration", () => {

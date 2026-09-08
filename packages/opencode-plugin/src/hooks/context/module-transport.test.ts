@@ -428,6 +428,19 @@ describe("a local close wins over recovery", () => {
         expect(requests).toBe(0);
     });
 
+    test("reports a cached route for one session only", () => {
+        const instance = new HostModuleTransport("/tmp/unused-eidnara-host.json");
+        const transport = internals(instance);
+        const route = { channel: 9, epoch: 1 } as unknown as RouteHandle;
+        transport.routes.set("s\0/tmp", {
+            route,
+            generation: 0,
+        });
+
+        expect(instance.hasSessionRoute("s")).toBe(true);
+        expect(instance.hasSessionRoute("other")).toBe(false);
+    });
+
     test("a call queued behind the lane when the session closes does not send", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         let requests = 0;

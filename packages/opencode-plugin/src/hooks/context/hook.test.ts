@@ -269,6 +269,49 @@ describe("eidnara hook", () => {
         );
     });
 
+    it("classifies a restored child before forwarding its first todo snapshot", async () => {
+        useTempDataHome("hook-todo-restored-child-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        let postResolutionGate = false;
+        const hasSubagent = liveSessionState.subagentSessions.has.bind(
+            liveSessionState.subagentSessions,
+        );
+        liveSessionState.subagentSessions.has = mock((sessionId: string) => {
+            const result = hasSubagent(sessionId);
+            if (result) postResolutionGate = true;
+            return result;
+        });
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(async () => ({
+            data: { directory: "/other/repo", parentID: "ses-parent" },
+        }));
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-restored-todo-child",
+            args: { todos: [{ status: "pending", priority: "high", content: "Child task" }] },
+        });
+        for (let attempt = 0; attempt < 20 && !postResolutionGate; attempt += 1) {
+            await Bun.sleep(0);
+        }
+
+        expect(postResolutionGate).toBe(true);
+        expect(liveSessionState.subagentSessions.has("ses-restored-todo-child")).toBe(true);
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
+    });
+
     it("drops a detached todo snapshot whose session was deleted while it awaited the directory", async () => {
         useTempDataHome("hook-todo-deleted-race-");
         const fake = createFakeModuleClient();
@@ -306,6 +349,37 @@ describe("eidnara hook", () => {
         await Bun.sleep(0);
         await Bun.sleep(0);
 
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
+    });
+
+    it("skips a todo snapshot without a second directory read when the session is already deleted", async () => {
+        useTempDataHome("hook-todo-already-deleted-");
+        const fake = createFakeModuleClient();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                }),
+            ),
+        );
+        const sessionId = "ses-todo-already-deleted";
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        client.session.get.mockClear();
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: sessionId,
+            args: { todos: [{ status: "pending", priority: "high", content: "Too late" }] },
+        });
+        await Bun.sleep(0);
+
+        expect(client.session.get).toHaveBeenCalledTimes(1);
         expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
     });
 
@@ -566,6 +640,109 @@ describe("eidnara hook", () => {
             { system: ["third prompt"] },
         );
         expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
+    });
+
+    it("routes rust cleanup from the deleted event directory without an SDK read", async () => {
+        useTempDataHome("hook-session-deleted-route-");
+        const fake = createFakeModuleClient();
+        const client = createClientMock(undefined, "/wrong/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                }),
+            ),
+        );
+
+        await hook.event({
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: "ses-delete-route", directory: "/actual/repo" } },
+            },
+        });
+        await Bun.sleep(0);
+
+        expect(client.session.get).not.toHaveBeenCalled();
+        expect(fake.deleteSession).toHaveBeenCalledWith("ses-delete-route", "/actual/repo");
+    });
+
+    it("preserves an existing route pin when the deleted event reports another directory", async () => {
+        useTempDataHome("hook-session-deleted-pinned-route-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        liveSessionState.sessionDirectoryBySession.set("ses-delete-pinned", "/pinned/repo");
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook.event({
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: "ses-delete-pinned", directory: "/event/repo" } },
+            },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.deleteSession).toHaveBeenCalledWith("ses-delete-pinned", "/pinned/repo");
+    });
+
+    it("closes local route state without invoking daemon deletion in ts mode", async () => {
+        useTempDataHome("hook-session-deleted-ts-");
+        const fake = createFakeModuleClient();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    rustModeModuleClient: fake.client,
+                    config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "ts" },
+                }),
+            ),
+        );
+
+        await hook.event({
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: "ses-delete-ts", directory: "/actual/repo" } },
+            },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.deleteSession).not.toHaveBeenCalled();
+        expect(fake.closeSession).toHaveBeenCalledWith("ses-delete-ts");
+    });
+
+    it("deletes daemon state for a ts-mode session with an existing route", async () => {
+        useTempDataHome("hook-session-deleted-ts-route-");
+        const fake = createFakeModuleClient();
+        fake.client.hasSessionRoute = (sessionId) => sessionId === "ses-delete-ts-routed";
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    rustModeModuleClient: fake.client,
+                    config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "ts" },
+                }),
+            ),
+        );
+
+        await hook.event({
+            event: {
+                type: "session.deleted",
+                properties: {
+                    info: { id: "ses-delete-ts-routed", directory: "/actual/repo" },
+                },
+            },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.deleteSession).toHaveBeenCalledWith("ses-delete-ts-routed", "/actual/repo");
+        expect(fake.closeSession).toHaveBeenCalledWith("ses-delete-ts-routed");
     });
 
     it("forwards /ctx-flush to session.flush and throws the sentinel", async () => {
