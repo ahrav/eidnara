@@ -78,35 +78,44 @@ function memoryView(row: ReadRow): Record<string, unknown> {
 /** The marker a bounded field ends with, so an elided middle is visible in the tool text. */
 const CTX_MEMORY_TRUNCATION_MARKER = "… [truncated]";
 
-function boundedText(text: string): string {
-    if (Buffer.byteLength(text, "utf8") <= MAX_RENDER_FIELD_BYTES) return text;
-    return `${truncateUtf8Bytes(text, MAX_RENDER_FIELD_BYTES)}${CTX_MEMORY_TRUNCATION_MARKER}`;
+function boundedText(text: string, fieldBytes: number): string {
+    if (Buffer.byteLength(text, "utf8") <= fieldBytes) return text;
+    return `${truncateUtf8Bytes(text, fieldBytes)}${CTX_MEMORY_TRUNCATION_MARKER}`;
 }
 
-/** Bounds every string the view serializes — content, rationale, and parsed anti-memory fields — to the shared per-field byte cap. */
-function boundedMemoryView(row: ReadRow): Record<string, unknown> {
+function boundedMemoryView(row: ReadRow, fieldBytes: number): Record<string, unknown> {
     const view = memoryView(row);
     const bounded: Record<string, unknown> = { ...view };
-    if (typeof view.content === "string") bounded.content = boundedText(view.content);
-    if (typeof view.rationale === "string") bounded.rationale = boundedText(view.rationale);
+    if (typeof view.content === "string") bounded.content = boundedText(view.content, fieldBytes);
+    if (typeof view.rationale === "string") {
+        bounded.rationale = boundedText(view.rationale, fieldBytes);
+    }
     if (view.antiMemory !== undefined) {
         const antiMemory: Record<string, unknown> = {
             ...(view.antiMemory as Record<string, unknown>),
         };
         for (const [key, value] of Object.entries(antiMemory)) {
-            if (typeof value === "string") antiMemory[key] = boundedText(value);
+            if (typeof value === "string") antiMemory[key] = boundedText(value, fieldBytes);
         }
         bounded.antiMemory = antiMemory;
     }
     return bounded;
 }
 
-/**
- * Retains the leading rows whose serialized views fit the response byte
- * budget and elides the rest, so one call cannot inject an unbounded read
- * into the conversation. The first row always yields a view: complete when
- * it fits, field-bounded when it alone exceeds the budget.
- */
+function serializedBytes(view: Record<string, unknown>): number {
+    return Buffer.byteLength(JSON.stringify(view), "utf8");
+}
+
+/** A raw per-field cap does not bound the serialized view: JSON escaping multiplies a field's bytes (a control character costs six), and an anti-memory repeats its summary across `content` and every parsed field. The cap therefore halves until the serialized view fits the response budget; `null` means no cap fits, which only an oversized unbounded field such as the object id or category can cause. commentlint: allow(JUDGE) */
+function boundedMemoryViewWithinBudget(row: ReadRow): Record<string, unknown> | null {
+    for (let fieldBytes = MAX_RENDER_FIELD_BYTES; fieldBytes >= 1; fieldBytes >>= 1) {
+        const view = boundedMemoryView(row, fieldBytes);
+        if (serializedBytes(view) <= CTX_MEMORY_RESPONSE_BUDGET_BYTES) return view;
+    }
+    return null;
+}
+
+/** Retains the leading rows whose serialized views fit `CTX_MEMORY_RESPONSE_BUDGET_BYTES` and elides the rest. A first row that alone exceeds the budget is field-bounded and re-measured against the same budget, so the rendered response never exceeds it; the row is elided only when no field cap fits. commentlint: allow(JUDGE) */
 function packMemoryViews(
     rows: readonly ReadRow[],
     viewOf: (row: ReadRow) => Record<string, unknown>,
@@ -115,10 +124,12 @@ function packMemoryViews(
     let usedBytes = 0;
     for (const [index, row] of rows.entries()) {
         const view = viewOf(row);
-        const cost = Buffer.byteLength(JSON.stringify(view), "utf8");
+        const cost = serializedBytes(view);
         if (usedBytes + cost > CTX_MEMORY_RESPONSE_BUDGET_BYTES) {
             if (views.length > 0) return { views, elidedRows: rows.slice(index) };
-            views.push(boundedMemoryView(row));
+            const bounded = boundedMemoryViewWithinBudget(row);
+            if (bounded === null) return { views, elidedRows: rows.slice(index) };
+            views.push(bounded);
             return { views, elidedRows: rows.slice(index + 1) };
         }
         views.push(view);
@@ -500,6 +511,7 @@ function successorSpec(identity: CtxMemoryWriteIdentity, successor: ReadRow): De
     };
 }
 
+/** Renders a create replay from the row the first delivery wrote. Only `create` uses this: a redelivered generated-expiry create hashes to a different digest, so the daemon answers `operation_key_reused` and no replayed receipt exists to render from; a create touches exactly the object it inserted, so the row alone names the complete affected set. Revise and merge render their replayed probe receipt instead, whose tokens also list the retired predecessors. commentlint: allow(JUDGE) */
 function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow, knownAsOf: number): string {
     return JSON.stringify({
         action,
@@ -561,6 +573,8 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
     }
 
     if (action === "create") {
+        // The executor is the last check before the kernel commits: the generic client accepts any decision kind, so taxonomy membership and positive/anti-memory exclusivity are enforced here regardless of which harness wrapper called. commentlint: allow(JUDGE)
+        assertCtxMemoryWriteShape({ ...args, action: "create" });
         const category = args.category?.trim() ?? "";
         const spec = decisionSpec(args, category, identity, {
             sourceId: CTX_MEMORY_SOURCE_ID,
@@ -640,7 +654,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
                 ],
             });
             if (isAvailable(probe) && probe.receipt.replayed) {
-                return renderReplayedOutcome(action, replayed, read.knownAsOf);
+                return renderCommit(action, probe, [target], replayed.object.object_id);
             }
         }
         const predecessors = requireVisible(read.rows, [target]);
@@ -718,7 +732,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
             })),
         });
         if (isAvailable(probe) && probe.receipt.replayed) {
-            return renderReplayedOutcome(action, replayed, read.knownAsOf);
+            return renderCommit(action, probe, targets, replayed.object.object_id);
         }
     }
     const predecessors = requireVisible(read.rows, targets);
