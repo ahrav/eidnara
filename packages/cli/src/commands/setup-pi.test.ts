@@ -840,6 +840,32 @@ describe("runSetup", () => {
         expect(config.historian?.thinking_level).toBe("medium");
     });
 
+    it("refuses a malformed target during a dry run, matching a real run", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        writeFileSync(join(agentDir, "settings.json"), "{ malformed");
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        // `true` accepts host registration, which makes settings.json a target.
+        const prompts = new MockPrompts({ confirms: [true] });
+
+        const code = await runSetup({ prompts, env, dryRun: true });
+
+        expect(code).toBe(1);
+        expect(prompts.messages.join("\n")).toContain("Refusing to overwrite unparseable config");
+        expect(readFileSync(join(agentDir, "settings.json"), "utf-8")).toBe("{ malformed");
+    });
+
     it("exits gracefully without writing files when Pi is missing", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
@@ -882,7 +908,7 @@ describe("runSetup", () => {
 
         const code = await runSetup({ prompts, env });
 
-        expect(code).toBe(0);
+        expect(code).toBe(1);
         const log = prompts.messages.join("\n");
         expect(log).toContain("Pi 0.69.0 is older than the required 0.74.0");
         expect(log).toContain("outro:Setup cancelled");

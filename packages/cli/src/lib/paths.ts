@@ -86,7 +86,7 @@ export function detectConfigPaths(): ConfigPaths {
         configDir,
         opencodeConfig,
         opencodeConfigFormat,
-        eidnaraConfig: resolveEidnaraUserConfigPath(),
+        eidnaraConfig: getSharedUserConfigPath(),
         omoConfig: findOmoConfig(configDir),
         tuiConfig,
         tuiConfigFormat,

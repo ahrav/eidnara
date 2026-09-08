@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { parse } from "comment-json";
 
 import {
@@ -8,6 +8,7 @@ import {
     DCP_PACKAGE_NAMES,
     extractPluginName,
     matchesPackageName,
+    projectOpenCodeConfigPaths,
 } from "./conflict-detector";
 import { appendJsoncArrayValues, removeJsoncArrayEntries, setJsoncValue } from "./jsonc-edit";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
@@ -20,15 +21,8 @@ const CONFLICTING_OMO_HOOKS = [
     "anthropic-context-window-limit-recovery",
 ] as const;
 
-const OMO_CONFIG_NAMES = [
-    "oh-my-openagent.jsonc",
-    "oh-my-openagent.json",
-    "oh-my-opencode.jsonc",
-    "oh-my-opencode.json",
-] as const;
-
-/* */
-const OMO_UNIFIED_NAMES = ["omo.jsonc", "omo.json"] as const;
+/** Legacy OMO config base names; each has a `.jsonc`/`.json` pair. The unified layout uses `omo.jsonc`/`omo.json`. */
+const OMO_CONFIG_BASE_NAMES = ["oh-my-openagent", "oh-my-opencode"] as const;
 
 function isRecord(value: unknown): value is JsonObject {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -69,6 +63,13 @@ function resolveUserOpenCodeConfigPath(): string {
     return paths.configJson;
 }
 
+/** OpenCode and OMO load one file per directory, `.jsonc` first; the shadowed sibling is not a repair target. */
+function effectiveMember(jsoncPath: string, jsonPath: string): string | null {
+    if (existsSync(jsoncPath)) return jsoncPath;
+    if (existsSync(jsonPath)) return jsonPath;
+    return null;
+}
+
 function collectOpenCodeConfigPaths(directory: string): string[] {
     const paths = new Set<string>();
     const userConfig = resolveUserOpenCodeConfigPath();
@@ -77,60 +78,41 @@ function collectOpenCodeConfigPaths(directory: string): string[] {
         paths.add(userConfig);
     }
 
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
     for (const filePath of [
-        join(directory, ".opencode", "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, "opencode.json"),
+        effectiveMember(dotOcJsonc, dotOcJson),
+        effectiveMember(rootJsonc, rootJson),
     ]) {
-        if (existsSync(filePath)) {
-            paths.add(filePath);
-        }
+        if (filePath !== null) paths.add(filePath);
     }
 
     return [...paths];
 }
 
-function collectOmoConfigPaths(directory: string): string[] {
+/** Existing OMO config files `fixConflicts` may edit: user and project, legacy and unified layouts. */
+export function collectOmoConfigPaths(directory: string): string[] {
     const paths = new Set<string>();
     const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
+    const add = (path: string | null) => {
+        if (path !== null) paths.add(path);
+    };
 
-    for (const fileName of OMO_CONFIG_NAMES) {
-        const userPath = join(configDir, fileName);
-        const projectPath = join(directory, fileName);
-
-        if (existsSync(userPath)) {
-            paths.add(userPath);
-        }
-
-        if (existsSync(projectPath)) {
-            paths.add(projectPath);
-        }
+    for (const base of OMO_CONFIG_BASE_NAMES) {
+        add(effectiveMember(join(configDir, `${base}.jsonc`), join(configDir, `${base}.json`)));
+        add(effectiveMember(join(directory, `${base}.jsonc`), join(directory, `${base}.json`)));
     }
 
     const homeDir = process.env.HOME || homedir();
-    const omoHomeDir = join(homeDir, ".omo");
-    for (const name of OMO_UNIFIED_NAMES) {
-        const userPath = join(omoHomeDir, name);
-        if (existsSync(userPath)) {
-            paths.add(userPath);
-        }
-    }
-
-    for (const name of OMO_UNIFIED_NAMES) {
-        const projectPath = join(directory, ".omo", name);
-        if (existsSync(projectPath)) {
-            paths.add(projectPath);
-        }
-    }
+    add(effectiveMember(join(homeDir, ".omo", "omo.jsonc"), join(homeDir, ".omo", "omo.json")));
+    add(effectiveMember(join(directory, ".omo", "omo.jsonc"), join(directory, ".omo", "omo.json")));
 
     return [...paths];
 }
 
 /* */
 function isUnifiedOmoPath(configPath: string): boolean {
-    const basename = configPath.split("/").pop() ?? "";
-    return basename === "omo.jsonc" || basename === "omo.json";
+    const name = basename(configPath);
+    return name === "omo.jsonc" || name === "omo.json";
 }
 
 function disableCompactionFlags(

@@ -1,17 +1,14 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
 import type { PluginEntryResult } from "../adapters/types";
+import { type AgentBlockKind, pruneInvalidAgentFields } from "../lib/agent-config";
 import { writeFileAtomic } from "../lib/atomic-write";
-import {
-    assertJsoncConfigsParseable,
-    readJsoncConfigForUpdate,
-    readJsoncLenient,
-} from "../lib/jsonc-config";
+import { type EidnaraModes, projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentDir, getPiUserExtensionsPath, getSharedUserConfigPath } from "../lib/paths";
 import {
@@ -21,6 +18,7 @@ import {
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
 import type { PromptIO } from "../lib/prompts";
+import { compareVersionStrings } from "../lib/version";
 
 export interface SetupEnvironment {
     detectPiBinary: () => { path: string } | null;
@@ -35,15 +33,6 @@ export interface SetupEnvironment {
 
 /** Throw when a restoration did not take effect so the caller reports a partial rollback. */
 export type SetupRollback = () => Promise<void>;
-
-/** Shared-config modes a host hook reads before disabling a native manager. */
-export interface EidnaraModes {
-    enabled: boolean;
-    /** False when Eidnara compaction is off or Eidnara is disabled. */
-    compactionEnabled: boolean;
-    /** False when Eidnara memory is off or Eidnara is disabled. */
-    memoryEnabled: boolean;
-}
 
 export interface PiCompatibleSetupHost {
     displayName: string;
@@ -154,27 +143,6 @@ function compactObject<T extends Record<string, unknown>>(obj: T): T {
     return obj;
 }
 
-/**
- * The comparison parses X.Y.Z versions and ignores pre-release and build suffixes.
- * Returns -1 if `a < b`, 0 if equal, and 1 if `a > b`.
- * either string can't be parsed (we conservatively assume "good enough" so
- * a parse failure doesn't block the user with a phantom upgrade prompt).
- */
-function comparePiVersion(a: string, b: string): number {
-    const parse = (v: string): [number, number, number] | null => {
-        const match = v.match(/(\d+)\.(\d+)\.(\d+)/);
-        return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
-    };
-    const left = parse(a);
-    const right = parse(b);
-    if (!left || !right) return 0;
-    for (let i = 0; i < 3; i += 1) {
-        if (left[i] < right[i]) return -1;
-        if (left[i] > right[i]) return 1;
-    }
-    return 0;
-}
-
 export function writePiSettingsPackage(
     settingsPath: string,
     packageSource = PI_PACKAGE_SOURCE,
@@ -225,10 +193,15 @@ export function writeEidnaraConfig(
         sidekickModel?: string;
         sidekickThinkingLevel?: string;
         modelRefToCanonical?: (ref: string) => string;
+        onInvalidAgentFields?: (kind: AgentBlockKind, fields: string[]) => void;
     },
 ): void {
     const config = readJsoncConfigForUpdate(configPath);
     ensureDir(dirname(configPath));
+    const reportInvalid = (kind: AgentBlockKind, block: Record<string, unknown>) => {
+        const removed = pruneInvalidAgentFields(kind, block);
+        if (removed.length > 0) options.onInvalidAgentFields?.(kind, removed);
+    };
 
     if (!config.$schema) {
         config.$schema =
@@ -243,7 +216,10 @@ export function writeEidnaraConfig(
     const historian = isRecord(config.historian) ? config.historian : {};
     historian.model = toCanonical(options.historianModel);
     historian.thinking_level = options.historianThinkingLevel;
-    config.historian = compactObject(historian);
+    delete historian.disable;
+    delete historian.enabled;
+    reportInvalid("historian", compactObject(historian));
+    config.historian = historian;
 
     const sidekick = isRecord(config.sidekick) ? config.sidekick : {};
     sidekick.model =
@@ -253,7 +229,8 @@ export function writeEidnaraConfig(
     sidekick.thinking_level = options.sidekickEnabled ? options.sidekickThinkingLevel : undefined;
     sidekick.disable = options.sidekickEnabled ? undefined : true;
     sidekick.enabled = undefined;
-    config.sidekick = compactObject(sidekick);
+    reportInvalid("sidekick", compactObject(sidekick));
+    config.sidekick = sidekick;
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
@@ -282,37 +259,6 @@ async function pickCopilotThinkingLevel(
         { label: "high — best quality, slowest", value: "high" },
         { label: "off — no thinking, fastest (not recommended)", value: "off" },
     ]);
-}
-
-/**
- * The read is lenient because dry runs skip config validation; an unreadable
- * config resolves to the schema defaults (both enabled).
- */
-function readEidnaraModes(configPath: string): EidnaraModes {
-    const config = readJsoncLenient(configPath).value;
-    const enabled = config.enabled !== false;
-    return {
-        enabled,
-        compactionEnabled: enabled && isCompactionEnabled(config),
-        memoryEnabled: enabled && (!isRecord(config.memory) || config.memory.enabled !== false),
-    };
-}
-
-/**
- * Host native settings are global, so setup decides from the shared config
- * and only reports a project-tier disagreement.
- */
-function projectModeOverrides(projectConfigPath: string, shared: EidnaraModes): string[] {
-    const project = readJsoncLenient(projectConfigPath).value;
-    const overrides: string[] = [];
-    if (typeof project.enabled === "boolean" && project.enabled !== shared.enabled) {
-        overrides.push(`enabled: ${project.enabled}`);
-    }
-    const memory = isRecord(project.memory) ? project.memory.enabled : undefined;
-    if (typeof memory === "boolean" && memory !== shared.memoryEnabled) {
-        overrides.push(`memory.enabled: ${memory}`);
-    }
-    return overrides;
 }
 
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
@@ -346,7 +292,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             : `${host.displayName} detected at ${binary.path}`,
     );
 
-    if (version && host.minimumVersion && comparePiVersion(version, host.minimumVersion) < 0) {
+    if (version && host.minimumVersion && compareVersionStrings(version, host.minimumVersion) < 0) {
         prompts.log.warn(
             host.versionWarning?.(version, host.minimumVersion) ??
                 `${host.displayName} ${version} is older than required ${host.minimumVersion}.`,
@@ -356,8 +302,9 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             false,
         );
         if (!proceed) {
+            // A non-zero code keeps the dispatcher from printing next steps after nothing was written.
             prompts.outro(`Setup cancelled — upgrade ${host.displayName} and try again.`);
-            return 0;
+            return 1;
         }
     }
 
@@ -371,17 +318,16 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         `Configure ${host.displayName} to load Eidnara?`,
         true,
     );
-    if (!dryRun) {
-        try {
-            // Validate every target this run will write before writing any of
-            // them, so a later invalid target cannot leave a partial setup.
-            // The host settings file is a target only when registration is on.
-            assertJsoncConfigsParseable(configureHost ? [settingsPath, configPath] : [configPath]);
-        } catch (error) {
-            prompts.log.error(error instanceof Error ? error.message : String(error));
-            prompts.outro("Setup stopped — fix the malformed config and rerun setup.");
-            return 1;
-        }
+    // The read-only check runs in dry-run mode too, so a dry run predicts the refusal a real run would make.
+    try {
+        // Validate every target this run will write before writing any of
+        // them, so a later invalid target cannot leave a partial setup.
+        // The host settings file is a target only when registration is on.
+        assertJsoncConfigsParseable(configureHost ? [settingsPath, configPath] : [configPath]);
+    } catch (error) {
+        prompts.log.error(error instanceof Error ? error.message : String(error));
+        prompts.outro("Setup stopped — fix the malformed config and rerun setup.");
+        return 1;
     }
     if (configureHost && dryRun) {
         prompts.log.message(
@@ -450,6 +396,10 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
                 sidekickModel,
                 sidekickThinkingLevel,
                 modelRefToCanonical: host.modelRefToCanonical,
+                onInvalidAgentFields: (kind, fields) =>
+                    prompts.log.warn(
+                        `Dropped invalid ${kind} field${fields.length > 1 ? "s" : ""} ${fields.join(", ")} from ${configPath}; the plugin would otherwise ignore the whole ${kind} block.`,
+                    ),
             });
             prompts.log.success(`Config written to ${configPath}`);
         }

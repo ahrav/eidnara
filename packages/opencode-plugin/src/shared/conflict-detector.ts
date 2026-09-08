@@ -82,6 +82,10 @@ export interface DetectConflictsOptions {
     resolvedCompaction?: ResolvedCompaction;
 }
 
+/** The `reasons` entry `detectConflicts` emits for `conflicts.dcpPlugin`. */
+export const DCP_CONFLICT_REASON =
+    "opencode-dcp plugin is installed — it conflicts with Eidnara's context management";
+
 /**
  *
  *
@@ -126,9 +130,7 @@ export function detectConflicts(
     const dcpFound = checkDcpPlugin(directory);
     if (dcpFound) {
         conflicts.dcpPlugin = true;
-        reasons.push(
-            "opencode-dcp plugin is installed — it conflicts with Eidnara's context management",
-        );
+        reasons.push(DCP_CONFLICT_REASON);
     }
 
     const omoResult = checkOmoHooks(directory);
@@ -230,15 +232,30 @@ function checkCompaction(directory: string): { auto: boolean; prune: boolean } {
     return { auto: true, prune: false };
 }
 
+/** Project-level OpenCode config paths in precedence order, as `.jsonc`/`.json` pairs per directory. */
+export function projectOpenCodeConfigPaths(
+    directory: string,
+): readonly [string, string, string, string] {
+    return [
+        join(directory, ".opencode", "opencode.jsonc"),
+        join(directory, ".opencode", "opencode.json"),
+        join(directory, "opencode.jsonc"),
+        join(directory, "opencode.json"),
+    ];
+}
+
+/** OpenCode and OMO load one config per directory, `.jsonc` first; a shadowed `.json` sibling is not consulted. */
+function readEffectiveConfig<T = OpenCodeConfig>(jsoncPath: string, jsonPath: string): T | null {
+    return readJsoncFile<T>(jsoncPath) ?? readJsoncFile<T>(jsonPath);
+}
+
 function readProjectCompaction(directory: string): {
     auto: boolean;
     prune: boolean;
     resolved: boolean;
 } {
-    const dotOcJsonc = join(directory, ".opencode", "opencode.jsonc");
-    const dotOcJson = join(directory, ".opencode", "opencode.json");
-    const dotOcConfig =
-        readJsoncFile<OpenCodeConfig>(dotOcJsonc) ?? readJsoncFile<OpenCodeConfig>(dotOcJson);
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
+    const dotOcConfig = readEffectiveConfig(dotOcJsonc, dotOcJson);
 
     if (dotOcConfig?.compaction) {
         const c = dotOcConfig.compaction;
@@ -247,10 +264,7 @@ function readProjectCompaction(directory: string): {
         }
     }
 
-    const rootJsonc = join(directory, "opencode.jsonc");
-    const rootJson = join(directory, "opencode.json");
-    const rootConfig =
-        readJsoncFile<OpenCodeConfig>(rootJsonc) ?? readJsoncFile<OpenCodeConfig>(rootJson);
+    const rootConfig = readEffectiveConfig(rootJsonc, rootJson);
 
     if (rootConfig?.compaction) {
         const c = rootConfig.compaction;
@@ -325,6 +339,15 @@ export function extractPluginName(entry: unknown): string | null {
     return null;
 }
 
+/** Raw plugin entries from the effective project-level OpenCode configs under `directory`. */
+export function projectPluginEntries(directory: string): Array<string | [string, unknown]> {
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
+    return [
+        ...(readEffectiveConfig(dotOcJsonc, dotOcJson)?.plugin ?? []),
+        ...(readEffectiveConfig(rootJsonc, rootJson)?.plugin ?? []),
+    ];
+}
+
 function collectPluginEntries(directory: string): string[] {
     const plugins: string[] = [];
 
@@ -336,24 +359,12 @@ function collectPluginEntries(directory: string): string[] {
         }
     };
 
-    // Project-level configs
-    for (const configPath of [
-        join(directory, ".opencode", "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, "opencode.json"),
-    ]) {
-        const config = readJsoncFile<OpenCodeConfig>(configPath);
-        pushFrom(config?.plugin);
-    }
+    pushFrom(projectPluginEntries(directory));
 
     // User-level config
     try {
         const paths = getOpenCodeConfigPaths({ binary: "opencode" });
-        for (const configPath of [paths.configJsonc, paths.configJson]) {
-            const config = readJsoncFile<OpenCodeConfig>(configPath);
-            pushFrom(config?.plugin);
-        }
+        pushFrom(readEffectiveConfig(paths.configJsonc, paths.configJson)?.plugin);
     } catch {
         // best-effort
     }
@@ -367,6 +378,11 @@ function collectPluginEntries(directory: string): string[] {
  */
 const OMO_PACKAGE_NAMES = new Set(["oh-my-opencode", "oh-my-openagent"]);
 
+/** Whether a project- or user-level OpenCode config lists an OMO plugin entry. */
+export function hasOmoPlugin(directory: string): boolean {
+    return collectPluginEntries(directory).some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
+}
+
 function checkOmoHooks(directory: string): {
     preemptiveCompaction: boolean;
     contextWindowMonitor: boolean;
@@ -378,9 +394,7 @@ function checkOmoHooks(directory: string): {
         anthropicRecovery: false,
     };
 
-    const plugins = collectPluginEntries(directory);
-    const hasOmo = plugins.some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
-    if (!hasOmo) return result;
+    if (!hasOmoPlugin(directory)) return result;
 
     const disabledHooks = readOmoDisabledHooks(directory);
 
@@ -393,57 +407,38 @@ function checkOmoHooks(directory: string): {
 
 function readOmoDisabledHooks(directory: string): Set<string> {
     const disabled = new Set<string>();
+    const addAll = (hooks: string[] | undefined) => {
+        for (const hook of hooks ?? []) disabled.add(hook);
+    };
 
-    const configNames = [
-        "oh-my-opencode.jsonc",
-        "oh-my-opencode.json",
-        "oh-my-openagent.jsonc",
-        "oh-my-openagent.json",
-    ];
+    const legacyBaseNames = ["oh-my-opencode", "oh-my-openagent"];
+    const readLegacy = (dir: string) => {
+        for (const base of legacyBaseNames) {
+            const config = readEffectiveConfig<OmoConfig>(
+                join(dir, `${base}.jsonc`),
+                join(dir, `${base}.json`),
+            );
+            addAll(config?.disabled_hooks);
+        }
+    };
+    const readUnified = (dir: string) => {
+        const config = readEffectiveConfig<OmoV2Config>(
+            join(dir, "omo.jsonc"),
+            join(dir, "omo.json"),
+        );
+        addAll(config?.["[opencode]"]?.disabled_hooks);
+    };
 
     try {
-        const paths = getOpenCodeConfigPaths({ binary: "opencode" });
-        for (const name of configNames) {
-            const configPath = join(paths.configDir, name);
-            const config = readJsoncFile<OmoConfig>(configPath);
-            if (config?.disabled_hooks) {
-                for (const hook of config.disabled_hooks) {
-                    disabled.add(hook);
-                }
-            }
-        }
+        readLegacy(getOpenCodeConfigPaths({ binary: "opencode" }).configDir);
     } catch {
         // best-effort
     }
-
-    for (const name of configNames) {
-        const config = readJsoncFile<OmoConfig>(join(directory, name));
-        if (config?.disabled_hooks) {
-            for (const hook of config.disabled_hooks) {
-                disabled.add(hook);
-            }
-        }
-    }
+    readLegacy(directory);
 
     const homeDir = process.env.HOME || homedir();
-    const omoHomeDir = join(homeDir, ".omo");
-    for (const name of ["omo.jsonc", "omo.json"]) {
-        const config = readJsoncFile<OmoV2Config>(join(omoHomeDir, name));
-        if (config?.["[opencode]"]?.disabled_hooks) {
-            for (const hook of config["[opencode]"].disabled_hooks) {
-                disabled.add(hook);
-            }
-        }
-    }
-
-    for (const name of ["omo.jsonc", "omo.json"]) {
-        const config = readJsoncFile<OmoV2Config>(join(directory, ".omo", name));
-        if (config?.["[opencode]"]?.disabled_hooks) {
-            for (const hook of config["[opencode]"].disabled_hooks) {
-                disabled.add(hook);
-            }
-        }
-    }
+    readUnified(join(homeDir, ".omo"));
+    readUnified(join(directory, ".omo"));
 
     return disabled;
 }

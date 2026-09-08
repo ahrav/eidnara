@@ -4,7 +4,24 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectConflicts, resolveCompactionForBoot } from "./conflict-detector";
+import {
+    detectConflicts,
+    hasOmoPlugin,
+    projectOpenCodeConfigPaths,
+    projectPluginEntries,
+    resolveCompactionForBoot,
+} from "./conflict-detector";
+
+describe("projectOpenCodeConfigPaths", () => {
+    it("lists .opencode/ before the project root and .jsonc before .json", () => {
+        expect(projectOpenCodeConfigPaths("/proj")).toEqual([
+            join("/proj", ".opencode", "opencode.jsonc"),
+            join("/proj", ".opencode", "opencode.json"),
+            join("/proj", "opencode.jsonc"),
+            join("/proj", "opencode.json"),
+        ]);
+    });
+});
 
 /**
  */
@@ -65,6 +82,36 @@ describe("detectConflicts", () => {
     function writeProjectConfig(plugins: Array<string | [string, unknown]>): void {
         writeFileSync(join(projectDir, "opencode.json"), JSON.stringify({ plugin: plugins }));
     }
+
+    describe("effective config per directory", () => {
+        it("ignores a plugin entry that lives only in a shadowed .json sibling", () => {
+            writeFileSync(join(projectDir, "opencode.jsonc"), JSON.stringify({ plugin: [] }));
+            writeProjectConfig(["oh-my-opencode", "@tarquinen/opencode-dcp"]);
+
+            expect(hasOmoPlugin(projectDir)).toBe(false);
+            const result = detectConflicts(projectDir);
+            expect(result.conflicts.dcpPlugin).toBe(false);
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(false);
+        });
+
+        it("reads the .json sibling when no .jsonc exists", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            expect(hasOmoPlugin(projectDir)).toBe(true);
+        });
+
+        it("exposes the raw project plugin entries from both project locations", () => {
+            mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(projectDir, ".opencode", "opencode.json"),
+                JSON.stringify({ plugin: [["file:///dev/eidnara", { dev: true }]] }),
+            );
+            writeProjectConfig(["other"]);
+            expect(projectPluginEntries(projectDir)).toEqual([
+                ["file:///dev/eidnara", { dev: true }],
+                "other",
+            ]);
+        });
+    });
 
     describe("DCP detection", () => {
         it("matches the canonical @tarquinen/opencode-dcp package", () => {
@@ -262,6 +309,30 @@ describe("detectConflicts", () => {
             const result = detectConflicts(projectDir);
             // Together, the legacy and unified configs disable all three OMO hooks.
             expect(result.hasConflict).toBe(false);
+        });
+
+        it("ignores disabled_hooks in a shadowed omo.json when omo.jsonc exists", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            const omoDir = join(homeDir, ".omo");
+            mkdirSync(omoDir, { recursive: true });
+            writeFileSync(join(omoDir, "omo.jsonc"), JSON.stringify({ "[opencode]": {} }));
+            writeFileSync(
+                join(omoDir, "omo.json"),
+                JSON.stringify({
+                    "[opencode]": {
+                        disabled_hooks: [
+                            "preemptive-compaction",
+                            "context-window-monitor",
+                            "anthropic-context-window-limit-recovery",
+                        ],
+                    },
+                }),
+            );
+            const result = detectConflicts(projectDir);
+            // The effective omo.jsonc leaves every hook active; the stale omo.json is not consulted.
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
+            expect(result.conflicts.omoContextWindowMonitor).toBe(true);
+            expect(result.conflicts.omoAnthropicRecovery).toBe(true);
         });
 
         it("ignores new omo.jsonc when OMO is not installed", () => {
