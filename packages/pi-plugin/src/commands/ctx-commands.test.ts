@@ -120,7 +120,7 @@ describe("Pi /ctx-status", () => {
         moduleClient,
         compactionOff,
         kernelClient: fakeKernelResolver().kernelClient,
-        projectIdentity: "proj",
+        resolveProjectSettings: () => ({ projectIdentity: "proj" }),
     });
 
     it("renders the daemon status fields as text when no TUI is available", async () => {
@@ -151,6 +151,26 @@ describe("Pi /ctx-status", () => {
         expect(entry?.text).toContain("- Compartments: 4");
         expect(entry?.text).toContain("### Tail Hygiene");
         expect(entry?.text).toContain("65.1%");
+    });
+
+    it("resolves project settings and the daemon route from the same invoking cwd", async () => {
+        const { pi, run } = harness();
+        const module = fakeModuleClient(() => ({ result: {} }));
+        const resolvedFor: string[] = [];
+        registerCtxStatusCommand(pi, {
+            ...statusDeps(module.client),
+            resolveProjectSettings: ({ cwd }) => {
+                resolvedFor.push(cwd);
+                return { projectIdentity: `proj:${cwd}` };
+            },
+        });
+        await run("ctx-status", "", "/tmp/project-a");
+        await run("ctx-status", "", "/tmp/project-b");
+        expect(resolvedFor).toEqual(["/tmp/project-a", "/tmp/project-b"]);
+        expect(module.calls.map((call) => call.projectRoot)).toEqual([
+            "/tmp/project-a",
+            "/tmp/project-b",
+        ]);
     });
 
     it("reports the unavailable line when session.status fails and notes compaction-off", async () => {

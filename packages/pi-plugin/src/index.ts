@@ -451,11 +451,16 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     registerCtxStatusCommand(pi, {
         ...daemonSessionDeps,
         kernelClient,
-        projectIdentity,
-        protectedTags: bootProjectDeps.config.protected_tags,
-        executeThresholdPercentage: bootProjectDeps.config.execute_threshold_percentage,
-        historyBudgetPercentage: bootProjectDeps.config.history_budget_percentage,
-        executeThresholdTokens: bootProjectDeps.config.execute_threshold_tokens,
+        resolveProjectSettings: (ctx) => {
+            const { projectIdentity: identity, config: cfg } = resolveCurrentProjectDeps(ctx);
+            return {
+                projectIdentity: identity,
+                protectedTags: cfg.protected_tags,
+                executeThresholdPercentage: cfg.execute_threshold_percentage,
+                historyBudgetPercentage: cfg.history_budget_percentage,
+                executeThresholdTokens: cfg.execute_threshold_tokens,
+            };
+        },
     });
     info("registered /ctx-status");
     registerStatusLine(pi, { projectIdentity });
