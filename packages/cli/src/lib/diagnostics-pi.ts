@@ -135,9 +135,19 @@ function getSelfVersion(): string {
  */
 function redactKeyedText(value: string): string {
     // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
+    // A quoted key may hold spaces or slashes (`"api key"`); a bare key is an identifier.
     return value.replace(
-        /(["']?)\b([A-Za-z][A-Za-z0-9_.-]*)\1(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,}\]]+)/g,
-        (full, quote: string, key: string, separator: string, secret: string) => {
+        /(?:"([^"\\\r\n]+)"|'([^'\\\r\n]+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,}\]]+)/g,
+        (
+            full,
+            doubleQuoted: string | undefined,
+            singleQuoted: string | undefined,
+            bare: string | undefined,
+            separator: string,
+            secret: string,
+        ) => {
+            const quote = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : "";
+            const key = doubleQuoted ?? singleQuoted ?? bare ?? "";
             const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
             if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
                 return full;
@@ -241,6 +251,40 @@ function getUserConfigPath(): string | null {
 
 function getProjectConfigPath(cwd: string): string {
     return detectConfigFile(eidnaraProjectConfigBasePath(cwd)).path;
+}
+
+/**
+ * The Pi loader reads its candidate files with a blocking `readFileSync`, so a
+ * FIFO at any of them would stall diagnostics until a writer appeared. The
+ * candidates are checked first and the loader is skipped when one is not a
+ * regular file.
+ */
+function loadPiConfigUnlessBlocking(cwd: string): {
+    loadedFromPaths: string[];
+    warnings: string[];
+} {
+    const userBase = eidnaraUserConfigBasePath();
+    const projectBase = eidnaraProjectConfigBasePath(cwd);
+    const candidates = [
+        ...(userBase === undefined ? [] : [`${userBase}.jsonc`, `${userBase}.json`]),
+        `${projectBase}.jsonc`,
+        `${projectBase}.json`,
+    ];
+    const blocking = candidates.filter((path) => {
+        try {
+            const entry = statSync(path, { throwIfNoEntry: false });
+            return entry !== undefined && !entry.isFile();
+        } catch {
+            return false;
+        }
+    });
+    if (blocking.length === 0) return loadPiConfig({ cwd });
+    return {
+        loadedFromPaths: [],
+        warnings: blocking.map(
+            (path) => `${path}: not a regular file; the Pi config loader was not run`,
+        ),
+    };
 }
 
 /** Parse errors carry the absolute config path, so they are sanitized like any other path. */
@@ -425,7 +469,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const packages = packageEntries(settingsParsed.value);
     const userConfigPath = getUserConfigPath();
     const projectConfigPath = getProjectConfigPath(cwd);
-    const loaded = loadPiConfig({ cwd });
+    const loaded = loadPiConfigUnlessBlocking(cwd);
     const logFile = statLogFile(getEidnaraLogPath("pi"));
     const otherPiExtensions = packages
         .filter((entry) => !matchesPiPackageSource(entry))
