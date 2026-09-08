@@ -22,13 +22,25 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
-import { Database } from "../../shared/sqlite";
+import {
+    collectSqliteRuntimeGateInput,
+    Database,
+    evaluateSqliteRuntimeGate,
+    runImmediate,
+    type SqliteRuntimeGateResult,
+} from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const ID_PREFIX_HEX_LENGTH = 12;
 const ID_SUFFIX_LENGTH = 14;
 const ID_PREFIX_MASK = (1n << BigInt(ID_PREFIX_HEX_LENGTH * 4)) - 1n;
+
+/**
+ * `EIDNARA_PROVIDER_ID` identifies summaries injected by this module; ownership queries match this value.
+ * OpenCode-native summaries carry a real provider ID and never match it.
+ */
+export const EIDNARA_PROVIDER_ID = "eidnara";
 
 function deterministicBase62(seed: string, length: number): string {
     let value = BigInt(`0x${createHash("sha256").update(seed).digest("hex")}`);
@@ -68,6 +80,18 @@ export function getOpenCodeDbPath(): string {
 }
 
 let cachedWriteDb: { path: string; db: Database } | null = null;
+
+let cachedRuntimeGate: SqliteRuntimeGateResult | null = null;
+
+/** The verdict depends only on the running engine, so it is evaluated once per process. */
+function assertSqliteRuntimeGate(): void {
+    cachedRuntimeGate ??= evaluateSqliteRuntimeGate(collectSqliteRuntimeGateInput());
+    if (!cachedRuntimeGate.ok) {
+        throw new Error(
+            `SQLite runtime rejected for opencode.db writes: ${cachedRuntimeGate.reasons.join("; ")}`,
+        );
+    }
+}
 
 // `REQUIRED_MESSAGE_COLUMNS` and `REQUIRED_PART_COLUMNS` list every column used by `injectCompactionMarker` INSERT statements.
 // The schema probe detects missing required columns before marker writes.
@@ -146,6 +170,7 @@ function getWritableOpenCodeDb(): Database {
     if (!existsSync(dbPath)) {
         throw new Error(`OpenCode database not found at ${dbPath} (is OpenCode installed?)`);
     }
+    assertSqliteRuntimeGate();
     const db = new Database(dbPath);
     // Set `busy_timeout` before `journal_mode=WAL` so a cold open waits up to 5 s when OpenCode holds the lock.
     db.exec("PRAGMA busy_timeout=5000");
@@ -416,13 +441,21 @@ export function injectCompactionMarker(
         path: { cwd: args.directory, root: args.directory },
         cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        modelID: "context",
-        providerID: "context",
+        modelID: EIDNARA_PROVIDER_ID,
+        providerID: EIDNARA_PROVIDER_ID,
         time: { created: boundaryTime + 1 },
     });
 
     try {
-        db.transaction(() => {
+        // BEGIN IMMEDIATE holds the write lock across the boundary re-check and the inserts,
+        // preventing a concurrent reversion from deleting the boundary between them.
+        // The connection does not enforce foreign keys, so an unchecked insert against a
+        // deleted boundary would commit.
+        runImmediate(db, () => {
+            if (!getOpenCodeMessageById(args.sessionId, boundary.id)) {
+                throw new Error(`boundary user message ${boundary.id} no longer exists`);
+            }
+
             // A committed insert can outlive a failed context-state write, so the canonical-row transaction removes stale lineage.
             removeLegacyMarkerLineageRows(db, {
                 sessionId: args.sessionId,
@@ -461,7 +494,7 @@ export function injectCompactionMarker(
                 timeUpdated: boundaryTime + 1,
                 data: JSON.stringify({ type: "text", text: args.summaryText }),
             });
-        })();
+        });
 
         log(
             `[eidnara] compaction-marker: injected boundary at user msg ${boundary.id} (ordinal ~${args.endOrdinal}), summary msg ${summaryMsgId}`,
@@ -487,7 +520,7 @@ export function injectCompactionMarker(
  *
  * `summaryMessageIds` contains completed assistant summaries with `summary=true` and `finish="stop"`.
  * Each `summaryMessageIds` entry is parented to the boundary user message.
- * `summaryMessageIds` includes only summaries with Eidnara's provider identity.
+ * `summaryMessageIds` includes only summaries with Eidnara's provider identity and is never empty.
  * OpenCode-native `/compact` summaries use their real provider ID and are excluded.
  * Excluding summaries without Eidnara's provider ID prevents callers from deleting native compactions.
  */
@@ -499,48 +532,94 @@ export interface SessionCompactionMarkerRows {
     summaryMessageIds: string[];
 }
 
+interface EidnaraSummaryRow {
+    id: string;
+    /** `parentId` is empty when the summary's boundary reference is missing. */
+    parentId: string;
+}
+
+function selectEidnaraSummaryRows(db: Database, sessionId: string): EidnaraSummaryRow[] {
+    const rows = db
+        .prepare(
+            `SELECT id, COALESCE(json_extract(data, '$.parentID'), '') AS parent_id
+             FROM message
+             WHERE session_id = ?
+               AND COALESCE(json_extract(data, '$.summary'), 0) = 1
+               AND COALESCE(json_extract(data, '$.finish'), '') = 'stop'
+               AND COALESCE(json_extract(data, '$.providerID'), '') = ?`,
+        )
+        .all(sessionId, EIDNARA_PROVIDER_ID) as Array<{ id?: unknown; parent_id?: unknown }>;
+    return rows.flatMap((row) =>
+        typeof row.id === "string"
+            ? [{ id: row.id, parentId: typeof row.parent_id === "string" ? row.parent_id : "" }]
+            : [],
+    );
+}
+
+interface SessionCompactionPart {
+    id: string;
+    messageId: string;
+    data: unknown;
+    tailStartId: string | null;
+}
+
+/** Native and plugin-owned compaction parts are both returned; callers apply the ownership test. */
+function selectSessionCompactionParts(db: Database, sessionId: string): SessionCompactionPart[] {
+    const rows = db
+        .prepare(
+            `SELECT id, message_id, data
+             FROM part
+             WHERE session_id = ?
+               AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'`,
+        )
+        .all(sessionId) as Array<{ id?: unknown; message_id?: unknown; data?: unknown }>;
+    const parts: SessionCompactionPart[] = [];
+    for (const row of rows) {
+        if (typeof row.id !== "string" || typeof row.message_id !== "string") continue;
+        let data: unknown;
+        try {
+            data = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
+        } catch {
+            data = null;
+        }
+        parts.push({
+            id: row.id,
+            messageId: row.message_id,
+            data,
+            tailStartId: dataReferencesTailStart(data),
+        });
+    }
+    return parts;
+}
+
 /**
  *
  * Used by the fork-orphan hygiene pass: OpenCode's `/fork` copies the
  * parent session's message rows — including this plugin's compaction marker
- * rows — into the fork, while Eidnara's durable marker state (the daemon store)
- * is NOT inherited. The fork then owns marker rows its
- * state knows nothing about. This scan enumerates all markers so the caller can
- * diff them against the persisted state and repair the ones it does not own.
+ * rows — into the fork. Forks do not record copied marker rows in the daemon store.
+ * Callers diff the listed markers against that store and repair the ones it does not own.
  *
  * The hygiene pass retries scan failures later instead of treating them as fatal transform errors.
  */
 export function listSessionCompactionMarkers(sessionId: string): SessionCompactionMarkerRows[] {
     const db = getWritableOpenCodeDb();
-    const partRows = db
-        .prepare(
-            `SELECT id, message_id
-             FROM part
-             WHERE session_id = ?
-               AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'`,
-        )
-        .all(sessionId) as Array<{ id?: unknown; message_id?: unknown }>;
+
+    const summariesByBoundary = new Map<string, string[]>();
+    for (const row of selectEidnaraSummaryRows(db, sessionId)) {
+        if (row.parentId.length === 0) continue;
+        const ids = summariesByBoundary.get(row.parentId) ?? [];
+        ids.push(row.id);
+        summariesByBoundary.set(row.parentId, ids);
+    }
 
     const markers: SessionCompactionMarkerRows[] = [];
-    const summaryStmt = db.prepare(
-        `SELECT id
-         FROM message
-         WHERE session_id = ?
-           AND COALESCE(json_extract(data, '$.parentID'), '') = ?
-           AND COALESCE(json_extract(data, '$.summary'), 0) = 1
-           AND COALESCE(json_extract(data, '$.finish'), '') = 'stop'
-           AND COALESCE(json_extract(data, '$.providerID'), '') = 'eidnara'`,
-    );
-    for (const row of partRows) {
-        if (typeof row.id !== "string" || typeof row.message_id !== "string") continue;
-        const summaryRows = summaryStmt.all(sessionId, row.message_id) as Array<{ id?: unknown }>;
-        const summaryMessageIds = summaryRows.flatMap((summaryRow) =>
-            typeof summaryRow.id === "string" ? [summaryRow.id] : [],
-        );
+    for (const part of selectSessionCompactionParts(db, sessionId)) {
+        const summaryMessageIds = summariesByBoundary.get(part.messageId);
+        if (!summaryMessageIds || !isMcCanonicalCompactionPartData(part.data)) continue;
         markers.push({
-            compactionPartId: row.id,
-            boundaryMessageId: row.message_id,
-            summaryMessageIds,
+            compactionPartId: part.id,
+            boundaryMessageId: part.messageId,
+            summaryMessageIds: [...summaryMessageIds],
         });
     }
     return markers;
@@ -658,6 +737,9 @@ function isMcCanonicalCompactionPartData(data: unknown): boolean {
  * Deleting only the compaction part would leave its summary message in model history.
  * The boundary user message is real user history; cleanup deletes only its plugin-injected compaction part.
  * Preflight retains a lineage when a surviving compaction marker references a row that deletion would remove through `tail_start_id`.
+ * The preflight scans and every deletion run under one `BEGIN IMMEDIATE` transaction, so a
+ * `tail_start_id` that OpenCode writes concurrently cannot land between the scan and the delete
+ * it would have retained.
  *
  * Idempotent: absent rows delete as a no-op (second run reports zeros).
  * Errors propagate.
@@ -677,16 +759,17 @@ export function removeEidnaraOwnedCompactionMarkers(
         };
     }
 
-    const canonicalSummaries = db
-        .prepare(
-            `SELECT id, COALESCE(json_extract(data, '$.parentID'), '') AS parent_id
-             FROM message
-             WHERE session_id = ?
-               AND COALESCE(json_extract(data, '$.summary'), 0) = 1
-               AND COALESCE(json_extract(data, '$.finish'), '') = 'stop'
-               AND COALESCE(json_extract(data, '$.providerID'), '') = 'eidnara'`,
-        )
-        .all(sessionId) as Array<{ id?: unknown; parent_id?: unknown }>;
+    return runImmediate(db, () =>
+        removeEidnaraOwnedCompactionMarkersLocked(db, sessionId, summaryText),
+    );
+}
+
+function removeEidnaraOwnedCompactionMarkersLocked(
+    db: Database,
+    sessionId: string,
+    summaryText: string,
+): EidnaraOwnedMarkerCleanupResult {
+    const canonicalSummaries = selectEidnaraSummaryRows(db, sessionId);
     const legacySummaries = db
         .prepare(
             `SELECT m.id, COALESCE(json_extract(m.data, '$.parentID'), '') AS parent_id
@@ -694,7 +777,7 @@ export function removeEidnaraOwnedCompactionMarkers(
              WHERE m.session_id = ?
                AND COALESCE(json_extract(m.data, '$.summary'), 0) = 1
                AND COALESCE(json_extract(m.data, '$.finish'), '') = 'stop'
-               AND COALESCE(json_extract(m.data, '$.providerID'), '') <> 'eidnara'
+               AND COALESCE(json_extract(m.data, '$.providerID'), '') <> ?
                AND EXISTS (
                    SELECT 1
                    FROM part p
@@ -704,16 +787,26 @@ export function removeEidnaraOwnedCompactionMarkers(
                      AND COALESCE(json_extract(p.data, '$.text'), '') = ?
                )`,
         )
-        .all(sessionId, summaryText) as Array<{ id?: unknown; parent_id?: unknown }>;
+        .all(sessionId, EIDNARA_PROVIDER_ID, summaryText) as Array<{
+        id?: unknown;
+        parent_id?: unknown;
+    }>;
 
     const summariesByBoundary = new Map<string, Set<string>>();
     const orphanSummaryIds = new Set<string>();
-    for (const row of [...canonicalSummaries, ...legacySummaries]) {
-        if (typeof row.id !== "string") continue;
-        if (typeof row.parent_id === "string" && row.parent_id.length > 0) {
-            const set = summariesByBoundary.get(row.parent_id) ?? new Set<string>();
+    const summaryRows: EidnaraSummaryRow[] = [
+        ...canonicalSummaries,
+        ...legacySummaries.flatMap((row) =>
+            typeof row.id === "string"
+                ? [{ id: row.id, parentId: typeof row.parent_id === "string" ? row.parent_id : "" }]
+                : [],
+        ),
+    ];
+    for (const row of summaryRows) {
+        if (row.parentId.length > 0) {
+            const set = summariesByBoundary.get(row.parentId) ?? new Set<string>();
             set.add(row.id);
-            summariesByBoundary.set(row.parent_id, set);
+            summariesByBoundary.set(row.parentId, set);
         } else {
             // A stranded plugin summary whose boundary is gone is still plugin-owned
             // Cleanup removes stranded plugin summaries because they remain visible in model history.
@@ -722,35 +815,7 @@ export function removeEidnaraOwnedCompactionMarkers(
     }
 
     // Preflight parses every session compaction part once so it sees surviving native parts and evaluates each boundary against all of its parts.
-    const compactionParts = db
-        .prepare(
-            `SELECT id, message_id, data
-             FROM part
-             WHERE session_id = ?
-               AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'`,
-        )
-        .all(sessionId) as Array<{ id?: unknown; message_id?: unknown; data?: unknown }>;
-    const parsedParts: Array<{
-        id: string;
-        messageId: string;
-        data: unknown;
-        tailStartId: string | null;
-    }> = [];
-    for (const part of compactionParts) {
-        if (typeof part.id !== "string" || typeof part.message_id !== "string") continue;
-        let data: unknown;
-        try {
-            data = typeof part.data === "string" ? JSON.parse(part.data) : part.data;
-        } catch {
-            data = null;
-        }
-        parsedParts.push({
-            id: part.id,
-            messageId: part.message_id,
-            data,
-            tailStartId: dataReferencesTailStart(data),
-        });
-    }
+    const parsedParts = selectSessionCompactionParts(db, sessionId);
 
     // Preflight includes message-level V2 compaction `tail_start_id` references; any reference to a deletion target retains the lineage.
     const messageTailRefs = db
@@ -821,13 +886,10 @@ export function removeEidnaraOwnedCompactionMarkers(
             continue;
         }
 
-        const rows = db.transaction(() => {
-            let changed = deleteSummaries(summaryIds);
-            for (const partId of mcPartIds) {
-                changed += deletePart.run(sessionId, partId).changes;
-            }
-            return changed;
-        })();
+        let rows = deleteSummaries(summaryIds);
+        for (const partId of mcPartIds) {
+            rows += deletePart.run(sessionId, partId).changes;
+        }
         if (rows > 0 || summaryIds.size > 0 || mcPartIds.length > 0) {
             removedLineages += 1;
             removedRows += rows;
@@ -846,7 +908,7 @@ export function removeEidnaraOwnedCompactionMarkers(
         if (survivingPartsReferenceDeletion || messageFieldReferencesDeletion) {
             retainedLineages += 1;
         } else {
-            const rows = db.transaction(() => deleteSummaries(orphanSummaryIds))();
+            const rows = deleteSummaries(orphanSummaryIds);
             removedLineages += 1;
             removedRows += rows;
         }
