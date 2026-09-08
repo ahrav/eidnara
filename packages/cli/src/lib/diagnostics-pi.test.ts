@@ -46,15 +46,21 @@ afterEach(() => {
 });
 
 describe("sanitizeValue Pi diagnostics redaction", () => {
-    it("preserves numeric thresholds while redacting string secrets", () => {
+    it("preserves numeric thresholds while redacting string and numeric secrets", () => {
         expect(
             sanitizeValue({
                 execute_threshold_tokens: 200000,
+                timeout_ms: 30000,
+                enabled: true,
                 api_key: "sk-x",
+                password: 123456,
             }),
         ).toEqual({
-            execute_threshold_tokens: 200000,
+            execute_threshold_tokens: "<REDACTED>",
+            timeout_ms: 30000,
+            enabled: true,
             api_key: "<REDACTED>",
+            password: "<REDACTED>",
         });
     });
 
@@ -66,7 +72,7 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
                 private_key: "p",
                 access_key: "k",
                 cookie: "session=abc",
-                injection_budget_tokens: 4000,
+                injection_budget_ms: 4000,
             }),
         ).toEqual({
             credential: "<REDACTED>",
@@ -74,7 +80,7 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
             private_key: "<REDACTED>",
             access_key: "<REDACTED>",
             cookie: "<REDACTED>",
-            injection_budget_tokens: 4000,
+            injection_budget_ms: 4000,
         });
     });
 
