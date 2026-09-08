@@ -14,7 +14,7 @@ export function getEidnaraBuiltinCommands(compactionEnabled = true): BuiltinComm
         "ctx-recomp": {
             template: "ctx-recomp",
             description: compactionEnabled
-                ? "Rebuild compartments and facts from raw history (full or <start>-<end> range)"
+                ? "Rebuild compartments and facts from raw history"
                 : unavailableInCompactionOff("ctx-recomp"),
         },
         "ctx-wrapup": {

@@ -33,6 +33,12 @@ const RECONNECT_MAX_MS = 10_000;
  * The watcher performs no IPC when the active session is unchanged. */
 const SESSION_WATCH_MS = 1_000;
 
+/** Bun's constructor accepts connection headers; the DOM declaration that `tsconfig.tui.json` loads for Solid's JSX types does not. */
+const HeaderedWebSocket = WebSocket as unknown as new (
+    url: string,
+    options: { headers: Record<string, string> },
+) => WebSocket;
+
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let sessionWatchTimer: ReturnType<typeof setInterval> | undefined;
@@ -162,7 +168,7 @@ async function connect(): Promise<void> {
 
     let ws: WebSocket;
     try {
-        ws = new WebSocket(`ws://127.0.0.1:${endpoint.port}/ws`, {
+        ws = new HeaderedWebSocket(`ws://127.0.0.1:${endpoint.port}/ws`, {
             headers: endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {},
         });
     } catch {

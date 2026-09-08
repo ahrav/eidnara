@@ -9,6 +9,7 @@ import {
     flushIgnoredMessages,
     MAX_QUEUED_IGNORED_NOTIFICATIONS,
     sendIgnoredMessage,
+    sendUserPrompt,
 } from "./send-session-notification";
 
 const DEFAULT_TITLE = "New session - 2026-06-11T12:00:00.000Z";
@@ -82,6 +83,19 @@ describe("sendIgnoredMessage", () => {
         expect(result).toBe("queued");
         expect(session.prompt).not.toHaveBeenCalled();
         expect(__ignoredNotificationTest.pendingTexts("ses-active")).toEqual(["background status"]);
+    });
+
+    it("reports failed and releases the flush when the prompt endpoint never settles", async () => {
+        const session = titledClientWithLastTurn();
+        session.prompt = mock(() => new Promise<never>(() => {}));
+        __ignoredNotificationTest.setMidTurnDetector(() => false);
+        __ignoredNotificationTest.setSendTimeoutMs(20);
+
+        const result = await sendIgnoredMessage({ session }, "ses-hung-prompt", "status", {});
+
+        expect(result).toBe("failed");
+        expect(session.prompt).toHaveBeenCalledTimes(1);
+        expect(__ignoredNotificationTest.pendingTexts("ses-hung-prompt")).toEqual([]);
     });
 
     it("flushes queued notices in order after the session becomes idle", async () => {
@@ -226,5 +240,47 @@ describe("TUI toast delivery", () => {
     it("carries an explicit toastDurationMs as the per-call override", async () => {
         const payload = await toastPayloadFor({ toastDurationMs: 10_000 });
         expect(payload.duration).toBe(10_000);
+    });
+});
+
+describe("sendUserPrompt", () => {
+    it("prefers promptAsync and sends the text as a single user part", async () => {
+        const prompt = mock(async () => ({}));
+        const promptAsync = mock(async () => ({}));
+
+        await sendUserPrompt({ session: { prompt, promptAsync } }, "ses-user", "hello");
+
+        expect(prompt).not.toHaveBeenCalled();
+        expect(promptAsync).toHaveBeenCalledWith({
+            path: { id: "ses-user" },
+            body: { parts: [{ type: "text", text: "hello" }] },
+        });
+    });
+
+    it("falls back to prompt when promptAsync is absent", async () => {
+        const prompt = mock(() => ({}));
+
+        await sendUserPrompt({ session: { prompt } }, "ses-user-sync", "hello");
+
+        expect(prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects when the session prompt API is unavailable", async () => {
+        await expect(sendUserPrompt(undefined, "ses-no-client", "hello")).rejects.toThrow(
+            "session prompt API unavailable",
+        );
+        await expect(sendUserPrompt({ session: {} }, "ses-no-prompt", "hello")).rejects.toThrow(
+            "session prompt API unavailable",
+        );
+    });
+
+    it("propagates a rejected prompt call", async () => {
+        const promptAsync = mock(async () => {
+            throw new Error("session is busy");
+        });
+
+        await expect(
+            sendUserPrompt({ session: { promptAsync } }, "ses-busy", "hello"),
+        ).rejects.toThrow("session is busy");
     });
 });

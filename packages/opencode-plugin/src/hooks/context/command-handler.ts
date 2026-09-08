@@ -195,20 +195,68 @@ function statusInputTokens(value: Record<string, unknown>): number {
         : 0;
 }
 
+function statusCount(value: Record<string, unknown>, key: string): number {
+    return typeof value[key] === "number" ? (value[key] as number) : 0;
+}
+
+function statusObject(value: Record<string, unknown>, key: string): Record<string, unknown> {
+    const nested = value[key];
+    return nested && typeof nested === "object" ? (nested as Record<string, unknown>) : {};
+}
+
+function plural(count: number, noun: string): string {
+    return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+const MAX_STATUS_REJECT_ERROR_CHARS = 160;
+
 function formatRustStatusText(value: Record<string, unknown>): string {
     const usage = statusUsage(value);
     const tokens = statusInputTokens(value);
     const limit = typeof usage.context_limit_tokens === "number" ? usage.context_limit_tokens : 0;
     const coverage = value.coverage_ordinal == null ? "none" : String(value.coverage_ordinal);
     const boundary = value.boundary_present === true ? "present" : "absent";
-    const compartments = typeof value.compartment_count === "number" ? value.compartment_count : 0;
-    return [
+    const compartments = statusCount(value, "compartment_count");
+    const pendingDrops = statusCount(value, "pending_drop_count");
+    const tags = statusCount(value, "tag_count");
+    const pendingM1 =
+        value.pending_m1_delta === true
+            ? `pending${typeof value.pending_m1_age_ms === "number" ? ` (${Math.round(value.pending_m1_age_ms / 1000)}s)` : ""}`
+            : "none";
+    const wrapup =
+        value.wrapup_active === true
+            ? `running (${plural(statusCount(value, "wrapup_rounds"), "round")} complete)`
+            : "idle";
+    const historian = statusObject(value, "historian");
+    const publishFailures = statusCount(historian, "consecutive_publish_failures");
+    const publishHealth =
+        historian.publish_health_degraded === true
+            ? `degraded (${publishFailures} consecutive publish failures)`
+            : `ok (${plural(publishFailures, "consecutive publish failure")})`;
+    const passTrace = statusObject(value, "pass_trace");
+    const rejectError =
+        typeof passTrace.last_reject_error === "string" && passTrace.last_reject_error !== ""
+            ? `; last reject: ${passTrace.last_reject_error.slice(0, MAX_STATUS_REJECT_ERROR_CHARS)}`
+            : "";
+    const lines = [
         "### Module Cache",
         `- Usage: ${tokens.toLocaleString()}${limit > 0 ? ` / ${limit.toLocaleString()} tokens` : " tokens"}`,
         `- Boundary: ${boundary}`,
         `- Coverage ordinal: ${coverage}`,
         `- Compartments: ${compartments}`,
-    ].join("\n");
+        `- Pending: ${plural(pendingDrops, "drop")}, ${plural(tags, "tag")}, m1 delta ${pendingM1}`,
+        `- Wrapup: ${wrapup}`,
+        `- Historian publish health: ${publishHealth}`,
+    ];
+    if (value.pass_trace && typeof value.pass_trace === "object") {
+        lines.push(
+            `- Passes: ${statusCount(passTrace, "receive_count")} received, ${statusCount(passTrace, "reject_count")} rejected${rejectError}`,
+        );
+    }
+    if (typeof value.summary === "string" && value.summary.trim() !== "") {
+        lines.push(`- Daemon: ${value.summary.trim()}`);
+    }
+    return lines.join("\n");
 }
 
 /**
@@ -224,7 +272,8 @@ async function executeAugmentation(
         sidekick?: {
             config: SidekickConfig;
             projectPath: string;
-            sessionDirectory?: string;
+            /** The Sidekick child runs in the session's own directory, not the plugin launch directory. */
+            resolveSessionDirectory?: (sessionId: string) => Promise<string> | string;
             client: PluginContext["client"];
             language?: string;
         };
@@ -262,7 +311,7 @@ async function executeAugmentation(
         client: deps.sidekick.client,
         sessionId,
         projectPath: deps.sidekick.projectPath,
-        sessionDirectory: deps.sidekick.sessionDirectory,
+        sessionDirectory: await deps.sidekick.resolveSessionDirectory?.(sessionId),
         userMessage: prompt,
         config: deps.sidekick.config,
         language: deps.sidekick.language,
@@ -277,7 +326,17 @@ async function executeAugmentation(
         sessionLog(sessionId, "/ctx-aug: sidekick returned no result, sending prompt as-is");
     }
 
-    await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt);
+    try {
+        await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt);
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        sessionLog(sessionId, `/ctx-aug: failed to send augmented prompt: ${reason}`);
+        await deps.sendNotification(
+            sessionId,
+            `## /ctx-aug — Failed\n\nThe augmented prompt was not sent to the session: ${reason}\n\nYour original prompt was not sent either. Send it again, with or without /ctx-aug:\n\n${prompt}`,
+            {},
+        );
+    }
 
     throwSentinel("CTX-AUG");
 }
@@ -286,6 +345,8 @@ export function createEidnaraCommandHandler(deps: {
     /** Command paths use boot-resolved mode and must not reread configuration. */
     compactionOff?: boolean;
     getLiveModelKey?: (sessionId: string) => string | undefined;
+    /** The `session.wrapup` request carries no subagent flag, so the handler gates `/ctx-wrapup` on this predicate. */
+    isSubagentSession: (sessionId: string) => boolean;
     onFlush?: (sessionId: string) => void;
     sendNotification: (
         sessionId: string,
@@ -293,11 +354,12 @@ export function createEidnaraCommandHandler(deps: {
         params: NotificationParams,
     ) => Promise<void>;
     moduleClient: RustModeModuleClient;
-    projectRoot?: string;
+    /** The daemon keys session state by `(session, project_root)`; commands route by the same directory the transform resolved for the session. */
+    resolveProjectRoot?: (sessionId: string) => Promise<string> | string;
     sidekick?: {
         config: SidekickConfig;
         projectPath: string;
-        sessionDirectory?: string;
+        resolveSessionDirectory?: (sessionId: string) => Promise<string> | string;
         client: PluginContext["client"];
         language?: string;
     };
@@ -328,7 +390,8 @@ export function createEidnaraCommandHandler(deps: {
         moduleResponseValue(
             await deps.moduleClient.call({
                 sessionId: body.session_id as string,
-                projectRoot: deps.projectRoot ?? process.cwd(),
+                projectRoot:
+                    (await deps.resolveProjectRoot?.(body.session_id as string)) ?? process.cwd(),
                 method,
                 body,
                 ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -462,7 +525,10 @@ export function createEidnaraCommandHandler(deps: {
 
             if (isWrapup) {
                 const parsed = parseWrapupArgs(input.arguments);
-                if (!parsed.ok) {
+                if (deps.isSubagentSession(sessionId)) {
+                    result =
+                        "## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.";
+                } else if (!parsed.ok) {
                     result = `## Eidnara Wrapup — Invalid Arguments\n\n${parsed.message}`;
                 } else {
                     const keep = parsed.messagesToKeep;

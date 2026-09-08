@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
-// @ts-nocheck
 
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui";
+import type { JSX } from "@opentui/solid";
 import { createMemo } from "solid-js";
 import packageJson from "../../package.json";
 import { loadPluginConfig } from "../config";
@@ -165,7 +165,7 @@ function getSessionId(api: TuiPluginApi): string | null {
     try {
         const route = api.route.current;
         if (route?.name === "session" && route.params?.sessionID) {
-            return route.params.sessionID;
+            return String(route.params.sessionID);
         }
     } catch {
         // ignore
@@ -321,7 +321,6 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
             <box width="100%" flexDirection="row" height={1}>
                 {barSegments().map((seg) => (
                     <box
-                        key={seg.label}
                         flexGrow={Math.max(1, seg.tokens)}
                         flexBasis={0}
                         height={1}
@@ -335,12 +334,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 {breakdownSegments().segs.map((seg) => {
                     const pct = ((seg.tokens / breakdownSegments().total) * 100).toFixed(1);
                     return (
-                        <box
-                            key={seg.label}
-                            width="100%"
-                            flexDirection="row"
-                            justifyContent="space-between"
-                        >
+                        <box width="100%" flexDirection="row" justifyContent="space-between">
                             <text fg={seg.color}>
                                 {seg.label} {seg.detail ?? ""}
                             </text>
@@ -701,7 +695,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     <R
                         t={t()}
                         l="Last error"
-                        v={s().loggerDiagnostics.lastErrorMessage}
+                        v={s().loggerDiagnostics?.lastErrorMessage ?? ""}
                         fg={t().error}
                     />
                 )}
@@ -709,7 +703,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     <R
                         t={t()}
                         l="Last error time"
-                        v={s().loggerDiagnostics.lastErrorTime}
+                        v={s().loggerDiagnostics?.lastErrorTime ?? ""}
                         fg={t().textMuted}
                     />
                 )}
@@ -882,7 +876,7 @@ async function waitForTuiProbeHostPaint(api: TuiPluginApi, result: TuiProbeResul
             resolve();
         }, 500);
         try {
-            renderer.once("frame", onFrame);
+            renderer.once?.("frame", onFrame);
         } catch (error) {
             if (settled) return;
             settled = true;

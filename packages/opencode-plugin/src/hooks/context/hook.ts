@@ -26,6 +26,7 @@ import { createHostModuleClient } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
+import { resolveSessionDirectory } from "./session-directory";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
@@ -87,7 +88,8 @@ function resolveSessionId(messages: readonly MessageLike[]): string | undefined 
 }
 
 export function createEidnaraHook(deps: EidnaraDeps) {
-    const contextUsageMap = new Map<string, ContextUsageEntry>();
+    const contextUsageMap =
+        deps.liveSessionState?.contextUsageBySession ?? new Map<string, ContextUsageEntry>();
 
     clearHookInitFailure();
     const projectPath = resolveProjectIdentityForSession(
@@ -121,6 +123,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         deps.liveSessionState?.sessionDirectoryBySession ?? new Map<string, string>();
     const internalChildSessions = deps.liveSessionState?.internalChildSessions ?? new Set<string>();
     const subagentSessions = deps.liveSessionState?.subagentSessions ?? new Set<string>();
+    // One resolver serves the transform, the commands, and the Sidekick child, so every daemon call for a session shares one route root.
+    const sessionDirectoryDeps = {
+        client: deps.client,
+        directory: deps.directory,
+        sessionDirectoryBySession,
+    };
+    const sessionDirectoryFor = (sessionId: string): Promise<string> =>
+        resolveSessionDirectory(sessionDirectoryDeps, sessionId);
 
     /**
      * `resolveLiveModel` prefers entries in `liveModelBySession` populated by chat and event hooks.
@@ -148,9 +158,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const moduleClient: RustModeModuleClient =
         deps.rustModeModuleClient ?? createHostModuleClient(deps.config.subc?.connection_file);
 
-    const rustToolBackends: RustToolBackends | undefined = rustMode
-        ? createRustToolBackends(moduleClient)
-        : undefined;
+    // The backends are daemon facades that do not depend on the messages transform, so every transform mode builds them.
+    const rustToolBackends: RustToolBackends = createRustToolBackends(moduleClient);
 
     const systemPromptHash = createSystemPromptHashHandler({
         promptSurface: deps.config.prompt_surface,
@@ -200,7 +209,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             systemPromptHashFor: (sessionId) =>
                 systemPromptHash.promptStateFor(sessionId)?.systemPromptHash ?? "",
         },
-        { moduleClient, projectRoot: deps.directory },
+        // No `projectRoot` option: the transform routes each session by its own resolved directory.
+        { moduleClient },
     );
 
     // `ts` mode leaves messages untouched; the plugin-level adapter passes them through.
@@ -209,6 +219,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
               const messages = output.messages as MessageLike[];
               const sessionId = resolveSessionId(messages);
               if (!sessionId) return;
+              // Hidden `eidnara-` children run Eidnara's own prompts and receive no project context.
+              if (internalChildSessions.has(sessionId)) return;
               await rustTransform.run(sessionId, messages, output);
           }
         : async (): Promise<void> => {};
@@ -241,7 +253,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const commandHandler = createEidnaraCommandHandler({
         moduleClient,
         compactionOff,
-        projectRoot: deps.directory,
+        resolveProjectRoot: sessionDirectoryFor,
+        isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
         // The DB fallback gives /ctx-status the model-specific threshold before the first hook after a restart.
         getLiveModelKey: (sessionId) => {
             const model = resolveLiveModel(sessionId);
@@ -269,7 +282,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             ? {
                   config: sidekickConfig,
                   projectPath,
-                  sessionDirectory: deps.directory,
+                  resolveSessionDirectory: sessionDirectoryFor,
                   client: deps.client,
                   language: deps.config.language,
               }
@@ -309,10 +322,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             client: deps.client,
             transformMode: deps.config.transform_mode,
             todoStateSet: rustMode
-                ? ({ sessionId, stateJson, ownerMessageId }) =>
+                ? async ({ sessionId, stateJson, ownerMessageId }) =>
                       moduleClient.call({
                           sessionId,
-                          projectRoot: deps.directory,
+                          projectRoot: await sessionDirectoryFor(sessionId),
                           method: "todo_state.set",
                           body: {
                               method: "todo_state.set",
@@ -326,7 +339,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         }),
     };
     const hooksWithBackends = hooks as typeof hooks & {
-        rustToolBackends?: RustToolBackends;
+        rustToolBackends: RustToolBackends;
     };
     Object.defineProperty(hooksWithBackends, "rustToolBackends", {
         value: rustToolBackends,

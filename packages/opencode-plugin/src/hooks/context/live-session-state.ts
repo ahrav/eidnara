@@ -1,9 +1,12 @@
+import type { ContextUsageEntry } from "./event-handler";
 import type { AgentBySession, LiveModelBySession, VariantBySession } from "./hook-handlers";
 
 export interface LiveSessionState {
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
+    /** `contextUsageBySession` holds each session's input-token usage from its latest assistant response; the sidebar reads it when the daemon supplies no usage. commentlint: allow(JUDGE) */
+    contextUsageBySession: Map<string, ContextUsageEntry>;
     historyRefreshSessions: Set<string>;
     deferredHistoryRefreshSessions: Set<string>;
     systemPromptRefreshSessions: Set<string>;
@@ -28,6 +31,7 @@ export function createLiveSessionState(): LiveSessionState {
         liveModelBySession: new Map<string, { providerID: string; modelID: string }>(),
         variantBySession: new Map<string, string | undefined>(),
         agentBySession: new Map<string, string>(),
+        contextUsageBySession: new Map<string, ContextUsageEntry>(),
         historyRefreshSessions: new Set<string>(),
         deferredHistoryRefreshSessions: new Set<string>(),
         systemPromptRefreshSessions: new Set<string>(),

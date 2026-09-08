@@ -99,6 +99,22 @@ test("hides the Notes and Archived rows when their counts are zero or absent", (
     expect(rows).toEqual([{ label: "Memories", value: "5" }]);
 });
 
+test("shows the memory state instead of a zero count when memory is not available", () => {
+    const disabled = compactionOffSidebarRows(
+        snapshot({ memoryCount: 0, memoryState: "disabled", sessionNoteCount: 0 }),
+    );
+    const absent = compactionOffSidebarRows(
+        snapshot({ memoryCount: 0, memoryState: "unavailable:daemon_absent", sessionNoteCount: 0 }),
+    );
+
+    expect(disabled[0]).toEqual({ label: "Memories", value: "disabled" });
+    expect(absent[0]).toEqual({ label: "Memories", value: "unavailable:daemon_absent" });
+    expect(compactionOffSidebarRows(snapshot({ memoryTruncated: true }))[0]).toEqual({
+        label: "Memories",
+        value: "5+",
+    });
+});
+
 test("recovers the unreserved window from the native percentage for the token total", () => {
     // 40k tokens at 40% is a 100k window; the reserved contextLimit would pair 40K with 80K.
     expect(

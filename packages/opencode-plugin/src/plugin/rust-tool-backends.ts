@@ -121,8 +121,7 @@ export function createRustToolBackends(moduleClient: RustModeModuleClient): Rust
                 },
                 ...(signal ? { signal } : {}),
             }),
-        // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note. commentlint: allow(JUDGE)
-        noteEvaluationAvailable: () => true,
+        // `noteEvaluationAvailable` stays absent: the daemon accepts a conditioned write only while a `note.evaluation.register` heartbeat is live for the project, and no shipped host registers one, so the tool must surface the daemon's refusal instead of compiling the condition. commentlint: allow(JUDGE)
     };
 }
 

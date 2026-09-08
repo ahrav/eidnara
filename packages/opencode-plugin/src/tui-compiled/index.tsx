@@ -7,7 +7,6 @@ import { setProp as _$setProp } from "opentui:runtime-module:%40opentui%2Fsolid"
 import { createElement as _$createElement } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createComponent as _$createComponent } from "opentui:runtime-module:%40opentui%2Fsolid";
 /** @jsxImportSource @opentui/solid */
-// @ts-nocheck
 
 import { createMemo } from "opentui:runtime-module:solid-js";
 import packageJson from "../../package.json";
@@ -127,7 +126,7 @@ function getSessionId(api) {
   try {
     const route = api.route.current;
     if (route?.name === "session" && route.params?.sessionID) {
-      return route.params.sessionID;
+      return String(route.params.sessionID);
     }
   } catch {
     // ignore
@@ -330,17 +329,14 @@ const StatusDialog = props => {
       _$setProp(_el$34, "flexBasis", 0);
       _$setProp(_el$34, "height", 1);
       _$effect(_p$ => {
-        var _v$9 = seg.label,
-          _v$0 = Math.max(1, seg.tokens),
-          _v$1 = seg.color;
-        _v$9 !== _p$.e && (_p$.e = _$setProp(_el$34, "key", _v$9, _p$.e));
-        _v$0 !== _p$.t && (_p$.t = _$setProp(_el$34, "flexGrow", _v$0, _p$.t));
-        _v$1 !== _p$.a && (_p$.a = _$setProp(_el$34, "backgroundColor", _v$1, _p$.a));
+        var _v$9 = Math.max(1, seg.tokens),
+          _v$0 = seg.color;
+        _v$9 !== _p$.e && (_p$.e = _$setProp(_el$34, "flexGrow", _v$9, _p$.e));
+        _v$0 !== _p$.t && (_p$.t = _$setProp(_el$34, "backgroundColor", _v$0, _p$.t));
         return _p$;
       }, {
         e: undefined,
-        t: undefined,
-        a: undefined
+        t: undefined
       });
       return _el$34;
     })()));
@@ -368,17 +364,14 @@ const StatusDialog = props => {
         _$insert(_el$38, () => fmt(seg.tokens), _el$39);
         _$insert(_el$38, pct, _el$40);
         _$effect(_p$ => {
-          var _v$10 = seg.label,
-            _v$11 = seg.color,
-            _v$12 = t().textMuted;
-          _v$10 !== _p$.e && (_p$.e = _$setProp(_el$35, "key", _v$10, _p$.e));
-          _v$11 !== _p$.t && (_p$.t = _$setProp(_el$36, "fg", _v$11, _p$.t));
-          _v$12 !== _p$.a && (_p$.a = _$setProp(_el$38, "fg", _v$12, _p$.a));
+          var _v$1 = seg.color,
+            _v$10 = t().textMuted;
+          _v$1 !== _p$.e && (_p$.e = _$setProp(_el$36, "fg", _v$1, _p$.e));
+          _v$10 !== _p$.t && (_p$.t = _$setProp(_el$38, "fg", _v$10, _p$.t));
           return _p$;
         }, {
           e: undefined,
-          t: undefined,
-          a: undefined
+          t: undefined
         });
         return _el$35;
       })();
@@ -724,14 +717,14 @@ const StatusDialog = props => {
           }
         }), null);
         _$effect(_p$ => {
-          var _v$13 = t().text,
-            _v$14 = t().text,
-            _v$15 = t().text,
-            _v$16 = t().text;
-          _v$13 !== _p$.e && (_p$.e = _$setProp(_el$49, "fg", _v$13, _p$.e));
-          _v$14 !== _p$.t && (_p$.t = _$setProp(_el$53, "fg", _v$14, _p$.t));
-          _v$15 !== _p$.a && (_p$.a = _$setProp(_el$57, "fg", _v$15, _p$.a));
-          _v$16 !== _p$.o && (_p$.o = _$setProp(_el$61, "fg", _v$16, _p$.o));
+          var _v$11 = t().text,
+            _v$12 = t().text,
+            _v$13 = t().text,
+            _v$14 = t().text;
+          _v$11 !== _p$.e && (_p$.e = _$setProp(_el$49, "fg", _v$11, _p$.e));
+          _v$12 !== _p$.t && (_p$.t = _$setProp(_el$53, "fg", _v$12, _p$.t));
+          _v$13 !== _p$.a && (_p$.a = _$setProp(_el$57, "fg", _v$13, _p$.a));
+          _v$14 !== _p$.o && (_p$.o = _$setProp(_el$61, "fg", _v$14, _p$.o));
           return _p$;
         }, {
           e: undefined,
@@ -881,12 +874,12 @@ const StatusDialog = props => {
           });
         })(), null);
         _$effect(_p$ => {
-          var _v$17 = t().text,
-            _v$18 = t().text,
-            _v$19 = t().text;
-          _v$17 !== _p$.e && (_p$.e = _$setProp(_el$65, "fg", _v$17, _p$.e));
-          _v$18 !== _p$.t && (_p$.t = _$setProp(_el$69, "fg", _v$18, _p$.t));
-          _v$19 !== _p$.a && (_p$.a = _$setProp(_el$73, "fg", _v$19, _p$.a));
+          var _v$15 = t().text,
+            _v$16 = t().text,
+            _v$17 = t().text;
+          _v$15 !== _p$.e && (_p$.e = _$setProp(_el$65, "fg", _v$15, _p$.e));
+          _v$16 !== _p$.t && (_p$.t = _$setProp(_el$69, "fg", _v$16, _p$.t));
+          _v$17 !== _p$.a && (_p$.a = _$setProp(_el$73, "fg", _v$17, _p$.a));
           return _p$;
         }, {
           e: undefined,
@@ -936,7 +929,7 @@ const StatusDialog = props => {
         },
         l: "Last error",
         get v() {
-          return s().loggerDiagnostics.lastErrorMessage;
+          return s().loggerDiagnostics?.lastErrorMessage ?? "";
         },
         get fg() {
           return t().error;
@@ -951,7 +944,7 @@ const StatusDialog = props => {
         },
         l: "Last error time",
         get v() {
-          return s().loggerDiagnostics.lastErrorTime;
+          return s().loggerDiagnostics?.lastErrorTime ?? "";
         },
         get fg() {
           return t().textMuted;
@@ -1125,7 +1118,7 @@ async function waitForTuiProbeHostPaint(api, result) {
       resolve();
     }, 500);
     try {
-      renderer.once("frame", onFrame);
+      renderer.once?.("frame", onFrame);
     } catch (error) {
       if (settled) return;
       settled = true;
