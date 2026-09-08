@@ -11,7 +11,7 @@ import { createElement as _$createElement } from "opentui:runtime-module:%40open
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "opentui:runtime-module:solid-js";
 import packageJson from "../../../package.json";
 import { formatThresholdPercent } from "../../shared/format-threshold";
-import { formatMemoryCount } from "../../shared/rpc-types";
+import { formatMemoryCount, formatMemoryStatus } from "../../shared/rpc-types";
 import { formatTailHygiene } from "../../shared/tail-hygiene-status";
 import { computeEffectiveOrder, DEFAULT_SLOT_ORDER, PLUGIN_KEY, queueTuiPreferenceUpdate, readTuiPreferencesFile, readTuiPreferencesFileSync, resolveEidnaraPrefs, watchTuiPreferences } from "../../shared/tui-preferences";
 import { badgeTextColor } from "../badge-contrast";
@@ -122,7 +122,6 @@ const TokenBreakdown = props => {
     const result = [];
     if (s.systemPromptTokens > 0) {
       result.push({
-        key: "sys",
         tokens: s.systemPromptTokens,
         color: COLORS.system,
         label: "System"
@@ -132,7 +131,6 @@ const TokenBreakdown = props => {
     // Docs represents the injected `<project-docs>` block.
     if (s.docsTokens > 0) {
       result.push({
-        key: "docs",
         tokens: s.docsTokens,
         color: COLORS.docs,
         label: "Docs"
@@ -142,7 +140,6 @@ const TokenBreakdown = props => {
     // Compartments (blue)
     if (s.compaction_enabled !== false && s.compartmentTokens > 0) {
       result.push({
-        key: "comp",
         tokens: s.compartmentTokens,
         color: COLORS.compartments,
         label: "Compartments"
@@ -152,7 +149,6 @@ const TokenBreakdown = props => {
     // Facts (yellow/orange)
     if (s.factTokens > 0) {
       result.push({
-        key: "fact",
         tokens: s.factTokens,
         color: COLORS.facts,
         label: "Facts"
@@ -162,7 +158,6 @@ const TokenBreakdown = props => {
     // Memories (green)
     if (s.memoryTokens > 0) {
       result.push({
-        key: "mem",
         tokens: s.memoryTokens,
         color: COLORS.memories,
         label: "Memories"
@@ -172,7 +167,6 @@ const TokenBreakdown = props => {
     // The injected `<user-profile>` block contains promoted user memories.
     if (s.profileTokens > 0) {
       result.push({
-        key: "profile",
         tokens: s.profileTokens,
         color: COLORS.profile,
         label: "User Profile"
@@ -184,7 +178,6 @@ const TokenBreakdown = props => {
     //
     // The `Conversation` row remains visible when its token count is zero.
     result.push({
-      key: "conv",
       tokens: s.conversationTokens,
       color: COLORS.conversation,
       label: "Conversation*"
@@ -193,7 +186,6 @@ const TokenBreakdown = props => {
     // `Tool Calls` includes `tool_use`, `tool_result`, `tool`, and `tool-invocation` message parts.
     if (s.toolCallTokens > 0) {
       result.push({
-        key: "tool-calls",
         tokens: s.toolCallTokens,
         color: COLORS.toolCalls,
         label: "Tool Calls"
@@ -206,7 +198,6 @@ const TokenBreakdown = props => {
     // `toolDefinitionTokens` remains zero until the first turn measures the active agent's tool set.
     if (s.toolDefinitionTokens > 0) {
       result.push({
-        key: "tool-defs",
         tokens: s.toolDefinitionTokens,
         color: COLORS.toolDefs,
         label: "Tool Defs"
@@ -232,17 +223,14 @@ const TokenBreakdown = props => {
       _$setProp(_el$3, "flexBasis", 0);
       _$setProp(_el$3, "height", 1);
       _$effect(_p$ => {
-        var _v$ = seg.key,
-          _v$2 = Math.max(1, seg.tokens),
-          _v$3 = seg.color;
-        _v$ !== _p$.e && (_p$.e = _$setProp(_el$3, "key", _v$, _p$.e));
-        _v$2 !== _p$.t && (_p$.t = _$setProp(_el$3, "flexGrow", _v$2, _p$.t));
-        _v$3 !== _p$.a && (_p$.a = _$setProp(_el$3, "backgroundColor", _v$3, _p$.a));
+        var _v$ = Math.max(1, seg.tokens),
+          _v$2 = seg.color;
+        _v$ !== _p$.e && (_p$.e = _$setProp(_el$3, "flexGrow", _v$, _p$.e));
+        _v$2 !== _p$.t && (_p$.t = _$setProp(_el$3, "backgroundColor", _v$2, _p$.t));
         return _p$;
       }, {
         e: undefined,
-        t: undefined,
-        a: undefined
+        t: undefined
       });
       return _el$3;
     })()));
@@ -273,17 +261,14 @@ const TokenBreakdown = props => {
             _$insert(_el$9, () => compactTokens(seg.tokens), _el$0);
             _$insert(_el$9, pct, _el$1);
             _$effect(_p$ => {
-              var _v$4 = seg.key,
-                _v$5 = seg.color,
-                _v$6 = props.theme.textMuted;
-              _v$4 !== _p$.e && (_p$.e = _$setProp(_el$7, "key", _v$4, _p$.e));
-              _v$5 !== _p$.t && (_p$.t = _$setProp(_el$8, "fg", _v$5, _p$.t));
-              _v$6 !== _p$.a && (_p$.a = _$setProp(_el$9, "fg", _v$6, _p$.a));
+              var _v$3 = seg.color,
+                _v$4 = props.theme.textMuted;
+              _v$3 !== _p$.e && (_p$.e = _$setProp(_el$8, "fg", _v$3, _p$.e));
+              _v$4 !== _p$.t && (_p$.t = _$setProp(_el$9, "fg", _v$4, _p$.t));
               return _p$;
             }, {
               e: undefined,
-              t: undefined,
-              a: undefined
+              t: undefined
             });
             return _el$7;
           })();
@@ -317,10 +302,10 @@ const StatRow = props => {
     _$insertNode(_el$12, _el$13);
     _$insert(_el$13, () => props.value);
     _$effect(_p$ => {
-      var _v$7 = props.theme.textMuted,
-        _v$8 = fg();
-      _v$7 !== _p$.e && (_p$.e = _$setProp(_el$11, "fg", _v$7, _p$.e));
-      _v$8 !== _p$.t && (_p$.t = _$setProp(_el$12, "fg", _v$8, _p$.t));
+      var _v$5 = props.theme.textMuted,
+        _v$6 = fg();
+      _v$5 !== _p$.e && (_p$.e = _$setProp(_el$11, "fg", _v$5, _p$.e));
+      _v$6 !== _p$.t && (_p$.t = _$setProp(_el$12, "fg", _v$6, _p$.t));
       return _p$;
     }, {
       e: undefined,
@@ -391,10 +376,10 @@ const RecompProgressSection = props => {
     _$insert(_el$19, verb);
     _$insert(_el$20, () => label().text);
     _$effect(_p$ => {
-      var _v$9 = props.theme.text,
-        _v$0 = label().color;
-      _v$9 !== _p$.e && (_p$.e = _$setProp(_el$18, "fg", _v$9, _p$.e));
-      _v$0 !== _p$.t && (_p$.t = _$setProp(_el$20, "fg", _v$0, _p$.t));
+      var _v$7 = props.theme.text,
+        _v$8 = label().color;
+      _v$7 !== _p$.e && (_p$.e = _$setProp(_el$18, "fg", _v$7, _p$.e));
+      _v$8 !== _p$.t && (_p$.t = _$setProp(_el$20, "fg", _v$8, _p$.t));
       return _p$;
     }, {
       e: undefined,
@@ -415,10 +400,10 @@ const RecompProgressSection = props => {
     _$insertNode(_el$23, _el$24);
     _$insert(_el$23, pct, _el$24);
     _$effect(_p$ => {
-      var _v$1 = props.theme.accent,
-        _v$10 = props.theme.textMuted;
-      _v$1 !== _p$.e && (_p$.e = _$setProp(_el$22, "fg", _v$1, _p$.e));
-      _v$10 !== _p$.t && (_p$.t = _$setProp(_el$23, "fg", _v$10, _p$.t));
+      var _v$9 = props.theme.accent,
+        _v$0 = props.theme.textMuted;
+      _v$9 !== _p$.e && (_p$.e = _$setProp(_el$22, "fg", _v$9, _p$.e));
+      _v$0 !== _p$.t && (_p$.t = _$setProp(_el$23, "fg", _v$0, _p$.t));
       return _p$;
     }, {
       e: undefined,
@@ -842,10 +827,10 @@ const SidebarContent = props => {
               _$insert(_el$79, () => progress().processed, _el$81);
               _$insert(_el$79, () => progress().total, null);
               _$effect(_p$ => {
-                var _v$19 = props.theme.textMuted,
-                  _v$20 = props.theme.warning;
-                _v$19 !== _p$.e && (_p$.e = _$setProp(_el$77, "fg", _v$19, _p$.e));
-                _v$20 !== _p$.t && (_p$.t = _$setProp(_el$79, "fg", _v$20, _p$.t));
+                var _v$17 = props.theme.textMuted,
+                  _v$18 = props.theme.warning;
+                _v$17 !== _p$.e && (_p$.e = _$setProp(_el$77, "fg", _v$17, _p$.e));
+                _v$18 !== _p$.t && (_p$.t = _$setProp(_el$79, "fg", _v$18, _p$.t));
                 return _p$;
               }, {
                 e: undefined,
@@ -872,10 +857,10 @@ const SidebarContent = props => {
               });
             })());
             _$effect(_p$ => {
-              var _v$15 = props.theme.textMuted,
-                _v$16 = s()?.memoryState && s()?.memoryState !== "available" ? props.theme.warning : props.theme.textMuted;
-              _v$15 !== _p$.e && (_p$.e = _$setProp(_el$63, "fg", _v$15, _p$.e));
-              _v$16 !== _p$.t && (_p$.t = _$setProp(_el$65, "fg", _v$16, _p$.t));
+              var _v$13 = props.theme.textMuted,
+                _v$14 = s()?.memoryState && s()?.memoryState !== "available" ? props.theme.warning : props.theme.textMuted;
+              _v$13 !== _p$.e && (_p$.e = _$setProp(_el$63, "fg", _v$13, _p$.e));
+              _v$14 !== _p$.t && (_p$.t = _$setProp(_el$65, "fg", _v$14, _p$.t));
               return _p$;
             }, {
               e: undefined,
@@ -903,10 +888,10 @@ const SidebarContent = props => {
               return () => _c$12() ? ` N:${s().sessionNoteCount}` : "";
             })(), null);
             _$effect(_p$ => {
-              var _v$17 = props.theme.textMuted,
-                _v$18 = props.theme.textMuted;
-              _v$17 !== _p$.e && (_p$.e = _$setProp(_el$67, "fg", _v$17, _p$.e));
-              _v$18 !== _p$.t && (_p$.t = _$setProp(_el$69, "fg", _v$18, _p$.t));
+              var _v$15 = props.theme.textMuted,
+                _v$16 = props.theme.textMuted;
+              _v$15 !== _p$.e && (_p$.e = _$setProp(_el$67, "fg", _v$15, _p$.e));
+              _v$16 !== _p$.t && (_p$.t = _$setProp(_el$69, "fg", _v$16, _p$.t));
               return _p$;
             }, {
               e: undefined,
@@ -1001,8 +986,9 @@ const SidebarContent = props => {
         },
         label: "Memories",
         get value() {
-          return _$memo(() => !!(s()?.memoryState && s()?.memoryState !== "available"))() ? String(s().memoryState) : formatMemoryCount(s() ?? {
-            memoryCount: 0
+          return formatMemoryStatus(s() ?? {
+            memoryCount: 0,
+            memoryState: null
           });
         },
         accent: true
@@ -1015,7 +1001,7 @@ const SidebarContent = props => {
           return String(s().memoryBlockCount);
         },
         dim: true
-      }))])]), _$memo(() => _$memo(() => !!(sections().status && (compactionOff() || (s()?.pendingOpsCount ?? 0) > 0 || (s()?.sessionNoteCount ?? 0) > 0 || (s()?.readySmartNoteCount ?? 0) > 0)))() && [_$createComponent(SectionHeader, {
+      }))])]), _$memo(() => _$memo(() => !!(sections().status && (compactionOff() ? compactionOffSidebarRows(s()).some(row => row.label !== "Memories") : (s()?.pendingOpsCount ?? 0) > 0 || (s()?.sessionNoteCount ?? 0) > 0 || (s()?.readySmartNoteCount ?? 0) > 0)))() && [_$createComponent(SectionHeader, {
         get theme() {
           return props.theme;
         },
@@ -1121,14 +1107,14 @@ const SidebarContent = props => {
       })])];
     })(), null);
     _$effect(_p$ => {
-      var _v$11 = props.theme.borderActive,
-        _v$12 = props.theme.accent,
-        _v$13 = badgeTextColor(props.theme.accent, props.theme.background),
-        _v$14 = props.theme.textMuted;
-      _v$11 !== _p$.e && (_p$.e = _$setProp(_el$27, "borderColor", _v$11, _p$.e));
-      _v$12 !== _p$.t && (_p$.t = _$setProp(_el$29, "backgroundColor", _v$12, _p$.t));
-      _v$13 !== _p$.a && (_p$.a = _$setProp(_el$30, "fg", _v$13, _p$.a));
-      _v$14 !== _p$.o && (_p$.o = _$setProp(_el$32, "fg", _v$14, _p$.o));
+      var _v$1 = props.theme.borderActive,
+        _v$10 = props.theme.accent,
+        _v$11 = badgeTextColor(props.theme.accent, props.theme.background),
+        _v$12 = props.theme.textMuted;
+      _v$1 !== _p$.e && (_p$.e = _$setProp(_el$27, "borderColor", _v$1, _p$.e));
+      _v$10 !== _p$.t && (_p$.t = _$setProp(_el$29, "backgroundColor", _v$10, _p$.t));
+      _v$11 !== _p$.a && (_p$.a = _$setProp(_el$30, "fg", _v$11, _p$.a));
+      _v$12 !== _p$.o && (_p$.o = _$setProp(_el$32, "fg", _v$12, _p$.o));
       return _p$;
     }, {
       e: undefined,

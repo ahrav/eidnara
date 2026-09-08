@@ -1,4 +1,4 @@
-import { formatMemoryCount, type SidebarSnapshot } from "../shared/rpc-types";
+import { formatMemoryStatus, type SidebarSnapshot } from "../shared/rpc-types";
 
 export interface CompactionOffSidebarRow {
     label: "Memories" | "Notes" | "Archived compartments";
@@ -32,7 +32,7 @@ export function nativeContextLimit(snapshot: SidebarSnapshot): number {
 
 export function compactionOffSidebarRows(snapshot: SidebarSnapshot): CompactionOffSidebarRow[] {
     const rows: CompactionOffSidebarRow[] = [
-        { label: "Memories", value: formatMemoryCount(snapshot) },
+        { label: "Memories", value: formatMemoryStatus(snapshot) },
     ];
     // A zero count can mean the producer had no source for it, not an empty collection, so the row stays hidden rather than rendering a misleading 0.
     if (snapshot.sessionNoteCount > 0) {

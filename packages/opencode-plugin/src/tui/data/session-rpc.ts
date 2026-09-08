@@ -88,27 +88,35 @@ const STICKY_TTL_MS = 5 * 60 * 1000;
 const STICKY_MAX_ENTRIES = 100;
 const stickySidebarCache = new Map<string, CachedSnapshot>();
 
-function rememberSidebarSnapshot(snapshot: SidebarSnapshot): void {
+/** The producer resolves a snapshot from both the session and the requested project root, so the cache key carries both. */
+function stickyKey(sessionId: string, directory: string): string {
+    return `${sessionId}\u001f${directory}`;
+}
+
+function rememberSidebarSnapshot(snapshot: SidebarSnapshot, directory: string): void {
     if (!snapshot.sessionId) return;
+    const key = stickyKey(snapshot.sessionId, directory);
     // The entry cap prevents unbounded growth across session switches.
-    if (
-        stickySidebarCache.size >= STICKY_MAX_ENTRIES &&
-        !stickySidebarCache.has(snapshot.sessionId)
-    ) {
+    if (stickySidebarCache.size >= STICKY_MAX_ENTRIES && !stickySidebarCache.has(key)) {
         const firstKey = stickySidebarCache.keys().next().value;
         if (firstKey) stickySidebarCache.delete(firstKey);
     }
-    stickySidebarCache.set(snapshot.sessionId, {
+    stickySidebarCache.set(key, {
         snapshot,
         cachedAt: Date.now(),
     });
 }
 
-function recallSidebarSnapshot(sessionId: string, fallback: SidebarSnapshot): SidebarSnapshot {
-    const cached = stickySidebarCache.get(sessionId);
+function recallSidebarSnapshot(
+    sessionId: string,
+    directory: string,
+    fallback: SidebarSnapshot,
+): SidebarSnapshot {
+    const key = stickyKey(sessionId, directory);
+    const cached = stickySidebarCache.get(key);
     if (!cached) return fallback;
     if (Date.now() - cached.cachedAt > STICKY_TTL_MS) {
-        stickySidebarCache.delete(sessionId);
+        stickySidebarCache.delete(key);
         return fallback;
     }
     return cached.snapshot;
@@ -120,20 +128,20 @@ export async function loadSidebarSnapshot(
     directory: string,
 ): Promise<SidebarSnapshot> {
     const empty: SidebarSnapshot = { ...EMPTY_SNAPSHOT, sessionId };
-    if (!rpcClient) return recallSidebarSnapshot(sessionId, empty);
+    if (!rpcClient) return recallSidebarSnapshot(sessionId, directory, empty);
     try {
         const result = await rpcClient.call<SidebarSnapshot>("sidebar-snapshot", {
             sessionId,
             directory,
         });
         if (isRpcError(result)) {
-            return recallSidebarSnapshot(sessionId, empty);
+            return recallSidebarSnapshot(sessionId, directory, empty);
         }
         // Every successful snapshot, including a zero-token one, becomes the newest cached value so a later failure replays current memory counts rather than EMPTY_SNAPSHOT.
-        rememberSidebarSnapshot(result);
+        rememberSidebarSnapshot(result, directory);
         return result;
     } catch {
-        return recallSidebarSnapshot(sessionId, empty);
+        return recallSidebarSnapshot(sessionId, directory, empty);
     }
 }
 
