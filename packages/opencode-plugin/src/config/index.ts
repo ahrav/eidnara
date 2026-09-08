@@ -20,7 +20,7 @@ import { pruneNestedConfigLeaf } from "./prune-config-leaf";
 import { type EidnaraConfig, EidnaraConfigSchema, REMOVED_CONFIG_KEYS } from "./schema/eidnara";
 import { redactConfigIssuePath } from "./schema/issue-path";
 import { resolveTransformMode } from "./transform-mode";
-import { substituteConfigVariables } from "./variable";
+import { type SubstituteFailure, substituteConfigVariables } from "./variable";
 
 export type { LoadOutcome } from "./load-outcome";
 
@@ -66,7 +66,7 @@ interface LoadedConfigFileDetailed extends LoadedConfigFile {
      * `schema-recovery`, so `outcome` alone cannot identify these failures. Sensitive-path advisories
      * are warnings but not failures.
      */
-    substitutionFailures: string[];
+    substitutionFailures: SubstituteFailure[];
 }
 
 /**
@@ -120,7 +120,10 @@ function loadConfigFileDetailed(
         const config: Record<string, unknown> = parsed;
         const prefix = (warning: string) => `${configPath}: ${warning}`;
         const substitutionWarnings = substituted.warnings.map(prefix);
-        const substitutionFailures = substituted.failures.map(prefix);
+        const substitutionFailures = substituted.failures.map((failure) => ({
+            ...failure,
+            message: prefix(failure.message),
+        }));
         const unsafeKeyWarnings = rejectedKeyPaths.map((path) =>
             prefix(
                 `Ignored unsafe config key ${describeRejectedKeyPath(path)} (security: prototype-pollution keys are not allowed).`,
@@ -387,57 +390,16 @@ function hasUserTierExplicitDaemonConfig(config: Record<string, unknown> | undef
     return typeof connectionFile === "string" && connectionFile.trim().length > 0;
 }
 
-function collectEmptyStringPaths(value: unknown, prefix: string[] = []): string[][] {
-    if (typeof value === "string") {
-        return value === "" && prefix.length > 0 ? [prefix] : [];
-    }
-    if (Array.isArray(value) || value === null || typeof value !== "object") {
-        return [];
-    }
-
-    const paths: string[][] = [];
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-        paths.push(...collectEmptyStringPaths(child, [...prefix, key]));
-    }
-    return paths;
-}
-
 function bindSubstitutionFailures(
     loaded: LoadedConfigFileDetailed | null,
 ): Array<{ keyPath: string; source: "user" | "project"; message: string }> {
-    if (!loaded || loaded.substitutionFailures.length === 0) {
-        return [];
-    }
-
-    // Raw key names drive the matching; the published `keyPath` is redacted like a warning path.
-    const publish = (path: string[]): string => redactConfigIssuePath(path).join(".");
-
-    // Equal counts preserve duplicate token-to-path pairing by index; otherwise each path can match once.
-    const emptyPaths = collectEmptyStringPaths(loaded.config);
-    const { substitutionFailures, source } = loaded;
-    if (emptyPaths.length === substitutionFailures.length) {
-        return substitutionFailures.map((message, index) => {
-            const path = emptyPaths[index];
-            return { keyPath: path ? publish(path) : "<unknown>", source, message };
-        });
-    }
-
-    const unboundPaths = new Set(emptyPaths);
-    return substitutionFailures.map((message) => {
-        let matchedPath: string[] | undefined;
-        for (const path of unboundPaths) {
-            const tail = path.at(-1) ?? "";
-            if (
-                message.includes(path.join(".")) ||
-                message.toLowerCase().includes(tail.toLowerCase())
-            ) {
-                matchedPath = path;
-                unboundPaths.delete(path);
-                break;
-            }
-        }
-        return { keyPath: matchedPath ? publish(matchedPath) : "<unknown>", source, message };
-    });
+    if (!loaded) return [];
+    // `redactConfigIssuePath` withholds a substituted object key, which can carry a secret.
+    return loaded.substitutionFailures.map(({ message, path }) => ({
+        keyPath: path === undefined ? "<unknown>" : redactConfigIssuePath(path).join("."),
+        source: loaded.source,
+        message,
+    }));
 }
 
 /** Zod strips removed keys silently; this names them so users learn the key no longer does anything. */

@@ -2,6 +2,8 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
+import { getLocation, type JSONPath } from "jsonc-parser";
+
 import { stripJsoncComments } from "../shared/jsonc-parser";
 
 /**
@@ -30,6 +32,16 @@ export interface SubstituteInput {
     isProjectConfig?: boolean;
 }
 
+export interface SubstituteFailure {
+    /** The same text as the matching entry in `SubstituteResult.warnings`. */
+    message: string;
+    /**
+     * The JSONC path of the value or key that held the token, read from the document before the
+     * token was replaced. `undefined` when the failure is not tied to one token.
+     */
+    path: JSONPath | undefined;
+}
+
 export interface SubstituteResult {
     /* */
     text: string;
@@ -41,7 +53,7 @@ export interface SubstituteResult {
      * The subset of `warnings` where a token was replaced with an empty string or left unresolved.
      * A sensitive-path advisory is not a failure: the file was read and inlined.
      */
-    failures: string[];
+    failures: SubstituteFailure[];
 }
 
 const ENV_PATTERN = /\{env:([^}]+)\}/g;
@@ -93,10 +105,13 @@ function sensitiveFilePathReason(resolvedPath: string): string | null {
  */
 export function substituteConfigVariables(input: SubstituteInput): SubstituteResult {
     const warnings: string[] = [];
-    const failures: string[] = [];
+    const failures: SubstituteFailure[] = [];
+    // A token's path is read from the text being scanned; placeholders from an earlier pass are
+    // ordinary string tokens, so the structure is unchanged.
+    let tokenPath: JSONPath | undefined;
     const fail = (message: string): void => {
         warnings.push(message);
-        failures.push(message);
+        failures.push({ message, path: tokenPath });
     };
     let text = input.text;
 
@@ -154,6 +169,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             const lineStart = source.lastIndexOf("\n", index - 1) + 1;
             const prefix = source.slice(lineStart, index).trimStart();
             if (prefix.startsWith("//")) return token;
+            tokenPath = getLocation(source, index).path;
 
             // A missing fragment must not leave a shorter path that names some other existing file (`{file:{env:DIR}/secret}` with `DIR` unset would read `/secret`), so the whole token yields the empty string the env warning already announced. commentlint: allow(JUDGE)
             let nestedEnvMissing = false;
@@ -233,7 +249,8 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         },
     );
 
-    text = text.replace(ENV_PATTERN, (_, rawName: string) => {
+    text = text.replace(ENV_PATTERN, (_, rawName: string, index: number, source: string) => {
+        tokenPath = getLocation(source, index).path;
         const value = envValue(rawName);
         return value === undefined ? "" : placeholder(JSON.stringify(value).slice(1, -1));
     });

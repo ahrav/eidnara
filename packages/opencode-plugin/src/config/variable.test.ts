@@ -545,15 +545,51 @@ describe("substituteConfigVariables", () => {
     });
 
     describe("failures subset", () => {
-        it("lists every empty-string fallback and nothing else", () => {
+        it("lists every empty-string fallback with its JSONC path and nothing else", () => {
             delete process.env.EIDNARA_MISSING_FOR_FAILURES;
             const missing = join(tmpDir, "no-such-file.txt");
-            const input = `{ "a": "{env:EIDNARA_MISSING_FOR_FAILURES}", "b": "{file:${missing}}" }`;
+            const input = `{ "a": "{env:EIDNARA_MISSING_FOR_FAILURES}", "b": { "c": "{file:${missing}}" } }`;
 
             const result = substituteConfigVariables({ text: input });
 
-            expect(result.failures).toEqual(result.warnings);
-            expect(result.failures).toHaveLength(2);
+            // The file pass runs before the env pass, so the file failure is recorded first.
+            expect(result.failures).toEqual([
+                { message: expect.stringContaining("not found"), path: ["b", "c"] },
+                { message: expect.stringContaining("is not set"), path: ["a"] },
+            ]);
+            expect(result.failures.map((failure) => failure.message).sort()).toEqual(
+                [...result.warnings].sort(),
+            );
+        });
+
+        it("records the array index for a token inside an array element", () => {
+            delete process.env.EIDNARA_MISSING_IN_ARRAY;
+            const input = `{ "models": ["a/b", "{env:EIDNARA_MISSING_IN_ARRAY}"] }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.failures).toEqual([expect.objectContaining({ path: ["models", 1] })]);
+        });
+
+        it("records the enclosing value's path for a missing env inside a {file:} token", () => {
+            delete process.env.EIDNARA_MISSING_DIR;
+            const input = `{ "nested": { "key": "{file:{env:EIDNARA_MISSING_DIR}/x.txt}" } }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.failures).toEqual([expect.objectContaining({ path: ["nested", "key"] })]);
+        });
+
+        it("records distinct paths for two fields that reference the same missing token", () => {
+            delete process.env.EIDNARA_MISSING_SHARED;
+            const input = `{ "x": { "model": "{env:EIDNARA_MISSING_SHARED}" }, "y": { "model": "{env:EIDNARA_MISSING_SHARED}" } }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.failures.map((failure) => failure.path)).toEqual([
+                ["x", "model"],
+                ["y", "model"],
+            ]);
         });
 
         it("keeps a sensitive-path advisory out of failures when the file is then missing", () => {
@@ -561,17 +597,18 @@ describe("substituteConfigVariables", () => {
             const result = substituteConfigVariables({ text: `{ "key": "{file:~/.ssh/id_rsa}" }` });
 
             expect(result.warnings).toHaveLength(2);
-            expect(result.failures).toEqual([expect.stringContaining("not found")]);
+            expect(result.failures).toEqual([
+                { message: expect.stringContaining("not found"), path: ["key"] },
+            ]);
         });
 
-        it("treats literal project-level tokens as failures", () => {
+        it("treats literal project-level tokens as one failure without a path", () => {
             const result = substituteConfigVariables({
                 text: `{ "a": "{env:X}" }`,
                 isProjectConfig: true,
             });
 
-            expect(result.failures).toEqual(result.warnings);
-            expect(result.failures).toHaveLength(1);
+            expect(result.failures).toEqual([{ message: result.warnings[0], path: undefined }]);
         });
     });
 });

@@ -610,6 +610,17 @@ describe("loadPluginConfigDetailed — combined outcome", () => {
             "sidekick.model",
         ]);
     });
+
+    it("binds a failure inside an array-valued setting to its indexed path", () => {
+        const result = loadDetailedWithUserConfig(
+            '{"historian": {"fallback_models": ["a/b", "{env:EIDNARA_TEST_UNSET_FALLBACK}"]}, "prompt_surface": {"default": ""}}',
+        );
+
+        // The legitimately empty `prompt_surface.default` must not absorb the array failure.
+        expect(result.substitutionFailures).toEqual([
+            expect.objectContaining({ keyPath: "historian.fallback_models.[1]" }),
+        ]);
+    });
 });
 
 describe("loadPluginConfigDetailed — substituted text never reaches diagnostics", () => {
