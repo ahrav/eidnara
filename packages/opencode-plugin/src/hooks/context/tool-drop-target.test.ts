@@ -673,13 +673,17 @@ describe("tool-drop-target", () => {
             });
 
             describe("#when a long argument ends with the truncation sentinel", () => {
-                it("#then only the bounded clamped shape is exempt from re-clamping", () => {
+                it("#then only the exact five-scalar clamped shape is exempt from re-clamping", () => {
                     const longTail = `${"y".repeat(600)}...[truncated]`;
                     const toolPart = {
                         type: "tool",
                         callID: "call-tail",
                         state: {
-                            input: { payload: longTail, already: "abc...[truncated]" },
+                            input: {
+                                payload: longTail,
+                                clamped: "abcde...[truncated]",
+                                shortHead: "abc...[truncated]",
+                            },
                             output: "done",
                         },
                     };
@@ -691,10 +695,11 @@ describe("tool-drop-target", () => {
                     expect(target.truncate()).toBe("truncated");
 
                     const wire = messages[0]?.parts[0] as {
-                        state: { input: { payload: string; already: string } };
+                        state: { input: { payload: string; clamped: string; shortHead: string } };
                     };
                     expect(wire.state.input.payload).toBe("yyyyy...[truncated]");
-                    expect(wire.state.input.already).toBe("abc...[truncated]");
+                    expect(wire.state.input.clamped).toBe("abcde...[truncated]");
+                    expect(wire.state.input.shortHead).toBe("abc.....[truncated]");
                 });
             });
 
@@ -773,6 +778,25 @@ describe("tool-drop-target", () => {
                     expect(target.setContent("same text")).toBe(true);
                     expect("attachments" in toolPart.state).toBe(false);
                     expect(target.setContent("same text")).toBe(false);
+                });
+
+                it("#then setContent with different text also removes attachments", () => {
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-att-3",
+                        state: {
+                            attachments: [{ type: "file", mime: "image/png", url: "data:..." }],
+                            output: "old text",
+                        },
+                    };
+                    const messages: MessageLike[] = [message("m-att-3", "assistant", [toolPart])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-att-3", [], index, batch, 22);
+
+                    expect(target.setContent("new text")).toBe(true);
+                    expect(toolPart.state.output).toBe("new text");
+                    expect("attachments" in toolPart.state).toBe(false);
                 });
             });
         });
@@ -871,6 +895,10 @@ describe("tool-drop-target", () => {
             expect(hasMeaningfulPart({ type: "reasoning" })).toBe(false);
             expect(hasMeaningfulPart({ type: "redacted_thinking" })).toBe(false);
             expect(hasMeaningfulPart({ type: "meta" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "snapshot" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "patch" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "agent" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "retry" })).toBe(false);
         });
     });
 });

@@ -24,6 +24,7 @@ export type ToolCallIndex = Map<string, ToolCallIndexEntry>;
 
 /** `setContent` treats only this exact marker as a drop request. */
 const DROP_SENTINEL = /^\[dropped \u00a7\d+\u00a7\]$/;
+/** Part types omitted from OpenCode message content. */
 const IGNORE_PART_TYPES = new Set([
     "thinking",
     "reasoning",
@@ -31,6 +32,10 @@ const IGNORE_PART_TYPES = new Set([
     "meta",
     "step-start",
     "step-finish",
+    "snapshot",
+    "patch",
+    "agent",
+    "retry",
 ]);
 
 function isToolCallId(value: unknown): value is string {
@@ -70,10 +75,11 @@ function setToolContent(part: unknown, content: string): boolean {
     if (!isRecord(part)) return false;
     if (part.type === "tool" && isRecord(part.state)) {
         const state = part.state;
-        const changed = getToolContent(part) !== content || clearToolAttachments(part, state);
+        const textChanged = getToolContent(part) !== content;
+        const attachmentsCleared = clearToolAttachments(part, state);
         state.output = content;
         if (isErrorState(state)) state.error = content;
-        return changed;
+        return textChanged || attachmentsCleared;
     }
     if (part.type === "tool_result") {
         const changed = part.content !== content;
@@ -193,7 +199,11 @@ function scalarPrefix(str: string, count: number): string | null {
 function isClampedArg(value: string): boolean {
     if (!value.endsWith(TRUNCATION_SENTINEL)) return false;
     const head = value.slice(0, value.length - TRUNCATION_SENTINEL.length);
-    return scalarPrefix(head, SKELETON_ARG_LEN) === null;
+    // The clamp emits exactly `SKELETON_ARG_LEN` scalars before the sentinel.
+    return (
+        scalarPrefix(head, SKELETON_ARG_LEN) === null &&
+        scalarPrefix(head, SKELETON_ARG_LEN - 1) !== null
+    );
 }
 
 function truncateInputValues(input: Record<string, unknown>): void {
