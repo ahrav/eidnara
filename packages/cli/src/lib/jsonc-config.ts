@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { parseConfigJsonc } from "@eidnara/opencode/shared/jsonc-parser";
+import { sanitizeParsedJson } from "@eidnara/opencode/shared/jsonc-parser";
+import { parse as parseCommentJson } from "comment-json";
 
 export type JsoncReadResult =
     | { kind: "missing" }
@@ -57,7 +58,10 @@ export function readJsoncConfig(path: string): JsoncReadResult {
     try {
         content = readFileSync(path, "utf-8");
         const rejectedKeyPaths: string[] = [];
-        const parsed = parseConfigJsonc(content, {
+        const parsed: unknown = parseCommentJson(content);
+        // sanitizeParsedJson's return value is dropped: its copy lacks the
+        // symbol-keyed comment metadata that `stringify` needs to emit comments.
+        sanitizeParsedJson(parsed, {
             onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
         });
         if (rejectedKeyPaths.length > 0) {

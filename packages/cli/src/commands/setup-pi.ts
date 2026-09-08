@@ -1,10 +1,16 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
+import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
 import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
+import {
+    assertJsoncConfigsParseable,
+    readJsoncConfigForUpdate,
+    readJsoncLenient,
+} from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentDir, getPiUserExtensionsPath, getSharedUserConfigPath } from "../lib/paths";
 import {
@@ -43,7 +49,15 @@ export interface PiCompatibleSetupHost {
         prompts: PromptIO;
         dryRun: boolean;
         configureHost: boolean;
+        /** False delegates window compaction to the host's native compaction. */
+        eidnaraCompactionEnabled: boolean;
     }) => Promise<SetupRollback | false>;
+    /**
+     * Undo a successful `ensurePluginEntry`. Throw when the undo did not take
+     * effect: the caller then skips the native-settings rollback, because
+     * restoring native context managers while the plugin stays registered
+     * runs two managers side by side.
+     */
     rollbackPluginEntry?: (registration: PluginEntryResult) => Promise<void>;
 }
 
@@ -209,23 +223,31 @@ export function writeEidnaraConfig(
     // Model pickers return harness-native provider IDs. Persist only canonical
     // OpenCode-form IDs so every harness reads the same shared config.
     const toCanonical = options.modelRefToCanonical ?? piModelRefToCanonical;
-    config.historian = compactObject({
-        ...((config.historian as Record<string, unknown> | undefined) ?? {}),
-        model: toCanonical(options.historianModel),
-        thinking_level: options.historianThinkingLevel,
-    });
+    // comment-json keeps a section's comments as symbol-keyed metadata on the
+    // parsed object; a spread copy would drop them from the rewritten file.
+    const historian = isRecord(config.historian) ? config.historian : {};
+    historian.model = toCanonical(options.historianModel);
+    historian.thinking_level = options.historianThinkingLevel;
+    config.historian = compactObject(historian);
 
-    const sidekick = {
-        ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
-        model:
-            options.sidekickEnabled && options.sidekickModel
-                ? toCanonical(options.sidekickModel)
-                : undefined,
-        disable: options.sidekickEnabled ? undefined : true,
-        enabled: undefined,
-    };
+    const sidekick = isRecord(config.sidekick) ? config.sidekick : {};
+    sidekick.model =
+        options.sidekickEnabled && options.sidekickModel
+            ? toCanonical(options.sidekickModel)
+            : undefined;
+    sidekick.disable = options.sidekickEnabled ? undefined : true;
+    sidekick.enabled = undefined;
     config.sidekick = compactObject(sidekick);
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+}
+
+/**
+ * Compaction-off mode in the shared config delegates compaction to the host.
+ * The read is lenient because dry runs skip config validation; an unreadable
+ * config resolves to the schema default (enabled).
+ */
+function readEidnaraCompactionEnabled(configPath: string): boolean {
+    return isCompactionEnabled(readJsoncLenient(configPath).value);
 }
 
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
@@ -280,20 +302,22 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 
     const settingsPath = env.paths.getPiUserExtensionsPath();
     const configPath = env.paths.getPiUserConfigPath();
+    const configureHost = await prompts.confirm(
+        `Configure ${host.displayName} to load Eidnara?`,
+        true,
+    );
     if (!dryRun) {
         try {
-            // Validate all targets before writing to prevent partial setup when a later target is invalid.
-            assertJsoncConfigsParseable([settingsPath, configPath]);
+            // Validate every target this run will write before writing any of
+            // them, so a later invalid target cannot leave a partial setup.
+            // The host settings file is a target only when registration is on.
+            assertJsoncConfigsParseable(configureHost ? [settingsPath, configPath] : [configPath]);
         } catch (error) {
             prompts.log.error(error instanceof Error ? error.message : String(error));
             prompts.outro("Setup stopped — fix the malformed config and rerun setup.");
             return 1;
         }
     }
-    const configureHost = await prompts.confirm(
-        `Configure ${host.displayName} to load Eidnara?`,
-        true,
-    );
     if (configureHost && dryRun) {
         prompts.log.message(
             `[dry-run] would register ${host.packageSource} for ${host.displayName} in ${settingsPath}`,
@@ -339,6 +363,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             prompts,
             dryRun,
             configureHost,
+            eidnaraCompactionEnabled: readEidnaraCompactionEnabled(configPath),
         })) ?? (async () => {});
     if (rollbackHost === false) {
         prompts.outro(`Setup stopped — could not configure ${host.displayName}.`);
@@ -365,11 +390,25 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             prompts.log.success(`Config written to ${configPath}`);
         }
     } catch (error) {
+        prompts.log.error(error instanceof Error ? error.message : String(error));
         if (registration?.ok && host.rollbackPluginEntry) {
-            await host.rollbackPluginEntry(registration);
+            try {
+                await host.rollbackPluginEntry(registration);
+            } catch (rollbackError) {
+                prompts.log.error(
+                    rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+                );
+                prompts.log.warn(
+                    `Left ${host.displayName} native settings as configured for Eidnara: ` +
+                        `restoring them while the Eidnara plugin is still registered would run two context managers at once.`,
+                );
+                prompts.outro(
+                    `Setup stopped — undo the ${host.displayName} plugin registration by hand, then rerun setup.`,
+                );
+                return 1;
+            }
         }
         await rollbackHost();
-        prompts.log.error(error instanceof Error ? error.message : String(error));
         prompts.outro(`Setup stopped — rolled back ${host.displayName} changes.`);
         return 1;
     }

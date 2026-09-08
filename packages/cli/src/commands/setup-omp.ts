@@ -42,7 +42,14 @@ const OMP_HOST: PiCompatibleSetupHost = {
         "Upgrade with `omp update` before enabling Eidnara.",
     modelRefToCanonical: ompModelRefToCanonical,
     ensurePluginEntry: async () => new OmpAdapter().ensurePluginEntry(),
-    beforeWrite: async ({ binaryPath, cwd, prompts, dryRun, configureHost }) => {
+    beforeWrite: async ({
+        binaryPath,
+        cwd,
+        prompts,
+        dryRun,
+        configureHost,
+        eidnaraCompactionEnabled,
+    }) => {
         if (!configureHost && !new OmpAdapter().hasPluginEntry()) {
             return async () => {};
         }
@@ -60,7 +67,11 @@ const OMP_HOST: PiCompatibleSetupHost = {
             from: string;
             to: string;
         }> = [];
-        if (compaction === true) {
+        if (compaction === true && !eidnaraCompactionEnabled) {
+            prompts.log.info(
+                "Eidnara compaction is off in the shared config; leaving OMP native compaction enabled as the context-window owner.",
+            );
+        } else if (compaction === true) {
             const disable = await prompts.confirm(
                 "Disable OMP native compaction? Eidnara must own context management end to end.",
                 true,
@@ -131,10 +142,20 @@ const OMP_HOST: PiCompatibleSetupHost = {
     },
     rollbackPluginEntry: async (registration) => {
         if (registration.action === "already_present") return;
-        const omp = detectOmpBinary();
-        if (!omp) return;
         const action = registration.action === "added" ? "uninstall" : "disable";
-        runOmpCommand(omp.path, ["plugin", action, OMP_PLUGIN_PACKAGE], 120_000);
+        const manualStep = `Run \`omp plugin ${action} ${OMP_PLUGIN_PACKAGE}\` by hand.`;
+        const omp = detectOmpBinary();
+        if (!omp) {
+            throw new Error(
+                `Could not ${action} ${OMP_PLUGIN_PACKAGE}: OMP binary not found. ${manualStep}`,
+            );
+        }
+        const result = runOmpCommand(omp.path, ["plugin", action, OMP_PLUGIN_PACKAGE], 120_000);
+        if (!result.ok) {
+            throw new Error(
+                `Could not ${action} ${OMP_PLUGIN_PACKAGE}: ${result.stderr || result.stdout || "omp exited with an error"}. ${manualStep}`,
+            );
+        }
     },
 };
 

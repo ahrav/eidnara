@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import {
+    type PiCompatibleSetupHost,
     removePiSettingsPackage,
     runSetup,
     type SetupEnvironment,
@@ -169,7 +170,8 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => settingsPath,
             },
         };
-        const prompts = new MockPrompts({ confirms: [] });
+        // The single confirmation is configurePi=true, which makes settings.json a write target.
+        const prompts = new MockPrompts({ confirms: [true] });
 
         const code = await runSetup({ prompts, env });
 
@@ -178,6 +180,194 @@ describe("runSetup", () => {
         expect(existsSync(env.paths.getPiUserConfigPath())).toBe(false);
         expect(prompts.messages.join("\n")).toContain(
             `Refusing to overwrite unparseable config ${settingsPath} at line 3, column 1`,
+        );
+    });
+
+    it("writes the shared config when registration is skipped and only settings.json is malformed", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const settingsPath = join(agentDir, "settings.json");
+        const malformed = `{\n  "packages": [\n`;
+        writeFileSync(settingsPath, malformed);
+        const configPath = join(root, ".config", "eidnara", "eidnara.jsonc");
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => settingsPath,
+            },
+        };
+        // The confirmations are configurePi=false and sidekickEnabled=false.
+        const prompts = new MockPrompts({ confirms: [false, false] });
+
+        const code = await runSetup({ prompts, env });
+
+        expect(code).toBe(0);
+        expect(readFileSync(settingsPath, "utf-8")).toBe(malformed);
+        const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
+            historian?: { model?: string };
+        };
+        expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
+        expect(prompts.messages.join("\n")).toContain("Skipped Pi package registration.");
+    });
+
+    it("keeps JSONC comments in an existing eidnara config when rewriting it", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const configPath = join(root, ".config", "eidnara", "eidnara.jsonc");
+        mkdirSync(join(root, ".config", "eidnara"), { recursive: true });
+        writeFileSync(
+            configPath,
+            [
+                "{",
+                "  // top-level note",
+                '  "historian": {',
+                "    // inside historian",
+                '    "model": "anthropic/claude-sonnet-4-6"',
+                "  },",
+                "  /* compaction stays off */",
+                '  "compaction": { "enabled": false }',
+                "}",
+                "",
+            ].join("\n"),
+        );
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        // The confirmations are configurePi=true and sidekickEnabled=false.
+        const prompts = new MockPrompts({ confirms: [true, false] });
+
+        const code = await runSetup({ prompts, env });
+
+        expect(code).toBe(0);
+        const written = readFileSync(configPath, "utf-8");
+        expect(written).toContain("// top-level note");
+        expect(written).toContain("// inside historian");
+        expect(written).toContain("/* compaction stays off */");
+        const config = parseJsonc(written) as {
+            historian?: { model?: string };
+            compaction?: { enabled?: boolean };
+        };
+        expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
+        expect(config.compaction?.enabled).toBe(false);
+    });
+
+    it("skips the native-settings rollback when the plugin registration cannot be undone", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        // A regular file at the config's parent path fails the write but not the pre-write validation.
+        writeFileSync(join(root, "not-a-dir"), "");
+        const configPath = join(root, "not-a-dir", "eidnara.jsonc");
+        const settingsPath = join(agentDir, "settings.json");
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => settingsPath,
+            },
+        };
+        const calls: string[] = [];
+        const host: PiCompatibleSetupHost = {
+            displayName: "Fake",
+            cliName: "fake",
+            packageSource: "npm:fake",
+            ensurePluginEntry: async () => {
+                calls.push("ensurePluginEntry");
+                return {
+                    ok: true,
+                    action: "added",
+                    message: "registered",
+                    configPath: settingsPath,
+                };
+            },
+            beforeWrite: async () => async () => {
+                calls.push("rollbackHost");
+            },
+            rollbackPluginEntry: async () => {
+                calls.push("rollbackPluginEntry");
+                throw new Error("plugin undo failed");
+            },
+        };
+        // The confirmations are configureHost=true and sidekickEnabled=false.
+        const prompts = new MockPrompts({ confirms: [true, false] });
+
+        const code = await runSetup({ prompts, env, host });
+
+        expect(code).toBe(1);
+        expect(calls).toEqual(["ensurePluginEntry", "rollbackPluginEntry"]);
+        const log = prompts.messages.join("\n");
+        expect(log).toContain("error:plugin undo failed");
+        expect(log).toContain("two context managers at once");
+        expect(log).toContain("outro:Setup stopped — undo the Fake plugin registration by hand");
+    });
+
+    it("restores native settings when the plugin registration is undone", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        writeFileSync(join(root, "not-a-dir"), "");
+        const configPath = join(root, "not-a-dir", "eidnara.jsonc");
+        const settingsPath = join(agentDir, "settings.json");
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => settingsPath,
+            },
+        };
+        const calls: string[] = [];
+        const host: PiCompatibleSetupHost = {
+            displayName: "Fake",
+            cliName: "fake",
+            packageSource: "npm:fake",
+            ensurePluginEntry: async () => ({
+                ok: true,
+                action: "added",
+                message: "registered",
+                configPath: settingsPath,
+            }),
+            beforeWrite: async () => async () => {
+                calls.push("rollbackHost");
+            },
+            rollbackPluginEntry: async () => {
+                calls.push("rollbackPluginEntry");
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [true, false] });
+
+        const code = await runSetup({ prompts, env, host });
+
+        expect(code).toBe(1);
+        expect(calls).toEqual(["rollbackPluginEntry", "rollbackHost"]);
+        expect(prompts.messages.join("\n")).toContain(
+            "outro:Setup stopped — rolled back Fake changes.",
         );
     });
 

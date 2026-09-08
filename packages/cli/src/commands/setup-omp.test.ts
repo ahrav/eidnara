@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
@@ -67,14 +75,16 @@ afterEach(() => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function makeFakeOmp(options: { failMemorySet?: boolean } = {}): {
+function makeFakeOmp(options: { failMemorySet?: boolean; failPluginCommands?: boolean } = {}): {
     root: string;
     binary: string;
     state: string;
+    pluginLog: string;
 } {
     const root = mkdtempSync(join(tmpdir(), "eidnara-omp-setup-"));
     roots.push(root);
     const state = join(root, "state.json");
+    const pluginLog = join(root, "plugin-commands.log");
     const binary = join(root, "omp");
     writeFileSync(state, JSON.stringify({ compaction: true, memory: "mnemopi" }));
     writeFileSync(
@@ -82,8 +92,10 @@ function makeFakeOmp(options: { failMemorySet?: boolean } = {}): {
         `#!/usr/bin/env node
 const fs = require("fs");
 const statePath = ${JSON.stringify(state)};
+const pluginLogPath = ${JSON.stringify(pluginLog)};
 const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
 const failMemorySet = ${JSON.stringify(options.failMemorySet === true)};
+const failPluginCommands = ${JSON.stringify(options.failPluginCommands === true)};
 const args = process.argv.slice(2);
 if (args[0] === "config" && args[1] === "get") {
   const value = args[2] === "compaction.enabled" ? state.compaction : state.memory;
@@ -100,16 +112,82 @@ if (args[0] === "config" && args[1] === "get") {
   fs.writeFileSync(statePath, JSON.stringify(state));
 } else if (args[0] === "plugin" && args[1] === "list") {
   process.stdout.write(JSON.stringify({ npm: [], marketplace: [] }));
+} else if (args[0] === "plugin") {
+  fs.appendFileSync(pluginLogPath, args.join(" ") + "\\n");
+  if (failPluginCommands) {
+    process.stderr.write("plugin command failed");
+    process.exit(1);
+  }
 }
 `,
     );
     chmodSync(binary, 0o755);
     process.env.PATH = [root, original.PATH].filter(Boolean).join(delimiter);
     process.env.HOME = root;
-    return { root, binary, state };
+    return { root, binary, state, pluginLog };
 }
 
 describe("OMP setup transaction", () => {
+    it("leaves OMP native compaction on when Eidnara compaction is off", async () => {
+        const { root, binary, state } = makeFakeOmp();
+        // The single confirmation disables the memory backend; no compaction prompt is issued.
+        const prompts = new MockPrompts([true]);
+        const rollback = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd: root,
+            prompts,
+            dryRun: false,
+            configureHost: true,
+            eidnaraCompactionEnabled: false,
+        });
+        expect(typeof rollback).toBe("function");
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: true,
+            memory: "off",
+        });
+        expect(prompts.messages.join("\n")).toContain("leaving OMP native compaction enabled");
+
+        if (typeof rollback === "function") await rollback();
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: true,
+            memory: "mnemopi",
+        });
+    });
+
+    it("reports a failed plugin rollback instead of discarding the result", async () => {
+        const { pluginLog } = makeFakeOmp({ failPluginCommands: true });
+
+        await expect(
+            __test.OMP_HOST.rollbackPluginEntry?.({
+                ok: true,
+                action: "updated",
+                message: "enabled",
+                configPath: "unused",
+            }),
+        ).rejects.toThrow(/Could not disable .*plugin command failed.*omp plugin disable/);
+        expect(readFileSync(pluginLog, "utf-8").trim()).toBe("plugin disable @eidnara/pi");
+    });
+
+    it("uninstalls a plugin that setup installed and leaves an already-present one alone", async () => {
+        const { pluginLog } = makeFakeOmp();
+
+        await __test.OMP_HOST.rollbackPluginEntry?.({
+            ok: true,
+            action: "already_present",
+            message: "present",
+            configPath: "unused",
+        });
+        expect(existsSync(pluginLog)).toBe(false);
+
+        await __test.OMP_HOST.rollbackPluginEntry?.({
+            ok: true,
+            action: "added",
+            message: "installed",
+            configPath: "unused",
+        });
+        expect(readFileSync(pluginLog, "utf-8").trim()).toBe("plugin uninstall @eidnara/pi");
+    });
+
     it("restores native settings when a later setup step rolls back", async () => {
         const { root, binary, state } = makeFakeOmp();
         const prompts = new MockPrompts([true, true]);
@@ -119,6 +197,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
+            eidnaraCompactionEnabled: true,
         });
         expect(typeof rollback).toBe("function");
         expect(fetchCalls).toEqual([]);
@@ -144,6 +223,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
+            eidnaraCompactionEnabled: true,
         });
 
         expect(result).toBe(false);
@@ -164,6 +244,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: false,
+            eidnaraCompactionEnabled: true,
         });
         expect(typeof rollback).toBe("function");
         expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
@@ -186,6 +267,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
+            eidnaraCompactionEnabled: true,
         });
 
         expect(result).toBe(false);
@@ -209,6 +291,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
+            eidnaraCompactionEnabled: true,
         });
 
         expect(result).toBe(false);
