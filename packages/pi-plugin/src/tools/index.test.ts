@@ -133,7 +133,7 @@ describe("registerEidnaraTools", () => {
             },
             registerCommand: () => undefined,
         } as never;
-        const requests: Array<{ projectPath: string; projectRoot: string }> = [];
+        const requests: Array<{ memoryProject: string; projectRoot: string }> = [];
 
         registerEidnaraTools(pi, {
             kernelClient,
@@ -163,7 +163,7 @@ describe("registerEidnaraTools", () => {
         expect((result as { isError?: boolean } | undefined)?.isError).toBeUndefined();
         expect(requests).toEqual([
             expect.objectContaining({
-                projectPath: "git:project-b",
+                memoryProject: "git:project-b",
                 projectRoot: "/tmp/project-b",
             }),
         ]);

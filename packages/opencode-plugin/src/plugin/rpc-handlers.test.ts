@@ -6,10 +6,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { EidnaraConfigSchema } from "../config/schema/eidnara";
 import { createEventHandler } from "../hooks/context/event-handler";
+import { createEventHook } from "../hooks/context/hook-handlers";
 import { resetKernelClientsForTest } from "../hooks/context/kernel-transport";
 import { createLiveSessionState } from "../hooks/context/live-session-state";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
+import { BoundedSessionMap } from "../shared/bounded-session-map";
 import { unavailable } from "../shared/kernel-client";
 import { ANTI_MEMORY_CATEGORY, renderAntiMemoryContent } from "../shared/kernel-client/anti-memory";
 import { FakeKernel } from "../shared/kernel-client-testing/fake-kernel";
@@ -22,7 +24,8 @@ import {
     buildSidebarSnapshot,
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
-    clearRustSessionStatus,
+    CoalescedTtlCache,
+    clearSessionPollCaches,
     clearWorkMetricsCarry,
     clearWorkMetricsCarryIfFolded,
     type RustSessionStatus,
@@ -153,7 +156,17 @@ describe("registerRpcHandlers", () => {
         expect(detail.compartmentCount).toBe(4);
     });
 
-    test("the daemon status cache keys by project root, so one session polled under two roots asks each route", async () => {
+    test("an empty requested directory falls back to the server's directory instead of pinning an empty root", async () => {
+        const { handlers, roots } = register({}, DAEMON_STATUS);
+        const sessionId = "ses-handler-empty-dir";
+
+        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: "" });
+        await handlers.get("status-detail")?.({ sessionId, directory: 7 });
+
+        expect(roots).toEqual([process.cwd()]);
+    });
+
+    test("a session keeps its first route root when a later poll supplies another directory", async () => {
         const { handlers, calls, roots } = register({}, DAEMON_STATUS);
         const sessionId = "ses-handler-two-roots";
         const rootA = process.cwd();
@@ -161,17 +174,18 @@ describe("registerRpcHandlers", () => {
 
         await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootA });
         await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootB });
-        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootA });
+        await handlers.get("status-detail")?.({ sessionId, directory: rootB });
 
-        expect(calls).toEqual(["session.status", "session.status"]);
-        expect(roots).toEqual([rootA, rootB]);
+        // Every call routes to the pinned root, so the cached status answers the later polls.
+        expect(calls).toEqual(["session.status"]);
+        expect(roots).toEqual([rootA]);
     });
 
-    test("a zero-token answer from a second root does not inherit the first root's sticky totals", async () => {
-        const sessionId = "ses-handler-sticky-roots";
+    test("the host-reported session directory routes the poll, not the caller's directory", async () => {
+        const sessionId = "ses-handler-host-root";
         const rootA = process.cwd();
         const rootB = join(process.cwd(), "src");
-        // Root B keeps root A's compartment count so a session-keyed sticky cache would substitute A's totals.
+        // Root B keeps root A's compartment count so a wrong route would be visible only through the token totals.
         const statusByRoot = new Map<string, RustSessionStatus>([
             [rootA, DAEMON_STATUS],
             [
@@ -188,33 +202,39 @@ describe("registerRpcHandlers", () => {
                 handlers.set(method, handler);
             },
         } as unknown as EidnaraRpcServer;
+        const liveSessionState = createLiveSessionState();
+        const roots: string[] = [];
         registerRpcHandlers(server, {
             directory: rootA,
             config: EidnaraConfigSchema.parse({
                 transform_mode: "rust",
                 subc: { connection_file: MISSING_CONNECTION_FILE },
             }),
-            client: null,
-            liveSessionState: createLiveSessionState(),
+            client: {
+                session: {
+                    async get(args: { path: { id: string } }) {
+                        return { data: { id: args.path.id, directory: rootB } };
+                    },
+                },
+            } as unknown as NonNullable<Parameters<typeof registerRpcHandlers>[1]["client"]>,
+            liveSessionState,
             rustModeModuleClient: {
                 async call(args) {
+                    roots.push(args.projectRoot);
                     return { ok: true, result: statusByRoot.get(args.projectRoot) ?? {} };
                 },
             },
         });
 
-        const first = (await handlers.get("sidebar-snapshot")?.({
+        const snapshot = (await handlers.get("sidebar-snapshot")?.({
             sessionId,
             directory: rootA,
         })) as unknown as SidebarSnapshot;
-        expect(first.inputTokens).toBe(42_000);
-
-        const second = (await handlers.get("sidebar-snapshot")?.({
-            sessionId,
-            directory: rootB,
-        })) as unknown as SidebarSnapshot;
-        expect(second.inputTokens).toBe(0);
-        expect(second.usagePercentage).toBe(0);
+        expect(roots).toEqual([rootB]);
+        expect(snapshot.inputTokens).toBe(0);
+        expect(snapshot.usagePercentage).toBe(0);
+        // The pin is shared with the hooks, so their daemon calls take the same route.
+        expect(liveSessionState.sessionDirectoryBySession.get(sessionId)).toBe(rootB);
     });
 
     test("a daemon that cannot answer fails the poll instead of returning a zero snapshot", async () => {
@@ -229,6 +249,56 @@ describe("registerRpcHandlers", () => {
         });
         // A failure is not cached, so the next poll asks the daemon again.
         expect(calls).toEqual(["session.status", "session.status"]);
+    });
+
+    test("status-detail classifies a restored child from host metadata before reporting isSubagent", async () => {
+        const sessionId = "ses-restored-child";
+        const liveSessionState = createLiveSessionState();
+        const reads: string[] = [];
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: process.cwd(),
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: {
+                session: {
+                    async get(args: { path: { id: string } }) {
+                        reads.push(args.path.id);
+                        return {
+                            data: {
+                                id: args.path.id,
+                                parentID: "ses-parent",
+                                directory: process.cwd(),
+                            },
+                        };
+                    },
+                },
+            } as unknown as NonNullable<Parameters<typeof registerRpcHandlers>[1]["client"]>,
+            liveSessionState,
+            rustModeModuleClient: {
+                async call() {
+                    return { ok: true, result: DAEMON_STATUS };
+                },
+            },
+        });
+        expect(liveSessionState.subagentSessions.has(sessionId)).toBe(false);
+
+        const detail = (await handlers.get("status-detail")?.({
+            sessionId,
+        })) as unknown as StatusDetail;
+        expect(detail.isSubagent).toBe(true);
+        expect(liveSessionState.subagentSessions.has(sessionId)).toBe(true);
+
+        // The completed read is memoized; a second request does not read the host again.
+        await handlers.get("status-detail")?.({ sessionId });
+        expect(reads).toEqual([sessionId]);
     });
 
     test("a daemon error response fails the poll the same way", async () => {
@@ -299,10 +369,57 @@ describe("registerRpcHandlers", () => {
         expect(detail.compartmentCount).toBe(4);
     });
 
-    test("clearRustSessionStatus forgets the cached status and fences a request in flight", async () => {
+    test("an assistant message.updated drops the cached status so the refresh it triggers reads the daemon", async () => {
+        const sessionId = "ses-handler-status-turn";
+        const live = createLiveSessionState();
+        const { handlers, calls } = register({}, DAEMON_STATUS, live);
+        const eventHook = createEventHook({
+            eventHandler: createEventHandler({ contextUsageMap: live.contextUsageBySession }),
+            contextUsageMap: live.contextUsageBySession,
+            liveModelBySession: live.liveModelBySession,
+            variantBySession: live.variantBySession,
+            agentBySession: live.agentBySession,
+            sessionDirectoryBySession: live.sessionDirectoryBySession,
+            historyRefreshSessions: live.historyRefreshSessions,
+            deferredHistoryRefreshSessions: live.deferredHistoryRefreshSessions,
+            systemPromptRefreshSessions: live.systemPromptRefreshSessions,
+            pendingMaterializationSessions: live.pendingMaterializationSessions,
+            deferredMaterializationSessions: live.deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map(),
+            client: undefined as never,
+            protectedTags: 5,
+        });
+
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        // Within the TTL the second poll reuses the cache.
+        expect(calls).toEqual(["session.status"]);
+
+        await eventHook({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        sessionID: sessionId,
+                        id: "msg-turn",
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        finish: "stop",
+                        tokens: { input: 1_000, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toEqual(["session.status", "session.status"]);
+    });
+
+    test("clearSessionPollCaches forgets the cached status and fences a request in flight", async () => {
         const sessionId = "ses-handler-status-cleared";
         let calls = 0;
         let release: (() => void) | undefined;
+        let onThirdCall: (() => void) | undefined;
         const gate = new Promise<void>((resolve) => {
             release = resolve;
         });
@@ -323,7 +440,10 @@ describe("registerRpcHandlers", () => {
             rustModeModuleClient: {
                 async call() {
                     calls += 1;
-                    if (calls === 3) await gate;
+                    if (calls === 3) {
+                        onThirdCall?.();
+                        await gate;
+                    }
                     return { ok: true, result: DAEMON_STATUS };
                 },
             },
@@ -332,19 +452,80 @@ describe("registerRpcHandlers", () => {
         await handlers.get("sidebar-snapshot")?.({ sessionId });
         expect(calls).toBe(1);
         // Within the TTL a poll would reuse the cache; the clear forces a fresh daemon read.
-        clearRustSessionStatus(sessionId);
+        clearSessionPollCaches(sessionId);
         await handlers.get("sidebar-snapshot")?.({ sessionId });
         expect(calls).toBe(2);
 
         // A clear while a request is in flight discards its late answer: the waiting poll fails instead of rendering the invalidated session, and nothing is cached.
-        clearRustSessionStatus(sessionId);
+        clearSessionPollCaches(sessionId);
+        let reached: (() => void) | undefined;
+        const daemonReached = new Promise<void>((resolve) => {
+            reached = resolve;
+        });
+        onThirdCall = () => reached?.();
         const pending = handlers.get("sidebar-snapshot")?.({ sessionId });
+        await daemonReached;
         expect(calls).toBe(3);
-        clearRustSessionStatus(sessionId);
+        clearSessionPollCaches(sessionId);
         release?.();
         expect(await pending).toEqual({ error: "sidebar snapshot unavailable" });
         await handlers.get("sidebar-snapshot")?.({ sessionId });
         expect(calls).toBe(4);
+    });
+
+    test("the snapshot carries the host's compaction ownership only while Eidnara compaction is off", async () => {
+        const build = (
+            configOverrides: Record<string, unknown>,
+            nativeCompaction?: { auto: boolean; prune: boolean },
+        ) => {
+            const handlers = new Map<string, Handler>();
+            const server = {
+                handle(method: string, handler: Handler) {
+                    handlers.set(method, handler);
+                },
+            } as unknown as EidnaraRpcServer;
+            registerRpcHandlers(server, {
+                directory: process.cwd(),
+                config: EidnaraConfigSchema.parse({
+                    transform_mode: "rust",
+                    subc: { connection_file: MISSING_CONNECTION_FILE },
+                    ...configOverrides,
+                }),
+                client: null,
+                liveSessionState: createLiveSessionState(),
+                rustModeModuleClient: {
+                    async call() {
+                        return { ok: true, result: DAEMON_STATUS };
+                    },
+                },
+                nativeCompaction,
+            });
+            return handlers;
+        };
+        const call = async (handlers: Map<string, Handler>) =>
+            (await handlers.get("sidebar-snapshot")?.({
+                sessionId: "ses-compaction-owner",
+            })) as unknown as SidebarSnapshot;
+
+        const neither = await call(
+            build({ compaction: { enabled: false } }, { auto: false, prune: false }),
+        );
+        expect(neither.compaction_enabled).toBe(false);
+        expect(neither.native_compaction_active).toBe(false);
+
+        const prune = await call(
+            build({ compaction: { enabled: false } }, { auto: false, prune: true }),
+        );
+        expect(prune.native_compaction_active).toBe(true);
+
+        // Without the host's resolved setting the field stays absent rather than guessing.
+        const unknown = await call(build({ compaction: { enabled: false } }));
+        expect(unknown.native_compaction_active).toBeUndefined();
+
+        // Eidnara owns the window: the host's setting is irrelevant and not reported.
+        const eidnara = await call(build({}, { auto: true, prune: true }));
+        expect(eidnara.compaction_enabled).toBe(true);
+        expect(eidnara.native_compaction_active).toBeUndefined();
     });
 
     test("sidebar-snapshot reports disabled memory and rejects an empty session id", async () => {
@@ -354,6 +535,45 @@ describe("registerRpcHandlers", () => {
         })) as unknown as SidebarSnapshot;
         expect(snapshot.memoryState).toBe("disabled");
         expect(await handlers.get("sidebar-snapshot")?.({})).toEqual({ error: "unavailable" });
+    });
+
+    test("the live sample wins over the daemon's forwarded copy; the daemon fills in when no sample exists", async () => {
+        const sessionId = "ses-handler-live-first";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        const { handlers } = register({}, DAEMON_STATUS, live);
+
+        // No live or persisted sample: the daemon's 42k is the only measurement.
+        const daemonOnly = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(daemonOnly.inputTokens).toBe(42_000);
+        expect(daemonOnly.compartmentCount).toBe(DAEMON_STATUS.compartment_count);
+
+        // A newer response measured 6.4k; the daemon still holds the sample a transform forwarded earlier.
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 5, inputTokens: 6_400 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+            model: { providerID: "test-provider", modelID: "test-model" },
+        });
+        clearSessionPollCaches(sessionId);
+        const liveFirst = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(liveFirst.inputTokens).toBe(6_400);
+
+        // A sample measured against another model does not pair with the active model; the daemon's copy fills in.
+        live.liveModelBySession.set(sessionId, { providerID: "other", modelID: "model" });
+        clearSessionPollCaches(sessionId);
+        const otherModel = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(otherModel.inputTokens).toBe(42_000);
     });
 
     test("ts mode serves the live event usage without contacting the daemon", async () => {
@@ -466,9 +686,10 @@ describe("buildSidebarSnapshot — daemon status", () => {
             undefined,
             { execute_threshold_percentage: 65 },
             { usage: { current_total_input_tokens: 41_000, context_limit_tokens: 100_000 } },
-            false,
+            { enabled: false, nativeActive: false },
         );
         expect(snapshot.compaction_enabled).toBe(false);
+        expect(snapshot.native_compaction_active).toBe(false);
         expect(snapshot.native_context_usage_percentage).toBeUndefined();
         expect(snapshot.usagePercentage).toBe(41);
         expect(snapshot.cacheTtl).toBe("5m");
@@ -535,8 +756,8 @@ describe("buildSidebarSnapshot — daemon status", () => {
         expect(fromLive.usagePercentage).toBe(50);
         expect(fromLive.native_context_usage_percentage).toBe(50);
 
-        // Daemon usage wins when present.
-        const fromDaemon = buildSidebarSnapshot(
+        // Live usage takes precedence over daemon usage.
+        const withDaemon = buildSidebarSnapshot(
             sessionId,
             process.cwd(),
             live,
@@ -546,8 +767,9 @@ describe("buildSidebarSnapshot — daemon status", () => {
                 usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
             },
         );
-        expect(fromDaemon.inputTokens).toBe(42_000);
-        expect(fromDaemon.usagePercentage).toBe(42);
+        expect(withDaemon.inputTokens).toBe(64_000);
+        expect(withDaemon.contextLimit).toBe(128_000);
+        expect(withDaemon.usagePercentage).toBe(50);
     });
 
     test("live usage measured against a different model is not shown after a model switch", () => {
@@ -1043,9 +1265,65 @@ describe("clearWorkMetricsCarry", () => {
         expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(0);
         expect(live.contextUsageBySession.has(sessionId)).toBe(false);
 
+        // The daemon still holds the pre-compaction sample a transform forwarded; a compacted session with no later response reports zero, not that copy.
+        expect(
+            buildSidebarSnapshot(
+                sessionId,
+                process.cwd(),
+                createLiveSessionState(),
+                undefined,
+                undefined,
+                {
+                    usage: { current_total_input_tokens: 90_000, context_limit_tokens: 100_000 },
+                },
+            ).inputTokens,
+        ).toBe(0);
+
         insertAssistantRow(db, sessionId, "b", 3, 12_000);
         closeQuietly(db);
         expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(12_000);
+        // The persisted post-compaction sample wins over the daemon's copy even from a fresh process.
+        expect(
+            buildSidebarSnapshot(
+                sessionId,
+                process.cwd(),
+                createLiveSessionState(),
+                undefined,
+                undefined,
+                {
+                    usage: { current_total_input_tokens: 90_000, context_limit_tokens: 100_000 },
+                },
+            ).inputTokens,
+        ).toBe(12_000);
+    });
+
+    test("recovery orders the compaction boundary by (time_created, id) and tolerates malformed rows", () => {
+        const sessionId = "ses-usage-boundary-tuple";
+        const db = openTempOpenCodeDb();
+        const insert = db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        );
+        insert.run("bad", sessionId, 1, "{not json");
+        insert.run(
+            "s",
+            sessionId,
+            5,
+            JSON.stringify({
+                role: "assistant",
+                summary: true,
+                providerID: "test-provider",
+                modelID: "test-model",
+                tokens: { input: 95_000, output: 500, cache: { read: 0, write: 0 } },
+            }),
+        );
+        // Same millisecond as the summary, id sorts after it: this response is post-compaction.
+        insertAssistantRow(db, sessionId, "t", 5, 7_000);
+        closeQuietly(db);
+
+        const live = createLiveSessionState();
+        const snapshot = buildSidebarSnapshot(sessionId, process.cwd(), live);
+        expect(snapshot.inputTokens).toBe(7_000);
+        expect(live.contextUsageBySession.get(sessionId)?.messageID).toBe("t");
     });
 
     test("a retained carry survives row deletion until the session is cleared", () => {
@@ -1079,7 +1357,7 @@ describe("clearWorkMetricsCarry", () => {
         // The carry already folded `a`, so a poll without the event still reports the closed phase.
         expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
 
-        const handle = createEventHandler({ contextUsageMap: new Map() });
+        const handle = createEventHandler({ contextUsageMap: new BoundedSessionMap(8) });
         await handle({
             event: {
                 type: "message.removed",
@@ -1144,5 +1422,64 @@ describe("BoundedTtlCache", () => {
         expect(cache.get("a", 3_000)).toBeUndefined();
         expect(cache.get("b", 3_000)).toBe("beta-2");
         expect(cache.get("c", 3_000)).toBe("gamma");
+    });
+});
+
+describe("CoalescedTtlCache", () => {
+    test("concurrent misses share one load, a settled value is cached, and a failure is not", async () => {
+        const cache = new CoalescedTtlCache<number>(60_000, 8);
+        let loads = 0;
+        let release: ((value: number) => void) | undefined;
+        const load = () =>
+            new Promise<number>((resolve) => {
+                loads += 1;
+                release = resolve;
+            });
+
+        const first = cache.getOrLoad("k", load);
+        const second = cache.getOrLoad("k", load);
+        expect(loads).toBe(1);
+        release?.(7);
+        expect(await Promise.all([first, second])).toEqual([7, 7]);
+        expect(await cache.getOrLoad("k", load)).toBe(7);
+        expect(loads).toBe(1);
+
+        await expect(
+            cache.getOrLoad("bad", () => Promise.reject(new Error("boom"))),
+        ).rejects.toThrow("boom");
+        let recovered = 0;
+        await cache.getOrLoad("bad", async () => {
+            recovered += 1;
+            return 1;
+        });
+        expect(recovered).toBe(1);
+    });
+
+    test("invalidate drops cached and in-flight entries under a prefix and rejects the late load", async () => {
+        const cache = new CoalescedTtlCache<number>(60_000, 8);
+        await cache.getOrLoad("ses\u001f/a", async () => 1);
+        await cache.getOrLoad("other\u001f/a", async () => 2);
+        let release: ((value: number) => void) | undefined;
+        const pending = cache.getOrLoad(
+            "ses\u001f/b",
+            () =>
+                new Promise<number>((resolve) => {
+                    release = resolve;
+                }),
+        );
+
+        cache.invalidate("ses\u001f");
+        release?.(3);
+        await expect(pending).rejects.toThrow("invalidated");
+
+        let reloaded = 0;
+        expect(
+            await cache.getOrLoad("ses\u001f/a", async () => {
+                reloaded += 1;
+                return 4;
+            }),
+        ).toBe(4);
+        expect(reloaded).toBe(1);
+        expect(await cache.getOrLoad("other\u001f/a", async () => 99)).toBe(2);
     });
 });

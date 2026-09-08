@@ -113,20 +113,15 @@ export async function resolvePromptContext(
     };
     if (typeof c.session?.messages !== "function") return null;
 
-    let messages: unknown[] = [];
-    try {
-        const response = await withTimeout(
-            c.session.messages({
-                path: { id: sessionId },
-                query: { limit: PROMPT_CONTEXT_MESSAGE_LIMIT },
-            }),
-            HOST_SDK_READ_TIMEOUT_MS,
-            "prompt context read timed out",
-        );
-        messages = extractMessages(response);
-    } catch {
-        return null;
-    }
+    const response = await withTimeout(
+        c.session.messages({
+            path: { id: sessionId },
+            query: { limit: PROMPT_CONTEXT_MESSAGE_LIMIT },
+        }),
+        HOST_SDK_READ_TIMEOUT_MS,
+        "prompt context read timed out",
+    );
+    const messages = extractMessages(response);
     if (messages.length === 0) return null;
 
     let result: ResolvedPromptContext = {};

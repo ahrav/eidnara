@@ -25,7 +25,6 @@ import {
 } from "@eidnara/opencode/hooks/context/module-transport";
 import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/rust-mode-transform";
 import { normalizeTodoStateJson } from "@eidnara/opencode/hooks/context/todo-view";
-import { createRustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { setHarness } from "@eidnara/opencode/shared/harness";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
 import { log } from "@eidnara/opencode/shared/logger";
@@ -45,6 +44,7 @@ import type { DaemonSessionDeps } from "./commands/daemon-session-routes";
 import { registerCtxStatusEntryRenderer } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
 import { createPiKernelClientResolver, forgetPiSessionKernelTokens } from "./kernel-client-pi";
+import { createPiRustToolBackends } from "./rust-tool-backends";
 import { registerStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { configurePiSubagentExtensions, EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
@@ -334,7 +334,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
 
     // The connection file is user-tier configuration, so one daemon client serves every project in this process.
     const moduleClient: RustModeModuleClient = createHostModuleClient(config.subc?.connection_file);
-    const rustToolBackends = createRustToolBackends(moduleClient);
+    const rustToolBackends = createPiRustToolBackends(moduleClient);
     // Each command routes on its own `ctx.cwd`, so the deps carry no project root.
     const daemonSessionDeps: DaemonSessionDeps = {
         moduleClient,

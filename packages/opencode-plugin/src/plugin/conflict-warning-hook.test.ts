@@ -285,6 +285,9 @@ describe.if(platform() === "linux")(
             const insertPart = db.prepare(
                 "INSERT INTO part (id, session_id, message_id, data) VALUES (?, ?, ?, ?)",
             );
+            // A malformed row elsewhere in the session must not abort the scan.
+            insertMessage.run("msg_bad", SESSION_ID, 0, "{not json");
+            insertPart.run("prt_bad", SESSION_ID, "msg_bad", "{not json");
             insertMessage.run("msg_warning", SESSION_ID, 1, JSON.stringify({ role: "user" }));
             insertPart.run(
                 "prt_warning",

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import type { ContextUsageEntry } from "./event-handler";
 import {
     createChatMessageHook,
     createEventHook,
@@ -222,7 +224,12 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
 });
 
 describe("createEventHook live model tracking", () => {
-    function makeAssistantEvent(sessionID: string, providerID: string, modelID: string) {
+    function makeAssistantEvent(
+        sessionID: string,
+        providerID: string,
+        modelID: string,
+        id = `msg-${Math.random().toString(36).slice(2)}`,
+    ) {
         return {
             event: {
                 type: "message.updated",
@@ -230,7 +237,7 @@ describe("createEventHook live model tracking", () => {
                     info: {
                         role: "assistant",
                         sessionID,
-                        id: `msg-${Math.random().toString(36).slice(2)}`,
+                        id,
                         providerID,
                         modelID,
                         finish: "stop",
@@ -241,11 +248,14 @@ describe("createEventHook live model tracking", () => {
         };
     }
 
-    function makeHook(liveModelBySession: Map<string, { providerID: string; modelID: string }>) {
+    function makeHook(
+        liveModelBySession: Map<string, { providerID: string; modelID: string }>,
+        contextUsageMap = new BoundedSessionMap<ContextUsageEntry>(8),
+    ) {
         const sessionDirectoryBySession = new Map<string, string>();
         const hook = createEventHook({
             eventHandler: async () => {},
-            contextUsageMap: new Map(),
+            contextUsageMap,
             liveModelBySession,
             variantBySession: new Map(),
             agentBySession: new Map(),
@@ -278,6 +288,30 @@ describe("createEventHook live model tracking", () => {
             providerID: "anthropic",
             modelID: "claude-large",
         });
+    });
+
+    test("an update to an older response does not move the live model off the newest response", async () => {
+        const sessionId = "ses-model-older-edit";
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
+        const contextUsageMap = new BoundedSessionMap<ContextUsageEntry>(8);
+        contextUsageMap.set(sessionId, {
+            usage: { percentage: 10, inputTokens: 10_000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+            messageID: "msg-9",
+            model: { providerID: "anthropic", modelID: "claude-large" },
+        });
+        const { hook } = makeHook(liveModelBySession, contextUsageMap);
+
+        await hook(makeAssistantEvent(sessionId, "anthropic", "claude-large", "msg-9"));
+        await hook(makeAssistantEvent(sessionId, "anthropic", "claude-small", "msg-3"));
+        expect(liveModelBySession.get(sessionId)).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-large",
+        });
+
+        await hook(makeAssistantEvent(sessionId, "openai", "gpt", "msg-9z"));
+        expect(liveModelBySession.get(sessionId)).toEqual({ providerID: "openai", modelID: "gpt" });
     });
 
     test("session.deleted clears the session's live state", async () => {

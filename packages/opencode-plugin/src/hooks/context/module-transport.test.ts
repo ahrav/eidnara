@@ -28,6 +28,7 @@ import {
     buildManagedStartupEnvelope,
     HostModuleTransport,
     harnessForParentPackage,
+    isModuleCallBodyValid,
 } from "./module-transport";
 
 const REPO_ROOT = join(import.meta.dir, "../../../../..");
@@ -428,6 +429,19 @@ describe("a local close wins over recovery", () => {
         expect(requests).toBe(0);
     });
 
+    test("reports a cached route for one session only", () => {
+        const instance = new HostModuleTransport("/tmp/unused-eidnara-host.json");
+        const transport = internals(instance);
+        const route = { channel: 9, epoch: 1 } as unknown as RouteHandle;
+        transport.routes.set("s\0/tmp", {
+            route,
+            generation: 0,
+        });
+
+        expect(instance.hasSessionRoute("s")).toBe(true);
+        expect(instance.hasSessionRoute("other")).toBe(false);
+    });
+
     test("a call queued behind the lane when the session closes does not send", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         let requests = 0;
@@ -760,6 +774,74 @@ describe("possibly sent bodies fence the session lane", () => {
 });
 
 describe("call policy is keyed off the body it forwards", () => {
+    test("accepts the ctx_note facade body and normal method-discriminated bodies", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const bodies: unknown[] = [];
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            request: async (_route: RouteHandle, body: unknown) => {
+                bodies.push(body);
+                return { ok: true };
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureRoute = async (sessionId) => ({
+            client,
+            route,
+            routeKey: `${sessionId}\0/tmp`,
+            generation: 0,
+        });
+        const facadeBody = { name: "ctx_note", arguments: { action: "read" } };
+        const normalBody = { method: "session.status", v: 1 };
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "ctx_note",
+                body: facadeBody,
+            }),
+        ).resolves.toEqual({ ok: true });
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: normalBody,
+            }),
+        ).resolves.toEqual({ ok: true });
+        expect(bodies).toEqual([facadeBody, normalBody]);
+    });
+
+    test("rejects malformed ctx_note facade bodies before route resolution", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let ensured = 0;
+        transport.ensureRoute = async () => {
+            ensured += 1;
+            throw new Error("must not be reached");
+        };
+        const invalidBodies = [
+            { method: "ctx_note", name: "ctx_note", arguments: {} },
+            { name: "other", arguments: {} },
+            { name: "ctx_note" },
+            { name: "ctx_note", arguments: [] },
+            { name: "ctx_note", arguments: {}, extra: true },
+        ];
+
+        for (const body of invalidBodies) {
+            expect(isModuleCallBodyValid("ctx_note", body)).toBe(false);
+            await expect(
+                transport.call({
+                    sessionId: "s",
+                    projectRoot: "/tmp",
+                    method: "ctx_note",
+                    body,
+                }),
+            ).rejects.toBeInstanceOf(TypeError);
+        }
+        expect(ensured).toBe(0);
+    });
+
     test("a body naming a different method is rejected before any deadline is chosen", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         let ensured = 0;

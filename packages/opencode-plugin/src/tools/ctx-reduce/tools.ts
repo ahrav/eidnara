@@ -1,6 +1,10 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
-import { boundedCommandId, toolCallIdFromContext } from "../../plugin/rust-tool-backends";
+import {
+    boundedCommandId,
+    isRustToolSessionDeletedError,
+    toolCallIdFromContext,
+} from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_REDUCE_DESCRIPTION } from "./constants";
@@ -84,7 +88,6 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             try {
                 const response = await rustReduce({
                     sessionId,
-                    projectRoot: toolContext.directory,
                     drop: args.drop,
                     commandId: boundedCommandId(`oc-${sessionId}-${callId}`),
                 });
@@ -141,6 +144,9 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 );
                 return `Queued: ${[`drop ${targets}`, ...details].join("; ")}.`;
             } catch (error) {
+                if (isRustToolSessionDeletedError(error)) {
+                    return "Error: Session was deleted before ctx_reduce could run; nothing was queued.";
+                }
                 return `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`;
             }
         },

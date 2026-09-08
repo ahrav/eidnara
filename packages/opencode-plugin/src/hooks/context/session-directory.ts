@@ -56,14 +56,15 @@ export async function resolveSessionDirectory(
     )
         return pinned;
     const fallback = pinned ?? knownSessionDirectory(deps, sessionId);
-    if (!deps.client?.session?.get) return pin(deps, sessionId, fallback);
+    const sessionClient = deps.client?.session;
+    if (!sessionClient?.get) return pin(deps, sessionId, fallback);
     const attempts = metadataState?.inFlight
         ? metadataState.attempts
         : (metadataState?.attempts ?? 0) + 1;
     const inFlight =
         metadataState?.inFlight ??
         withTimeout(
-            deps.client.session.get({ path: { id: sessionId } }),
+            Promise.resolve().then(() => sessionClient.get({ path: { id: sessionId } })),
             HOST_SDK_READ_TIMEOUT_MS,
             "session directory read timed out",
         ).then((response) => {

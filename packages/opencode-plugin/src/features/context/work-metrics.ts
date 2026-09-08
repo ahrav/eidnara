@@ -1,4 +1,5 @@
 import type { Database } from "../../shared/sqlite";
+import { jsonField } from "../../shared/sqlite-helpers";
 
 export interface WorkMetrics {
     newWorkTokens: number;
@@ -26,23 +27,22 @@ interface PiUsage {
 const OPEN_CODE_WORK_METRICS_SQL = `
 WITH ordered AS (
   SELECT
-    json_extract(data, '$.agent') AS agent,
+    ${jsonField("data", "$.agent")} AS agent,
     time_created,
     id,
-    COALESCE(json_extract(data, '$.tokens.input'), 0)
-      + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
-      + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) AS cur_prompt,
-    COALESCE(json_extract(data, '$.tokens.output'), 0) AS cur_output,
+    COALESCE(${jsonField("data", "$.tokens.input")}, 0)
+      + COALESCE(${jsonField("data", "$.tokens.cache.read")}, 0)
+      + COALESCE(${jsonField("data", "$.tokens.cache.write")}, 0) AS cur_prompt,
+    COALESCE(${jsonField("data", "$.tokens.output")}, 0) AS cur_output,
     LAG(
-      COALESCE(json_extract(data, '$.tokens.input'), 0)
-      + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
-      + COALESCE(json_extract(data, '$.tokens.cache.write'), 0),
+      COALESCE(${jsonField("data", "$.tokens.input")}, 0)
+      + COALESCE(${jsonField("data", "$.tokens.cache.read")}, 0)
+      + COALESCE(${jsonField("data", "$.tokens.cache.write")}, 0),
       1, 0
-    ) OVER (PARTITION BY json_extract(data, '$.agent') ORDER BY time_created, id) AS prev_prompt
+    ) OVER (PARTITION BY ${jsonField("data", "$.agent")} ORDER BY time_created, id) AS prev_prompt
   FROM message
   WHERE session_id = ?
-    AND json_extract(data, '$.role') = 'assistant'
-    AND data IS NOT NULL
+    AND ${jsonField("data", "$.role")} = 'assistant'
 ),
 deltas AS (
   SELECT agent, MAX(0, cur_prompt - prev_prompt) AS delta, cur_output,
@@ -241,17 +241,16 @@ export function metricsFromCarry(carry: WorkMetricsCarry): WorkMetrics {
 
 const ASSISTANT_USAGE_ROWS_AFTER_SQL = `
 SELECT
-  json_extract(data, '$.agent') AS agent,
+  ${jsonField("data", "$.agent")} AS agent,
   time_created AS time_created,
   id AS id,
-  COALESCE(json_extract(data, '$.tokens.input'), 0)
-    + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
-    + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) AS prompt,
-  COALESCE(json_extract(data, '$.tokens.output'), 0) AS output
+  COALESCE(${jsonField("data", "$.tokens.input")}, 0)
+    + COALESCE(${jsonField("data", "$.tokens.cache.read")}, 0)
+    + COALESCE(${jsonField("data", "$.tokens.cache.write")}, 0) AS prompt,
+  COALESCE(${jsonField("data", "$.tokens.output")}, 0) AS output
 FROM message
 WHERE session_id = ?
-  AND json_extract(data, '$.role') = 'assistant'
-  AND data IS NOT NULL
+  AND ${jsonField("data", "$.role")} = 'assistant'
   AND (time_created > ? OR (time_created = ? AND id > ?))
 ORDER BY time_created, id`;
 

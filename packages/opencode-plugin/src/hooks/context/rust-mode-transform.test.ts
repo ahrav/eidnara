@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import * as logger from "../../shared/logger";
 import { promptSurfaceConfigIdentity } from "../../shared/prompt-surface";
 import { Database } from "../../shared/sqlite";
@@ -80,7 +80,7 @@ const makeMessages = (sessionId: string): MessageLike[] =>
 
 function makeDeps(): RustModeTransformDeps {
     return {
-        contextUsageMap: new Map(),
+        contextUsageMap: new BoundedSessionMap(8),
         protectedTags: 4,
         clearReasoningAge: 50,
         cacheTtl: "5m",
@@ -93,7 +93,10 @@ function makeDeps(): RustModeTransformDeps {
 
 type RecordedCall = { method: string; body: unknown; generationSensitive: boolean | undefined };
 
-function recordingClient(respond: (body: Record<string, unknown>, index: number) => unknown): {
+function recordingClient(
+    respond: (body: Record<string, unknown>, index: number) => unknown,
+    respondDisposition?: (method: string, body: Record<string, unknown>) => unknown,
+): {
     client: RustModeModuleClient;
     bodies: Record<string, unknown>[];
     calls: RecordedCall[];
@@ -103,7 +106,11 @@ function recordingClient(respond: (body: Record<string, unknown>, index: number)
     const client: RustModeModuleClient = {
         call: async ({ method, body, generationSensitive }) => {
             calls.push({ method, body, generationSensitive });
-            if (method !== "transform") return { ok: true };
+            if (method !== "transform") {
+                return (
+                    respondDisposition?.(method, body as Record<string, unknown>) ?? { ok: true }
+                );
+            }
             const request = body as Record<string, unknown>;
             bodies.push(request);
             return respond(request, bodies.length - 1);
@@ -796,6 +803,84 @@ describe("Rust mode transform transport", () => {
         expect(transform.getState(sessionId).forceFullWire).toBe(false);
     });
 
+    it("supersedes an older pass that finishes preflight after a newer pass starts", async () => {
+        const sessionId = `rust-overlapping-preflight-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let releaseDirectoryRead: (() => void) | undefined;
+        const deps = makeDeps();
+        deps.client = {
+            session: {
+                get: () =>
+                    new Promise<{ data: { directory: string } }>((resolve) => {
+                        releaseDirectoryRead = () =>
+                            resolve({ data: { directory: "/tmp/project" } });
+                    }),
+            },
+        } as never;
+        deps.sessionMetadataReadStateBySession = new Map();
+        const { client, bodies } = recordingClient((request) => ({
+            native_messages: request.native_messages,
+        }));
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+        const firstInput = makeMessages(sessionId);
+        const firstOutput = { messages: [...firstInput] as unknown[] };
+        const first = transform.run(sessionId, firstInput, firstOutput);
+        while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+        const secondInput = makeMessages(sessionId);
+        const secondOutput = { messages: [...secondInput] as unknown[] };
+        const second = transform.run(sessionId, secondInput, secondOutput);
+
+        releaseDirectoryRead();
+        await Promise.all([first, second]);
+
+        expect(bodies).toHaveLength(1);
+        expect(firstOutput.messages).toEqual(firstInput);
+        expect(secondOutput.messages).toEqual(secondInput);
+        expect(transform.getState(sessionId).passCount).toBe(2);
+        expect(transform.getState(sessionId).failureCount).toBe(0);
+    });
+
+    it("nacks note deliveries when a pass is superseded while its transform response is pending", async () => {
+        const sessionId = `rust-overlapping-response-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let releaseFirstResponse:
+            | ((value: {
+                  native_messages: unknown[];
+                  note_deliveries: Array<{ transform_pass_id: string }>;
+              }) => void)
+            | undefined;
+        const { client, calls } = recordingClient((_request, index) => {
+            if (index > 0) return { native_messages: [] };
+            return new Promise<{
+                native_messages: unknown[];
+                note_deliveries: Array<{ transform_pass_id: string }>;
+            }>((resolve) => {
+                releaseFirstResponse = resolve;
+            });
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const firstInput = makeMessages(sessionId);
+        const firstOutput = { messages: [...firstInput] as unknown[] };
+        const first = transform.run(sessionId, firstInput, firstOutput);
+        while (releaseFirstResponse === undefined) await Bun.sleep(0);
+        const secondInput = makeMessages(sessionId);
+        await transform.run(sessionId, secondInput, { messages: [...secondInput] });
+
+        releaseFirstResponse({
+            native_messages: [{ info: { id: "superseded" }, parts: [] }],
+            note_deliveries: [{ transform_pass_id: "pass-superseded" }],
+        });
+        await first;
+
+        expect(firstOutput.messages).toEqual(firstInput);
+        expect(calls.map((call) => call.method)).toEqual([
+            "transform",
+            "transform",
+            "transform.nack",
+        ]);
+        expect(transform.getState(sessionId).failureCount).toBe(0);
+    });
+
     it("does not resurrect a wire cache for a session cleared while its pass is in flight", async () => {
         const sessionId = `rust-clear-in-flight-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
@@ -976,6 +1061,251 @@ describe("native output delta", () => {
                 },
             },
         ]);
+    });
+
+    it("attempts every ack sequentially before reporting aggregate failures", async () => {
+        const sessionId = `rust-note-ack-isolation-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        const ackFailure = new Error("first ack failed");
+        let activeCalls = 0;
+        let maxActiveCalls = 0;
+        const native = [{ role: "assistant", parts: [] }];
+        const { client, calls } = recordingClient(
+            () => ({
+                native_messages: native,
+                note_deliveries: [
+                    { transform_pass_id: "pass-1" },
+                    { transform_pass_id: "pass-2" },
+                    { transform_pass_id: "pass-3" },
+                ],
+            }),
+            async (_method, body) => {
+                activeCalls += 1;
+                maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+                try {
+                    await Bun.sleep(0);
+                    if (body.transform_pass_id === "pass-1") throw ackFailure;
+                    return { ok: true };
+                } finally {
+                    activeCalls -= 1;
+                }
+            },
+        );
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const input = makeMessages(sessionId);
+            const output = { messages: [...input] as unknown[] };
+
+            await transform.run(sessionId, input, output);
+
+            expect(
+                calls
+                    .filter((call) => call.method === "transform.ack")
+                    .map((call) => (call.body as Record<string, unknown>).transform_pass_id),
+            ).toEqual(["pass-1", "pass-2", "pass-3"]);
+            expect(maxActiveCalls).toBe(1);
+            expect(output.messages).toEqual(native);
+            expect(transform.getState(sessionId).failureCount).toBe(0);
+            const aggregate = logSpy.mock.calls.find(
+                ([, message]) => message === "rust note delivery ack failed (will retry):",
+            )?.[2];
+            expect(aggregate).toBeInstanceOf(AggregateError);
+            expect((aggregate as AggregateError).errors).toEqual([ackFailure]);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it("keeps applied note output when a newer pass starts during the ack", async () => {
+        const sessionId = `rust-note-ack-superseded-${Date.now()}`;
+        installRawRows(sessionId, rawRows(3));
+        let releaseAck: (() => void) | undefined;
+        const firstNative = [{ info: { id: "first-applied" }, parts: [] }];
+        const secondNative = [
+            { info: { id: "second-applied-1" }, parts: [] },
+            { info: { id: "second-applied-2" }, parts: [] },
+        ];
+        const { client, bodies } = recordingClient(
+            (_request, index) =>
+                index === 0
+                    ? {
+                          native_messages: firstNative,
+                          note_deliveries: [{ transform_pass_id: "pass-first" }],
+                      }
+                    : { native_messages: secondNative },
+            async (method) => {
+                if (method === "transform.ack") {
+                    await new Promise<void>((resolve) => {
+                        releaseAck = resolve;
+                    });
+                }
+                return { ok: true };
+            },
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const firstInput = rowMessages(sessionId, rawRows(1));
+        const firstOutput = { messages: [...firstInput] as unknown[] };
+        const first = transform.run(sessionId, firstInput, firstOutput);
+        while (releaseAck === undefined) await Bun.sleep(0);
+        const secondInput = rowMessages(sessionId, rawRows(2));
+        const secondOutput = { messages: [...secondInput] as unknown[] };
+        const second = transform.run(sessionId, secondInput, secondOutput);
+        await second;
+        releaseAck();
+        await first;
+        const thirdInput = rowMessages(sessionId, rawRows(3));
+        await transform.run(sessionId, thirdInput, { messages: [...thirdInput] });
+
+        expect(firstOutput.messages).toEqual(firstNative);
+        expect(secondOutput.messages).toEqual(secondNative);
+        expect(
+            (bodies[2]?.tail_delta as { native_replace_from?: number } | undefined)
+                ?.native_replace_from,
+        ).toBe(1);
+        expect(transform.getState(sessionId).failureCount).toBe(0);
+    });
+
+    it("disposes each duplicate delivery pass ID only once", async () => {
+        const sessionId = `rust-note-delivery-dedup-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        const { client, calls } = recordingClient(() => ({
+            native_messages: [],
+            note_deliveries: [
+                { transform_pass_id: "pass-1" },
+                { transform_pass_id: "pass-1" },
+                { transform_pass_id: "pass-2" },
+                { transform_pass_id: "pass-1" },
+            ],
+        }));
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const input = makeMessages(sessionId);
+
+        await transform.run(sessionId, input, { messages: [...input] });
+
+        expect(
+            calls
+                .filter((call) => call.method === "transform.ack")
+                .map((call) => (call.body as Record<string, unknown>).transform_pass_id),
+        ).toEqual(["pass-1", "pass-2"]);
+    });
+
+    it("attempts every nack without replacing the original apply error", async () => {
+        const sessionId = `rust-note-nack-isolation-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        const nackFailure = new Error("first nack failed");
+        const { client, calls } = recordingClient(
+            () => ({
+                boundary_id: "m-1#0",
+                native_messages: [{ role: "assistant", parts: [] }],
+                note_deliveries: [{ transform_pass_id: "pass-1" }, { transform_pass_id: "pass-2" }],
+            }),
+            (_method, body) => {
+                if (body.transform_pass_id === "pass-1") throw nackFailure;
+                return { ok: true };
+            },
+        );
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const input = makeMessages(sessionId);
+            const output = { messages: [...input] as unknown[] };
+
+            await transform.run(sessionId, input, output);
+
+            expect(calls.map((call) => call.method)).toEqual([
+                "transform",
+                "transform.nack",
+                "transform.nack",
+            ]);
+            expect(output.messages).toEqual(input);
+            expect(transform.getState(sessionId).failureCount).toBe(1);
+            const aggregate = logSpy.mock.calls.find(
+                ([, message]) => message === "rust note delivery nack failed (ignored):",
+            )?.[2];
+            expect(aggregate).toBeInstanceOf(AggregateError);
+            expect((aggregate as AggregateError).errors).toEqual([nackFailure]);
+            const applyError = logSpy.mock.calls.find(([, message]) =>
+                message.startsWith("rust transform failed; serving the input unchanged:"),
+            )?.[2];
+            expect(applyError).toBeInstanceOf(Error);
+            expect(applyError).not.toBeInstanceOf(AggregateError);
+            expect((applyError as Error).message).toContain("wire invariant failed");
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it("nacks discarded delivery IDs and acks only IDs from the applied retry response", async () => {
+        const sessionId = `rust-note-delivery-retry-union-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        const native = [{ role: "assistant", parts: [] }];
+        const { client, bodies, calls } = recordingClient((_request, index) =>
+            index === 0
+                ? {
+                      status: "ok",
+                      served_from: "transform",
+                      note_deliveries: [
+                          { transform_pass_id: "pass-initial" },
+                          { transform_pass_id: "pass-shared" },
+                      ],
+                  }
+                : {
+                      native_messages: native,
+                      note_deliveries: [
+                          { transform_pass_id: "pass-shared" },
+                          { transform_pass_id: "pass-retry" },
+                      ],
+                  },
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const input = makeMessages(sessionId);
+        const output = { messages: [...input] as unknown[] };
+
+        await transform.run(sessionId, input, output);
+
+        expect(bodies).toHaveLength(2);
+        expect(output.messages).toEqual(native);
+        expect(
+            calls
+                .filter((call) => call.method === "transform.nack")
+                .map((call) => (call.body as Record<string, unknown>).transform_pass_id),
+        ).toEqual(["pass-initial"]);
+        expect(
+            calls
+                .filter((call) => call.method === "transform.ack")
+                .map((call) => (call.body as Record<string, unknown>).transform_pass_id),
+        ).toEqual(["pass-shared", "pass-retry"]);
+    });
+
+    it("nacks initial and retry delivery IDs when the full retry still cannot be applied", async () => {
+        const sessionId = `rust-note-delivery-retry-failure-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        const { client, calls } = recordingClient((_request, index) =>
+            index === 0
+                ? {
+                      status: "ok",
+                      served_from: "transform",
+                      note_deliveries: [{ transform_pass_id: "pass-initial" }],
+                  }
+                : {
+                      status: "need_full_sync",
+                      note_deliveries: [{ transform_pass_id: "pass-retry" }],
+                  },
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const input = makeMessages(sessionId);
+        const output = { messages: [...input] as unknown[] };
+
+        await transform.run(sessionId, input, output);
+
+        expect(output.messages).toEqual(input);
+        expect(
+            calls
+                .filter((call) => call.method === "transform.nack")
+                .map((call) => (call.body as Record<string, unknown>).transform_pass_id),
+        ).toEqual(["pass-initial", "pass-retry"]);
+        expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
     });
 
     it("nacks note deliveries and serves the input unchanged when the boundary lacks a synthetic m0", async () => {

@@ -2,15 +2,15 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { fakeContext } from "../__tests__/test-utils";
+import type { PiRustToolBackends } from "../rust-tool-backends";
 import { createCtxReduceTool } from "./ctx-reduce";
 
-type ReduceInput = Parameters<NonNullable<RustToolBackends["reduce"]>>[0];
+type ReduceInput = Parameters<NonNullable<PiRustToolBackends["reduce"]>>[0];
 
 function recordingReduce(response: unknown = { ok: true, queued: 1 }) {
     const calls: ReduceInput[] = [];
-    const reduce: NonNullable<RustToolBackends["reduce"]> = async (input) => {
+    const reduce: NonNullable<PiRustToolBackends["reduce"]> = async (input) => {
         calls.push(input);
         return response;
     };
@@ -18,7 +18,7 @@ function recordingReduce(response: unknown = { ok: true, queued: 1 }) {
 }
 
 async function callTool(
-    backends: RustToolBackends,
+    backends: PiRustToolBackends,
     params: Record<string, unknown>,
     options: { callId?: string; sessionId?: string } = {},
 ) {
