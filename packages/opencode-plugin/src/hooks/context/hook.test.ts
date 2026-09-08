@@ -240,6 +240,35 @@ describe("eidnara hook", () => {
         ]);
     });
 
+    it("routes todo_state.set by the session's own directory", async () => {
+        useTempDataHome("hook-todo-route-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-todo-routed",
+            args: { todos: [{ status: "pending", priority: "high", content: "Route me" }] },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
+            ["todo_state.set", "/other/repo"],
+        ]);
+        expect(liveSessionState.sessionDirectoryBySession.get("ses-todo-routed")).toBe(
+            "/other/repo",
+        );
+    });
+
     it("sends agent_drops.append through rustToolBackends.reduce", async () => {
         useTempDataHome("hook-reduce-");
         const fake = createFakeModuleClient();

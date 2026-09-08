@@ -90,17 +90,6 @@ function readDesktopState(directory: string): DesktopState {
     }
 }
 
-const cachedDesktopStateByDir = new Map<string, DesktopState>();
-
-function getDesktopState(directory: string): DesktopState {
-    let cached = cachedDesktopStateByDir.get(directory);
-    if (!cached) {
-        cached = readDesktopState(directory);
-        cachedDesktopStateByDir.set(directory, cached);
-    }
-    return cached;
-}
-
 async function deleteMessage(
     serverUrl: string,
     sessionId: string,
@@ -220,7 +209,7 @@ export async function sendConflictWarning(
     directory: string,
     conflictResult: ConflictResult,
 ): Promise<void> {
-    const { sessionId } = getDesktopState(directory);
+    const { sessionId } = readDesktopState(directory);
     if (!sessionId) {
         log("[eidnara] conflict-warning: could not find active session for Desktop warning");
         return;
@@ -249,7 +238,7 @@ export async function cleanupConflictWarnings(
     directory: string,
     serverUrl?: string,
 ): Promise<void> {
-    const { sessionId, sidecarUrl } = getDesktopState(directory);
+    const { sessionId, sidecarUrl } = readDesktopState(directory);
     if (!sessionId) {
         log("[eidnara] cleanup: no active Desktop session found");
         return;

@@ -389,10 +389,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             client: deps.client,
             transformMode: deps.config.transform_mode,
             todoStateSet: rustMode
-                ? ({ sessionId, stateJson, ownerMessageId }) =>
+                ? async ({ sessionId, stateJson, ownerMessageId }) =>
                       moduleClient.call({
                           sessionId,
-                          projectRoot: deps.directory,
+                          projectRoot: await sessionDirectoryFor(sessionId),
                           method: "todo_state.set",
                           body: {
                               method: "todo_state.set",

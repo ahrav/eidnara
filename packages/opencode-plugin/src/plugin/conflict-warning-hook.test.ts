@@ -18,17 +18,19 @@ let configHome: string;
 let originalXdgConfigHome: string | undefined;
 let directorySerial = 0;
 
-/** Registers `SESSION_ID` as the Desktop session for a fresh project
- *  directory. The hook caches desktop state per directory, so each test gets
- *  its own directory key. */
-function seedDesktopSession(options: { sidecarUrl?: string } = {}): string {
+/** Registers `sessionId` (default `SESSION_ID`) as the Desktop session for a
+ *  fresh project directory, or for `options.directory` when a test rewrites
+ *  the state for a directory it already seeded. */
+function seedDesktopSession(
+    options: { sidecarUrl?: string; sessionId?: string; directory?: string } = {},
+): string {
     directorySerial += 1;
-    const directory = `/project/conflict-hook-${directorySerial}`;
+    const directory = options.directory ?? `/project/conflict-hook-${directorySerial}`;
     const stateDir = join(configHome, "ai.opencode.desktop");
     mkdirSync(stateDir, { recursive: true });
     const state: Record<string, string> = {
         "layout.page": JSON.stringify({
-            lastProjectSession: { [directory]: { id: SESSION_ID } },
+            lastProjectSession: { [directory]: { id: options.sessionId ?? SESSION_ID } },
         }),
     };
     if (options.sidecarUrl) {
@@ -103,6 +105,22 @@ describe.if(platform() === "linux")(
             expect(input.body.agent).toBe("builder");
             expect(input.body.model).toEqual({ providerID: "anthropic", modelID: "claude-fable" });
             expect(input.body.variant).toBe("max");
+        });
+
+        it("re-reads the Desktop state on every call so a reopened project targets its current session", async () => {
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const { client, prompt } = titledClient();
+
+            await sendConflictWarning(client, directory, CONFLICT);
+            seedDesktopSession({ directory, sessionId: "ses_conflict_hook_reopened" });
+            await sendConflictWarning(client, directory, CONFLICT);
+
+            expect(prompt).toHaveBeenCalledTimes(2);
+            const sessionIds = prompt.mock.calls.map(
+                (call) => (call[0] as { path: { id: string } }).path.id,
+            );
+            expect(sessionIds).toEqual([SESSION_ID, "ses_conflict_hook_reopened"]);
         });
 
         it("persists the conflict warning even when a TUI is connected", async () => {
