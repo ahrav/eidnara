@@ -170,7 +170,7 @@ describe("doctor OpenCode conflict repair", () => {
         }
     });
 
-    it("returns 1 when --force repairs a conflict but another failure remains", async () => {
+    it("leaves native compaction on under --force while the server plugin is unregistered", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeJsonc(opencodeConfigPath, { plugin: [], compaction: { auto: true } });
         writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
@@ -181,9 +181,36 @@ describe("doctor OpenCode conflict repair", () => {
             const code = await runDoctor({ force: true, cwd });
 
             expect(code).toBe(1);
-            expect(successes).toContain("Fixed: Disabled auto-compaction");
+            expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
             expect(errors).toContain(
                 "Plugin @eidnara/opencode is not registered in opencode.jsonc",
+            );
+            expect(
+                errors.some((message) => message.startsWith("Leaving conflicts in place:")),
+            ).toBe(true);
+            const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
+                compaction?: { auto?: boolean };
+            };
+            expect(untouched.compaction?.auto).toBe(true);
+        } finally {
+            restore();
+        }
+    });
+
+    it("returns 1 when --force repairs a conflict but another failure remains", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
+        writeJsonc(join(configDir, "tui.jsonc"), { plugin: [] });
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ force: true, cwd });
+
+            expect(code).toBe(1);
+            expect(successes).toContain("Fixed: Disabled auto-compaction");
+            expect(errors).toContain(
+                "TUI sidebar plugin @eidnara/opencode is not registered in tui.jsonc",
             );
         } finally {
             restore();

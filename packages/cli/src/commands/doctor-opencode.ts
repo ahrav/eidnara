@@ -3,7 +3,6 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
-import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
@@ -21,6 +20,7 @@ import {
     matchesPluginEntry,
 } from "../adapters/opencode";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
+import { compactionEnabledFor } from "../lib/eidnara-modes";
 import { bundleIssueReport } from "../lib/logs-opencode";
 import { detectOpenCodeInstallations } from "../lib/opencode-detect";
 import {
@@ -46,10 +46,7 @@ const PLUGIN_NAME = "@eidnara/opencode";
  */
 function resolveCompactionEnabledForDoctor(cwd: string): boolean {
     try {
-        const config = loadPluginConfig(cwd);
-        // With `enabled: false` the plugin skips every hook, so native compaction must stay on.
-        if (config.enabled === false) return false;
-        return isCompactionEnabled(config);
+        return compactionEnabledFor(loadPluginConfig(cwd));
     } catch (error) {
         console.warn(
             `[eidnara] Could not load Eidnara config to resolve compaction mode; ` +
@@ -252,7 +249,7 @@ export async function runDoctor(
     };
 
     // The doctor only reports plugin entries; `setup` owns every write to these files.
-    const reportPluginEntry = (configPath: string, configName: string, what: string): void => {
+    const reportPluginEntry = (configPath: string, configName: string, what: string): boolean => {
         let config: Record<string, unknown>;
         try {
             config = parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
@@ -260,7 +257,7 @@ export async function runDoctor(
             fail(
                 `Could not parse ${configName} to verify the ${what} entry: ${error instanceof Error ? error.message : String(error)}`,
             );
-            return;
+            return false;
         }
         const rawPlugins: unknown[] = Array.isArray(config?.plugin) ? config.plugin : [];
         if (rawPlugins.some(isUnverifiableLocalPluginEntry)) {
@@ -275,13 +272,14 @@ export async function runDoctor(
         if (entry === undefined) {
             fail(`${what} ${PLUGIN_NAME} is not registered in ${configName}`);
             log.info(`  Run 'setup' to register the ${what}`);
-            return;
+            return false;
         }
         pass(
             isDevPathPluginEntry(entry)
                 ? `${what} registered in ${configName} (dev path: ${pluginEntryName(entry)})`
                 : `${what} registered in ${configName} (${pluginEntryName(entry)})`,
         );
+        return true;
     };
 
     const installationReports = describeOpenCodeInstallations(detectOpenCodeInstallations());
@@ -379,10 +377,11 @@ export async function runDoctor(
         }
     }
 
+    let serverPluginRegistered = false;
     if (paths.opencodeConfigFormat !== "none") {
         const configName =
             paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
-        reportPluginEntry(paths.opencodeConfig, configName, "Plugin");
+        serverPluginRegistered = reportPluginEntry(paths.opencodeConfig, configName, "Plugin");
     }
 
     const compactionEnabled = resolveCompactionEnabledForDoctor(cwd);
@@ -397,7 +396,13 @@ export async function runDoctor(
         for (const reason of conflictResult.reasons) {
             fail(`Conflict: ${reason}`);
         }
-        if (options.force) {
+        if (options.force && !serverPluginRegistered) {
+            // Disabling native compaction with no registered plugin would leave
+            // the installation with no context-window manager at all.
+            fail(
+                `Leaving conflicts in place: ${PLUGIN_NAME} is not registered in the OpenCode config, so nothing would replace native compaction. Run 'setup' first.`,
+            );
+        } else if (options.force) {
             try {
                 const actions = fixConflicts(cwd, conflictResult.conflicts, { compactionEnabled });
                 for (const action of actions) {

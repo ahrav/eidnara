@@ -514,6 +514,52 @@ describe("OMP doctor", () => {
         expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
     });
 
+    it("does not turn off OMP compaction or memory while the plugin is not enabled", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-gate-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const calls: string[][] = [];
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                // The plugin is absent, so nothing could replace the native managers.
+                listOmpPlugins: () => [],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? true : "mnemopi") as never,
+                runOmpCommand: (_path, args) => {
+                    calls.push(args);
+                    return { ok: true, stdout: agentDir, stderr: "" };
+                },
+            },
+        });
+
+        expect(code).toBe(1);
+        expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
+        expect(prompts.messages.join("\n")).toContain(
+            "Leaving OMP native compaction and memory on: @eidnara/pi is not enabled in OMP",
+        );
+    });
+
     it("sanitizes the issue title before passing it to gh issue create", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-title-"));
         roots.push(root);

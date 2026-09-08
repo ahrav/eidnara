@@ -79,7 +79,7 @@ describe("bundleIssueReport session filtering", () => {
         "[2026-05-11T12:00:06.000Z] plugin startup line without a session tag",
     ];
 
-    it("keeps the selected session, untagged lines, and non-session labels; drops every other tag", async () => {
+    it("keeps the selected session, untagged lines, and the global label; drops every other tag", async () => {
         const body = await bundleWithLog(
             "eidnara-pi-issue-filter-",
             `${logLines.join("\n")}\n`,
@@ -87,10 +87,11 @@ describe("bundleIssueReport session filtering", () => {
         );
 
         expect(body).toContain("selected session line");
-        expect(body).toContain("status label line");
         expect(body).toContain("global label line");
-        expect(body).toContain("plugin label line");
         expect(body).toContain("plugin startup line without a session tag");
+        // `pi` and `pi-status` carry per-session command output, so they fail closed.
+        expect(body).not.toContain("status label line");
+        expect(body).not.toContain("plugin label line");
         expect(body).not.toContain("other uuid session line");
         expect(body).not.toContain("other custom session line");
     });

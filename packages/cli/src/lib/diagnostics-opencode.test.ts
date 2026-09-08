@@ -72,4 +72,21 @@ describe("collectDiagnostics", () => {
         });
         expect(report.eidnaraConfig.exists).toBe(false);
     });
+
+    it("reports compaction as off when Eidnara is disabled with enabled: false", async () => {
+        const { root, configDir } = isolate();
+        writeFileSync(
+            join(configDir, "opencode.jsonc"),
+            JSON.stringify({ plugin: ["@eidnara/opencode"], compaction: { auto: true } }),
+        );
+        writeFileSync(
+            join(root, "xdg", "eidnara", "eidnara.jsonc"),
+            JSON.stringify({ enabled: false }),
+        );
+
+        const report = await collectDiagnostics();
+
+        expect(report.conflicts.compactionEnabled).toBe(false);
+        expect(report.conflicts.hasConflict).toBe(false);
+    });
 });

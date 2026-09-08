@@ -356,6 +356,19 @@ async function repair(
             fixed += 1;
         } else prompts.log.error(result.message);
     }
+    if (plan.disableCompaction || plan.disableMemory) {
+        // Turning off OMP's managers only makes sense once the plugin that
+        // replaces them is enabled and carries an extension manifest.
+        const plugin = deps
+            .listOmpPlugins(omp.path)
+            ?.find((entry) => entry.name === OMP_PLUGIN_PACKAGE);
+        if (plugin?.enabled !== true || pluginDeclaresOmp(plugin.path) === false) {
+            prompts.log.error(
+                `Leaving OMP native compaction and memory on: ${OMP_PLUGIN_PACKAGE} is not enabled in OMP, so nothing would replace them`,
+            );
+            return fixed;
+        }
+    }
     const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
     for (const [enabled, key, value] of [
         [plan.disableCompaction, "compaction.enabled", "false"],

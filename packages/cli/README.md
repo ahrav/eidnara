@@ -2,7 +2,10 @@
 
 `@eidnara/cli` installs as the `eidnara` command. It configures the Eidnara
 plugin for OpenCode, Pi, and Oh My Pi (OMP), checks those configurations, and
-controls the shared `eidnara-host` daemon.
+controls the shared `eidnara-host` daemon. It requires Node.js 24.15 or newer,
+the same floor as the plugins it bundles; `doctor --issue` reads the OpenCode
+session database through `node:sqlite`, which older Node releases lack or gate
+behind a flag.
 
 ## Commands
 

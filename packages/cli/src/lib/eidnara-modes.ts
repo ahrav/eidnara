@@ -38,3 +38,11 @@ export function projectModeOverrides(projectConfigPath: string, shared: EidnaraM
     }
     return overrides;
 }
+
+/** With `enabled: false` the plugin skips every hook, so a native manager must stay on regardless of `compaction.enabled`. */
+export function compactionEnabledFor(config: { enabled?: unknown; compaction?: unknown }): boolean {
+    if (config.enabled === false) return false;
+    return isCompactionEnabled({
+        compaction: isRecord(config.compaction) ? config.compaction : null,
+    });
+}

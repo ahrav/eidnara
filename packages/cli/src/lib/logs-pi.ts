@@ -37,9 +37,11 @@ const SESSION_TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/;
 
 /**
  * The filter retains these tags and drops every other mismatched tag, so it
- * never has to infer a session id's format.
+ * never has to infer a session id's format. `[eidnara][pi]` and
+ * `[eidnara][pi-status]` are not listed: the plugin writes per-session
+ * command output under them, so they fail closed with the session records.
  */
-const NON_SESSION_TAGS: ReadonlySet<string> = new Set(["pi", "pi-status", "global"]);
+const NON_SESSION_TAGS: ReadonlySet<string> = new Set(["global"]);
 
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;

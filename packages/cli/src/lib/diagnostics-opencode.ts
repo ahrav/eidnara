@@ -6,7 +6,6 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
-import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import { eidnaraProjectConfigBasePath } from "@eidnara/opencode/config/config-paths";
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
@@ -18,6 +17,7 @@ import {
 } from "@eidnara/opencode/shared/redaction";
 import { parse as parseJsonc } from "comment-json";
 import { matchesPluginEntry } from "../adapters/opencode";
+import { compactionEnabledFor } from "./eidnara-modes";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
@@ -293,7 +293,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
 
     let compactionEnabled = false;
     try {
-        compactionEnabled = isCompactionEnabled(loadPluginConfig(process.cwd()));
+        compactionEnabled = compactionEnabledFor(loadPluginConfig(process.cwd()));
     } catch (error) {
         console.warn(
             `[eidnara] Could not load Eidnara config to resolve compaction mode; ` +
