@@ -23,6 +23,7 @@ import {
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
     clearWorkMetricsCarry,
+    clearWorkMetricsCarryIfFolded,
     type RustSessionStatus,
     registerRpcHandlers,
 } from "./rpc-handlers";
@@ -939,6 +940,33 @@ describe("clearWorkMetricsCarry", () => {
             },
         });
         expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(2_000);
+    });
+
+    test("an update to a folded row clears the carry; an update to the held-back newest row keeps it", () => {
+        const sessionId = "ses-carry-updated";
+        const db = openTempOpenCodeDb();
+        insertAssistantRow(db, sessionId, "a", 1, 3_000);
+        insertAssistantRow(db, sessionId, "b", 2, 1_000);
+        insertAssistantRow(db, sessionId, "c", 3, 2_000);
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
+
+        // Row `a` shrinks to 1.5k, so the phase `b` closes is worth 1.5k once re-read.
+        db.prepare("UPDATE message SET data = ? WHERE id = 'a'").run(
+            JSON.stringify({
+                id: "a",
+                role: "assistant",
+                agent: "build",
+                tokens: { input: 1_500, output: 10, cache: { read: 0, write: 0 } },
+            }),
+        );
+        closeQuietly(db);
+
+        // `c` is the held-back newest row (watermark is `b`), so an update to it leaves the carry alone.
+        clearWorkMetricsCarryIfFolded(sessionId, "c");
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
+
+        clearWorkMetricsCarryIfFolded(sessionId, "a");
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(3_500);
     });
 });
 

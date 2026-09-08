@@ -59,6 +59,14 @@ export function clearWorkMetricsCarry(sessionId: string): void {
     workMetricsCarryBySession.delete(sessionId);
 }
 
+/** A row at or below the watermark is already folded in, and the incremental read never revisits it. OpenCode message ids are time-ordered, so id order tracks the `(time_created, id)` fold order. commentlint: allow(JUDGE) */
+export function clearWorkMetricsCarryIfFolded(sessionId: string, messageId: string): void {
+    const carry = workMetricsCarryBySession.peek(sessionId);
+    if (carry && carry.lastId !== "" && messageId <= carry.lastId) {
+        workMetricsCarryBySession.delete(sessionId);
+    }
+}
+
 /**
  * The module transport routes by `(sessionId, projectRoot)`, so every per-poll cache keys by both:
  * one session id polled under two project roots must not share a daemon answer.
