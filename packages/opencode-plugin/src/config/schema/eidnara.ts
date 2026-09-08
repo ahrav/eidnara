@@ -2,17 +2,22 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import { isValidLanguageCode } from "../../agents/language-directive";
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
-import { isValidPromptSurfaceModelKey } from "../../shared/prompt-surface";
+import { PROMPT_SURFACE_MODEL_KEY_PATTERN } from "../../shared/prompt-surface";
 import { AgentOverrideConfigSchema } from "./agent-overrides";
 
 export const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE = 65;
+/** The project-config sanitizer shares these bounds so schema-valid project values cannot bypass its raise-only rule. */
+export const MIN_EXECUTE_THRESHOLD_PERCENTAGE = 20;
+export const MAX_EXECUTE_THRESHOLD_PERCENTAGE = 90;
+export const MIN_EXECUTE_THRESHOLD_TOKENS = 5_000;
+export const MAX_EXECUTE_THRESHOLD_TOKENS = 2_000_000;
 // The 95% emergency wall remains above the 90% execute-threshold cap.
-export const EXECUTE_THRESHOLD_CAP_MESSAGE =
-    "execute_threshold is capped at 90% for cache safety: output capacity is reserved from the usable context window, and the remaining 10% absorbs mid-turn growth before the absolute 95% emergency wall. Use a value between 20 and 90.";
+export const EXECUTE_THRESHOLD_CAP_MESSAGE = `execute_threshold is capped at ${MAX_EXECUTE_THRESHOLD_PERCENTAGE}% for cache safety: output capacity is reserved from the usable context window, and the remaining ${100 - MAX_EXECUTE_THRESHOLD_PERCENTAGE}% absorbs mid-turn growth before the absolute 95% emergency wall. Use a value between ${MIN_EXECUTE_THRESHOLD_PERCENTAGE} and ${MAX_EXECUTE_THRESHOLD_PERCENTAGE}.`;
 export const DEFAULT_HISTORIAN_TIMEOUT_MS = 300_000;
 /** Upper bound a session may configure for `memory.injection_budget_tokens`. */
 export const MAX_MEMORY_INJECTION_BUDGET_TOKENS = 20_000;
 export const DEFAULT_HISTORY_BUDGET_PERCENTAGE = 0.15;
+const LANGUAGE_CODE_MESSAGE = 'language must be a 2-letter ISO 639-1 code (e.g. "tr", "es", "de")';
 
 /** Top-level keys the schema no longer defines; the loader warns when a configuration still carries one. */
 export const REMOVED_CONFIG_KEYS = ["auto_update", "dreamer", "embedding"] as const;
@@ -46,12 +51,14 @@ export type PiConfig = NonNullable<z.infer<typeof PiConfigSchema>>;
 export const PromptSurfacePresetSchema = z.enum(["full", "light"]);
 export type { PromptSurfacePreset } from "../../shared/prompt-surface";
 
-const PromptSurfaceModelKeySchema = z.string().refine(isValidPromptSurfaceModelKey, {
+const PromptSurfaceModelKeySchema = z.string().regex(PROMPT_SURFACE_MODEL_KEY_PATTERN, {
     message:
         "Use a non-empty bare model key, provider/model key, or the literal provider/* wildcard; model IDs may contain additional slashes and matching is case-sensitive.",
 });
+// `.regex(/\S/)` publishes as a JSON Schema `pattern`; a `.refine` on `trim().length` would be dropped from the generated asset.
+const NON_BLANK_PATTERN = /\S/;
 // Harness-specific known-tool validation runs when a user override is applied.
-const PromptSurfaceToolKeySchema = z.string().refine((value) => value.trim().length > 0, {
+const PromptSurfaceToolKeySchema = z.string().regex(NON_BLANK_PATTERN, {
     message: "tool description keys must not be empty or whitespace-only",
 });
 
@@ -68,7 +75,7 @@ export const PromptSurfaceConfigSchema = z
             ),
         guidance_override_path: z
             .string()
-            .refine((value) => value.trim().length > 0, {
+            .regex(NON_BLANK_PATTERN, {
                 message: "guidance_override_path must not be empty or whitespace-only",
             })
             .optional()
@@ -78,7 +85,7 @@ export const PromptSurfaceConfigSchema = z
         tool_descriptions: z
             .record(
                 PromptSurfaceToolKeySchema,
-                z.string().refine((value) => value.trim().length > 0, {
+                z.string().regex(NON_BLANK_PATTERN, {
                     message: "tool description values must not be empty or whitespace-only",
                 }),
             )
@@ -335,12 +342,12 @@ export const EidnaraConfigSchema = z
             ),
         language: z
             .string()
+            // The regex emits a JSON Schema `pattern`; `isValidLanguageCode` remains runtime-only
+            // validation because JSON Schema cannot express whether a code names a language.
+            .regex(/^\s*[A-Za-z]{2}\s*$/, { message: LANGUAGE_CODE_MESSAGE, abort: true })
             .trim()
             .toLowerCase()
-            .refine(
-                (s) => isValidLanguageCode(s),
-                'language must be a 2-letter ISO 639-1 code (e.g. "tr", "es", "de")',
-            )
+            .refine((s) => isValidLanguageCode(s), LANGUAGE_CODE_MESSAGE)
             .optional()
             .describe(
                 "Output language for Eidnara's generated content and guidance, as a " +
@@ -403,10 +410,23 @@ export const EidnaraConfigSchema = z
             ),
         execute_threshold_percentage: z
             .union([
-                z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE),
                 z
-                    .object({ default: z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE) })
-                    .catchall(z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE)),
+                    .number()
+                    .min(MIN_EXECUTE_THRESHOLD_PERCENTAGE)
+                    .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE),
+                z
+                    .object({
+                        default: z
+                            .number()
+                            .min(MIN_EXECUTE_THRESHOLD_PERCENTAGE)
+                            .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE),
+                    })
+                    .catchall(
+                        z
+                            .number()
+                            .min(MIN_EXECUTE_THRESHOLD_PERCENTAGE)
+                            .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE),
+                    ),
             ])
             .default(DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE)
             .describe(
@@ -414,9 +434,15 @@ export const EidnaraConfigSchema = z
             ),
         execute_threshold_tokens: z
             .object({
-                default: z.number().min(5_000).max(2_000_000).optional(),
+                default: z
+                    .number()
+                    .min(MIN_EXECUTE_THRESHOLD_TOKENS)
+                    .max(MAX_EXECUTE_THRESHOLD_TOKENS)
+                    .optional(),
             })
-            .catchall(z.number().min(5_000).max(2_000_000))
+            .catchall(
+                z.number().min(MIN_EXECUTE_THRESHOLD_TOKENS).max(MAX_EXECUTE_THRESHOLD_TOKENS),
+            )
             .optional()
             .describe(
                 "Absolute token thresholds per model. When matched, overrides execute_threshold_percentage for that model. Accepts `default` for all models or per-model keys. Values above 90% × context_limit are clamped with a warning log. Min 5_000, max 2_000_000.",

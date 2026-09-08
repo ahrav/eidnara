@@ -1,4 +1,10 @@
-import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "./schema/eidnara";
+import {
+    DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+    MAX_EXECUTE_THRESHOLD_PERCENTAGE,
+    MAX_EXECUTE_THRESHOLD_TOKENS,
+    MIN_EXECUTE_THRESHOLD_PERCENTAGE,
+    MIN_EXECUTE_THRESHOLD_TOKENS,
+} from "./schema/eidnara";
 
 /**
  *
@@ -49,12 +55,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isValidPercentageThreshold(value: unknown): value is number {
-    return typeof value === "number" && Number.isFinite(value) && value >= 20 && value <= 80;
+    return (
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= MIN_EXECUTE_THRESHOLD_PERCENTAGE &&
+        value <= MAX_EXECUTE_THRESHOLD_PERCENTAGE
+    );
 }
 
 function isValidTokenThreshold(value: unknown): value is number {
     return (
-        typeof value === "number" && Number.isFinite(value) && value >= 5_000 && value <= 2_000_000
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= MIN_EXECUTE_THRESHOLD_TOKENS &&
+        value <= MAX_EXECUTE_THRESHOLD_TOKENS
     );
 }
 

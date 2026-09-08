@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { PROMPT_SURFACE_MODEL_KEY_PATTERN } from "../src/shared/prompt-surface";
 import { buildSchema } from "./build-schema";
 
 /**
@@ -43,5 +44,34 @@ describe("eidnara JSON schema", () => {
             properties: Record<string, unknown>;
         };
         expect(schema.properties.experimental).toBeUndefined();
+    });
+
+    test("runtime string constraints are published as JSON Schema patterns", () => {
+        // `z.toJSONSchema` drops `.refine` callbacks, so these constraints must stay
+        // expressed as `.regex` checks or editors accept values the loader rejects.
+        const schema = buildSchema() as {
+            properties: {
+                language: { pattern?: string };
+                prompt_surface: {
+                    properties: {
+                        models: { propertyNames: { pattern?: string } };
+                        guidance_override_path: { pattern?: string };
+                        tool_descriptions: {
+                            propertyNames: { pattern?: string };
+                            additionalProperties: { pattern?: string };
+                        };
+                    };
+                };
+            };
+        };
+        const promptSurface = schema.properties.prompt_surface.properties;
+
+        expect(schema.properties.language.pattern).toBe("^\\s*[A-Za-z]{2}\\s*$");
+        expect(promptSurface.models.propertyNames.pattern).toBe(
+            PROMPT_SURFACE_MODEL_KEY_PATTERN.source,
+        );
+        expect(promptSurface.guidance_override_path.pattern).toBe("\\S");
+        expect(promptSurface.tool_descriptions.propertyNames.pattern).toBe("\\S");
+        expect(promptSurface.tool_descriptions.additionalProperties.pattern).toBe("\\S");
     });
 });

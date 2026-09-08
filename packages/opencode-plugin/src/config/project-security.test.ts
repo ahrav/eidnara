@@ -234,6 +234,49 @@ describe("stripUnsafeProjectConfigFields", () => {
 });
 
 describe("constrainProjectThresholdOverrides", () => {
+    it("raises a lower scalar project percentage in the 81-90 band back to the trusted value", () => {
+        // The schema accepts percentages through 90, so the sanitizer must recognize
+        // them; otherwise the merged project value survives unconstrained.
+        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 85 };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: 85 },
+            trustedBaseConfig: { execute_threshold_percentage: 90 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage")]);
+    });
+
+    it("drops lower object project percentages in the 81-90 band and warns per entry", () => {
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { default: 85, "openai/gpt-4": 82 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { default: 85, "openai/gpt-4": 82 } },
+            trustedBaseConfig: { execute_threshold_percentage: 90 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toEqual([
+            expect.stringContaining("execute_threshold_percentage.default"),
+            expect.stringContaining("execute_threshold_percentage.openai/gpt-4"),
+        ]);
+    });
+
+    it("allows a higher project percentage at the schema's 90 cap", () => {
+        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 90 };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: 90 },
+            trustedBaseConfig: { execute_threshold_percentage: 65 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toHaveLength(0);
+    });
+
     it("drops lower project token thresholds and warns", () => {
         const mergedRaw: Record<string, unknown> = {
             execute_threshold_tokens: { default: 9_000 },

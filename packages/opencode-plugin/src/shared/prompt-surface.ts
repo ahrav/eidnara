@@ -28,33 +28,21 @@ export function promptSurfaceConfigIdentity(config: PromptSurfaceConfig | undefi
 
 export type PromptSurfaceResolutionSource = "exact" | "bare" | "wildcard" | "default";
 
-/** The validator accepts bare model, provider/model, and provider/* routing keys. */
-export function isValidPromptSurfaceModelKey(key: string): boolean {
-    if (key.length === 0 || key.trim() !== key) return false;
-
-    const slash = key.indexOf("/");
-    if (slash < 0) return !key.includes("*");
-    if (slash === 0 || slash === key.length - 1) return false;
-
-    const provider = key.slice(0, slash);
-    const modelID = key.slice(slash + 1);
-    if (
-        provider.trim() !== provider ||
-        modelID.trim() !== modelID ||
-        provider.includes("*") ||
-        (modelID.includes("*") && modelID !== "*")
-    ) {
-        return false;
-    }
-    if (modelID === "*") return true;
-
-    return (
-        modelID.length > 0 &&
-        !modelID.startsWith("/") &&
-        !modelID.endsWith("/") &&
-        !modelID.includes("//")
-    );
-}
+/**
+ * The pattern accepts bare model, provider/model, and provider/* routing keys.
+ *
+ * The JSON Schema generator publishes the regex as `pattern`; it drops `.refine` callbacks,
+ * so editors validating against the asset would otherwise accept keys the loader rejects.
+ *
+ * - `[^\s/*](?:[^/*]*[^\s/*])?` — a bare key or provider: no `/` or `*`, no leading or
+ *   trailing whitespace (interior whitespace is allowed).
+ * - `/\*` — the provider wildcard.
+ * - `/[^\s/*](?:(?:[^/*]|\/(?=[^/*]))*[^\s/*])?` — a model ID: no `*`, no leading or
+ *   trailing whitespace, and every `/` is followed by a non-slash so `//` and a trailing `/`
+ *   are rejected.
+ */
+export const PROMPT_SURFACE_MODEL_KEY_PATTERN =
+    /^[^\s/*](?:[^/*]*[^\s/*])?(?:\/(?:\*|[^\s/*](?:(?:[^/*]|\/(?=[^/*]))*[^\s/*])?))?$/;
 
 export type ModelKeyLookupSource = Exclude<PromptSurfaceResolutionSource, "default">;
 

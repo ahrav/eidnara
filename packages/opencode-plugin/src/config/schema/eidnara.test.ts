@@ -220,6 +220,15 @@ describe("EidnaraConfigSchema", () => {
             expect(EidnaraConfigSchema.parse({ language: "ja" }).language).toBe("ja");
         });
 
+        it("rejects language values that are not two letters or do not name a language", () => {
+            for (const language of ["english", "e", "t1", "", "zz"]) {
+                const result = EidnaraConfigSchema.safeParse({ language });
+                expect([language, result.success]).toEqual([language, false]);
+                // The shape check aborts before the ISO lookup so a malformed value reports one issue.
+                expect([language, result.error?.issues.length]).toEqual([language, 1]);
+            }
+        });
+
         it("parses per-model cache_ttl objects", () => {
             const input = {
                 cache_ttl: {
@@ -269,14 +278,30 @@ describe("EidnaraConfigSchema", () => {
                 "provider//model",
                 "provider/model/",
                 "provider/ model",
+                "provider /model",
+                " provider/model",
+                "provider/model ",
                 "*/model",
+                "*",
+                "\u00a0model",
             ];
             for (const key of malformedKeys) {
-                expect(
+                expect([
+                    key,
                     EidnaraConfigSchema.safeParse({
                         prompt_surface: { models: { [key]: "light" } },
                     }).success,
-                ).toBe(false);
+                ]).toEqual([key, false]);
+            }
+
+            const acceptedKeys = ["gpt-4", "openai/gpt-4", "openai/*", "openai/gpt/4/x", "a b/c d"];
+            for (const key of acceptedKeys) {
+                expect([
+                    key,
+                    EidnaraConfigSchema.safeParse({
+                        prompt_surface: { models: { [key]: "light" } },
+                    }).success,
+                ]).toEqual([key, true]);
             }
 
             expect(
