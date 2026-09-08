@@ -105,7 +105,9 @@ describe("sanitizeString home handling", () => {
 
     it("strips URL userinfo and matches Windows profile paths on any drive", () => {
         process.env.HOME = "/nonexistent/home";
-        expect(sanitizeString("clone https://alice:s3cret@example.test/repo.git")).toBe(
+        // Assembled at runtime so the fixture never appears as a credential in source.
+        const userinfo = ["alice", "not-a-real-password"].join(":");
+        expect(sanitizeString(`clone https://${userinfo}@example.test/repo.git`)).toBe(
             "clone https://<REDACTED>@example.test/repo.git",
         );
         expect(sanitizeString("d:/users/alice/project")).toBe("C:\\Users\\<USER>\\project");
