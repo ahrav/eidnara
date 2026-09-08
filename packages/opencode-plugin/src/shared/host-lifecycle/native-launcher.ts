@@ -148,6 +148,10 @@ function collectChild(child: ChildProcess, deadlineMs: number): Promise<Collecte
             }
             stdoutChunks.push(chunk);
         });
+        // Pipe read errors are emitted on the stream, not on the ChildProcess
+        // `error` event; `close` still settles the promise.
+        child.stdout?.on("error", () => {});
+        child.stderr?.on("error", () => {});
         // Stderr is tainted diagnostics: drain it so a child writing more than
         // one pipe buffer cannot block, and discard every byte — it never
         // reaches an error or result. Draining keeps the read end open for the
