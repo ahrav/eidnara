@@ -1,16 +1,12 @@
-import { afterEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { LATEST_SUPPORTED_VERSION } from "@eidnara/opencode/features/context/storage-db";
-import { createDirectTestDatabase } from "@eidnara/opencode/features/context/test-database";
-import { Database } from "@eidnara/opencode/shared/sqlite";
 import { parse as parseJsonc } from "comment-json";
-import { openExistingContextDatabase } from "../lib/database-access";
 import type { PiDiagnosticReport } from "../lib/diagnostics-pi";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
-import { type RunDoctorOptions, runDoctor } from "./doctor-pi";
+import { parseDoctorArgs, type RunDoctorOptions, runDoctor } from "./doctor-pi";
 
 setDefaultTimeout(30_000);
 
@@ -18,7 +14,6 @@ const tempRoots: string[] = [];
 const originalHome = process.env.HOME;
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
-const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
 
 function makeTempRoot(prefix = "eidnara-pi-doctor-"): string {
@@ -80,7 +75,6 @@ function setEnv(root: string, cwd: string): string {
     process.env.HOME = root;
     process.env.PI_CODING_AGENT_DIR = join(root, ".pi", "agent");
     process.env.XDG_DATA_HOME = join(root, ".local", "share");
-    process.env.XDG_CACHE_HOME = join(root, ".cache");
     process.env.XDG_CONFIG_HOME = join(root, ".config");
     mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
     mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
@@ -96,54 +90,11 @@ function writeHealthyFiles(agentDir: string, cwd: string): void {
         }),
     );
     const configHome = process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? "", ".config");
-    writeFileSync(
-        join(configHome, "eidnara", "eidnara.jsonc"),
-        JSON.stringify({ embedding: { provider: "local" } }),
-    );
+    writeFileSync(join(configHome, "eidnara", "eidnara.jsonc"), JSON.stringify({ enabled: true }));
     writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({ enabled: true }));
 }
 
-function createInstalledPiPlugin(agentDir: string, withNativeBinding: boolean): void {
-    const pluginDir = join(agentDir, "npm", "node_modules", "@eidnara", "pi");
-    mkdirSync(pluginDir, { recursive: true });
-    writeFileSync(
-        join(pluginDir, "package.json"),
-        JSON.stringify({ name: "@eidnara/pi", version: "0.0.0" }),
-    );
-
-    const onnxDir = join(pluginDir, "node_modules", "onnxruntime-node");
-    mkdirSync(onnxDir, { recursive: true });
-    writeFileSync(
-        join(onnxDir, "package.json"),
-        JSON.stringify({ name: "onnxruntime-node", main: "index.js" }),
-    );
-    writeFileSync(join(onnxDir, "index.js"), "module.exports = {};\n");
-
-    if (withNativeBinding) {
-        const binDir = join(onnxDir, "bin", "napi-v6", process.platform, process.arch);
-        mkdirSync(binDir, { recursive: true });
-        writeFileSync(join(binDir, "onnxruntime_binding.node"), "mock native binding");
-    }
-}
-
-function writePiCachePackage(cacheRoot: string, version: string): string {
-    const pluginDir = join(cacheRoot, "extensions", "npm", "node_modules", "@eidnara", "pi");
-    mkdirSync(pluginDir, { recursive: true });
-    writeFileSync(
-        join(pluginDir, "package.json"),
-        JSON.stringify({ name: "@eidnara/pi", version }),
-    );
-    return pluginDir;
-}
-
-function createMockDb(): Database {
-    return createDirectTestDatabase().db;
-}
-
 function baseOptions(root: string, cwd: string, prompts: MockPrompts): RunDoctorOptions {
-    const storageDir = join(root, ".local", "share", "eidnara", "context");
-    mkdirSync(storageDir, { recursive: true });
-    createDirectTestDatabase({ path: join(storageDir, "context.db") }).db.close();
     return {
         cwd,
         prompts,
@@ -153,8 +104,6 @@ function baseOptions(root: string, cwd: string, prompts: MockPrompts): RunDoctor
                 source: "home",
             }),
             getPiVersion: () => "0.74.0",
-            getLatestNpmVersion: () => "0.1.0",
-            openExistingContextDatabase: () => createMockDb(),
             now: () => new Date("2026-04-28T12:34:56Z"),
             execFileSync: () => {
                 throw new Error("gh unavailable");
@@ -171,8 +120,6 @@ afterEach(() => {
     else process.env.PI_CODING_AGENT_DIR = originalPiDir;
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalDataHome;
-    if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = originalCacheHome;
     if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = originalConfigHome;
 
@@ -195,121 +142,10 @@ describe("Pi doctor", () => {
         const output = prompts.messages.join("\n");
         expect(output).toContain("PASS Pi 0.74.0 detected");
         expect(output).toContain("PASS npm:@eidnara/pi is registered");
-        expect(output).toContain("PASS SQLite integrity_check: ok");
+        expect(output).toContain("PASS No conflicting Eidnara entries in Pi packages[]");
+        expect(output).toContain("INFO Other Pi extensions registered: npm:other-pi-extension");
         expect(output).toContain("Summary: PASS");
         expect(output).toContain("FAIL 0");
-    });
-
-    it("names the database and repair command when integrity_check fails", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        writeHealthyFiles(agentDir, cwd);
-        const prompts = new MockPrompts();
-        const options = baseOptions(root, cwd, prompts);
-        const damaged = createMockDb();
-        const originalPrepare = damaged.prepare.bind(damaged);
-        (damaged as Database & { prepare: typeof damaged.prepare }).prepare = ((sql: string) => {
-            if (sql === "PRAGMA integrity_check") {
-                return { get: () => ({ integrity_check: "invalid page number 42" }) };
-            }
-            return originalPrepare(sql);
-        }) as typeof damaged.prepare;
-        if (!options.deps) throw new Error("expected doctor dependencies");
-        options.deps.openExistingContextDatabase = () => damaged;
-        const errors: string[] = [];
-        const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-            errors.push(args.map(String).join(" "));
-        });
-
-        try {
-            const code = await runDoctor(options);
-            expect(code).toBe(1);
-        } finally {
-            errorSpy.mockRestore();
-        }
-
-        const output = errors.join("\n");
-        const dbPath = join(root, ".local", "share", "eidnara", "context", "context.db");
-        expect(output).toContain(`Database: ${dbPath}`);
-        expect(output).toContain("bunx @eidnara/cli@latest doctor repair-db");
-    });
-
-    it("refuses an older migration-lane database unchanged", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        writeHealthyFiles(agentDir, cwd);
-        const prompts = new MockPrompts();
-        const options = baseOptions(root, cwd, prompts);
-        const dbPath = join(root, ".local", "share", "eidnara", "context", "context.db");
-        rmSync(dbPath);
-        const fixture = new Database(dbPath);
-        fixture.exec(`
-            CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-            INSERT INTO schema_migrations(version) VALUES (50);
-            CREATE TABLE tags (id INTEGER);
-            CREATE TABLE compartments (id INTEGER);
-            CREATE TABLE memories (id INTEGER);
-            CREATE TABLE notes (id INTEGER);
-            CREATE TABLE dream_runs (id INTEGER);
-        `);
-        fixture.close();
-        if (!options.deps) throw new Error("expected doctor dependencies");
-        options.deps.openExistingContextDatabase = openExistingContextDatabase;
-
-        const code = await runDoctor(options);
-
-        expect(code).toBe(1);
-        const reopened = new Database(dbPath);
-        const version = reopened
-            .prepare("SELECT MAX(version) AS version FROM schema_migrations")
-            .get() as {
-            version: number;
-        };
-        reopened.close();
-        expect(version.version).toBe(50);
-        expect(prompts.messages.join("\n")).toContain(
-            "PASS Opened the shared DB read-only with a supported schema",
-        );
-        const output = prompts.messages.join("\n");
-        expect(output).toContain("context_db_schema_version=50");
-        expect(output).toContain(`plugin_supported_version=${LATEST_SUPPORTED_VERSION}`);
-    });
-
-    it("warns when the local onnxruntime native binding is absent", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        writeHealthyFiles(agentDir, cwd);
-        createInstalledPiPlugin(agentDir, false);
-        const prompts = new MockPrompts();
-
-        const code = await runDoctor(baseOptions(root, cwd, prompts));
-
-        expect(code).toBe(0);
-        const output = prompts.messages.join("\n");
-        expect(output).toContain(
-            "WARN Embedding provider: local — onnxruntime-node native binding missing",
-        );
-        expect(output).toContain("postinstall likely failed");
-        expect(output).toContain("Stale Pi extension cache found");
-        expect(output).toContain("WARN 2");
-    });
-
-    it("passes the local embedding check when the onnxruntime native binding is present", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        writeHealthyFiles(agentDir, cwd);
-        createInstalledPiPlugin(agentDir, true);
-        const prompts = new MockPrompts();
-
-        const code = await runDoctor(baseOptions(root, cwd, prompts));
-
-        expect(code).toBe(0);
-        const output = prompts.messages.join("\n");
-        expect(output).toContain("PASS Embedding provider: local (native runtime present)");
     });
 
     it("repairs missing package entry and missing user config in --force mode", async () => {
@@ -337,104 +173,6 @@ describe("Pi doctor", () => {
         expect(output).toContain("Repair attempted; 2 item(s) changed");
     });
 
-    it("migrates legacy Pi user config before --force writes a default", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        const settingsPath = join(agentDir, "settings.json");
-        const legacyPath = join(agentDir, "eidnara.jsonc");
-        writeFileSync(settingsPath, JSON.stringify({ packages: [] }));
-        writeFileSync(legacyPath, JSON.stringify({ protected_tags: 13 }));
-        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({ enabled: true }));
-        const prompts = new MockPrompts();
-
-        const code = await runDoctor({
-            ...baseOptions(root, cwd, prompts),
-            force: true,
-        });
-
-        expect(code).toBe(0);
-        const targetPath = join(root, ".config", "eidnara", "eidnara.jsonc");
-        const config = parseJsonc(readFileSync(targetPath, "utf-8")) as {
-            protected_tags?: number;
-        };
-        expect(config.protected_tags).toBe(13);
-        expect(existsSync(legacyPath)).toBe(false);
-        expect(existsSync(`${legacyPath}.MOVED_READPLEASE`)).toBe(true);
-        const output = prompts.messages.join("\n");
-        expect(output).toContain("Migrated Eidnara user config");
-        expect(output).not.toContain("Wrote default Eidnara config");
-    });
-
-    it("does not write a default when legacy user configs conflict", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        writeFileSync(
-            join(agentDir, "settings.json"),
-            JSON.stringify({ packages: ["npm:@eidnara/pi"] }),
-        );
-        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({ enabled: true }));
-        const opencodeDir = join(root, ".config", "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(join(opencodeDir, "eidnara.jsonc"), JSON.stringify({ protected_tags: 7 }));
-        writeFileSync(join(agentDir, "eidnara.jsonc"), JSON.stringify({ protected_tags: 13 }));
-        const prompts = new MockPrompts();
-
-        const code = await runDoctor({
-            ...baseOptions(root, cwd, prompts),
-            force: true,
-        });
-
-        expect(code).toBe(0);
-        expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(false);
-        const output = prompts.messages.join("\n");
-        expect(output).toContain("Eidnara user config migration refused");
-        expect(output).toContain("Default config repair skipped");
-        expect(output).not.toContain("Wrote default Eidnara config");
-    });
-
-    it("recognizes object-form Eidnara package and preserves object entries during repair", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        const settingsPath = join(agentDir, "settings.json");
-        writeFileSync(
-            settingsPath,
-            JSON.stringify({
-                packages: [
-                    { name: "npm:@eidnara/pi", version: "1.2.3" },
-                    { name: "third-party-extension", version: "9.9.9", enabled: true },
-                    "npm:other-pi-extension",
-                ],
-            }),
-        );
-        writeFileSync(
-            join(root, ".config", "eidnara", "eidnara.jsonc"),
-            JSON.stringify({ embedding: { provider: "local" } }),
-        );
-        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({ enabled: true }));
-        const prompts = new MockPrompts();
-
-        const code = await runDoctor({
-            ...baseOptions(root, cwd, prompts),
-            force: true,
-        });
-
-        expect(code).toBe(0);
-        const settings = parseJsonc(readFileSync(settingsPath, "utf-8")) as {
-            packages?: unknown[];
-        };
-        expect(settings.packages).toEqual([
-            { name: "npm:@eidnara/pi", version: "1.2.3" },
-            { name: "third-party-extension", version: "9.9.9", enabled: true },
-            "npm:other-pi-extension",
-        ]);
-        const output = prompts.messages.join("\n");
-        expect(output).toContain("PASS npm:@eidnara/pi is registered");
-        expect(output).not.toContain("Added npm:@eidnara/pi");
-    });
-
     it("generates a sanitized markdown report in --issue mode without calling gh create", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
@@ -444,7 +182,7 @@ describe("Pi doctor", () => {
             join(tmpdir(), "eidnara.log"),
             `token=abc123\nUser path ${root}/secret with sk-12345678901234567890\n`,
         );
-        let ghCreateCalled = false;
+        const ghCalls: Array<{ command: string; args: readonly string[] }> = [];
         const logged: unknown[] = [];
         const originalConsoleLog = console.log;
         console.log = (...args: unknown[]) => {
@@ -476,7 +214,7 @@ describe("Pi doctor", () => {
             userConfig: {
                 path: join(root, ".config", "eidnara", "eidnara.jsonc"),
                 exists: true,
-                flags: { embedding: { provider: "local" } },
+                flags: { enabled: true },
             },
             projectConfig: {
                 path: join(cwd, ".eidnara", "eidnara.jsonc"),
@@ -485,11 +223,6 @@ describe("Pi doctor", () => {
             },
             loadedConfigPaths: ["<HOME>/.config/eidnara/eidnara.jsonc"],
             loadWarnings: [],
-            storageDir: {
-                path: join(root, ".local", "share", "eidnara", "context"),
-                exists: true,
-                contextDbSizeBytes: 4,
-            },
             conflicts: { knownConflicts: [], otherPiExtensions: [] },
             logFile: {
                 path: join(tmpdir(), "eidnara.log"),
@@ -518,10 +251,10 @@ describe("Pi doctor", () => {
                     execFileSync: () => {
                         throw new Error("gh unavailable");
                     },
-                    spawnSync: () => {
-                        ghCreateCalled = true;
-                        return { status: 0, stdout: "", stderr: "" } as never;
-                    },
+                    spawnSync: ((command: string, args: readonly string[]) => {
+                        ghCalls.push({ command, args });
+                        return { status: 0, stdout: "", stderr: "" };
+                    }) as never,
                 },
             });
 
@@ -530,7 +263,7 @@ describe("Pi doctor", () => {
             console.log = originalConsoleLog;
         }
 
-        expect(ghCreateCalled).toBe(false);
+        expect(ghCalls).toEqual([]);
         expect(logged.join("\n")).toContain("[pi] Bug title");
         const reportPath = join(cwd, "eidnara-pi-issue-20260428-123456.md");
         expect(existsSync(reportPath)).toBe(true);
@@ -540,37 +273,6 @@ describe("Pi doctor", () => {
         expect(report).not.toContain(root);
         expect(report).not.toContain("abc123");
         expect(report).not.toContain("sk-12345678901234567890");
-    });
-
-    it("clears stale caches under PI_CODING_AGENT_DIR's parent without touching HOME/.pi/cache", async () => {
-        const root = makeTempRoot();
-        const home = join(root, "home");
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = join(root, "isolated", "agent");
-        process.env.HOME = home;
-        process.env.PI_CODING_AGENT_DIR = agentDir;
-        process.env.XDG_DATA_HOME = join(root, "data");
-        process.env.XDG_CACHE_HOME = join(root, "cache");
-        process.env.XDG_CONFIG_HOME = join(root, "config");
-        mkdirSync(agentDir, { recursive: true });
-        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        writeHealthyFiles(agentDir, cwd);
-        const isolatedCachePlugin = writePiCachePackage(join(root, "isolated", "cache"), "9.9.9");
-        const homeCachePlugin = writePiCachePackage(join(home, ".pi", "cache"), "9.9.9");
-        const prompts = new MockPrompts();
-
-        const code = await runDoctor({
-            ...baseOptions(root, cwd, prompts),
-            force: true,
-        });
-
-        expect(code).toBe(0);
-        expect(existsSync(isolatedCachePlugin)).toBe(false);
-        expect(existsSync(homeCachePlugin)).toBe(true);
-        expect(prompts.messages.join("\n")).toContain(
-            `Cleared stale Pi extension cache: ${isolatedCachePlugin}`,
-        );
     });
 
     it("reports an unknown CLI version as info instead of pass-current", async () => {
@@ -591,97 +293,14 @@ describe("Pi doctor", () => {
 
         expect(code).toBe(0);
         const output = prompts.messages.join("\n");
-        expect(output).toContain("INFO Eidnara for Pi CLI version unknown; npm latest is v0.1.0");
-        expect(output).not.toContain("PASS Eidnara for Pi CLI vunknown is current");
+        expect(output).toContain("INFO Eidnara for Pi CLI version unknown");
+        expect(output).not.toContain("PASS Eidnara for Pi CLI");
     });
 
-    it("sanitizes invalid-scheme embedding endpoints before printing them", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        writeHealthyFiles(agentDir, cwd);
-        writeFileSync(
-            join(root, ".config", "eidnara", "eidnara.jsonc"),
-            JSON.stringify({
-                embedding: {
-                    provider: "openai-compatible",
-                    endpoint: "ftp://user:pass@example.com/v1?api_key=secret",
-                    model: "text-embedding-3-small",
-                },
-            }),
-        );
-        const prompts = new MockPrompts();
-        const options = baseOptions(root, cwd, prompts);
-        const errors: string[] = [];
-        const originalError = console.error;
-        console.error = (message?: unknown) => {
-            errors.push(String(message));
-        };
-        try {
-            const code = await runDoctor({
-                ...options,
-                deps: {
-                    ...options.deps,
-                    probeEmbeddingEndpoint: async () => ({
-                        kind: "invalid_scheme",
-                        endpoint: "ftp://user:pass@example.com/v1?api_key=secret",
-                    }),
-                },
-            });
+    it("does not recognize --clear as a doctor flag", () => {
+        const parsed = parseDoctorArgs(["--clear"]);
 
-            expect(code).toBe(1);
-        } finally {
-            console.error = originalError;
-        }
-
-        const output = errors.join("\n");
-        expect(output).toContain("ftp://example.com/v1");
-        expect(output).not.toContain("user:pass");
-        expect(output).not.toContain("api_key=secret");
-    });
-
-    it("sanitizes thrown embedding probe errors before printing them", async () => {
-        const root = makeTempRoot();
-        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
-        const agentDir = setEnv(root, cwd);
-        writeHealthyFiles(agentDir, cwd);
-        writeFileSync(
-            join(root, ".config", "eidnara", "eidnara.jsonc"),
-            JSON.stringify({
-                embedding: {
-                    provider: "openai-compatible",
-                    endpoint: "https://example.com/v1",
-                    model: "text-embedding-3-small",
-                },
-            }),
-        );
-        const prompts = new MockPrompts();
-        const options = baseOptions(root, cwd, prompts);
-        const errors: string[] = [];
-        const originalError = console.error;
-        console.error = (message?: unknown) => {
-            errors.push(String(message));
-        };
-        try {
-            const code = await runDoctor({
-                ...options,
-                deps: {
-                    ...options.deps,
-                    probeEmbeddingEndpoint: async () => {
-                        throw new Error("token=abc123 from /Users/alice/private");
-                    },
-                },
-            });
-
-            expect(code).toBe(1);
-        } finally {
-            console.error = originalError;
-        }
-
-        const output = errors.join("\n");
-        expect(output).toContain("Embedding probe threw: token=<REDACTED:token>");
-        expect(output).toContain("/Users/<USER>/private");
-        expect(output).not.toContain("alice");
-        expect(output).not.toContain("token=abc123");
+        expect(parsed).toEqual({ force: false, issue: false, help: false });
+        expect(parsed).not.toHaveProperty("clear");
     });
 });

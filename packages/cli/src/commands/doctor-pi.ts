@@ -1,76 +1,29 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
-import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/migrate-config-location";
-import {
-    dropInheritedEmbeddingKeyOnRedirect,
-    stripUnsafeProjectConfigFields,
-} from "@eidnara/opencode/config/project-security";
-import {
-    DEFAULT_LOCAL_EMBEDDING_MODEL,
-    EidnaraConfigSchema,
-    RETIRED_DEFAULT_LOCAL_EMBEDDING_MODEL,
-} from "@eidnara/opencode/config/schema/eidnara";
-import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
-import {
-    type EmbeddingProbeOutcome,
-    probeEmbeddingEndpoint,
-} from "@eidnara/opencode/features/context/memory/embedding-probe";
-import type { ContextDatabase } from "@eidnara/opencode/features/context/storage";
-import { getEidnaraStorageDir } from "@eidnara/opencode/shared/data-path";
-import { isPrototypePollutionKey, parseConfigJsonc } from "@eidnara/opencode/shared/jsonc-parser";
+import { dirname } from "node:path";
+import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
+import { EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
+import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import { stringify as stringifyJsonc } from "comment-json";
 
 import { writeFileAtomic } from "../lib/atomic-write";
-import {
-    hasUserConfigLocationMigrationRefusal,
-    migrateConfigLocationsForCli,
-} from "../lib/config-location-migration";
-import { openExistingContextDatabase, UnsupportedSchemaVersionError } from "../lib/database-access";
-import { formatDatabaseRepairGuidance } from "../lib/database-repair-guidance";
 import { collectDiagnostics } from "../lib/diagnostics-pi";
-import {
-    checkLocalEmbeddingRuntimeByResolution,
-    formatLocalEmbeddingRuntimeDoctorWarning,
-    isLocalEmbeddingRuntimeBroken,
-} from "../lib/embedding-runtime";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import { bundleIssueReport } from "../lib/logs-pi";
-import {
-    getEidnaraLogPath,
-    getPiAgentDir,
-    getPiCacheRoot,
-    getPiUserExtensionsPath,
-    getSharedUserConfigPath,
-} from "../lib/paths";
+import { getEidnaraLogPath, getPiUserExtensionsPath, getSharedUserConfigPath } from "../lib/paths";
 import {
     detectPiBinary,
     getPiVersion,
     PI_PACKAGE_SOURCE,
     type PiBinaryInfo,
 } from "../lib/pi-helpers";
-import {
-    describePiPackageEntry,
-    getPiEidnaraPackageSpecifier,
-    hasPiEidnaraPackage,
-    isPiEidnaraPackageEntry,
-} from "../lib/pi-package-entry";
 import { type PromptIO, promptIO } from "../lib/prompts";
-import { sanitizeDiagnosticEndpoint, sanitizeDiagnosticText } from "../lib/redaction";
-import {
-    checkStorageVersionFence,
-    formatStorageVersions,
-    readStorageVersions,
-} from "../lib/storage-versions";
 import { writePiSettingsPackage } from "./setup-pi";
 
-const PACKAGE_NAME = "@eidnara/pi";
 // Pi 0.74.0 changed the package scope from `@mariozechner/pi-coding-agent` to `@earendil-works/pi-coding-agent`; older Pi versions cannot load this extension because its peerDependency uses the new scope.
 const MIN_PI_VERSION = "0.74.0";
-const ROW_COUNT_TABLES = ["tags", "compartments", "claims", "notes", "dream_runs"];
 
 type CheckStatus = "pass" | "warn" | "fail" | "info";
 
@@ -82,7 +35,6 @@ interface CheckResult {
 interface RepairPlan {
     addPackageEntry: boolean;
     writeUserConfig: boolean;
-    clearCachePaths: string[];
 }
 
 interface HealthReport {
@@ -98,10 +50,7 @@ interface DoctorDeps {
     collectDiagnostics: typeof collectDiagnostics;
     detectPiBinary: () => PiBinaryInfo | null;
     getPiVersion: (piPath: string) => string | null;
-    getLatestNpmVersion: () => string | null;
     selfVersion: () => string;
-    probeEmbeddingEndpoint: typeof probeEmbeddingEndpoint;
-    openExistingContextDatabase: typeof openExistingContextDatabase;
     now: () => Date;
     execFileSync: typeof execFileSync;
     spawnSync: typeof spawnSync;
@@ -121,10 +70,7 @@ const DEFAULT_DEPS: DoctorDeps = {
     collectDiagnostics,
     detectPiBinary,
     getPiVersion,
-    getLatestNpmVersion: () => getLatestNpmVersion(PACKAGE_NAME),
     selfVersion,
-    probeEmbeddingEndpoint,
-    openExistingContextDatabase,
     now: () => new Date(),
     execFileSync,
     spawnSync,
@@ -160,18 +106,6 @@ function selfVersion(): string {
         } catch {}
     }
     return "unknown";
-}
-
-function getLatestNpmVersion(packageName: string): string | null {
-    try {
-        return execFileSync("npm", ["view", packageName, "version"], {
-            encoding: "utf-8",
-            stdio: ["ignore", "pipe", "ignore"],
-            timeout: 10_000,
-        }).trim();
-    } catch {
-        return null;
-    }
 }
 
 function parseSemver(version: string | null): [number, number, number] | null {
@@ -216,183 +150,12 @@ function packagesFrom(settings: Record<string, unknown>): unknown[] {
     return Array.isArray(settings.packages) ? settings.packages : [];
 }
 
-/**
- * Pi can install managed packages under `~/.pi/agent/npm/node_modules/<pkg>` or `<cwd>/.pi/npm/node_modules/<pkg>`.
- */
-function piPluginDirCandidates(packages: unknown[], cwd: string): string[] {
-    const dirs: string[] = [];
-    const agentDir = getPiAgentDir();
-
-    // Pi resolves relative `packages[]` entries from the agent directory.
-    for (const entry of packages) {
-        const spec = typeof entry === "string" ? entry.trim() : "";
-        if (!spec || spec.startsWith("npm:")) continue;
-        const resolved = isAbsolute(spec) ? spec : join(agentDir, spec);
-        dirs.push(resolved);
-    }
-
-    // Managed installs resolve packages from `<root>/node_modules/<pkg>`.
-    dirs.push(join(agentDir, "npm", "node_modules", PACKAGE_NAME));
-    dirs.push(join(cwd, ".pi", "npm", "node_modules", PACKAGE_NAME));
-
-    return dirs.filter((dir) => existsSync(join(dir, "package.json")));
+function isPiEidnaraPackageEntry(entry: unknown): boolean {
+    return entry === PI_PACKAGE_SOURCE;
 }
 
-function projectConfigPath(cwd: string): string {
-    return resolveEidnaraProjectConfigPath(cwd);
-}
-
-function readConfigForEmbedding(
-    path: string,
-    isProjectConfig: boolean,
-): Record<string, unknown> | null {
-    if (!existsSync(path)) return null;
-    try {
-        const rawText = readFileSync(path, "utf-8");
-        // Project-level config must leave `{env:}` and `{file:}` tokens literal to prevent a repository-chosen endpoint from receiving secrets.
-        // A malicious repository could resolve `{env:ANTHROPIC_API_KEY}` into a value sent to a repository-chosen endpoint.
-        // Project configuration must leave `{env:}` and `{file:}` tokens literal because a repository can choose the endpoint.
-        // `isProjectConfig` leaves project-config tokens literal, matching the runtime loader.
-        const substituted = substituteConfigVariables({
-            text: rawText,
-            configPath: path,
-            isProjectConfig,
-        });
-        const rejectedKeyPaths: string[] = [];
-        const parsed = parseConfigJsonc<Record<string, unknown>>(substituted.text, {
-            onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
-        });
-        if (rejectedKeyPaths.length > 0) {
-            throw new Error("unsafe prototype-pollution key in config");
-        }
-        return parsed;
-    } catch {
-        return null;
-    }
-}
-
-function classifyEmbeddingOutcome(outcome: EmbeddingProbeOutcome): CheckResult {
-    switch (outcome.kind) {
-        case "ok":
-            return {
-                status: "pass",
-                message: `Embedding endpoint OK (${outcome.status}, ${outcome.dimensions ?? "?"}-dim vectors)`,
-            };
-        case "auth_failed":
-            return {
-                status: "fail",
-                message: `Embedding endpoint rejected credentials (${outcome.status})`,
-            };
-        case "timeout":
-            return {
-                status: "warn",
-                message: `Embedding endpoint timed out after ${outcome.timeoutMs}ms`,
-            };
-        case "network_error":
-            return {
-                status: "fail",
-                message: `Embedding endpoint network error: ${sanitizeDiagnosticText(outcome.message)}`,
-            };
-        case "endpoint_unsupported":
-            return {
-                status: "fail",
-                message: `Embedding endpoint does not support embeddings (${outcome.status})`,
-            };
-        case "http_error":
-            return {
-                status: "fail",
-                message: `Embedding endpoint returned HTTP ${outcome.status}`,
-            };
-        case "invalid_scheme":
-            return {
-                status: "fail",
-                message: `Embedding endpoint must start with http:// or https://: ${sanitizeDiagnosticEndpoint(outcome.endpoint)}`,
-            };
-    }
-}
-
-function countTable(db: ContextDatabase, table: string): number | null {
-    try {
-        const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as {
-            count?: unknown;
-        };
-        return typeof row?.count === "number" ? row.count : null;
-    } catch {
-        return null;
-    }
-}
-
-function pinnedVersionFromPackageSpecifier(specifier: string | null): string | null {
-    if (!specifier) return null;
-    const normalized = specifier.replace(/^npm:/, "");
-    const slash = normalized.indexOf("/");
-    const versionAt = normalized.indexOf("@", slash + 1);
-    if (versionAt < 0) return null;
-    const version = normalized.slice(versionAt + 1);
-    return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version) ? version : null;
-}
-
-function cacheRoots(cwd: string): string[] {
-    const home = process.env.HOME?.trim();
-    const cacheHome = process.env.XDG_CACHE_HOME || join(home || homedir(), ".cache");
-    const piCacheRoot = getPiCacheRoot();
-    return [
-        join(piCacheRoot, "extensions"),
-        join(piCacheRoot, "packages"),
-        join(cacheHome, "pi", "extensions"),
-        join(cacheHome, "pi", "packages"),
-        join(getPiAgentDir(), "cache", "extensions"),
-        join(getPiAgentDir(), "npm", "node_modules", PACKAGE_NAME),
-        join(cwd, ".pi", "npm", "node_modules", PACKAGE_NAME),
-    ];
-}
-
-function findPiEidnaraCacheDirs(
-    cwd: string,
-    expectedVersion: string | null,
-    force = false,
-): Array<{ path: string; version?: string }> {
-    const found = new Map<string, { path: string; version?: string }>();
-    const visit = (path: string, depth: number): void => {
-        if (depth < 0 || !existsSync(path)) return;
-        let stat: ReturnType<typeof statSync>;
-        try {
-            stat = statSync(path);
-        } catch {
-            return;
-        }
-        if (!stat.isDirectory()) return;
-
-        const packageJson = join(path, "package.json");
-        if (existsSync(packageJson)) {
-            try {
-                const pkg = JSON.parse(readFileSync(packageJson, "utf-8")) as {
-                    name?: unknown;
-                    version?: unknown;
-                };
-                const name = typeof pkg.name === "string" ? pkg.name : "";
-                const version = typeof pkg.version === "string" ? pkg.version : undefined;
-                if (name === PACKAGE_NAME) {
-                    if (force || !version || (expectedVersion && version !== expectedVersion)) {
-                        found.set(path, { path, version });
-                    }
-                }
-            } catch {
-                if (path.includes("@eidnara/pi")) found.set(path, { path });
-            }
-        }
-
-        let entries: string[] = [];
-        try {
-            entries = readdirSync(path);
-        } catch {
-            return;
-        }
-        for (const entry of entries) visit(join(path, entry), depth - 1);
-    };
-
-    for (const root of cacheRoots(cwd)) visit(root, 5);
-    return [...found.values()];
+function describePackageEntry(entry: unknown): string {
+    return typeof entry === "string" ? entry : JSON.stringify(entry);
 }
 
 async function runHealthChecks(options: {
@@ -400,17 +163,11 @@ async function runHealthChecks(options: {
     prompts: PromptIO;
     deps: DoctorDeps;
     quiet?: boolean;
-    configMigrationWarnings?: readonly string[];
-    force?: boolean;
 }): Promise<HealthReport> {
     const results: CheckResult[] = [];
-    const userConfigMigrationRefused = hasUserConfigLocationMigrationRefusal(
-        options.configMigrationWarnings ?? [],
-    );
     const repairPlan: RepairPlan = {
         addPackageEntry: false,
         writeUserConfig: false,
-        clearCachePaths: [],
     };
     const self = options.deps.selfVersion();
 
@@ -436,16 +193,10 @@ async function runHealthChecks(options: {
         }
     }
 
-    const latest = options.deps.getLatestNpmVersion();
-    const latestCompare = latest ? compareSemver(self, latest) : null;
-    if (latest && latestCompare === -1) {
-        add(results, "warn", `Eidnara for Pi CLI v${self} is older than npm latest v${latest}`);
-    } else if (latest && latestCompare !== null) {
-        add(results, "pass", `Eidnara for Pi CLI v${self} is current (npm latest v${latest})`);
-    } else if (latest) {
-        add(results, "info", `Eidnara for Pi CLI version unknown; npm latest is v${latest}`);
+    if (parseSemver(self)) {
+        add(results, "info", `Eidnara for Pi CLI v${self}`);
     } else {
-        add(results, "info", `Eidnara for Pi CLI v${self}; npm latest check unavailable`);
+        add(results, "info", "Eidnara for Pi CLI version unknown");
     }
 
     const settingsPath = getPiUserExtensionsPath();
@@ -464,7 +215,7 @@ async function runHealthChecks(options: {
         } else {
             packages = packagesFrom(parsed.value);
             add(results, "pass", `Pi settings found at ${settingsPath}`);
-            if (hasPiEidnaraPackage(packages)) {
+            if (packages.some(isPiEidnaraPackageEntry)) {
                 add(results, "pass", `${PI_PACKAGE_SOURCE} is registered in packages[]`);
             } else {
                 add(results, "fail", `${PI_PACKAGE_SOURCE} is missing from packages[]`);
@@ -474,7 +225,7 @@ async function runHealthChecks(options: {
     }
 
     const userConfigPath = getSharedUserConfigPath();
-    const projectPath = projectConfigPath(options.cwd);
+    const projectPath = resolveEidnaraProjectConfigPath(options.cwd);
     for (const [label, path, required] of [
         ["user", userConfigPath, true],
         ["project", projectPath, false],
@@ -482,15 +233,7 @@ async function runHealthChecks(options: {
         if (!existsSync(path)) {
             if (required) {
                 add(results, "warn", `No ${label} eidnara.jsonc found at ${path}`);
-                if (userConfigMigrationRefused) {
-                    add(
-                        results,
-                        "warn",
-                        "Default config repair skipped because legacy Eidnara user config needs manual consolidation first",
-                    );
-                } else {
-                    repairPlan.writeUserConfig = true;
-                }
+                repairPlan.writeUserConfig = true;
             } else {
                 add(results, "info", `No project Eidnara config found at ${path}`);
             }
@@ -516,10 +259,6 @@ async function runHealthChecks(options: {
         add(results, "pass", "Pi Eidnara config loads successfully");
     }
 
-    // Copilot injects and rejects `minimal` with HTTP 400 when a reasoning historian omits `thinking_level`.
-    // Without an explicit `thinking_level`, Copilot injects `minimal`, which it rejects with HTTP 400.
-    // Without an explicit `thinking_level`, Pi leaves the level unset and Copilot injects `minimal`.
-    // Copilot rejects its injected `minimal` reasoning effort with HTTP 400.
     const historianModel = loadedConfig.config.historian?.model?.trim() ?? "";
     const historianThinkingLevel = loadedConfig.config.historian?.thinking_level;
     if (historianModel.startsWith("github-copilot/") && !historianThinkingLevel) {
@@ -540,188 +279,8 @@ async function runHealthChecks(options: {
         );
     }
 
-    const storageDir = getEidnaraStorageDir();
-    const dbPath = join(storageDir, "context.db");
-    const existedBeforeOpen = existsSync(dbPath);
-    if (existedBeforeOpen) add(results, "pass", `Shared context DB exists at ${dbPath}`);
-    else
-        add(
-            results,
-            "warn",
-            `Shared context DB not found yet at ${dbPath}; runtime will create it`,
-        );
-
-    if (existedBeforeOpen) {
-        let db: ContextDatabase | null = null;
-        try {
-            // Doctor must observe the installed runtime's schema without migrating it.
-            db = options.deps.openExistingContextDatabase(dbPath, { readonly: true });
-            if (!db) {
-                add(results, "fail", `Shared context DB no longer exists at ${dbPath}`);
-            } else {
-                add(results, "pass", "Opened the shared DB read-only with a supported schema");
-                const storageVersions = readStorageVersions(db);
-                add(results, "info", formatStorageVersions(storageVersions));
-                const fenceCheck = checkStorageVersionFence(storageVersions);
-                add(results, fenceCheck.alarm ? "fail" : "info", fenceCheck.message);
-
-                const integrity = db.prepare("PRAGMA integrity_check").get() as {
-                    integrity_check?: unknown;
-                };
-                if (integrity?.integrity_check === "ok")
-                    add(results, "pass", "SQLite integrity_check: ok");
-                else
-                    add(
-                        results,
-                        "fail",
-                        `SQLite integrity_check: ${String(integrity?.integrity_check ?? "unknown")}\n${formatDatabaseRepairGuidance(dbPath)}`,
-                    );
-
-                const counts = ROW_COUNT_TABLES.map(
-                    (table) => `${table}=${countTable(db as ContextDatabase, table) ?? "n/a"}`,
-                ).join(", ");
-                add(results, "info", `Shared DB row counts: ${counts}`);
-            }
-        } catch (error) {
-            if (error instanceof UnsupportedSchemaVersionError) {
-                add(
-                    results,
-                    "fail",
-                    checkStorageVersionFence({
-                        context_db_schema_version: error.persistedVersion,
-                        plugin_supported_version: error.supportedVersion,
-                    }).message,
-                );
-            } else {
-                add(
-                    results,
-                    "fail",
-                    `Could not open shared context DB: ${error instanceof Error ? error.message : String(error)}\n${formatDatabaseRepairGuidance(dbPath)}`,
-                );
-            }
-        } finally {
-            db?.close();
-        }
-    }
-
-    // Doctor reads user and project configs separately so a project endpoint redirect without `api_key` drops the inherited user key.
-    // Project-config tokens remain literal to prevent repository-controlled configuration from reading secrets.
-    // If project configuration redirects `embedding.endpoint` without its own `api_key`, the runtime loader drops the inherited user `api_key`.
-    // The runtime loader must not merge the inherited user `api_key` into a project-controlled endpoint.
-    // Sending the inherited user `api_key` to a repository-chosen endpoint would exfiltrate the key.
-    const userRaw = readConfigForEmbedding(userConfigPath, false);
-    const projectRaw = readConfigForEmbedding(projectPath, true);
-    if (projectRaw) {
-        // Repository-controlled agent prompts and `sqlite.*` fields must not influence the probe.
-        // Repository-controlled agent prompts and `sqlite.*` fields must not influence the probe.
-        stripUnsafeProjectConfigFields(projectRaw);
-    }
-    const mergedEmbedding: Record<string, unknown> = {};
-    for (const config of [userRaw, projectRaw]) {
-        const embedding = config?.embedding;
-        if (embedding && typeof embedding === "object" && !Array.isArray(embedding)) {
-            for (const key of Object.keys(embedding)) {
-                if (isPrototypePollutionKey(key)) continue;
-                Object.defineProperty(mergedEmbedding, key, {
-                    value: (embedding as Record<string, unknown>)[key],
-                    enumerable: true,
-                    configurable: true,
-                    writable: true,
-                });
-            }
-        }
-    }
-    // The runtime loader drops the inherited user `api_key` when the project redirects the endpoint.
-    if (projectRaw) {
-        dropInheritedEmbeddingKeyOnRedirect(
-            projectRaw,
-            { embedding: mergedEmbedding },
-            userRaw ?? undefined,
-        );
-    }
-    if (mergedEmbedding.provider === "openai-compatible") {
-        const endpoint =
-            typeof mergedEmbedding.endpoint === "string" ? mergedEmbedding.endpoint.trim() : "";
-        const model = typeof mergedEmbedding.model === "string" ? mergedEmbedding.model.trim() : "";
-        const apiKey =
-            typeof mergedEmbedding.api_key === "string" ? mergedEmbedding.api_key : undefined;
-        const inputType =
-            typeof mergedEmbedding.input_type === "string"
-                ? mergedEmbedding.input_type.trim()
-                : undefined;
-        const truncateMode =
-            typeof mergedEmbedding.truncate === "string"
-                ? mergedEmbedding.truncate.trim()
-                : undefined;
-        if (!endpoint || !model) {
-            add(
-                results,
-                "fail",
-                "Embedding provider is openai-compatible but endpoint/model is missing",
-            );
-        } else {
-            try {
-                const outcome = await options.deps.probeEmbeddingEndpoint({
-                    endpoint,
-                    model,
-                    apiKey,
-                    ...(inputType ? { inputType } : {}),
-                    ...(truncateMode ? { truncate: truncateMode } : {}),
-                    timeoutMs: 10_000,
-                });
-                const classified = classifyEmbeddingOutcome(outcome);
-                add(results, classified.status, classified.message);
-            } catch (error) {
-                add(
-                    results,
-                    "fail",
-                    `Embedding probe threw: ${sanitizeDiagnosticText(error instanceof Error ? error.message : String(error))}`,
-                );
-            }
-        }
-    } else if (loadedConfig.config.embedding.provider === "off") {
-        add(results, "info", "Embedding provider disabled");
-    } else {
-        // The embedding probe requires both `onnxruntime-node` and its platform binary to resolve.
-        // A missing runtime makes the plugin's static import throw for every embedding.
-        if (loadedConfig.config.embedding.model === RETIRED_DEFAULT_LOCAL_EMBEDDING_MODEL) {
-            add(
-                results,
-                "warn",
-                `Config pins the retired default embedding model (${RETIRED_DEFAULT_LOCAL_EMBEDDING_MODEL}); remove the embedding.model line or rerun setup to adopt the current default (${DEFAULT_LOCAL_EMBEDDING_MODEL})`,
-            );
-        }
-        let runtimeReported = false;
-        let runtimeUnverifiedReason = "no installed plugin tree found to inspect";
-        for (const pluginDir of piPluginDirCandidates(packages, options.cwd)) {
-            const runtime = checkLocalEmbeddingRuntimeByResolution(pluginDir);
-            if (runtime.state === "ok") {
-                add(
-                    results,
-                    "pass",
-                    `Embedding provider: ${loadedConfig.config.embedding.provider} (native runtime present)`,
-                );
-                runtimeReported = true;
-                break;
-            }
-            if (isLocalEmbeddingRuntimeBroken(runtime)) {
-                add(results, "warn", formatLocalEmbeddingRuntimeDoctorWarning(runtime));
-                runtimeReported = true;
-                break;
-            }
-            if (runtime.state === "unknown") runtimeUnverifiedReason = runtime.reason;
-        }
-        if (!runtimeReported) {
-            add(
-                results,
-                "warn",
-                `Embedding provider ${loadedConfig.config.embedding.provider}: native runtime unverified (${runtimeUnverifiedReason})`,
-            );
-        }
-    }
-
     // An npm entry and a local development-path entry for the same plugin load the plugin twice.
-    const piEntries = packages.filter(isPiEidnaraPackageEntry).map(describePiPackageEntry);
+    const piEntries = packages.filter(isPiEidnaraPackageEntry).map(describePackageEntry);
     if (piEntries.length > 1) {
         add(
             results,
@@ -734,31 +293,11 @@ async function runHealthChecks(options: {
 
     const otherExtensions = packages
         .filter((entry) => !isPiEidnaraPackageEntry(entry))
-        .map(describePiPackageEntry);
+        .map(describePackageEntry);
     if (otherExtensions.length > 0) {
         add(results, "info", `Other Pi extensions registered: ${otherExtensions.join(", ")}`);
     } else {
         add(results, "info", "No other Pi extensions listed in settings.json");
-    }
-
-    const configuredEntry = packages.find(isPiEidnaraPackageEntry);
-    const configuredSpecifier = getPiEidnaraPackageSpecifier(configuredEntry);
-    const expectedPluginVersion =
-        pinnedVersionFromPackageSpecifier(configuredSpecifier) ?? latest ?? null;
-    const staleCaches = findPiEidnaraCacheDirs(
-        options.cwd,
-        expectedPluginVersion,
-        options.force === true,
-    );
-    if (staleCaches.length > 0) {
-        repairPlan.clearCachePaths = staleCaches.map((entry) => entry.path);
-        add(
-            results,
-            "warn",
-            `Stale Pi extension cache found: ${staleCaches.map((entry) => `${entry.path}${entry.version ? ` (v${entry.version})` : ""}`).join(", ")}`,
-        );
-    } else {
-        add(results, "pass", "Pi extension cache clean (no stale cached package found)");
     }
 
     const logPath = getEidnaraLogPath("pi");
@@ -857,18 +396,6 @@ function repair(plan: RepairPlan, prompts: PromptIO): number {
                     `FAIL Could not write ${configPath}: ${error instanceof Error ? error.message : String(error)}`,
                 );
             }
-        }
-    }
-
-    for (const path of plan.clearCachePaths) {
-        try {
-            rmSync(path, { recursive: true, force: true });
-            prompts.log.success(`Cleared stale Pi extension cache: ${path}`);
-            fixed += 1;
-        } catch (error) {
-            console.error(
-                `FAIL Could not clear ${path}: ${error instanceof Error ? error.message : String(error)}`,
-            );
         }
     }
 
@@ -993,20 +520,12 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
         return 0;
     }
 
-    const configMigrationWarnings = migrateConfigLocationsForCli(cwd, prompts.log);
-
     if (options.issue) {
         return runIssueFlow({ cwd, prompts, deps });
     }
 
     prompts.intro("Eidnara for Pi Doctor");
-    const first = await runHealthChecks({
-        cwd,
-        prompts,
-        deps,
-        configMigrationWarnings,
-        force: options.force,
-    });
+    const first = await runHealthChecks({ cwd, prompts, deps });
     console.log("");
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
 
@@ -1016,13 +535,7 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
         prompts.log.message(
             `Repair attempted; ${fixed} item(s) changed. Re-running health checks.`,
         );
-        const second = await runHealthChecks({
-            cwd,
-            prompts,
-            deps,
-            configMigrationWarnings,
-            force: false,
-        });
+        const second = await runHealthChecks({ cwd, prompts, deps });
         console.log("");
         prompts.log.message(
             `Summary: PASS ${second.pass} / WARN ${second.warn} / FAIL ${second.fail}`,
