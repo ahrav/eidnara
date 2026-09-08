@@ -1268,10 +1268,11 @@ describe("ctx_memory response byte budget", () => {
                 "call-get-big",
             ),
         );
+        // The daemon serves rows newest first, so `mem_big_c` leads and the older two are elided by name.
         expect(got.memories).toEqual([
-            expect.objectContaining({ objectId: "mem_big_a", content: bigContent("a") }),
+            expect.objectContaining({ objectId: "mem_big_c", content: bigContent("c") }),
         ]);
-        expect(got.elidedObjectIds).toEqual(["mem_big_b", "mem_big_c"]);
+        expect(got.elidedObjectIds).toEqual(["mem_big_b", "mem_big_a"]);
         expect(got.elisionNote).toContain("2 elided ids");
         expect(got.missingObjectIds).toEqual([]);
     });

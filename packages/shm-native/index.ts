@@ -166,6 +166,16 @@ function consumesHandle(error: unknown): boolean {
     return error instanceof Error && error.message.startsWith(HANDLE_CONSUMED_PREFIX);
 }
 
+/**
+ * The exact message `produce` and `reserve` throw when the outbound ring has no capacity.
+ * A full ring is retryable backpressure, so callers classify it by this message.
+ */
+export const RING_FULL_MESSAGE = "shared-memory ring is full";
+
+export function isRingFullError(error: unknown): boolean {
+    return error instanceof Error && error.message === RING_FULL_MESSAGE;
+}
+
 /** True only when the query ran and reported absence; a throwing (busy) query is not evidence. */
 function confirmedAbsent(query: () => boolean): boolean {
     try {

@@ -28,7 +28,40 @@ const BLOCK_KEYWORDS = new Set(["else", "do", "try", "finally"]);
 
 interface OpenParen {
     control: boolean;
-    open: number;
+}
+
+/**
+ * A `class` or `function` keyword awaiting its body brace. Parameter defaults and class heritage
+ * may contain nested braces, so the body matches the keyword's own paren and bracket depth.
+ */
+interface PendingBody {
+    parens: number;
+    brackets: number;
+    value: boolean;
+}
+
+const WORD = /[\w$]+/y;
+
+function nextCodeChar(source: string, position: number): string | undefined {
+    let index = position;
+    for (;;) {
+        while (/\s/.test(source[index] ?? "")) index += 1;
+        if (source.startsWith("//", index)) {
+            index = endOfLine(source, index);
+            continue;
+        }
+        if (source.startsWith("/*", index)) {
+            const close = source.indexOf("*/", index + 2);
+            index = close < 0 ? source.length : close + 2;
+            continue;
+        }
+        return source[index];
+    }
+}
+
+function classBodyCanFollow(source: string, position: number): boolean {
+    const next = nextCodeChar(source, position);
+    return next !== ":" && next !== "(";
 }
 
 /**
@@ -46,6 +79,8 @@ export function scanSourceSpans(source: string): SourceSpan[] {
     let codeStart = 0;
     const openParens: OpenParen[] = [];
     const openBraces: boolean[] = [];
+    const pendingBodies: PendingBody[] = [];
+    let bracketDepth = 0;
     let lastCloseParen: OpenParen | null = null;
     let lastCloseBraceWasValue = false;
 
@@ -114,16 +149,57 @@ export function scanSourceSpans(source: string): SourceSpan[] {
             ) {
                 pushSpan("string", endOfRegex(source, index));
             } else {
+                WORD.lastIndex = index;
+                const token = WORD.exec(source);
+                if (token) {
+                    const previous = source[wordEndBefore(source, index) - 1];
+                    if (
+                        token[0] === "class" &&
+                        previous !== "." &&
+                        classBodyCanFollow(source, WORD.lastIndex)
+                    ) {
+                        pendingBodies.push({
+                            parens: openParens.length,
+                            brackets: bracketDepth,
+                            value: expressionPrecedes(source, index),
+                        });
+                    } else if (
+                        token[0] === "function" &&
+                        previous !== "." &&
+                        nextCodeChar(source, WORD.lastIndex) !== ":"
+                    ) {
+                        pendingBodies.push({
+                            parens: openParens.length,
+                            brackets: bracketDepth,
+                            value: expressionPrecedes(source, index),
+                        });
+                    }
+                    index = WORD.lastIndex;
+                    continue;
+                }
                 if (char === "(") {
                     openParens.push({
                         control: CONTROL_KEYWORDS.has(wordBefore(source, index)),
-                        open: index,
                     });
                 } else if (char === ")") {
                     lastCloseParen = openParens.pop() ?? null;
+                } else if (char === "[") {
+                    bracketDepth += 1;
+                } else if (char === "]") {
+                    bracketDepth -= 1;
                 } else if (char === "{") {
                     braceDepth += 1;
-                    openBraces.push(braceOpensValue(source, index, lastCloseParen));
+                    const pendingBody = pendingBodies.at(-1);
+                    if (
+                        pendingBody &&
+                        pendingBody.parens === openParens.length &&
+                        pendingBody.brackets === bracketDepth
+                    ) {
+                        pendingBodies.pop();
+                        openBraces.push(pendingBody.value);
+                    } else {
+                        openBraces.push(braceOpensValue(source, index));
+                    }
                 } else if (char === "}") {
                     if (stopAtClosingBrace && braceDepth === 0) {
                         flushCode();
@@ -255,29 +331,14 @@ function wordStartBefore(source: string, position: number): number {
 
 /**
  * True when the `}` that closes this brace ends an operand, so a following slash divides:
- * object literals, and the bodies of function and class expressions. False for blocks and for
- * function and class declarations, after which a slash starts a regular-expression literal.
+ * object literals and function expressions. Class bodies are classified while scanning their
+ * keyword and heritage clause. False means a block or function declaration.
  */
-function braceOpensValue(source: string, brace: number, lastCloseParen: OpenParen | null): boolean {
+function braceOpensValue(source: string, brace: number): boolean {
     const index = wordEndBefore(source, brace) - 1;
     if (index < 0) return false;
     const previous = source[index];
-    if (previous === ")") {
-        if (!lastCloseParen) return false;
-        const keyword = functionKeywordBefore(source, lastCloseParen.open);
-        if (keyword >= 0) return expressionPrecedes(source, keyword);
-        // `class X extends (expr) {`: the heritage clause ends in a parenthesized expression.
-        if (wordBefore(source, lastCloseParen.open) === "extends") {
-            const classKeyword = classKeywordBefore(
-                source,
-                wordStartBefore(source, lastCloseParen.open) + "extends".length,
-            );
-            return classKeyword >= 0 && expressionPrecedes(source, classKeyword);
-        }
-        return false;
-    }
-    const classKeyword = classKeywordBefore(source, brace);
-    if (classKeyword >= 0) return expressionPrecedes(source, classKeyword);
+    if (previous === ")") return false;
     if (previous === ">" && source[index - 1] === "=") return false;
     if (/[(,=:[?+\-*/%&|^!~<>]/.test(previous)) return true;
     if (/[\w$]/.test(previous)) {
@@ -286,34 +347,6 @@ function braceOpensValue(source: string, brace: number, lastCloseParen: OpenPare
         return REGEX_PRECEDING_KEYWORDS.has(word);
     }
     return false;
-}
-
-/** Start offset of the `function` keyword whose parameter list opens at `paren`, or -1. */
-function functionKeywordBefore(source: string, paren: number): number {
-    let position = paren;
-    for (let words = 0; words < 2; words += 1) {
-        let end = wordEndBefore(source, position);
-        if (source[end - 1] === "*") end -= 1;
-        const start = wordStartBefore(source, end);
-        const word = source.slice(start, wordEndBefore(source, end));
-        if (word === "function") return start;
-        if (!/^[\w$]+$/.test(word)) return -1;
-        position = start;
-    }
-    return -1;
-}
-
-/** Start offset of the `class` keyword whose body opens at `brace`, or -1. */
-function classKeywordBefore(source: string, brace: number): number {
-    let position = brace;
-    for (let words = 0; words < 4; words += 1) {
-        const start = wordStartBefore(source, position);
-        const word = source.slice(start, wordEndBefore(source, position));
-        if (word === "class") return start;
-        if (!/^[\w$]+$/.test(word)) return -1;
-        position = start;
-    }
-    return -1;
 }
 
 /** True when the token before `keyword` places a function or class in expression position. */

@@ -1,12 +1,19 @@
 import { Buffer } from "node:buffer";
 import type { Deadline } from "./deadline";
-import { type EnvelopeHeader, FrameType, isLegalHostToConsumerType } from "./protocol";
+import {
+    type EnvelopeHeader,
+    FrameType,
+    flagsBinary,
+    isLegalHostToConsumerType,
+    MAX_CONTROL_BODY_LEN,
+} from "./protocol";
 
 export type FrameChannelCloseReason =
     | "eof"
     | "protocol_violation"
     | "role_violation"
-    | "quarantined";
+    | "quarantined"
+    | "control_exhausted";
 
 export type ProducerFrameHeader = Omit<EnvelopeHeader, "len">;
 
@@ -18,7 +25,13 @@ export class CopyCounter {
     }
 }
 
-export type ReceiveReleaseOutcome = "released" | "quarantined";
+/**
+ * `released` proves no caller alias into the storage survives, so the transport may reuse it.
+ * `quarantined` means alias state is uncertain; the transport must retire the storage instead.
+ */
+export type StorageReleaseOutcome = "released" | "quarantined";
+
+export type ReceiveReleaseOutcome = StorageReleaseOutcome;
 
 export class ReceiveLease {
     private released = false;
@@ -167,9 +180,20 @@ export function bytesFrameBody(bytes: Uint8Array): DirectFrameBody {
 
 const UTF8_ENCODER = new TextEncoder();
 const SPLIT_CODE_POINT = new Uint8Array(4);
+// Without the `u` flag, surrogates match as code units, so this finds one that has no partner.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/**
+ * `Buffer.byteLength` may count a lone surrogate as two bytes, while `writeUtf8` emits U+FFFD
+ * (three bytes) for lone surrogates; replacing them before `Buffer.byteLength` keeps both byte
+ * counts equal.
+ */
+function utf8ByteLength(text: string): number {
+    return Buffer.byteLength(text.replace(LONE_SURROGATE, "\ufffd"), "utf8");
+}
 
 export function utf8FrameBody(text: string): DirectFrameBody {
-    const byteLength = Buffer.byteLength(text, "utf8");
+    const byteLength = utf8ByteLength(text);
     const body: DirectFrameBody = {
         byteLength,
         fill: (cursor) => writeUtf8(cursor, text, byteLength),
@@ -264,8 +288,8 @@ export class BoundedFrameProducer implements FrameProducerCursor {
             segments: readonly Uint8Array[],
             exactLength: number,
         ) => PreparedProducerCommit,
-        private readonly releaseReservation: () => void,
-        private readonly detachOnCommit = true,
+        private readonly releaseReservation: (outcome: StorageReleaseOutcome) => void,
+        private readonly detachAliases?: () => StorageReleaseOutcome,
     ) {
         try {
             const available = producerSegments.reduce((total, segment) => {
@@ -283,7 +307,7 @@ export class BoundedFrameProducer implements FrameProducerCursor {
             }
         } catch (error) {
             this.active = false;
-            this.releaseReservation();
+            this.releaseReservation("released");
             throw error;
         }
     }
@@ -348,7 +372,10 @@ export class BoundedFrameProducer implements FrameProducerCursor {
         let prepared: PreparedProducerCommit;
         try {
             prepared = this.prepareCommit(this.committedSegments(exactLength), exactLength);
-            if (this.detachOnCommit) this.detachProducerAliases();
+            // A transport that owns alias revocation performs it inside `publish`.
+            if (!this.detachAliases && this.detachProducerAliases() === "quarantined") {
+                throw new Error("producer alias detachment failed");
+            }
         } catch (error) {
             this.abort();
             throw error;
@@ -357,16 +384,29 @@ export class BoundedFrameProducer implements FrameProducerCursor {
         try {
             return prepared.publish();
         } catch (error) {
-            this.releaseReservation();
+            this.releaseReservation(this.revokeAliases());
             throw error;
         }
     }
 
+    /**
+     * Aliases are revoked before the reservation is returned, mirroring `commit`, because the
+     * release callback may hand the same span to another reserver synchronously. A failed
+     * revocation returns `quarantined` instead of throwing to preserve the caller's error.
+     */
     abort(): void {
         if (!this.active) return;
         this.active = false;
-        this.releaseReservation();
-        this.detachProducerAliases(false);
+        this.releaseReservation(this.revokeAliases());
+    }
+
+    private revokeAliases(): StorageReleaseOutcome {
+        if (!this.detachAliases) return this.detachProducerAliases();
+        try {
+            return this.detachAliases();
+        } catch {
+            return "quarantined";
+        }
     }
 
     private committedSegments(exactLength: number): readonly Uint8Array[] {
@@ -381,19 +421,29 @@ export class BoundedFrameProducer implements FrameProducerCursor {
         return committed;
     }
 
-    private detachProducerAliases(strict = true): void {
+    /**
+     * Transfers each segment buffer through `structuredClone`, detaching its `Uint8Array` views.
+     * A segment already at length 0 is treated as detached. Any transfer that throws or leaves
+     * bytes behind makes the whole reservation `quarantined`.
+     */
+    private detachProducerAliases(): StorageReleaseOutcome {
+        let outcome: StorageReleaseOutcome = "released";
         for (const segment of this.producerSegments) {
             const buffer = segment.buffer;
-            if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) continue;
+            if (!(buffer instanceof ArrayBuffer)) {
+                outcome = "quarantined";
+                continue;
+            }
+            if (buffer.byteLength === 0) continue;
             try {
                 structuredClone(buffer, { transfer: [buffer] });
-            } catch (error) {
-                if (strict) throw error;
+            } catch {
+                outcome = "quarantined";
+                continue;
             }
-            if (strict && buffer.byteLength !== 0) {
-                throw new Error("producer alias detachment failed");
-            }
+            if (buffer.byteLength !== 0) outcome = "quarantined";
         }
+        return outcome;
     }
 
     private abortWith(code: ProducerErrorCode): never {
@@ -500,16 +550,29 @@ export function headerViolation(
     if (!isLegalHostToConsumerType(header.ty)) {
         return { reason: "role_violation", detail: `role-invalid frame type ${header.ty}` };
     }
+    if (header.channel === 0 && header.len > MAX_CONTROL_BODY_LEN) {
+        return { reason: "protocol_violation", detail: "channel-0 body above the control cap" };
+    }
     switch (header.ty) {
         case FrameType.Response:
         case FrameType.Error:
+            if (header.corr === 0n) {
+                return { reason: "protocol_violation", detail: "terminal frame with corr 0" };
+            }
+            // Section 7.1 admits UTF-8 JSON only on channel 0.
+            if (header.channel === 0 && flagsBinary(header.flags)) {
+                return { reason: "protocol_violation", detail: "binary control terminal" };
+            }
+            return null;
         case FrameType.StreamData:
         case FrameType.StreamEnd:
             if (header.corr === 0n) {
-                return {
-                    reason: "protocol_violation",
-                    detail: "terminal/stream frame with corr 0",
-                };
+                return { reason: "protocol_violation", detail: "stream frame with corr 0" };
+            }
+            // `docs/host-wire-protocol.md` Section 6.2 requires stream frames to match a
+            // pending routed identity; channel 0 cannot.
+            if (header.channel === 0) {
+                return { reason: "protocol_violation", detail: "stream frame on channel 0" };
             }
             if (header.ty === FrameType.StreamEnd && header.len !== 0) {
                 return { reason: "protocol_violation", detail: "StreamEnd with a non-empty body" };

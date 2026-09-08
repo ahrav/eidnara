@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import hostRelease from "../../../../../release/host-release.json";
+import type { BrocaProvider, CredentialFingerprints } from "./types";
 
 const DOMAIN: string = hostRelease.credential_fingerprint.domain;
 const CANONICALIZATION: string = hostRelease.credential_fingerprint.canonicalization;
@@ -10,7 +11,7 @@ const PROVIDER_ROWS = {
     anthropic: ["ANTHROPIC_API_KEY"],
     google: ["GEMINI_API_KEY"],
     openai: ["OPENAI_API_KEY"],
-} as const;
+} as const satisfies Record<BrocaProvider, readonly string[]>;
 
 export const BROCA_CREDENTIAL_NAMES = Object.freeze(Object.values(PROVIDER_ROWS).flat());
 
@@ -20,7 +21,7 @@ function encoded(field: string): string {
 
 export function canonicalCredentialRowEncoding(
     harness: "opencode" | "pi",
-    provider: keyof typeof PROVIDER_ROWS,
+    provider: BrocaProvider,
     entries: readonly (readonly [string, string])[],
 ): string {
     let message = encoded(CANONICALIZATION) + encoded(harness) + encoded(provider);
@@ -34,31 +35,28 @@ export function credentialFingerprints(
     connectionKey: Uint8Array,
     harness: "opencode" | "pi",
     source: Record<string, string | undefined>,
-): Readonly<Record<string, string>> {
+): CredentialFingerprints {
     if (connectionKey.byteLength !== 32) {
         throw new TypeError("connection key must be exactly 32 bytes");
     }
     const derivedKey = createHmac("sha256", connectionKey).update(DOMAIN).digest();
-    const fingerprints: Record<string, string> = {};
+    const fingerprints: Partial<Record<BrocaProvider, string>> = {};
     for (const [provider, names] of Object.entries(PROVIDER_ROWS) as [
-        keyof typeof PROVIDER_ROWS,
+        BrocaProvider,
         readonly string[],
     ][]) {
         const entries: [string, string][] = [];
         let complete = true;
         for (const name of names) {
             const value = source[name];
-            if (value === undefined || value.length === 0) {
+            // An unqualified value drops only this provider's row, matching the host's per-provider `provider_row` in `crates/host-runtime/src/broca/subprocess.rs`. commentlint: allow(JUDGE)
+            if (
+                value === undefined ||
+                value.length === 0 ||
+                Buffer.byteLength(value) > BROCA_CREDENTIAL_VALUE_CAP_BYTES
+            ) {
                 complete = false;
                 break;
-            }
-            const valueBytes = Buffer.byteLength(value);
-            if (valueBytes > BROCA_CREDENTIAL_VALUE_CAP_BYTES) {
-                const error = new Error("credential value exceeds its size cap") as Error & {
-                    code?: string;
-                };
-                error.code = "credential_value_too_large";
-                throw error;
             }
             entries.push([name, value]);
         }

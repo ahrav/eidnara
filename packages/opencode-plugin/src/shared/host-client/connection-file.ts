@@ -3,25 +3,21 @@
  *
  * Section 4 of `docs/host-wire-protocol.md` defines the connection-file snapshot contract.
  *
- * For a direct regular file, the reader opens with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`.
- * The reader validates descriptor identity, ownership, and mode before a bounded descriptor read.
- * The reader requires post-read `lstat` identity to match the opened file.
- * The reader restarts the whole snapshot once after an atomic replacement.
- * A second identity mismatch fails closed.
- * For an explicitly trusted symlink, the reader captures the link identity and text before opening its resolved target with no-follow.
- * The reader validates the target and requires both link and target identities to remain unchanged.
- * Any symlink or resolved-target replacement fails closed.
+ * Every ancestor directory is subject to the Section 4.2 client-discovery policy: reached without a symlink, owned by the current user or root, and not group- or other-writable unless the sticky bit is set.
+ * A writable ancestor lets another user rename a whole subtree into place, so the policy covers the full chain, not only the immediate parent.
+ * The immediate parent must additionally be owner-only.
+ * After the read, ownership and mode are validated on the descriptor again: a file that becomes group- or world-readable during the read has exposed its key and fails closed without a restart.
+ * Identity, size, mtime, and ctime must be unchanged, and the directory entry must still name the opened file; either mismatch is a replacement and permits one restart.
  *
  * Errors expose typed, redacted failures and never include key or daemon-ID bytes.
- * The runtime trusts directory components of both paths.
+ * The ancestor checks are pathname checks, not descriptor-anchored: Node exposes no `openat`, `openat2`, or `RESOLVE_BENEATH` API, so a component can be swapped between an ancestor `lstat` and the final `open`.
  * `O_NOFOLLOW` guards only the final path component.
- * Node exposes no `openat2` or `RESOLVE_BENEATH` API to constrain path prefixes.
- * The runtime directory must not be writable by other users.
+ * `ctime` is compared because an owner can rewrite a file and restore its `mtime` with `utimensat`, but cannot set `ctime`; every write and metadata change bumps it.
  */
 
-import { constants as fsConstants } from "node:fs";
+import { type BigIntStats, constants as fsConstants } from "node:fs";
 import { type FileHandle, lstat, open } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import type { Deadline } from "./deadline";
 
 /** The wire protocol caps snapshots at 65,536 bytes. */
@@ -38,7 +34,10 @@ export type ConnectionFileErrorCode =
     | "not_found"
     | "open_failed"
     | "stat_failed"
+    | "read_failed"
+    | "not_directory"
     | "not_regular_file"
+    | "multiply_linked"
     | "foreign_owner"
     | "insecure_permissions"
     | "oversize"
@@ -81,13 +80,18 @@ export interface ReadConnectionFileOptions {
     deadline: Deadline;
     /** When omitted, `platform` defaults to the real platform. */
     platform?: NodeJS.Platform;
-    /** When omitted, `uid` defaults to `process.getuid()`. */
+    /** When omitted, `uid` defaults to `process.geteuid()`. */
     uid?: number;
     /**
      * The reader invokes `afterOpen` once per attempt after opening the target descriptor and before reading.
      * `afterOpen` lets tests race replacements deterministically.
      */
     afterOpen?: () => void | Promise<void>;
+    /**
+     * The reader invokes `afterRead` once per attempt after the bounded read and before the post-read revalidation.
+     * `afterRead` lets tests race in-place rewrites and permission changes against the post-read gate deterministically.
+     */
+    afterRead?: () => void | Promise<void>;
 }
 
 /**
@@ -106,12 +110,25 @@ function checkDeadline(deadline: Deadline): void {
 }
 
 interface FileIdentity {
-    dev: number | bigint;
-    ino: number | bigint;
+    dev: bigint;
+    ino: bigint;
 }
 
 function sameIdentity(a: FileIdentity, b: FileIdentity): boolean {
     return a.dev === b.dev && a.ino === b.ino;
+}
+
+/**
+ * Two stats describe the same unchanged inode when identity, size, mtime, and ctime all agree.
+ * `size` and `mtime` catch an in-place rewrite; `ctime` catches a rewrite whose `mtime` was restored, and every chmod or chown.
+ */
+function sameSnapshot(a: BigIntStats, b: BigIntStats): boolean {
+    return (
+        sameIdentity(a, b) &&
+        a.size === b.size &&
+        a.mtimeNs === b.mtimeNs &&
+        a.ctimeNs === b.ctimeNs
+    );
 }
 
 function statErrno(error: unknown): string | undefined {
@@ -123,13 +140,14 @@ function statErrno(error: unknown): string | undefined {
 }
 
 function currentUid(): number {
-    if (typeof process.getuid !== "function") {
+    // The effective uid is the principal the kernel authorizes filesystem access against.
+    if (typeof process.geteuid !== "function") {
         throw new ConnectionFileError(
             "cannot determine process uid on this platform",
             "unsupported_platform",
         );
     }
-    return process.getuid();
+    return process.geteuid();
 }
 
 async function openNoFollow(filePath: string): Promise<FileHandle> {
@@ -158,16 +176,22 @@ async function openNoFollow(filePath: string): Promise<FileHandle> {
 
 /**
  * The reader reads `MAX_CONNECTION_FILE_LEN + 1` bytes to detect oversize content without relying on stale metadata.
- * The reader reads `MAX_CONNECTION_FILE_LEN + 1` bytes to detect oversize content without relying on stale metadata.
- * The loop rechecks `deadline` between reads; an in-flight `handle.read()` cannot be cancelled and can exceed the deadline by one syscall.
  * The loop rechecks `deadline` between reads; an in-flight `handle.read()` cannot be cancelled and can exceed the deadline by one syscall.
  */
-async function readBounded(handle: FileHandle, deadline: Deadline): Promise<Uint8Array> {
+async function readBounded(
+    handle: FileHandle,
+    deadline: Deadline,
+    what: string,
+): Promise<Uint8Array> {
     const buffer = Buffer.alloc(MAX_CONNECTION_FILE_LEN + 1);
     let total = 0;
     while (total < buffer.length) {
         checkDeadline(deadline);
-        const { bytesRead } = await handle.read(buffer, total, buffer.length - total, total);
+        const { bytesRead } = await handle
+            .read(buffer, total, buffer.length - total, total)
+            .catch((error: unknown) => {
+                throw new ConnectionFileError(`failed to read ${what}`, "read_failed", error);
+            });
         if (bytesRead === 0) break;
         total += bytesRead;
     }
@@ -180,25 +204,130 @@ async function readBounded(handle: FileHandle, deadline: Deadline): Promise<Uint
     return buffer.subarray(0, total);
 }
 
+/** An `fstat` failure becomes a `stat_failed` `ConnectionFileError`, never a raw `SystemError`. */
+async function statDescriptor(handle: FileHandle, what: string): Promise<BigIntStats> {
+    return handle.stat({ bigint: true }).catch((error: unknown) => {
+        throw new ConnectionFileError(`failed to stat ${what}`, "stat_failed", error);
+    });
+}
+
+interface OwnerModeStat {
+    uid: bigint;
+    mode: bigint;
+}
+
+/** Sticky bit on a directory: only the entry owner, directory owner, or root may rename or unlink an entry. */
+const S_ISVTX = 0o1000;
+const ROOT_UID = 0;
+
+/** Owner-only means the current uid owns the entry and no group or other permission bit is set. */
+function requireOwnerOnly(stat: OwnerModeStat, uid: number, what: string): void {
+    if (Number(stat.uid) !== uid) {
+        throw new ConnectionFileError(`${what} is not owned by the current user`, "foreign_owner");
+    }
+    if ((Number(stat.mode) & 0o077) !== 0) {
+        throw new ConnectionFileError(
+            `${what} has group or other permission bits; expected owner-only mode`,
+            "insecure_permissions",
+        );
+    }
+}
+
+/**
+ * A safe ancestor is owned by the current user or root and is not group- or other-writable unless sticky.
+ * Root ownership permits standard root-owned ancestors such as `/`, `/home`, and `/tmp`.
+ */
+function requireSafeAncestor(stat: OwnerModeStat, uid: number, what: string): void {
+    const owner = Number(stat.uid);
+    if (owner !== uid && owner !== ROOT_UID) {
+        throw new ConnectionFileError(
+            `${what} is not owned by the current user or root`,
+            "foreign_owner",
+        );
+    }
+    const mode = Number(stat.mode);
+    if ((mode & 0o022) !== 0 && (mode & S_ISVTX) === 0) {
+        throw new ConnectionFileError(
+            `${what} is writable by other users and not sticky; another user could rename over the connection-file tree`,
+            "insecure_permissions",
+        );
+    }
+}
+
 /**
  * validateOpenStat rejects non-regular descriptors before reads because FIFO reads can block.
+ * A second hard link is a name outside the validated directory through which the same inode can be rewritten without changing `dev`/`ino`.
+ * A link count of zero means the opened inode was unlinked or renamed over, which is replacement churn rather than an alias.
  */
 function validateOpenStat(
-    stat: { isFile(): boolean; uid: number; mode: number },
+    stat: OwnerModeStat & { nlink: bigint; isFile(): boolean },
     uid: number,
     what: string,
 ): void {
     if (!stat.isFile()) {
         throw new ConnectionFileError(`${what} is not a regular file`, "not_regular_file");
     }
-    if (stat.uid !== uid) {
-        throw new ConnectionFileError(`${what} is not owned by the current user`, "foreign_owner");
-    }
-    if ((stat.mode & 0o077) !== 0) {
+    if (stat.nlink === 0n) {
         throw new ConnectionFileError(
-            `${what} has group or other permission bits; expected owner-only mode`,
-            "insecure_permissions",
+            `${what} was unlinked during the snapshot`,
+            "replaced_during_read",
         );
+    }
+    if (stat.nlink !== 1n) {
+        throw new ConnectionFileError(
+            `${what} has ${stat.nlink} hard links; a published credential must have exactly one name`,
+            "multiply_linked",
+        );
+    }
+    requireOwnerOnly(stat, uid, what);
+}
+
+function ancestorsRootFirst(filePath: string): string[] {
+    const chain: string[] = [];
+    let dir = dirname(filePath);
+    for (;;) {
+        chain.push(dir);
+        const next = dirname(dir);
+        if (next === dir) break;
+        dir = next;
+    }
+    return chain.reverse();
+}
+
+/**
+ * The walk runs root first so a component that is not a directory is reported as `not_directory` rather than surfacing as `ENOTDIR` on a deeper component.
+ * `lstat` on a symlinked component reports the link, which is not a directory.
+ * The deadline is rechecked before each component so a deep path on a slow filesystem cannot keep issuing `lstat` calls after expiry.
+ */
+async function validateAncestors(filePath: string, uid: number, deadline: Deadline): Promise<void> {
+    const chain = ancestorsRootFirst(filePath);
+    const parent = chain[chain.length - 1];
+    for (const dirPath of chain) {
+        checkDeadline(deadline);
+        const stat = await lstat(dirPath, { bigint: true }).catch((error: unknown) => {
+            if (statErrno(error) === "ENOENT") {
+                throw new ConnectionFileError(
+                    `connection file directory ${dirPath} does not exist`,
+                    "not_found",
+                    error,
+                );
+            }
+            throw new ConnectionFileError(
+                `failed to stat connection file directory ${dirPath}`,
+                "stat_failed",
+                error,
+            );
+        });
+        if (!stat.isDirectory()) {
+            throw new ConnectionFileError(
+                `connection file directory ${dirPath} is not a directory; symlinked or non-directory ancestors are rejected`,
+                "not_directory",
+            );
+        }
+        requireSafeAncestor(stat, uid, `connection file ancestor ${dirPath}`);
+        if (dirPath === parent) {
+            requireOwnerOnly(stat, uid, `connection file directory ${dirPath}`);
+        }
     }
 }
 
@@ -208,69 +337,69 @@ async function snapshotDirect(
     deadline: Deadline,
     uid: number,
     afterOpen?: () => void | Promise<void>,
+    afterRead?: () => void | Promise<void>,
 ): Promise<Uint8Array> {
+    const what = `connection file ${filePath}`;
+    await validateAncestors(filePath, uid, deadline);
     checkDeadline(deadline);
-    const before = await lstat(filePath).catch((error: unknown) => {
+    const before = await lstat(filePath, { bigint: true }).catch((error: unknown) => {
         if (statErrno(error) === "ENOENT") {
-            throw new ConnectionFileError(
-                `connection file ${filePath} does not exist`,
-                "not_found",
-                error,
-            );
+            throw new ConnectionFileError(`${what} does not exist`, "not_found", error);
         }
-        throw new ConnectionFileError(
-            `failed to stat connection file ${filePath}`,
-            "stat_failed",
-            error,
-        );
+        throw new ConnectionFileError(`failed to stat ${what}`, "stat_failed", error);
     });
     if (before.isSymbolicLink()) {
         throw new ConnectionFileError(
-            `connection file ${filePath} is a symlink; client discovery must reject symbolic links`,
+            `${what} is a symlink; client discovery must reject symbolic links`,
             "not_regular_file",
         );
     }
     if (!before.isFile()) {
-        throw new ConnectionFileError(
-            `connection file ${filePath} is not a regular file`,
-            "not_regular_file",
-        );
+        throw new ConnectionFileError(`${what} is not a regular file`, "not_regular_file");
     }
     checkDeadline(deadline);
     const handle = await openNoFollow(filePath);
     try {
         await afterOpen?.();
-        const during = await handle.stat();
+        const during = await statDescriptor(handle, what);
         if (!sameIdentity(before, during)) {
             throw new ConnectionFileError(
-                `connection file ${filePath} was replaced between lstat and open`,
+                `${what} was replaced between lstat and open`,
                 "replaced_during_read",
             );
         }
-        validateOpenStat(during, uid, `connection file ${filePath}`);
+        validateOpenStat(during, uid, what);
         checkDeadline(deadline);
-        const bytes = await readBounded(handle, deadline);
+        const bytes = await readBounded(handle, deadline, what);
+        await afterRead?.();
         checkDeadline(deadline);
-        const after = await lstat(filePath).catch((error: unknown) => {
+        // The snapshot fails instead of restarting because a mode relaxed mid-read may expose key bytes already read.
+        const after = await statDescriptor(handle, what);
+        validateOpenStat(after, uid, what);
+        if (!sameSnapshot(during, after)) {
+            throw new ConnectionFileError(
+                `${what} was rewritten during the snapshot`,
+                "replaced_during_read",
+            );
+        }
+        checkDeadline(deadline);
+        const entry = await lstat(filePath, { bigint: true }).catch((error: unknown) => {
             if (statErrno(error) === "ENOENT") {
                 throw new ConnectionFileError(
-                    `connection file ${filePath} was removed during the snapshot`,
+                    `${what} was removed during the snapshot`,
                     "replaced_during_read",
                     error,
                 );
             }
-            throw new ConnectionFileError(
-                `failed to re-stat connection file ${filePath}`,
-                "stat_failed",
-                error,
-            );
+            throw new ConnectionFileError(`failed to re-stat ${what}`, "stat_failed", error);
         });
-        if (!after.isFile() || !sameIdentity(during, after)) {
+        if (!entry.isFile() || !sameIdentity(during, entry)) {
             throw new ConnectionFileError(
-                `connection file ${filePath} was replaced during the snapshot`,
+                `${what} was replaced during the snapshot`,
                 "replaced_during_read",
             );
         }
+        checkDeadline(deadline);
         return bytes;
     } finally {
         await handle.close().catch(() => {});
@@ -349,8 +478,10 @@ function decodeAndValidate(bytes: Uint8Array): ConnectionSnapshot {
     let parsed: unknown;
     try {
         parsed = JSON.parse(text);
-    } catch (error) {
-        throw new ConnectionFileError("connection file is not valid JSON", "invalid_json", error);
+    } catch {
+        // The parse error is dropped, not chained: V8 quotes the source text around the fault
+        // in `SyntaxError.message`, and that text can include the key array.
+        throw new ConnectionFileError("connection file is not valid JSON", "invalid_json");
     }
     return validateSnapshotJson(parsed);
 }
@@ -369,14 +500,18 @@ export async function readConnectionFile(
         );
     }
     const uid = options.uid ?? currentUid();
+    // The resolved path is what `open` receives, so the ancestor chain checked is the chain opened.
+    const resolvedPath = resolve(filePath);
+    const snapshot = (): Promise<Uint8Array> =>
+        snapshotDirect(resolvedPath, options.deadline, uid, options.afterOpen, options.afterRead);
     let bytes: Uint8Array;
     try {
-        bytes = await snapshotDirect(filePath, options.deadline, uid, options.afterOpen);
+        bytes = await snapshot();
     } catch (error) {
         if (!(error instanceof ConnectionFileError) || error.code !== "replaced_during_read") {
             throw error;
         }
-        bytes = await snapshotDirect(filePath, options.deadline, uid, options.afterOpen);
+        bytes = await snapshot();
     }
     return decodeAndValidate(bytes);
 }

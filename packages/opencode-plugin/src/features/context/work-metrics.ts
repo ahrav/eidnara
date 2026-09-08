@@ -312,6 +312,7 @@ export function computeOpenCodeWorkMetricsIncremental(
 
 export function computePiWorkMetrics(sessionEntries: PiSessionEntry[] | unknown[]): WorkMetrics {
     let previousPrompt = 0;
+    let phaseId = 0;
     let phasePeak = 0;
     let newWorkTokens = 0;
     let totalInputTokens = 0;
@@ -324,8 +325,11 @@ export function computePiWorkMetrics(sessionEntries: PiSessionEntry[] | unknown[
         const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
         if (sawAssistant && prompt < previousPrompt) {
             totalInputTokens += phasePeak;
-            phasePeak = prompt;
-        } else {
+            phaseId += 1;
+            phasePeak = 0;
+        }
+        // A prompt after a zero-prompt (aborted) entry repeats the pre-abort context and must not raise the phase peak.
+        if (previousPrompt > 0 || phaseId === 0) {
             phasePeak = Math.max(phasePeak, prompt);
         }
         newWorkTokens += Math.max(0, prompt - previousPrompt);

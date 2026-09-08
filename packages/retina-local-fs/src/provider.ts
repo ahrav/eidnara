@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, createReadStream } from "node:fs";
-import { access, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, type FileHandle, open, readlink, stat } from "node:fs/promises";
 import { promisify } from "node:util";
-import { ProviderError } from "./errors";
+import { fsError, hasErrnoCode, isMissingError, ProviderError } from "./errors";
 import { resolveAndFenceProviderPath, revalidateProviderPath } from "./path-fence";
 
 export { ProviderError } from "./errors";
@@ -11,6 +11,18 @@ export { ProviderError } from "./errors";
 const execFileAsync = promisify(execFile);
 const SCALAR_VERSION = 1;
 const FILE_CONTAINS_CHUNK_BYTES = 64 * 1024;
+const FILE_CONTAINS_MAX_NEEDLE_BYTES = FILE_CONTAINS_CHUNK_BYTES;
+// Node's execFile default is 1 MiB, which a broad tag pattern in a large
+// repository exceeds. 16 MiB holds roughly half a million 32-byte tag names.
+const GIT_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
+// Replaces the inherited environment so git reads only the repository's own config.
+const GIT_ENV = {
+    PATH: process.env.PATH,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+} as const;
 
 interface PredicateAudit {
     /** resolved_path_exists is false when the source was relative or absent at write time. */
@@ -85,7 +97,7 @@ export async function runProvider(
     const firedAt = (options.now ?? Date.now)();
 
     for (const [index, predicate] of predicates.entries()) {
-        const predicateHash = sha256(canonicalJson(predicate));
+        const predicateHash = sha256(canonicalJson(predicateIdentity(predicate)));
         const scalarKey = `${index}:${predicateHash}`;
         const pathOptions = {
             allowMissing: predicate.kind === "path_exists",
@@ -98,10 +110,12 @@ export async function runProvider(
         );
         let beforePathUseForTests = options.beforePathUseForTests;
         const pathAtUse = async () => {
+            const revalidated = await revalidateProviderPath(canonicalPath, pathOptions);
+            // Tests can mutate the path after revalidation and before the filesystem operation.
             const beforeUse = beforePathUseForTests;
             beforePathUseForTests = undefined;
-            await beforeUse?.(canonicalPath);
-            return revalidateProviderPath(canonicalPath, pathOptions);
+            await beforeUse?.(revalidated);
+            return revalidated;
         };
         const evaluated = await evaluatePredicate(predicate, previous[scalarKey], pathAtUse);
         next.predicates[scalarKey] = {
@@ -148,14 +162,14 @@ async function evaluatePredicate(
         case "mtime_after": {
             const metadata = await readableStat(await pathAtUse());
             const mtimeMs = metadata.mtimeMs;
-            const changed = previous?.state !== mtimeMs;
+            const fires = mtimeMs > predicate.since_ms && previous?.state !== mtimeMs;
+            const occurrence = fires ? nextOccurrence(previous) : (previous?.occurrence ?? 0);
             return {
                 state: mtimeMs,
-                occurrence: previous?.occurrence ?? 0,
-                events:
-                    mtimeMs > predicate.since_ms && changed
-                        ? [{ marker: String(mtimeMs), observed: { mtime_ms: mtimeMs } }]
-                        : [],
+                occurrence,
+                events: fires
+                    ? [{ marker: `${mtimeMs}:${occurrence}`, observed: { mtime_ms: mtimeMs } }]
+                    : [],
             };
         }
         case "git_commit_after": {
@@ -171,28 +185,34 @@ async function evaluatePredicate(
             ]);
             const isAfter =
                 currentSha !== baseSha && (await gitIsAncestor(pathAtUse, baseSha, currentSha));
+            const fires = isAfter && previous?.state !== currentSha;
+            const occurrence = fires ? nextOccurrence(previous) : (previous?.occurrence ?? 0);
             return {
                 state: currentSha,
-                occurrence: previous?.occurrence ?? 0,
-                events:
-                    isAfter && previous?.state !== currentSha
-                        ? [
-                              {
-                                  marker: currentSha,
-                                  observed: {
-                                      sha: currentSha,
-                                      ref: predicate.ref ?? "HEAD",
-                                      after_sha: predicate.sha,
-                                  },
+                occurrence,
+                events: fires
+                    ? [
+                          {
+                              marker: `${currentSha}:${occurrence}`,
+                              observed: {
+                                  sha: currentSha,
+                                  ref: predicate.ref ?? "HEAD",
+                                  after_sha: predicate.sha,
                               },
-                          ]
-                        : [],
+                          },
+                      ]
+                    : [],
             };
         }
         case "git_tag_matching": {
-            // `--` ends option parsing so a pattern such as `--format=%(objectname)` is
-            // matched as a glob instead of changing what `git tag` prints.
-            const tagsOutput = await git(pathAtUse, ["tag", "--list", "--", predicate.pattern]);
+            // A repository's column.tag setting can print several tags per line.
+            const tagsOutput = await git(pathAtUse, [
+                "tag",
+                "--list",
+                "--no-column",
+                "--end-of-options",
+                predicate.pattern,
+            ]);
             const above = predicate.above ? parseSemver(predicate.above) : undefined;
             const tags = tagsOutput
                 .split("\n")
@@ -209,15 +229,21 @@ async function evaluatePredicate(
                 ? previous.state.filter((tag): tag is string => typeof tag === "string")
                 : [];
             const prior = new Set(previousTags);
-            return {
-                state: tags,
-                occurrence: previous?.occurrence ?? 0,
-                events: tags
-                    .filter((tag) => !prior.has(tag))
-                    .map((tag) => ({ marker: tag, observed: { tag } })),
-            };
+            let occurrence = previous?.occurrence ?? 0;
+            const events = tags
+                .filter((tag) => !prior.has(tag))
+                .map((tag) => {
+                    occurrence = nextOccurrence({ occurrence });
+                    return { marker: `${tag}:${occurrence}`, observed: { tag } };
+                });
+            return { state: tags, occurrence, events };
         }
     }
+}
+
+// nextOccurrence saturates at Number.MAX_SAFE_INTEGER because parseScalar accepts only safe integers.
+function nextOccurrence(previous: Pick<PredicateScalar, "occurrence"> | undefined): number {
+    return Math.min(Number.MAX_SAFE_INTEGER, (previous?.occurrence ?? 0) + 1);
 }
 
 function evaluateBooleanState(
@@ -228,7 +254,7 @@ function evaluateBooleanState(
 ): EvaluatedPredicate {
     const transitioned = previous === undefined || previous.state !== state;
     const occurrence =
-        matches && transitioned ? (previous?.occurrence ?? 0) + 1 : (previous?.occurrence ?? 0);
+        matches && transitioned ? nextOccurrence(previous) : (previous?.occurrence ?? 0);
     return {
         state,
         occurrence,
@@ -236,31 +262,81 @@ function evaluateBooleanState(
     };
 }
 
-/**
- * Streams the file so memory is bounded by one chunk plus the needle regardless of file size.
- * `tail` retains the last `needle.length - 1` characters so matches spanning chunks are found;
- * the stream's UTF-8 decoder keeps multibyte characters whole across chunk boundaries.
- */
+/** Fixed-size chunks bound memory independently of file size. */
 async function fileContains(path: string, needle: string): Promise<boolean> {
-    if (needle.length === 0) return true;
-    const overlap = needle.length - 1;
-    const stream = createReadStream(path, {
-        encoding: "utf8",
-        highWaterMark: FILE_CONTAINS_CHUNK_BYTES,
-    });
-    let tail = "";
+    // Opening first keeps the regular-file check for an empty needle too.
+    const handle = await openRegularFile(path);
     try {
-        for await (const chunk of stream) {
-            const window = tail + (chunk as string);
-            if (window.includes(needle)) return true;
-            tail = overlap > 0 ? window.slice(-overlap) : "";
+        // For valid UTF-8 files, byte search matches string search.
+        const needleBytes = Buffer.from(needle, "utf8");
+        if (needleBytes.length === 0) {
+            return true;
         }
-        return false;
+        // Carrying the chunk tail into the next read keeps a seam-straddling needle in one window.
+        const overlap = needleBytes.length - 1;
+        const buffer = Buffer.alloc(overlap + FILE_CONTAINS_CHUNK_BYTES);
+        let carried = 0;
+        while (true) {
+            const { bytesRead } = await handle.read(
+                buffer,
+                carried,
+                FILE_CONTAINS_CHUNK_BYTES,
+                null,
+            );
+            if (bytesRead === 0) {
+                return false;
+            }
+            const window = buffer.subarray(0, carried + bytesRead);
+            if (window.indexOf(needleBytes) !== -1) {
+                return true;
+            }
+            carried = Math.min(overlap, window.length);
+            buffer.copy(buffer, 0, window.length - carried, window.length);
+        }
     } catch (error) {
         throw fsError(path, error);
     } finally {
-        stream.destroy();
+        await handle.close();
     }
+}
+
+async function openRegularFile(path: string): Promise<FileHandle> {
+    let handle: FileHandle;
+    try {
+        // O_NONBLOCK makes open(2) return at once on a FIFO instead of waiting for a writer.
+        // O_NONBLOCK does not affect regular-file reads.
+        // O_NOFOLLOW rejects a symlink at the final path component.
+        handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    } catch (error) {
+        // ELOOP means path resolution encountered a symlink.
+        if (hasErrnoCode(error, "ELOOP")) {
+            throw pathChangedError(path);
+        }
+        throw fsError(path, error);
+    }
+    try {
+        // fstat on the open descriptor decides the type without a stat/open race.
+        const metadata = await handle.stat();
+        if (!metadata.isFile()) {
+            throw fsError(path, new Error("not a regular file"));
+        }
+        // O_NOFOLLOW does not reject an ancestor directory replaced by a symlink.
+        // Linux exposes the descriptor's resolved path through /proc/self/fd.
+        if (process.platform === "linux") {
+            const opened = await readlink(`/proc/self/fd/${handle.fd}`);
+            if (opened !== path) {
+                throw pathChangedError(path);
+            }
+        }
+        return handle;
+    } catch (error) {
+        await handle.close();
+        throw error instanceof ProviderError ? error : fsError(path, error);
+    }
+}
+
+function pathChangedError(path: string): ProviderError {
+    return new ProviderError("fenced_path", `Refusing path changed after fence check: ${path}`);
 }
 
 async function readableStat(path: string): Promise<Awaited<ReturnType<typeof stat>>> {
@@ -284,32 +360,13 @@ async function pathExists(path: string): Promise<boolean> {
     }
 }
 
-function fsError(path: string, error: unknown): ProviderError {
-    const message = error instanceof Error ? error.message : String(error);
-    return new ProviderError("unreadable_path", `Could not read ${path}: ${message}`);
-}
-
-function isMissingError(error: unknown): boolean {
-    return (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        (error.code === "ENOENT" || error.code === "ENOTDIR")
-    );
-}
-
 async function git(pathAtUse: () => Promise<string>, args: string[]): Promise<string> {
     const repoPath = await pathAtUse();
     try {
         const { stdout } = await execFileAsync("git", ["-C", repoPath, ...args], {
             encoding: "utf8",
-            env: {
-                PATH: process.env.PATH,
-                GIT_CONFIG_GLOBAL: "/dev/null",
-                GIT_CONFIG_NOSYSTEM: "1",
-                GIT_CONFIG_SYSTEM: "/dev/null",
-                GIT_TERMINAL_PROMPT: "0",
-            },
+            env: GIT_ENV,
+            maxBuffer: GIT_OUTPUT_MAX_BYTES,
         });
         return stdout.trim();
     } catch (error) {
@@ -328,15 +385,7 @@ async function gitIsAncestor(
         await execFileAsync(
             "git",
             ["-C", repoPath, "merge-base", "--is-ancestor", ancestor, descendant],
-            {
-                env: {
-                    PATH: process.env.PATH,
-                    GIT_CONFIG_GLOBAL: "/dev/null",
-                    GIT_CONFIG_NOSYSTEM: "1",
-                    GIT_CONFIG_SYSTEM: "/dev/null",
-                    GIT_TERMINAL_PROMPT: "0",
-                },
-            },
+            { env: GIT_ENV },
         );
         return true;
     } catch (error) {
@@ -351,7 +400,6 @@ async function gitIsAncestor(
     }
 }
 
-/** Numeric components are `bigint` so identifiers beyond 2^53 keep their exact ordering. */
 interface Semver {
     major: bigint;
     minor: bigint;
@@ -359,13 +407,17 @@ interface Semver {
     prerelease: Array<bigint | string>;
 }
 
-// The SemVer 2.0.0 grammar: numeric identifiers carry no leading zeros, alphanumeric
-// identifiers contain at least one non-digit, and no identifier is empty.
-const SEMVER_IDENTIFIER = String.raw`(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)`;
+// SemVer 2.0.0 grammar. A numeric identifier has no leading zero; an
+// alphanumeric identifier contains at least one letter or hyphen; identifiers
+// are non-empty.
+const SEMVER_NUMERIC = String.raw`0|[1-9]\d*`;
+const SEMVER_ALPHANUMERIC = String.raw`\d*[A-Za-z-][0-9A-Za-z-]*`;
+const SEMVER_PRERELEASE_IDENTIFIER = `(?:${SEMVER_NUMERIC}|${SEMVER_ALPHANUMERIC})`;
+const SEMVER_BUILD_IDENTIFIER = "[0-9A-Za-z-]+";
 const SEMVER_PATTERN = new RegExp(
-    String.raw`^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)` +
-        String.raw`(?:-(${SEMVER_IDENTIFIER}(?:\.${SEMVER_IDENTIFIER})*))?` +
-        String.raw`(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`,
+    `^v?(${SEMVER_NUMERIC})\\.(${SEMVER_NUMERIC})\\.(${SEMVER_NUMERIC})` +
+        `(?:-(${SEMVER_PRERELEASE_IDENTIFIER}(?:\\.${SEMVER_PRERELEASE_IDENTIFIER})*))?` +
+        `(?:\\+${SEMVER_BUILD_IDENTIFIER}(?:\\.${SEMVER_BUILD_IDENTIFIER})*)?$`,
 );
 
 function parseSemver(value: string): Semver {
@@ -373,10 +425,11 @@ function parseSemver(value: string): Semver {
     if (!match) {
         throw new ProviderError("invalid_config", `Invalid semantic version: ${value}`);
     }
+    // BigInt keeps numeric identifiers exact beyond Number.MAX_SAFE_INTEGER.
     return {
-        major: BigInt(match[1]),
-        minor: BigInt(match[2]),
-        patch: BigInt(match[3]),
+        major: BigInt(match[1] as string),
+        minor: BigInt(match[2] as string),
+        patch: BigInt(match[3] as string),
         prerelease: match[4]
             ? match[4].split(".").map((part) => (/^\d+$/.test(part) ? BigInt(part) : part))
             : [],
@@ -391,14 +444,10 @@ function tryParseSemver(value: string): Semver | null {
     }
 }
 
-function compareOrdered<T extends bigint | string>(left: T, right: T): number {
-    return left < right ? -1 : left > right ? 1 : 0;
-}
-
 function compareSemver(left: Semver, right: Semver): number {
     for (const key of ["major", "minor", "patch"] as const) {
         if (left[key] !== right[key]) {
-            return compareOrdered(left[key], right[key]);
+            return left[key] < right[key] ? -1 : 1;
         }
     }
     if (left.prerelease.length === 0 || right.prerelease.length === 0) {
@@ -419,7 +468,7 @@ function compareSemver(left: Semver, right: Semver): number {
             continue;
         }
         if (typeof leftPart === "bigint" && typeof rightPart === "bigint") {
-            return compareOrdered(leftPart, rightPart);
+            return leftPart < rightPart ? -1 : 1;
         }
         if (typeof leftPart === "bigint") {
             return -1;
@@ -427,9 +476,9 @@ function compareSemver(left: Semver, right: Semver): number {
         if (typeof rightPart === "bigint") {
             return 1;
         }
-        // SemVer orders alphanumeric identifiers by ASCII code, so `Z` sorts before `a`;
-        // the identifier grammar admits only ASCII, so code-unit comparison is that order.
-        return compareOrdered(leftPart, rightPart);
+        // SemVer 11.4.2 compares alphanumeric identifiers in ASCII order.
+        // Code-unit comparison is ASCII order for the [0-9A-Za-z-] class parseSemver admits.
+        return leftPart < rightPart ? -1 : 1;
     }
     return 0;
 }
@@ -479,21 +528,26 @@ function parseAtomicPredicate(value: unknown): AtomicPredicate {
         invalid("predicate.kind must be a string");
     }
     switch (predicate.kind) {
-        case "file_contains":
+        case "file_contains": {
             requireOnlyKeys(
                 predicate,
                 ["kind", "path", "needle", "absent", "resolved_path_exists"],
                 predicate.kind,
             );
+            const needle = requireString(predicate.needle, "needle", true);
+            if (Buffer.byteLength(needle, "utf8") > FILE_CONTAINS_MAX_NEEDLE_BYTES) {
+                invalid(`needle must be at most ${FILE_CONTAINS_MAX_NEEDLE_BYTES} bytes`);
+            }
             return {
                 kind: predicate.kind,
                 path: requireString(predicate.path, "path"),
-                needle: requireString(predicate.needle, "needle", true),
+                needle,
                 ...(optionalBoolean(predicate.absent, "absent") === undefined
                     ? {}
                     : { absent: predicate.absent as boolean }),
                 ...predicateAudit(predicate),
             };
+        }
         case "path_exists":
             requireOnlyKeys(
                 predicate,
@@ -546,10 +600,16 @@ function parseAtomicPredicate(value: unknown): AtomicPredicate {
             if (above !== undefined) {
                 parseSemver(above);
             }
+            // The pattern is a bare positional to `git tag --list`, which parses
+            // options anywhere in argv; a leading dash would turn it into one.
+            const pattern = requireString(predicate.pattern, "pattern");
+            if (pattern.startsWith("-")) {
+                invalid("pattern must not start with '-'");
+            }
             return {
                 kind: predicate.kind,
                 repo_path: requireString(predicate.repo_path, "repo_path"),
-                pattern: requireString(predicate.pattern, "pattern"),
+                pattern,
                 ...(above === undefined ? {} : { above }),
                 ...predicateAudit(predicate),
             };
@@ -610,6 +670,14 @@ function predicateAudit(
 ): Pick<AtomicPredicate, "resolved_path_exists"> {
     const exists = optionalBoolean(predicate.resolved_path_exists, "resolved_path_exists");
     return exists === undefined ? {} : { resolved_path_exists: exists };
+}
+
+// Audit metadata must not affect predicate identity.
+function predicateIdentity(
+    predicate: AtomicPredicate,
+): Omit<AtomicPredicate, keyof PredicateAudit> {
+    const { resolved_path_exists: _audit, ...identity } = predicate;
+    return identity;
 }
 
 function optionalBoolean(value: unknown, field: string): boolean | undefined {

@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import hostRelease from "../../../../../release/host-release.json";
 import { getTestBackstopDataRoot } from "../data-path";
+import {
+    FAILING_REASONS,
+    type FailingReason,
+    REMEDIATIONS,
+    type Remediation,
+} from "./contract-vocabulary";
 import {
     admitLifecycleFilesystem,
     CONNECTION_FILE_NAME,
@@ -106,6 +113,41 @@ describe("canonical lifecycle paths", () => {
     });
 });
 
+describe("verdict vocabulary", () => {
+    // Each rejecting verdict must name a `cli.reasons.failing_by_precedence` id and that id's remediation.
+    const failingRemediationFor = (reason: string): string | null | undefined =>
+        hostRelease.cli.reasons.failing_by_precedence.find((entry) => entry.id === reason)
+            ?.remediation;
+
+    test("no_data_dir is a failing reason", () => {
+        const resolution = resolveLifecycleDataRoot({});
+        expect(resolution.ok).toBe(false);
+        if (resolution.ok) return;
+        const reason: FailingReason = resolution.reason;
+        expect(FAILING_REASONS).toContain(reason);
+    });
+
+    test("filesystem and platform verdicts pair a failing reason with its contract remediation", () => {
+        const verdicts = [
+            admitLifecycleFilesystem("/data", {
+                platform: "linux",
+                readMounts: () => "remote:/x / nfs4 rw 0 0\n",
+                realpath: (value) => value,
+            }),
+            admitLifecycleFilesystem("/data", { platform: "win32", readMounts: () => "" }),
+        ];
+        for (const verdict of verdicts) {
+            expect(verdict.ok).toBe(false);
+            if (verdict.ok) continue;
+            const reason: FailingReason = verdict.reason;
+            const remediation: Remediation = verdict.remediation;
+            expect(FAILING_REASONS).toContain(reason);
+            expect(REMEDIATIONS).toContain(remediation);
+            expect(failingRemediationFor(reason)).toBe(remediation);
+        }
+    });
+});
+
 describe("filesystem admission (KTD11)", () => {
     // These fixtures use nonexistent host paths, so `realpath` defaults to identity.
     // Identity canonicalization leaves mount selection to the fabricated mount table.
@@ -173,14 +215,23 @@ describe("filesystem admission (KTD11)", () => {
             "fuse.glusterfs",
             "lustre",
             "beegfs",
+            "fhgfs",
             "gpfs",
             "orangefs",
+            "pvfs2",
+            "panfs",
+            "wekafs",
+            "coda",
+            "gfs",
             "gfs2",
             "ocfs2",
             "fuse.s3fs",
             "fuse.rclone",
             "fuse.gcsfuse",
+            "fuse.quobyte",
             "vboxsf",
+            "vmhgfs",
+            "prl_fs",
             "virtiofs",
             "smb3",
         ]) {
@@ -392,6 +443,35 @@ describe("filesystem admission (KTD11)", () => {
             ),
         );
         expect(shadowedByLocal).toEqual({ ok: true });
+    });
+
+    test("the mount table is read after traversal so a triggered automount governs", () => {
+        // Resolving the root triggers the automount; a table read before that shows only the `autofs` trigger.
+        let triggered = false;
+        const verdict = admitLifecycleFilesystem("/net/host/share/eidnara", {
+            platform: "linux",
+            readMounts: () =>
+                "/dev/root / ext4 rw 0 0\nsystemd-1 /net autofs rw 0 0\n" +
+                (triggered ? "host:/share /net/host nfs4 rw 0 0\n" : ""),
+            realpath: (value) => {
+                triggered = true;
+                return value;
+            },
+        });
+        expect(verdict.ok).toBe(false);
+        if (!verdict.ok) expect(verdict.detail).toBe("unsupported filesystem type nfs4");
+    });
+
+    test("a root beneath an untriggered automount point is not admitted", () => {
+        const verdict = admitLifecycleFilesystem(
+            "/net/missing/share",
+            mounts(
+                "/dev/root / ext4 rw 0 0\nsystemd-1 /net autofs rw 0 0\n",
+                resolvesOnly("/net", "/net"),
+            ),
+        );
+        expect(verdict.ok).toBe(false);
+        if (!verdict.ok) expect(verdict.detail).toBe("unsupported filesystem type autofs");
     });
 });
 

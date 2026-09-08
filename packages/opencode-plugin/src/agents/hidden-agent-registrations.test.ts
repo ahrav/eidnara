@@ -74,4 +74,20 @@ describe("buildHiddenAgentConfig", () => {
         expect(config.steps).toBe(40);
         expect(config.maxSteps).toBe(5);
     });
+
+    it("falls back to the cap for a step limit that is not a positive integer", () => {
+        for (const bad of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY, "7", null]) {
+            const config = buildHiddenAgentConfig("p", ["ctx_search"], 40, {
+                steps: bad,
+                maxSteps: bad,
+            });
+            expect([bad, config.steps, config.maxSteps]).toEqual([bad, 40, 40]);
+        }
+    });
+
+    it("keeps a positive integer step limit at or under the cap", () => {
+        const config = buildHiddenAgentConfig("p", ["ctx_search"], 40, { steps: 1, maxSteps: 40 });
+        expect(config.steps).toBe(1);
+        expect(config.maxSteps).toBe(40);
+    });
 });

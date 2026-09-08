@@ -72,6 +72,7 @@ const MAX_MANIFEST_ENTRIES = 64;
 const MAX_MANIFEST_BYTES = 32 * 1024;
 /** The module limits cron expressions to NOTE_EVALUATOR_MAX_CRON_BYTES (256 bytes). */
 const MAX_CRON_BYTES = 256;
+const MAX_SUMMARY_CHARS = 160;
 const MAX_COMPILER_ERROR_CHARS = 2 * 1024;
 const MAX_REJECTED_ARGUMENT_CHARS = 120;
 const DRY_RUN_TIMEOUT_MS = 2_000;
@@ -233,17 +234,19 @@ async function validateCompilerOutput(
     }
     // A dry run remains pending only when the check propagates a served network failure
     // unchanged; a check that catches it and then fails for another reason is not waived.
-    const escaped = bound
-        .servedNetworkFailures()
-        .find((message) => dryRun.error === `${SmartNoteNetworkError.name}: ${message}`);
-    if (!dryRun.cancelled && escaped !== undefined) {
-        return {
-            compiledCheck,
-            manifest,
-            checkCron,
-            dryRun: null,
-            dryRunNetworkError: boundedError(escaped),
-        };
+    if (!dryRun.cancelled && dryRun.hostNetworkError === true) {
+        const escaped = bound
+            .servedNetworkFailures()
+            .find((message) => dryRun.error === `${SmartNoteNetworkError.name}: ${message}`);
+        if (escaped !== undefined) {
+            return {
+                compiledCheck,
+                manifest,
+                checkCron,
+                dryRun: null,
+                dryRunNetworkError: boundedError(escaped),
+            };
+        }
     }
     throw new Error(`dry-run failed: ${dryRun.error}`);
 }
@@ -284,6 +287,13 @@ export async function bindDeclaredRequests(
                 responses.set(url, { ok: true, value: await fetcher.httpGet(url) });
             } catch (error) {
                 if (!(error instanceof SmartNoteNetworkError)) throw error;
+                // A terminal failure (a body over the hard cap) recurs on every evaluation, so the
+                // attempt fails instead of waiting on a dry-run waiver.
+                if (error.terminal) {
+                    throw new Error(
+                        `httpGet(${JSON.stringify(url)}) cannot succeed: ${error.message}`,
+                    );
+                }
                 responses.set(url, { ok: false, error });
             }
         }),
@@ -329,7 +339,28 @@ export function parseCompilerOutput(output: string | null): CompilerResponse {
     if (!parsed.manifest || typeof parsed.manifest !== "object")
         throw new Error("manifest missing");
     if (typeof parsed.check_cron !== "string") throw new Error("check_cron missing");
+    // JSON.parse accepts a `\ud83d` escape that no UTF-8 decoder can represent, and the daemon
+    // reparses the artifact's JSON as UTF-8.
+    if (hasLoneSurrogate(parsed)) {
+        throw new Error("smart-note compiler output contains an unpaired surrogate");
+    }
     return parsed as CompilerResponse;
+}
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+function hasLoneSurrogate(value: unknown): boolean {
+    if (typeof value === "string") return LONE_SURROGATE.test(value);
+    if (Array.isArray(value)) return value.some(hasLoneSurrogate);
+    if (value !== null && typeof value === "object") {
+        return Object.values(value).some(hasLoneSurrogate);
+    }
+    return false;
+}
+
+/** Counts Unicode scalars rather than UTF-16 code units. */
+function truncateAtScalarBoundary(text: string, maxLength: number): string {
+    return Array.from(text).slice(0, maxLength).join("");
 }
 
 export function normalizeCompiledCheck(source: string): string {
@@ -354,13 +385,18 @@ export function normalizeCompiledCheck(source: string): string {
     if (!signature) {
         throw new Error("compiled_check must define function check(cap)");
     }
-    // The runner uses the final `check` binding, so redeclaration or reassignment can replace
-    // the validated function.
-    if ((codeOnly.match(/\bfunction\s+check\s*\(/g) ?? []).length !== 1) {
-        throw new Error("compiled_check must define check exactly once");
+    // The runner invokes the `check` binding, so any other mention of it (a second declaration,
+    // an assignment of any form, a destructuring target) could substitute a function whose
+    // parameter is not named `cap`.
+    const declarationIndex = signature.index + signature[0].indexOf("check");
+    for (const mention of codeOnly.matchAll(/(?<![\w$.])check(?![\w$])/g)) {
+        if (mention.index !== declarationIndex) {
+            throw new Error("compiled_check must not reference check outside its declaration");
+        }
     }
-    if (/\bcheck\s*=(?![=>])/.test(codeOnly)) {
-        throw new Error("compiled_check must not reassign check");
+    // Identifiers beginning with `__` are reserved for the runner.
+    if (/(?<![\w$])__[\w$]*/.test(codeOnly)) {
+        throw new Error("compiled_check must not use identifiers beginning with __");
     }
     if (/\b(?:import|require)\b/.test(codeOnly)) {
         throw new Error("compiled_check must not import modules");
@@ -426,7 +462,10 @@ export function normalizeManifest(manifest: SmartNoteCheckManifest): SmartNoteCh
         hosts: uniqueStrings(manifest.hosts, (host) => host.toLowerCase()),
         urls: uniqueStrings(manifest.urls),
         signals: uniqueStrings(manifest.signals),
-        summary: typeof manifest.summary === "string" ? manifest.summary.slice(0, 160) : undefined,
+        summary:
+            typeof manifest.summary === "string"
+                ? truncateAtScalarBoundary(manifest.summary, MAX_SUMMARY_CHARS)
+                : undefined,
     };
     // The validator rejects manifests over 32 KiB because 64 entries do not bound string sizes.
     if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > MAX_MANIFEST_BYTES) {
@@ -558,6 +597,7 @@ export function normalizeCron(cron: string): string {
     return normalized;
 }
 
+const U64_MAX = BigInt("18446744073709551615");
 const CRON_FIELD_BOUNDS: ReadonlyArray<readonly [min: number, max: number]> = [
     [0, 59],
     [0, 23],
@@ -579,7 +619,11 @@ export function isValidSmartNoteCron(expression: string): boolean {
         return token.split(",").every((piece) => {
             const [rangePart, stepPart, extra] = piece.split("/");
             if (piece.length === 0 || extra !== undefined) return false;
-            if (stepPart !== undefined && (!/^\d+$/.test(stepPart) || Number(stepPart) < 1)) {
+            // The daemon parses the step as a u64; `Number` would accept larger digit strings.
+            if (
+                stepPart !== undefined &&
+                (!/^\d+$/.test(stepPart) || BigInt(stepPart) < 1n || BigInt(stepPart) > U64_MAX)
+            ) {
                 return false;
             }
             let lo: number;

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -23,8 +23,10 @@ import {
     type CompatibilitySnapshot,
     HostLifecyclePolicy,
     type LifecyclePolicyOptions,
+    monotonicNow,
     type ObservationalHealth,
     ReadinessProbeControlError,
+    STORAGE_HARD_BUDGET_MS,
 } from "./policy";
 
 const MAX_PARENT_WALK = 8;
@@ -51,18 +53,41 @@ function asRecord(value: unknown): Record<string, unknown> | null {
         : null;
 }
 
+/** One `host.status` component record, or `null` when unavailable or malformed. */
+function componentRecord(
+    metrics: Record<string, unknown>,
+    component: string,
+): Record<string, unknown> | null {
+    return asRecord(asRecord(metrics.components)?.[component]);
+}
+
 /** The `metrics` object of one `host.status` component, or `null` when absent. */
 function componentMetrics(
     metrics: Record<string, unknown>,
     component: string,
 ): Record<string, unknown> | null {
-    const components = asRecord(metrics.components);
-    return asRecord(asRecord(components?.[component])?.metrics);
+    return asRecord(componentRecord(metrics, component)?.metrics);
 }
 
 function storageState(metrics: Record<string, unknown>): "ready" | "starting" | "unavailable" {
     const state = componentMetrics(metrics, "context")?.storage_state;
     return state === "ready" || state === "unavailable" ? state : "starting";
+}
+
+export type SynapseReadiness =
+    | { state: "ready"; reason: "healthy" }
+    | { state: "starting"; reason: "synapse_starting" }
+    | { state: "degraded"; reason: "synapse_degraded" }
+    | { state: "unsupported"; reason: "synapse_unsupported" };
+
+export function synapseReadiness(metrics: Record<string, unknown>): SynapseReadiness {
+    const component = componentRecord(metrics, "synapse");
+    const state = asRecord(component?.metrics)?.synapse_state;
+    if (state === "ready") return { state: "ready", reason: "healthy" };
+    if (state === "starting") return { state: "starting", reason: "synapse_starting" };
+    if (state === "unsupported") return { state: "unsupported", reason: "synapse_unsupported" };
+    // The fixed profile always carries a Synapse lane and reports `unsupported` as an explicit literal, so an absent component, like a named one with a missing or out-of-set state, is a lane that cannot prove readiness and fails rather than reading as absent or unsupported. commentlint: allow(JUDGE)
+    return { state: "degraded", reason: "synapse_degraded" };
 }
 
 export type KernelReadiness =
@@ -119,8 +144,9 @@ async function probeManagedStorage(
     root: string,
     budgetMs: number,
     expectedDaemonId?: Uint8Array,
+    signal?: AbortSignal,
 ): Promise<"ready" | "starting" | "unavailable"> {
-    const deadline = Date.now() + budgetMs;
+    const deadline = monotonicNow() + budgetMs;
     const options: HostClientOptions = {
         connectionFile: connectionFilePath(root),
         handshakeTimeoutMs: Math.max(1, budgetMs),
@@ -133,24 +159,36 @@ async function probeManagedStorage(
         assertStorageProbePeer(client, expectedDaemonId);
         for (;;) {
             const snapshot = await client.hostStatus({
-                timeoutMs: Math.max(1, deadline - Date.now()),
+                timeoutMs: Math.max(1, deadline - monotonicNow()),
             });
             assertStorageProbePeer(client, expectedDaemonId);
             const state = storageState(snapshot.metrics);
-            if (state !== "starting" || Date.now() >= deadline) return state;
-            await new Promise((resolve) =>
-                setTimeout(
-                    resolve,
-                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - Date.now())),
-                ),
-            );
+            // An abort means no waiter remains; the observation is left indeterminate rather than polled to the deadline. commentlint: allow(JUDGE)
+            if (state !== "starting" || monotonicNow() >= deadline || signal?.aborted) return state;
+            await new Promise<void>((resolve) => {
+                const onAbort = (): void => {
+                    clearTimeout(timer);
+                    resolve();
+                };
+                const timer = setTimeout(
+                    () => {
+                        // `once` removes the listener only when abort fires; the timer path must remove it too or every poll iteration leaves one behind. commentlint: allow(JUDGE)
+                        signal?.removeEventListener("abort", onAbort);
+                        resolve();
+                    },
+                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
+                );
+                signal?.addEventListener("abort", onAbort, { once: true });
+            });
+            if (signal?.aborted) return "starting";
         }
     } catch (error) {
         if (error instanceof StorageProbeDaemonMismatchError) throw error;
-        return Date.now() >= deadline ? "starting" : "unavailable";
+        return monotonicNow() >= deadline ? "starting" : "unavailable";
     } finally {
         // The connected channel holds a referenced interval, so a one-shot caller stays alive until this client closes.
-        if (client !== undefined) await client.closeAsync().catch(() => undefined);
+        // Teardown runs under `closeAsync`'s own shutdown deadline and is not awaited, so a settled state reaches the policy inside its storage budget. commentlint: allow(JUDGE)
+        if (client !== undefined) void client.closeAsync().catch(() => undefined);
     }
 }
 
@@ -167,14 +205,13 @@ function samePeer(left: AuthenticatedPeer | null, right: AuthenticatedPeer): boo
     return sameDaemonId(left.daemonId, right.daemonId);
 }
 
-interface CompatibilityProbeResult {
+export interface CompatibilityProbeResult {
     snapshot: CompatibilitySnapshot;
     status: HostStatusSnapshot | null;
 }
 
 /**
- *
- *
+ * `deadline` is a `monotonicNow()` timestamp.
  */
 async function readCompatibilityProbe(
     client: ManagedCompatibilityClient,
@@ -202,7 +239,7 @@ async function readCompatibilityProbe(
             status: null,
         };
     }
-    const catalogMs = deadline - Date.now();
+    const catalogMs = deadline - monotonicNow();
     if (catalogMs <= 0) throw new Error("compatibility probe deadline expired");
     const catalog = await client.catalogList({ timeoutMs: catalogMs });
     if (!samePeer(client.authenticated, authenticated)) {
@@ -226,7 +263,7 @@ async function readCompatibilityProbe(
             status: null,
         };
     }
-    const remainingMs = deadline - Date.now();
+    const remainingMs = deadline - monotonicNow();
     if (remainingMs <= 0) throw new Error("compatibility probe deadline expired");
     const status = await client.hostStatus({
         timeoutMs: remainingMs,
@@ -251,6 +288,7 @@ async function readCompatibilityProbe(
     return { snapshot, status };
 }
 
+/** `deadline` is a `monotonicNow()` timestamp. */
 export async function readCompatibilitySnapshot(
     client: ManagedCompatibilityClient,
     deadline: number,
@@ -264,22 +302,22 @@ async function probeManagedCompatibility(
     budgetMs: number,
     signal?: AbortSignal,
 ): Promise<CompatibilityProbeResult> {
-    const deadline = Date.now() + budgetMs;
+    const deadline = monotonicNow() + budgetMs;
     const client = await HostClient.connect({
         connectionFile: connectionFilePath(root),
         handshakeTimeoutMs: Math.max(1, budgetMs),
         requestTimeoutMs: Math.max(1, budgetMs),
-        shutdownDeadlineMs: Math.max(1, budgetMs),
     });
     try {
         return await readCompatibilityProbe(client, deadline, signal);
     } finally {
-        await client.closeAsync().catch(() => {});
+        // Teardown is not awaited: the policy shares this probe across demands and a caller without its own deadline waits for the promise to settle, so a slow Goodbye flush would hold a completed observation for a second aggregate. commentlint: allow(JUDGE)
+        void client.closeAsync().catch(() => undefined);
     }
 }
 
 async function probeManagedReadiness(root: string, budgetMs: number): Promise<ObservationalHealth> {
-    const deadline = Date.now() + budgetMs;
+    const deadline = monotonicNow() + budgetMs;
     // A private client, like the storage probe's. The residual budget varies per
     // call and `ownerKey` includes the timeouts, so a shared owner would cache a
     // new client — and prefault another ring — on every status or doctor, until
@@ -315,33 +353,7 @@ async function probeManagedReadiness(root: string, budgetMs: number): Promise<Ob
     }
     const storage = storageState(status.metrics);
     const kernel = kernelReadiness(status.metrics);
-    const synapseState = componentMetrics(status.metrics, "synapse")?.synapse_state;
-    const synapse =
-        synapseState === "ready"
-            ? { state: "ready" as const, reason: "healthy" as const }
-            : synapseState === "unsupported"
-              ? {
-                    state: "unsupported" as const,
-                    reason: "synapse_unsupported" as const,
-                }
-              : synapseState === "starting"
-                ? { state: "starting" as const, reason: "synapse_starting" as const }
-                : synapseState === undefined
-                  ? // The status payload omits a component whose state it
-                    // cannot report: the daemon skips any module missing from
-                    // `components`, missing a usable `status`, or missing its
-                    // state key. Absence means the lane is not offered, so it
-                    // reports `unsupported` — the one non-failing readiness
-                    // state, which `addCheck` maps to a skipped check. Calling
-                    // it `degraded` would make `status` and `doctor` answer
-                    // `ok: false` for a daemon that is serving correctly and
-                    // simply has no Synapse lane, which is the normal shape on
-                    // every platform the model lane does not cover.
-                    {
-                        state: "unsupported" as const,
-                        reason: "synapse_unsupported" as const,
-                    }
-                  : { state: "degraded" as const, reason: "synapse_degraded" as const };
+    const synapse = synapseReadiness(status.metrics);
     return {
         ...compatibility,
         readiness: {
@@ -369,24 +381,182 @@ export interface ManagedLifecyclePolicyOptions
     explicitExternalRoot?: string;
 }
 
+type StorageReadinessState = "ready" | "starting" | "unavailable";
+
+export interface ManagedProbeIo {
+    compatibility(budgetMs: number, signal?: AbortSignal): Promise<CompatibilityProbeResult>;
+    storage(
+        budgetMs: number,
+        expectedDaemonId?: Uint8Array,
+        signal?: AbortSignal,
+    ): Promise<StorageReadinessState>;
+}
+
+export interface ManagedProbes {
+    compatibilityProbe(budgetMs: number, signal?: AbortSignal): Promise<CompatibilitySnapshot>;
+    storageProbe(
+        budgetMs: number,
+        expectedDaemonId?: Uint8Array,
+        signal?: AbortSignal,
+    ): Promise<StorageReadinessState>;
+}
+
+function daemonKey(daemonId: Uint8Array): string {
+    return Buffer.from(daemonId).toString("hex");
+}
+
+interface SharedStoragePoll {
+    result: Promise<StorageReadinessState>;
+    controller: AbortController;
+    waiters: number;
+}
+
+/**
+ * A waiter that outlives its own budget answers `starting`, the state a private poll of that length would have returned; the shared poll keeps running for the waiters still entitled to wait. `onIdle` fires when the last waiter leaves a poll that has not settled. commentlint: allow(JUDGE)
+ *
+ * A waiter whose caller aborts leaves at once, so a canceled demand stops holding the shared poll (and its connection) open for the rest of its budget. commentlint: allow(JUDGE)
+ */
+function joinStoragePoll(
+    poll: SharedStoragePoll,
+    budgetMs: number,
+    onIdle: () => void,
+    signal?: AbortSignal,
+): Promise<StorageReadinessState> {
+    poll.waiters += 1;
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const onAbort = (): void => {
+            leave();
+            resolve("starting");
+        };
+        const leave = (): void => {
+            if (settled) return;
+            settled = true;
+            if (timer !== null) clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            poll.waiters -= 1;
+            if (poll.waiters === 0) onIdle();
+        };
+        if (signal?.aborted) {
+            onAbort();
+            return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+        timer = setTimeout(
+            () => {
+                leave();
+                resolve("starting");
+            },
+            Math.max(1, budgetMs),
+        );
+        poll.result.then(
+            (state) => {
+                leave();
+                resolve(state);
+            },
+            (error: unknown) => {
+                leave();
+                reject(error);
+            },
+        );
+    });
+}
+
+/**
+ * The compatibility probe records the storage state with the reporting daemon ID. A storage probe expecting that daemon answers a terminal `ready` or `unavailable` from the record, so readiness and compatibility describe one observation and the storage probe opens no connection of its own; a `starting` record still polls within the storage budget. commentlint: allow(JUDGE)
+ *
+ * The record is not consumed on read. The policy shares one compatibility probe across concurrent demands and each of them runs its own storage probe, so a one-shot slot would hand the observation to the first waiter and send every other waiter to open a connection. Each later compatibility probe replaces the record, and a storage probe always follows the compatibility probe of its own demand, so no demand reads a record older than its own observation. commentlint: allow(JUDGE)
+ *
+ * Polls for the same daemon coalesce for the same reason: each connection attaches and prefaults a shared-memory ring, so a burst of demands during startup would otherwise spend admission on redundant probes. The shared poll runs on the hard storage budget rather than the first waiter's remaining budget, so a nearly expired waiter arriving first cannot mint a poll too short for the waiters that join it; each waiter bounds its own wait, and the poll is aborted once no waiter remains. commentlint: allow(JUDGE)
+ */
+export function managedProbes(io: ManagedProbeIo): ManagedProbes {
+    let observed: { daemonId: Uint8Array; state: StorageReadinessState } | null = null;
+    let issued = 0;
+    const polling = new Map<string, SharedStoragePoll>();
+    return {
+        async compatibilityProbe(budgetMs, signal) {
+            const sequence = ++issued;
+            const probe = await io.compatibility(budgetMs, signal);
+            // Only the most recently issued probe may write the record. A probe the policy already gave up on can still settle after its replacement, and its older storage state must not displace the newer one. commentlint: allow(JUDGE)
+            if (sequence === issued) {
+                observed =
+                    probe.status === null
+                        ? null
+                        : {
+                              daemonId: Uint8Array.from(probe.snapshot.authenticatedPeer.daemonId),
+                              state: storageState(probe.status.metrics),
+                          };
+            }
+            return probe.snapshot;
+        },
+        storageProbe(budgetMs, expectedDaemonId, signal) {
+            if (expectedDaemonId === undefined) return io.storage(budgetMs);
+            const record = observed;
+            if (
+                record !== null &&
+                sameDaemonId(record.daemonId, expectedDaemonId) &&
+                record.state !== "starting"
+            ) {
+                return Promise.resolve(record.state);
+            }
+            const key = daemonKey(expectedDaemonId);
+            let poll = polling.get(key);
+            if (poll === undefined) {
+                const controller = new AbortController();
+                const created: SharedStoragePoll = {
+                    result: io.storage(STORAGE_HARD_BUDGET_MS, expectedDaemonId, controller.signal),
+                    controller,
+                    waiters: 0,
+                };
+                poll = created;
+                polling.set(key, created);
+                const evict = (): void => {
+                    if (polling.get(key) === created) polling.delete(key);
+                };
+                void created.result.then(evict, evict);
+            }
+            const current = poll;
+            return joinStoragePoll(
+                current,
+                budgetMs,
+                () => {
+                    current.controller.abort();
+                    if (polling.get(key) === current) polling.delete(key);
+                },
+                signal,
+            );
+        },
+    };
+}
+
 function findDeclaringParentRoot(moduleUrl: string, packageName: string): string {
     let current = dirname(fileURLToPath(moduleUrl));
     for (let depth = 0; depth <= MAX_PARENT_WALK; depth += 1) {
         const packagePath = join(current, "package.json");
-        if (existsSync(packagePath)) {
-            try {
-                const parsed: unknown = JSON.parse(readFileSync(packagePath, "utf8"));
-                if (
-                    parsed !== null &&
-                    typeof parsed === "object" &&
-                    !Array.isArray(parsed) &&
-                    (parsed as Record<string, unknown>).name === packageName
-                ) {
-                    return current;
-                }
-            } catch {
-                // The search ignores malformed and unrelated ancestors.
+        let text: string | null;
+        try {
+            text = readFileSync(packagePath, "utf8");
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            // Only a genuine absence lets the walk climb. A descriptor that exists but cannot be read may name this package, and climbing past it would certify a farther install's payload as the declaring one. commentlint: allow(JUDGE)
+            if (code !== "ENOENT" && code !== "ENOTDIR") {
+                throw new BootstrapError(
+                    "unsupported_install_layout",
+                    "declaring parent package descriptor is not inspectable",
+                );
             }
+            text = null;
+        }
+        if (text !== null) {
+            const parsed = asRecord(parseJsonOrNull(text));
+            if (parsed === null) {
+                throw new BootstrapError(
+                    "unsupported_install_layout",
+                    "declaring parent package descriptor is malformed",
+                );
+            }
+            if (parsed.name === packageName) return current;
         }
         const parent = dirname(current);
         if (parent === current) break;
@@ -398,12 +568,21 @@ function findDeclaringParentRoot(moduleUrl: string, packageName: string): string
     );
 }
 
+function parseJsonOrNull(text: string): unknown {
+    try {
+        return JSON.parse(text) as unknown;
+    } catch {
+        return null;
+    }
+}
+
 /**
  */
 export function createManagedLifecyclePolicy(
     options: ManagedLifecyclePolicyOptions,
 ): HostLifecyclePolicy {
-    const env = options.env ?? process.env;
+    // Construction admits the data root, stages the bootstrap under it, and pins the probes to it; the policy's per-command root resolution reads the same snapshot so a later mutation of the supplied object cannot send commands to one root and probes to another. commentlint: allow(JUDGE)
+    const env: Record<string, string | undefined> = { ...(options.env ?? process.env) };
     const root = resolveLifecycleDataRoot(env);
     if (!root.ok) return new HostLifecyclePolicy({ ...options, env });
 
@@ -420,67 +599,35 @@ export function createManagedLifecyclePolicy(
     }
 
     try {
-        const declaringParentRoot = findDeclaringParentRoot(
-            options.declaringModuleUrl,
-            options.parentPackageName,
-        );
+        // A compiled Bun caller declares its module from an embedded filesystem with no physical package tree, so the parent walk would fail before the external root is examined; the payload resolver never reads the lexical root once an explicit root is supplied. commentlint: allow(JUDGE)
+        const payloadLocator =
+            options.explicitExternalRoot === undefined
+                ? {
+                      declaringParentRoot: findDeclaringParentRoot(
+                          options.declaringModuleUrl,
+                          options.parentPackageName,
+                      ),
+                  }
+                : { explicitExternalRoot: options.explicitExternalRoot };
         const prepared = prepareManagedLaunchTarget({
             dataRoot: root.root,
-            declaringParentRoot,
             target: platform.target,
             allowStaging: options.mode === "mutating",
-            ...(options.explicitExternalRoot === undefined
-                ? {}
-                : { explicitExternalRoot: options.explicitExternalRoot }),
+            ...payloadLocator,
         });
-        // Reuse the `host.status` response so readiness and compatibility describe the same observation.
-        // Only terminal observations short-circuit; a `starting` observation still runs the polling probe.
-        // The polling probe can wait for startup within its own budget.
-        //
-        // Concurrent probes share the observation slot.
-        // Demand tags observations because untagged reuse could return a state from another request or daemon.
-        // Demand tags observations because untagged reuse could return a state from another request or daemon.
-        let observedStorage: {
-            daemonId: Uint8Array;
-            state: "ready" | "starting" | "unavailable";
-        } | null = null;
-        const defaultCompatibilityProbe = async (
-            budgetMs: number,
-            signal?: AbortSignal,
-        ): Promise<CompatibilitySnapshot> => {
-            const probe = await probeManagedCompatibility(root.root, budgetMs, signal);
-            observedStorage =
-                probe.status === null
-                    ? null
-                    : {
-                          daemonId: Uint8Array.from(probe.snapshot.authenticatedPeer.daemonId),
-                          state: storageState(probe.status.metrics),
-                      };
-            return probe.snapshot;
-        };
-        const defaultStorageProbe = (
-            budgetMs: number,
-            expectedDaemonId?: Uint8Array,
-        ): Promise<"ready" | "starting" | "unavailable"> => {
-            const observed = observedStorage;
-            observedStorage = null;
-            if (
-                expectedDaemonId !== undefined &&
-                observed !== null &&
-                sameDaemonId(observed.daemonId, expectedDaemonId) &&
-                (observed.state === "ready" || observed.state === "unavailable")
-            ) {
-                return Promise.resolve(observed.state);
-            }
-            return probeManagedStorage(root.root, budgetMs, expectedDaemonId);
-        };
+        const probes = managedProbes({
+            compatibility: (budgetMs, signal) =>
+                probeManagedCompatibility(root.root, budgetMs, signal),
+            storage: (budgetMs, expectedDaemonId, signal) =>
+                probeManagedStorage(root.root, budgetMs, expectedDaemonId, signal),
+        });
         return new HostLifecyclePolicy({
             ...options,
             env,
             launchTarget: prepared,
             defaultStartupEnvelope: buildManagedCredentialEnvelope(env),
-            storageProbe: options.storageProbe ?? defaultStorageProbe,
-            compatibilityProbe: options.compatibilityProbe ?? defaultCompatibilityProbe,
+            storageProbe: options.storageProbe ?? probes.storageProbe,
+            compatibilityProbe: options.compatibilityProbe ?? probes.compatibilityProbe,
             readinessProbe:
                 options.readinessProbe ??
                 ((budgetMs) => probeManagedReadiness(root.root, budgetMs)),
@@ -490,13 +637,8 @@ export function createManagedLifecyclePolicy(
                 ? {
                       payloadDirFallback: () =>
                           resolveManagedPayloadDir({
-                              declaringParentRoot,
                               target: platform.target,
-                              ...(options.explicitExternalRoot === undefined
-                                  ? {}
-                                  : {
-                                        explicitExternalRoot: options.explicitExternalRoot,
-                                    }),
+                              ...payloadLocator,
                           }),
                   }
                 : {}),
