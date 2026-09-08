@@ -74,6 +74,8 @@ const MAX_REJECTED_ARGUMENT_CHARS = 120;
 const DRY_RUN_TIMEOUT_MS = 2_000;
 const DEADLINE_EXPIRED_ERROR = "smart-note compile deadline expired";
 const NON_CODE_SPANS: ReadonlySet<SourceSpanKind> = new Set(["comment", "string", "template"]);
+const CHECK_SIGNATURE = /\bfunction\s+check\s*\(\s*cap\s*\)/;
+const DIRECT_CAPABILITY_CALL = /^\s*\.\s*(?:readFile|httpGet|gitHeadSha|gitTag|gitLog)\s*\(/;
 
 type LiteralCapabilityMethod = "readFile" | "httpGet";
 
@@ -240,18 +242,30 @@ export function normalizeCompiledCheck(source: string): string {
     let code = source.trim();
     const fence = code.match(/^```(?:javascript|js)?\s*([\s\S]*?)```$/i);
     if (fence) code = fence[1].trim();
-    code = code.replace(/export\s+function\s+check\s*\(/, "function check(");
-    // Keyword scans run over code with comments and literals blanked, so a check that
-    // inspects file contents for the word `require` is not mistaken for a module import.
+    // Mask comments and literals so textual `require` or `export function check(` remains valid.
+    const exported = /\bexport\s+(?=function\s+check\s*\()/.exec(
+        maskSourceSpans(code, NON_CODE_SPANS),
+    );
+    if (exported) {
+        code = code.slice(0, exported.index) + code.slice(exported.index + exported[0].length);
+    }
     const codeOnly = maskSourceSpans(code, NON_CODE_SPANS);
     if (/\basync\s+function\s+check\s*\(/.test(codeOnly)) {
         throw new Error("compiled_check must be synchronous");
     }
-    if (!/\bfunction\s+check\s*\(/.test(codeOnly) && !/module\.exports\.check\s*=/.test(codeOnly)) {
-        throw new Error("compiled_check must define check(cap)");
+    const signature = CHECK_SIGNATURE.exec(codeOnly);
+    if (!signature) {
+        throw new Error("compiled_check must define function check(cap)");
     }
     if (/\b(?:import|require)\b/.test(codeOnly)) {
         throw new Error("compiled_check must not import modules");
+    }
+    if (/\barguments\b/.test(codeOnly)) {
+        throw new Error("compiled_check must not use arguments");
+    }
+    const misuse = capabilityMisuse(code, codeOnly, signature.index + signature[0].indexOf("cap"));
+    if (misuse !== null) {
+        throw new Error(`cap may only be called directly as cap.<capability>(...): ${misuse}`);
     }
     const computed = capabilityCallSites(code).find((site) => site.literal === null);
     if (computed) {
@@ -261,6 +275,19 @@ export function normalizeCompiledCheck(source: string): string {
         throw new Error("compiled_check exceeds 64 KiB");
     }
     return code;
+}
+
+function capabilityMisuse(code: string, codeOnly: string, parameterIndex: number): string | null {
+    const identifier = /(?<![\w$.])cap(?![\w$])/g;
+    for (const match of codeOnly.matchAll(identifier)) {
+        const index = match.index ?? 0;
+        if (index === parameterIndex) continue;
+        if (DIRECT_CAPABILITY_CALL.test(codeOnly.slice(index + 3))) continue;
+        return JSON.stringify(
+            code.slice(index, index + MAX_REJECTED_ARGUMENT_CHARS).split("\n")[0],
+        );
+    }
+    return null;
 }
 
 /**
@@ -417,16 +444,13 @@ function capabilityCallSites(code: string): CapabilityCallSite[] {
         }
         const quote = code[span.start];
         const body = code.slice(span.start + 1, span.end - 1);
+        // A template segment ending at `${` has no closing backtick.
         const terminated = span.end - span.start >= 2 && code[span.end - 1] === quote;
         const isRegexLiteral = quote === "/";
-        const interpolates = span.kind === "template" && body.includes("${");
         const closesCall = /^\s*\)/.test(codeOnly.slice(span.end));
         sites.push({
             method,
-            literal:
-                terminated && !isRegexLiteral && !interpolates && closesCall
-                    ? decodeStringLiteral(body)
-                    : null,
+            literal: terminated && !isRegexLiteral && closesCall ? decodeStringLiteral(body) : null,
         });
     }
     return sites;

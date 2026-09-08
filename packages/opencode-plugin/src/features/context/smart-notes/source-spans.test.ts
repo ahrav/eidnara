@@ -25,11 +25,19 @@ describe("scanSourceSpans", () => {
         ]);
     });
 
-    test("treats a template with nested expressions and quotes as one span", () => {
+    test("exposes template expressions as code between template pieces", () => {
         const source = 'x = `a ${ f("}", `${y}`) } b`; z';
         expect(kinds(source)).toEqual([
             "code:x = ",
-            `template:${source.slice(4, source.length - 3)}`,
+            "template:`a ${",
+            "code: f(",
+            'string:"}"',
+            "code:, ",
+            "template:`${",
+            "code:y",
+            "template:}`",
+            "code:) ",
+            "template:} b`",
             "code:; z",
         ]);
     });
@@ -40,6 +48,17 @@ describe("scanSourceSpans", () => {
             `string:/"/`,
             "code:.test(s)) { a = 1 / 2; b = x / y / z; }",
         ]);
+    });
+
+    test("recognizes a regular-expression literal after a control-flow head", () => {
+        expect(kinds(`if (text) /require/.test(text); while (a) /x/.exec(b)`)).toEqual([
+            "code:if (text) ",
+            "string:/require/",
+            "code:.test(text); while (a) ",
+            "string:/x/",
+            "code:.exec(b)",
+        ]);
+        expect(kinds(`(a) / (b) / c; f(x) / 2`)).toEqual(["code:(a) / (b) / c; f(x) / 2"]);
     });
 
     test("closes an unterminated string at the end of its line", () => {

@@ -23,42 +23,101 @@ const REGEX_PRECEDING_KEYWORDS = new Set([
     "await",
 ]);
 
+const CONTROL_KEYWORDS = new Set(["if", "while", "for", "with"]);
+
 /**
- * A regular-expression literal is reported as a `string` span. The preceding-token heuristic
- * that detects it can misclassify `a++ / b`; the QuickJS sandbox, not this scan, is the
- * enforcement layer.
+ * `${...}` inside a template yields `code` spans, so template expressions stay visible to
+ * callers that scan code; each template piece around them is its own `template` span.
+ *
+ * A regular-expression literal is reported as a `string` span. After `)`, a slash starts a
+ * literal only if the parenthesis closed an `if`, `while`, `for`, or `with` head.
  */
 export function scanSourceSpans(source: string): SourceSpan[] {
     const spans: SourceSpan[] = [];
-    let codeStart = 0;
     let index = 0;
+    let codeStart = 0;
+    const openParens: boolean[] = [];
+    let lastCloseParenWasControl = false;
 
-    const pushSpan = (kind: SourceSpanKind, end: number): void => {
+    const flushCode = (): void => {
         if (index > codeStart) spans.push({ kind: "code", start: codeStart, end: index });
+    };
+    const pushSpan = (kind: SourceSpanKind, end: number): void => {
+        flushCode();
         spans.push({ kind, start: index, end });
         index = end;
         codeStart = end;
     };
 
-    while (index < source.length) {
-        const char = source[index];
-        const next = source[index + 1];
-        if (char === "/" && next === "/") {
-            pushSpan("comment", endOfLine(source, index));
-        } else if (char === "/" && next === "*") {
-            const close = source.indexOf("*/", index + 2);
-            pushSpan("comment", close < 0 ? source.length : close + 2);
-        } else if (char === '"' || char === "'") {
-            pushSpan("string", endOfQuoted(source, index, char));
-        } else if (char === "`") {
-            pushSpan("template", endOfTemplate(source, index));
-        } else if (char === "/" && regexCanStart(source, index)) {
-            pushSpan("string", endOfRegex(source, index));
-        } else {
+    const scanTemplate = (): void => {
+        let pieceStart = index;
+        index += 1;
+        while (index < source.length) {
+            const char = source[index];
+            if (char === "\\") {
+                index += 2;
+                continue;
+            }
+            if (char === "`") {
+                index += 1;
+                spans.push({ kind: "template", start: pieceStart, end: index });
+                codeStart = index;
+                return;
+            }
+            if (char === "$" && source[index + 1] === "{") {
+                index += 2;
+                spans.push({ kind: "template", start: pieceStart, end: index });
+                codeStart = index;
+                scanCode(true);
+                pieceStart = index - 1;
+                continue;
+            }
             index += 1;
         }
-    }
-    if (index > codeStart) spans.push({ kind: "code", start: codeStart, end: index });
+        spans.push({ kind: "template", start: pieceStart, end: source.length });
+        codeStart = source.length;
+    };
+
+    const scanCode = (stopAtClosingBrace: boolean): void => {
+        let braceDepth = 0;
+        while (index < source.length) {
+            const char = source[index];
+            const next = source[index + 1];
+            if (char === "/" && next === "/") {
+                pushSpan("comment", endOfLine(source, index));
+            } else if (char === "/" && next === "*") {
+                const close = source.indexOf("*/", index + 2);
+                pushSpan("comment", close < 0 ? source.length : close + 2);
+            } else if (char === '"' || char === "'") {
+                pushSpan("string", endOfQuoted(source, index, char));
+            } else if (char === "`") {
+                flushCode();
+                scanTemplate();
+            } else if (char === "/" && regexCanStart(source, index, lastCloseParenWasControl)) {
+                pushSpan("string", endOfRegex(source, index));
+            } else {
+                if (char === "(") {
+                    openParens.push(CONTROL_KEYWORDS.has(wordBefore(source, index)));
+                } else if (char === ")") {
+                    lastCloseParenWasControl = openParens.pop() ?? false;
+                } else if (char === "{") {
+                    braceDepth += 1;
+                } else if (char === "}") {
+                    if (stopAtClosingBrace && braceDepth === 0) {
+                        flushCode();
+                        index += 1;
+                        codeStart = index;
+                        return;
+                    }
+                    braceDepth -= 1;
+                }
+                index += 1;
+            }
+        }
+        flushCode();
+    };
+
+    scanCode(false);
     return spans;
 }
 
@@ -131,43 +190,6 @@ function endOfQuoted(source: string, open: number, quote: string): number {
     return source.length;
 }
 
-function endOfTemplate(source: string, open: number): number {
-    let index = open + 1;
-    while (index < source.length) {
-        const char = source[index];
-        if (char === "\\") {
-            index += 2;
-            continue;
-        }
-        if (char === "`") return index + 1;
-        if (char === "$" && source[index + 1] === "{") {
-            index = endOfTemplateExpression(source, index + 2);
-            continue;
-        }
-        index += 1;
-    }
-    return source.length;
-}
-
-function endOfTemplateExpression(source: string, from: number): number {
-    let depth = 1;
-    let index = from;
-    while (index < source.length && depth > 0) {
-        const char = source[index];
-        if (char === "{") depth += 1;
-        else if (char === "}") depth -= 1;
-        else if (char === '"' || char === "'") {
-            index = endOfQuoted(source, index, char);
-            continue;
-        } else if (char === "`") {
-            index = endOfTemplate(source, index);
-            continue;
-        }
-        index += 1;
-    }
-    return index;
-}
-
 function endOfRegex(source: string, open: number): number {
     let index = open + 1;
     let inClass = false;
@@ -192,16 +214,23 @@ function endOfRegex(source: string, open: number): number {
     return source.length;
 }
 
-function regexCanStart(source: string, slash: number): boolean {
+function wordBefore(source: string, position: number): string {
+    let end = position;
+    while (end > 0 && /\s/.test(source[end - 1])) end -= 1;
+    let start = end;
+    while (start > 0 && /[\w$]/.test(source[start - 1])) start -= 1;
+    return source.slice(start, end);
+}
+
+function regexCanStart(source: string, slash: number, lastCloseParenWasControl: boolean): boolean {
     let index = slash - 1;
     while (index >= 0 && /\s/.test(source[index])) index -= 1;
     if (index < 0) return true;
     const previous = source[index];
+    if (previous === ")") return lastCloseParenWasControl;
     if (/[(,=:[!&|?{};+\-*%<>~^]/.test(previous)) return true;
     if (/[\w$]/.test(previous)) {
-        let start = index;
-        while (start > 0 && /[\w$]/.test(source[start - 1])) start -= 1;
-        return REGEX_PRECEDING_KEYWORDS.has(source.slice(start, index + 1));
+        return REGEX_PRECEDING_KEYWORDS.has(wordBefore(source, index + 1));
     }
     return false;
 }

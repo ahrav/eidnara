@@ -221,7 +221,7 @@ describe("compileSmartNoteCheck", () => {
         expect(httpGet).not.toHaveBeenCalled();
     });
 
-    test("refuses an aliased capability call with a computed URL at the host boundary", async () => {
+    test("rejects an aliased capability call before any code runs", async () => {
         const httpGet = mock(async () => ({ status: 200, body: "ok" }));
         const client = createCompilerClient([
             compilerOutput(
@@ -234,7 +234,7 @@ describe("compileSmartNoteCheck", () => {
         );
 
         expect(result.ok).toBe(false);
-        if (!result.ok) expect(result.error).toContain("not a string literal");
+        if (!result.ok) expect(result.error).toContain("cap may only be called directly");
         expect(httpGet).not.toHaveBeenCalled();
     });
 
@@ -435,12 +435,85 @@ describe("smart-note compiler output bounds", () => {
         ).toContain("function check(cap)");
     });
 
+    test("rejects every use of cap other than a direct capability call", () => {
+        const cases: Array<[string, RegExp]> = [
+            [
+                `function check(cap) { const get = cap.httpGet; return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { cap["httpGet"]("https://x/a"); return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { const { httpGet } = cap; return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { return { met: helper(cap) }; } function helper(c) { return true; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { cap?.httpGet("https://x/a"); return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { const inner = (cap) => cap.gitTag(); return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { const c = arguments[0]; return { met: true }; }`,
+                /must not use arguments/,
+            ],
+            [
+                `function check(c) { return { met: c.gitTag() !== null }; }`,
+                /must define function check\(cap\)/,
+            ],
+            [
+                `function check(cap, extra) { return { met: true }; }`,
+                /must define function check\(cap\)/,
+            ],
+            [
+                `module.exports.check = (cap) => ({ met: true });`,
+                /must define function check\(cap\)/,
+            ],
+            [
+                `function check(cap) {
+                    if (false) { cap.httpGet("https://a/0"); cap.httpGet("https://a/1"); }
+                    const g = cap.httpGet;
+                    const bit = (cap.readFile("config.txt") || "").length % 2;
+                    g(bit ? "https://a/1" : "https://a/0");
+                    return { met: true };
+                }`,
+                /only be called directly/,
+            ],
+        ];
+        for (const [code, error] of cases) {
+            expect(() => normalizeCompiledCheck(code)).toThrow(error);
+        }
+        expect(
+            normalizeCompiledCheck(
+                `function check(cap) { const tag = cap.gitTag(); const log = cap.gitLog({ maxCount: 3 }); return { met: tag !== null && log.length > 0 && cap.gitHeadSha() !== null }; }`,
+            ),
+        ).toContain("function check(cap)");
+    });
+
+    test("strips export only from the declaration, not from string data", () => {
+        const declaration = `export function check(cap) { return { met: true }; }`;
+        expect(normalizeCompiledCheck(declaration)).toBe(
+            `function check(cap) { return { met: true }; }`,
+        );
+        const data = `function check(cap) { return { met: (cap.readFile("source.js") || "").includes("export function check(") }; }`;
+        expect(normalizeCompiledCheck(data)).toBe(data);
+    });
+
     test("ignores module keywords and call-like text inside strings and comments", () => {
         const code = `// import nothing; cap.httpGet("https://decoy.example/comment")
 function check(cap) {
   /* require("fs") is only mentioned here */
   const source = cap.readFile("source.js") || "";
-  const usesCommonJs = source.includes("require") || /import\\s/.test(source);
+  if (source) /import\\s/.test(source);
+  const usesCommonJs = source.includes("require") || /require\\(/.test(source);
   return { met: usesCommonJs && !source.includes("cap.readFile(\\"decoy\\")") };
 }`;
         expect(normalizeCompiledCheck(code)).toBe(code);
