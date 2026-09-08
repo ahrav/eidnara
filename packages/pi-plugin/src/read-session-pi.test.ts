@@ -274,4 +274,29 @@ describe("convertEntriesToRawMessages: part synthesis", () => {
 
         expect(raws[0]?.parts).toEqual([{ type: "text", text: "kept" }]);
     });
+
+    it("emits tool-result image blocks as file parts beside the tool part", () => {
+        const raws = convertEntriesToRawMessages([
+            messageEntry("asst-1", {
+                role: "assistant",
+                content: [{ type: "toolCall", id: "tc-1", name: "screenshot" }],
+            }),
+            messageEntry("tr-1", {
+                role: "toolResult",
+                toolCallId: "tc-1",
+                toolName: "screenshot",
+                content: [
+                    { type: "text", text: "captured" },
+                    { type: "image", data: "BBBB", mimeType: "image/jpeg" },
+                    { type: "image", mimeType: "image/png" },
+                ],
+            }),
+        ]);
+
+        expect(raws[1]?.role).toBe("user");
+        expect(raws[1]?.parts).toEqual([
+            { type: "tool", tool: "screenshot", callID: "tc-1", state: { output: "captured" } },
+            { type: "file", mime: "image/jpeg", url: "data:image/jpeg;base64,BBBB" },
+        ]);
+    });
 });

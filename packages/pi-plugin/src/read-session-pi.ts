@@ -188,20 +188,27 @@ function synthesizeUserParts(msg: unknown): unknown[] {
         const cc = c as Record<string, unknown>;
         if (cc.type === "text" && typeof cc.text === "string") {
             parts.push({ type: "text", text: cc.text });
-        } else if (
-            cc.type === "image" &&
-            typeof cc.mimeType === "string" &&
-            typeof cc.data === "string"
-        ) {
-            // Pi stores an image as `{ type: "image", data, mimeType }`; OpenCode file parts carry `mime` and a data URL.
-            parts.push({
-                type: "file",
-                mime: cc.mimeType,
-                url: `data:${cc.mimeType};base64,${cc.data}`,
-            });
+        } else {
+            const image = synthesizeImagePart(cc);
+            if (image !== null) parts.push(image);
         }
     }
     return parts;
+}
+
+/**
+ * Pi stores an image as `{ type: "image", data, mimeType }`; OpenCode file parts carry `mime` and a data URL.
+ * Returns `null` for any other block, including an image block missing a string `data` or `mimeType`.
+ */
+function synthesizeImagePart(cc: Record<string, unknown>): unknown | null {
+    if (cc.type !== "image" || typeof cc.mimeType !== "string" || typeof cc.data !== "string") {
+        return null;
+    }
+    return {
+        type: "file",
+        mime: cc.mimeType,
+        url: `data:${cc.mimeType};base64,${cc.data}`,
+    };
 }
 
 function synthesizeAssistantParts(msg: unknown): unknown[] {
@@ -242,7 +249,9 @@ function synthesizeToolResultParts(msg: unknown): unknown[] {
 
     if (!callID) return []; // no useful pairing handle
 
+    // The OpenCode tool shape has no image slot, so tool-result images ride as sibling file parts.
     let output = "";
+    const imageParts: unknown[] = [];
     if (Array.isArray(m.content)) {
         const fragments: string[] = [];
         for (const c of m.content) {
@@ -250,6 +259,9 @@ function synthesizeToolResultParts(msg: unknown): unknown[] {
             const cc = c as Record<string, unknown>;
             if (cc.type === "text" && typeof cc.text === "string") {
                 fragments.push(cc.text);
+            } else {
+                const image = synthesizeImagePart(cc);
+                if (image !== null) imageParts.push(image);
             }
         }
         output = fragments.join("\n");
@@ -264,5 +276,6 @@ function synthesizeToolResultParts(msg: unknown): unknown[] {
                 output,
             },
         },
+        ...imageParts,
     ];
 }
