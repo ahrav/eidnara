@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -30,15 +30,37 @@ export interface BundledIssueReport {
     bodyMarkdown: string;
 }
 
-/**
- */
+/** The logger appends without rotation, so the bundle reads a bounded tail. */
+const LOG_TAIL_MAX_BYTES = 8 * 1024 * 1024;
+
+export function readLogTailLines(path: string, maxBytes = LOG_TAIL_MAX_BYTES): string[] {
+    const fd = openSync(path, "r");
+    try {
+        const size = fstatSync(fd).size;
+        const start = Math.max(0, size - maxBytes);
+        const buffer = Buffer.alloc(size - start);
+        const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
+        const lines = buffer.toString("utf-8", 0, bytesRead).split(/\r?\n/);
+        // A mid-file start lands inside a line, so the first entry is a fragment.
+        if (start > 0) lines.shift();
+        return lines;
+    } finally {
+        closeSync(fd);
+    }
+}
+
+/** `sessionLog` writes `[eidnara][<uuid>]`; a line with no UUID tag belongs to no single session. */
+const SESSION_TAG_PATTERN =
+    /\[eidnara\]\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/gi;
+
+/** `sessionId` is a Pi JSONL stem `<timestamp>_<uuid>` while log tags carry the bare UUID. */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    const isWanted = (tag: string) => tag === sessionId || sessionId.endsWith(`_${tag}`);
     return lines.filter((line) => {
-        const matches = line.match(otherSessionPattern);
-        if (!matches) return true;
-        return matches.every((id) => id === sessionId);
+        const tags = [...line.matchAll(SESSION_TAG_PATTERN)].map((match) => match[1] ?? "");
+        if (tags.length === 0) return true;
+        return tags.every(isWanted);
     });
 }
 
@@ -49,9 +71,7 @@ export async function bundleIssueReport(
     options: { cwd?: string; now?: Date; sessionFilter?: string | null } = {},
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists
-        ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
-        : [];
+    const allLogLines = report.logFile.exists ? readLogTailLines(report.logFile.path) : [];
     const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 

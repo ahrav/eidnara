@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, userInfo } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 
-import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
+import {
+    eidnaraProjectConfigBasePath,
+    eidnaraUserConfigBasePath,
+} from "@eidnara/opencode/config/config-paths";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
+import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { escapeRegex, redactSecretText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import {
@@ -20,7 +24,6 @@ import {
     getPiAgentDir,
     getPiSessionsRoot,
     getPiUserExtensionsPath,
-    getSharedUserConfigPath,
 } from "./paths";
 import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
 
@@ -73,8 +76,8 @@ export interface PiDiagnosticReport {
      * `recentSessions` contains the five JSONL sessions with the newest mtimes.
      * `--issue` uses these sessions in its session picker.
      * Pi stores session JSONL files under `~/.pi/agent/sessions/<slug>/*.jsonl`.
-     * Pi derives each session slug by replacing `/` in the project directory with `-`.
-     * Pi wraps each session slug in `--`.
+     * Each session's `directory` comes from the `cwd` in its JSONL header line.
+     * The session-slug folder is the fallback when a header carries no `cwd`.
      */
     recentSessions: PiRecentSessionSummary[];
     /** The report keeps legacy tmp-dir dumps separate from project-grouped dumps. */
@@ -83,7 +86,7 @@ export interface PiDiagnosticReport {
 
 export interface PiRecentSessionSummary {
     sessionId: string;
-    /** Pi's session-slug folder determines `directory`. */
+    /** The session header's `cwd`, or the reversed session slug when the header has none. */
     directory: string;
     /** The JSONL file's mtime determines `lastActiveAt` in ISO format. */
     lastActiveAt: string;
@@ -121,8 +124,19 @@ function getSelfVersion(): string {
     return "unknown";
 }
 
+/** `userInfo()` throws when the process UID has no passwd entry. */
+function currentUsername(): string | undefined {
+    try {
+        const username = userInfo().username;
+        if (username) return username;
+    } catch {}
+    const home = process.env.HOME || homedir();
+    const fromHome = home ? basename(home) : "";
+    return fromHome || undefined;
+}
+
 function currentUserHash(): string {
-    const username = userInfo().username || "unknown";
+    const username = currentUsername() ?? "unknown";
     return createHash("sha256").update(username).digest("hex").slice(0, 12);
 }
 
@@ -143,7 +157,7 @@ function redactSecretString(value: string): string {
  */
 export function sanitizeString(value: string): string {
     const home = process.env.HOME || homedir();
-    const username = userInfo().username;
+    const username = currentUsername();
     const userHash = `<USER:${currentUserHash()}>`;
     let sanitized = redactSecretString(value);
     if (home) {
@@ -162,9 +176,26 @@ function shouldRedactKey(key: string): boolean {
     return /api[_-]?key|token|secret|password|authorization|cookie/i.test(key);
 }
 
+/** Prompt fields hold arbitrary private prose; the report keeps only presence and length. */
+function isPromptKey(key: string): boolean {
+    return /^(prompt|system_prompt|description|tool_descriptions)$/.test(key);
+}
+
+function redactProse(value: unknown): unknown {
+    if (typeof value === "string") return `<REDACTED ${value.length} chars>`;
+    if (Array.isArray(value)) return value.map(redactProse);
+    if (value && typeof value === "object") {
+        return Object.fromEntries(
+            Object.entries(value).map(([entryKey, entry]) => [entryKey, redactProse(entry)]),
+        );
+    }
+    return value;
+}
+
 export function sanitizeValue(value: unknown, key = ""): unknown {
     if (value === null || typeof value === "number" || typeof value === "boolean") return value;
     if (shouldRedactKey(key)) return "<REDACTED>";
+    if (isPromptKey(key)) return redactProse(value);
     if (typeof value === "string") return sanitizeString(value);
     if (Array.isArray(value)) return value.map((entry) => sanitizeValue(entry));
     if (value && typeof value === "object") {
@@ -178,16 +209,25 @@ export function sanitizeValue(value: unknown, key = ""): unknown {
     return value;
 }
 
-function getProjectConfigPath(cwd: string): string {
-    return resolveEidnaraProjectConfigPath(cwd);
+/**
+ * `detectConfigFile` applies the Pi loader's precedence: `.jsonc`, then `.json`,
+ * and the `.jsonc` path when neither exists.
+ */
+function getUserConfigPath(): string {
+    return detectConfigFile(eidnaraUserConfigBasePath()).path;
 }
 
+function getProjectConfigPath(cwd: string): string {
+    return detectConfigFile(eidnaraProjectConfigBasePath(cwd)).path;
+}
+
+/** Parse errors carry the absolute config path, so they are sanitized like any other path. */
 function readConfigDiagnostic(path: string): PiConfigDiagnostic {
     const parsed = readJsoncLenient(path);
     return {
         path,
         exists: existsSync(path),
-        ...(parsed.parseError ? { parseError: parsed.parseError } : {}),
+        ...(parsed.parseError ? { parseError: sanitizeString(parsed.parseError) } : {}),
         flags: sanitizeValue(parsed.value) as Record<string, unknown>,
     };
 }
@@ -211,13 +251,38 @@ function describePackageEntry(entry: unknown): string {
  *
  * Pi strips the leading `/`, replaces `/` with `-`, and wraps the result in `--`.
  *
- * Literal `-` characters in path components make session-slug reversal lossy.
+ * Literal `-` characters in path components make session-slug reversal lossy,
+ * so the slug is the fallback when the header does not provide an absolute `cwd`.
  */
 function reverseSlugToDirectory(slug: string): string | null {
     if (!slug.startsWith("--") || !slug.endsWith("--")) return null;
     const inner = slug.slice(2, -2);
     if (!inner) return null;
     return `/${inner.replace(/-/g, "/")}`;
+}
+
+const SESSION_HEADER_MAX_BYTES = 8 * 1024;
+
+/**
+ * The first JSONL line is Pi's session header, whose `cwd` is the exact project
+ * path. The read is bounded because the rest of the file is the transcript.
+ */
+function readSessionHeaderCwd(file: string): string | null {
+    let fd: number | null = null;
+    try {
+        fd = openSync(file, "r");
+        const buffer = Buffer.alloc(SESSION_HEADER_MAX_BYTES);
+        const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+        const text = buffer.toString("utf-8", 0, bytesRead);
+        const newline = text.indexOf("\n");
+        if (newline === -1) return null;
+        const header = JSON.parse(text.slice(0, newline)) as { cwd?: unknown };
+        return typeof header.cwd === "string" && isAbsolute(header.cwd) ? header.cwd : null;
+    } catch {
+        return null;
+    } finally {
+        if (fd !== null) closeSync(fd);
+    }
 }
 
 /**
@@ -235,13 +300,14 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
 
         const candidates: Array<{
             sessionId: string;
-            directory: string;
+            file: string;
+            slugDirectory: string;
             mtime: number;
         }> = [];
 
         for (const slug of slugs) {
-            const directory = reverseSlugToDirectory(slug);
-            if (!directory) continue;
+            const slugDirectory = reverseSlugToDirectory(slug);
+            if (!slugDirectory) continue;
             const slugDir = join(sessionsRoot, slug);
             let files: string[];
             try {
@@ -249,11 +315,12 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
             } catch {
                 continue;
             }
-            for (const file of files) {
+            for (const name of files) {
+                const file = join(slugDir, name);
                 try {
-                    const mtime = statSync(join(slugDir, file)).mtimeMs;
-                    const sessionId = file.replace(/\.jsonl$/, "");
-                    candidates.push({ sessionId, directory, mtime });
+                    const mtime = statSync(file).mtimeMs;
+                    const sessionId = name.replace(/\.jsonl$/, "");
+                    candidates.push({ sessionId, file, slugDirectory, mtime });
                 } catch {}
             }
         }
@@ -261,7 +328,7 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
         candidates.sort((a, b) => b.mtime - a.mtime);
         return candidates.slice(0, 5).map((entry) => ({
             sessionId: entry.sessionId,
-            directory: entry.directory,
+            directory: readSessionHeaderCwd(entry.file) ?? entry.slugDirectory,
             lastActiveAt: new Date(entry.mtime).toISOString(),
         }));
     } catch {
@@ -306,16 +373,27 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
     };
 }
 
+/**
+ * One `stat` decides both fields, so a file removed or made unreadable between
+ * two probes cannot abort the report; it reads as absent.
+ */
+function statLogFile(path: string): PiDiagnosticReport["logFile"] {
+    try {
+        return { path, exists: true, sizeKb: Math.round(statSync(path).size / 1024) };
+    } catch {
+        return { path, exists: false, sizeKb: 0 };
+    }
+}
+
 export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnosticReport> {
     const pi = detectPiBinary();
     const settingsPath = getPiUserExtensionsPath();
     const settingsParsed = readJsoncLenient(settingsPath);
     const packages = packageEntries(settingsParsed.value);
-    const userConfigPath = getSharedUserConfigPath();
+    const userConfigPath = getUserConfigPath();
     const projectConfigPath = getProjectConfigPath(cwd);
     const loaded = loadPiConfig({ cwd });
-    const logPath = getEidnaraLogPath("pi");
-    const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
+    const logFile = statLogFile(getEidnaraLogPath("pi"));
     const otherPiExtensions = packages
         .filter((entry) => entry !== PI_PACKAGE_SOURCE)
         .map(describePackageEntry);
@@ -334,7 +412,9 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         settings: {
             path: settingsPath,
             exists: existsSync(settingsPath),
-            ...(settingsParsed.parseError ? { parseError: settingsParsed.parseError } : {}),
+            ...(settingsParsed.parseError
+                ? { parseError: sanitizeString(settingsParsed.parseError) }
+                : {}),
             hasEidnaraPackage: packages.some((entry) => entry === PI_PACKAGE_SOURCE),
             packages: sanitizeValue(packages) as unknown[],
         },
@@ -351,11 +431,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             knownConflicts: [],
             otherPiExtensions: otherPiExtensions.map(sanitizeString),
         },
-        logFile: {
-            path: logPath,
-            exists: existsSync(logPath),
-            sizeKb: Math.round(logFileSize / 1024),
-        },
+        logFile,
         recentSessions,
         historianDumps,
     };
