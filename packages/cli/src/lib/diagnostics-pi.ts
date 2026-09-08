@@ -82,7 +82,7 @@ export interface PiDiagnosticReport {
      * `unavailable` when the sessions directory exists but could not be read,
      * so an empty `recentSessions` is a failure, not an absence.
      */
-    sessionDiscovery: "ok" | "unavailable";
+    sessionDiscovery: PiSessionDiscovery["status"];
     /** The report keeps legacy tmp-dir dumps separate from project-grouped dumps. */
     historianDumps: PiHistorianDumpsReport;
 }
@@ -281,12 +281,17 @@ export function piSessionIdFromFileName(fileName: string): string {
  *
  * The session reader returns an empty array when `~/.pi/agent/sessions/` does not exist.
  */
-type PiSessionDiscovery =
-    | { status: "ok"; sessions: PiRecentSessionSummary[] }
+export type PiSessionDiscovery =
+    | { status: "ok" | "partial"; sessions: PiRecentSessionSummary[] }
     | { status: "unavailable"; sessions: [] };
 
-function collectPiRecentSessions(): PiSessionDiscovery {
-    const sessionsRoot = getPiSessionsRoot();
+/**
+ * OMP keeps the same `<slug>/<timestamp>_<id>.jsonl` layout under its own
+ * root, so the OMP doctor passes `getOmpSessionsRoot()`.
+ */
+export function collectPiRecentSessions(
+    sessionsRoot: string = getPiSessionsRoot(),
+): PiSessionDiscovery {
     if (!existsSync(sessionsRoot)) return { status: "ok", sessions: [] };
     try {
         const slugs = readdirSync(sessionsRoot, { withFileTypes: true })
@@ -341,13 +346,17 @@ function collectPiRecentSessions(): PiSessionDiscovery {
                 lastActiveAt: new Date(entry.mtime).toISOString(),
             };
         });
-        return { status: "ok", sessions };
+        // Some sessions were read while others were not, so the list is
+        // incomplete rather than empty.
+        return { status: unreadable > 0 ? "partial" : "ok", sessions };
     } catch {
         return { status: "unavailable", sessions: [] };
     }
 }
 
-function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHistorianDumpsReport {
+export function collectPiHistorianDumps(
+    recentSessions: PiRecentSessionSummary[],
+): PiHistorianDumpsReport {
     const buckets = new Map<string, PiProjectHistorianBucket>();
     for (const session of recentSessions) {
         const dir = session.directory;

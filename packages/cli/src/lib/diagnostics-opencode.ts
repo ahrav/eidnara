@@ -61,6 +61,8 @@ export interface DiagnosticReport {
     conflicts: {
         hasConflict: boolean;
         reasons: string[];
+        /** With `enabled: false` no integration is a conflict, since the plugin skips every hook. */
+        eidnaraEnabled: boolean;
         /** `compactionEnabled` stores the resolved Eidnara compaction mode used by the writer and fixer. */
         compactionEnabled: boolean;
         /** `nativeCompaction` stores the resolved native OpenCode `auto` and `prune` states. */
@@ -302,8 +304,11 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
 
     let compactionEnabled = false;
+    let eidnaraEnabled = true;
     try {
-        compactionEnabled = compactionEnabledFor(loadPluginConfig(process.cwd()));
+        const config = loadPluginConfig(process.cwd());
+        eidnaraEnabled = config.enabled !== false;
+        compactionEnabled = compactionEnabledFor(config);
     } catch (error) {
         console.warn(
             `[eidnara] Could not load Eidnara config to resolve compaction mode; ` +
@@ -311,7 +316,10 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
                 `(${error instanceof Error ? error.message : String(error)})`,
         );
     }
+    // With `enabled: false` the plugin skips every hook, so DCP and the OMO
+    // hooks are not conflicts; the doctor skips this detector in that mode too.
     const conflictResult = detectConflicts(process.cwd(), { compactionEnabled });
+    const reasons = eidnaraEnabled ? conflictResult.reasons : [];
     const discovery = await collectRecentSessions();
     const recentSessions = discovery.sessions;
     const opencodeInstallations = describeOpenCodeInstallations(detectOpenCodeInstallations());
@@ -347,8 +355,9 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             flags: (sanitizeValue(projectConfig.value ?? {}) as Record<string, unknown>) ?? {},
         },
         conflicts: {
-            hasConflict: conflictResult.hasConflict,
-            reasons: conflictResult.reasons,
+            hasConflict: reasons.length > 0,
+            reasons,
+            eidnaraEnabled,
             compactionEnabled,
             nativeCompaction: conflictResult.nativeCompaction,
         },
@@ -430,6 +439,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
         `- eidnara.jsonc parse error: ${report.eidnaraConfig.parseError === undefined ? "none" : sanitizeString(report.eidnaraConfig.parseError)}`,
         `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}`,
+        `- Eidnara enabled: ${report.conflicts.eidnaraEnabled}`,
         `- Eidnara compaction mode: ${report.conflicts.compactionEnabled ? "on" : "off"}`,
         `- Native compaction: auto=${report.conflicts.nativeCompaction?.auto ?? "unknown"}, prune=${report.conflicts.nativeCompaction?.prune ?? "unknown"}`,
         ...openCodeInstallationTable,

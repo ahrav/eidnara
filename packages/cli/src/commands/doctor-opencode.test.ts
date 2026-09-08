@@ -54,6 +54,8 @@ afterEach(() => {
  * data roots, and `PATH` (which carries only a fake `opencode` binary so the
  * host's real installation cannot leak into detection).
  */
+const OPENCODE_VERSION = "1.18.0";
+
 function installIsolatedHome(): { configDir: string; opencodeConfigPath: string } {
     snapshotEnv();
     const root = makeTempDir();
@@ -64,7 +66,7 @@ function installIsolatedHome(): { configDir: string; opencodeConfigPath: string 
     mkdirSync(configDir, { recursive: true });
 
     const fakeOpenCode = join(binDir, "opencode");
-    writeFileSync(fakeOpenCode, "#!/bin/sh\necho 1.0.0\n");
+    writeFileSync(fakeOpenCode, `#!/bin/sh\necho ${OPENCODE_VERSION}\n`);
     chmodSync(fakeOpenCode, 0o755);
 
     process.env.HOME = root;
@@ -409,6 +411,25 @@ describe("doctor OpenCode read-only checks", () => {
                 plugin?: unknown[];
             };
             expect(untouched.plugin).toContain("@tarquinen/opencode-dcp");
+        } finally {
+            restore();
+        }
+    });
+
+    it("fails when the installed OpenCode is older than the plugin's minimum", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeFileSync(join(configDir, "..", "..", "bin", "opencode"), "#!/bin/sh\necho 1.14.9\n");
+        writeJsonc(opencodeConfigPath, REGISTERED_PLUGIN);
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const { errors, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({});
+
+            expect(code).toBe(1);
+            expect(errors).toContain(
+                "OpenCode 1.14.9 is older than the required 1.15.0; the plugin may fail to load. Upgrade OpenCode.",
+            );
         } finally {
             restore();
         }

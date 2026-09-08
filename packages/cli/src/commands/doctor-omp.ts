@@ -14,7 +14,9 @@ import { loadPiConfig } from "@eidnara/pi/config";
 import { stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { collectPiHistorianDumps, collectPiRecentSessions } from "../lib/diagnostics-pi";
 import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import { describeHistorianDumps } from "../lib/historian-dumps";
 import { capBodyToGithubLimit } from "../lib/issue-body";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import {
@@ -314,6 +316,18 @@ async function runHealthChecks(options: {
         "info",
         `Pi-compatible runtime log: ${logPath}${existsSync(logPath) ? "" : " (not created yet)"}`,
     );
+
+    const sessions = collectPiRecentSessions(getOmpSessionsRoot());
+    if (sessions.status !== "ok") {
+        add(
+            results,
+            "warn",
+            `Some OMP session directories under ${getOmpSessionsRoot()} could not be read`,
+        );
+    }
+    for (const line of describeHistorianDumps(collectPiHistorianDumps(sessions.sessions))) {
+        add(results, line.status, line.message);
+    }
 
     if (!options.quiet) for (const result of results) printResult(options.prompts, result);
     return {

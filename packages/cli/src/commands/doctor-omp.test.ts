@@ -597,6 +597,59 @@ describe("OMP doctor", () => {
         expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
     });
 
+    it("reports historian dumps for recent OMP sessions", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-dumps-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "eidnara");
+        const project = join(root, "project");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        // One OMP session whose header names the project; the project holds one dump.
+        const slugDir = join(agentDir, "sessions", "--tmp-omp-project--");
+        mkdirSync(slugDir, { recursive: true });
+        writeFileSync(
+            join(slugDir, "2026-07-07T12-00-00-000Z_omp1.jsonl"),
+            `${JSON.stringify({ type: "session", version: 3, id: "omp1", cwd: project })}\n`,
+        );
+        const dumpDir = join(project, ".eidnara", "context", "historian");
+        mkdirSync(dumpDir, { recursive: true });
+        writeFileSync(join(dumpDir, "dump-001.xml"), "<compartments></compartments>\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    { name: "@eidnara/pi", version: "0.33.0", enabled: true, path: pluginDir },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(0);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("Historian debug dumps: 1 file(s) across 1 project(s)");
+        expect(output).toContain(`[${project}] 1 file(s)`);
+        expect(output).toContain("dump-001.xml");
+    });
+
     it("sanitizes the issue title before passing it to gh issue create", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-title-"));
         roots.push(root);

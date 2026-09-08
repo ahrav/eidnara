@@ -233,6 +233,38 @@ describe("collectDiagnostics Pi path resolution", () => {
         }
     });
 
+    it("reports discovery as partial when some session directories are unreadable", async () => {
+        if (typeof process.getuid === "function" && process.getuid() === 0) return;
+        const root = makeTempRoot();
+        const home = join(root, "home");
+        const cwd = join(root, "workspace");
+        const agentDir = join(root, "agent");
+        process.env.HOME = home;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_DATA_HOME = join(root, "data");
+        process.env.XDG_CACHE_HOME = join(root, "cache");
+        process.env.XDG_CONFIG_HOME = join(root, "config");
+        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
+        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+        const readable = join(agentDir, "sessions", "--tmp-openproject--");
+        const locked = join(agentDir, "sessions", "--tmp-lockedproject--");
+        mkdirSync(readable, { recursive: true });
+        mkdirSync(locked, { recursive: true });
+        writeFileSync(join(readable, "2026-07-07T12-00-00-000Z_visible.jsonl"), "{}\n");
+        writeFileSync(join(locked, "2026-07-07T12-00-00-000Z_hidden.jsonl"), "{}\n");
+        chmodSync(locked, 0o000);
+
+        try {
+            const report = await collectDiagnostics(cwd);
+            expect(report.recentSessions.map((session) => session.sessionId)).toEqual(["visible"]);
+            expect(report.sessionDiscovery).toBe("partial");
+        } finally {
+            chmodSync(locked, 0o755);
+        }
+    });
+
     it("sanitizes config parse errors so the issue body does not carry local paths", async () => {
         const root = makeTempRoot();
         const home = join(root, "home");

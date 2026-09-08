@@ -371,6 +371,7 @@ describe("bundleIssueReport secret redaction", () => {
                 conflicts: {
                     hasConflict: false,
                     reasons: [],
+                    eidnaraEnabled: true,
                     compactionEnabled: true,
                     nativeCompaction: { auto: false, prune: false },
                 },
@@ -455,6 +456,7 @@ describe("bundleIssueReport secret redaction", () => {
                 conflicts: {
                     hasConflict: false,
                     reasons: [],
+                    eidnaraEnabled: true,
                     compactionEnabled: true,
                     nativeCompaction: { auto: false, prune: false },
                 },
@@ -662,6 +664,7 @@ function baseReport(root: string): DiagnosticReport {
         conflicts: {
             hasConflict: false,
             reasons: [],
+            eidnaraEnabled: true,
             compactionEnabled: true,
             nativeCompaction: { auto: false, prune: false },
         },

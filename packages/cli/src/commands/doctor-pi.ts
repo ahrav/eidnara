@@ -15,6 +15,7 @@ import { stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics, sanitizeString } from "../lib/diagnostics-pi";
 import { readFileTail } from "../lib/fs-utils";
+import { describeHistorianDumps } from "../lib/historian-dumps";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
 import { bundleIssueReport } from "../lib/logs-pi";
@@ -343,33 +344,8 @@ async function runHealthChecks(options: {
     }
 
     const diagnosticsForDumps = await collectDiagnostics(options.cwd);
-    const dumpBuckets = diagnosticsForDumps.historianDumps.byProject;
-    if (dumpBuckets.length > 0) {
-        const totalCount = dumpBuckets.reduce((sum, b) => sum + b.count, 0);
-        add(
-            results,
-            "warn",
-            `Historian debug dumps: ${totalCount} file(s) across ${dumpBuckets.length} project(s)`,
-        );
-        for (const bucket of dumpBuckets) {
-            add(results, "info", `  [${bucket.directory}] ${bucket.count} file(s)`);
-            for (const dump of bucket.recent.slice(0, 3)) {
-                const age = dump.ageMinutes;
-                const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
-                add(results, "info", `    ${dump.name} (${ageStr})`);
-            }
-            if (bucket.count > 3) {
-                add(results, "info", `    ... and ${bucket.count - 3} more`);
-            }
-        }
-    }
-    const legacyDumps = diagnosticsForDumps.historianDumps.legacyDumps;
-    if (legacyDumps.count > 0) {
-        add(
-            results,
-            "info",
-            `Legacy historian dumps (pre-v0.18.x): ${legacyDumps.count} file(s) in ${legacyDumps.dir}`,
-        );
+    for (const line of describeHistorianDumps(diagnosticsForDumps.historianDumps)) {
+        add(results, line.status, line.message);
     }
 
     if (!options.quiet) {
@@ -478,7 +454,16 @@ async function runIssueFlow(options: {
             );
             if (!includeAll) sessionFilter = EXCLUDE_SESSION_RECORDS;
         }
-        if (report.recentSessions.length > 1) {
+        if (report.sessionDiscovery === "partial") {
+            options.prompts.log.warn(
+                "Some Pi session directories could not be read, so the session list may be incomplete.",
+            );
+        }
+        // An incomplete list still gets the picker for a lone session so "All sessions" stays reachable.
+        const showPicker =
+            report.recentSessions.length > 1 ||
+            (report.recentSessions.length === 1 && report.sessionDiscovery === "partial");
+        if (showPicker) {
             const choice = await options.prompts.selectOne(
                 "Which Pi session is this issue about? (filters log lines from other sessions)",
                 [

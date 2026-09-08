@@ -39,6 +39,8 @@ import {
     spinner,
     text,
 } from "../lib/prompts";
+import { compareVersionStrings } from "../lib/version";
+import { OPENCODE_MINIMUM_VERSION } from "./setup-opencode";
 
 const PLUGIN_NAME = "@eidnara/opencode";
 
@@ -329,6 +331,13 @@ export async function runDoctor(
                 ? `OpenCode ${activeInstallation.version} installed (active install marked above)`
                 : `OpenCode ${activeInstallation.version} installed`,
         );
+        if (compareVersionStrings(activeInstallation.version, OPENCODE_MINIMUM_VERSION) < 0) {
+            fail(
+                `OpenCode ${activeInstallation.version} is older than the required ${OPENCODE_MINIMUM_VERSION}; the plugin may fail to load. Upgrade OpenCode.`,
+            );
+        } else {
+            pass(`OpenCode version meets minimum ${OPENCODE_MINIMUM_VERSION} requirement`);
+        }
     }
 
     log.info(`Eidnara CLI v${getSelfVersion()}`);

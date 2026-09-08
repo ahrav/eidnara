@@ -73,11 +73,14 @@ describe("collectDiagnostics", () => {
         expect(report.eidnaraConfig.exists).toBe(false);
     });
 
-    it("reports compaction as off when Eidnara is disabled with enabled: false", async () => {
+    it("reports no conflicts when Eidnara is disabled, even with DCP and native compaction on", async () => {
         const { root, configDir } = isolate();
         writeFileSync(
             join(configDir, "opencode.jsonc"),
-            JSON.stringify({ plugin: ["@eidnara/opencode"], compaction: { auto: true } }),
+            JSON.stringify({
+                plugin: ["@eidnara/opencode", "@tarquinen/opencode-dcp"],
+                compaction: { auto: true },
+            }),
         );
         writeFileSync(
             join(root, "xdg", "eidnara", "eidnara.jsonc"),
@@ -86,8 +89,27 @@ describe("collectDiagnostics", () => {
 
         const report = await collectDiagnostics();
 
+        expect(report.conflicts.eidnaraEnabled).toBe(false);
         expect(report.conflicts.compactionEnabled).toBe(false);
         expect(report.conflicts.hasConflict).toBe(false);
+        expect(report.conflicts.reasons).toEqual([]);
+    });
+
+    it("still reports the DCP conflict when Eidnara is enabled", async () => {
+        const { configDir } = isolate();
+        writeFileSync(
+            join(configDir, "opencode.jsonc"),
+            JSON.stringify({
+                plugin: ["@eidnara/opencode", "@tarquinen/opencode-dcp"],
+                compaction: { auto: false, prune: false },
+            }),
+        );
+
+        const report = await collectDiagnostics();
+
+        expect(report.conflicts.eidnaraEnabled).toBe(true);
+        expect(report.conflicts.hasConflict).toBe(true);
+        expect(report.conflicts.reasons.some((reason) => /dcp/i.test(reason))).toBe(true);
     });
 
     it("reports session discovery as unavailable when the database cannot be read", async () => {
