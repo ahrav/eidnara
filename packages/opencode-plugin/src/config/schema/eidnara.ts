@@ -6,6 +6,9 @@ import { isValidPromptSurfaceModelKey } from "../../shared/prompt-surface";
 import { AgentOverrideConfigSchema } from "./agent-overrides";
 
 export const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE = 65;
+/** Inclusive range the schema accepts for `execute_threshold_percentage`. */
+export const MIN_EXECUTE_THRESHOLD_PERCENTAGE = 20;
+export const MAX_EXECUTE_THRESHOLD_PERCENTAGE = 90;
 // The 95% emergency wall remains above the 90% execute-threshold cap.
 export const EXECUTE_THRESHOLD_CAP_MESSAGE =
     "execute_threshold is capped at 90% for cache safety: output capacity is reserved from the usable context window, and the remaining 10% absorbs mid-turn growth before the absolute 95% emergency wall. Use a value between 20 and 90.";
@@ -403,10 +406,23 @@ export const EidnaraConfigSchema = z
             ),
         execute_threshold_percentage: z
             .union([
-                z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE),
                 z
-                    .object({ default: z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE) })
-                    .catchall(z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE)),
+                    .number()
+                    .min(MIN_EXECUTE_THRESHOLD_PERCENTAGE)
+                    .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE),
+                z
+                    .object({
+                        default: z
+                            .number()
+                            .min(MIN_EXECUTE_THRESHOLD_PERCENTAGE)
+                            .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE),
+                    })
+                    .catchall(
+                        z
+                            .number()
+                            .min(MIN_EXECUTE_THRESHOLD_PERCENTAGE)
+                            .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE),
+                    ),
             ])
             .default(DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE)
             .describe(

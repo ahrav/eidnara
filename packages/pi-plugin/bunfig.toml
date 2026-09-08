@@ -1,0 +1,3 @@
+# The test runner preloads test-preload.ts so tests never touch the user's data root.
+[test]
+preload = ["./test-preload.ts"]

@@ -234,6 +234,46 @@ describe("stripUnsafeProjectConfigFields", () => {
 });
 
 describe("constrainProjectThresholdOverrides", () => {
+    it("constrains project percentage thresholds across the schema's full 20-90 range", () => {
+        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 85 };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: 85 },
+            trustedBaseConfig: { execute_threshold_percentage: 90 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage")]);
+    });
+
+    it("lets a project raise the percentage threshold up to the schema cap", () => {
+        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 90 };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: 90 },
+            trustedBaseConfig: { execute_threshold_percentage: 85 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toHaveLength(0);
+    });
+
+    it("constrains per-model project percentage overrides between 80 and 90", () => {
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { default: 90, "provider/model": 82 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { "provider/model": 82 } },
+            trustedBaseConfig: { execute_threshold_percentage: 90 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toEqual([
+            expect.stringContaining("execute_threshold_percentage.provider/model"),
+        ]);
+    });
+
     it("drops lower project token thresholds and warns", () => {
         const mergedRaw: Record<string, unknown> = {
             execute_threshold_tokens: { default: 9_000 },
