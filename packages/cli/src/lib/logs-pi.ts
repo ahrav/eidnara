@@ -72,6 +72,14 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     });
 }
 
+/**
+ * A log line starting with up to three spaces and three or more backticks
+ * would close the bundle fence; escaping its first backtick prevents that.
+ */
+function escapeFenceOpeners(lines: string[]): string[] {
+    return lines.map((line) => line.replace(/^( {0,3})(`{3,})/, "$1\\$2"));
+}
+
 export async function bundleIssueReport(
     report: PiDiagnosticReport,
     description: string,
@@ -88,7 +96,9 @@ export async function bundleIssueReport(
             logReadError = error instanceof Error ? error.message : String(error);
         }
     }
-    const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
+    const logLines = escapeFenceOpeners(
+        filterLogLinesBySession(allLogLines, options.sessionFilter ?? null),
+    );
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // The error scan uses 4,000 lines so trailing log output does not exclude earlier errors.

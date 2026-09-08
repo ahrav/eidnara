@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, userInfo } from "node:os";
@@ -143,11 +142,6 @@ function currentUsername(): string | undefined {
     return fromHome || undefined;
 }
 
-function currentUserHash(): string {
-    const username = currentUsername() ?? "unknown";
-    return createHash("sha256").update(username).digest("hex").slice(0, 12);
-}
-
 function redactSecretString(value: string): string {
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
     return redactSecretText(value)
@@ -160,22 +154,19 @@ function redactSecretString(value: string): string {
 /**
  * `sanitizeString` redacts paths, usernames, and secret material before issue reports are written.
  * `sanitizeString` replaces the exact home path with `<HOME>`.
- * `sanitizeString` replaces the local username with a stable short hash.
- * The stable hash correlates repeated occurrences without exposing the account name.
  */
 export function sanitizeString(value: string): string {
     const home = currentHome();
     const username = currentUsername();
-    const userHash = `<USER:${currentUserHash()}>`;
     let sanitized = redactSecretString(value);
     if (home) {
         sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "<HOME>");
     }
-    sanitized = sanitized.replace(/\/Users\/[^/]+\//g, `/Users/${userHash}/`);
-    sanitized = sanitized.replace(/\/home\/[^/]+\//g, `/home/${userHash}/`);
-    sanitized = sanitized.replace(/C:\\Users\\[^\\]+\\/g, `C:\\Users\\${userHash}\\`);
+    sanitized = sanitized.replace(/\/Users\/[^/]+\//g, "/Users/<USER>/");
+    sanitized = sanitized.replace(/\/home\/[^/]+\//g, "/home/<USER>/");
+    sanitized = sanitized.replace(/C:\\Users\\[^\\]+\\/g, "C:\\Users\\<USER>\\");
     if (username) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), userHash);
+        sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
     }
     return sanitized;
 }

@@ -127,6 +127,32 @@ describe("bundleIssueReport session filtering", () => {
         expect(bundled.bodyMarkdown).toContain("dir=/srv/p");
     });
 
+    it("escapes a log line that would close the Markdown fence", async () => {
+        const root = makeTempRoot();
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "[2026-07-07T12:00:00.000Z] sidekick stderr follows",
+                "```",
+                "  ```json",
+                "inside",
+                "[2026-07-07T12:00:01.000Z] newest line",
+            ].join("\n"),
+        );
+
+        const bundled = await bundleIssueReport(reportWithLog(logPath), "desc", "title", {
+            cwd: root,
+            now: new Date("2026-07-07T12:00:00Z"),
+        });
+
+        const logSection = bundled.bodyMarkdown.slice(bundled.bodyMarkdown.indexOf("## Log ("));
+        expect(logSection).toContain("\n\\```\n");
+        expect(logSection).toContain("\n  \\```json\n");
+        expect(logSection.match(/^```$/gm)).toHaveLength(2);
+        expect(logSection).toContain("newest line");
+    });
+
     it("drops another session's error stack along with its tagged first line", async () => {
         const root = makeTempRoot();
         const logPath = join(root, "eidnara.log");
