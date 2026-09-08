@@ -137,7 +137,8 @@ export interface RestartEffects {
 
 export interface DaemonVersions {
     release: string | null;
-    proof: string | null;
+    /** The binary emits `"current"` only on a successful `start` or `restart`. */
+    proof: "current" | null;
     daemon: string | null;
     context: string | null;
     synapse: string | null;
@@ -493,22 +494,23 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         ["release", "proof", "daemon", "context", "synapse", "broca"],
         "versions",
     );
+    const proof = nullableString(rawVersions.proof, "versions.proof");
+    if (proof !== null && proof !== "current") {
+        fail("versions.proof is outside its closed literal");
+    }
+    // Only an authenticated, successful start or restart vouches for the running code; status and stop never authenticate.
+    const provesCurrent = record.ok && (command === "start" || command === "restart");
+    if (proof === "current" && !provesCurrent) {
+        fail("versions.proof claims current from a result that cannot authenticate");
+    }
     const versions: DaemonVersions = {
         release: nullableString(rawVersions.release, "versions.release"),
-        proof: nullableString(rawVersions.proof, "versions.proof"),
+        proof,
         daemon: nullableDaemonVersion(rawVersions.daemon),
         context: nullableString(rawVersions.context, "versions.context"),
         synapse: nullableString(rawVersions.synapse, "versions.synapse"),
         broca: nullableString(rawVersions.broca, "versions.broca"),
     };
-    if (versions.proof !== null && versions.proof !== "current") {
-        fail("versions.proof is outside its closed literal");
-    }
-    // Only an authenticated, successful start or restart vouches for the running code; status and stop never authenticate.
-    const provesCurrent = record.ok && (command === "start" || command === "restart");
-    if (versions.proof === "current" && !provesCurrent) {
-        fail("versions.proof claims current from a result that cannot authenticate");
-    }
     return {
         schema: DAEMON_RESULT_SCHEMA,
         command: command as DaemonCommand,

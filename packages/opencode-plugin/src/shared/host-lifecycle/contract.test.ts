@@ -149,6 +149,7 @@ describe("parseDaemonResult", () => {
                     remediation: null,
                     readiness,
                     checks: [],
+                    versions: { ...(validResult().versions as object), proof: "current" },
                 }),
             );
         expect(() =>
