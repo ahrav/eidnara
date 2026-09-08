@@ -74,4 +74,34 @@ describe("writeFileAtomic", () => {
             expect(existsSync(`${link}.tmp`)).toBe(false);
         },
     );
+
+    it.if(process.platform !== "win32")(
+        "creates the missing target of a dangling relative symlink and keeps the link",
+        () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-dangling-"));
+            roots.push(root);
+            const link = join(root, "config", "opencode.jsonc");
+            const target = join(root, "dotfiles", "opencode.jsonc");
+            mkdirSync(dirname(link), { recursive: true });
+            symlinkSync(join("..", "dotfiles", "opencode.jsonc"), link);
+            expect(existsSync(target)).toBe(false);
+
+            writeFileAtomic(link, "v1\n");
+
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(readFileSync(target, "utf-8")).toBe("v1\n");
+            expect(readFileSync(link, "utf-8")).toBe("v1\n");
+        },
+    );
+
+    it.if(process.platform !== "win32")("refuses a symlink loop instead of spinning", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-loop-"));
+        roots.push(root);
+        const a = join(root, "a.jsonc");
+        const b = join(root, "b.jsonc");
+        symlinkSync(b, a);
+        symlinkSync(a, b);
+        expect(() => writeFileAtomic(a, "x\n")).toThrow(/symbolic links/);
+        expect(lstatSync(a).isSymbolicLink()).toBe(true);
+    });
 });

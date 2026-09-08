@@ -1,16 +1,27 @@
-import { chmodSync, mkdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import {
+    chmodSync,
+    lstatSync,
+    mkdirSync,
+    readlinkSync,
+    renameSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
+
+const MAX_SYMLINK_HOPS = 40;
 
 /**
- * A symlinked target is resolved first so the rename replaces the file the
- * link points at and the link itself survives.
+ * Resolve link text instead of calling `realpathSync`: dangling links' missing
+ * targets remain writable without replacing the link.
  */
 function resolveWriteTarget(targetPath: string): string {
-    try {
-        return realpathSync(targetPath);
-    } catch {
-        return targetPath;
+    let current = targetPath;
+    for (let hops = 0; hops < MAX_SYMLINK_HOPS; hops++) {
+        if (!lstatSync(current, { throwIfNoEntry: false })?.isSymbolicLink()) return current;
+        current = resolve(dirname(current), readlinkSync(current));
     }
+    throw new Error(`Too many levels of symbolic links: ${targetPath}`);
 }
 
 /**
@@ -21,6 +32,7 @@ function resolveWriteTarget(targetPath: string): string {
 export function writeFileAtomic(targetPath: string, data: string): void {
     mkdirSync(dirname(targetPath), { recursive: true });
     const resolvedTarget = resolveWriteTarget(targetPath);
+    mkdirSync(dirname(resolvedTarget), { recursive: true });
     const tmpPath = `${resolvedTarget}.tmp`;
     writeFileSync(tmpPath, data, { encoding: "utf-8" });
     try {

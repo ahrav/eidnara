@@ -64,6 +64,22 @@ describe("OMP binary discovery", () => {
         expect(detectOmpBinary()).toBeNull();
     });
 
+    it("finds Bun under ~/.bun/bin when it is absent from PATH", () => {
+        const { root } = makePackageRoot();
+        const bunBin = join(root, "home", ".bun", "bin");
+        mkdirSync(bunBin, { recursive: true });
+        writeFileSync(join(bunBin, "bun"), "#!/bin/sh\n");
+        chmodSync(join(bunBin, "bun"), 0o755);
+        process.env.PATH = join(root, "empty-bin");
+        const cli = join(root, "pkg", "dist", "cli.js");
+
+        expect(detectOmpBinary()).toEqual({ path: cli, source: "package" });
+        expect(getOmpCommandInvocation(cli, ["--version"])).toEqual({
+            command: join(bunBin, "bun"),
+            args: [cli, "--version"],
+        });
+    });
+
     it("routes a package CLI script through Bun instead of spawning it directly", () => {
         const { root, binDir } = makePackageRoot();
         process.env.PATH = binDir;

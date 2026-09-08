@@ -7,7 +7,12 @@ import {
     getCommandInvocation,
     invocationSpawnOptions,
 } from "./command-invocation";
-import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
+import {
+    findBunRuntime,
+    findOnPath,
+    isExecutableFile,
+    packageManagerBinCandidates,
+} from "./find-on-path";
 import { getOmpPackageDir } from "./paths";
 export interface OmpBinaryInfo {
     path: string;
@@ -39,7 +44,7 @@ const OMP_BINARY_ENV = "EIDNARA_OMP_BINARY";
 function detectOmpPackageCli(): string | null {
     const packageDir = getOmpPackageDir();
     if (!packageDir) return null;
-    if (!findOnPath("bun")) return null;
+    if (!findBunRuntime()) return null;
     try {
         const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")) as {
             name?: unknown;
@@ -53,7 +58,7 @@ function detectOmpPackageCli(): string | null {
 }
 export function getOmpCommandInvocation(ompPath: string, args: string[]): CommandInvocation {
     if (extname(ompPath).toLowerCase() === ".js") {
-        const bun = findOnPath("bun");
+        const bun = findBunRuntime();
         if (bun) return { command: bun, args: [ompPath, ...args] };
     }
     return getCommandInvocation(ompPath, args, OMP_BINARY_ENV);

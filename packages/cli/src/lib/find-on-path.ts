@@ -1,4 +1,5 @@
 import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 
 /**
@@ -70,4 +71,18 @@ export function packageManagerBinCandidates(
         join(home, ".bun", "bin", `${binary}.exe`),
         join(home, ".bun", "bin", `${binary}.cmd`),
     ];
+}
+
+/** Bun's installer places the runtime itself in `~/.bun/bin`, which a GUI-launched process may not have on `PATH`. */
+export function findBunRuntime(): string | null {
+    const onPath = findOnPath("bun");
+    if (onPath) return onPath;
+    const home = process.env.HOME?.trim() || homedir();
+    const candidates = packageManagerBinCandidates(
+        "bun",
+        process.platform,
+        home,
+        process.env.APPDATA,
+    );
+    return candidates.find((candidate) => isExecutableFile(candidate)) ?? null;
 }
