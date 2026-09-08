@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectDiagnostics, sanitizeValue } from "./diagnostics-pi";
+import { collectDiagnostics, sanitizeString, sanitizeValue } from "./diagnostics-pi";
 
 setDefaultTimeout(15_000);
 
@@ -78,6 +78,7 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
                     default: "light",
                     tool_descriptions: { ctx_search: "Find prior notes" },
                 },
+                system_prompt_injection: { skip_signatures: ["<!-- eidnara: skip -->", "secret"] },
             }),
         ).toEqual({
             historian: { prompt: "<REDACTED 25 chars>", model: "claude" },
@@ -86,7 +87,17 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
                 default: "light",
                 tool_descriptions: { ctx_search: "<REDACTED 16 chars>" },
             },
+            system_prompt_injection: {
+                skip_signatures: ["<REDACTED 22 chars>", "<REDACTED 6 chars>"],
+            },
         });
+    });
+});
+
+describe("sanitizeString home handling", () => {
+    it("does not treat a root home directory as a redactable prefix", () => {
+        process.env.HOME = "/";
+        expect(sanitizeString("https://example.test/a/b")).toBe("https://example.test/a/b");
     });
 });
 

@@ -1,7 +1,7 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, userInfo } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, parse } from "node:path";
 
 import {
     eidnaraProjectConfigBasePath,
@@ -153,13 +153,13 @@ function redactSecretString(value: string): string {
 
 /**
  * `sanitizeString` redacts paths, usernames, and secret material before issue reports are written.
- * `sanitizeString` replaces the exact home path with `<HOME>`.
+ * Home roots are not redacted because they would match every path separator.
  */
 export function sanitizeString(value: string): string {
     const home = currentHome();
     const username = currentUsername();
     let sanitized = redactSecretString(value);
-    if (home) {
+    if (home && parse(home).root !== home) {
         sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "<HOME>");
     }
     sanitized = sanitized.replace(/\/Users\/[^/]+\//g, "/Users/<USER>/");
@@ -177,7 +177,7 @@ function shouldRedactKey(key: string): boolean {
 
 /** Prompt fields hold arbitrary private prose; the report keeps only presence and length. */
 function isPromptKey(key: string): boolean {
-    return /^(prompt|system_prompt|description|tool_descriptions)$/.test(key);
+    return /^(prompt|system_prompt|description|tool_descriptions|skip_signatures)$/.test(key);
 }
 
 function redactProse(value: unknown): unknown {
