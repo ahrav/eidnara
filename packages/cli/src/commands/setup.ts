@@ -12,6 +12,15 @@ export async function runSetup(argv: string[]): Promise<number> {
     const dryRun = argv.includes("--dry-run");
     intro(dryRun ? "Eidnara setup (dry run)" : "Eidnara setup");
 
+    // A misspelled safety flag such as `--dryrun` must not fall through to real writes.
+    const unknown = unknownSetupArguments(argv);
+    if (unknown.length > 0) {
+        log.error(`Unknown option${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}`);
+        log.message("Supported options: --dry-run, --harness <opencode|pi|omp>");
+        outro("Setup stopped — correct the command arguments and try again.");
+        return 1;
+    }
+
     let adapters: HarnessAdapter[];
     try {
         adapters = await resolveAdaptersForCommand(argv, {
@@ -48,6 +57,22 @@ export async function runSetup(argv: string[]): Promise<number> {
     }
     outro(dryRun ? "Dry run done — no changes were made." : "Done.");
     return 0;
+}
+
+/** A `--`-prefixed harness value stays unconsumed so the harness parser reports its missing-value error. */
+export function unknownSetupArguments(argv: readonly string[]): string[] {
+    const unknown: string[] = [];
+    for (let index = 0; index < argv.length; index++) {
+        const argument = argv[index];
+        if (argument === "--dry-run") continue;
+        if (argument === "--harness") {
+            const value = argv[index + 1];
+            if (value !== undefined && !value.startsWith("--")) index++;
+            continue;
+        }
+        unknown.push(argument);
+    }
+    return unknown;
 }
 
 async function dispatchSetup(adapter: HarnessAdapter, dryRun: boolean): Promise<number> {

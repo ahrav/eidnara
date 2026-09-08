@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     eidnaraProjectConfigBasePath,
@@ -44,5 +46,20 @@ describe("config paths", () => {
         expect(resolveEidnaraProjectConfigPath("/work/proj")).toBe(
             join("/work/proj", ".eidnara", "eidnara.jsonc"),
         );
+    });
+
+    test("resolves to an existing eidnara.json when no eidnara.jsonc exists", () => {
+        const xdg = mkdtempSync(join(tmpdir(), "eidnara-config-paths-"));
+        try {
+            process.env.XDG_CONFIG_HOME = xdg;
+            mkdirSync(join(xdg, "eidnara"), { recursive: true });
+            writeFileSync(join(xdg, "eidnara", "eidnara.json"), "{}");
+            expect(resolveEidnaraUserConfigPath()).toBe(join(xdg, "eidnara", "eidnara.json"));
+
+            writeFileSync(join(xdg, "eidnara", "eidnara.jsonc"), "{}");
+            expect(resolveEidnaraUserConfigPath()).toBe(join(xdg, "eidnara", "eidnara.jsonc"));
+        } finally {
+            rmSync(xdg, { recursive: true, force: true });
+        }
     });
 });

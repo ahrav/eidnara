@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { parse } from "comment-json";
 
 import {
@@ -8,6 +8,7 @@ import {
     DCP_PACKAGE_NAMES,
     extractPluginName,
     matchesPackageName,
+    projectOpenCodeConfigPaths,
 } from "./conflict-detector";
 import { appendJsoncArrayValues, removeJsoncArrayEntries, setJsoncValue } from "./jsonc-edit";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
@@ -77,12 +78,7 @@ function collectOpenCodeConfigPaths(directory: string): string[] {
         paths.add(userConfig);
     }
 
-    for (const filePath of [
-        join(directory, ".opencode", "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, "opencode.json"),
-    ]) {
+    for (const filePath of projectOpenCodeConfigPaths(directory)) {
         if (existsSync(filePath)) {
             paths.add(filePath);
         }
@@ -91,7 +87,8 @@ function collectOpenCodeConfigPaths(directory: string): string[] {
     return [...paths];
 }
 
-function collectOmoConfigPaths(directory: string): string[] {
+/** Existing OMO config files `fixConflicts` may edit: user and project, legacy and unified layouts. */
+export function collectOmoConfigPaths(directory: string): string[] {
     const paths = new Set<string>();
     const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
 
@@ -129,8 +126,8 @@ function collectOmoConfigPaths(directory: string): string[] {
 
 /* */
 function isUnifiedOmoPath(configPath: string): boolean {
-    const basename = configPath.split("/").pop() ?? "";
-    return basename === "omo.jsonc" || basename === "omo.json";
+    const name = basename(configPath);
+    return name === "omo.jsonc" || name === "omo.json";
 }
 
 function disableCompactionFlags(

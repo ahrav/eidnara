@@ -1,12 +1,21 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+    type ConflictResult,
+    DCP_CONFLICT_REASON,
+} from "@eidnara/opencode/shared/conflict-detector";
 import { parse as parseJsonc } from "comment-json";
+import { assertJsoncConfigsParseable } from "../lib/jsonc-config";
 import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
     findDcpPluginIndexes,
+    hasAnthropicModel,
+    preflightConfigPaths,
+    withClaudeMaxCacheTtl,
+    withoutDcpConflict,
     writeEidnaraConfig,
 } from "./setup-opencode";
 
@@ -66,6 +75,94 @@ describe("setup-opencode config safety", () => {
         const rewritten = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
         expect(rewritten.$schema).toBe(written.$schema);
         expect(rewritten.sidekick).toEqual({ model: "openai/gpt-5-nano" });
+    });
+
+    it("lifts a scalar cache_ttl into the record default when Claude Max is selected", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(path, `{"cache_ttl":"10m","historian":{"model":"openai/gpt-5"}}`);
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: false,
+            sidekickModel: null,
+            claudeMax: true,
+        });
+
+        const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(written.cache_ttl).toEqual({
+            default: "10m",
+            "anthropic/claude-sonnet-4-6": "59m",
+            "anthropic/claude-opus-4-6": "59m",
+            "anthropic/claude-haiku-4-5": "59m",
+        });
+    });
+
+    it("clears a historian opt-out when a historian model is chosen", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(
+            path,
+            `{"historian":{"disable":true,"enabled":false,"model":"old"},"sidekick":{"disable":true}}`,
+        );
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: false,
+            sidekickModel: null,
+            claudeMax: false,
+        });
+
+        const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.sidekick).toEqual({ disable: true });
+    });
+
+    it("replaces schema-invalid agent blocks instead of throwing on them", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(path, `{"historian":"old-model","sidekick":["stale"]}`);
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: true,
+            sidekickModel: "openai/gpt-5-mini",
+            claudeMax: false,
+        });
+
+        const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.sidekick).toEqual({ model: "openai/gpt-5-mini" });
+    });
+
+    it("normalizes every cache_ttl shape before adding the Claude Max overrides", () => {
+        const overrides = {
+            "anthropic/claude-sonnet-4-6": "59m",
+            "anthropic/claude-opus-4-6": "59m",
+        };
+        expect(withClaudeMaxCacheTtl(undefined)).toEqual({ default: "5m", ...overrides });
+        expect(withClaudeMaxCacheTtl("never")).toEqual({ default: "never", ...overrides });
+        expect(withClaudeMaxCacheTtl({ "openai/gpt-5": "1h" })).toEqual({
+            default: "5m",
+            "openai/gpt-5": "1h",
+            ...overrides,
+        });
+        expect(withClaudeMaxCacheTtl(["5m"])).toEqual({ default: "5m", ...overrides });
+    });
+
+    it("extends the Claude Max overrides to the selected Anthropic models only", () => {
+        expect(
+            withClaudeMaxCacheTtl(undefined, ["anthropic/claude-haiku-4-5", "openai/gpt-5", null]),
+        ).toEqual({
+            default: "5m",
+            "anthropic/claude-sonnet-4-6": "59m",
+            "anthropic/claude-opus-4-6": "59m",
+            "anthropic/claude-haiku-4-5": "59m",
+        });
+    });
+
+    it("offers the Claude Max prompt for a manually entered Anthropic model", () => {
+        expect(hasAnthropicModel([])).toBe(false);
+        expect(hasAnthropicModel(["openai/gpt-5", null])).toBe(false);
+        expect(hasAnthropicModel(["anthropic/claude-haiku-4-5"])).toBe(true);
+        expect(hasAnthropicModel(["openai/gpt-5", "anthropic/claude-haiku-4-5", null])).toBe(true);
     });
 
     it("appends the bare plugin name once and leaves a second run unchanged", () => {
@@ -131,6 +228,69 @@ describe("setup-opencode config safety", () => {
     });
 });
 
+describe("setup-opencode preflight targets", () => {
+    it("checks only the effective member of each project config pair", () => {
+        const root = tempDir();
+        mkdirSync(join(root, ".opencode"), { recursive: true });
+        writeFileSync(join(root, ".opencode", "opencode.jsonc"), "{}");
+        writeFileSync(join(root, ".opencode", "opencode.json"), "{ malformed");
+        writeFileSync(join(root, "opencode.json"), "{}");
+        const userPaths = {
+            configDir: join(root, "user"),
+            opencodeConfig: join(root, "user", "opencode.jsonc"),
+            opencodeConfigFormat: "none" as const,
+            eidnaraConfig: join(root, "user", "eidnara.jsonc"),
+            omoConfig: null,
+            tuiConfig: join(root, "user", "tui.jsonc"),
+            tuiConfigFormat: "none" as const,
+        };
+
+        const targets = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: false });
+
+        expect(targets).toContain(join(root, ".opencode", "opencode.jsonc"));
+        expect(targets).not.toContain(join(root, ".opencode", "opencode.json"));
+        expect(targets).toContain(join(root, "opencode.json"));
+        expect(targets.slice(0, 3)).toEqual([
+            userPaths.opencodeConfig,
+            userPaths.eidnaraConfig,
+            userPaths.tuiConfig,
+        ]);
+        expect(() => assertJsoncConfigsParseable(targets)).not.toThrow();
+    });
+
+    it("includes OMO configs only when the fixer can reach them", () => {
+        const root = tempDir();
+        mkdirSync(join(root, ".omo"), { recursive: true });
+        writeFileSync(join(root, "oh-my-opencode.jsonc"), "{}");
+        writeFileSync(join(root, ".omo", "omo.json"), "{ malformed");
+        const userPaths = {
+            configDir: join(root, "user"),
+            opencodeConfig: join(root, "user", "opencode.jsonc"),
+            opencodeConfigFormat: "none" as const,
+            eidnaraConfig: join(root, "user", "eidnara.jsonc"),
+            omoConfig: null,
+            tuiConfig: join(root, "user", "tui.jsonc"),
+            tuiConfigFormat: "none" as const,
+        };
+
+        // No OMO plugin entry and no first-time repair: the stale file is not a target.
+        const unrelated = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: false });
+        expect(unrelated).not.toContain(join(root, ".omo", "omo.json"));
+        expect(() => assertJsoncConfigsParseable(unrelated)).not.toThrow();
+
+        // The first-time branch edits OMO configs, so they are checked.
+        const firstTime = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: true });
+        expect(firstTime).toContain(join(root, "oh-my-opencode.jsonc"));
+        expect(firstTime).toContain(join(root, ".omo", "omo.json"));
+        expect(() => assertJsoncConfigsParseable(firstTime)).toThrow(/omo\.json/);
+
+        // A project OMO plugin entry drives the conflict pass, so they are checked too.
+        writeFileSync(join(root, "opencode.json"), `{"plugin":["oh-my-opencode"]}`);
+        const withPlugin = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: false });
+        expect(withPlugin).toContain(join(root, ".omo", "omo.json"));
+    });
+});
+
 describe("setup-opencode DCP preflight", () => {
     it("is tuple-safe and only matches canonical opencode-dcp entries", () => {
         const plugins: unknown[] = [
@@ -142,6 +302,42 @@ describe("setup-opencode DCP preflight", () => {
 
         expect(() => findDcpPluginIndexes(plugins)).not.toThrow();
         expect(findDcpPluginIndexes(plugins)).toEqual([2]);
+    });
+
+    it("keeps a retained DCP plugin out of the broader automatic-fix pass", () => {
+        const detected: ConflictResult = {
+            hasConflict: true,
+            reasons: [
+                "OpenCode auto-compaction is enabled (compaction.auto=true)",
+                DCP_CONFLICT_REASON,
+            ],
+            conflicts: {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: true,
+                omoPreemptiveCompaction: false,
+                omoContextWindowMonitor: false,
+                omoAnthropicRecovery: false,
+            },
+            nativeCompaction: { auto: true, prune: false },
+        };
+
+        const masked = withoutDcpConflict(detected);
+        expect(masked.conflicts.dcpPlugin).toBe(false);
+        expect(masked.conflicts.compactionAuto).toBe(true);
+        expect(masked.reasons).toEqual([
+            "OpenCode auto-compaction is enabled (compaction.auto=true)",
+        ]);
+        expect(masked.hasConflict).toBe(true);
+        expect(detected.conflicts.dcpPlugin).toBe(true);
+
+        const dcpOnly = withoutDcpConflict({
+            ...detected,
+            reasons: [DCP_CONFLICT_REASON],
+            conflicts: { ...detected.conflicts, compactionAuto: false },
+        });
+        expect(dcpOnly.hasConflict).toBe(false);
+        expect(dcpOnly.reasons).toEqual([]);
     });
 });
 

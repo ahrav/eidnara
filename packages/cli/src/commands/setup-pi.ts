@@ -1,10 +1,17 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
+import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
 import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
+import {
+    assertJsoncConfigsParseable,
+    readJsoncConfigForUpdate,
+    readJsoncLenient,
+} from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentDir, getPiUserExtensionsPath, getSharedUserConfigPath } from "../lib/paths";
 import {
@@ -27,7 +34,17 @@ export interface SetupEnvironment {
     };
 }
 
+/** Throw when a restoration did not take effect so the caller reports a partial rollback. */
 export type SetupRollback = () => Promise<void>;
+
+/** Shared-config modes a host hook reads before disabling a native manager. */
+export interface EidnaraModes {
+    enabled: boolean;
+    /** False when Eidnara compaction is off or Eidnara is disabled. */
+    compactionEnabled: boolean;
+    /** False when Eidnara memory is off or Eidnara is disabled. */
+    memoryEnabled: boolean;
+}
 
 export interface PiCompatibleSetupHost {
     displayName: string;
@@ -44,7 +61,14 @@ export interface PiCompatibleSetupHost {
         prompts: PromptIO;
         dryRun: boolean;
         configureHost: boolean;
+        eidnara: EidnaraModes;
     }) => Promise<SetupRollback | false>;
+    /**
+     * Undo a successful `ensurePluginEntry`. Throw when the undo did not take
+     * effect: the caller then skips the native-settings rollback, because
+     * restoring native context managers while the plugin stays registered
+     * runs two managers side by side.
+     */
     rollbackPluginEntry?: (registration: PluginEntryResult) => Promise<void>;
 }
 
@@ -157,7 +181,6 @@ export function writePiSettingsPackage(
     packageSource = PI_PACKAGE_SOURCE,
 ): boolean {
     const settings = readJsoncConfigForUpdate(settingsPath);
-    ensureDir(dirname(settingsPath));
     if (settings.packages !== undefined && !Array.isArray(settings.packages)) {
         // Refuse to replace a non-array `packages` value; overwriting it would discard user configuration.
         throw new Error(
@@ -165,20 +188,20 @@ export function writePiSettingsPackage(
         );
     }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
-
     // A local checkout or pinned spec of the same package counts as present;
     // adding the npm entry beside it would load the plugin twice.
-    const hasPackage = packages.some(
+    const present = packages.some(
         (entry) =>
             entry === packageSource ||
             (packageSource === PI_PACKAGE_SOURCE &&
                 isEidnaraPiPackageEntry(entry, dirname(settingsPath))),
     );
+    if (present) return false;
 
-    if (!hasPackage) packages.push(packageSource);
+    packages.push(packageSource);
     settings.packages = packages;
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
-    return !hasPackage;
+    return true;
 }
 export function removePiSettingsPackage(
     settingsPath: string,
@@ -188,10 +211,16 @@ export function removePiSettingsPackage(
     const settings = readJsoncConfigForUpdate(settingsPath);
     if (!Array.isArray(settings.packages)) return false;
     const packages = settings.packages;
-    const filtered = packages.filter((entry) => entry !== packageSource);
-    if (filtered.length === packages.length) return false;
-    if (removeFieldWhenEmpty && filtered.length === 0) delete settings.packages;
-    else settings.packages = filtered;
+    // Splicing in place preserves comments that comment-json attaches to
+    // remaining entries; `filter` drops them.
+    let removed = false;
+    for (let index = packages.length - 1; index >= 0; index -= 1) {
+        if (packages[index] !== packageSource) continue;
+        packages.splice(index, 1);
+        removed = true;
+    }
+    if (!removed) return false;
+    if (removeFieldWhenEmpty && packages.length === 0) delete settings.packages;
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return true;
 }
@@ -203,6 +232,7 @@ export function writeEidnaraConfig(
         historianThinkingLevel?: string;
         sidekickEnabled: boolean;
         sidekickModel?: string;
+        sidekickThinkingLevel?: string;
         modelRefToCanonical?: (ref: string) => string;
     },
 ): void {
@@ -217,23 +247,66 @@ export function writeEidnaraConfig(
     // Model pickers return harness-native provider IDs. Persist only canonical
     // OpenCode-form IDs so every harness reads the same shared config.
     const toCanonical = options.modelRefToCanonical ?? piModelRefToCanonical;
-    config.historian = compactObject({
-        ...((config.historian as Record<string, unknown> | undefined) ?? {}),
-        model: toCanonical(options.historianModel),
-        thinking_level: options.historianThinkingLevel,
-    });
+    // comment-json keeps a section's comments as symbol-keyed metadata on the
+    // parsed object; a spread copy would drop them from the rewritten file.
+    const historian = isRecord(config.historian) ? config.historian : {};
+    historian.model = toCanonical(options.historianModel);
+    historian.thinking_level = options.historianThinkingLevel;
+    delete historian.disable;
+    delete historian.enabled;
+    config.historian = compactObject(historian);
 
-    const sidekick = {
-        ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
-        model:
-            options.sidekickEnabled && options.sidekickModel
-                ? toCanonical(options.sidekickModel)
-                : undefined,
-        disable: options.sidekickEnabled ? undefined : true,
-        enabled: undefined,
-    };
+    const sidekick = isRecord(config.sidekick) ? config.sidekick : {};
+    sidekick.model =
+        options.sidekickEnabled && options.sidekickModel
+            ? toCanonical(options.sidekickModel)
+            : undefined;
+    sidekick.thinking_level = options.sidekickEnabled ? options.sidekickThinkingLevel : undefined;
+    sidekick.disable = options.sidekickEnabled ? undefined : true;
+    sidekick.enabled = undefined;
     config.sidekick = compactObject(sidekick);
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+}
+
+/**
+ * GitHub Copilot reasoning models need an explicit thinking level: the
+ * Copilot API injects "minimal" as the default and then rejects it (400).
+ * Other providers resolve their own default, so the prompt is skipped.
+ */
+async function pickCopilotThinkingLevel(
+    prompts: PromptIO,
+    role: "historian" | "sidekick",
+    model: string,
+): Promise<string | undefined> {
+    if (!model.startsWith("github-copilot/")) return undefined;
+    prompts.log.warn(
+        `GitHub Copilot reasoning models require an explicit thinking level.\n` +
+            `Without it, Copilot injects "minimal" as a default — which it then rejects with a 400 error.`,
+    );
+    return prompts.selectOne(`Select thinking level for ${role}`, [
+        {
+            label: "medium — good quality, moderate cost (Recommended)",
+            value: "medium",
+            recommended: true,
+        },
+        { label: "low — faster, less thorough", value: "low" },
+        { label: "high — best quality, slowest", value: "high" },
+        { label: "off — no thinking, fastest (not recommended)", value: "off" },
+    ]);
+}
+
+/**
+ * The read is lenient because dry runs skip config validation; an unreadable
+ * config resolves to the schema defaults (both enabled).
+ */
+function readEidnaraModes(configPath: string): EidnaraModes {
+    const config = readJsoncLenient(configPath).value;
+    const enabled = config.enabled !== false;
+    return {
+        enabled,
+        compactionEnabled: enabled && isCompactionEnabled(config),
+        memoryEnabled: enabled && (!isRecord(config.memory) || config.memory.enabled !== false),
+    };
 }
 
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
@@ -277,8 +350,9 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             false,
         );
         if (!proceed) {
+            // A non-zero code keeps the dispatcher from printing next steps after nothing was written.
             prompts.outro(`Setup cancelled — upgrade ${host.displayName} and try again.`);
-            return 0;
+            return 1;
         }
     }
 
@@ -288,20 +362,21 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 
     const settingsPath = env.paths.getPiUserExtensionsPath();
     const configPath = env.paths.getPiUserConfigPath();
-    if (!dryRun) {
-        try {
-            // Validate all targets before writing to prevent partial setup when a later target is invalid.
-            assertJsoncConfigsParseable([settingsPath, configPath]);
-        } catch (error) {
-            prompts.log.error(error instanceof Error ? error.message : String(error));
-            prompts.outro("Setup stopped — fix the malformed config and rerun setup.");
-            return 1;
-        }
-    }
     const configureHost = await prompts.confirm(
         `Configure ${host.displayName} to load Eidnara?`,
         true,
     );
+    // The read-only check runs in dry-run mode too, so a dry run predicts the refusal a real run would make.
+    try {
+        // Validate every target this run will write before writing any of
+        // them, so a later invalid target cannot leave a partial setup.
+        // The host settings file is a target only when registration is on.
+        assertJsoncConfigsParseable(configureHost ? [settingsPath, configPath] : [configPath]);
+    } catch (error) {
+        prompts.log.error(error instanceof Error ? error.message : String(error));
+        prompts.outro("Setup stopped — fix the malformed config and rerun setup.");
+        return 1;
+    }
     if (configureHost && dryRun) {
         prompts.log.message(
             `[dry-run] would register ${host.packageSource} for ${host.displayName} in ${settingsPath}`,
@@ -311,35 +386,34 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     }
 
     const historianModel = await pickModel(prompts, allModels, "historian");
-
-    // GitHub Copilot reasoning models need an explicit thinking_level because
-    // the Copilot API injects "minimal" as a default and then rejects it (400).
-    let historianThinkingLevel: string | undefined;
-    if (historianModel.startsWith("github-copilot/")) {
-        prompts.log.warn(
-            `GitHub Copilot reasoning models require an explicit thinking level.\n` +
-                `Without it, Copilot injects "minimal" as a default — which it then rejects with a 400 error.`,
-        );
-        historianThinkingLevel = await prompts.selectOne("Select thinking level for historian", [
-            {
-                label: "medium — good quality, moderate cost (Recommended)",
-                value: "medium",
-                recommended: true,
-            },
-            { label: "low — faster, less thorough", value: "low" },
-            { label: "high — best quality, slowest", value: "high" },
-            {
-                label: "off — no thinking, fastest (not recommended for historian)",
-                value: "off",
-            },
-        ]);
-    }
+    const historianThinkingLevel = await pickCopilotThinkingLevel(
+        prompts,
+        "historian",
+        historianModel,
+    );
 
     const sidekickEnabled = await prompts.confirm("Enable sidekick for /ctx-aug?", false);
     const sidekickModel = sidekickEnabled
         ? await pickModel(prompts, allModels, "sidekick")
         : undefined;
+    const sidekickThinkingLevel = sidekickModel
+        ? await pickCopilotThinkingLevel(prompts, "sidekick", sidekickModel)
+        : undefined;
 
+    const eidnara = readEidnaraModes(configPath);
+    if (!eidnara.enabled) {
+        prompts.log.warn(
+            `Eidnara is disabled (\`enabled: false\`) in ${configPath}; setup keeps that setting and leaves ${host.displayName}'s native context managers on.`,
+        );
+    }
+    // Project config is a per-project opt-out layered over the shared config.
+    // Native host settings are global, so `eidnara` follows the shared config.
+    const projectConfigPath = resolveEidnaraProjectConfigPath(process.cwd());
+    if (readJsoncLenient(projectConfigPath).value.enabled === false) {
+        prompts.log.warn(
+            `Eidnara is disabled (\`enabled: false\`) by the project config ${projectConfigPath}; it will not run in this project after setup.`,
+        );
+    }
     const rollbackHost =
         (await host.beforeWrite?.({
             binaryPath: binary.path,
@@ -347,6 +421,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             prompts,
             dryRun,
             configureHost,
+            eidnara,
         })) ?? (async () => {});
     if (rollbackHost === false) {
         prompts.outro(`Setup stopped — could not configure ${host.displayName}.`);
@@ -368,28 +443,54 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
                 historianThinkingLevel,
                 sidekickEnabled,
                 sidekickModel,
+                sidekickThinkingLevel,
                 modelRefToCanonical: host.modelRefToCanonical,
             });
             prompts.log.success(`Config written to ${configPath}`);
         }
     } catch (error) {
-        if (registration?.ok && host.rollbackPluginEntry) {
-            await host.rollbackPluginEntry(registration);
-        }
-        await rollbackHost();
         prompts.log.error(error instanceof Error ? error.message : String(error));
+        if (registration?.ok && host.rollbackPluginEntry) {
+            try {
+                await host.rollbackPluginEntry(registration);
+            } catch (rollbackError) {
+                prompts.log.error(
+                    rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+                );
+                prompts.log.warn(
+                    `Left ${host.displayName} native settings as configured for Eidnara: ` +
+                        `restoring them while the Eidnara plugin is still registered would run two context managers at once.`,
+                );
+                prompts.outro(
+                    `Setup stopped — undo the ${host.displayName} plugin registration by hand, then rerun setup.`,
+                );
+                return 1;
+            }
+        }
+        try {
+            await rollbackHost();
+        } catch (rollbackError) {
+            prompts.log.error(
+                rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+            );
+            prompts.outro(
+                `Setup stopped — ${host.displayName} changes were only partly rolled back; finish the steps above by hand.`,
+            );
+            return 1;
+        }
         prompts.outro(`Setup stopped — rolled back ${host.displayName} changes.`);
         return 1;
     }
 
-    const thinkingLevelSuffix = historianThinkingLevel
-        ? ` (thinking: ${historianThinkingLevel})`
-        : "";
+    const thinkingSuffix = (level: string | undefined): string =>
+        level ? ` (thinking: ${level})` : "";
     const summary = [
         `${host.displayName} plugin: ${configureHost ? settingsPath : "skipped"}`,
         `Eidnara config: ${configPath}`,
-        `Historian: ${historianModel}${thinkingLevelSuffix}`,
-        sidekickEnabled ? `Sidekick: ${sidekickModel}` : "Sidekick: disabled",
+        `Historian: ${historianModel}${thinkingSuffix(historianThinkingLevel)}`,
+        sidekickEnabled
+            ? `Sidekick: ${sidekickModel}${thinkingSuffix(sidekickThinkingLevel)}`
+            : "Sidekick: disabled",
     ].join("\n");
 
     prompts.note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");

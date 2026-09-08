@@ -2,8 +2,14 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
-import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
-import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
+import {
+    type ConflictResult,
+    DCP_CONFLICT_REASON,
+    detectConflicts,
+    hasOmoPlugin,
+    projectOpenCodeConfigPaths,
+} from "@eidnara/opencode/shared/conflict-detector";
+import { collectOmoConfigPaths, fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import {
     appendJsoncArrayValues,
     removeJsoncArrayEntries,
@@ -20,17 +26,23 @@ import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/js
 import { pickModel } from "../lib/model-picker";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
-import { detectConfigPaths } from "../lib/paths";
+import { type ConfigPaths, detectConfigPaths } from "../lib/paths";
 import { confirm, intro, log, note, outro, promptIO, spinner } from "../lib/prompts";
 
 const PLUGIN_NAME = "@eidnara/opencode";
 const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 
-/**
- */
+/** With `enabled: false` the plugin skips every hook at startup, so native compaction must stay on. commentlint: allow(JUDGE) */
 function resolveCompactionEnabledForWriter(): boolean {
     try {
         const config = loadPluginConfig(process.cwd());
+        if (config.enabled === false) {
+            log.warn(
+                "Eidnara is disabled in its config (enabled: false); leaving native compaction untouched. " +
+                    "Set enabled to true to let Eidnara manage the context window.",
+            );
+            return false;
+        }
         return isCompactionEnabled(config);
     } catch (error) {
         log.warn(
@@ -184,15 +196,18 @@ function pluginEntryName(entry: unknown): string {
     return String(entry);
 }
 
+/** `keep` records an explicit refusal, which the broader conflict-fix pass must honor. */
+type DcpDecision = "absent" | "remove" | "keep";
+
 async function resolveDcpConflictBeforeSetup(
     configPath: string,
     format: "json" | "jsonc" | "none",
-): Promise<boolean> {
-    if (format === "none") return false;
+): Promise<DcpDecision> {
+    if (format === "none") return "absent";
     const ocConfig = readJsoncConfigForUpdate(configPath);
     const plugins = Array.isArray(ocConfig.plugin) ? ocConfig.plugin : [];
     const dcpIndexes = findDcpPluginIndexes(plugins);
-    if (dcpIndexes.length === 0) return false;
+    if (dcpIndexes.length === 0) return "absent";
 
     log.warn(`Found conflicting plugin: ${pluginEntryName(plugins[dcpIndexes[0]])}`);
     log.message(
@@ -203,7 +218,21 @@ async function resolveDcpConflictBeforeSetup(
     if (!shouldRemove) {
         log.warn("Skipped — you may experience context management conflicts");
     }
-    return shouldRemove;
+    return shouldRemove ? "remove" : "keep";
+}
+
+/**
+ * Drop the DCP conflict from a detection result so a later "apply automatic
+ * fixes" answer cannot remove a plugin the user chose to keep.
+ */
+export function withoutDcpConflict(result: ConflictResult): ConflictResult {
+    const reasons = result.reasons.filter((reason) => reason !== DCP_CONFLICT_REASON);
+    return {
+        ...result,
+        hasConflict: reasons.length > 0,
+        reasons,
+        conflicts: { ...result.conflicts, dcpPlugin: false },
+    };
 }
 
 export function writeEidnaraConfig(
@@ -223,12 +252,14 @@ export function writeEidnaraConfig(
     }
 
     if (options.historianModel) {
-        const historian = (config.historian as Record<string, unknown>) ?? {};
+        const historian = asPlainRecord(config.historian);
         historian.model = options.historianModel;
+        delete historian.disable;
+        delete historian.enabled;
         config.historian = historian;
     }
 
-    const sidekick = (config.sidekick as Record<string, unknown>) ?? {};
+    const sidekick = asPlainRecord(config.sidekick);
     delete sidekick.enabled;
     if (options.sidekickEnabled) {
         delete sidekick.disable;
@@ -242,14 +273,75 @@ export function writeEidnaraConfig(
     }
 
     if (options.claudeMax) {
-        const cacheTtl = (config.cache_ttl as Record<string, string>) ?? {};
-        if (!cacheTtl.default) cacheTtl.default = "5m";
-        cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
-        cacheTtl["anthropic/claude-opus-4-6"] = "59m";
-        config.cache_ttl = cacheTtl;
+        config.cache_ttl = withClaudeMaxCacheTtl(config.cache_ttl, [
+            options.historianModel,
+            options.sidekickModel,
+        ]);
     }
 
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+}
+
+/**
+ * A parseable config can still hold a schema-invalid block such as `"historian": "old-model"`; config loading logs "invalid agent configuration, ignoring" for it, and the writer starts fresh the same way. commentlint: allow(JUDGE)
+ * Setting a key on a primitive throws under strict mode, and an array would
+ * drop the keys on serialization.
+ */
+function asPlainRecord(value: unknown): Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+        ? { ...(value as Record<string, unknown>) }
+        : {};
+}
+
+/**
+ * Normalize a scalar `cache_ttl` into `{ default: existing }` before adding
+ * per-model overrides. Selected Anthropic models receive the same 59m TTL as
+ * the fixed overrides.
+ */
+export function withClaudeMaxCacheTtl(
+    existing: unknown,
+    selectedModels: readonly (string | null)[] = [],
+): Record<string, string> {
+    const cacheTtl =
+        typeof existing === "string"
+            ? { default: existing }
+            : (asPlainRecord(existing) as Record<string, string>);
+    if (!cacheTtl.default) cacheTtl.default = "5m";
+    cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
+    cacheTtl["anthropic/claude-opus-4-6"] = "59m";
+    for (const model of selectedModels) {
+        if (model?.startsWith("anthropic/")) cacheTtl[model] = "59m";
+    }
+    return cacheTtl;
+}
+
+/** Chosen models count too: `pickModel` accepts manual entry when discovery returns nothing. */
+export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
+    return models.some((model) => model?.startsWith("anthropic/") ?? false);
+}
+
+/**
+ * `detectConflicts` and `fixConflicts` skip unparseable files, so these repair targets are checked before any write. commentlint: allow(JUDGE)
+ * Only the effective member of each project `.jsonc`/`.json` pair is listed,
+ * matching the file OpenCode loads, so a stale shadowed sibling cannot block setup.
+ * OMO files count only when the fixer can reach them: an OMO plugin entry
+ * drives the conflict pass, and the first-time branch edits the user OMO config.
+ */
+export function preflightConfigPaths(
+    paths: ConfigPaths,
+    directory: string,
+    options: { firstTimeOmoRepair: boolean },
+): string[] {
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
+    const omoReachable = hasOmoPlugin(directory) || options.firstTimeOmoRepair;
+    return [
+        paths.opencodeConfig,
+        paths.eidnaraConfig,
+        paths.tuiConfig,
+        existsSync(dotOcJsonc) ? dotOcJsonc : dotOcJson,
+        existsSync(rootJsonc) ? rootJsonc : rootJson,
+        ...(omoReachable ? collectOmoConfigPaths(directory) : []),
+    ];
 }
 
 export async function runSetup(dryRun = false): Promise<number> {
@@ -295,28 +387,32 @@ export async function runSetup(dryRun = false): Promise<number> {
     }
 
     const paths = detectConfigPaths();
+    // A project-level OpenCode config counts: `detectConflicts` and
+    // `fixConflicts` read and repair those files, so a first-time user running
+    // setup inside such a project must not skip the conflict pass.
     const hadExistingSetup =
         paths.opencodeConfigFormat !== "none" ||
         existsSync(paths.eidnaraConfig) ||
-        paths.tuiConfigFormat !== "none";
+        paths.tuiConfigFormat !== "none" ||
+        projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
+    const omoConfigs = collectOmoConfigPaths(process.cwd());
+    const firstTimeOmoRepair = omoConfigs.length > 0 && !hadExistingSetup;
 
-    if (!dryRun) {
-        try {
-            assertJsoncConfigsParseable([
-                paths.opencodeConfig,
-                paths.eidnaraConfig,
-                paths.tuiConfig,
-            ]);
-        } catch (error) {
-            log.error(error instanceof Error ? error.message : String(error));
-            outro("Setup stopped — fix the malformed config and rerun setup.");
-            return 1;
-        }
+    // The preflight is read-only, so a dry run performs it too and predicts the refusal a real run would make.
+    try {
+        assertJsoncConfigsParseable(
+            preflightConfigPaths(paths, process.cwd(), { firstTimeOmoRepair }),
+        );
+    } catch (error) {
+        log.error(error instanceof Error ? error.message : String(error));
+        outro("Setup stopped — fix the malformed config and rerun setup.");
+        return 1;
     }
 
-    const removeDcp = dryRun
-        ? false
+    const dcpDecision: DcpDecision = dryRun
+        ? "absent"
         : await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
+    const removeDcp = dcpDecision === "remove";
 
     const compactionEnabled = resolveCompactionEnabledForWriter();
 
@@ -330,9 +426,10 @@ export async function runSetup(dryRun = false): Promise<number> {
 
     let conflictFix: Parameters<typeof fixConflicts>[1] | null = null;
     if (hadExistingSetup) {
-        const conflicts = detectConflicts(process.cwd(), {
+        const detected = detectConflicts(process.cwd(), {
             compactionEnabled,
         });
+        const conflicts = dcpDecision === "keep" ? withoutDcpConflict(detected) : detected;
         if (conflicts.hasConflict) {
             log.warn("Found conflicting configuration that can disable Eidnara:");
             for (const reason of conflicts.reasons) {
@@ -366,7 +463,7 @@ export async function runSetup(dryRun = false): Promise<number> {
         log.success(`Sidekick: ${sidekickModel}`);
     }
 
-    const hasAnthropic = allModels.some((m) => m.startsWith("anthropic/"));
+    const hasAnthropic = hasAnthropicModel([...allModels, historianModel, sidekickModel]);
     let claudeMax = false;
     if (hasAnthropic) {
         log.message(
@@ -384,17 +481,10 @@ export async function runSetup(dryRun = false): Promise<number> {
         log.message(`[dry-run] would add the TUI sidebar plugin to ${paths.tuiConfig}`);
     }
 
-    // ─── Step 8: Oh-My-OpenCode compatibility ───────────
-    // Intentional: this branch handles the FIRST-TIME-INSTALL case only.
-    // Existing users hit the same OMO conflict-fix logic via the
-    // `if (hadExistingSetup) detectConflicts/fixConflicts` block above,
-    // which already covers omoPreemptiveCompaction,
-    // omoContextWindowMonitor, and omoAnthropicRecovery. Audit tools
-    // sometimes flag this `!hadExistingSetup` gate as "OMO check skipped
-    // for existing users" — that's a false positive.
+    // Existing users receive the OMO hook fixes in the `hadExistingSetup` conflict pass above.
     let disableOmoHooks = false;
-    if (paths.omoConfig && !hadExistingSetup) {
-        log.warn(`Found oh-my-opencode config: ${paths.omoConfig}`);
+    if (firstTimeOmoRepair) {
+        log.warn(`Found oh-my-opencode config: ${omoConfigs.join(", ")}`);
         log.message(
             "These hooks may conflict:\n" +
                 "  • context-window-monitor\n" +

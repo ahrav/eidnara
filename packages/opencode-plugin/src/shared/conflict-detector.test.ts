@@ -4,7 +4,22 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectConflicts, resolveCompactionForBoot } from "./conflict-detector";
+import {
+    detectConflicts,
+    projectOpenCodeConfigPaths,
+    resolveCompactionForBoot,
+} from "./conflict-detector";
+
+describe("projectOpenCodeConfigPaths", () => {
+    it("lists .opencode/ before the project root and .jsonc before .json", () => {
+        expect(projectOpenCodeConfigPaths("/proj")).toEqual([
+            join("/proj", ".opencode", "opencode.jsonc"),
+            join("/proj", ".opencode", "opencode.json"),
+            join("/proj", "opencode.jsonc"),
+            join("/proj", "opencode.json"),
+        ]);
+    });
+});
 
 /**
  */

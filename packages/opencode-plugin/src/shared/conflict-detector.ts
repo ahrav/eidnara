@@ -82,6 +82,10 @@ export interface DetectConflictsOptions {
     resolvedCompaction?: ResolvedCompaction;
 }
 
+/** The `reasons` entry `detectConflicts` emits for `conflicts.dcpPlugin`. */
+export const DCP_CONFLICT_REASON =
+    "opencode-dcp plugin is installed — it conflicts with Eidnara's context management";
+
 /**
  *
  *
@@ -126,9 +130,7 @@ export function detectConflicts(
     const dcpFound = checkDcpPlugin(directory);
     if (dcpFound) {
         conflicts.dcpPlugin = true;
-        reasons.push(
-            "opencode-dcp plugin is installed — it conflicts with Eidnara's context management",
-        );
+        reasons.push(DCP_CONFLICT_REASON);
     }
 
     const omoResult = checkOmoHooks(directory);
@@ -230,13 +232,24 @@ function checkCompaction(directory: string): { auto: boolean; prune: boolean } {
     return { auto: true, prune: false };
 }
 
+/** Project-level OpenCode config paths in precedence order, as `.jsonc`/`.json` pairs per directory. */
+export function projectOpenCodeConfigPaths(
+    directory: string,
+): readonly [string, string, string, string] {
+    return [
+        join(directory, ".opencode", "opencode.jsonc"),
+        join(directory, ".opencode", "opencode.json"),
+        join(directory, "opencode.jsonc"),
+        join(directory, "opencode.json"),
+    ];
+}
+
 function readProjectCompaction(directory: string): {
     auto: boolean;
     prune: boolean;
     resolved: boolean;
 } {
-    const dotOcJsonc = join(directory, ".opencode", "opencode.jsonc");
-    const dotOcJson = join(directory, ".opencode", "opencode.json");
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
     const dotOcConfig =
         readJsoncFile<OpenCodeConfig>(dotOcJsonc) ?? readJsoncFile<OpenCodeConfig>(dotOcJson);
 
@@ -247,8 +260,6 @@ function readProjectCompaction(directory: string): {
         }
     }
 
-    const rootJsonc = join(directory, "opencode.jsonc");
-    const rootJson = join(directory, "opencode.json");
     const rootConfig =
         readJsoncFile<OpenCodeConfig>(rootJsonc) ?? readJsoncFile<OpenCodeConfig>(rootJson);
 
@@ -337,12 +348,7 @@ function collectPluginEntries(directory: string): string[] {
     };
 
     // Project-level configs
-    for (const configPath of [
-        join(directory, ".opencode", "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, "opencode.json"),
-    ]) {
+    for (const configPath of projectOpenCodeConfigPaths(directory)) {
         const config = readJsoncFile<OpenCodeConfig>(configPath);
         pushFrom(config?.plugin);
     }
@@ -367,6 +373,11 @@ function collectPluginEntries(directory: string): string[] {
  */
 const OMO_PACKAGE_NAMES = new Set(["oh-my-opencode", "oh-my-openagent"]);
 
+/** Whether a project- or user-level OpenCode config lists an OMO plugin entry. */
+export function hasOmoPlugin(directory: string): boolean {
+    return collectPluginEntries(directory).some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
+}
+
 function checkOmoHooks(directory: string): {
     preemptiveCompaction: boolean;
     contextWindowMonitor: boolean;
@@ -378,9 +389,7 @@ function checkOmoHooks(directory: string): {
         anthropicRecovery: false,
     };
 
-    const plugins = collectPluginEntries(directory);
-    const hasOmo = plugins.some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
-    if (!hasOmo) return result;
+    if (!hasOmoPlugin(directory)) return result;
 
     const disabledHooks = readOmoDisabledHooks(directory);
 

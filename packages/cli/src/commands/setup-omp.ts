@@ -5,6 +5,7 @@ import {
     getOmpAvailableModels,
     getOmpSetting,
     getOmpVersion,
+    listOmpPlugins,
     OMP_PLUGIN_PACKAGE,
     runOmpCommand,
 } from "../lib/omp-helpers";
@@ -42,9 +43,30 @@ const OMP_HOST: PiCompatibleSetupHost = {
         "Upgrade with `omp update` before enabling Eidnara.",
     modelRefToCanonical: ompModelRefToCanonical,
     ensurePluginEntry: async () => new OmpAdapter().ensurePluginEntry(),
-    beforeWrite: async ({ binaryPath, cwd, prompts, dryRun, configureHost }) => {
-        if (!configureHost && !new OmpAdapter().hasPluginEntry()) {
-            return async () => {};
+    beforeWrite: async ({ binaryPath, cwd, prompts, dryRun, configureHost, eidnara }) => {
+        // Global settings are unobservable when project or overlay config is
+        // active, so setup refuses to trust either OMP probe.
+        const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
+        if (nonGlobalSources.length > 0) {
+            prompts.log.error(
+                "OMP effective settings come from project/overlay config; refusing to mutate the global config or enable Eidnara beside unobserved global settings.\n" +
+                    nonGlobalSources.map((path) => `- ${path}`).join("\n") +
+                    "\nRun setup from a directory without a project OMP config and with PI_CONFIG_FILES unset.",
+            );
+            return false;
+        }
+        if (!configureHost) {
+            const plugins = listOmpPlugins(binaryPath);
+            if (plugins === null) {
+                prompts.log.error(
+                    "Could not list OMP plugins (`omp plugin list --json` failed), so whether Eidnara is already enabled is unknown; refusing to write a shared config that may run beside OMP's native context managers.",
+                );
+                return false;
+            }
+            const pluginActive = plugins.some(
+                (plugin) => plugin.name === OMP_PLUGIN_PACKAGE && plugin.enabled,
+            );
+            if (!pluginActive) return async () => {};
         }
         const compaction = getOmpSetting(binaryPath, "compaction.enabled");
         const memoryBackend = getOmpSetting(binaryPath, "memory.backend");
@@ -60,7 +82,11 @@ const OMP_HOST: PiCompatibleSetupHost = {
             from: string;
             to: string;
         }> = [];
-        if (compaction === true) {
+        if (compaction === true && !eidnara.compactionEnabled) {
+            prompts.log.info(
+                "Eidnara compaction is off in the shared config; leaving OMP native compaction enabled as the context-window owner.",
+            );
+        } else if (compaction === true) {
             const disable = await prompts.confirm(
                 "Disable OMP native compaction? Eidnara must own context management end to end.",
                 true,
@@ -71,7 +97,11 @@ const OMP_HOST: PiCompatibleSetupHost = {
             }
             changes.push({ key: "compaction.enabled", from: "true", to: "false" });
         }
-        if (memoryBackend !== "off") {
+        if (memoryBackend !== "off" && !eidnara.memoryEnabled) {
+            prompts.log.info(
+                `Eidnara memory is off in the shared config; leaving OMP memory backend "${memoryBackend}" enabled.`,
+            );
+        } else if (memoryBackend !== "off") {
             const disable = await prompts.confirm(
                 `Disable OMP memory backend "${memoryBackend}"? Running two automatic memory injectors duplicates context and writes.`,
                 true,
@@ -81,15 +111,6 @@ const OMP_HOST: PiCompatibleSetupHost = {
                 return false;
             }
             changes.push({ key: "memory.backend", from: memoryBackend, to: "off" });
-        }
-        const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
-        if (changes.length > 0 && nonGlobalSources.length > 0) {
-            prompts.log.error(
-                "OMP effective settings come from project/overlay config; refusing to mutate the global config.\n" +
-                    nonGlobalSources.map((path) => `- ${path}`).join("\n") +
-                    "\nEdit those files directly, then rerun setup.",
-            );
-            return false;
         }
 
         if (dryRun) {
@@ -103,14 +124,24 @@ const OMP_HOST: PiCompatibleSetupHost = {
 
         const applied: typeof changes = [];
         const rollback = async () => {
+            const failed: string[] = [];
             for (const change of [...applied].reverse()) {
                 const result = runOmpCommand(
                     binaryPath,
                     ["config", "set", change.key, change.from],
                     10_000,
                 );
-                if (result.ok) prompts.log.info(`Restored OMP ${change.key}=${change.from}`);
-                else prompts.log.error(result.stderr || `Could not restore OMP ${change.key}`);
+                if (result.ok) {
+                    prompts.log.info(`Restored OMP ${change.key}=${change.from}`);
+                } else {
+                    const detail = result.stderr ? ` (${result.stderr})` : "";
+                    failed.push(`omp config set ${change.key} ${change.from}${detail}`);
+                }
+            }
+            if (failed.length > 0) {
+                throw new Error(
+                    `Could not restore OMP settings; run by hand:\n${failed.map((step) => `- ${step}`).join("\n")}`,
+                );
             }
         };
         for (const change of changes) {
@@ -121,7 +152,15 @@ const OMP_HOST: PiCompatibleSetupHost = {
             );
             if (!result.ok) {
                 prompts.log.error(result.stderr || `Could not set OMP ${change.key}`);
-                await rollback();
+                try {
+                    await rollback();
+                } catch (rollbackError) {
+                    prompts.log.error(
+                        rollbackError instanceof Error
+                            ? rollbackError.message
+                            : String(rollbackError),
+                    );
+                }
                 return false;
             }
             applied.push(change);
@@ -131,10 +170,20 @@ const OMP_HOST: PiCompatibleSetupHost = {
     },
     rollbackPluginEntry: async (registration) => {
         if (registration.action === "already_present") return;
-        const omp = detectOmpBinary();
-        if (!omp) return;
         const action = registration.action === "added" ? "uninstall" : "disable";
-        runOmpCommand(omp.path, ["plugin", action, OMP_PLUGIN_PACKAGE], 120_000);
+        const manualStep = `Run \`omp plugin ${action} ${OMP_PLUGIN_PACKAGE}\` by hand.`;
+        const omp = detectOmpBinary();
+        if (!omp) {
+            throw new Error(
+                `Could not ${action} ${OMP_PLUGIN_PACKAGE}: OMP binary not found. ${manualStep}`,
+            );
+        }
+        const result = runOmpCommand(omp.path, ["plugin", action, OMP_PLUGIN_PACKAGE], 120_000);
+        if (!result.ok) {
+            throw new Error(
+                `Could not ${action} ${OMP_PLUGIN_PACKAGE}: ${result.stderr || result.stdout || "omp exited with an error"}. ${manualStep}`,
+            );
+        }
     },
 };
 

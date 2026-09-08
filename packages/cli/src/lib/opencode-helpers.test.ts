@@ -8,6 +8,7 @@ import {
     getAvailableModels,
     getOpenCodeCommandInvocation,
     getOpenCodeVersion,
+    OPENCODE_MODELS_PROBE_TIMEOUT_MS,
     OPENCODE_VERSION_PROBE_TIMEOUT_MS,
 } from "./opencode-helpers";
 
@@ -153,6 +154,14 @@ describe.if(isPosix)("opencode helpers with a resolved binary path", () => {
         const started = performance.now();
         expect(getOpenCodeVersion(bin)).toBeNull();
         expect(performance.now() - started).toBeLessThan(OPENCODE_VERSION_PROBE_TIMEOUT_MS + 1_500);
+    });
+
+    it("bounds a hanging model discovery and reports an empty catalog", () => {
+        const bin = fakeOpencode("sleep 5");
+        const started = performance.now();
+        expect(getAvailableModels(bin, 500)).toEqual([]);
+        expect(performance.now() - started).toBeLessThan(2_000);
+        expect(OPENCODE_MODELS_PROBE_TIMEOUT_MS).toBeGreaterThan(OPENCODE_VERSION_PROBE_TIMEOUT_MS);
     });
 
     it("returns empty / null when the binary path does not exist", () => {

@@ -1,11 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import {
-    eidnaraUserConfigBasePath,
-    resolveEidnaraUserConfigPath,
-} from "@eidnara/opencode/config/config-paths";
-import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
+import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
 // ============================================================================
 // OpenCode paths
@@ -90,9 +86,7 @@ export function detectConfigPaths(): ConfigPaths {
         configDir,
         opencodeConfig,
         opencodeConfigFormat,
-        // The runtime loads `eidnara.json` when no `eidnara.jsonc` exists, so the
-        // existing file is reported and written to; only a fresh install gets `.jsonc`.
-        eidnaraConfig: detectConfigFile(eidnaraUserConfigBasePath()).path,
+        eidnaraConfig: getSharedUserConfigPath(),
         omoConfig: findOmoConfig(configDir),
         tuiConfig,
         tuiConfigFormat,
