@@ -95,6 +95,26 @@ describe("bundleIssueReport session filtering", () => {
         expect(body).not.toContain("other custom session line");
     });
 
+    it("drops the untagged continuation lines of another session's multi-line record", async () => {
+        const log = [
+            `[2026-05-11T12:00:00.000Z] [eidnara][${OTHER_UUID}] rust session.status failed: boom`,
+            "Error: boom",
+            "    at other-session-frame (/work/b/file.ts:1:1)",
+            `[2026-05-11T12:00:01.000Z] [eidnara][${SELECTED}] selected failed: mine`,
+            "Error: mine",
+            "    at selected-session-frame (/work/a/file.ts:1:1)",
+            "[2026-05-11T12:00:02.000Z] untagged record",
+            "    continuation of the untagged record",
+        ].join("\n");
+        const body = await bundleWithLog("eidnara-pi-issue-multiline-", `${log}\n`, SELECTED);
+
+        expect(body).not.toContain("boom");
+        expect(body).not.toContain("other-session-frame");
+        expect(body).toContain("Error: mine");
+        expect(body).toContain("selected-session-frame");
+        expect(body).toContain("continuation of the untagged record");
+    });
+
     it("keeps every line when no session is selected", async () => {
         const body = await bundleWithLog(
             "eidnara-pi-issue-nofilter-",

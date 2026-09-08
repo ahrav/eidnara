@@ -363,6 +363,11 @@ describe("bundleIssueReport secret redaction", () => {
                         historian: { api_key: "historian-secret-value" },
                     },
                 },
+                projectConfig: {
+                    path: "/Users/alice/project/.eidnara/eidnara.jsonc",
+                    exists: false,
+                    flags: {},
+                },
                 conflicts: {
                     hasConflict: false,
                     reasons: [],
@@ -439,6 +444,11 @@ describe("bundleIssueReport secret redaction", () => {
                 tuiConfigHasPlugin: true,
                 eidnaraConfig: {
                     exists: true,
+                    flags: {},
+                },
+                projectConfig: {
+                    path: "/Users/alice/project/.eidnara/eidnara.jsonc",
+                    exists: false,
                     flags: {},
                 },
                 conflicts: {
@@ -528,6 +538,33 @@ describe("bundleIssueReport secret redaction", () => {
         }
     });
 
+    it("renders the project-tier config alongside the user config", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-project-config-"));
+        tempDirs.push(root);
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const report = baseReport(root);
+            report.projectConfig = {
+                path: "/Users/alice/project/.eidnara/eidnara.json",
+                exists: true,
+                flags: { historian: { model: "anthropic/claude" } },
+            };
+
+            const bundled = await bundleIssueReport(report, "desc", "title");
+            const body = readFileSync(bundled.path, "utf-8");
+
+            expect(body).toContain(
+                "### Project config (/Users/<USER>/project/.eidnara/eidnara.json)",
+            );
+            expect(body).toContain("- Exists: true");
+            expect(body).toContain('"model": "anthropic/claude"');
+            expect(body).not.toContain("alice");
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
+
     it("reads only the tail of a large log", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-log-tail-"));
         tempDirs.push(root);
@@ -578,6 +615,11 @@ function baseReport(root: string): DiagnosticReport {
         opencodeConfigHasPlugin: true,
         tuiConfigHasPlugin: true,
         eidnaraConfig: { exists: true, flags: {} },
+        projectConfig: {
+            path: "/Users/alice/project/.eidnara/eidnara.jsonc",
+            exists: false,
+            flags: {},
+        },
         conflicts: {
             hasConflict: false,
             reasons: [],

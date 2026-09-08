@@ -7,14 +7,17 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import { eidnaraProjectConfigBasePath } from "@eidnara/opencode/config/config-paths";
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
+import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import {
     sanitizeConfigValue,
     sanitizeDiagnosticText,
     sanitizePathString,
 } from "@eidnara/opencode/shared/redaction";
 import { parse as parseJsonc } from "comment-json";
+import { matchesPluginEntry } from "../adapters/opencode";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
@@ -44,6 +47,13 @@ export interface DiagnosticReport {
     opencodeConfigHasPlugin: boolean;
     tuiConfigHasPlugin: boolean;
     eidnaraConfig: {
+        exists: boolean;
+        parseError?: string;
+        flags: Record<string, unknown>;
+    };
+    /** The `<cwd>/.eidnara/eidnara.json[c]` tier the loader merges over the user config. */
+    projectConfig: {
+        path: string;
         exists: boolean;
         parseError?: string;
         flags: Record<string, unknown>;
@@ -160,12 +170,7 @@ function readConfig(path: string): { value: Record<string, unknown> | null; erro
 
 function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
     const plugins = Array.isArray(config?.plugin) ? config.plugin : [];
-    return plugins.some((entry) => {
-        if (typeof entry !== "string") return false;
-        if (entry === OPENCODE_PLUGIN_NAME) return true;
-        if (entry.startsWith(`${OPENCODE_PLUGIN_NAME}@`)) return true;
-        return false;
-    });
+    return plugins.some((entry) => matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME));
 }
 
 /**
@@ -226,29 +231,18 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     const opencodeDbPath = join(dataHome, "opencode", "opencode.db");
     if (!existsSync(opencodeDbPath)) return [];
 
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
-        return [];
-    }
-
-    type DatabaseCtor = new (
-        path: string,
-        opts?: { readonly?: boolean },
-    ) => {
-        prepare: (sql: string) => { all: () => unknown[] };
-        close: () => void;
-    };
-
-    let DatabaseClass: DatabaseCtor;
+    // The shared module picks `bun:sqlite` or `node:sqlite` for the running
+    // runtime and loads it at import time, so the import stays lazy: a Node
+    // without `node:sqlite` degrades to an empty list instead of failing the
+    // whole doctor.
+    let DatabaseClass: typeof import("@eidnara/opencode/shared/sqlite").Database;
     try {
-        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
-            Database: DatabaseCtor;
-        };
-        DatabaseClass = mod.Database;
+        DatabaseClass = (await import("@eidnara/opencode/shared/sqlite")).Database;
     } catch {
         return [];
     }
 
-    let db: { prepare: (sql: string) => { all: () => unknown[] }; close: () => void } | null = null;
+    let db: InstanceType<typeof DatabaseClass> | null = null;
     try {
         db = new DatabaseClass(opencodeDbPath, { readonly: true });
         const rows = db
@@ -291,6 +285,8 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const opencodeConfig = readConfig(configPaths.opencodeConfig);
     const tuiConfig = readConfig(configPaths.tuiConfig);
     const eidnaraConfig = readConfig(configPaths.eidnaraConfig);
+    const projectConfigPath = detectConfigFile(eidnaraProjectConfigBasePath(process.cwd())).path;
+    const projectConfig = readConfig(projectConfigPath);
 
     const logPath = getEidnaraLogPath("opencode");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -332,6 +328,12 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             exists: existsSync(configPaths.eidnaraConfig),
             ...(eidnaraConfig.error ? { parseError: sanitizeString(eidnaraConfig.error) } : {}),
             flags: (sanitizeValue(eidnaraConfig.value ?? {}) as Record<string, unknown>) ?? {},
+        },
+        projectConfig: {
+            path: projectConfigPath,
+            exists: existsSync(projectConfigPath),
+            ...(projectConfig.error ? { parseError: sanitizeString(projectConfig.error) } : {}),
+            flags: (sanitizeValue(projectConfig.value ?? {}) as Record<string, unknown>) ?? {},
         },
         conflicts: {
             hasConflict: conflictResult.hasConflict,
@@ -428,6 +430,13 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "### eidnara.jsonc flags",
         "```jsonc",
         JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2),
+        "```",
+        "",
+        `### Project config (${sanitizeString(report.projectConfig.path)})`,
+        `- Exists: ${report.projectConfig.exists}`,
+        `- Parse error: ${report.projectConfig.parseError === undefined ? "none" : sanitizeString(report.projectConfig.parseError)}`,
+        "```jsonc",
+        JSON.stringify(sanitizeConfigValue(report.projectConfig.flags), null, 2),
         "```",
         "",
         "### Recent sessions",

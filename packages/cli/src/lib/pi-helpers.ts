@@ -97,6 +97,9 @@ export function getPiVersion(piPath: string): string | null {
             encoding: "utf-8",
             timeout: 10_000,
         });
+        // A failing executable can print a dependency's version to stderr;
+        // only a clean exit's output is a Pi version.
+        if (result.error || result.status !== 0) return null;
         const stdout = result.stdout?.trim();
         if (stdout) return stdout;
         const stderr = result.stderr?.trim();

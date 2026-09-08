@@ -99,13 +99,14 @@ describe("collectDiagnostics Pi path resolution", () => {
         );
         writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({}));
 
-        const customProject = "/tmp/eidnaradiagnosticproject";
         const customSessionId = "customsession";
         const customSlugDir = join(agentDir, "sessions", "--tmp-eidnaradiagnosticproject--");
         mkdirSync(customSlugDir, { recursive: true });
+        // The slug for `/tmp/eidnaradiagnosticproject` is exact; the header's
+        // `cwd` names a hyphenated directory the slug cannot round-trip.
         writeFileSync(
             join(customSlugDir, `2026-07-07T12-00-00-000Z_${customSessionId}.jsonl`),
-            '{"type":"session"}\n',
+            `${JSON.stringify({ type: "session", version: 3, id: customSessionId, cwd: "/tmp/my-hyphenated-project" })}\n`,
         );
 
         const homeFallbackSlugDir = join(
@@ -127,7 +128,36 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.recentSessions).toEqual([
             {
                 sessionId: customSessionId,
-                directory: customProject,
+                directory: "/tmp/my-hyphenated-project",
+                lastActiveAt: report.recentSessions[0]?.lastActiveAt,
+            },
+        ]);
+    });
+
+    it("falls back to the slug directory when a session file has no header", async () => {
+        const root = makeTempRoot();
+        const home = join(root, "home");
+        const cwd = join(root, "workspace");
+        const agentDir = join(root, "agent");
+        process.env.HOME = home;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_DATA_HOME = join(root, "data");
+        process.env.XDG_CACHE_HOME = join(root, "cache");
+        process.env.XDG_CONFIG_HOME = join(root, "config");
+        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
+        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+        const slugDir = join(agentDir, "sessions", "--tmp-plainproject--");
+        mkdirSync(slugDir, { recursive: true });
+        writeFileSync(join(slugDir, "2026-07-07T12-00-00-000Z_headerless.jsonl"), "not json\n");
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.recentSessions).toEqual([
+            {
+                sessionId: "headerless",
+                directory: "/tmp/plainproject",
                 lastActiveAt: report.recentSessions[0]?.lastActiveAt,
             },
         ]);

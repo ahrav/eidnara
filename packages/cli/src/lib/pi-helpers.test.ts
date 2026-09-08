@@ -102,6 +102,31 @@ describe("Pi command execution", () => {
     });
 });
 
+describe("getPiVersion", () => {
+    it("returns null when the executable exits non-zero even if stderr carries a version", () => {
+        if (process.platform === "win32") return;
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-version-"));
+        tempDirs.push(root);
+        const broken = join(root, "pi");
+        writeFileSync(
+            broken,
+            "#!/bin/sh\necho 'Error: requires node 22.1.0 or newer' >&2\nexit 1\n",
+        );
+        chmodSync(broken, 0o755);
+        expect(getPiVersion(broken)).toBeNull();
+    });
+
+    it("accepts a version printed to stderr on a clean exit", () => {
+        if (process.platform === "win32") return;
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-version-"));
+        tempDirs.push(root);
+        const quirky = join(root, "pi");
+        writeFileSync(quirky, "#!/bin/sh\necho '0.74.0' >&2\nexit 0\n");
+        chmodSync(quirky, 0o755);
+        expect(getPiVersion(quirky)).toBe("0.74.0");
+    });
+});
+
 describe("getAvailableModels", () => {
     it("returns [] when pi output parses to no models (no static fallback)", () => {
         const piPath = process.platform === "win32" ? "where" : "true";

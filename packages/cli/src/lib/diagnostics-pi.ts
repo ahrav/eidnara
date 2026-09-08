@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -217,13 +217,45 @@ function describePackageEntry(entry: unknown): string {
  *
  * Pi strips the leading `/`, replaces `/` with `-`, and wraps the result in `--`.
  *
- * Literal `-` characters in path components make session-slug reversal lossy.
+ * Literal `-` characters in path components make session-slug reversal lossy,
+ * so the reversal is only a fallback for a session file whose header lacks `cwd`.
  */
 function reverseSlugToDirectory(slug: string): string | null {
     if (!slug.startsWith("--") || !slug.endsWith("--")) return null;
     const inner = slug.slice(2, -2);
     if (!inner) return null;
     return `/${inner.replace(/-/g, "/")}`;
+}
+
+/** A Pi session header is one JSON line; 4 KiB covers any path it can carry. */
+const SESSION_HEADER_BYTES = 4096;
+
+/**
+ * Pi writes `{"type":"session", ..., "cwd": <project directory>}` as the first
+ * line of every session file. The header's `cwd` is the exact directory, unlike
+ * the slug, so it is read from the top of the file; a missing or malformed
+ * header yields `null`.
+ */
+function readSessionHeaderCwd(path: string): string | null {
+    const buffer = Buffer.alloc(SESSION_HEADER_BYTES);
+    const fd = openSync(path, "r");
+    let read = 0;
+    try {
+        read = readSync(fd, buffer, 0, buffer.length, 0);
+    } finally {
+        closeSync(fd);
+    }
+    const text = buffer.toString("utf-8", 0, read);
+    const newline = text.indexOf("\n");
+    if (newline === -1) return null;
+    try {
+        const header = JSON.parse(text.slice(0, newline)) as { type?: unknown; cwd?: unknown };
+        return header.type === "session" && typeof header.cwd === "string" && header.cwd
+            ? header.cwd
+            : null;
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -253,13 +285,14 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
 
         const candidates: Array<{
             sessionId: string;
-            directory: string;
+            path: string;
+            slugDirectory: string;
             mtime: number;
         }> = [];
 
         for (const slug of slugs) {
-            const directory = reverseSlugToDirectory(slug);
-            if (!directory) continue;
+            const slugDirectory = reverseSlugToDirectory(slug);
+            if (!slugDirectory) continue;
             const slugDir = join(sessionsRoot, slug);
             let files: string[];
             try {
@@ -269,19 +302,27 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
             }
             for (const file of files) {
                 try {
-                    const mtime = statSync(join(slugDir, file)).mtimeMs;
+                    const path = join(slugDir, file);
+                    const mtime = statSync(path).mtimeMs;
                     const sessionId = piSessionIdFromFileName(file);
-                    candidates.push({ sessionId, directory, mtime });
+                    candidates.push({ sessionId, path, slugDirectory, mtime });
                 } catch {}
             }
         }
 
         candidates.sort((a, b) => b.mtime - a.mtime);
-        return candidates.slice(0, 5).map((entry) => ({
-            sessionId: entry.sessionId,
-            directory: entry.directory,
-            lastActiveAt: new Date(entry.mtime).toISOString(),
-        }));
+        // Headers are read only for the sessions that are reported.
+        return candidates.slice(0, 5).map((entry) => {
+            let directory = entry.slugDirectory;
+            try {
+                directory = readSessionHeaderCwd(entry.path) ?? directory;
+            } catch {}
+            return {
+                sessionId: entry.sessionId,
+                directory,
+                lastActiveAt: new Date(entry.mtime).toISOString(),
+            };
+        });
     } catch {
         return [];
     }
