@@ -25,7 +25,7 @@ export const COMMIT_HASH_TEST_PATTERN = new RegExp(`\\b${HASH_HEX}\\b`, "i");
  * it matters.
  */
 export const COMMIT_VERB_PATTERN =
-    /\b(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b/i;
+    /\b(?:commit(?:ted|ting|s)?|cherry[-\s]?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b/i;
 
 /**
  * */
@@ -35,7 +35,9 @@ export function textMentionsRecentCommit(text: string): boolean {
 
 /**
  * `createCommitHashExtractPattern` returns a new global regex so callers do not share `lastIndex`.
+ * Group 1 captures the hash. The match consumes backticks only when they enclose the hash;
+ * `.replace(pattern, "")` therefore never leaves a code span half-closed.
  */
 export function createCommitHashExtractPattern(): RegExp {
-    return new RegExp(`\`?\\b(${HASH_HEX})\\b\`?`, "gi");
+    return new RegExp(`(?:\`(?=${HASH_HEX}\`))?\\b(${HASH_HEX})\\b(?:(?<=\`${HASH_HEX})\`)?`, "gi");
 }

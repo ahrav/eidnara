@@ -46,7 +46,9 @@ function touchIsolatedRoot(
     }
 }
 
+/** A redelivered fork event reaches an already isolated session; returning preserves its mutation tokens and `known_as_of`, where a fresh cache would break mutation continuity. */
 export function isolatePiSessionKernelTokens(sessionId: string): void {
+    if (isolatedTokenCaches.has(sessionId)) return;
     isolatedTokenCaches.set(sessionId, {
         tokens: new TokenCache(),
         rootOrder: new Set(),

@@ -551,9 +551,11 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
                 "ghr_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
             ];
             for (const token of tokens) {
-                const sanitized = sanitizeLogContent(`Token: ${token}`);
-                expect(sanitized).toContain("<GITHUB_TOKEN_REDACTED>");
-                expect(sanitized).not.toContain(token.slice(0, 12));
+                // The keyed `Token:` rule claims the value; a bare token falls to the provider rule.
+                expect(sanitizeLogContent(`Token: ${token}`)).toBe("Token: <REDACTED:token>");
+                const bare = sanitizeLogContent(`saw ${token} in output`);
+                expect(bare).toContain("<GITHUB_TOKEN_REDACTED>");
+                expect(bare).not.toContain(token.slice(0, 12));
             }
         });
     });
@@ -609,7 +611,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             const log = "SLACK_BOT_TOKEN=xoxb-1234567890-abcdefghij-ABCDEFG12345"; // gitleaks:allow redaction-test fixture
             const sanitized = sanitizeLogContent(log);
             // env-var wins
-            expect(sanitized).toBe("SLACK_BOT_TOKEN=<REDACTED:token>");
+            expect(sanitized).toBe("SLACK_BOT_TOKEN=<REDACTED:slack_token>");
         });
 
         it("redacts standalone xoxp/xoxr/xoxs", () => {
@@ -641,7 +643,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
 
         it("redacts BAR_TOKEN=value", () => {
             const sanitized = sanitizeLogContent("DATABASE_TOKEN=tokenvaluehere");
-            expect(sanitized).toBe("DATABASE_TOKEN=<REDACTED:token>");
+            expect(sanitized).toBe("DATABASE_TOKEN=<REDACTED:database_token>");
         });
 
         it("redacts BAZ_SECRET=value", () => {
@@ -651,7 +653,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
 
         it("redacts QUX_PASSWORD=value", () => {
             const sanitized = sanitizeLogContent("DB_PASSWORD=hunter2");
-            expect(sanitized).toBe("DB_PASSWORD=<REDACTED:password>");
+            expect(sanitized).toBe("DB_PASSWORD=<REDACTED:db_password>");
         });
 
         it("redacts COMPOUND_CREDENTIAL=value", () => {

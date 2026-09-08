@@ -11,6 +11,7 @@ import {
     deriveObjectId,
     isAvailable,
     isMemoryDecisionRow,
+    isServedMemoryDecisionRow,
     type KernelClient,
     MEMORY_DOMAIN_ID,
     type MemoryState,
@@ -35,7 +36,7 @@ import { MAX_RENDER_FIELD_BYTES, truncateUtf8Bytes } from "../ctx-search/bounds"
 import { readObjectRowsChunked } from "../ctx-search/kernel-memory-search";
 import { CTX_MEMORY_RESPONSE_BUDGET_BYTES, GET_MAX_CLAIMS, MERGE_MAX_TARGETS } from "./constants";
 import type { CtxMemoryAction, CtxMemoryArgs } from "./types";
-import { assertCtxMemoryWriteShape } from "./write-shape";
+import { assertCtxMemoryFieldTypes, assertCtxMemoryWriteShape } from "./write-shape";
 
 /** Every memory the tool writes lives in this kernel domain. */
 export const CTX_MEMORY_DOMAIN_ID = MEMORY_DOMAIN_ID;
@@ -78,35 +79,44 @@ function memoryView(row: ReadRow): Record<string, unknown> {
 /** The marker a bounded field ends with, so an elided middle is visible in the tool text. */
 const CTX_MEMORY_TRUNCATION_MARKER = "… [truncated]";
 
-function boundedText(text: string): string {
-    if (Buffer.byteLength(text, "utf8") <= MAX_RENDER_FIELD_BYTES) return text;
-    return `${truncateUtf8Bytes(text, MAX_RENDER_FIELD_BYTES)}${CTX_MEMORY_TRUNCATION_MARKER}`;
+function boundedText(text: string, fieldBytes: number): string {
+    if (Buffer.byteLength(text, "utf8") <= fieldBytes) return text;
+    return `${truncateUtf8Bytes(text, fieldBytes)}${CTX_MEMORY_TRUNCATION_MARKER}`;
 }
 
-/** Bounds every string the view serializes — content, rationale, and parsed anti-memory fields — to the shared per-field byte cap. */
-function boundedMemoryView(row: ReadRow): Record<string, unknown> {
+function boundedMemoryView(row: ReadRow, fieldBytes: number): Record<string, unknown> {
     const view = memoryView(row);
     const bounded: Record<string, unknown> = { ...view };
-    if (typeof view.content === "string") bounded.content = boundedText(view.content);
-    if (typeof view.rationale === "string") bounded.rationale = boundedText(view.rationale);
+    if (typeof view.content === "string") bounded.content = boundedText(view.content, fieldBytes);
+    if (typeof view.rationale === "string") {
+        bounded.rationale = boundedText(view.rationale, fieldBytes);
+    }
     if (view.antiMemory !== undefined) {
         const antiMemory: Record<string, unknown> = {
             ...(view.antiMemory as Record<string, unknown>),
         };
         for (const [key, value] of Object.entries(antiMemory)) {
-            if (typeof value === "string") antiMemory[key] = boundedText(value);
+            if (typeof value === "string") antiMemory[key] = boundedText(value, fieldBytes);
         }
         bounded.antiMemory = antiMemory;
     }
     return bounded;
 }
 
-/**
- * Retains the leading rows whose serialized views fit the response byte
- * budget and elides the rest, so one call cannot inject an unbounded read
- * into the conversation. The first row always yields a view: complete when
- * it fits, field-bounded when it alone exceeds the budget.
- */
+function serializedBytes(view: Record<string, unknown>): number {
+    return Buffer.byteLength(JSON.stringify(view), "utf8");
+}
+
+/** A raw per-field cap does not bound the serialized view: JSON escaping multiplies a field's bytes (a control character costs six), and an anti-memory repeats its summary across `content` and every parsed field. The cap therefore halves until the serialized view fits the response budget; `null` means no cap fits, which only an oversized unbounded field such as the object id or category can cause. commentlint: allow(JUDGE) */
+function boundedMemoryViewWithinBudget(row: ReadRow): Record<string, unknown> | null {
+    for (let fieldBytes = MAX_RENDER_FIELD_BYTES; fieldBytes >= 1; fieldBytes >>= 1) {
+        const view = boundedMemoryView(row, fieldBytes);
+        if (serializedBytes(view) <= CTX_MEMORY_RESPONSE_BUDGET_BYTES) return view;
+    }
+    return null;
+}
+
+/** Retains the leading rows whose serialized views fit `CTX_MEMORY_RESPONSE_BUDGET_BYTES` and elides the rest. A first row that alone exceeds the budget is field-bounded and re-measured against the same budget, so the rendered response never exceeds it; the row is elided only when no field cap fits. commentlint: allow(JUDGE) */
 function packMemoryViews(
     rows: readonly ReadRow[],
     viewOf: (row: ReadRow) => Record<string, unknown>,
@@ -115,16 +125,41 @@ function packMemoryViews(
     let usedBytes = 0;
     for (const [index, row] of rows.entries()) {
         const view = viewOf(row);
-        const cost = Buffer.byteLength(JSON.stringify(view), "utf8");
+        const cost = serializedBytes(view);
         if (usedBytes + cost > CTX_MEMORY_RESPONSE_BUDGET_BYTES) {
             if (views.length > 0) return { views, elidedRows: rows.slice(index) };
-            views.push(boundedMemoryView(row));
+            const bounded = boundedMemoryViewWithinBudget(row);
+            if (bounded === null) return { views, elidedRows: rows.slice(index) };
+            views.push(bounded);
             return { views, elidedRows: rows.slice(index + 1) };
         }
         views.push(view);
         usedBytes += cost;
     }
     return { views, elidedRows: [] };
+}
+
+/**
+ * Echoes caller-supplied ids while their serialized bytes fit `remainingBytes`, each field-bounded
+ * first, and counts the rest. The count lets the caller learn how many ids went unserved without
+ * the response repeating arbitrarily long input.
+ */
+function packEchoedIds(
+    ids: readonly string[],
+    remainingBytes: number,
+): { ids: string[]; elidedCount: number; usedBytes: number } {
+    const echoed: string[] = [];
+    let usedBytes = 0;
+    for (const [index, id] of ids.entries()) {
+        const bounded = boundedText(id, MAX_RENDER_FIELD_BYTES);
+        const cost = Buffer.byteLength(JSON.stringify(bounded), "utf8") + 1;
+        if (usedBytes + cost > remainingBytes) {
+            return { ids: echoed, elidedCount: ids.length - index, usedBytes };
+        }
+        echoed.push(bounded);
+        usedBytes += cost;
+    }
+    return { ids: echoed, elidedCount: 0, usedBytes };
 }
 
 /** Tool text for a state other than `available`; a conflict names the object to re-read. */
@@ -347,17 +382,17 @@ async function readMemoryRowsChunked(
     };
 }
 
-/** An anti-memory predecessor's summary is parsed back into an `antiMemory` payload — never inherited as `content` — because `assertCtxMemoryWriteShape` requires the payload arm for the anti-memory category. commentlint: allow(JUDGE) */
+/** An anti-memory predecessor's summary is parsed back into an `antiMemory` payload — never inherited as `content` — because `assertCtxMemoryWriteShape` requires the payload arm for the anti-memory category. `null` counts as omitted for every inherited field, matching the shape assertion's admission of null optional strings on the schema-fallback path; a strict `undefined` test would let `reason: null` reach `decisionSpec` as an explicit empty rationale and erase the stored one. commentlint: allow(JUDGE) */
 function revisionArgs(args: CtxMemoryArgs, predecessors: readonly ReadRow[]): CtxMemoryArgs {
     const decision = predecessors[0]?.decision;
     const merged: CtxMemoryArgs = {
         ...args,
-        ...(args.category === undefined && decision ? { category: decision.decision_kind } : {}),
-        ...(args.reason === undefined && decision?.payload.rationale
+        ...(args.category == null && decision ? { category: decision.decision_kind } : {}),
+        ...(args.reason == null && decision?.payload.rationale
             ? { reason: decision.payload.rationale }
             : {}),
     };
-    if (args.content !== undefined || args.antiMemory !== undefined || !decision) return merged;
+    if (args.content != null || args.antiMemory != null || !decision) return merged;
     if (merged.category?.trim() !== ANTI_MEMORY_CATEGORY) {
         return { ...merged, content: decision.payload.summary };
     }
@@ -407,10 +442,13 @@ function plausiblyGeneratedExpiry(
     );
 }
 
-/** The create replay probe answers "already applied" only when the stored row equals the spec this request derives on its own: the derived category and rationale (empty when omitted) must equal the stored decision kind and rationale, a caller-supplied summary must equal the stored one byte for byte, and an anti-memory must re-render to the stored payload under the stored expiry — the one field a generated expiry legitimately drifts on — so any other changed content surfaces the daemon's `operation_key_reused` rejection. commentlint: allow(JUDGE) */
+/** The create replay probe answers "already applied" only when the stored row equals the spec this request derives on its own: the derived category and rationale (empty when omitted) must equal the stored decision kind and rationale, a caller-supplied summary must equal the stored one byte for byte, and an anti-memory must re-render to the stored payload under the stored expiry — the one field a generated expiry legitimately drifts on — so any other changed content surfaces the daemon's `operation_key_reused` rejection. The row must also carry the create spec's lineage, `ctx_memory` at revision 1: a revise or merge under the same identity derives the same object id but writes revision 2 or later, and the stored operation for such a row was a supersede, not the insert this request would issue. commentlint: allow(JUDGE) */
 function replayMatchesRow(args: CtxMemoryArgs, row: ReadRow): boolean {
     const decision = row.decision;
     if (!decision) return false;
+    if (row.object.source_id !== CTX_MEMORY_SOURCE_ID || row.object.source_revision !== 1) {
+        return false;
+    }
     if (decision.decision_kind !== (args.category?.trim() ?? "")) return false;
     if (decision.payload.rationale !== (args.reason?.trim() ?? "")) return false;
     if (args.antiMemory) {
@@ -428,11 +466,11 @@ function replayMatchesRow(args: CtxMemoryArgs, row: ReadRow): boolean {
             return false;
         }
     }
-    if (args.content === undefined) return false;
+    if (args.content == null) return false;
     return decision.payload.summary === args.content.trim();
 }
 
-/** The revise and merge replay probe requires every payload field explicitly: an omitted category, content, or reason inherits from the retired predecessors, which no read serves, so the reconstructed spec is unverifiable — the probe answers no match and the ordinary path surfaces the mismatch instead of a false "already applied". A generated anti-memory expiry is the one field a redelivery legitimately drifts on — it is day-aligned at delivery time — so the comparison re-renders under the stored expiry when the stored value could have been generated, mirroring the create probe. commentlint: allow(JUDGE) */
+/** The revise and merge replay probe compares only the fields this request states: an omitted category, content, or reason inherits from the retired predecessors, which no read serves, so it is consistent with whatever the successor holds, and the daemon's digest probe on the row-rebuilt spec is what proves the identity committed that successor. An explicit field must equal the stored one so a request that names different content keeps the daemon's `operation_key_reused` rejection. A generated anti-memory expiry is the one field a redelivery legitimately drifts on — it is day-aligned at delivery time — so the comparison re-renders under the stored expiry when the stored value could have been generated, mirroring the create probe. commentlint: allow(JUDGE) */
 function replayMatchesSuccessor(
     args: CtxMemoryArgs,
     row: ReadRow,
@@ -440,11 +478,8 @@ function replayMatchesSuccessor(
 ): boolean {
     const decision = row.decision;
     if (!decision) return false;
-    const category = args.category?.trim();
-    if (!category || decision.decision_kind !== category) return false;
-    if (args.reason === undefined || decision.payload.rationale !== args.reason.trim()) {
-        return false;
-    }
+    if (args.category != null && decision.decision_kind !== args.category.trim()) return false;
+    if (args.reason != null && decision.payload.rationale !== args.reason.trim()) return false;
     if (args.antiMemory) {
         if (!generatedExpiry) {
             return renderAntiMemoryContent(args.antiMemory) === decision.payload.summary;
@@ -463,7 +498,7 @@ function replayMatchesSuccessor(
             return false;
         }
     }
-    if (args.content === undefined) return false;
+    if (args.content == null) return true;
     return decision.payload.summary === args.content.trim();
 }
 
@@ -500,12 +535,13 @@ function successorSpec(identity: CtxMemoryWriteIdentity, successor: ReadRow): De
     };
 }
 
-function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow, knownAsOf: number): string {
+/** Renders a create replay from the row the first delivery wrote. Only `create` uses this: a redelivered generated-expiry create hashes to a different digest, so the daemon answers `operation_key_reused` and no replayed receipt exists to render from; a create touches exactly the object it inserted, so the row alone names the complete affected set. Revise and merge render their replayed probe receipt instead, whose tokens also list the retired predecessors. `knownAsOf` is the row's creating commit because a daemon replay reports the stored receipt's commit sequence as `known_as_of`, not the tip the probe read. commentlint: allow(JUDGE) */
+function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow): string {
     return JSON.stringify({
         action,
         outcome: "already applied",
         commitSeq: row.object.created_commit_seq,
-        knownAsOf,
+        knownAsOf: row.object.created_commit_seq,
         objectId: row.object.object_id,
         objects: [row.object.object_id],
     });
@@ -513,6 +549,8 @@ function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow, knownAsOf:
 
 export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<string> {
     const { client, action, identity, actor, sourceKind, signal } = input;
+    // Every action reads at least one optional string field with `.trim()`, and the wrappers pass raw arguments through when schema parsing fails, so the type check runs once here rather than per action; archive has no shape assertion of its own to carry it. commentlint: allow(JUDGE)
+    assertCtxMemoryFieldTypes(input.args);
     const args = withAntiMemoryExpiry(input.args);
     // A generated expiry drifts across UTC day boundaries, so a redelivered call renders a different expiry line under the same operation key; the replay probes compare such requests under the stored expiry instead. commentlint: allow(JUDGE)
     const generatedExpiry =
@@ -537,13 +575,30 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         }
         const read = await readMemoryRows(client, signal, wanted);
         if (!read.ok) return renderCtxMemoryStateText(read.state, []);
-        const found = read.rows.filter((row) => wanted.includes(row.object.object_id));
+        // An expired anti-memory reads as missing, the same served-row rule list, search, and status apply, so `get` cannot resurface a rejected strategy past its horizon. commentlint: allow(JUDGE)
+        const nowMs = Date.now();
+        const returnedIds = new Set(read.rows.map((row) => row.object.object_id));
+        const found = read.rows.filter(
+            (row) => wanted.includes(row.object.object_id) && isServedMemoryDecisionRow(row, nowMs),
+        );
         const foundIds = new Set(found.map((row) => row.object.object_id));
-        const notFound = wanted.filter((id) => !foundIds.has(id));
         // Each named id serializes complete when it fits; ids past the response byte budget are elided by name so the caller can re-request them in smaller batches. commentlint: allow(JUDGE)
         const packed = packMemoryViews(found, memoryView);
         const elidedObjectIds = packed.elidedRows.map((row) => row.object.object_id);
-        // A truncated read cannot prove absent ids are missing — they can live beyond the daemon's row cap — so those ids report as unresolved rather than missing. commentlint: allow(JUDGE)
+        // Ids the read did not serve echo back as the caller wrote them. They are caller input the packer never measures and the daemon caps their count but not their length, so the echo shares the response budget with the packed views: each id is field-bounded, and ids past the remaining budget are counted instead of named. commentlint: allow(JUDGE)
+        const notServed = wanted.filter((id) => !foundIds.has(id));
+        // A truncated read cannot prove an absent id is missing — it can live beyond the daemon's row cap — so such ids report as unresolved. An id the daemon did return and the served-row filter hid is known missing even on a truncated read. commentlint: allow(JUDGE)
+        const hidden = notServed.filter((id) => returnedIds.has(id));
+        const absent = notServed.filter((id) => !returnedIds.has(id));
+        let remainingBytes =
+            CTX_MEMORY_RESPONSE_BUDGET_BYTES -
+            packed.views.reduce((total, view) => total + serializedBytes(view), 0);
+        const missing = packEchoedIds(read.truncated ? hidden : notServed, remainingBytes);
+        remainingBytes -= missing.usedBytes;
+        const unresolved = read.truncated
+            ? packEchoedIds(absent, remainingBytes)
+            : { ids: [], elidedCount: 0, usedBytes: 0 };
+        const elidedRequestedIdCount = missing.elidedCount + unresolved.elidedCount;
         return JSON.stringify({
             action,
             knownAsOf: read.knownAsOf,
@@ -554,13 +609,19 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
                       elisionNote: `response byte budget reached; re-request ${elidedObjectIds.length} elided id${elidedObjectIds.length === 1 ? "" : "s"} in smaller batches`,
                   }
                 : {}),
-            ...(read.truncated
-                ? { truncated: true, missingObjectIds: [], unresolvedObjectIds: notFound }
-                : { missingObjectIds: notFound }),
+            missingObjectIds: missing.ids,
+            ...(read.truncated ? { truncated: true, unresolvedObjectIds: unresolved.ids } : {}),
+            ...(elidedRequestedIdCount > 0
+                ? {
+                      elidedRequestedIdCount,
+                      elidedRequestedIdNote: `${elidedRequestedIdCount} requested id${elidedRequestedIdCount === 1 ? "" : "s"} not served and too long to echo within the response budget`,
+                  }
+                : {}),
         });
     }
-
     if (action === "create") {
+        // The executor is the last check before the kernel commits: the generic client accepts any decision kind, so taxonomy membership and positive/anti-memory exclusivity are enforced here regardless of which harness wrapper called. commentlint: allow(JUDGE)
+        assertCtxMemoryWriteShape({ ...args, action: "create" });
         const category = args.category?.trim() ?? "";
         const spec = decisionSpec(args, category, identity, {
             sourceId: CTX_MEMORY_SOURCE_ID,
@@ -580,7 +641,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
                 ? read.rows.find((row) => row.object.object_id === spec.object_id)
                 : undefined;
             if (read.ok && existing && replayMatchesRow(args, existing)) {
-                return renderReplayedOutcome(action, existing, read.knownAsOf);
+                return renderReplayedOutcome(action, existing);
             }
         }
         return renderCommit(action, result, [], spec.object_id);
@@ -640,7 +701,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
                 ],
             });
             if (isAvailable(probe) && probe.receipt.replayed) {
-                return renderReplayedOutcome(action, replayed, read.knownAsOf);
+                return renderCommit(action, probe, [target], replayed.object.object_id);
             }
         }
         const predecessors = requireVisible(read.rows, [target]);
@@ -670,14 +731,14 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         );
     }
 
-    const targets = uniqueIds(args.objectIds);
-    // The raw list is bounded before any per-element work so an oversized input (the schema-fallback path passes raw arguments through) is rejected without scanning. A duplicate id in the merge list is a caller-side bug; the duplicate check precedes arity validation so duplicate input cannot pass as a smaller merge after deduplication, and the error names the offending ids so the caller can fix its list. commentlint: allow(JUDGE)
-    const supplied = (args.objectIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0);
-    if (supplied.length > MERGE_MAX_TARGETS) {
+    // The raw list's length is bounded before any per-element work so an oversized input (the schema-fallback path passes raw arguments through) is rejected without a scan, and blank entries count toward the cap because they were given. A duplicate id in the merge list is a caller-side bug; the duplicate check precedes arity validation so duplicate input cannot pass as a smaller merge after deduplication, and the error names the offending ids so the caller can fix its list. commentlint: allow(JUDGE)
+    if (Array.isArray(args.objectIds) && args.objectIds.length > MERGE_MAX_TARGETS) {
         throw new ClaimOperationInputError(
-            `merge accepts at most ${MERGE_MAX_TARGETS} objectIds; ${supplied.length} were given. Merge in smaller batches.`,
+            `merge accepts at most ${MERGE_MAX_TARGETS} objectIds; ${args.objectIds.length} were given. Merge in smaller batches.`,
         );
     }
+    const targets = uniqueIds(args.objectIds);
+    const supplied = (args.objectIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0);
     const seen = new Set<string>();
     const duplicates = new Set<string>();
     for (const id of supplied) {
@@ -694,6 +755,13 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
     }
     if (targets.length < 2) {
         throw new ClaimOperationInputError("merge requires at least two objectIds");
+    }
+    // Revise may inherit its predecessor's payload, but a merge survivor that inherited only
+    // `predecessors[0]` would retire every other target and silently discard their content.
+    if (args.content == null && args.antiMemory == null) {
+        throw new ClaimOperationInputError(
+            "merge requires content (with category) or antiMemory for the survivor; the targets' payloads are not combined automatically",
+        );
     }
     // The successor id rides in the filter so redelivery recovery sees the row this identity already wrote. commentlint: allow(JUDGE)
     const read = await readMemoryRowsChunked(
@@ -718,7 +786,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
             })),
         });
         if (isAvailable(probe) && probe.receipt.replayed) {
-            return renderReplayedOutcome(action, replayed, read.knownAsOf);
+            return renderCommit(action, probe, targets, replayed.object.object_id);
         }
     }
     const predecessors = requireVisible(read.rows, targets);

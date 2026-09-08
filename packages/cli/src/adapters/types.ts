@@ -4,7 +4,8 @@ export interface HarnessConfigPaths {
     /** configDir identifies the primary configuration directory. */
     configDir: string;
     pluginConfigPath: string;
-    eidnaraConfigPath: string;
+    /** Absent when the environment provides no absolute home, so no user tier exists to read or write. */
+    eidnaraConfigPath: string | undefined;
     /**
      * secondaryConfigPath is null when the harness has no equivalent.
      */

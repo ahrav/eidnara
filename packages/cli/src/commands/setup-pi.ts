@@ -314,6 +314,13 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 
     const settingsPath = env.paths.getPiUserExtensionsPath();
     const configPath = env.paths.getPiUserConfigPath();
+    if (configPath === undefined) {
+        prompts.log.error(
+            "No user configuration directory: set HOME (or XDG_CONFIG_HOME) to an absolute path so eidnara.jsonc has a location.",
+        );
+        prompts.outro("Setup stopped.");
+        return 1;
+    }
     const configureHost = await prompts.confirm(
         `Configure ${host.displayName} to load Eidnara?`,
         true,

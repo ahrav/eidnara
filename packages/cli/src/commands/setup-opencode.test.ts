@@ -363,7 +363,9 @@ describe("setup-opencode preflight targets", () => {
     it("includes OMO configs only when the fixer can reach them", () => {
         const root = tempDir();
         mkdirSync(join(root, ".omo"), { recursive: true });
-        writeFileSync(join(root, "oh-my-opencode.jsonc"), "{}");
+        // oh-my-opencode reads its project config from `.opencode/`, so the fixer only reaches it there.
+        mkdirSync(join(root, ".opencode"), { recursive: true });
+        writeFileSync(join(root, ".opencode", "oh-my-opencode.jsonc"), "{}");
         writeFileSync(join(root, ".omo", "omo.json"), "{ malformed");
         const userPaths = {
             configDir: join(root, "user"),
@@ -382,7 +384,7 @@ describe("setup-opencode preflight targets", () => {
 
         // Reachable: the fixer may edit these files, so they are checked.
         const firstTime = preflightConfigPaths(userPaths, root, { omoRepairReachable: true });
-        expect(firstTime).toContain(join(root, "oh-my-opencode.jsonc"));
+        expect(firstTime).toContain(join(root, ".opencode", "oh-my-opencode.jsonc"));
         expect(firstTime).toContain(join(root, ".omo", "omo.json"));
         expect(() => assertJsoncConfigsParseable(firstTime)).toThrow(/omo\.json/);
 

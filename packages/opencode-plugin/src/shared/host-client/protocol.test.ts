@@ -31,8 +31,11 @@ import {
 } from "./route-handle";
 import { AdmissionClass, Priority } from "./types";
 
-const ROUTE_OPEN_HEADER_HEX = "ad0000000200020000000000000100000000000000";
+const ROUTE_OPEN_HEADER_HEX = "a70000000200020000000000000100000000000000";
 const ROUTED_REQUEST_HEADER_HEX = "2c00000002000407004d0000000200000000000000";
+/** The wire doc Section 7.2 compact canonical `route.open` request body. */
+const ROUTE_OPEN_CANONICAL_BODY =
+    '{"op":"route.open","target":{"kind":"tool_provider","module_id":"context"},"identity":{"project_root":"/workspace/project","harness":"opencode","session":"session-1"}}';
 
 function hexToBytes(hex: string): Uint8Array {
     const bytes = new Uint8Array(hex.length / 2);
@@ -79,9 +82,17 @@ function validHeaderBytes(): Uint8Array {
 }
 
 describe("committed wire-doc Section 6.4 vectors", () => {
+    test("the canonical route.open header declares the Section 7.2 body's exact byte length", () => {
+        // The committed header and the committed body must agree; the vector is not a free constant.
+        // An independent length keeps the header literal honest instead of self-consistent.
+        const bodyLen = new TextEncoder().encode(ROUTE_OPEN_CANONICAL_BODY).length;
+        expect(bodyLen).toBe(167);
+        expect(decodeHex(ROUTE_OPEN_HEADER_HEX).len).toBe(bodyLen);
+    });
+
     test("decodes the canonical route.open request header field-by-field", () => {
         const header = decodeHex(ROUTE_OPEN_HEADER_HEX);
-        expect(header.len).toBe(173);
+        expect(header.len).toBe(167);
         expect(header.ver).toBe(2);
         expect(header.ty).toBe(FrameType.Request);
         expect(flagsBinary(header.flags)).toBe(false);
@@ -95,7 +106,7 @@ describe("committed wire-doc Section 6.4 vectors", () => {
 
     test("encodes the canonical route.open request header to the exact bytes", () => {
         const bytes = encodeHeader({
-            len: 173,
+            len: 167,
             ver: PROTOCOL_VERSION,
             ty: FrameType.Request,
             flags: buildFlags(false, Priority.Interactive, false),
@@ -445,20 +456,5 @@ describe("route handles", () => {
         expect(() => createRouteHandle(1, 0, token)).toThrow(RangeError);
         expect(() => createRouteHandle(1, 0x1_0000_0000, token)).toThrow(RangeError);
         expect(() => createRouteHandle(1.5, 1, token)).toThrow(RangeError);
-    });
-});
-
-describe("committed catalog capability vector", () => {
-    test("host_ops contains only application control operations", () => {
-        const canonical =
-            '{"op":"catalog.list","generation":1,"modules":[],"host_ops":["route.open","catalog.list","host.shutdown","host.status"]}';
-        const parsed = JSON.parse(canonical) as { op: string; host_ops: string[] };
-        expect(parsed.op).toBe("catalog.list");
-        expect(parsed.host_ops).toEqual([
-            "route.open",
-            "catalog.list",
-            "host.shutdown",
-            "host.status",
-        ]);
     });
 });

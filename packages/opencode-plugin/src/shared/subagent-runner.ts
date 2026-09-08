@@ -16,6 +16,8 @@
  *
  */
 
+import type { HarnessId } from "./harness";
+
 /**
  *
  * The configuration contains fields shared by OpenCode session calls and Pi print flags.
@@ -29,7 +31,7 @@
  * `model` uses the canonical `provider/model` form.
  * Each runner translates `model` to its harness's native model selection.
  * `fallbackModels` lists models to retry after transient failures of `model`.
- * `timeoutMs` expiry aborts the child and returns `{ ok: false, reason: "timeout" }`.
+ * `timeoutMs` is one deadline for the whole run, including every retry and fallback attempt; its expiry aborts the running child and returns `{ ok: false, reason: "timeout" }`.
  * OpenCode passes `cwd` as `query.directory`.
  * Pi uses `cwd` as the spawn cwd.
  * `signal` lets callers cancel an in-flight run.
@@ -86,7 +88,6 @@ export interface SubagentRunOptions {
  * Categories:
  * `first_event` is the first event received from the child and can measure auth and network warmup time.
  * `terminal` identifies the final assistant turn: Pi requires an assistant `message_end` with a terminal `stopReason` and no tool call; OpenCode uses the SDK `agent_end` equivalent.
- *   `agent_end` equivalent).
  * `raw_event` contains every parsed Pi NDJSON or OpenCode SDK event.
  * `raw_event` is emitted unconditionally so debug logs capture the full timeline.
  * `raw_event.event` is harness-shaped; callers must treat it as `unknown` and log it raw.
@@ -118,7 +119,7 @@ export type SubagentProgressEvent =
  * Fields:
  * - `ok`: true iff the child produced a final assistant message.
  * `assistantText` contains trimmed, concatenated text from the final assistant message; empty text returns `ok: false` with reason `"no_assistant"` so callers can try fallback models.
- *     - `"invalid_prompt"`: a known zero-tool child was given no system prompt
+ *     - `"invalid_prompt"`: a zero-tool child was given no system prompt
  *     - `"timeout"`: hit `timeoutMs` before the child finished
  *     - `"abort"`: caller's `signal` was triggered
  *     - `"model_failed"`: every configured model + fallback returned an error
@@ -154,7 +155,7 @@ export type SubagentRunResult =
               | "parse_failed";
           error: string;
           durationMs: number;
-          /** `retryable` is true when callers should retry the task instead of advancing its schedule. */
+          /** `transient` is true when callers should retry the task instead of advancing its schedule. */
           transient?: boolean;
           meta?: Record<string, unknown>;
       };
@@ -163,8 +164,8 @@ export type SubagentRunResult =
  *
  */
 export interface SubagentRunner {
-    /** `harness` identifies the harness in logs (`"opencode"` or `"pi"`). */
-    readonly harness: string;
+    /** `harness` identifies the harness in logs. */
+    readonly harness: HarnessId;
 
     /**
      *

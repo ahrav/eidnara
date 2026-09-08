@@ -1,35 +1,46 @@
-import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { detectConfigFile } from "../shared/jsonc-parser";
 
 const CONFIG_FILE_BASENAME = "eidnara";
 
-function homeDir(): string {
-    if (process.platform === "win32") {
-        return process.env.USERPROFILE || process.env.HOME || homedir();
+// Only an absolute home prevents user-tier paths from resolving relative to the process CWD.
+function absoluteOrUndefined(value: string | undefined): string | undefined {
+    return value && isAbsolute(value) ? value : undefined;
+}
+
+/** Only an absolute home from the environment yields a user tier; an unset or empty home does not fall back to the passwd entry. */
+function homeDir(): string | undefined {
+    const candidates =
+        process.platform === "win32"
+            ? [process.env.USERPROFILE, process.env.HOME]
+            : [process.env.HOME];
+    for (const candidate of candidates) {
+        const absolute = absoluteOrUndefined(candidate);
+        if (absolute) return absolute;
     }
-    return process.env.HOME || homedir();
+    return undefined;
 }
 
-function configHome(): string {
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg && isAbsolute(xdg)) return xdg;
-    return join(homeDir(), ".config");
+function configHome(): string | undefined {
+    const xdg = absoluteOrUndefined(process.env.XDG_CONFIG_HOME);
+    if (xdg) return xdg;
+    const home = homeDir();
+    return home === undefined ? undefined : join(home, ".config");
 }
 
-/** `~/.config/eidnara/eidnara` (no extension, for `detectConfigFile`). */
-export function eidnaraUserConfigBasePath(): string {
-    return join(configHome(), "eidnara", CONFIG_FILE_BASENAME);
+export function eidnaraUserConfigBasePath(): string | undefined {
+    const home = configHome();
+    return home === undefined ? undefined : join(home, "eidnara", CONFIG_FILE_BASENAME);
 }
 
-/** `<root>/.eidnara/eidnara` (no extension, for `detectConfigFile`). */
 export function eidnaraProjectConfigBasePath(directory: string): string {
     return join(directory, ".eidnara", CONFIG_FILE_BASENAME);
 }
 
-/** Returns an existing `.jsonc` path, then `.json`, or the `.jsonc` path for a new file. */
-export function resolveEidnaraUserConfigPath(): string {
-    return detectConfigFile(eidnaraUserConfigBasePath()).path;
+/** Returns an existing `.jsonc` path, then `.json`, or the `.jsonc` path for a new file; `undefined` when there is no user tier. */
+export function resolveEidnaraUserConfigPath(): string | undefined {
+    const base = eidnaraUserConfigBasePath();
+    return base === undefined ? undefined : detectConfigFile(base).path;
 }
 
 export function resolveEidnaraProjectConfigPath(directory: string): string {

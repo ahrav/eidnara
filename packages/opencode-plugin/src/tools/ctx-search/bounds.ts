@@ -3,7 +3,7 @@ import { estimateTokens } from "../../shared/token-estimator";
 /** The query validator checks the 16 KiB UTF-8 limit before trimming or tokenization. */
 export const MAX_QUERY_BYTES = 16 * 1024;
 export const MAX_QUERY_TOKENS = 512;
-/** The FTS lexer counts duplicate whitespace-delimited operands toward the 64-atom limit. */
+/** The memory ranker scans every operand against every served row, so the operand count bounds its work. */
 export const MAX_QUERY_ATOMS = 64;
 /** Missing or non-finite result-limit requests default to 10. */
 export const DEFAULT_SEARCH_RESULT_LIMIT = 10;
@@ -65,19 +65,17 @@ export function describeQueryBoundsViolation(detail: QueryBoundsDetail): string 
     }
 }
 
-/** Duplicates count separately because the FTS lexer emits one atom per whitespace-delimited operand. */
+/** Runs of letters, digits, and underscores are operands; every other character separates them. */
+const QUERY_OPERAND_SEPARATOR = /[^\p{L}\p{N}_]+/u;
+
+/** The operands of `query` in order, duplicates kept. */
+export function splitQueryOperands(query: string): string[] {
+    return query.split(QUERY_OPERAND_SEPARATOR).filter(Boolean);
+}
+
+/** Duplicates count separately so the count is an upper bound on the ranker's deduplicated term set. */
 export function countQueryAtoms(query: string): number {
-    let count = 0;
-    let inAtom = false;
-    for (const char of query) {
-        if (/\s/.test(char)) {
-            inAtom = false;
-        } else if (!inAtom) {
-            inAtom = true;
-            count += 1;
-        }
-    }
-    return count;
+    return splitQueryOperands(query).length;
 }
 
 export type ExplicitQueryPreparation =

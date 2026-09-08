@@ -96,6 +96,29 @@ describe("createMessagesTransformHandler — rust mode", () => {
         expect((result[0]?.info as { id?: string }).id).toBe("m1");
     });
 
+    it("restores the input messages when the inner hook mutates them and then throws", async () => {
+        const handler = createMessagesTransformHandler({
+            eidnara: {
+                "experimental.chat.messages.transform": async (_input, out) => {
+                    out.messages.splice(0, out.messages.length, {
+                        info: { id: "partial", role: "user", sessionID: "ses_test" },
+                        parts: [],
+                    } as unknown as Message);
+                    throw new Error("daemon transform failed after rewriting history");
+                },
+            },
+            transformMode: "rust",
+        });
+
+        const output = makeOutput();
+        const original = output.messages[0];
+        const result = await handler({}, output);
+
+        expect(result).toBe(output.messages);
+        expect(result).toHaveLength(1);
+        expect(result[0]).toBe(original);
+    });
+
     it("no-ops when eidnara is null", async () => {
         const handler = createMessagesTransformHandler({ eidnara: null, transformMode: "rust" });
 

@@ -1,5 +1,6 @@
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import { withTimeout } from "../../shared/with-timeout";
 import { isMidTurn } from "./read-session-db";
 
 export interface NotificationParams {
@@ -9,9 +10,14 @@ export interface NotificationParams {
     modelId?: string;
     /* */
     toastDurationMs?: number;
+    forcePersist?: boolean;
 }
 
 export type NotificationDeliveryDisposition = "sent" | "queued" | "skipped" | "failed";
+
+/** A `noReply` prompt only persists a row, so a delivery still pending after this long is treated as failed rather than left to stall the hook that awaits it. */
+const NOTIFICATION_SEND_TIMEOUT_MS = 10_000;
+let notificationSendTimeoutMs = NOTIFICATION_SEND_TIMEOUT_MS;
 
 /**
  * Because notifications are status lines rather than user input, the queue keeps only the newest entries.
@@ -20,29 +26,44 @@ export type NotificationDeliveryDisposition = "sent" | "queued" | "skipped" | "f
  */
 export const MAX_QUEUED_IGNORED_NOTIFICATIONS = 16;
 
-interface QueuedIgnoredNotification {
+/** A queued notification is dropped after this many idle flushes that could not deliver it. */
+export const MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS = 3;
+
+interface IgnoredNotification {
     client: unknown;
     sessionId: string;
     text: string;
     params: NotificationParams;
     forcePersist: boolean;
+    /** Idle flushes that ended in `"failed"` or `"skipped"` for this entry. */
+    attempts: number;
 }
 
-const queuedIgnoredNotifications = new Map<string, QueuedIgnoredNotification[]>();
+const queuedIgnoredNotifications = new Map<string, IgnoredNotification[]>();
 const flushingIgnoredNotifications = new Set<string>();
 let midTurnDetector = (sessionId: string): boolean => isMidTurn(undefined, sessionId);
 
-function queueIgnoredNotification(notification: QueuedIgnoredNotification): void {
-    const queued = queuedIgnoredNotifications.get(notification.sessionId) ?? [];
-    queued.push(notification);
+function storeQueuedNotifications(sessionId: string, queued: IgnoredNotification[]): void {
     if (queued.length > MAX_QUEUED_IGNORED_NOTIFICATIONS) {
         queued.splice(0, queued.length - MAX_QUEUED_IGNORED_NOTIFICATIONS);
         sessionLog(
-            notification.sessionId,
+            sessionId,
             `ignored notification queue full; dropped oldest entries (kept newest ${MAX_QUEUED_IGNORED_NOTIFICATIONS})`,
         );
     }
-    queuedIgnoredNotifications.set(notification.sessionId, queued);
+    queuedIgnoredNotifications.set(sessionId, queued);
+}
+
+function queueIgnoredNotification(notification: IgnoredNotification): void {
+    const queued = queuedIgnoredNotifications.get(notification.sessionId) ?? [];
+    queued.push(notification);
+    storeQueuedNotifications(notification.sessionId, queued);
+}
+
+/** Restore the interrupted flush batch ahead of later arrivals to preserve chronological delivery order. */
+function requeueFlushBatch(sessionId: string, batch: IgnoredNotification[]): void {
+    const arrived = queuedIgnoredNotifications.get(sessionId) ?? [];
+    storeQueuedNotifications(sessionId, [...batch, ...arrived]);
 }
 
 async function trySendTuiToast(
@@ -56,19 +77,21 @@ async function trySendTuiToast(
     const title = extractToastTitle(text);
     const message = text.length > 200 ? `${text.slice(0, 200)}…` : text;
     const toastVariant = inferToastVariant(text);
-    const duration = params.toastDurationMs ?? 5000;
     const { isTuiConnected: checkTui } = await import("../../shared/rpc-notifications");
     if (!checkTui(sessionId)) return false;
 
     try {
         const { pushNotification } = await import("../../shared/rpc-notifications");
+        // The TUI treats a present `duration` as a per-call override; omitting it applies the configured `toast_duration_ms`.
         pushNotification(
             "toast",
             {
                 title,
                 message,
                 variant: toastVariant,
-                duration,
+                ...(params.toastDurationMs === undefined
+                    ? {}
+                    : { duration: params.toastDurationMs }),
             },
             sessionId,
         );
@@ -89,9 +112,13 @@ export const __ignoredNotificationTest = {
         queuedIgnoredNotifications.clear();
         flushingIgnoredNotifications.clear();
         midTurnDetector = (sessionId: string): boolean => isMidTurn(undefined, sessionId);
+        notificationSendTimeoutMs = NOTIFICATION_SEND_TIMEOUT_MS;
     },
     setMidTurnDetector(detector: (sessionId: string) => boolean): void {
         midTurnDetector = detector;
+    },
+    setSendTimeoutMs(timeoutMs: number): void {
+        notificationSendTimeoutMs = timeoutMs;
     },
 };
 
@@ -141,24 +168,30 @@ function extractToastTitle(text: string): string {
     return "Eidnara";
 }
 
-async function sendIgnoredMessageNow(
-    client: unknown,
-    sessionId: string,
-    text: string,
-    params: NotificationParams,
-    forcePersist: boolean,
+/** A `"queued"` result leaves the queue untouched; the caller chooses the entry's position. */
+async function deliverIgnoredMessage(
+    notification: IgnoredNotification,
 ): Promise<NotificationDeliveryDisposition> {
-    // A final active-run check closes the window created by title and prompt-context lookups.
-    if (midTurnDetector(sessionId)) {
-        queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
-        return "queued";
-    }
+    const { client, sessionId, text, params, forcePersist } = notification;
+
+    // TUI notifications are already out-of-band and do not create a user row.
+    if (await trySendTuiToast(sessionId, text, params, forcePersist)) return "sent";
+
+    // `MessageV2.latest` treats an ignored-only user row as the latest user turn.
+    // Do not create an ignored-only user row while a run is active.
+    if (midTurnDetector(sessionId)) return "queued";
 
     // Persistence requires a real session title.
     // Ignored messages are hidden from the LLM but are not `synthetic`, so OpenCode counts them as real user messages for title generation.
     // A notification persisted before title generation permanently suppresses that session's title generation.
     const { waitForSafeNotificationTarget } = await import("../../shared/safe-notification-target");
-    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") {
+    const target = await waitForSafeNotificationTarget(
+        client,
+        sessionId,
+        forcePersist ? { attempts: 1, delayMs: 0 } : undefined,
+    );
+    if (target === "skip") {
+        if (forcePersist) return "queued";
         sessionLog(sessionId, "notification skipped (session not titled yet)");
         return "skipped";
     }
@@ -166,10 +199,7 @@ async function sendIgnoredMessageNow(
     // The second active-run check prevents runs that begin during title or prompt-context lookup from receiving a user row.
     // The second check runs after title and prompt-context lookup to close their race window.
     // The second check prevents a newly active run from receiving a user row.
-    if (midTurnDetector(sessionId)) {
-        queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
-        return "queued";
-    }
+    if (midTurnDetector(sessionId)) return "queued";
 
     if (!hasNotificationSessionClient(client)) {
         sessionLog(sessionId, "session prompt API unavailable for notification");
@@ -202,8 +232,14 @@ async function sendIgnoredMessageNow(
             const resolved = await resolvePromptContext(client, sessionId);
             if (resolved) {
                 agent = agent ?? resolved.agent;
+                // A variant belongs to one model, so it carries over only when the model does too.
+                const sameModel =
+                    model === undefined ||
+                    (resolved.model !== undefined &&
+                        model.providerID === resolved.model.providerID &&
+                        model.modelID === resolved.model.modelID);
                 model = model ?? resolved.model;
-                variant = variant ?? resolved.variant;
+                if (sameModel) variant = variant ?? resolved.variant;
             }
         } catch {
             // If resolution fails, use caller-supplied params without blocking the notification.
@@ -211,10 +247,7 @@ async function sendIgnoredMessageNow(
     }
 
     // Check for an active run immediately before the SDK call to prevent a concurrent run from receiving a user row.
-    if (midTurnDetector(sessionId)) {
-        queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
-        return "queued";
-    }
+    if (midTurnDetector(sessionId)) return "queued";
 
     const input = {
         path: { id: sessionId },
@@ -238,11 +271,19 @@ async function sendIgnoredMessageNow(
 
     try {
         if (typeof c.session?.prompt === "function") {
-            await Promise.resolve(c.session.prompt(input));
+            await withTimeout(
+                Promise.resolve(c.session.prompt(input)),
+                notificationSendTimeoutMs,
+                "notification delivery timed out",
+            );
             return "sent";
         }
         if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(input);
+            await withTimeout(
+                c.session.promptAsync(input),
+                notificationSendTimeoutMs,
+                "notification delivery timed out",
+            );
             return "sent";
         }
         sessionLog(sessionId, "session prompt API unavailable for notification");
@@ -263,18 +304,17 @@ export async function sendIgnoredMessage(
     // forcePersist preserves the message in scrollback.
     forcePersist = false,
 ): Promise<NotificationDeliveryDisposition> {
-    // TUI notifications are already out-of-band and do not create a user row.
-    if (await trySendTuiToast(sessionId, text, params, forcePersist)) return "sent";
-
-    // `MessageV2.latest` treats an ignored-only user row as the latest user turn.
-    // Do not create an ignored-only user row.
-    // `MessageV2.latest` treats an ignored-only user row as the latest user turn; do not create one when `midTurnDetector(sessionId)` returns true.
-    if (midTurnDetector(sessionId)) {
-        queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
-        return "queued";
-    }
-
-    return sendIgnoredMessageNow(client, sessionId, text, params, forcePersist);
+    const notification: IgnoredNotification = {
+        client,
+        sessionId,
+        text,
+        params,
+        forcePersist,
+        attempts: 0,
+    };
+    const disposition = await deliverIgnoredMessage(notification);
+    if (disposition === "queued") queueIgnoredNotification(notification);
+    return disposition;
 }
 
 /**
@@ -289,23 +329,26 @@ export async function flushIgnoredMessages(sessionId: string): Promise<void> {
     queuedIgnoredNotifications.delete(sessionId);
     flushingIgnoredNotifications.add(sessionId);
     try {
-        for (const notification of queued) {
-            const disposition = await sendIgnoredMessage(
-                notification.client,
-                notification.sessionId,
-                notification.text,
-                notification.params,
-                notification.forcePersist,
-            );
+        let retained: IgnoredNotification[] = [];
+        for (const [index, notification] of queued.entries()) {
+            const disposition = await deliverIgnoredMessage(notification);
             if (disposition === "queued") {
-                // The current item is already re-queued by sendIgnoredMessage.
-                // Preserve the remaining entries behind it in their original order.
-                for (const remaining of queued.slice(queued.indexOf(notification) + 1)) {
-                    queueIgnoredNotification(remaining);
-                }
+                retained = queued.slice(index);
                 break;
             }
+            if (disposition === "failed" || disposition === "skipped") {
+                notification.attempts += 1;
+                if (notification.attempts < MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS) {
+                    retained = queued.slice(index);
+                    break;
+                }
+                sessionLog(
+                    sessionId,
+                    `dropped queued notification after ${notification.attempts} undelivered flushes (last: ${disposition})`,
+                );
+            }
         }
+        if (retained.length > 0) requeueFlushBatch(sessionId, retained);
     } finally {
         flushingIgnoredNotifications.delete(sessionId);
     }
@@ -316,36 +359,43 @@ export function clearIgnoredMessages(sessionId: string): void {
     flushingIgnoredNotifications.delete(sessionId);
 }
 
-/**
- */
+/** Propagates session prompt failures so callers replacing user input can report the loss. */
 export async function sendUserPrompt(
     client: unknown,
     sessionId: string,
     text: string,
+    promptContext: NotificationParams = {},
 ): Promise<void> {
     if (!hasNotificationSessionClient(client)) {
-        sessionLog(sessionId, "session prompt API unavailable for user prompt");
-        return;
+        throw new Error("session prompt API unavailable for user prompt");
     }
     const c = client as NotificationClient;
 
+    const model =
+        promptContext.providerId && promptContext.modelId
+            ? { providerID: promptContext.providerId, modelID: promptContext.modelId }
+            : undefined;
     const input = {
         path: { id: sessionId },
         body: {
+            ...(promptContext.agent ? { agent: promptContext.agent } : {}),
+            ...(model ? { model } : {}),
+            ...(promptContext.variant ? { variant: promptContext.variant } : {}),
             parts: [{ type: "text", text }],
         },
     };
 
-    try {
-        if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(input);
-        } else if (typeof c.session?.prompt === "function") {
-            await Promise.resolve(c.session.prompt(input));
-        } else {
-            sessionLog(sessionId, "session prompt API unavailable for user prompt");
-        }
-    } catch (error: unknown) {
-        const msg = getErrorMessage(error);
-        sessionLog(sessionId, "failed to send user prompt:", msg);
+    if (typeof c.session?.promptAsync === "function") {
+        // `promptAsync` only enqueues the turn, so a call still pending after the deadline is a stuck endpoint, not a long turn.
+        await withTimeout(
+            c.session.promptAsync(input),
+            notificationSendTimeoutMs,
+            "user prompt delivery timed out",
+        );
+    } else if (typeof c.session?.prompt === "function") {
+        // `prompt` returns after the model turn completes; a deadline here would report a slow turn as an undelivered prompt.
+        await Promise.resolve(c.session.prompt(input));
+    } else {
+        throw new Error("session prompt API unavailable for user prompt");
     }
 }

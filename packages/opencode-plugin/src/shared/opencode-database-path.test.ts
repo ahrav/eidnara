@@ -31,11 +31,34 @@ describe("resolveOpenCodeDatabasePath", () => {
         expect(resolveOpenCodeDatabasePath(root)).toBe(explicit);
     });
 
-    test("ignores OPENCODE_DB_PATH when the file is missing", () => {
+    test("throws when OPENCODE_DB_PATH is set but does not exist", () => {
         const root = dataDir();
         writeFileSync(join(root, "opencode", "opencode.db"), "");
-        process.env.OPENCODE_DB_PATH = join(root, "missing.db");
-        expect(resolveOpenCodeDatabasePath(root)).toBe(join(root, "opencode", "opencode.db"));
+        const missing = join(root, "missing.db");
+        process.env.OPENCODE_DB_PATH = missing;
+        expect(() => resolveOpenCodeDatabasePath(root)).toThrow(
+            `OPENCODE_DB_PATH is set to ${missing}, which does not exist`,
+        );
+    });
+
+    test("ranks opencode*.db by last activity, counting a newer -wal sidecar", () => {
+        const root = dataDir();
+        const stable = join(root, "opencode", "opencode.db");
+        const beta = join(root, "opencode", "opencode-beta.db");
+        writeFileSync(stable, "");
+        writeFileSync(beta, "");
+        const now = Date.now() / 1000;
+        utimesSync(stable, now - 3600, now - 3600);
+        utimesSync(beta, now, now);
+        expect(resolveOpenCodeDatabasePath(root)).toBe(beta);
+
+        utimesSync(stable, now + 60, now + 60);
+        expect(resolveOpenCodeDatabasePath(root)).toBe(stable);
+
+        const betaWal = `${beta}-wal`;
+        writeFileSync(betaWal, "");
+        utimesSync(betaWal, now + 120, now + 120);
+        expect(resolveOpenCodeDatabasePath(root)).toBe(beta);
     });
 
     test("falls back to the newest channel database", () => {

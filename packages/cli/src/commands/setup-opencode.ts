@@ -361,7 +361,7 @@ export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
  * first-time branch.
  */
 export function preflightConfigPaths(
-    paths: ConfigPaths,
+    paths: ConfigPaths & { eidnaraConfig: string },
     directory: string,
     options: { omoRepairReachable: boolean },
 ): string[] {
@@ -448,7 +448,16 @@ export async function runSetup(dryRun = false): Promise<number> {
         log.warn("You can configure models manually in eidnara.jsonc later");
     }
 
-    const paths = detectConfigPaths();
+    const detected = detectConfigPaths();
+    if (detected.eidnaraConfig === undefined) {
+        log.error(
+            "No user configuration directory: set HOME (or XDG_CONFIG_HOME) to an absolute path so eidnara.jsonc has a location.",
+        );
+        outro("Setup stopped.");
+        return 1;
+    }
+    // The guard above narrows the user config path for every write and preflight that follows.
+    const paths = { ...detected, eidnaraConfig: detected.eidnaraConfig };
     // Shared Eidnara config can come from Pi or OMP; only OpenCode config files establish an OpenCode setup. commentlint: allow(JUDGE)
     // Project-level OpenCode configs are included because `detectConflicts` and `fixConflicts` read and repair them.
     const hadExistingSetup =

@@ -12,8 +12,12 @@ import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import type { EidnaraConfig, SidekickConfig } from "@eidnara/opencode/config/schema/eidnara";
-import { resolveProjectIdentityForSession } from "@eidnara/opencode/features/context/project-identity";
+import {
+    resolveProjectIdentityForSession,
+    resolveProjectRootDirectory,
+} from "@eidnara/opencode/features/context/project-identity";
 import { setCtxReduceRegisteredGlobally } from "@eidnara/opencode/hooks/context/ctx-reduce-availability";
+import { closeKernelSession } from "@eidnara/opencode/hooks/context/kernel-transport";
 import {
     configureManagedDemandStart,
     createHostModuleClient,
@@ -40,7 +44,7 @@ import { registerCtxWrapupCommand } from "./commands/ctx-wrapup";
 import type { DaemonSessionDeps } from "./commands/daemon-session-routes";
 import { registerCtxStatusEntryRenderer } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
-import { createPiKernelClientResolver } from "./kernel-client-pi";
+import { createPiKernelClientResolver, forgetPiSessionKernelTokens } from "./kernel-client-pi";
 import { registerStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { configurePiSubagentExtensions, EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
@@ -281,13 +285,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     configureManagedDemandStart(managedDemandStart);
     markPiEidnaraActive();
 
-    await startPiEidnaraRuntime(pi);
+    // Only a registered runtime installs the `session_shutdown` handler that clears the latch.
+    // A disabled or failed startup therefore clears it here, or `/reload` could never initialize a later enabled configuration.
+    let registered = false;
+    try {
+        registered = await startPiEidnaraRuntime(pi);
+    } finally {
+        if (!registered) clearPiEidnaraActive();
+    }
 }
 
-async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
+/** Returns `true` once every hook, tool, and command is registered; `false` when configuration disables the runtime. */
+async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // The boot project affects only initial config loading and logging.
     // Identity and path resolution use `ctx.cwd` for each hook and command, so cwd switches follow the active project without reloading config.
-    const projectDir = process.cwd();
+    // Project config lives at `<root>/.eidnara/`, so a nested start directory resolves to the checkout root the daemon routes also bind.
+    const projectDir = resolveProjectRootDirectory(process.cwd());
     // Invalid config fields use defaults per key.
     //
     // `warn()` surfaces invalid-config warnings to users.
@@ -316,15 +329,15 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
 
     if (!config.enabled) {
         info("plugin DISABLED via config (enabled: false) — skipping registration");
-        return;
+        return false;
     }
 
     // The connection file is user-tier configuration, so one daemon client serves every project in this process.
     const moduleClient: RustModeModuleClient = createHostModuleClient(config.subc?.connection_file);
     const rustToolBackends = createRustToolBackends(moduleClient);
+    // Each command routes on its own `ctx.cwd`, so the deps carry no project root.
     const daemonSessionDeps: DaemonSessionDeps = {
         moduleClient,
-        projectRoot: projectDir,
         compactionOff,
     };
 
@@ -359,7 +372,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
         };
     }
 
-    function resolveProjectDepsForDir(dir: string): ResolvedPiProjectDeps {
+    // Keyed by the checkout root, so every nested cwd in one project shares one config load and one cache entry.
+    function resolveProjectDepsForDir(rawDir: string): ResolvedPiProjectDeps {
+        const dir = resolveProjectRootDirectory(rawDir);
         const cached = projectDepsByDir.get(dir);
         if (cached) return cached;
         const switchedLoad = loadPiConfig({ cwd: dir });
@@ -442,11 +457,16 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
     registerCtxStatusCommand(pi, {
         ...daemonSessionDeps,
         kernelClient,
-        projectIdentity,
-        protectedTags: bootProjectDeps.config.protected_tags,
-        executeThresholdPercentage: bootProjectDeps.config.execute_threshold_percentage,
-        historyBudgetPercentage: bootProjectDeps.config.history_budget_percentage,
-        executeThresholdTokens: bootProjectDeps.config.execute_threshold_tokens,
+        resolveProjectSettings: (ctx) => {
+            const { projectIdentity: identity, config: cfg } = resolveCurrentProjectDeps(ctx);
+            return {
+                projectIdentity: identity,
+                protectedTags: cfg.protected_tags,
+                executeThresholdPercentage: cfg.execute_threshold_percentage,
+                historyBudgetPercentage: cfg.history_budget_percentage,
+                executeThresholdTokens: cfg.execute_threshold_tokens,
+            };
+        },
     });
     info("registered /ctx-status");
     registerStatusLine(pi, { projectIdentity });
@@ -602,22 +622,37 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
         }
     });
 
+    function sessionIdFromContext(ctx: unknown): string | undefined {
+        const sm = (
+            ctx as {
+                sessionManager?: { getSessionId?: () => string | undefined };
+            }
+        ).sessionManager;
+        const sessionId = typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
+        return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
+    }
+
+    // Clears one session's prompt state and closes its routes on both daemon transports; a closed route reopens on the session's next call, so no durable state is lost. commentlint: allow(JUDGE)
+    // The kernel transport is shared per connection file, and a session that `/cd`s across projects with distinct connection files holds routes on each, so every project config this process has resolved is released.
+    function releaseSessionResources(sessionId: string): void {
+        clearPiSystemPromptSession(sessionId);
+        promptSurfaceGuidanceEpochs.clear(sessionId);
+        systemPromptRefreshSessions.delete(sessionId);
+        moduleClient.closeSession?.(sessionId);
+        for (const deps of projectDepsByDir.values()) {
+            closeKernelSession(deps.config, sessionId);
+        }
+    }
+
     // `/reload` tears down extensions and re-runs the default export.
-    pi.on("session_shutdown", async (_event, ctx) => {
-        // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session maps.
+    pi.on("session_shutdown", async (event, ctx) => {
+        // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session state.
         try {
-            const sm = (
-                ctx as unknown as {
-                    sessionManager?: { getSessionId?: () => string | undefined };
-                }
-            ).sessionManager;
-            const sessionId =
-                typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
-            if (typeof sessionId === "string" && sessionId.length > 0) {
-                clearPiSystemPromptSession(sessionId);
-                promptSurfaceGuidanceEpochs.clear(sessionId);
-                systemPromptRefreshSessions.delete(sessionId);
-                moduleClient.closeSession?.(sessionId);
+            const sessionId = sessionIdFromContext(ctx);
+            if (sessionId) {
+                releaseSessionResources(sessionId);
+                // A reload re-creates the extension for the same live session, and no `fork` start event follows to isolate it again, so its fork tokens must survive. Every other reason ends this runtime's use of the session. commentlint: allow(JUDGE)
+                if (event.reason !== "reload") forgetPiSessionKernelTokens(sessionId);
             }
         } catch {
             // best-effort cleanup
@@ -626,22 +661,12 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
         clearPiEidnaraActive();
     });
 
+    // Each session swap releases the outgoing session's prompt state and daemon routes, or the process retains them for its lifetime.
     pi.on("session_before_switch", (_event, ctx) => {
         try {
-            const sm = (
-                ctx as unknown as {
-                    sessionManager?: { getSessionId?: () => string | undefined };
-                }
-            ).sessionManager;
-            const outgoingSessionId =
-                typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
-            if (typeof outgoingSessionId === "string" && outgoingSessionId.length > 0) {
-                // `session_before_switch` clears in-memory per-session maps so they do not retain one entry per session swap.
-                // `session_before_switch` must not clear durable state: users can return to the prior session.
-                clearPiSystemPromptSession(outgoingSessionId);
-                promptSurfaceGuidanceEpochs.clear(outgoingSessionId);
-                systemPromptRefreshSessions.delete(outgoingSessionId);
-            }
+            const outgoingSessionId = sessionIdFromContext(ctx);
+            if (outgoingSessionId) releaseSessionResources(outgoingSessionId);
         } catch {}
     });
+    return true;
 }

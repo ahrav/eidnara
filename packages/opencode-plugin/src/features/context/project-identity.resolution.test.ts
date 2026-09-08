@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    realpathSync,
+    rmSync,
+    symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import {
@@ -48,10 +56,14 @@ function returningRootCommit(rootCommit: string): typeof execFileSync {
 }
 
 function expectedDirIdentity(directory: string): string {
-    return `dir:${createHash("md5")
-        .update(path.resolve(directory), "utf8")
-        .digest("hex")
-        .slice(0, 12)}`;
+    const resolved = path.resolve(directory);
+    let canonical: string;
+    try {
+        canonical = realpathSync.native(resolved);
+    } catch {
+        canonical = resolved;
+    }
+    return `dir:${createHash("md5").update(canonical, "utf8").digest("hex").slice(0, 12)}`;
 }
 
 function expectProjectIdentityError(fn: () => void): ProjectIdentityError {
@@ -131,6 +143,28 @@ describe("project identity", () => {
         }
     });
 
+    it("drops a cached git identity when an accessible directory loses its metadata", () => {
+        const repo = makeRepoWithGitMetadata("project-identity-metadata-removed-");
+        const execMock = mock(returningRootCommit(FIRST_ROOT_COMMIT));
+        __setProjectIdentityTestHooks({ execFileSync: execMock as unknown as typeof execFileSync });
+
+        expect(resolveProjectIdentity(repo)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        rmSync(join(repo, ".git"), { recursive: true, force: true });
+
+        expect(resolveProjectIdentity(repo)).toBe(expectedDirIdentity(repo));
+        expect(execMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("retains a cached git identity while its directory is missing", () => {
+        const repo = makeRepoWithGitMetadata("project-identity-cached-missing-");
+        __setProjectIdentityTestHooks({ execFileSync: returningRootCommit(FIRST_ROOT_COMMIT) });
+        const identity = resolveProjectIdentity(repo);
+
+        rmSync(repo, { recursive: true, force: true });
+
+        expect(resolveProjectIdentity(repo)).toBe(identity);
+    });
+
     it("resolveProjectIdentity falls back to dir identity for non-git directories", () => {
         const directory = makeTempDir("project-identity-wrapper-");
 
@@ -174,6 +208,60 @@ describe("project identity", () => {
 
         expect(resolveProjectIdentity(link)).toBe(`git:${FIRST_ROOT_COMMIT}`);
         expect(execMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("gives a non-git directory one dir: identity through its symlink and its real path", () => {
+        const target = makeTempDir("project-identity-dir-symlink-target-");
+        const linkParent = makeTempDir("project-identity-dir-symlink-parent-");
+        const link = join(linkParent, "alias");
+        try {
+            symlinkSync(target, link, "dir");
+        } catch (error) {
+            if ((error as { code?: unknown }).code === "EPERM") return;
+            throw error;
+        }
+
+        expect(resolveProjectIdentity(link)).toBe(resolveProjectIdentity(target));
+        expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(target));
+    });
+
+    it("re-resolves a cached subdirectory once it becomes its own repository", () => {
+        const outer = makeRepoWithGitMetadata("project-identity-outer-then-nested-");
+        const nested = join(outer, "packages", "child");
+        mkdirSync(nested, { recursive: true });
+        // Git answers for the nearest `.git` above its cwd, so the mock keys on whether the nested repository exists yet.
+        const execMock = mock(() =>
+            existsSync(join(nested, ".git")) ? `${SECOND_ROOT_COMMIT}\n` : `${FIRST_ROOT_COMMIT}\n`,
+        );
+        __setProjectIdentityTestHooks({ execFileSync: execMock as unknown as typeof execFileSync });
+
+        expect(resolveProjectIdentity(nested)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(resolveProjectIdentity(nested)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(execMock).toHaveBeenCalledTimes(1);
+        mkdirSync(join(nested, ".git"));
+        expect(resolveProjectIdentity(nested)).toBe(`git:${SECOND_ROOT_COMMIT}`);
+        expect(execMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not reuse an enclosing repository's identity for a nested repository during a transient failure", () => {
+        const outer = makeRepoWithGitMetadata("project-identity-outer-");
+        const nested = join(outer, "vendor", "child");
+        mkdirSync(join(nested, ".git"), { recursive: true });
+        let failNested = false;
+        const execMock = mock((_file: string, _args: string[], options: { cwd?: string }) => {
+            if (options.cwd === realpathSync.native(nested) || options.cwd === nested) {
+                if (failNested) throw makeGitFailure({ code: "ETIMEDOUT" });
+                return `${SECOND_ROOT_COMMIT}\n`;
+            }
+            return `${FIRST_ROOT_COMMIT}\n`;
+        });
+        __setProjectIdentityTestHooks({ execFileSync: execMock as unknown as typeof execFileSync });
+
+        expect(resolveProjectIdentity(outer)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        failNested = true;
+
+        expect(resolveProjectIdentity(nested)).not.toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(resolveProjectIdentity(nested)).toBe(expectedDirIdentity(nested));
     });
 
     it("reuses the last successful git identity during transient failures and cooldown", () => {

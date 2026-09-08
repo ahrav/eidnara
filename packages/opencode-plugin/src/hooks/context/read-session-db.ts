@@ -4,19 +4,17 @@ import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-
-interface RawCountRow {
-    count?: number;
-}
+import { isMachineAuthoredPart, isMeaningfulUserText } from "./read-session-formatting";
 
 interface AssistantMidTurnRow {
     id?: string;
     finish?: string | null;
     timeCreated?: number;
+    timeCompleted?: number | null;
 }
 
-interface ExistenceRow {
-    one?: number;
+interface MessageIdRow {
+    id?: string;
 }
 
 interface PartDataRow {
@@ -24,6 +22,9 @@ interface PartDataRow {
 }
 
 function getOpenCodeDbPath(): string {
+    // `OPENCODE_DB` is OpenCode's own override, so the plugin reads the database OpenCode selected.
+    const override = process.env.OPENCODE_DB;
+    if (typeof override === "string" && override.length > 0) return override;
     return join(getDataDir(), "opencode", "opencode.db");
 }
 
@@ -69,90 +70,168 @@ export function closeReadOnlySessionDb(): void {
     closeCachedReadOnlyDb();
 }
 
-export function getRawSessionMessageCountFromDb(db: Database, sessionId: string): number {
-    // COALESCE treats NULL json_extract results from messages without summary or finish fields as non-summary values.
-    const row = db
-        .prepare(
-            `SELECT COUNT(*) as count FROM message WHERE session_id = ?
-             AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
-                      AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')`,
-        )
-        .get(sessionId) as RawCountRow | null;
-    return typeof row?.count === "number" ? row.count : 0;
+/**
+ * Builds a `json_extract` that yields NULL for a malformed `column` instead of raising `malformed JSON`.
+ * `CASE` evaluates only the taken branch, so the extract never runs on an invalid document; an `AND`
+ * guard has no such ordering guarantee. `column` and `path` are code literals, never caller input.
+ */
+function jsonField(column: string, path: string): string {
+    return `CASE WHEN json_valid(${column}) = 1 THEN json_extract(${column}, '${path}') END`;
 }
 
+/** Treat errors reading an existing database as mid-turn; a missing database is idle. */
 export function isMidTurn(_deps: unknown, sessionId: string): boolean {
+    if (!openCodeDbExists()) return false;
     try {
         return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
     } catch (error) {
-        log("[eidnara] failed to inspect OpenCode mid-turn state:", error);
-        return false;
+        log("[eidnara] failed to inspect OpenCode mid-turn state; treating as mid-turn:", error);
+        return true;
     }
 }
 
 export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolean {
+    // `(time_created, id)` is the session ordering `read-session-raw.ts` uses; the id tiebreak
+    // resolves two assistant rows that share a millisecond.
+    // A compaction summary is written mid-turn and would otherwise hide the `tool-calls`
+    // assistant that is still the active fence.
     const latestAssistant = db
         .prepare(
             `SELECT id,
                     json_extract(data, '$.finish') as finish,
+                    json_extract(data, '$.time.completed') as timeCompleted,
                     time_created as timeCreated
              FROM message
              WHERE session_id = ?
-               AND json_extract(data, '$.role') = 'assistant'
-             ORDER BY time_created DESC
+               AND ${jsonField("data", "$.role")} = 'assistant'
+               AND NOT (
+                 COALESCE(${jsonField("data", "$.summary")}, 0) = 1
+                 AND COALESCE(${jsonField("data", "$.finish")}, '') = 'stop'
+               )
+             ORDER BY time_created DESC, id DESC
              LIMIT 1`,
         )
         .get(sessionId) as AssistantMidTurnRow | null;
 
+    // A real user row newer than the latest assistant is a turn whose assistant row does not exist
+    // yet, including the first prompt of a session with no assistant row at all.
+    if (
+        hasNewerRealUserMessage(
+            db,
+            sessionId,
+            latestAssistant?.id ?? "",
+            latestAssistant?.timeCreated ?? -1,
+        )
+    ) {
+        return true;
+    }
     if (typeof latestAssistant?.id !== "string") return false;
-    if (hasNewerRealUserMessage(db, sessionId, latestAssistant.timeCreated)) return false;
+    // A missing `time.completed` marks an assistant message that is still being produced.
+    if (typeof latestAssistant.timeCompleted !== "number") return true;
     if (latestAssistant.finish === "tool-calls") return true;
 
     const partRows = db
         .prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?")
         .all(sessionId, latestAssistant.id) as PartDataRow[];
 
+    // A synthetic tool part is the daemon's own bookkeeping, not a local call still in flight.
     return partRows.some((row) => {
-        if (typeof row.data !== "string" || row.data.length === 0) return false;
-        try {
-            const part = JSON.parse(row.data) as Record<string, unknown>;
-            return part.type === "tool" && part.providerExecuted !== true;
-        } catch {
-            return false;
-        }
+        const part = parsePart(row);
+        return (
+            part !== null &&
+            part.type === "tool" &&
+            !isProviderExecuted(part) &&
+            !isMachineAuthoredPart(part)
+        );
     });
 }
 
+/** Accepts `providerExecuted` at `metadata.providerExecuted` (the persisted OpenCode shape) or at top level. */
+function isProviderExecuted(part: Record<string, unknown>): boolean {
+    if (part.providerExecuted === true) return true;
+    const metadata = part.metadata;
+    return (
+        metadata !== null &&
+        typeof metadata === "object" &&
+        (metadata as Record<string, unknown>).providerExecuted === true
+    );
+}
+
+/** Callers pass `""` and `-1` when the session has no assistant row; every user row is then newer. */
 function hasNewerRealUserMessage(
     db: Database,
     sessionId: string,
-    latestAssistantTimeCreated: unknown,
+    latestAssistantId: string,
+    latestAssistantTimeCreated: number,
 ): boolean {
-    if (typeof latestAssistantTimeCreated !== "number") return false;
-    const row = db
+    // "Newer" is the `(time_created, id)` tuple ordering, so a user row that shares the
+    // assistant's millisecond still counts when its id sorts after the assistant's.
+    // A `compaction` part excludes the whole message.
+    const candidates = db
         .prepare(
-            `SELECT 1 as one
+            `SELECT m.id
              FROM message m
              WHERE m.session_id = ?
-               AND m.time_created > ?
-               AND json_extract(m.data, '$.role') = 'user'
-               AND NOT (
-                 EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
-                 AND NOT EXISTS (
-                   SELECT 1 FROM part p
-                   WHERE p.message_id = m.id
-                     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) NOT IN (1, 'true')
-                     AND json_extract(p.data, '$.metadata.marker.kind') IS NULL
-                     AND COALESCE(json_extract(p.data, '$.ignored'), 0) NOT IN (1, 'true')
-                 )
+               AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
+               AND ${jsonField("m.data", "$.role")} = 'user'
+               AND NOT EXISTS (
+                 SELECT 1 FROM part p
+                 WHERE p.message_id = m.id
+                   AND ${jsonField("p.data", "$.type")} = 'compaction'
                )
-             LIMIT 1`,
+             ORDER BY m.time_created ASC, m.id ASC`,
         )
-        .get(sessionId, latestAssistantTimeCreated) as ExistenceRow | null;
-    // Parts with synthetic=true, metadata.marker.kind, or an ignored flag do not make a user message real.
-    // A user message with at least one non-synthetic, unmarked, non-ignored part counts as real.
-    // A partless user message counts as real.
-    return row?.one === 1;
+        .all(
+            sessionId,
+            latestAssistantTimeCreated,
+            latestAssistantTimeCreated,
+            latestAssistantId,
+        ) as MessageIdRow[];
+
+    const selectParts = db.prepare("SELECT data FROM part WHERE message_id = ?");
+    for (const candidate of candidates) {
+        if (typeof candidate.id !== "string") continue;
+        const partRows = selectParts.all(candidate.id) as PartDataRow[];
+        if (isRealUserMessage(partRows)) return true;
+    }
+    return false;
+}
+
+/**
+ * A partless user message counts as real. Otherwise at least one part must be real; a malformed
+ * part is not evidence of a real turn.
+ */
+function isRealUserMessage(partRows: PartDataRow[]): boolean {
+    if (partRows.length === 0) return true;
+    return partRows.some((row) => {
+        const part = parsePart(row);
+        return part !== null && isRealUserPart(part);
+    });
+}
+
+/**
+ * Parts with `synthetic`, `ignored`, or `metadata.marker.kind` do not count. Text parts count only
+ * when `isMeaningfulUserText` returns true; other typed, unflagged parts count.
+ */
+function isRealUserPart(part: Record<string, unknown>): boolean {
+    if (typeof part.type !== "string") return false;
+    if (isMachineAuthoredPart(part)) return false;
+    if (part.type === "text") {
+        return typeof part.text === "string" && isMeaningfulUserText(part.text);
+    }
+    return true;
+}
+
+function parsePart(row: PartDataRow): Record<string, unknown> | null {
+    if (typeof row.data !== "string" || row.data.length === 0) return null;
+    try {
+        const parsed: unknown = JSON.parse(row.data);
+        return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : null;
+    } catch {
+        return null;
+    }
 }
 
 interface AssistantModelRow {
@@ -168,6 +247,10 @@ interface MessageTimeRow {
     time_created?: number;
 }
 
+// `node:sqlite` caps a statement at 32,766 bound parameters; 800 ids per `IN (...)` stays far below
+// that and matches the chunk size `read-session-raw.ts` uses for part lookups.
+const MESSAGE_ID_CHUNK = 800;
+
 /**
  *
  * `<session-history>`.
@@ -181,15 +264,18 @@ export function getMessageTimesFromOpenCodeDb(
 
     try {
         withReadOnlySessionDb((db) => {
-            const placeholders = messageIds.map(() => "?").join(",");
-            const rows = db
-                .prepare(
-                    `SELECT id, time_created FROM message WHERE session_id = ? AND id IN (${placeholders})`,
-                )
-                .all(sessionId, ...messageIds) as MessageTimeRow[];
-            for (const row of rows) {
-                if (typeof row.id === "string" && typeof row.time_created === "number") {
-                    result.set(row.id, row.time_created);
+            for (let start = 0; start < messageIds.length; start += MESSAGE_ID_CHUNK) {
+                const chunk = messageIds.slice(start, start + MESSAGE_ID_CHUNK);
+                const placeholders = chunk.map(() => "?").join(",");
+                const rows = db
+                    .prepare(
+                        `SELECT id, time_created FROM message WHERE session_id = ? AND id IN (${placeholders})`,
+                    )
+                    .all(sessionId, ...chunk) as MessageTimeRow[];
+                for (const row of rows) {
+                    if (typeof row.id === "string" && typeof row.time_created === "number") {
+                        result.set(row.id, row.time_created);
+                    }
                 }
             }
         });
@@ -212,10 +298,10 @@ export function findLastAssistantModelFromOpenCodeDb(
                             json_extract(data, '$.agent') as agent
                      FROM message
                      WHERE session_id = ?
-                       AND json_extract(data, '$.role') = 'assistant'
-                       AND json_extract(data, '$.providerID') IS NOT NULL
-                       AND json_extract(data, '$.modelID') IS NOT NULL
-                     ORDER BY time_created DESC
+                       AND ${jsonField("data", "$.role")} = 'assistant'
+                       AND ${jsonField("data", "$.providerID")} IS NOT NULL
+                       AND ${jsonField("data", "$.modelID")} IS NOT NULL
+                     ORDER BY time_created DESC, id DESC
                      LIMIT 1`,
                 )
                 .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
@@ -232,6 +318,89 @@ export function findLastAssistantModelFromOpenCodeDb(
         });
     } catch (error) {
         log("[eidnara] failed to recover live model from OpenCode DB:", error);
+        return null;
+    }
+}
+
+export interface PersistedAssistantUsage {
+    messageID: string;
+    providerID: string;
+    modelID: string;
+    /** Prompt tokens: `input + cache.read + cache.write`. */
+    inputTokens: number;
+    /** `time.completed` when the row has one, else `time_created`. */
+    respondedAt: number;
+}
+
+/** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary are skipped, so a compacted session reports no usage until a post-compaction response lands. commentlint: allow(JUDGE) */
+export function findLastAssistantUsageFromOpenCodeDb(
+    sessionId: string,
+): PersistedAssistantUsage | null {
+    if (!openCodeDbExists()) return null;
+    try {
+        return withReadOnlySessionDb((db) => {
+            const row = db
+                .prepare(
+                    `SELECT id,
+                            json_extract(data, '$.providerID') as providerID,
+                            json_extract(data, '$.modelID') as modelID,
+                            COALESCE(json_extract(data, '$.tokens.input'), 0)
+                              + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
+                              + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) as inputTokens,
+                            json_extract(data, '$.time.completed') as completedAt,
+                            time_created as timeCreated
+                     FROM message
+                     WHERE session_id = ?1
+                       AND json_extract(data, '$.role') = 'assistant'
+                       AND COALESCE(json_extract(data, '$.summary'), 0) <> 1
+                       AND time_created > (
+                         SELECT COALESCE(MAX(time_created), -1)
+                         FROM message
+                         WHERE session_id = ?1
+                           AND COALESCE(json_extract(data, '$.summary'), 0) = 1
+                       )
+                       AND json_extract(data, '$.providerID') IS NOT NULL
+                       AND json_extract(data, '$.modelID') IS NOT NULL
+                       AND COALESCE(json_extract(data, '$.tokens.input'), 0)
+                         + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
+                         + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) > 0
+                     ORDER BY time_created DESC, id DESC
+                     LIMIT 1`,
+                )
+                .get(sessionId) as {
+                id?: unknown;
+                providerID?: unknown;
+                modelID?: unknown;
+                inputTokens?: unknown;
+                completedAt?: unknown;
+                timeCreated?: unknown;
+            } | null;
+            if (
+                !row ||
+                typeof row.id !== "string" ||
+                typeof row.providerID !== "string" ||
+                typeof row.modelID !== "string" ||
+                typeof row.inputTokens !== "number" ||
+                row.inputTokens <= 0
+            ) {
+                return null;
+            }
+            const respondedAt =
+                typeof row.completedAt === "number"
+                    ? row.completedAt
+                    : typeof row.timeCreated === "number"
+                      ? row.timeCreated
+                      : 0;
+            return {
+                messageID: row.id,
+                providerID: row.providerID,
+                modelID: row.modelID,
+                inputTokens: row.inputTokens,
+                respondedAt,
+            };
+        });
+    } catch (error) {
+        log("[eidnara] failed to recover assistant usage from OpenCode DB:", error);
         return null;
     }
 }

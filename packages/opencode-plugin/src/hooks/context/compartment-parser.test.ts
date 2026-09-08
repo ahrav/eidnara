@@ -95,6 +95,27 @@ describe("parseCompartmentOutput — v2 5-category facts", () => {
             content: "Preserve Sam's decision & keep <eidnara> wording.",
         });
     });
+
+    it("decodes one entity layer so an escaped entity stays literal text", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="1" end="2" title="Prose about &amp;lt;">Write &amp;lt; for a literal &lt; and &amp;amp; for &amp;.</compartment>
+</compartments>
+<facts>
+<PROJECT_RULES>
+* Escape as &amp;quot; in attributes.
+</PROJECT_RULES>
+</facts>
+</output>`);
+
+        expect(parsed.compartments[0].title).toBe("Prose about &lt;");
+        expect(parsed.compartments[0].content).toBe("Write &lt; for a literal < and &amp; for &.");
+        expect(parsed.facts).toContainEqual({
+            category: "PROJECT_RULES",
+            content: "Escape as &quot; in attributes.",
+        });
+    });
 });
 
 describe("parseCompartmentOutput — v2 tiers/importance/episode_type", () => {
@@ -347,6 +368,30 @@ describe("parseCompartmentOutput — fact scoping (audit Fix 6)", () => {
         expect(parsed.facts[0].category).toBe("PROJECT_RULES");
         // "NAMING" inside the event must not leak in via the fallback path.
         expect(parsed.facts.some((f) => f.category === "NAMING")).toBe(false);
+    });
+
+    it("strips every <events> block before the fallback scan, not only the first", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<PROJECT_RULES>
+* Follow the project release checklist.
+</PROJECT_RULES>
+<events>
+<trajectory_correction at_compartment="1">
+<from>first block</from>
+</trajectory_correction>
+</events>
+<events>
+<causal_incident at_compartment="1">
+<PROJECT_RULES>
+* phantom rule
+</PROJECT_RULES>
+</causal_incident>
+</events>
+</output>`);
+        expect(parsed.facts).toEqual([
+            { category: "PROJECT_RULES", content: "Follow the project release checklist." },
+        ]);
     });
 });
 

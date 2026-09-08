@@ -53,7 +53,7 @@
         }
     },
     "files": {
-        "includes": ["src/**/*.ts", "!dist", "!node_modules"]
+        "includes": ["src/**/*.ts", "test-preload.ts", "!dist", "!node_modules"]
     },
     "overrides": [
         {

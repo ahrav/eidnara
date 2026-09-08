@@ -20,7 +20,8 @@ export interface ContextUsage {
 
 export interface SessionCreatedInfo {
     id: string;
-    parentID: string;
+    /** Child sessions set `parentID`; root sessions omit it. */
+    parentID?: string;
     providerID?: string;
     modelID?: string;
     /**
@@ -89,13 +90,13 @@ export function getSessionCreatedInfo(properties: unknown): SessionCreatedInfo |
     }
 
     const info = eventProps.info;
-    if (typeof info.id !== "string" || typeof info.parentID !== "string") {
+    if (typeof info.id !== "string") {
         return null;
     }
 
     return {
         id: info.id,
-        parentID: info.parentID,
+        parentID: typeof info.parentID === "string" ? info.parentID : undefined,
         providerID: typeof info.providerID === "string" ? info.providerID : undefined,
         modelID: typeof info.modelID === "string" ? info.modelID : undefined,
         title: typeof info.title === "string" ? info.title : undefined,

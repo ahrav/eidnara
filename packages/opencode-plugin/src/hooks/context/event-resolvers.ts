@@ -1,8 +1,9 @@
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { escalationBands, MAX_EXECUTE_THRESHOLD } from "../../shared/escalation-bands";
-import { modelRefLookupOrder, piModelRefToCanonical } from "../../shared/harness-provider-map";
+import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { log, sessionLog } from "../../shared/logger";
 import { getSdkContextLimit, getSdkWindowGeometry } from "../../shared/models-dev-cache";
-import { resolveModelConfigOrDefault } from "../../shared/prompt-surface";
+import { modelKeyLookupOrder, resolveModelConfigOrDefault } from "../../shared/prompt-surface";
 
 export { escalationBands, MAX_EXECUTE_THRESHOLD };
 export const DEFAULT_CONTEXT_LIMIT = 128_000;
@@ -63,6 +64,19 @@ export function resolveCacheTtl(cacheTtl: CacheTtlConfig, modelKey: string | und
     return resolveModelConfigOrDefault(cacheTtl, modelKey, cacheTtl.default ?? "5m");
 }
 
+const CACHE_TTL_UNIT_MS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000 };
+/** The daemon's `scheduler_ttl_ms` substitutes this for a TTL `parse_cache_ttl` rejects. */
+export const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1_000;
+
+/** Matches the daemon's `parse_cache_ttl` grammar so both sides agree on when a lane expires. `never` is `Infinity`; unparseable text is `undefined`. commentlint: allow(JUDGE) */
+export function parseCacheTtlMs(ttl: string): number | undefined {
+    const normalized = ttl.trim();
+    if (normalized.toLowerCase() === "never") return Number.POSITIVE_INFINITY;
+    const match = /^(\d+)([smh]?)$/.exec(normalized);
+    if (!match) return undefined;
+    return Number(match[1]) * (match[2] ? CACHE_TTL_UNIT_MS[match[2]] : 1);
+}
+
 type ExecuteThresholdConfig = number | { default: number; [modelKey: string]: number };
 type ExecuteThresholdTokensConfig =
     | { default?: number; [modelKey: string]: number | undefined }
@@ -105,37 +119,22 @@ export interface ExecuteThresholdDetail {
     configuredValue?: number;
 }
 
-// Clamp-warning deduplication is scoped by the session ID, model key, configured token value, and cap, with sentinels for missing session IDs and model keys.
-const clampWarnSeen = new Set<string>();
+// Eviction re-logs an old key's warning once; that is the price of a bound under session churn.
+const CLAMP_WARN_DEDUPE_MAX_ENTRIES = 1000;
+const clampWarnSeen = new BoundedSessionMap<true>(CLAMP_WARN_DEDUPE_MAX_ENTRIES);
+
+function warnClampOnce(dedupeKey: string, sessionId: string | undefined, msg: string): void {
+    if (clampWarnSeen.has(dedupeKey)) return;
+    clampWarnSeen.set(dedupeKey, true);
+    if (sessionId) {
+        sessionLog(sessionId, `WARN: ${msg}`);
+    } else {
+        log(`[eidnara] WARN: ${msg}`);
+    }
+}
 
 function isFinitePositive(v: unknown): v is number {
     return typeof v === "number" && Number.isFinite(v) && v > 0;
-}
-
-/**
- * `modelKeyLookupOrder` yields progressively less-specific lookup keys for each model key.
- *
- * Derived model IDs may append `-`-delimited segments to a base model ID.
- * For example, `gpt-5.4-fast` derives from base model `gpt-5.4`.
- * `modelKeyLookupOrder` returns keys from most to least specific so resolution selects the most specific match.
- *
- *   "openai/gpt-5.4-fast"  (exact)
- */
-function* modelKeyLookupOrder(modelKey: string): Generator<string> {
-    const slash = modelKey.indexOf("/");
-    const providerRefs = slash >= 0 ? modelRefLookupOrder(modelKey) : [];
-    let modelId = slash >= 0 ? modelKey.slice(slash + 1) : modelKey;
-
-    while (modelId.length > 0) {
-        for (const providerRef of providerRefs) {
-            const providerSlash = providerRef.indexOf("/");
-            yield `${providerRef.slice(0, providerSlash)}/${modelId}`;
-        }
-        yield modelId;
-        const lastDash = modelId.lastIndexOf("-");
-        if (lastDash <= 0) break;
-        modelId = modelId.slice(0, lastDash);
-    }
 }
 
 /**
@@ -158,16 +157,11 @@ export function resolveExecuteThresholdDetail(
             const cap = contextLimit * (MAX_EXECUTE_THRESHOLD / 100);
             const effectiveTokens = Math.min(tokenMatch.value, cap);
             if (effectiveTokens < tokenMatch.value) {
-                const dedupeKey = `${options.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${tokenMatch.value}|${cap}`;
-                if (!clampWarnSeen.has(dedupeKey)) {
-                    clampWarnSeen.add(dedupeKey);
-                    const msg = `execute_threshold_tokens clamped: ${tokenMatch.value} → ${effectiveTokens} (${MAX_EXECUTE_THRESHOLD}% of ${contextLimit}) for ${modelKey ?? "default"}`;
-                    if (options.sessionId) {
-                        sessionLog(options.sessionId, `WARN: ${msg}`);
-                    } else {
-                        log(`[eidnara] WARN: ${msg}`);
-                    }
-                }
+                warnClampOnce(
+                    `${options.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${tokenMatch.value}|${cap}`,
+                    options.sessionId,
+                    `execute_threshold_tokens clamped: ${tokenMatch.value} → ${effectiveTokens} (${MAX_EXECUTE_THRESHOLD}% of ${contextLimit}) for ${modelKey ?? "default"}`,
+                );
             }
             const percentage = (effectiveTokens / contextLimit) * 100;
             const detail: ExecuteThresholdDetail = {
@@ -192,10 +186,10 @@ export function resolveExecuteThresholdDetail(
         resolved = config;
     } else if (modelKey) {
         let matched: number | undefined;
-        for (const candidate of modelKeyLookupOrder(modelKey)) {
-            if (typeof config[candidate] === "number") {
-                matched = config[candidate];
-                matchedKey = candidate;
+        for (const { key } of modelKeyLookupOrder(modelKey)) {
+            if (typeof config[key] === "number") {
+                matched = config[key];
+                matchedKey = key;
                 break;
             }
         }
@@ -219,16 +213,11 @@ export function resolveExecuteThresholdDetail(
     const cappedPercentage = Math.min(resolved, MAX_EXECUTE_THRESHOLD);
     const percentageClamped = cappedPercentage < resolved;
     if (percentageClamped) {
-        const dedupeKey = `pct|${options?.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${resolved}`;
-        if (!clampWarnSeen.has(dedupeKey)) {
-            clampWarnSeen.add(dedupeKey);
-            const msg = `execute_threshold clamped ${resolved}% → ${MAX_EXECUTE_THRESHOLD}% for ${modelKey ?? "default"} (capped against the output-reserved safe window; 10% remains for mid-turn growth before the absolute 95% wall)`;
-            if (options?.sessionId) {
-                sessionLog(options.sessionId, `WARN: ${msg}`);
-            } else {
-                log(`[eidnara] WARN: ${msg}`);
-            }
-        }
+        warnClampOnce(
+            `pct|${options?.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${resolved}`,
+            options?.sessionId,
+            `execute_threshold clamped ${resolved}% → ${MAX_EXECUTE_THRESHOLD}% for ${modelKey ?? "default"} (capped against the output-reserved safe window; 10% remains for mid-turn growth before the absolute 95% wall)`,
+        );
     }
     const detail: ExecuteThresholdDetail = {
         percentage: cappedPercentage,
@@ -264,10 +253,10 @@ function resolveTokensMatchWithKey(
     }
 
     if (modelKey) {
-        for (const candidate of modelKeyLookupOrder(modelKey)) {
-            const value = tokensConfig[candidate];
+        for (const { key } of modelKeyLookupOrder(modelKey)) {
+            const value = tokensConfig[key];
             if (typeof value === "number") {
-                return { value, matchedKey: candidate };
+                return { value, matchedKey: key };
             }
         }
     }

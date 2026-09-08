@@ -41,6 +41,7 @@ async function callNote(args: {
     callId?: string;
     sessionId?: string;
     cwd?: string;
+    signal?: AbortSignal;
     params: Record<string, unknown>;
 }) {
     const tool = createCtxNoteTool({
@@ -50,7 +51,7 @@ async function callNote(args: {
     const result = await tool.execute(
         args.callId ?? "call-1",
         args.params as never,
-        new AbortController().signal,
+        args.signal ?? new AbortController().signal,
         undefined,
         fakeContext(args.sessionId ?? SESSION, args.cwd ?? CWD) as never,
     );
@@ -69,11 +70,13 @@ describe("Pi ctx_note", () => {
         expect(requests[0]?.action).toBe("read");
     });
 
-    it("sends writes to the daemon facade with the project identity", async () => {
+    it("sends writes to the daemon facade with the project identity and the abort signal", async () => {
         const { requests, note } = recordingNote({
             content: [{ type: "text", text: "Saved session note #1." }],
         });
+        const signal = new AbortController().signal;
         const { isError, text } = await callNote({
+            signal,
             rustToolBackends: {
                 authorityState: async ({ domain }) => (domain === "notes" ? "MODULE" : "TS"),
                 note,
@@ -97,7 +100,22 @@ describe("Pi ctx_note", () => {
             limit: undefined,
             offset: undefined,
             noteId: undefined,
+            signal,
         });
+    });
+
+    it("hashes a command id longer than 128 bytes and keeps it stable across retries", async () => {
+        const { requests, note } = recordingNote("Saved session note #1.");
+        const callId = "c".repeat(200);
+        const params = { action: "write", content: "module owned note" };
+
+        await callNote({ rustToolBackends: { note }, callId, params });
+        await callNote({ rustToolBackends: { note }, callId, params });
+
+        expect(requests).toHaveLength(2);
+        expect(requests[0]?.commandId).toMatch(/^pi-[0-9a-f]{64}$/);
+        expect(Buffer.byteLength(requests[0]?.commandId ?? "")).toBeLessThanOrEqual(128);
+        expect(requests[1]?.commandId).toBe(requests[0]?.commandId);
     });
 
     it("compiles surface_condition when the daemon evaluates notes for the project", async () => {
