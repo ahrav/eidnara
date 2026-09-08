@@ -66,8 +66,12 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
     let text = input.text;
 
     if (input.isProjectConfig) {
-        const hasEnvTokens = ENV_PATTERN.test(text);
-        const hasFileTokens = FILE_PATTERN.test(text);
+        // Scan comment-stripped text so a documented token in a `//` or `/* */`
+        // comment does not raise the security warning; the returned text stays
+        // unchanged.
+        const scanText = stripJsonComments(text);
+        const hasEnvTokens = ENV_PATTERN.test(scanText);
+        const hasFileTokens = FILE_PATTERN.test(scanText);
         ENV_PATTERN.lastIndex = 0;
         FILE_PATTERN.lastIndex = 0;
         if (hasEnvTokens || hasFileTokens) {
@@ -157,6 +161,11 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             warnings.push(
                 `Failed to read file for ${token} (${filePath}): ${message}; using empty string`,
             );
+            continue;
+        }
+
+        if (contents === "") {
+            warnings.push(`File for ${token} (${filePath}) is empty; using empty string`);
             continue;
         }
 
