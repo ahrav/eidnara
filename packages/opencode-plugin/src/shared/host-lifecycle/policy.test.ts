@@ -1289,6 +1289,58 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     });
 
+    test("the demand's compatibility wait is bounded by what the start left of the aggregate", async () => {
+        const root = tempDir("eidnara-policy-compat-residual-");
+        const { binary } = fakeBinary(root, { sleepSeconds: 1 });
+        let storageProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 2_000,
+                compatibilityProbe: () => new Promise<never>(() => {}),
+                storageProbe: async () => {
+                    storageProbes += 1;
+                    return "ready";
+                },
+            });
+            const startedAt = performance.now();
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+            const elapsed = performance.now() - startedAt;
+            expect(elapsed).toBeLessThan(2_000 + 1_000);
+            expect(outcome.result.ok).toBe(false);
+            expect(outcome.result.reason).toBe("native_probe_unavailable");
+            expect(storageProbes).toBe(0);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a deadline beyond the timer limit waits for the result instead of detaching at once", async () => {
+        const root = tempDir("eidnara-policy-huge-deadline-");
+        const { binary } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: async () => "ready",
+            });
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+                // Above the 32-bit signed millisecond limit `setTimeout` honors.
+                deadlineMs: 2_147_483_648 * 4,
+            });
+            expect(outcome.result.reason).toBe("started");
+            expect(outcome.storage).toBe("ready");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("a compatibility probe that ignores its budget is bounded by the policy aggregate", async () => {
         const root = tempDir("eidnara-policy-probe-hang-");
         const { binary, invocationLog } = fakeBinary(root);
@@ -1513,7 +1565,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 launchTarget: { kind: "test-binary", path: binary },
                 storageProbe: async () => "ready",
             });
-            const [a, b, c] = await Promise.all([
+            const [a, b, c, d] = await Promise.all([
                 policy.demandStart({
                     origin: "managed-default",
                     capability: "context",
@@ -1525,6 +1577,12 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                     capability: "context",
                     startupEnvelope: { schema: 1, credentials: { B: "2", A: "1" } },
                 }),
+                // An optional field set to `undefined` is omitted on the wire, so requests with and without the field join.
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: { schema: 1, credentials: { A: "1", B: "2" }, pi: undefined },
+                }),
                 // Different credentials require a separate native `start` request.
                 policy.demandStart({
                     origin: "managed-default",
@@ -1535,6 +1593,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(a.result.reason).toBe("started");
             expect(b.result.reason).toBe("started");
             expect(c.result.reason).toBe("started");
+            expect(d.result.reason).toBe("started");
             expect(invocations(invocationLog)).toEqual(["start", "start"]);
         } finally {
             rmSync(root, { recursive: true, force: true });

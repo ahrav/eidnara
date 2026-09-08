@@ -118,6 +118,13 @@ function monotonicNow(): number {
     return performance.now();
 }
 
+/** `setTimeout` coerces delays above this limit to 1 ms, detaching waiters before their deadlines. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function timerDelay(deadlineMs: number): number {
+    return Math.min(deadlineMs, MAX_TIMER_DELAY_MS);
+}
+
 export class WaiterDetachedError extends Error {
     /**
      * `ETIMEDOUT` for a deadline detach, so callers that classify retryability on `code`
@@ -262,10 +269,12 @@ function unprovenCompatibility(result: DaemonResultV1): DaemonResultV1 {
 
 /**
  * Native `start` answers `harness_unavailable` for a changed harness or credential set on a running daemon, so demands with different envelopes are different requests and must not share one result. commentlint: allow(JUDGE)
- * Key order is normalized so equal envelopes coalesce however their callers built the object.
+ * The identity is the JSON the child receives with keys normalized, so wire-identical envelopes coalesce however their callers built the object. commentlint: allow(JUDGE)
  */
 function envelopeIdentity(envelope: NativeStartupEnvelope | undefined): string {
-    return envelope === undefined ? "" : stableStringify(envelope);
+    if (envelope === undefined) return "";
+    const wire = JSON.stringify(envelope);
+    return wire === undefined ? "" : stableStringify(JSON.parse(wire));
 }
 
 export interface DemandStartRequest {
@@ -429,16 +438,20 @@ export class HostLifecyclePolicy {
         if (compatibilityProbe === undefined) {
             return { result: unprovenCompatibility(result), storage: null };
         }
+        // The shared start consumes part of this demand's aggregate budget. The
+        // shared probe keeps the full aggregate so a late joiner is not truncated.
+        const aggregateMs = this.compatibilityAggregateMs();
+        const aggregateResidualMs = Math.max(0, aggregateMs - (monotonicNow() - startedAt));
+        if (aggregateResidualMs === 0) {
+            return { result: unprovenCompatibility(result), storage: null };
+        }
         let snapshot: CompatibilitySnapshot;
         try {
-            snapshot = await this.raceDetached(
-                this.sharedCompatibility(
-                    compatibilityProbe,
-                    rootKey,
-                    this.compatibilityAggregateMs(),
-                ),
+            snapshot = await this.raceWithinPolicy(
+                this.sharedCompatibility(compatibilityProbe, rootKey, aggregateMs),
                 request.signal,
                 remainingMs,
+                aggregateResidualMs,
             );
         } catch (error) {
             // Detachment is the caller's own deadline or signal and stays a
@@ -461,24 +474,16 @@ export class HostLifecyclePolicy {
             remainingMs === undefined
                 ? STORAGE_HARD_BUDGET_MS
                 : Math.min(STORAGE_HARD_BUDGET_MS, remainingMs);
-        // Only the caller's own residual deadline is a detachment. When the
-        // policy's storage cap is the tighter bound, its expiry is a storage
-        // observation that failed, and the caller still holds time.
-        const callerBound = remainingMs !== undefined && remainingMs <= STORAGE_HARD_BUDGET_MS;
         let storage: StorageReadiness;
         try {
-            storage = await this.raceDetached(
+            storage = await this.raceWithinPolicy(
                 this.storageProbe(storageBudget, authenticatedDaemonId),
                 request.signal,
-                storageBudget,
+                remainingMs,
+                STORAGE_HARD_BUDGET_MS,
             );
         } catch (error) {
-            if (
-                error instanceof WaiterDetachedError &&
-                (error.cause_kind === "aborted" || callerBound)
-            ) {
-                throw error;
-            }
+            if (error instanceof WaiterDetachedError) throw error;
             // Compatibility is already proven. A failed storage observation
             // cannot erase that proof; it only means this demand may not publish
             // application traffic.
@@ -513,14 +518,7 @@ export class HostLifecyclePolicy {
     ): Promise<CompatibilitySnapshot> {
         const existing = this.inflightCompatibility.get(root);
         if (existing) return existing;
-        const shared = this.raceDetached(probe(budgetMs), undefined, budgetMs).catch(
-            (error: unknown) => {
-                // The policy aggregate's expiry fails the probe for every waiter.
-                throw error instanceof WaiterDetachedError
-                    ? new Error("compatibility probe exceeded the policy aggregate")
-                    : error;
-            },
-        );
+        const shared = this.raceWithinPolicy(probe(budgetMs), undefined, undefined, budgetMs);
         this.inflightCompatibility.set(root, shared);
         const evict = (): void => {
             if (this.inflightCompatibility.get(root) === shared) {
@@ -535,6 +533,28 @@ export class HostLifecyclePolicy {
         if (this.outerAggregateMs !== undefined) return this.outerAggregateMs;
         const platform = checkPlatform(this.platformReaders);
         return platform.ok ? aggregateForTarget(platform.target) : OUTER_AGGREGATE_MS;
+    }
+
+    /** A policy deadline is not caller detachment, so its expiry surfaces as a plain error. */
+    private raceWithinPolicy<T>(
+        shared: Promise<T>,
+        signal: AbortSignal | undefined,
+        callerMs: number | undefined,
+        policyMs: number,
+    ): Promise<T> {
+        const callerBound = callerMs !== undefined && callerMs <= policyMs;
+        return this.raceDetached(shared, signal, callerBound ? callerMs : policyMs).catch(
+            (error: unknown) => {
+                if (
+                    error instanceof WaiterDetachedError &&
+                    error.cause_kind === "deadline" &&
+                    !callerBound
+                ) {
+                    throw new Error("policy budget expired before the probe answered");
+                }
+                throw error;
+            },
+        );
     }
 
     private raceDetached<T>(
@@ -566,7 +586,7 @@ export class HostLifecyclePolicy {
                     detach("deadline");
                     return;
                 }
-                timer = setTimeout(() => detach("deadline"), deadlineMs);
+                timer = setTimeout(() => detach("deadline"), timerDelay(deadlineMs));
             }
             shared.then(
                 (value) => {
@@ -628,7 +648,7 @@ export class HostLifecyclePolicy {
                     detach("deadline");
                     return;
                 }
-                timer = setTimeout(() => detach("deadline"), deadlineMs);
+                timer = setTimeout(() => detach("deadline"), timerDelay(deadlineMs));
             }
             shared.then(
                 (value) => {
