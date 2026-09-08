@@ -26,22 +26,28 @@ const REGEX_PRECEDING_KEYWORDS = new Set([
 const CONTROL_KEYWORDS = new Set(["if", "while", "for", "with"]);
 const BLOCK_KEYWORDS = new Set(["else", "do", "try", "finally"]);
 
+interface OpenParen {
+    control: boolean;
+    open: number;
+}
+
 /**
  * `${...}` inside a template yields `code` spans, so template expressions stay visible to
  * callers that scan code; each template piece around them is its own `template` span.
  *
  * A regular-expression literal is reported as a `string` span. After `)`, a slash starts a
  * literal only if the parenthesis closed an `if`, `while`, `for`, or `with` head; after `}`,
- * only if the brace closed a block rather than an object literal.
+ * only if the brace closed a block or a declaration rather than an object literal or a
+ * function or class expression.
  */
 export function scanSourceSpans(source: string): SourceSpan[] {
     const spans: SourceSpan[] = [];
     let index = 0;
     let codeStart = 0;
-    const openParens: boolean[] = [];
+    const openParens: OpenParen[] = [];
     const openBraces: boolean[] = [];
-    let lastCloseParenWasControl = false;
-    let lastCloseBraceWasObject = false;
+    let lastCloseParen: OpenParen | null = null;
+    let lastCloseBraceWasValue = false;
 
     const flushCode = (): void => {
         if (index > codeStart) spans.push({ kind: "code", start: codeStart, end: index });
@@ -99,17 +105,25 @@ export function scanSourceSpans(source: string): SourceSpan[] {
                 scanTemplate();
             } else if (
                 char === "/" &&
-                regexCanStart(source, index, lastCloseParenWasControl, lastCloseBraceWasObject)
+                regexCanStart(
+                    source,
+                    index,
+                    lastCloseParen?.control ?? false,
+                    lastCloseBraceWasValue,
+                )
             ) {
                 pushSpan("string", endOfRegex(source, index));
             } else {
                 if (char === "(") {
-                    openParens.push(CONTROL_KEYWORDS.has(wordBefore(source, index)));
+                    openParens.push({
+                        control: CONTROL_KEYWORDS.has(wordBefore(source, index)),
+                        open: index,
+                    });
                 } else if (char === ")") {
-                    lastCloseParenWasControl = openParens.pop() ?? false;
+                    lastCloseParen = openParens.pop() ?? null;
                 } else if (char === "{") {
                     braceDepth += 1;
-                    openBraces.push(objectLiteralCanStart(source, index));
+                    openBraces.push(braceOpensValue(source, index, lastCloseParen));
                 } else if (char === "}") {
                     if (stopAtClosingBrace && braceDepth === 0) {
                         flushCode();
@@ -118,7 +132,7 @@ export function scanSourceSpans(source: string): SourceSpan[] {
                         return;
                     }
                     braceDepth -= 1;
-                    lastCloseBraceWasObject = openBraces.pop() ?? false;
+                    lastCloseBraceWasValue = openBraces.pop() ?? false;
                 }
                 index += 1;
             }
@@ -224,19 +238,36 @@ function endOfRegex(source: string, open: number): number {
 }
 
 function wordBefore(source: string, position: number): string {
-    let end = position;
-    while (end > 0 && /\s/.test(source[end - 1])) end -= 1;
-    let start = end;
-    while (start > 0 && /[\w$]/.test(source[start - 1])) start -= 1;
-    return source.slice(start, end);
+    return source.slice(wordStartBefore(source, position), wordEndBefore(source, position));
 }
 
-/** A `{` after a recognized expression prefix begins an object literal; otherwise, the `{` begins a block. */
-function objectLiteralCanStart(source: string, brace: number): boolean {
-    let index = brace - 1;
-    while (index >= 0 && /\s/.test(source[index])) index -= 1;
+function wordEndBefore(source: string, position: number): number {
+    let end = position;
+    while (end > 0 && /\s/.test(source[end - 1])) end -= 1;
+    return end;
+}
+
+function wordStartBefore(source: string, position: number): number {
+    let start = wordEndBefore(source, position);
+    while (start > 0 && /[\w$]/.test(source[start - 1])) start -= 1;
+    return start;
+}
+
+/**
+ * True when the `}` that closes this brace ends an operand, so a following slash divides:
+ * object literals, and the bodies of function and class expressions. False for blocks and for
+ * function and class declarations, after which a slash starts a regular-expression literal.
+ */
+function braceOpensValue(source: string, brace: number, lastCloseParen: OpenParen | null): boolean {
+    const index = wordEndBefore(source, brace) - 1;
     if (index < 0) return false;
     const previous = source[index];
+    if (previous === ")") {
+        const keyword = lastCloseParen ? functionKeywordBefore(source, lastCloseParen.open) : -1;
+        return keyword >= 0 && expressionPrecedes(source, keyword);
+    }
+    const classKeyword = classKeywordBefore(source, brace);
+    if (classKeyword >= 0) return expressionPrecedes(source, classKeyword);
     if (previous === ">" && source[index - 1] === "=") return false;
     if (/[(,=:[?+\-*/%&|^!~<>]/.test(previous)) return true;
     if (/[\w$]/.test(previous)) {
@@ -247,18 +278,58 @@ function objectLiteralCanStart(source: string, brace: number): boolean {
     return false;
 }
 
+/** Start offset of the `function` keyword whose parameter list opens at `paren`, or -1. */
+function functionKeywordBefore(source: string, paren: number): number {
+    let position = paren;
+    for (let words = 0; words < 2; words += 1) {
+        let end = wordEndBefore(source, position);
+        if (source[end - 1] === "*") end -= 1;
+        const start = wordStartBefore(source, end);
+        const word = source.slice(start, wordEndBefore(source, end));
+        if (word === "function") return start;
+        if (!/^[\w$]+$/.test(word)) return -1;
+        position = start;
+    }
+    return -1;
+}
+
+/** Start offset of the `class` keyword whose body opens at `brace`, or -1. */
+function classKeywordBefore(source: string, brace: number): number {
+    let position = brace;
+    for (let words = 0; words < 4; words += 1) {
+        const start = wordStartBefore(source, position);
+        const word = source.slice(start, wordEndBefore(source, position));
+        if (word === "class") return start;
+        if (!/^[\w$]+$/.test(word)) return -1;
+        position = start;
+    }
+    return -1;
+}
+
+/** True when the token before `keyword` places a function or class in expression position. */
+function expressionPrecedes(source: string, keyword: number): boolean {
+    let end = wordEndBefore(source, keyword);
+    if (wordBefore(source, keyword) === "async")
+        end = wordEndBefore(source, wordStartBefore(source, keyword));
+    if (end === 0) return false;
+    const previous = source[end - 1];
+    if (previous === ">" && source[end - 2] === "=") return true;
+    if (/[(,=:[?+\-*/%&|^!~<>]/.test(previous)) return true;
+    if (/[\w$]/.test(previous)) return REGEX_PRECEDING_KEYWORDS.has(wordBefore(source, end));
+    return false;
+}
+
 function regexCanStart(
     source: string,
     slash: number,
     lastCloseParenWasControl: boolean,
-    lastCloseBraceWasObject: boolean,
+    lastCloseBraceWasValue: boolean,
 ): boolean {
-    let index = slash - 1;
-    while (index >= 0 && /\s/.test(source[index])) index -= 1;
+    const index = wordEndBefore(source, slash) - 1;
     if (index < 0) return true;
     const previous = source[index];
     if (previous === ")") return lastCloseParenWasControl;
-    if (previous === "}") return !lastCloseBraceWasObject;
+    if (previous === "}") return !lastCloseBraceWasValue;
     // A postfix `++` or `--` ends an operand, so the slash that follows divides.
     if ((previous === "+" || previous === "-") && source[index - 1] === previous) return false;
     if (/[(,=:[!&|?{;+\-*%<>~^]/.test(previous)) return true;

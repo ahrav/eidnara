@@ -38,11 +38,13 @@ export function childSessionMessagesFetcher(
     sessionId: string,
     directory: string | undefined,
     limit: number,
+    signal?: AbortSignal,
 ): () => Promise<unknown[]> {
     return async () => {
         const messagesResponse = await client.session.messages({
             path: { id: sessionId },
             query: { directory, limit },
+            ...(signal ? { signal } : {}),
         } as never);
         return normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,

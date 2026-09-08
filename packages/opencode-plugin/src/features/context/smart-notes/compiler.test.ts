@@ -304,7 +304,7 @@ describe("compileSmartNoteCheck", () => {
         expect(client.session.create).not.toHaveBeenCalled();
     });
 
-    test("passes the compile signal to session creation", async () => {
+    test("passes the compile signal to session creation and transcript fetches", async () => {
         const client = createCompilerClient([compilerOutput(VALID_CHECK)]);
 
         await compileSmartNoteCheck(compileArgs(client));
@@ -313,6 +313,10 @@ describe("compileSmartNoteCheck", () => {
             client.session.create.mock.calls as unknown as Array<[{ signal?: unknown }]>
         )[0][0];
         expect(createCall.signal).toBeInstanceOf(AbortSignal);
+        const messagesCall = (
+            client.session.messages.mock.calls as unknown as Array<[{ signal?: unknown }]>
+        )[0][0];
+        expect(messagesCall.signal).toBeInstanceOf(AbortSignal);
     });
 
     test("still fails a check whose declared URL the SSRF guard refuses", async () => {
@@ -608,6 +612,25 @@ describe("smart-note compiler output bounds", () => {
         expect(normalizeCron("  ")).toBe("0 * * * *");
     });
 
+    test("treats backtick fences inside the JSON as data, not as a response fence", () => {
+        const check = `function check(cap) { const r = cap.readFile("README.md") || ""; return { met: r.includes("\`\`\`json") && r.includes("\`\`\`") }; }`;
+        const body = JSON.stringify({
+            compiled_check: check,
+            manifest: { capabilities: ["readFile"] },
+            check_cron: "0 * * * *",
+        });
+        expect(parseCompilerOutput(body).compiled_check).toBe(check);
+        expect(parseCompilerOutput(`\`\`\`json\n${body}\n\`\`\``).compiled_check).toBe(check);
+    });
+
+    test("keeps only string capability names", () => {
+        expect(
+            normalizeManifest({
+                capabilities: [["readFile"], "httpGet", 3, null, "bogus"] as unknown as never,
+            }).capabilities,
+        ).toEqual(["httpGet"]);
+    });
+
     test("rejects capability call sites whose argument is not one string literal", () => {
         for (const call of [
             `cap.httpGet(url)`,
@@ -686,6 +709,22 @@ describe("smart-note compiler output bounds", () => {
             [
                 `function check(cap) { let get; const n = {} / (get = cap.httpGet) / 1; return { met: true }; }`,
                 /only be called directly/,
+            ],
+            [
+                `function check(cap) { let get; const n = function(){} / (get = cap.httpGet) / 1; return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { let get; const n = class {} / (get = cap.httpGet) / 1; return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { const c = argum\\u0065nts[0]; return { met: true }; }`,
+                /escape sequences in identifiers/,
+            ],
+            [
+                `function check(cap) { const c = c\\u0061p; return { met: true }; }`,
+                /escape sequences in identifiers/,
             ],
         ];
         for (const [code, error] of cases) {

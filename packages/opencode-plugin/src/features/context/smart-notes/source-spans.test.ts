@@ -87,6 +87,29 @@ describe("scanSourceSpans", () => {
         ]);
     });
 
+    test("treats a slash after a function or class expression as division", () => {
+        for (const source of [
+            `const n = function(){} / (get = cap.httpGet) / 1`,
+            `const n = function named(){} / 2`,
+            `const n = async function*(){} / 2`,
+            `x = (function(){}) / 2`,
+            `return function(){} / 2`,
+            `const c = class {} / 2; const d = class X extends Y {} / 3`,
+        ]) {
+            expect(kinds(source)).toEqual([`code:${source}`]);
+        }
+        expect(kinds(`function decl() {} /re/.test(s)`)).toEqual([
+            "code:function decl() {} ",
+            "string:/re/",
+            "code:.test(s)",
+        ]);
+        expect(kinds(`class Decl {} /re/.test(s)`)).toEqual([
+            "code:class Decl {} ",
+            "string:/re/",
+            "code:.test(s)",
+        ]);
+    });
+
     test("closes an unterminated string at the end of its line", () => {
         expect(kinds(`a = "oops\nb = 1`)).toEqual(["code:a = ", `string:"oops`, "code:\nb = 1"]);
     });

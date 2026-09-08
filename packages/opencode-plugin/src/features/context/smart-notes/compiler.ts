@@ -165,6 +165,7 @@ Remember: output only the JSON object described by the system prompt.`;
                     childSessionId as string,
                     args.sessionDirectory ?? args.projectIdentity,
                     20,
+                    signal,
                 ),
                 validateOutput: (messages) =>
                     validateCompilerOutput(
@@ -361,6 +362,11 @@ export function normalizeCompiledCheck(source: string): string {
     if (/\barguments\b/.test(codeOnly)) {
         throw new Error("compiled_check must not use arguments");
     }
+    // Outside literals and comments a backslash can only begin an identifier escape such as
+    // `c\u0061p`, which would hide `cap` or `arguments` from the identifier scans below.
+    if (codeOnly.includes("\\")) {
+        throw new Error("compiled_check must not use escape sequences in identifiers");
+    }
     const misuse = capabilityMisuse(code, codeOnly, signature.index + signature[0].indexOf("cap"));
     if (misuse !== null) {
         throw new Error(`cap may only be called directly as cap.<capability>(...): ${misuse}`);
@@ -401,10 +407,10 @@ export function normalizeManifest(manifest: SmartNoteCheckManifest): SmartNoteCh
         ? unique(
               manifest.capabilities
                   .slice(0, MAX_MANIFEST_ENTRIES)
-                  .filter((cap): cap is SmartNoteCapabilityName =>
-                      ["readFile", "gitHeadSha", "gitTag", "gitLog", "httpGet"].includes(
-                          String(cap),
-                      ),
+                  .filter(
+                      (cap): cap is SmartNoteCapabilityName =>
+                          typeof cap === "string" &&
+                          ["readFile", "gitHeadSha", "gitTag", "gitLog", "httpGet"].includes(cap),
                   ),
           )
         : [];
@@ -474,7 +480,8 @@ export function hashCheck(
 }
 
 function extractJsonObject(output: string): string {
-    const fenced = output.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    // Only a fence around the whole response is Markdown; backticks inside the JSON are data.
+    const fenced = output.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
     const text = fenced ? fenced[1] : output;
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
