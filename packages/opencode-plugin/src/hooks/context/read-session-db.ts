@@ -86,6 +86,8 @@ export function isMidTurn(_deps: unknown, sessionId: string): boolean {
 export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolean {
     // `(time_created, id)` is the session ordering `read-session-raw.ts` uses; the id tiebreak
     // resolves two assistant rows that share a millisecond.
+    // A compaction summary is written mid-turn and would otherwise hide the `tool-calls`
+    // assistant that is still the active fence.
     const latestAssistant = db
         .prepare(
             `SELECT id,
@@ -94,6 +96,10 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
              FROM message
              WHERE session_id = ?
                AND ${jsonField("data", "$.role")} = 'assistant'
+               AND NOT (
+                 COALESCE(${jsonField("data", "$.summary")}, 0) = 1
+                 AND COALESCE(${jsonField("data", "$.finish")}, '') = 'stop'
+               )
              ORDER BY time_created DESC, id DESC
              LIMIT 1`,
         )

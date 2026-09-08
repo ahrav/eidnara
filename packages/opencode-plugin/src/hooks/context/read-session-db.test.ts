@@ -404,6 +404,39 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });
 
+    it("stays mid-turn when a compaction summary assistant follows the tool-calls assistant", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "compaction", auto: true });
+        insertPart(db, "session-1", "user-1", "part-2", { type: "text", text: "Summarize." });
+        insertAssistant(db, "session-1", "assistant-2", { summary: true, finish: "stop" }, 300);
+        insertPart(db, "session-1", "assistant-2", "part-3", { type: "text", text: "Summary." });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is not mid-turn once the post-compaction continuation finishes with stop", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "compaction", auto: true });
+        insertAssistant(db, "session-1", "assistant-2", { summary: true, finish: "stop" }, 300);
+        insertAssistant(db, "session-1", "assistant-3", { finish: "stop" }, 400);
+        insertPart(db, "session-1", "assistant-3", "part-2", { type: "text", text: "Done." });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("is not mid-turn when the only assistant row is a compaction summary", () => {
+        const db = createMidTurnDb();
+        insertUser(db, "session-1", "user-1", { content: "" }, 100);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "compaction", auto: false });
+        insertAssistant(db, "session-1", "assistant-1", { summary: true, finish: "stop" }, 200);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
     it("stays mid-turn when an older message row holds malformed JSON", () => {
         const db = createMidTurnDb();
         db.prepare(
