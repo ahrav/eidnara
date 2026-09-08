@@ -87,7 +87,8 @@ function collectOpenCodeConfigPaths(directory: string): string[] {
     return [...paths];
 }
 
-function collectOmoConfigPaths(directory: string): string[] {
+/** Existing OMO config files `fixConflicts` may edit: user and project, legacy and unified layouts. */
+export function collectOmoConfigPaths(directory: string): string[] {
     const paths = new Set<string>();
     const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
 

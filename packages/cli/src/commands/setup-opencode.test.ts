@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,11 +7,13 @@ import {
     DCP_CONFLICT_REASON,
 } from "@eidnara/opencode/shared/conflict-detector";
 import { parse as parseJsonc } from "comment-json";
+import { assertJsoncConfigsParseable } from "../lib/jsonc-config";
 import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
     findDcpPluginIndexes,
     hasAnthropicModel,
+    preflightConfigPaths,
     withClaudeMaxCacheTtl,
     withoutDcpConflict,
     writeEidnaraConfig,
@@ -188,6 +190,59 @@ describe("setup-opencode config safety", () => {
         });
         expect(merged.plugin).toContain("other");
         expect(merged.plugin).not.toContain("@tarquinen/opencode-dcp@latest");
+    });
+});
+
+describe("setup-opencode preflight targets", () => {
+    it("checks only the effective member of each project config pair", () => {
+        const root = tempDir();
+        mkdirSync(join(root, ".opencode"), { recursive: true });
+        writeFileSync(join(root, ".opencode", "opencode.jsonc"), "{}");
+        writeFileSync(join(root, ".opencode", "opencode.json"), "{ malformed");
+        writeFileSync(join(root, "opencode.json"), "{}");
+        const userPaths = {
+            configDir: join(root, "user"),
+            opencodeConfig: join(root, "user", "opencode.jsonc"),
+            opencodeConfigFormat: "none" as const,
+            eidnaraConfig: join(root, "user", "eidnara.jsonc"),
+            omoConfig: null,
+            tuiConfig: join(root, "user", "tui.jsonc"),
+            tuiConfigFormat: "none" as const,
+        };
+
+        const targets = preflightConfigPaths(userPaths, root);
+
+        expect(targets).toContain(join(root, ".opencode", "opencode.jsonc"));
+        expect(targets).not.toContain(join(root, ".opencode", "opencode.json"));
+        expect(targets).toContain(join(root, "opencode.json"));
+        expect(targets.slice(0, 3)).toEqual([
+            userPaths.opencodeConfig,
+            userPaths.eidnaraConfig,
+            userPaths.tuiConfig,
+        ]);
+        expect(() => assertJsoncConfigsParseable(targets)).not.toThrow();
+    });
+
+    it("includes the project OMO configs the fixer may edit", () => {
+        const root = tempDir();
+        mkdirSync(join(root, ".omo"), { recursive: true });
+        writeFileSync(join(root, "oh-my-opencode.jsonc"), "{}");
+        writeFileSync(join(root, ".omo", "omo.json"), "{ malformed");
+        const userPaths = {
+            configDir: join(root, "user"),
+            opencodeConfig: join(root, "user", "opencode.jsonc"),
+            opencodeConfigFormat: "none" as const,
+            eidnaraConfig: join(root, "user", "eidnara.jsonc"),
+            omoConfig: null,
+            tuiConfig: join(root, "user", "tui.jsonc"),
+            tuiConfigFormat: "none" as const,
+        };
+
+        const targets = preflightConfigPaths(userPaths, root);
+
+        expect(targets).toContain(join(root, "oh-my-opencode.jsonc"));
+        expect(targets).toContain(join(root, ".omo", "omo.json"));
+        expect(() => assertJsoncConfigsParseable(targets)).toThrow(/omo\.json/);
     });
 });
 

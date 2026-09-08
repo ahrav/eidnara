@@ -8,7 +8,7 @@ import {
     detectConflicts,
     projectOpenCodeConfigPaths,
 } from "@eidnara/opencode/shared/conflict-detector";
-import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
+import { collectOmoConfigPaths, fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import {
     appendJsoncArrayValues,
     removeJsoncArrayEntries,
@@ -25,17 +25,23 @@ import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/js
 import { pickModel } from "../lib/model-picker";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
-import { detectConfigPaths } from "../lib/paths";
+import { type ConfigPaths, detectConfigPaths } from "../lib/paths";
 import { confirm, intro, log, note, outro, promptIO, spinner } from "../lib/prompts";
 
 const PLUGIN_NAME = "@eidnara/opencode";
 const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 
-/**
- */
+/** With `enabled: false` the plugin skips every hook at startup, so native compaction must stay on. commentlint: allow(JUDGE) */
 function resolveCompactionEnabledForWriter(): boolean {
     try {
         const config = loadPluginConfig(process.cwd());
+        if (config.enabled === false) {
+            log.warn(
+                "Eidnara is disabled in its config (enabled: false); leaving native compaction untouched. " +
+                    "Set enabled to true to let Eidnara manage the context window.",
+            );
+            return false;
+        }
         return isCompactionEnabled(config);
     } catch (error) {
         log.warn(
@@ -302,6 +308,23 @@ export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
     return models.some((model) => model?.startsWith("anthropic/") ?? false);
 }
 
+/**
+ * `detectConflicts` and `fixConflicts` skip unparseable files, so these repair targets are checked before any write. commentlint: allow(JUDGE)
+ * Only the effective member of each project `.jsonc`/`.json` pair is listed,
+ * matching the file OpenCode loads, so a stale shadowed sibling cannot block setup.
+ */
+export function preflightConfigPaths(paths: ConfigPaths, directory: string): string[] {
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
+    return [
+        paths.opencodeConfig,
+        paths.eidnaraConfig,
+        paths.tuiConfig,
+        existsSync(dotOcJsonc) ? dotOcJsonc : dotOcJson,
+        existsSync(rootJsonc) ? rootJsonc : rootJson,
+        ...collectOmoConfigPaths(directory),
+    ];
+}
+
 export async function runSetup(dryRun = false): Promise<number> {
     intro("Eidnara — Setup");
     if (dryRun) {
@@ -348,22 +371,15 @@ export async function runSetup(dryRun = false): Promise<number> {
     // A project-level OpenCode config counts: `detectConflicts` and
     // `fixConflicts` read and repair those files, so a first-time user running
     // setup inside such a project must not skip the conflict pass.
-    const projectConfigPaths = projectOpenCodeConfigPaths(process.cwd());
     const hadExistingSetup =
         paths.opencodeConfigFormat !== "none" ||
         existsSync(paths.eidnaraConfig) ||
         paths.tuiConfigFormat !== "none" ||
-        projectConfigPaths.some((path) => existsSync(path));
+        projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
 
     if (!dryRun) {
-        // Unparseable configs are skipped by conflict repair, so they must stop setup here.
         try {
-            assertJsoncConfigsParseable([
-                paths.opencodeConfig,
-                paths.eidnaraConfig,
-                paths.tuiConfig,
-                ...projectConfigPaths,
-            ]);
+            assertJsoncConfigsParseable(preflightConfigPaths(paths, process.cwd()));
         } catch (error) {
             log.error(error instanceof Error ? error.message : String(error));
             outro("Setup stopped — fix the malformed config and rerun setup.");
