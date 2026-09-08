@@ -460,6 +460,37 @@ describe("doctor OpenCode read-only checks", () => {
         }
     });
 
+    it("leaves conflicts in place under --force when only OpenCode Desktop is installed", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        rmSync(join(configDir, "..", "..", "bin", "opencode"));
+        const desktopDir = join(configDir, "..", "ai.opencode.desktop");
+        mkdirSync(desktopDir, { recursive: true });
+        writeFileSync(join(desktopDir, "opencode.settings"), "{}\n");
+        writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ force: true });
+
+            expect(code).toBe(1);
+            expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
+            expect(
+                errors.some((message) =>
+                    message.startsWith(
+                        "Leaving conflicts in place: OpenCode Desktop reports no version",
+                    ),
+                ),
+            ).toBe(true);
+            const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
+                compaction?: { auto?: boolean };
+            };
+            expect(untouched.compaction?.auto).toBe(true);
+        } finally {
+            restore();
+        }
+    });
+
     it("leaves conflicts in place under --force when the OpenCode version cannot be read", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeFileSync(join(configDir, "..", "..", "bin", "opencode"), "#!/bin/sh\nexit 1\n");
@@ -474,7 +505,9 @@ describe("doctor OpenCode read-only checks", () => {
             expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
             expect(
                 errors.some((message) =>
-                    message.startsWith("Leaving conflicts in place: this OpenCode is older than"),
+                    message.startsWith(
+                        "Leaving conflicts in place: the OpenCode CLI version could not be read",
+                    ),
                 ),
             ).toBe(true);
             const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {

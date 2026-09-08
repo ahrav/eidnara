@@ -317,8 +317,9 @@ export async function runDoctor(
 
     // A host below the plugin minimum, or one whose version cannot be read, may
     // not load the plugin, so nothing may replace the native managers a repair
-    // would turn off.
+    // would turn off. `unsupportedReason` names which case applies.
     let openCodeSupported = true;
+    let unsupportedReason = "";
     const installationReports = describeOpenCodeInstallations(detectOpenCodeInstallations());
     const activeInstallation = installationReports[0];
     if (!activeInstallation) {
@@ -334,6 +335,9 @@ export async function runDoctor(
         logOpenCodeInstallationTable(installationReports);
     }
     if (activeInstallation.kind === "desktop") {
+        // Desktop exposes no version probe, so its compatibility stays unverified.
+        openCodeSupported = false;
+        unsupportedReason = `OpenCode Desktop reports no version, so its compatibility with ${PLUGIN_NAME} cannot be verified (install the OpenCode CLI to check it)`;
         pass(
             installationReports.length > 1
                 ? "OpenCode Desktop selected for plugin checks (CLI not installed)"
@@ -341,6 +345,7 @@ export async function runDoctor(
         );
     } else if (activeInstallation.version === "unknown") {
         openCodeSupported = false;
+        unsupportedReason = "the OpenCode CLI version could not be read";
         fail(`OpenCode CLI was found at ${activeInstallation.path} but could not be executed`);
     } else {
         pass(
@@ -350,6 +355,7 @@ export async function runDoctor(
         );
         if (compareVersionStrings(activeInstallation.version, OPENCODE_MINIMUM_VERSION) < 0) {
             openCodeSupported = false;
+            unsupportedReason = `this OpenCode is older than ${OPENCODE_MINIMUM_VERSION}`;
             fail(
                 `OpenCode ${activeInstallation.version} is older than the required ${OPENCODE_MINIMUM_VERSION}; the plugin may fail to load. Upgrade OpenCode.`,
             );
@@ -457,7 +463,7 @@ export async function runDoctor(
             );
         } else if (options.force && !openCodeSupported) {
             fail(
-                `Leaving conflicts in place: this OpenCode is older than ${OPENCODE_MINIMUM_VERSION} or its version could not be read, so the plugin may not load to replace native compaction. Upgrade OpenCode first.`,
+                `Leaving conflicts in place: ${unsupportedReason}, so the plugin may not load to replace native compaction.`,
             );
         } else if (options.force) {
             try {

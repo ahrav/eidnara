@@ -52,6 +52,8 @@ interface RepairPlan {
     installPlugin: boolean;
     disableCompaction: boolean;
     disableMemory: boolean;
+    /** The `memory.backend` value a failed repair restores; set with `disableMemory`. */
+    priorMemoryBackend: string | null;
     writeUserConfig: boolean;
     /** False when OMP reports no version or one below the tested minimum; every OMP-side repair then stays off. */
     hostSupported: boolean;
@@ -148,6 +150,7 @@ async function runHealthChecks(options: {
         installPlugin: false,
         disableCompaction: false,
         disableMemory: false,
+        priorMemoryBackend: null,
         writeUserConfig: false,
         hostSupported: true,
     };
@@ -234,6 +237,7 @@ async function runHealthChecks(options: {
                 `OMP memory.backend=${memory} duplicates Eidnara memory injection`,
             );
             repairPlan.disableMemory = true;
+            repairPlan.priorMemoryBackend = memory;
         } else add(results, "fail", "Could not read OMP memory.backend");
 
         const nonGlobalSources = getOmpNonGlobalConfigSources(options.cwd);
@@ -352,9 +356,15 @@ async function repair(
     let fixed = 0;
     const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
     if (plan.writeUserConfig && userConfig.format === "none") {
-        writeDefaultConfig(userConfig.path);
-        prompts.log.success(`Wrote default Eidnara config to ${userConfig.path}`);
-        fixed += 1;
+        try {
+            writeDefaultConfig(userConfig.path);
+            prompts.log.success(`Wrote default Eidnara config to ${userConfig.path}`);
+            fixed += 1;
+        } catch (error) {
+            prompts.log.error(
+                `Could not write default Eidnara config to ${userConfig.path}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
     }
     const omp = deps.detectOmpBinary();
     if (!omp) return fixed;
@@ -400,6 +410,25 @@ async function repair(
         } else prompts.log.error(result.message);
     }
     if (!wantsManagersOff) return fixed;
+    // A plugin enabled in this run beside a native manager that stayed on
+    // would run both after restart, so any later failure restores the prior
+    // disabled state.
+    const disablePluginAgain = (why: string): void => {
+        if (!enabledHere) return;
+        const rollback = deps.runOmpCommand(
+            omp.path,
+            ["plugin", "disable", OMP_PLUGIN_PACKAGE],
+            120_000,
+        );
+        if (rollback.ok) {
+            fixed -= 1;
+            prompts.log.warn(`Disabled ${OMP_PLUGIN_PACKAGE} again: ${why}`);
+        } else {
+            prompts.log.error(
+                `Could not disable ${OMP_PLUGIN_PACKAGE} after ${why} (${rollback.stderr || rollback.stdout || "omp exited with an error"}). Run \`omp plugin disable ${OMP_PLUGIN_PACKAGE}\` by hand.`,
+            );
+        }
+    };
     // Turning off OMP's managers only makes sense once the plugin that
     // replaces them is enabled and carries an extension manifest.
     const plugin = deps
@@ -409,42 +438,46 @@ async function repair(
         prompts.log.error(
             `Leaving OMP native compaction and memory on: ${OMP_PLUGIN_PACKAGE} is not enabled in OMP with a verified extension manifest, so nothing would replace them`,
         );
+        disablePluginAgain("its enabled state could not be verified afterwards");
         return fixed;
     }
-    let managerFailed = false;
-    for (const [enabled, key, value] of [
-        [plan.disableCompaction, "compaction.enabled", "false"],
-        [plan.disableMemory, "memory.backend", "off"],
+    // Each mutation records the value that undoes it, so a later failure can
+    // restore every manager already turned off in this run.
+    const applied: Array<{ key: string; prior: string }> = [];
+    let failedKey: string | null = null;
+    for (const [enabled, key, value, prior] of [
+        [plan.disableCompaction, "compaction.enabled", "false", "true"],
+        [plan.disableMemory, "memory.backend", "off", plan.priorMemoryBackend],
     ] as const) {
         if (!enabled) continue;
         const result = deps.runOmpCommand(omp.path, ["config", "set", key, value], 10_000);
         if (result.ok) {
             prompts.log.success(`Set OMP ${key}=${value}`);
             fixed += 1;
+            if (prior !== null) applied.push({ key, prior });
         } else {
-            managerFailed = true;
+            failedKey = key;
             prompts.log.error(result.stderr || `Could not set OMP ${key}`);
+            break;
         }
     }
-    if (managerFailed && enabledHere) {
-        // A plugin enabled in this run beside a native manager that stayed on
-        // would run both after restart; restore the prior state.
-        const rollback = deps.runOmpCommand(
-            omp.path,
-            ["plugin", "disable", OMP_PLUGIN_PACKAGE],
-            120_000,
-        );
-        if (rollback.ok) {
+    if (failedKey === null) return fixed;
+    for (const { key, prior } of applied.reverse()) {
+        const restore = deps.runOmpCommand(omp.path, ["config", "set", key, prior], 10_000);
+        if (restore.ok) {
             fixed -= 1;
             prompts.log.warn(
-                `Disabled ${OMP_PLUGIN_PACKAGE} again: a native manager could not be turned off, so leaving it enabled would run both`,
+                `Restored OMP ${key}=${prior}: setting ${failedKey} failed afterwards`,
             );
         } else {
             prompts.log.error(
-                `Could not disable ${OMP_PLUGIN_PACKAGE} after a native-manager repair failed (${rollback.stderr || rollback.stdout || "omp exited with an error"}). Run \`omp plugin disable ${OMP_PLUGIN_PACKAGE}\` by hand.`,
+                `Could not restore OMP ${key}=${prior} after setting ${failedKey} failed (${restore.stderr || restore.stdout || "omp exited with an error"}). Run \`omp config set ${key} ${prior}\` by hand.`,
             );
         }
     }
+    disablePluginAgain(
+        `OMP ${failedKey} could not be turned off, so leaving it enabled would run both`,
+    );
 
     return fixed;
 }

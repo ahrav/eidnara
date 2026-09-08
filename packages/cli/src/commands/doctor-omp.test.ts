@@ -691,6 +691,167 @@ describe("OMP doctor", () => {
         );
     });
 
+    it("restores a manager already turned off when a later manager repair fails", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-restore-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+        let enabled = false;
+        const calls: string[][] = [];
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                ensurePluginEntry: async () => {
+                    enabled = true;
+                    return { ok: true, action: "updated", message: "Enabled", configPath: "" };
+                },
+                listOmpPlugins: () => [
+                    { name: "@eidnara/pi", version: "0.33.0", enabled, path: pluginDir },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? true : "mnemopi") as never,
+                runOmpCommand: (_path, args) => {
+                    calls.push(args);
+                    if (args[0] === "config" && args[1] === "set" && args[2] === "memory.backend") {
+                        if (args[3] === "off") {
+                            return { ok: false, stdout: "", stderr: "memory backend locked" };
+                        }
+                    }
+                    if (args[0] === "plugin" && args[1] === "disable") enabled = false;
+                    return { ok: true, stdout: agentDir, stderr: "" };
+                },
+            },
+        });
+
+        expect(code).toBe(1);
+        const sets = calls.filter((args) => args[0] === "config" && args[1] === "set");
+        expect(sets).toEqual([
+            ["config", "set", "compaction.enabled", "false"],
+            ["config", "set", "memory.backend", "off"],
+            ["config", "set", "compaction.enabled", "true"],
+        ]);
+        expect(calls).toContainEqual(["plugin", "disable", "@eidnara/pi"]);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain(
+            "Restored OMP compaction.enabled=true: setting memory.backend failed afterwards",
+        );
+        expect(output).toContain("Applied 0 repair(s)");
+    });
+
+    it("disables @eidnara/pi again when it cannot be seen enabled after the enable step", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-probe-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+        let listCalls = 0;
+        const calls: string[][] = [];
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                ensurePluginEntry: async () => ({
+                    ok: true,
+                    action: "updated",
+                    message: "Enabled",
+                    configPath: "",
+                }),
+                // The list right after the enable step fails; every other list
+                // shows the plugin installed but disabled.
+                listOmpPlugins: () => {
+                    listCalls += 1;
+                    if (listCalls === 3) return null;
+                    return [
+                        { name: "@eidnara/pi", version: "0.33.0", enabled: false, path: pluginDir },
+                    ];
+                },
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? true : "off") as never,
+                runOmpCommand: (_path, args) => {
+                    calls.push(args);
+                    return { ok: true, stdout: agentDir, stderr: "" };
+                },
+            },
+        });
+
+        expect(code).toBe(1);
+        expect(calls).toContainEqual(["plugin", "disable", "@eidnara/pi"]);
+        expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
+        expect(prompts.messages.join("\n")).toContain(
+            "Disabled @eidnara/pi again: its enabled state could not be verified afterwards",
+        );
+    });
+
+    it("reports an unwritable default config instead of aborting the repair", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-unwritable-config-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(join(root, ".config"), { recursive: true });
+        // A regular file where the config directory belongs makes mkdir fail.
+        writeFileSync(join(root, ".config", "eidnara"), "not a directory\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(1);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("Could not write default Eidnara config to");
+        expect(output).toContain("re-checking");
+    });
+
     it("does not enable @eidnara/pi under --force when its install has no extension manifest", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-no-manifest-enable-"));
         roots.push(root);
@@ -789,7 +950,7 @@ describe("OMP doctor", () => {
         const output = prompts.messages.join("\n");
         expect(output).toContain("settings file is read-only");
         expect(output).toContain(
-            "Disabled @eidnara/pi again: a native manager could not be turned off",
+            "Disabled @eidnara/pi again: OMP compaction.enabled could not be turned off",
         );
     });
 
