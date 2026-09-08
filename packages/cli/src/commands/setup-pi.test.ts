@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,6 +33,20 @@ function makeTempRoot(): string {
     const path = mkdtempSync(join(tmpdir(), "eidnara-pi-setup-"));
     tempRoots.push(path);
     return path;
+}
+
+/** Root ignores directory modes, so a write cannot be made to fail this way as root or on Windows. */
+const canRefuseWrites = process.platform !== "win32" && process.getuid?.() !== 0;
+
+/**
+ * A missing file under a read-only directory passes pre-write validation (`ENOENT` reads as
+ * absent) and fails at the write, which is the failure the rollback tests need to provoke.
+ */
+function unwritableConfigPath(root: string): string {
+    const locked = join(root, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0o555);
+    return join(locked, "eidnara.jsonc");
 }
 
 function setConfigEnv(root: string, agentDir: string): void {
@@ -110,6 +132,9 @@ afterEach(() => {
     else process.env.XDG_CONFIG_HOME = originalConfigHome;
 
     for (const path of tempRoots.splice(0)) {
+        try {
+            chmodSync(join(path, "locked"), 0o755);
+        } catch {}
         rmSync(path, { recursive: true, force: true });
     }
 });
@@ -294,154 +319,163 @@ describe("runSetup", () => {
         expect(config.compaction?.enabled).toBe(false);
     });
 
-    it("skips the native-settings rollback when the plugin registration cannot be undone", async () => {
-        const root = makeTempRoot();
-        const agentDir = join(root, ".pi", "agent");
-        setConfigEnv(root, agentDir);
-        mkdirSync(agentDir, { recursive: true });
-        // A regular file at the config's parent path fails the write but not the pre-write validation.
-        writeFileSync(join(root, "not-a-dir"), "");
-        const configPath = join(root, "not-a-dir", "eidnara.jsonc");
-        const settingsPath = join(agentDir, "settings.json");
+    it.if(canRefuseWrites)(
+        "skips the native-settings rollback when the plugin registration cannot be undone",
+        async () => {
+            const root = makeTempRoot();
+            const agentDir = join(root, ".pi", "agent");
+            setConfigEnv(root, agentDir);
+            mkdirSync(agentDir, { recursive: true });
+            const configPath = unwritableConfigPath(root);
+            const settingsPath = join(agentDir, "settings.json");
 
-        const env: SetupEnvironment = {
-            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
-            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
-            paths: {
-                getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => configPath,
-                getPiUserExtensionsPath: () => settingsPath,
-            },
-        };
-        const calls: string[] = [];
-        const host: PiCompatibleSetupHost = {
-            displayName: "Fake",
-            cliName: "fake",
-            packageSource: "npm:fake",
-            ensurePluginEntry: async () => {
-                calls.push("ensurePluginEntry");
-                return {
+            const env: SetupEnvironment = {
+                detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+                getPiVersion: () => "0.74.0",
+                getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+                paths: {
+                    getPiAgentConfigDir: () => agentDir,
+                    getPiUserConfigPath: () => configPath,
+                    getPiUserExtensionsPath: () => settingsPath,
+                },
+            };
+            const calls: string[] = [];
+            const host: PiCompatibleSetupHost = {
+                displayName: "Fake",
+                cliName: "fake",
+                packageSource: "npm:fake",
+                ensurePluginEntry: async () => {
+                    calls.push("ensurePluginEntry");
+                    return {
+                        ok: true,
+                        action: "added",
+                        message: "registered",
+                        configPath: settingsPath,
+                    };
+                },
+                beforeWrite: async () => async () => {
+                    calls.push("rollbackHost");
+                },
+                rollbackPluginEntry: async () => {
+                    calls.push("rollbackPluginEntry");
+                    throw new Error("plugin undo failed");
+                },
+            };
+            // The confirmations are configureHost=true and sidekickEnabled=false.
+            const prompts = new MockPrompts({ confirms: [true, false] });
+
+            const code = await runSetup({ prompts, env, host });
+
+            expect(code).toBe(1);
+            expect(calls).toEqual(["ensurePluginEntry", "rollbackPluginEntry"]);
+            const log = prompts.messages.join("\n");
+            expect(log).toContain("error:plugin undo failed");
+            expect(log).toContain("two context managers at once");
+            expect(log).toContain(
+                "outro:Setup stopped — undo the Fake plugin registration by hand",
+            );
+        },
+    );
+
+    it.if(canRefuseWrites)(
+        "restores native settings when the plugin registration is undone",
+        async () => {
+            const root = makeTempRoot();
+            const agentDir = join(root, ".pi", "agent");
+            setConfigEnv(root, agentDir);
+            mkdirSync(agentDir, { recursive: true });
+            const configPath = unwritableConfigPath(root);
+            const settingsPath = join(agentDir, "settings.json");
+
+            const env: SetupEnvironment = {
+                detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+                getPiVersion: () => "0.74.0",
+                getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+                paths: {
+                    getPiAgentConfigDir: () => agentDir,
+                    getPiUserConfigPath: () => configPath,
+                    getPiUserExtensionsPath: () => settingsPath,
+                },
+            };
+            const calls: string[] = [];
+            const host: PiCompatibleSetupHost = {
+                displayName: "Fake",
+                cliName: "fake",
+                packageSource: "npm:fake",
+                ensurePluginEntry: async () => ({
                     ok: true,
                     action: "added",
                     message: "registered",
                     configPath: settingsPath,
-                };
-            },
-            beforeWrite: async () => async () => {
-                calls.push("rollbackHost");
-            },
-            rollbackPluginEntry: async () => {
-                calls.push("rollbackPluginEntry");
-                throw new Error("plugin undo failed");
-            },
-        };
-        // The confirmations are configureHost=true and sidekickEnabled=false.
-        const prompts = new MockPrompts({ confirms: [true, false] });
+                }),
+                beforeWrite: async () => async () => {
+                    calls.push("rollbackHost");
+                },
+                rollbackPluginEntry: async () => {
+                    calls.push("rollbackPluginEntry");
+                },
+            };
+            const prompts = new MockPrompts({ confirms: [true, false] });
 
-        const code = await runSetup({ prompts, env, host });
+            const code = await runSetup({ prompts, env, host });
 
-        expect(code).toBe(1);
-        expect(calls).toEqual(["ensurePluginEntry", "rollbackPluginEntry"]);
-        const log = prompts.messages.join("\n");
-        expect(log).toContain("error:plugin undo failed");
-        expect(log).toContain("two context managers at once");
-        expect(log).toContain("outro:Setup stopped — undo the Fake plugin registration by hand");
-    });
+            expect(code).toBe(1);
+            expect(calls).toEqual(["rollbackPluginEntry", "rollbackHost"]);
+            expect(prompts.messages.join("\n")).toContain(
+                "outro:Setup stopped — rolled back Fake changes.",
+            );
+        },
+    );
 
-    it("restores native settings when the plugin registration is undone", async () => {
-        const root = makeTempRoot();
-        const agentDir = join(root, ".pi", "agent");
-        setConfigEnv(root, agentDir);
-        mkdirSync(agentDir, { recursive: true });
-        writeFileSync(join(root, "not-a-dir"), "");
-        const configPath = join(root, "not-a-dir", "eidnara.jsonc");
-        const settingsPath = join(agentDir, "settings.json");
+    it.if(canRefuseWrites)(
+        "reports a partial rollback when restoring native settings fails",
+        async () => {
+            const root = makeTempRoot();
+            const agentDir = join(root, ".pi", "agent");
+            setConfigEnv(root, agentDir);
+            mkdirSync(agentDir, { recursive: true });
+            const configPath = unwritableConfigPath(root);
 
-        const env: SetupEnvironment = {
-            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
-            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
-            paths: {
-                getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => configPath,
-                getPiUserExtensionsPath: () => settingsPath,
-            },
-        };
-        const calls: string[] = [];
-        const host: PiCompatibleSetupHost = {
-            displayName: "Fake",
-            cliName: "fake",
-            packageSource: "npm:fake",
-            ensurePluginEntry: async () => ({
-                ok: true,
-                action: "added",
-                message: "registered",
-                configPath: settingsPath,
-            }),
-            beforeWrite: async () => async () => {
-                calls.push("rollbackHost");
-            },
-            rollbackPluginEntry: async () => {
-                calls.push("rollbackPluginEntry");
-            },
-        };
-        const prompts = new MockPrompts({ confirms: [true, false] });
+            const env: SetupEnvironment = {
+                detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+                getPiVersion: () => "0.74.0",
+                getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+                paths: {
+                    getPiAgentConfigDir: () => agentDir,
+                    getPiUserConfigPath: () => configPath,
+                    getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+                },
+            };
+            const host: PiCompatibleSetupHost = {
+                displayName: "Fake",
+                cliName: "fake",
+                packageSource: "npm:fake",
+                ensurePluginEntry: async () => ({
+                    ok: true,
+                    action: "already_present",
+                    message: "present",
+                    configPath: "unused",
+                }),
+                beforeWrite: async () => async () => {
+                    throw new Error(
+                        "Could not restore OMP settings; run by hand:\n- omp config set x y",
+                    );
+                },
+            };
+            const prompts = new MockPrompts({ confirms: [true, false] });
 
-        const code = await runSetup({ prompts, env, host });
+            const code = await runSetup({ prompts, env, host });
 
-        expect(code).toBe(1);
-        expect(calls).toEqual(["rollbackPluginEntry", "rollbackHost"]);
-        expect(prompts.messages.join("\n")).toContain(
-            "outro:Setup stopped — rolled back Fake changes.",
-        );
-    });
-
-    it("reports a partial rollback when restoring native settings fails", async () => {
-        const root = makeTempRoot();
-        const agentDir = join(root, ".pi", "agent");
-        setConfigEnv(root, agentDir);
-        mkdirSync(agentDir, { recursive: true });
-        writeFileSync(join(root, "not-a-dir"), "");
-        const configPath = join(root, "not-a-dir", "eidnara.jsonc");
-
-        const env: SetupEnvironment = {
-            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
-            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
-            paths: {
-                getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => configPath,
-                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
-            },
-        };
-        const host: PiCompatibleSetupHost = {
-            displayName: "Fake",
-            cliName: "fake",
-            packageSource: "npm:fake",
-            ensurePluginEntry: async () => ({
-                ok: true,
-                action: "already_present",
-                message: "present",
-                configPath: "unused",
-            }),
-            beforeWrite: async () => async () => {
-                throw new Error(
-                    "Could not restore OMP settings; run by hand:\n- omp config set x y",
-                );
-            },
-        };
-        const prompts = new MockPrompts({ confirms: [true, false] });
-
-        const code = await runSetup({ prompts, env, host });
-
-        expect(code).toBe(1);
-        const log = prompts.messages.join("\n");
-        expect(log).toContain(
-            "error:Could not restore OMP settings; run by hand:\n- omp config set x y",
-        );
-        expect(log).toContain("outro:Setup stopped — Fake changes were only partly rolled back");
-    });
+            expect(code).toBe(1);
+            const log = prompts.messages.join("\n");
+            expect(log).toContain(
+                "error:Could not restore OMP settings; run by hand:\n- omp config set x y",
+            );
+            expect(log).toContain(
+                "outro:Setup stopped — Fake changes were only partly rolled back",
+            );
+        },
+    );
 
     it("passes the shared config's compaction and memory modes to the host hook", async () => {
         const root = makeTempRoot();
