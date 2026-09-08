@@ -86,6 +86,10 @@ function hasSecretKeySegment(key: string): boolean {
         .some((segment) => SECRET_KEY_SEGMENT_PATTERN.test(segment));
 }
 
+// `password`, `secret`, and `credential` identify secrets without a preceding qualifier.
+// Generic `token` and `key` segments require a preceding `SECRET_QUALIFIERS` segment.
+const UNQUALIFIED_SECRET_SEGMENT_PATTERN = /^(?:password|passwd|pwd|secret|credential)s?$/i;
+
 export function isSecretKey(key: string): boolean {
     const segments = key
         .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -113,6 +117,8 @@ export function isSecretKey(key: string): boolean {
             break;
         }
         if (!trailingOk) continue;
+
+        if (UNQUALIFIED_SECRET_SEGMENT_PATTERN.test(seg)) return true;
 
         for (let k = i - 1; k >= 0; k--) {
             const lead = segments[k];
@@ -204,12 +210,21 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: (_full: string, prefix: string) => `${prefix}<REDACTED:authorization>`,
     },
     {
+        pattern: /\b((?:Set-)?Cookie\s*:\s*)(\S[^\r\n]*)/gi,
+        replacement: (_full: string, prefix: string) => `${prefix}<REDACTED:cookie>`,
+    },
+    // `scheme://user:pass@host` keeps the scheme and host so the endpoint stays identifiable.
+    {
+        pattern: /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/@]+)@/gi,
+        replacement: (_full: string, scheme: string) => `${scheme}<REDACTED:userinfo>@`,
+    },
+    {
         pattern: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
         replacement: "<JWT_REDACTED>",
     },
     {
         pattern:
-            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])((?:\\.|[^\\"'\r\n])*)\4/gi,
+            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4/gi,
         replacement: (
             full: string,
             quote: string,
@@ -226,7 +241,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     // `[ \t]*` around the colon keeps a bare `key:` at end of line from consuming the next line's first word.
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|[^\\"'`\r\n])*)\3|([^\s'"`,;}\])]+))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s'"`,;}\])]+))/gi,
         replacement: (
             full: string,
             key: string,
@@ -245,7 +260,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])((?:\\.|[^\\"'`\r\n])*)\2|([^\s'"`]+))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])((?:\\.|(?!\2)[^\\\r\n])*)\2|([^\s'"`]+))/gi,
         replacement: (
             full: string,
             key: string,

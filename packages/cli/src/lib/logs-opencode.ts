@@ -13,10 +13,14 @@ export function sanitizeLogContent(content: string): string {
     return sanitizeDiagnosticText(content);
 }
 
-/** A Desktop install reports no version, so absence is decided by the install kind, not the version. */
+/**
+ * A Desktop install reports no version, so absence is decided by the install kind, not the version.
+ * The version text is external process output and is sanitized like any other probe result.
+ */
 function describeOpenCodeInstall(report: DiagnosticReport): string {
     if (!report.opencodeInstalled) return "not installed";
-    return `${report.opencodeVersion ?? "unknown version"} [${report.opencodeInstallKind}]`;
+    const version = report.opencodeVersion ? sanitizeDiagnosticText(report.opencodeVersion) : null;
+    return `${version ?? "unknown version"} [${report.opencodeInstallKind}]`;
 }
 
 function formatTimestamp(date: Date): string {

@@ -265,3 +265,61 @@ describe("redactSecretText — escaped quotes inside secret values", () => {
         expect(redactSecretText(`API_KEY="abc\\"def"`)).toBe('API_KEY="<REDACTED:api_key>"');
     });
 });
+
+describe("redactSecretText — cookies, URL userinfo, and opposite quotes", () => {
+    test("redacts Cookie and Set-Cookie header values whole", () => {
+        expect(redactSecretText("Cookie: session=supersecret; theme=dark")).toBe(
+            "Cookie: <REDACTED:cookie>",
+        );
+        expect(redactSecretText("set-cookie: sid=supersecret; HttpOnly")).toBe(
+            "set-cookie: <REDACTED:cookie>",
+        );
+    });
+
+    test("redacts userinfo in URLs and keeps scheme and host", () => {
+        expect(redactSecretText("postgres://dbuser:s3cr3t@db.example.com/prod")).toBe(
+            "postgres://<REDACTED:userinfo>@db.example.com/prod",
+        );
+        expect(redactSecretText("https://alice:password123@example.com/api")).toBe(
+            "https://<REDACTED:userinfo>@example.com/api",
+        );
+        expect(redactSecretText("https://example.com/api?user=alice")).toBe(
+            "https://example.com/api?user=alice",
+        );
+    });
+
+    test("allows the opposite quote character inside a quoted secret value", () => {
+        const secret = ["abc", "'def", "SECRET"].join("");
+        expect(redactSecretText(JSON.stringify({ password: secret }))).toBe(
+            '{"password":"<REDACTED:password>"}',
+        );
+        expect(redactSecretText(`token: 'it"s'`)).toBe("token: '<REDACTED:token>'");
+        expect(redactSecretText(`API_KEY="it's"`)).toBe('API_KEY="<REDACTED:api_key>"');
+    });
+});
+
+describe("sanitizeConfigValue unqualified password keys", () => {
+    test("redacts password, secret, and credential keys regardless of prefix", () => {
+        expect(
+            sanitizeConfigValue({
+                db_password: "hunter2",
+                db_passwd: "hunter2",
+                smtp_password: "hunter2",
+                webhook_secret: "hunter2",
+                ldap_credential: "hunter2",
+                token_budget: 4096,
+                cache_key: "sessions-v2",
+                injection_budget_tokens: 12,
+            }),
+        ).toEqual({
+            db_password: "<REDACTED:password>",
+            db_passwd: "<REDACTED:passwd>",
+            smtp_password: "<REDACTED:password>",
+            webhook_secret: "<REDACTED:secret>",
+            ldap_credential: "<REDACTED:credential>",
+            token_budget: 4096,
+            cache_key: "sessions-v2",
+            injection_budget_tokens: 12,
+        });
+    });
+});

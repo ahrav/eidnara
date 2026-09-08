@@ -435,7 +435,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
                   "| --- | --- | --- | --- |",
                   ...openCodeInstallations.map(
                       (installation) =>
-                          `| ${installation.active ? "[active]" : ""} | \`${sanitizeString(installation.path)}\` | ${installation.version} | ${installation.source} |`,
+                          `| ${installation.active ? "[active]" : ""} | \`${sanitizeString(installation.path)}\` | ${sanitizeDiagnosticText(installation.version)} | ${installation.source} |`,
                   ),
               ]
             : [];
@@ -497,7 +497,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- Plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,
+        `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${sanitizeDiagnosticText(report.opencodeVersion)})` : ""}`,
         `- Project directory: ${sanitizeString(report.projectDirectory)}`,
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
         `- opencode config parse error: ${describeParseError(report.opencodeConfigParseError)}`,

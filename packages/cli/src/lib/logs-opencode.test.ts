@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
-import { readLogTailLines } from "./log-tail";
+import { readLogTailLines, TRUNCATED_RECORD_MARKER } from "./log-tail";
 import { bundleIssueReport, sanitizeLogContent } from "./logs-opencode";
 
 const tempDirs: string[] = [];
@@ -119,6 +119,19 @@ describe("readLogTailLines", () => {
         const tail = readLogTailLines(path, 101);
         expect(tail.join("\n")).not.toContain("\uFFFD");
         for (const entry of tail.slice(0, -1)) expect(entry).toBe(line);
+    });
+
+    it("keeps a marked suffix when the newest record alone exceeds the window", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        const path = join(root, "eidnara.log");
+        const huge = `[2026-05-11T12:00:00.000Z] payload ${"é".repeat(5000)} END`;
+        writeFileSync(path, `[2026-05-11T11:00:00.000Z] earlier\n${huge}\n`);
+        const tail = readLogTailLines(path, 512);
+        expect(tail[0]).toStartWith(TRUNCATED_RECORD_MARKER);
+        expect(tail[0]).not.toContain("\uFFFD");
+        expect(tail[0]).toEndWith(" END");
+        expect(tail).toHaveLength(2);
     });
 });
 
@@ -355,6 +368,41 @@ describe("bundleIssueReport session filter", () => {
 });
 
 describe("renderDiagnosticsMarkdown sanitization", () => {
+    it("sanitizes version-probe output in the summary line and installation table", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-render-version-"));
+        tempDirs.push(root);
+        const noisyVersion = "1.2.3 warning: shim at /home/alice/.local/bin/opencode token=abc123";
+        const markdown = renderDiagnosticsMarkdown(
+            makeReport(root, {
+                opencodeVersion: noisyVersion,
+                opencodeInstallations: [
+                    {
+                        path: "/home/alice/a",
+                        source: "PATH",
+                        kind: "cli",
+                        version: noisyVersion,
+                        active: true,
+                    },
+                    {
+                        path: "/home/alice/b",
+                        source: "app",
+                        kind: "desktop",
+                        version: "unknown",
+                        active: false,
+                    },
+                ],
+            }),
+        );
+        expect(markdown).toContain(
+            "(1.2.3 warning: shim at /home/<USER>/.local/bin/opencode token=<REDACTED:token>)",
+        );
+        expect(markdown).toContain(
+            "| 1.2.3 warning: shim at /home/<USER>/.local/bin/opencode token=<REDACTED:token> | PATH |",
+        );
+        expect(markdown).not.toContain("alice");
+        expect(markdown).not.toContain("abc123");
+    });
+
     it("sanitizes historian dump parse errors and host-config parse errors", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-render-"));
         tempDirs.push(root);

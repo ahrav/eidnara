@@ -18,10 +18,18 @@ export function readLogTailLines(path: string, maxBytes = DEFAULT_LOG_TAIL_BYTES
         }
         const text = buffer.subarray(0, offset).toString("utf-8");
         const lines = text.split(/\r?\n/);
-        // Drop the first split entry when `start > 0`: it may begin mid-record or mid-UTF-8 sequence.
-        if (start > 0) lines.shift();
+        if (start > 0) {
+            // The first split entry may begin mid-record or mid-UTF-8 sequence.
+            const partial = lines.shift() ?? "";
+            // A record larger than the window has no complete line; return its read portion with `TRUNCATED_RECORD_MARKER`.
+            if (!lines.some((line) => line !== "")) {
+                lines.unshift(`${TRUNCATED_RECORD_MARKER}${partial.replace(/^\uFFFD+/, "")}`);
+            }
+        }
         return lines;
     } finally {
         closeSync(fd);
     }
 }
+
+export const TRUNCATED_RECORD_MARKER = "[truncated record] ";
