@@ -85,6 +85,18 @@ const revertedRerun = runGoldens();
 if (observedFailure.exit_status === 0) {
     throw new Error(`${name}: mutation did not redden the goldens test`);
 }
+// A compile or link failure also exits nonzero; only the goldens test failing on this family's wire proves the mutation reached its assertion.
+const expectedFailure = `wire drift in DG-${drill}-`;
+if (
+    !observedFailure.output.includes(
+        "test differential_goldens::dg_goldens_match_ts_wire_surface_and_gate_labels ... FAILED",
+    ) ||
+    !observedFailure.output.includes(expectedFailure)
+) {
+    throw new Error(
+        `${name}: mutated run went red without the goldens assertion "${expectedFailure}" failing`,
+    );
+}
 if (revertedRerun.exit_status !== 0) {
     throw new Error(`${name}: reverted goldens test did not pass`);
 }

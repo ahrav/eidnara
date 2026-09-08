@@ -213,13 +213,20 @@ const RUST_INCLUDE_RE = /include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)/g;
 /** A Rust verifier's `include_str!`/`include_bytes!` arguments resolve relative to the source file's directory. */
 export function includedFixturePaths(repoRoot: string, verifierPath: string): string[] {
     if (!verifierPath.endsWith(".rs")) return [];
-    const absolute = resolve(repoRoot, verifierPath);
+    const root = resolve(repoRoot);
+    const absolute = resolve(root, verifierPath);
     if (!existsSync(absolute)) return [];
     const source = readFileSync(absolute, "utf8");
     const fixtures = new Set<string>();
     for (const match of source.matchAll(RUST_INCLUDE_RE)) {
         const included = resolve(dirname(absolute), match[1]!);
-        fixtures.add(relative(repoRoot, included).split(sep).join("/"));
+        // A fixture outside the checkout would freeze runner state instead of accepted bytes.
+        if (included !== root && !included.startsWith(root + sep)) {
+            throw new Error(
+                `verifier ${verifierPath} includes ${match[1]} from outside the repository`,
+            );
+        }
+        fixtures.add(relative(root, included).split(sep).join("/"));
     }
     return [...fixtures].sort();
 }

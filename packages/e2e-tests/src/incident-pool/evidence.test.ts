@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { IncidentCatalog, SourceInventory } from "./contract";
@@ -13,6 +13,7 @@ import {
     type EvidenceView,
     EXPECTED_MUTATION_ARTIFACTS,
     EXPECTED_MUTATION_RECORDS,
+    includedFixturePaths,
     loadMutationEvidence,
     mutationRecordsBoundTo,
     REPO_ROOT,
@@ -240,6 +241,31 @@ describe("mutation evidence normalization (R11)", () => {
             expect(() => loadMutationEvidence(temp, REPO_ROOT)).toThrow(
                 /links a missing verifier packages\/e2e-tests\/tests\/this-verifier-does-not-exist\.test\.ts/,
             );
+        } finally {
+            rmSync(temp, { recursive: true, force: true });
+        }
+    });
+
+    it("rejects a verifier whose include escapes the repository", () => {
+        const temp = mkdtempSync(join(tmpdir(), "incident-evidence-"));
+        try {
+            const repo = join(temp, "repo");
+            mkdirSync(join(repo, "crates", "x", "src"), { recursive: true });
+            writeFileSync(join(temp, "outside.json"), "{}");
+            writeFileSync(
+                join(repo, "crates", "x", "src", "lib.rs"),
+                'const A: &str = include_str!("../../../../outside.json");\nconst B: &str = include_str!("../testdata/in.json");\n',
+            );
+            expect(() => includedFixturePaths(repo, "crates/x/src/lib.rs")).toThrow(
+                /includes \.\.\/\.\.\/\.\.\/\.\.\/outside\.json from outside the repository/,
+            );
+            writeFileSync(
+                join(repo, "crates", "x", "src", "lib.rs"),
+                'const B: &[u8] = include_bytes!("../testdata/in.json");\n',
+            );
+            expect(includedFixturePaths(repo, "crates/x/src/lib.rs")).toEqual([
+                "crates/x/testdata/in.json",
+            ]);
         } finally {
             rmSync(temp, { recursive: true, force: true });
         }
