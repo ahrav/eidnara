@@ -440,7 +440,7 @@ describe("shared-path connection identity", () => {
         expect(generationsSeen).toEqual([0, 1]);
     });
 
-    test("evicting a state with a call in flight defers the disconnect until that call settles", async () => {
+    test("a state with a call in flight is never evicted; the cap trims it once the call settles", async () => {
         const config = { subc: { connection_file: connectionFile } };
         const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
         const shared = sharedStateForTest(config);
@@ -462,14 +462,72 @@ describe("shared-path connection identity", () => {
                 },
             });
         }
-        expect(sharedStateForTest(config)).toBeUndefined();
-        // Evicted from the map, but the in-flight call still owns the connection.
+        // The busy state is skipped and the next idle one is evicted instead, so the busy module stays connected and reachable for a session close.
+        expect(sharedStateForTest(config)?.module).toBe(module);
+        expect(sharedConnectionFilesForTest()).toHaveLength(MAX_CONNECTION_FILE_STATES);
+        expect(sharedConnectionFilesForTest()).not.toContain(
+            "explicit:/tmp/kernel-transport-test-missing-0.json",
+        );
         expect(module.generation).toBe(0);
 
-        settle?.({ state: { kind: "available" }, known_as_of: 1, tip: 1, gated: false, rows: [] });
+        settle?.({
+            state: { kind: "available" },
+            known_as_of: 4,
+            tip: 4,
+            gated: false,
+            rows: [
+                {
+                    object: {
+                        object_id: "mem_a",
+                        object_kind: "decision",
+                        domain_id: "memory",
+                        source_kind: "assistant",
+                        source_id: "memory-lineage",
+                        source_revision: 1,
+                        created_commit_seq: 1,
+                        invalidated_commit_seq: null,
+                        superseded_by: null,
+                        sensitivity: "normal",
+                    },
+                    visibility: "labeled",
+                    labeled: true,
+                    scope_id: "project:x",
+                    token: { object_id: "mem_a", known_as_of: 4 },
+                    decision: { decision_kind: "memory", payload: { summary: "s", rationale: "" } },
+                },
+            ],
+        });
         const result = await pending;
         expect(result.state).toEqual({ kind: "available" });
+        // The response's tokens landed in the state that served the call.
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 4 });
+
+        // The next resolution trims the now-idle state.
+        createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: { subc: { connection_file: "/tmp/kernel-transport-test-missing-extra.json" } },
+        });
+        expect(sharedStateForTest(config)).toBeUndefined();
+        expect(sharedConnectionFilesForTest()).toHaveLength(MAX_CONNECTION_FILE_STATES);
         expect(module.generation).toBe(1);
+    });
+
+    test("a token write that names a superseded connection identity is dropped", () => {
+        const config = { subc: { connection_file: connectionFile } };
+        const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
+        const shared = sharedStateForTest(config);
+        if (!shared) throw new Error("the resolved client must have a shared transport");
+        const before = shared.transport.connectionIdentity?.();
+        shared.module.disconnect();
+        const after = shared.transport.connectionIdentity?.();
+        expect(after).not.toBe(before);
+
+        kernel.tokens.rememberTokens(PROJECT, [{ object_id: "stale", known_as_of: 9 }], 9, before);
+        kernel.tokens.rememberTokens(PROJECT, [{ object_id: "fresh", known_as_of: 1 }], 1, after);
+
+        expect(kernel.tokens.get(PROJECT, "stale")).toBeUndefined();
+        expect(kernel.tokens.get(PROJECT, "fresh")).toEqual({ object_id: "fresh", known_as_of: 1 });
     });
 
     test("a view's identity changes when its state is evicted and replaced, so a body built before the eviction is refused", async () => {

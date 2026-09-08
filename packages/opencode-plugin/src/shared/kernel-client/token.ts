@@ -1,10 +1,24 @@
 import type { MutationToken, ReadRow } from "./wire";
 
-/** The token operations `KernelClient` performs. `TokenCache` holds them directly; a caller may hand the client a view whose methods resolve to whichever cache currently belongs with the client's transport. commentlint: allow(JUDGE) */
-export type TokenStore = Pick<
-    TokenCache,
-    "remember" | "rememberTokens" | "get" | "knownAsOfFor" | "dropProject" | "size"
->;
+/** The token operations `KernelClient` performs. `TokenCache` holds them directly; a caller may hand the client a view whose methods resolve to whichever cache currently belongs with the client's transport. Writes carry the `connectionIdentity` the response was served under so such a view can refuse tokens from a connection it no longer represents. commentlint: allow(JUDGE) */
+export interface TokenStore {
+    remember(
+        projectRoot: string,
+        rows: readonly ReadRow[],
+        knownAsOf: number,
+        connectionIdentity?: string,
+    ): void;
+    rememberTokens(
+        projectRoot: string,
+        tokens: readonly MutationToken[],
+        knownAsOf: number,
+        connectionIdentity?: string,
+    ): void;
+    get(projectRoot: string, objectId: string): MutationToken | undefined;
+    knownAsOfFor(projectRoot: string): number | undefined;
+    dropProject(projectRoot: string): void;
+    size(projectRoot: string): number;
+}
 
 /**
  * Mutation tokens keyed by `(project_root, object_id)`. A token is the

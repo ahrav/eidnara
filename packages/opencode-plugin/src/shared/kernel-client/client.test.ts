@@ -353,6 +353,51 @@ describe("KernelClient transport mapping", () => {
         expect(transport.calls).toHaveLength(2);
     });
 
+    test("a connection identity refusal that races a cancellation still drops the stale tokens", async () => {
+        const controller = new AbortController();
+        const transport = new FakeTransport().queue(readReply(5, "mem_a"), () => {
+            controller.abort();
+            return new ConnectionIdentityChangedError();
+        });
+        const kernel = client(transport);
+        await kernel.read({ surface: "auto_inject" });
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toBeDefined();
+
+        const result = await kernel.read({ surface: "auto_inject", signal: controller.signal });
+        expect(result.state).toEqual({ kind: "cancelled" });
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toBeUndefined();
+    });
+
+    test("the connection identity a response was served under accompanies the token write", async () => {
+        const writes: Array<string | undefined> = [];
+        const transport = new FakeTransport().queue(
+            readReply(2, "mem_a"),
+            commitReply(3, false, "mem_a"),
+        );
+        transport.identity = "gen-7";
+        const kernel = new KernelClient({
+            transport,
+            enabled: true,
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            tokens: {
+                remember: (_root, _rows, _knownAsOf, identity) => {
+                    writes.push(identity);
+                },
+                rememberTokens: (_root, _tokens, _knownAsOf, identity) => {
+                    writes.push(identity);
+                },
+                get: () => ({ object_id: "mem_a", known_as_of: 2 }),
+                knownAsOfFor: () => 2,
+                dropProject: () => {},
+                size: () => 1,
+            },
+        });
+        await kernel.read({ surface: "auto_inject" });
+        await kernel.revise("mem_a", spec, intent);
+        expect(writes).toEqual(["gen-7", "gen-7"]);
+    });
+
     test("an unparseable success body is unrecognized_state", async () => {
         const transport = new FakeTransport().queue({ state: { kind: "available" }, rows: 3 });
         const result = await client(transport).read({ surface: "auto_inject" });

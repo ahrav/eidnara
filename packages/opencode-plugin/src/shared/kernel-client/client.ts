@@ -217,7 +217,10 @@ export function deriveOperationKey(parts: {
     );
 }
 
-type Invoked = { ok: true; raw: unknown } | { ok: false; state: NonAvailableState };
+/** A successful invocation carries the connection identity its body was sent under, so the tokens in the response are recorded against the connection that minted them. commentlint: allow(JUDGE) */
+type Invoked =
+    | { ok: true; raw: unknown; connectionIdentity?: string }
+    | { ok: false; state: NonAvailableState };
 
 interface InvokeOptions {
     signal?: AbortSignal;
@@ -345,8 +348,15 @@ export class KernelClient {
                     ...(connectionIdentity === undefined ? {} : { connectionIdentity }),
                     timeoutMs: Math.max(1, options.deadline.remainingMs()),
                 });
-                return { ok: true, raw };
+                return {
+                    ok: true,
+                    raw,
+                    ...(connectionIdentity === undefined ? {} : { connectionIdentity }),
+                };
             } catch (error) {
+                // A refused identity means the tokens this body carried belong to a daemon that is gone; they are dropped before any exit, including a cancellation, so the caller's next body is not built from them. commentlint: allow(JUDGE)
+                const identityChanged = error instanceof ConnectionIdentityChangedError;
+                if (identityChanged) this.tokens.dropProject(this.projectRoot);
                 // An `outcome_unknown` thrown from a write while cancellation or the deadline fires must keep its classification: the daemon may have committed, and reporting an ordinary cancellation would claim a definitively unapplied request. commentlint: allow(JUDGE)
                 const unknownOutcome = isHostCallError(error) && error.kind === "outcome_unknown";
                 if (options.signal?.aborted || options.deadline.isExpired()) {
@@ -358,10 +368,7 @@ export class KernelClient {
                                 : nonAvailable(cancelled()),
                     };
                 }
-                if (error instanceof ConnectionIdentityChangedError) {
-                    this.tokens.dropProject(this.projectRoot);
-                    return failed(unavailable("snapshot_diverged"));
-                }
+                if (identityChanged) return failed(unavailable("snapshot_diverged"));
                 if (isHostCallError(error)) {
                     if (error.kind === "not_sent") return absent();
                     if (error.kind === "outcome_unknown") {
@@ -403,9 +410,13 @@ export class KernelClient {
         body: Record<string, unknown>,
         options: InvokeOptions,
         parse: (raw: unknown) => Parsed<P>,
-    ): Promise<KernelResult<P>> {
+    ): Promise<{ result: KernelResult<P>; connectionIdentity?: string }> {
         const invoked = await this.invoke(method, body, options);
-        if (!invoked.ok) return { state: invoked.state };
+        if (!invoked.ok) return { result: { state: invoked.state } };
+        const identity =
+            invoked.connectionIdentity === undefined
+                ? {}
+                : { connectionIdentity: invoked.connectionIdentity };
         const parsed = parse(invoked.raw);
         if (parsed.state.kind !== "available" || parsed.payload === null) {
             // A daemon-produced negative state proves a mutating request was not applied, but an undecodable response does not: the commit may have succeeded and only its receipt was lost to a malformed or version-skewed payload, so a definitive-looking error would invite a fresh-identity retry. commentlint: allow(JUDGE)
@@ -413,11 +424,11 @@ export class KernelClient {
                 (parsed.state.kind === "invalid" && parsed.state.reason === "unrecognized_state") ||
                 (parsed.state.kind === "available" && parsed.payload === null);
             if (undecodable && options.mutating) {
-                return { state: nonAvailable(unavailable("outcome_unknown")) };
+                return { result: { state: nonAvailable(unavailable("outcome_unknown")) } };
             }
-            return { state: nonAvailable(parsed.state) };
+            return { result: { state: nonAvailable(parsed.state) }, ...identity };
         }
-        return { state: parsed.state, ...parsed.payload };
+        return { result: { state: parsed.state, ...parsed.payload }, ...identity };
     }
 
     private async readAt(
@@ -425,7 +436,7 @@ export class KernelClient {
         asOf: number | null,
         deadline: Deadline,
     ): Promise<ReadResult> {
-        const result = await this.call(
+        const { result, connectionIdentity } = await this.call(
             "kernel.read",
             this.wireBody("kernel.read", {
                 surface: args.surface,
@@ -438,7 +449,12 @@ export class KernelClient {
             parseReadResponse,
         );
         if (isAvailable(result)) {
-            this.tokens.remember(this.projectRoot, result.rows, result.known_as_of);
+            this.tokens.remember(
+                this.projectRoot,
+                result.rows,
+                result.known_as_of,
+                connectionIdentity,
+            );
         }
         return result;
     }
@@ -534,14 +550,19 @@ export class KernelClient {
             ({ tokens, missing } = this.collectTokens(args));
             if (missing.length > 0) return { state: nonAvailable(conflict("retracted")) };
         }
-        const result = await this.call(
+        const { result, connectionIdentity } = await this.call(
             "kernel.commit",
             this.commitBody(args, tokens),
             { signal: args.signal, deadline, reissuable: true, mutating: true },
             parseCommitResponse,
         );
         if (isAvailable(result)) {
-            this.tokens.rememberTokens(this.projectRoot, result.tokens, result.known_as_of);
+            this.tokens.rememberTokens(
+                this.projectRoot,
+                result.tokens,
+                result.known_as_of,
+                connectionIdentity,
+            );
         }
         return result;
     }
