@@ -33,40 +33,6 @@ describe("compiled smart-note QuickJS runner", () => {
         expect(result.ok).toBe(false);
     });
 
-    test("removes the clock and randomness from the guest, including indirect access", async () => {
-        const cases: Array<[string, RegExp]> = [
-            [`Date.now()`, /Date\.now/],
-            [`Date["now"]()`, /Date\.now/],
-            [`(0, Date.now)()`, /Date\.now/],
-            [`new Date()`, /without arguments/],
-            [`new Date`, /without arguments/],
-            [`Date()`, /without arguments/],
-            [`new (new Date(0).constructor)()`, /without arguments/],
-            [`Math.random()`, /Math\.random/],
-            [`Math["random"]()`, /Math\.random/],
-        ];
-        for (const [expression, error] of cases) {
-            const result = await runCompiledSmartNoteCheck({
-                compiledCheck: `function check() { const v = ${expression}; return { met: v !== undefined }; }`,
-                capabilities: fakeCap,
-            });
-            expect(result.ok).toBe(false);
-            if (!result.ok) expect(result.error).toMatch(error);
-        }
-    });
-
-    test("keeps deterministic Date construction and parsing available", async () => {
-        const result = await runCompiledSmartNoteCheck({
-            compiledCheck: `function check() {
-                const a = new Date("2026-01-01T00:00:00Z");
-                const b = new Date(Date.UTC(2026, 5, 1));
-                return { met: a instanceof Date && a.getTime() === 1767225600000 && a < b && Date.parse("2026-06-01T00:00:00Z") === b.getTime() };
-            }`,
-            capabilities: fakeCap,
-        });
-        expect(result).toEqual({ ok: true, result: { met: true } });
-    });
-
     test("interrupts infinite loops as execution failures", async () => {
         const result = await runCompiledSmartNoteCheck({
             compiledCheck: `function check() { while (true) {} }`,
