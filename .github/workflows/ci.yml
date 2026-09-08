@@ -76,6 +76,7 @@ jobs:
               - 'packages/shm-native/src/**'
             test:
               - *rust
+              - '.config/nextest.toml'
               - 'release/**'
               - 'docs/host-wire-protocol.md'
             native:
