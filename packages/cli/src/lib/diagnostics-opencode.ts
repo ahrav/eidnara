@@ -6,19 +6,24 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
-import { eidnaraProjectConfigBasePath } from "@eidnara/opencode/config/config-paths";
-import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
+import {
+    eidnaraProjectConfigBasePath,
+    eidnaraUserConfigBasePath,
+} from "@eidnara/opencode/config/config-paths";
+import { type ConflictResult, detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
+import { resolveOpenCodeDatabasePath } from "@eidnara/opencode/shared/opencode-database-path";
 import {
+    describeProseLength,
     sanitizeConfigValue,
     sanitizeDiagnosticText,
-    sanitizePathString,
 } from "@eidnara/opencode/shared/redaction";
 import { parse as parseJsonc } from "comment-json";
-import { matchesPluginEntry } from "../adapters/opencode";
+import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { compactionEnabledFor } from "./eidnara-modes";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
+import { codeFenceFor } from "./issue-body";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
 import {
@@ -32,6 +37,25 @@ export type { HistorianDumpMeta, HistorianDumpSummary } from "./historian-dumps"
 
 const OPENCODE_PLUGIN_NAME = "@eidnara/opencode";
 
+/**
+ * One Eidnara config tier as the plugin loader resolves it: `.jsonc` first, then `.json`.
+ * `path` is the detected file, or the canonical `.jsonc` path when neither exists.
+ */
+export interface EidnaraConfigTier {
+    path: string;
+    exists: boolean;
+    parseError?: string;
+    flags: Record<string, unknown>;
+}
+
+export interface ProjectOpenCodeConfigReport {
+    /** Existing `<cwd>/.opencode/opencode.json(c)` and `<cwd>/opencode.json(c)` files, in OpenCode's load order. */
+    paths: string[];
+    /** True when any listed file registers the plugin. */
+    hasPlugin: boolean;
+    parseErrors: string[];
+}
+
 export interface DiagnosticReport {
     timestamp: string;
     platform: string;
@@ -44,20 +68,21 @@ export interface DiagnosticReport {
     /** `opencodeInstallations` marks the first detection-ladder rung as active. */
     opencodeInstallations: OpenCodeInstallationReport[];
     configPaths: ConfigPaths;
+    /** Set when user-level paths could not be resolved (no `HOME`, no `XDG_CONFIG_HOME`, no passwd entry); the paths are then empty. */
+    configPathsError?: string;
+    /** Project-tier fields were collected for this directory; bundles for another directory must be re-collected. */
+    projectDirectory: string;
+    /** Registration in the user-level `opencode.json(c)` under the OpenCode config dir. */
     opencodeConfigHasPlugin: boolean;
+    /** A malformed or unreadable `opencode.json(c)` reports `false` for `opencodeConfigHasPlugin`; the error explains why. */
+    opencodeConfigParseError?: string;
     tuiConfigHasPlugin: boolean;
-    eidnaraConfig: {
-        exists: boolean;
-        parseError?: string;
-        flags: Record<string, unknown>;
-    };
-    /** The `<cwd>/.eidnara/eidnara.json[c]` tier the loader merges over the user config. */
-    projectConfig: {
-        path: string;
-        exists: boolean;
-        parseError?: string;
-        flags: Record<string, unknown>;
-    };
+    tuiConfigParseError?: string;
+    projectOpencodeConfig: ProjectOpenCodeConfigReport;
+    /** User tier under `$XDG_CONFIG_HOME/eidnara/`. */
+    eidnaraConfig: EidnaraConfigTier;
+    /** Project tier under `<cwd>/.eidnara/`; its overrides win over the user tier. */
+    projectConfig: EidnaraConfigTier;
     conflicts: {
         hasConflict: boolean;
         reasons: string[];
@@ -70,6 +95,8 @@ export interface DiagnosticReport {
             auto: boolean;
             prune: boolean;
         };
+        /** Set when conflict detection itself failed; `hasConflict` is then `false` by default, not by evidence. */
+        detectionError?: string;
     };
     logFile: {
         path: string;
@@ -85,8 +112,9 @@ export interface DiagnosticReport {
      */
     recentSessions: RecentSessionSummary[];
     /**
-     * `unavailable` when the OpenCode database exists but could not be opened
-     * or queried, so an empty `recentSessions` is a failure, not an absence.
+     * `unavailable` when the OpenCode database is missing or could not be
+     * opened or queried, so an empty `recentSessions` is a failure, not an
+     * absence, and the issue flow must ask before bundling log records.
      */
     sessionDiscovery: "ok" | "unavailable";
     /**
@@ -156,12 +184,23 @@ function getSelfVersion(): string {
 
 // ── Sanitization ─────────────────────────────────────────────────────
 
+// Paths can carry secret material through environment overrides (`EIDNARA_LOG_PATH=/tmp/token=abc/...`).
 function sanitizeString(value: string): string {
-    return sanitizePathString(value);
+    return sanitizeDiagnosticText(value);
 }
 
 function sanitizeValue(value: unknown): unknown {
     return sanitizeConfigValue(value);
+}
+
+/**
+ * Version-probe output is external process text: a wrapper can print warnings on extra lines,
+ * which would inject Markdown lines and break table rows.
+ */
+export function describeProbeText(text: string): string {
+    return sanitizeDiagnosticText(text)
+        .replace(/\s*[\r\n]+\s*/g, " ")
+        .trim();
 }
 
 function readConfig(path: string): { value: Record<string, unknown> | null; error?: string } {
@@ -175,15 +214,45 @@ function readConfig(path: string): { value: Record<string, unknown> | null; erro
     }
 }
 
-function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
+function readEidnaraConfigTier(basePath: string): EidnaraConfigTier {
+    const detected = detectConfigFile(basePath);
+    const parsed = readConfig(detected.path);
+    return {
+        path: detected.path,
+        exists: detected.format !== "none",
+        ...(parsed.error ? { parseError: parsed.error } : {}),
+        flags: (sanitizeValue(parsed.value ?? {}) as Record<string, unknown>) ?? {},
+    };
+}
+
+function configHasPluginEntry(config: Record<string, unknown> | null, baseDir: string): boolean {
     const plugins = Array.isArray(config?.plugin) ? config.plugin : [];
-    return plugins.some((entry) => matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME));
+    // `ensurePluginEntry` treats a local checkout of this package as registered; diagnostics must agree.
+    return plugins.some(
+        (entry) =>
+            matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) || isDevPathPluginEntry(entry, baseDir),
+    );
+}
+
+/** `detectConfigFile` prefers `.jsonc` over `.json` at each location, matching `collectPluginEntries` in the conflict detector. */
+function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
+    const locations = [join(cwd, ".opencode", "opencode"), join(cwd, "opencode")];
+    const report: ProjectOpenCodeConfigReport = { paths: [], hasPlugin: false, parseErrors: [] };
+    for (const basePath of locations) {
+        const detected = detectConfigFile(basePath);
+        if (detected.format === "none") continue;
+        report.paths.push(detected.path);
+        const parsed = readConfig(detected.path);
+        if (parsed.error) report.parseErrors.push(parsed.error);
+        if (configHasPluginEntry(parsed.value, cwd)) report.hasPlugin = true;
+    }
+    return report;
 }
 
 /**
  *
  */
-function collectHistorianDumps(
+export function collectHistorianDumps(
     recentSessions: RecentSessionSummary[],
 ): DiagnosticReport["historianDumps"] {
     // The query processes sessions in descending time order; the first session for a directory becomes that bucket's primarySessionId.
@@ -191,8 +260,6 @@ function collectHistorianDumps(
     for (const session of recentSessions) {
         const dir = session.directory;
         if (!dir) continue;
-        const projectHistorianDir = getProjectEidnaraHistorianDir(dir);
-        const listing = listDumpsInDir(projectHistorianDir, 5);
         const existing = buckets.get(dir);
         if (existing) {
             // When multiple sessions use a directory, append the session ID without recomputing that directory's listing.
@@ -201,6 +268,8 @@ function collectHistorianDumps(
             }
             continue;
         }
+        const projectHistorianDir = getProjectEidnaraHistorianDir(dir);
+        const listing = listDumpsInDir(projectHistorianDir, 5);
         if (listing.count === 0) continue;
         buckets.set(dir, {
             directory: dir,
@@ -235,24 +304,31 @@ type SessionDiscovery =
     | { status: "unavailable"; sessions: [] };
 
 async function collectRecentSessions(): Promise<SessionDiscovery> {
+    const unavailable: SessionDiscovery = { status: "unavailable", sessions: [] };
     // Runtime `XDG_DATA_HOME` or `HOME` overrides determine the database path.
     // Node's `homedir()` honors runtime `HOME` overrides; Bun's does not.
-    const dataHome =
-        process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), ".local", "share");
-    const opencodeDbPath = join(dataHome, "opencode", "opencode.db");
+    // `homedir()` throws for a UID without a passwd entry when `HOME` is unset.
+    let opencodeDbPath: string;
+    try {
+        const dataHome =
+            process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), ".local", "share");
+        opencodeDbPath = resolveOpenCodeDatabasePath(dataHome);
+    } catch {
+        return unavailable;
+    }
     // The append-only log outlives the database, so without one no record can
     // be attributed to a session and the issue flow must ask before bundling.
-    if (!existsSync(opencodeDbPath)) return { status: "unavailable", sessions: [] };
+    if (!existsSync(opencodeDbPath)) return unavailable;
 
     // The shared module picks `bun:sqlite` or `node:sqlite` for the running
     // runtime and loads it at import time, so the import stays lazy: a Node
-    // without `node:sqlite` degrades to an empty list instead of failing the
-    // whole doctor.
+    // without `node:sqlite` degrades to an unavailable list instead of failing
+    // the whole doctor.
     let DatabaseClass: typeof import("@eidnara/opencode/shared/sqlite").Database;
     try {
         DatabaseClass = (await import("@eidnara/opencode/shared/sqlite")).Database;
     } catch {
-        return { status: "unavailable", sessions: [] };
+        return unavailable;
     }
 
     let db: InstanceType<typeof DatabaseClass> | null = null;
@@ -285,7 +361,7 @@ async function collectRecentSessions(): Promise<SessionDiscovery> {
         });
         return { status: "ok", sessions };
     } catch {
-        return { status: "unavailable", sessions: [] };
+        return unavailable;
     } finally {
         try {
             db?.close();
@@ -293,18 +369,56 @@ async function collectRecentSessions(): Promise<SessionDiscovery> {
     }
 }
 
-/** `cwd` selects the project whose config tier, effective modes, and conflicts the report describes. */
-export async function collectDiagnostics(cwd: string = process.cwd()): Promise<DiagnosticReport> {
+/**
+ * With `HOME` and `XDG_CONFIG_HOME` unset for a UID without a passwd entry, every user-level path
+ * resolution throws; the report then carries empty user-level paths and the error text.
+ */
+function resolveUserLevelPaths(): { configPaths: ConfigPaths; error?: string } {
+    try {
+        return { configPaths: detectConfigPaths() };
+    } catch (error) {
+        return {
+            configPaths: {
+                configDir: "",
+                opencodeConfig: "",
+                opencodeConfigFormat: "none",
+                eidnaraConfig: "",
+                omoConfig: null,
+                tuiConfig: "",
+                tuiConfigFormat: "none",
+            },
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
+
+function readUserEidnaraConfigTier(): EidnaraConfigTier {
+    try {
+        return readEidnaraConfigTier(eidnaraUserConfigBasePath());
+    } catch {
+        return { path: "", exists: false, flags: {} };
+    }
+}
+
+export async function collectDiagnostics(cwd = process.cwd()): Promise<DiagnosticReport> {
     const pluginVersion = getSelfVersion();
-    const configPaths = detectConfigPaths();
-    const opencodeConfig = readConfig(configPaths.opencodeConfig);
-    const tuiConfig = readConfig(configPaths.tuiConfig);
-    const eidnaraConfig = readConfig(configPaths.eidnaraConfig);
-    const projectConfigPath = detectConfigFile(eidnaraProjectConfigBasePath(cwd)).path;
-    const projectConfig = readConfig(projectConfigPath);
+    const userLevel = resolveUserLevelPaths();
+    const configPaths = userLevel.configPaths;
+    const opencodeConfig = configPaths.opencodeConfig
+        ? readConfig(configPaths.opencodeConfig)
+        : { value: null };
+    const tuiConfig = configPaths.tuiConfig ? readConfig(configPaths.tuiConfig) : { value: null };
+    const eidnaraConfig = readUserEidnaraConfigTier();
+    const projectConfig = readEidnaraConfigTier(eidnaraProjectConfigBasePath(cwd));
 
     const logPath = getEidnaraLogPath("opencode");
-    const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
+    // The log can be rotated or removed between the existence check and the stat; a vanished log is reported as absent.
+    let logFileSize: number | null = null;
+    try {
+        logFileSize = statSync(logPath).size;
+    } catch {
+        logFileSize = null;
+    }
 
     let compactionEnabled = false;
     let eidnaraEnabled = true;
@@ -319,9 +433,22 @@ export async function collectDiagnostics(cwd: string = process.cwd()): Promise<D
                 `(${error instanceof Error ? error.message : String(error)})`,
         );
     }
+    // `detectConflicts` reads the `.omo` config through an unguarded home lookup; a host without a
+    // home directory must still get the rest of the report.
+    let conflictResult: Pick<ConflictResult, "hasConflict" | "reasons" | "nativeCompaction">;
+    let conflictsError: string | undefined;
+    try {
+        conflictResult = detectConflicts(cwd, { compactionEnabled });
+    } catch (error) {
+        conflictsError = error instanceof Error ? error.message : String(error);
+        conflictResult = {
+            hasConflict: false,
+            reasons: [],
+            nativeCompaction: { auto: false, prune: false },
+        };
+    }
     // With `enabled: false` the plugin skips every hook, so DCP and the OMO
     // hooks are not conflicts; the doctor skips this detector in that mode too.
-    const conflictResult = detectConflicts(cwd, { compactionEnabled });
     const reasons = eidnaraEnabled ? conflictResult.reasons : [];
     const discovery = await collectRecentSessions();
     const recentSessions = discovery.sessions;
@@ -344,30 +471,27 @@ export async function collectDiagnostics(cwd: string = process.cwd()): Promise<D
                 : null,
         opencodeInstallations,
         configPaths,
-        opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value),
-        tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value),
-        eidnaraConfig: {
-            exists: existsSync(configPaths.eidnaraConfig),
-            ...(eidnaraConfig.error ? { parseError: sanitizeString(eidnaraConfig.error) } : {}),
-            flags: (sanitizeValue(eidnaraConfig.value ?? {}) as Record<string, unknown>) ?? {},
-        },
-        projectConfig: {
-            path: projectConfigPath,
-            exists: existsSync(projectConfigPath),
-            ...(projectConfig.error ? { parseError: sanitizeString(projectConfig.error) } : {}),
-            flags: (sanitizeValue(projectConfig.value ?? {}) as Record<string, unknown>) ?? {},
-        },
+        ...(userLevel.error ? { configPathsError: userLevel.error } : {}),
+        projectDirectory: cwd,
+        opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value, cwd),
+        ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
+        tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value, cwd),
+        ...(tuiConfig.error ? { tuiConfigParseError: tuiConfig.error } : {}),
+        projectOpencodeConfig: readProjectOpenCodeConfigs(cwd),
+        eidnaraConfig,
+        projectConfig,
         conflicts: {
             hasConflict: reasons.length > 0,
             reasons,
             eidnaraEnabled,
             compactionEnabled,
             nativeCompaction: conflictResult.nativeCompaction,
+            ...(conflictsError ? { detectionError: conflictsError } : {}),
         },
         logFile: {
             path: logPath,
-            exists: existsSync(logPath),
-            sizeKb: Math.round(logFileSize / 1024),
+            exists: logFileSize !== null,
+            sizeKb: Math.round((logFileSize ?? 0) / 1024),
         },
         recentSessions,
         sessionDiscovery: discovery.status,
@@ -398,18 +522,19 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
                   "| --- | --- | --- | --- |",
                   ...openCodeInstallations.map(
                       (installation) =>
-                          `| ${installation.active ? "[active]" : ""} | \`${sanitizeString(installation.path)}\` | ${installation.version} | ${installation.source} |`,
+                          `| ${installation.active ? "[active]" : ""} | \`${sanitizeString(installation.path)}\` | ${describeProbeText(installation.version)} | ${installation.source} |`,
                   ),
               ]
             : [];
 
-    // A dump's parse error is a filesystem or parser message that can name the dump's path.
-    const sanitizeDumps = (dumps: HistorianDumpSummary[]): HistorianDumpSummary[] =>
-        dumps.map((dump) =>
-            dump.parseError === undefined
-                ? dump
-                : { ...dump, parseError: sanitizeString(dump.parseError) },
-        );
+    // `parseError` is a raw filesystem or parser message and can name the full local path.
+    const sanitizeDumps = (dumps: HistorianDumpSummary[]) =>
+        dumps.map((dump) => ({
+            ...dump,
+            name: sanitizeString(dump.name),
+            ...(dump.parseError ? { parseError: sanitizeDiagnosticText(dump.parseError) } : {}),
+        }));
+
     const historianDumps = {
         byProject: report.historianDumps.byProject.map((bucket) => ({
             directory: sanitizeString(bucket.directory),
@@ -425,56 +550,100 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         },
     };
 
+    // Titles are user prose (often the first prompt); the picker keeps them, the shareable report does not.
     const recentSessions = report.recentSessions.map((session) => ({
         sessionId: session.sessionId,
-        title: sanitizeDiagnosticText(session.title),
+        title: session.title ? describeProseLength(session.title) : "",
         directory: sanitizeString(session.directory),
         lastActiveAt: session.lastActiveAt,
     }));
+
+    const describeConfigTier = (tier: EidnaraConfigTier) =>
+        `\`${sanitizeString(tier.path)}\`${tier.exists ? "" : " (missing)"}`;
+    const describeParseError = (error: string | undefined) =>
+        error ? sanitizeDiagnosticText(error) : "none";
+
+    const configPathsJson = JSON.stringify(configPaths, null, 2);
+    const userFlagsJson = JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2);
+    const projectFlagsJson = JSON.stringify(
+        sanitizeConfigValue(report.projectConfig.flags),
+        null,
+        2,
+    );
+    const recentSessionsJson = JSON.stringify(recentSessions, null, 2);
+    const historianDumpsJson = JSON.stringify(historianDumps, null, 2);
+    const fence = codeFenceFor(
+        configPathsJson,
+        userFlagsJson,
+        projectFlagsJson,
+        recentSessionsJson,
+        historianDumpsJson,
+    );
 
     return [
         `- Timestamp: ${report.timestamp}`,
         `- Plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,
+        `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${describeProbeText(report.opencodeVersion)})` : ""}`,
+        `- Project directory: ${sanitizeString(report.projectDirectory)}`,
+        ...(report.configPathsError
+            ? [`- User-level paths unavailable: ${sanitizeDiagnosticText(report.configPathsError)}`]
+            : []),
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
+        `- opencode config parse error: ${describeParseError(report.opencodeConfigParseError)}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
-        `- eidnara.jsonc parse error: ${report.eidnaraConfig.parseError === undefined ? "none" : sanitizeString(report.eidnaraConfig.parseError)}`,
-        `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}`,
+        `- tui config parse error: ${describeParseError(report.tuiConfigParseError)}`,
+        `- Plugin registered in project opencode config: ${report.projectOpencodeConfig.hasPlugin}${
+            report.projectOpencodeConfig.paths.length === 0
+                ? " (no project opencode config)"
+                : ` (${report.projectOpencodeConfig.paths.map((p) => `\`${sanitizeString(p)}\``).join(", ")})`
+        }`,
+        `- project opencode config parse errors: ${
+            report.projectOpencodeConfig.parseErrors.length === 0
+                ? "none"
+                : report.projectOpencodeConfig.parseErrors.map(sanitizeDiagnosticText).join("; ")
+        }`,
+        `- User config: ${describeConfigTier(report.eidnaraConfig)}`,
+        `- User config parse error: ${describeParseError(report.eidnaraConfig.parseError)}`,
+        `- Project config: ${describeConfigTier(report.projectConfig)}`,
+        `- Project config parse error: ${describeParseError(report.projectConfig.parseError)}`,
+        `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}${
+            report.conflicts.detectionError
+                ? ` (detection failed: ${sanitizeDiagnosticText(report.conflicts.detectionError)})`
+                : ""
+        }`,
         `- Eidnara enabled: ${report.conflicts.eidnaraEnabled}`,
         `- Eidnara compaction mode: ${report.conflicts.compactionEnabled ? "on" : "off"}`,
         `- Native compaction: auto=${report.conflicts.nativeCompaction?.auto ?? "unknown"}, prune=${report.conflicts.nativeCompaction?.prune ?? "unknown"}`,
         ...openCodeInstallationTable,
         "",
         "### Config paths",
-        "```json",
-        JSON.stringify(configPaths, null, 2),
-        "```",
+        `${fence}json`,
+        configPathsJson,
+        fence,
         "",
-        "### eidnara.jsonc flags",
-        "```jsonc",
-        JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2),
-        "```",
+        "### User config flags",
+        `${fence}jsonc`,
+        userFlagsJson,
+        fence,
         "",
-        `### Project config (${sanitizeString(report.projectConfig.path)})`,
-        `- Exists: ${report.projectConfig.exists}`,
-        `- Parse error: ${report.projectConfig.parseError === undefined ? "none" : sanitizeString(report.projectConfig.parseError)}`,
-        "```jsonc",
-        JSON.stringify(sanitizeConfigValue(report.projectConfig.flags), null, 2),
-        "```",
+        "### Project config flags",
+        `${fence}jsonc`,
+        projectFlagsJson,
+        fence,
         "",
         "### Recent sessions",
         recentSessions.length === 0
             ? "_No recent OpenCode sessions found (or OpenCode DB unavailable on this runtime)._"
-            : ["```json", JSON.stringify(recentSessions, null, 2), "```"].join("\n"),
+            : [`${fence}json`, recentSessionsJson, fence].join("\n"),
         "",
         "### Historian dumps",
         "(Metadata only — XML content is not included in this report.)",
         "Dumps are stored per-project under `<project>/.eidnara/context/historian/`.",
-        "```json",
-        JSON.stringify(historianDumps, null, 2),
-        "```",
+        `${fence}json`,
+        historianDumpsJson,
+        fence,
         "",
         "### Log file",
         `- Path: ${sanitizeString(report.logFile.path)}`,

@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import os from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { findOnPath, isExecutableFile } from "./find-on-path";
 export type OpenCodeInstallSource = "PATH" | "home-bin" | "desktop" | "app";
 export interface OpenCodeInstallation {
@@ -48,11 +48,21 @@ export interface DetectDeps {
     realpath?: (path: string) => string;
 }
 
+// `homedir()` throws for a UID without a passwd entry when `HOME` is unset; detection then
+// simply finds no home-relative installation.
+function safeHomeDir(): string {
+    try {
+        return os.homedir();
+    } catch {
+        return "";
+    }
+}
+
 function defaultDeps(): DetectDeps {
     return {
         exists: existsSync,
         isExecutable: isExecutableFile,
-        home: process.env.HOME?.trim() || homedir(),
+        home: process.env.HOME?.trim() || safeHomeDir(),
         platform: process.platform,
         env: process.env,
         onPath: findOnPath,
@@ -161,32 +171,39 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
     const d = { ...defaultDeps(), ...deps };
     const installations: OpenCodeInstallation[] = [];
     const seenRealpaths = new Set<string>();
+    // With no home directory the home-derived candidates collapse to cwd-relative paths such as
+    // `.opencode/bin/opencode`; probing (and later executing) those would trust the project checkout.
+    const probeExecutable = (path: string) => isAbsolute(path) && d.isExecutable(path);
+    const probeExists = (path: string) => isAbsolute(path) && d.exists(path);
 
-    // PATH is first because shells resolve it when multiple installations exist.
+    // PATH is first because shells resolve it when multiple installations exist. A relative PATH
+    // entry yields a relative hit that the shell would run from the current directory, so it is
+    // resolved before the absolute-path gate.
     const onPath = d.onPath("opencode");
-    if (onPath && d.isExecutable(onPath)) {
-        addCandidate(installations, seenRealpaths, d, onPath, "PATH", "cli");
+    const onPathResolved = onPath ? resolve(onPath) : null;
+    if (onPathResolved && probeExecutable(onPathResolved)) {
+        addCandidate(installations, seenRealpaths, d, onPathResolved, "PATH", "cli");
     }
 
     const stockBin = stockCliBinary(d);
-    if (d.isExecutable(stockBin)) {
+    if (probeExecutable(stockBin)) {
         addCandidate(installations, seenRealpaths, d, stockBin, "home-bin", "cli");
     }
 
     for (const candidate of extraCliCandidates(d)) {
-        if (d.isExecutable(candidate)) {
+        if (probeExecutable(candidate)) {
             addCandidate(installations, seenRealpaths, d, candidate, "PATH", "cli");
         }
     }
 
     for (const appId of OPENCODE_DESKTOP_APP_IDS) {
         const marker = join(desktopUserDataDir(d, appId), OPENCODE_DESKTOP_SETTINGS_FILE);
-        if (d.exists(marker)) {
+        if (probeExists(marker)) {
             addCandidate(installations, seenRealpaths, d, marker, "desktop", "desktop");
         }
     }
     for (const appPath of desktopAppPaths(d)) {
-        if (d.exists(appPath)) {
+        if (probeExists(appPath)) {
             addCandidate(installations, seenRealpaths, d, appPath, "app", "desktop");
         }
     }

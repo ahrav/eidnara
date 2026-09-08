@@ -14,10 +14,10 @@ import { stringify as stringifyJsonc } from "comment-json";
 
 import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics, sanitizeString } from "../lib/diagnostics-pi";
-import { readFileTail } from "../lib/fs-utils";
 import { describeHistorianDumps } from "../lib/historian-dumps";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
+import { readLogTailLines } from "../lib/log-tail";
 import { bundleIssueReport } from "../lib/logs-pi";
 import { getEidnaraLogPath, getPiAgentDir, getPiUserExtensionsPath } from "../lib/paths";
 import {
@@ -117,8 +117,7 @@ function describeVersionOutput(output: string): string {
 const LOG_TAIL_BYTES = 64 * 1024;
 
 function readLastNonEmptyLine(path: string): string | undefined {
-    return readFileTail(path, LOG_TAIL_BYTES)
-        .split(/\r?\n/)
+    return readLogTailLines(path, LOG_TAIL_BYTES)
         .map((line) => line.trim())
         .filter(Boolean)
         .at(-1);

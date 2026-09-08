@@ -1,10 +1,14 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
-import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
-import { readFileTail } from "./fs-utils";
-import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import {
+    type DiagnosticReport,
+    describeProbeText,
+    renderDiagnosticsMarkdown,
+} from "./diagnostics-opencode";
+import { capBodyToGithubLimit, codeFenceFor, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
+import { readLogTailLines } from "./log-tail";
 
 /**
  *
@@ -12,6 +16,16 @@ import { filterLogRecords } from "./log-records";
  */
 export function sanitizeLogContent(content: string): string {
     return sanitizeDiagnosticText(content);
+}
+
+/**
+ * A Desktop install reports no version, so absence is decided by the install kind, not the version.
+ * The version text is external process output and is sanitized like any other probe result.
+ */
+function describeOpenCodeInstall(report: DiagnosticReport): string {
+    if (!report.opencodeInstalled) return "not installed";
+    const version = report.opencodeVersion ? describeProbeText(report.opencodeVersion) : null;
+    return `${version ?? "unknown version"} [${report.opencodeInstallKind}]`;
 }
 
 function formatTimestamp(date: Date): string {
@@ -62,9 +76,11 @@ function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
 }
 
 /**
- * With a session selected, only records that name that session survive. An
- * untagged record cannot be attributed, and the plugin writes some per-session
- * failures without a tag, so it fails closed rather than into the bundle.
+ * With a session selected, only records whose first line names that session
+ * survive. An untagged record cannot be attributed, and the plugin writes some
+ * per-session failures without a tag, so it fails closed rather than into the
+ * bundle. Stack frames following an `Error` record have no session tag and
+ * inherit that record's decision.
  */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
@@ -77,63 +93,49 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     });
 }
 
-const ISSUE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
-
-/**
- * A session filter also narrows the rendered report: other sessions' titles,
- * directories, and historian dumps are as much theirs as their log records.
- */
-function narrowReportToSession(report: DiagnosticReport, sessionFilter: string): DiagnosticReport {
+function scopeReportToSession(
+    report: DiagnosticReport,
+    sessionId: string | null,
+): DiagnosticReport {
+    if (!sessionId) return report;
     return {
         ...report,
-        recentSessions: report.recentSessions.filter(
-            (session) => session.sessionId === sessionFilter,
-        ),
+        recentSessions: report.recentSessions.filter((session) => session.sessionId === sessionId),
         historianDumps: {
             ...report.historianDumps,
-            byProject: report.historianDumps.byProject.filter((bucket) =>
-                bucket.sessionIds.includes(sessionFilter),
-            ),
+            byProject: report.historianDumps.byProject
+                .filter((bucket) => bucket.sessionIds.includes(sessionId))
+                .map((bucket) => ({
+                    ...bucket,
+                    primarySessionId: sessionId,
+                    sessionIds: [sessionId],
+                })),
         },
     };
 }
 
-/**
- * A log path that exists but cannot be read (permissions, or a directory named
- * by `EIDNARA_LOG_PATH`) yields no lines and an `unreadable` marker, so the
- * rest of the diagnostics still ship.
- */
-function readLogTail(logFile: { exists: boolean; path: string }): {
-    lines: string[];
-    unreadable: string | null;
-} {
-    if (!logFile.exists) return { lines: [], unreadable: null };
-    try {
-        return {
-            lines: readFileTail(logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/),
-            unreadable: null,
-        };
-    } catch (error) {
-        return {
-            lines: [],
-            unreadable: `<log unreadable: ${sanitizeDiagnosticText(error instanceof Error ? error.message : String(error))}>`,
-        };
-    }
-}
-
 export async function bundleIssueReport(
-    fullReport: DiagnosticReport,
+    report: DiagnosticReport,
     description: string,
     title: string,
     sessionFilter: string | null = null,
 ): Promise<BundledIssueReport> {
-    const report =
-        sessionFilter === null ? fullReport : narrowReportToSession(fullReport, sessionFilter);
     const LOG_TAIL_LINES = 400;
-    const tail = readLogTail(report.logFile);
-    const logLines = filterLogLinesBySession(tail.lines, sessionFilter);
-    const recentLog =
-        tail.unreadable ?? sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
+    const scopedReport = scopeReportToSession(report, sessionFilter);
+    // A log statted during diagnostics can become unreadable before bundling.
+    let allLogLines: string[] = [];
+    let logReadError: string | null = null;
+    if (report.logFile.exists) {
+        try {
+            allLogLines = readLogTailLines(report.logFile.path);
+        } catch (error) {
+            logReadError = sanitizeDiagnosticText(
+                error instanceof Error ? error.message : String(error),
+            );
+        }
+    }
+    const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
+    const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // The 4,000-line window includes historian failures outside the 400-line log tail.
     const historianScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
@@ -143,10 +145,13 @@ export async function bundleIssueReport(
     const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
     const recentErrorLines = extractRecentErrors(errorScanWindow, 20);
 
-    const configBody = JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2);
-    const sanitizedConfigPath = sanitizeDiagnosticText(report.configPaths.eidnaraConfig);
+    const sanitizedUserConfigPath = sanitizeDiagnosticText(report.eidnaraConfig.path);
+    const sanitizedProjectConfigPath = sanitizeDiagnosticText(report.projectConfig.path);
     const sanitizedDescription = sanitizeDiagnosticText(description);
     const sanitizedTitle = sanitizeDiagnosticText(title).trim();
+    const historianBlock = historianFailureLines.join("\n");
+    const errorBlock = recentErrorLines.join("\n");
+    const fence = codeFenceFor(historianBlock, errorBlock, recentLog);
 
     const rawBodyMarkdown = [
         ...(sanitizedTitle ? ["## Title", sanitizedTitle, ""] : []),
@@ -157,36 +162,54 @@ export async function bundleIssueReport(
         `- Plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- OpenCode: ${report.opencodeVersion ?? "not installed"}`,
+        `- OpenCode: ${describeOpenCodeInstall(report)}`,
         "",
         "## Configuration",
-        `Config from \`${sanitizedConfigPath}\`:`,
-        "```jsonc",
-        configBody,
-        "```",
+        `User config from \`${sanitizedUserConfigPath}\`${report.eidnaraConfig.exists ? "" : " (missing)"}`,
+        `Project config from \`${sanitizedProjectConfigPath}\`${report.projectConfig.exists ? "" : " (missing)"}`,
+        "Sanitized flags for both tiers are listed under Diagnostics.",
         "",
         "## Diagnostics",
-        renderDiagnosticsMarkdown(report),
+        renderDiagnosticsMarkdown(scopedReport),
         "",
         "## Historian failure signals (log, sanitized)",
         historianFailureLines.length === 0
             ? "_No historian failure log lines found in recent history._"
-            : ["```", historianFailureLines.join("\n"), "```"].join("\n"),
+            : [fence, historianBlock, fence].join("\n"),
         "",
         "## Recent errors (last 20, sanitized)",
         recentErrorLines.length === 0
             ? "_No error-shaped log lines found in recent history._"
-            : ["```", recentErrorLines.join("\n"), "```"].join("\n"),
+            : [fence, errorBlock, fence].join("\n"),
         "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
-        "```",
+        ...(logReadError ? [`_Log could not be read: ${logReadError}_`] : []),
+        fence,
         recentLog || "<no log output>",
-        "```",
+        fence,
     ].join("\n");
 
     const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
-    const path = join(process.cwd(), `eidnara-issue-${formatTimestamp(new Date())}.md`);
-    writeFileSync(path, `${bodyMarkdown}\n`);
+    const path = writeBundleExclusively(
+        join(process.cwd(), `eidnara-issue-${formatTimestamp(new Date())}`),
+        `${bodyMarkdown}\n`,
+    );
     return { path, bodyMarkdown };
+}
+
+/**
+ * Two bundles created in the same second share a timestamp; exclusive creation plus a
+ * numeric suffix keeps the earlier one intact.
+ */
+function writeBundleExclusively(basePath: string, contents: string): string {
+    for (let attempt = 0; ; attempt += 1) {
+        const path = attempt === 0 ? `${basePath}.md` : `${basePath}-${attempt + 1}.md`;
+        try {
+            writeFileSync(path, contents, { flag: "wx" });
+            return path;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+    }
 }

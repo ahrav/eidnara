@@ -6,9 +6,11 @@ import {
     renderDiagnosticsMarkdown,
     sanitizeString,
 } from "./diagnostics-pi";
-import { readFileTail } from "./fs-utils";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
+import { readLogTailLines } from "./log-tail";
+
+export { readLogTailLines } from "./log-tail";
 
 export function sanitizeLogContent(content: string): string {
     return sanitizeString(content);
@@ -32,48 +34,41 @@ export interface BundledIssueReport {
     bodyMarkdown: string;
 }
 
-/** `[eidnara][<sessionId>]` identifies session-scoped log lines. */
-const SESSION_TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/;
+const TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/g;
 
 /**
- * The filter retains these tags and drops every other tag and every untagged
- * record, so it never has to infer a session id's format or attribute an
- * unclassified record. `[eidnara][pi]` and `[eidnara][pi-status]` are not
- * listed: the plugin writes per-session command output under them.
+ * Tags that belong to no session and survive every session filter.
+ * `[eidnara][pi]` and `[eidnara][pi-status]` are not listed: the plugin writes
+ * per-session command output under them, so they fail closed with the
+ * session-tagged records.
  */
 const NON_SESSION_TAGS: ReadonlySet<string> = new Set(["global"]);
 
+/**
+ * A record survives only when it carries tags and every tag is the picked
+ * session or a non-session tag. An untagged record cannot be attributed, and
+ * the plugin writes some per-session failures without a tag, so it fails
+ * closed. `sessionId` may end with `_<uuid>` because log tags carry the bare
+ * id while a session file name carries a timestamp prefix. Continuation lines
+ * keep the preceding record's decision.
+ */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
+    const isWanted = (tag: string) =>
+        tag === sessionId || sessionId.endsWith(`_${tag}`) || NON_SESSION_TAGS.has(tag);
     return filterLogRecords(lines, (firstLine) => {
-        const tagged = SESSION_TAG_PATTERN.exec(firstLine)?.[1];
-        return tagged !== undefined && (tagged === sessionId || NON_SESSION_TAGS.has(tagged));
+        const tags = [...firstLine.matchAll(TAG_PATTERN)].map((match) => match[1] ?? "");
+        return tags.length > 0 && tags.every(isWanted);
     });
 }
 
-const ISSUE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
-
 /**
- * A log path that exists but cannot be read (permissions, or a directory named
- * by `EIDNARA_LOG_PATH`) yields no lines and an `unreadable` marker, so the
- * rest of the diagnostics still ship.
+ * A log line starting with up to three spaces and three or more backticks
+ * would close the bundle fence; escaping its first backtick prevents that.
+ * A bare carriage return also starts a Markdown line, so a fence after one is escaped too.
  */
-function readLogTail(logFile: { exists: boolean; path: string }): {
-    lines: string[];
-    unreadable: string | null;
-} {
-    if (!logFile.exists) return { lines: [], unreadable: null };
-    try {
-        return {
-            lines: readFileTail(logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/),
-            unreadable: null,
-        };
-    } catch (error) {
-        return {
-            lines: [],
-            unreadable: `<log unreadable: ${sanitizeString(error instanceof Error ? error.message : String(error))}>`,
-        };
-    }
+function escapeFenceOpeners(lines: string[]): string[] {
+    return lines.map((line) => line.replace(/(^|\r)( {0,3})(`{3,})/g, "$1$2\\$3"));
 }
 
 export async function bundleIssueReport(
@@ -83,10 +78,19 @@ export async function bundleIssueReport(
     options: { cwd?: string; now?: Date; sessionFilter?: string | null } = {},
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const tail = readLogTail(report.logFile);
-    const logLines = filterLogLinesBySession(tail.lines, options.sessionFilter ?? null);
-    const recentLog =
-        tail.unreadable ?? sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
+    let allLogLines: string[] = [];
+    let logReadError: string | null = null;
+    if (report.logFile.exists) {
+        try {
+            allLogLines = readLogTailLines(report.logFile.path);
+        } catch (error) {
+            logReadError = error instanceof Error ? error.message : String(error);
+        }
+    }
+    const logLines = escapeFenceOpeners(
+        filterLogLinesBySession(allLogLines, options.sessionFilter ?? null),
+    );
+    const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // The error scan uses 4,000 lines so trailing log output does not exclude earlier errors.
     const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
@@ -101,7 +105,7 @@ export async function bundleIssueReport(
         "",
         "## Environment",
         `- Pi plugin: v${report.pluginVersion}`,
-        `- Pi: ${report.piVersion ?? "not installed"}`,
+        `- Pi: ${report.piInstalled ? (report.piVersion ?? "installed, version unavailable") : "not installed"}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
         "",
@@ -115,14 +119,37 @@ export async function bundleIssueReport(
         "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
         "```",
-        recentLog || "<no log output>",
+        logReadError
+            ? `<log unreadable: ${sanitizeLogContent(logReadError)}>`
+            : recentLog || "<no log output>",
         "```",
     ].join("\n");
 
     const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
     const cwd = options.cwd ?? process.cwd();
-    const path = join(cwd, `eidnara-pi-issue-${formatTimestamp(options.now ?? new Date())}.md`);
-    writeFileSync(path, `${bodyMarkdown}\n`);
+    const stem = join(cwd, `eidnara-pi-issue-${formatTimestamp(options.now ?? new Date())}`);
+    const path = writeNewFile(stem, `${bodyMarkdown}\n`);
     return { path, bodyMarkdown };
+}
+
+const MAX_BUNDLE_NAME_ATTEMPTS = 100;
+
+/**
+ * The timestamp has one-second resolution, so a second bundle in the same
+ * second takes a numbered suffix instead of replacing the first.
+ */
+function writeNewFile(stem: string, data: string): string {
+    for (let attempt = 1; attempt <= MAX_BUNDLE_NAME_ATTEMPTS; attempt++) {
+        const path = attempt === 1 ? `${stem}.md` : `${stem}-${attempt}.md`;
+        try {
+            writeFileSync(path, data, { flag: "wx" });
+            return path;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+    }
+    throw new Error(
+        `Could not find a free bundle name after ${MAX_BUNDLE_NAME_ATTEMPTS} tries at ${stem}`,
+    );
 }

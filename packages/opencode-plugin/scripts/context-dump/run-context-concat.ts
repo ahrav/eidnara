@@ -1,6 +1,6 @@
 import Tokenizer from "ai-tokenizer";
 import * as claude from "ai-tokenizer/encoding/claude";
-import { resolveOpenCodeDatabasePath } from "./database-paths";
+import { resolveOpenCodeDatabasePath } from "../../src/shared/opencode-database-path";
 import { readOpenCodeSessionMessages } from "./read-opencode-session";
 import type { DumpMessage } from "./types";
 

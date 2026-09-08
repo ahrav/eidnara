@@ -84,13 +84,16 @@ export function listDumpsInDir(
     try {
         const entries = readdirSync(dir)
             .filter((name) => name.endsWith(".xml"))
-            .map((name) => {
-                const stat = statSync(join(dir, name));
-                return {
-                    name,
-                    mtime: stat.mtimeMs,
-                    sizeKb: Math.round(stat.size / 1024),
-                };
+            .flatMap((name) => {
+                // An entry removed or made unreadable mid-walk drops only itself, not the directory.
+                try {
+                    const stat = statSync(join(dir, name));
+                    // Reading a FIFO with no writer blocks, so only regular files are dumps.
+                    if (!stat.isFile()) return [];
+                    return [{ name, mtime: stat.mtimeMs, sizeKb: Math.round(stat.size / 1024) }];
+                } catch {
+                    return [];
+                }
             })
             .sort((a, b) => b.mtime - a.mtime);
 
