@@ -38,6 +38,12 @@
   "harnesses": {
     "opencode": {
       "closure": {
+        "anchors": {
+          "runtime": {
+            "from": "executable",
+            "source_path": "opencode.exe"
+          }
+        },
         "manifest_path": "release/harness-closures/opencode-linux-x64-1.18.22.json",
         "platforms": [
           "linux-x64-gnu"
@@ -53,6 +59,16 @@
     },
     "pi": {
       "closure": {
+        "anchors": {
+          "pi-install": {
+            "from": "entrypoint",
+            "source_path": "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+          },
+          "runtime": {
+            "from": "interpreter",
+            "source_path": "node"
+          }
+        },
         "manifest_path": "release/harness-closures/pi-linux-x64-node-24.18.0.json",
         "platforms": [
           "linux-x64-gnu"

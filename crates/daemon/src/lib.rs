@@ -30567,7 +30567,7 @@ mod release_contract_tests {
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "2d52108294669dab9011364484dffcb0ec0fb5e638b61ff85fdddc38c11bc60b"
+            "411970c1bf28f199dfbac59f52a8281a586732f3362acb388c4f99a9ee1bac4c"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));
