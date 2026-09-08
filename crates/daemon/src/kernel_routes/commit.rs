@@ -89,6 +89,39 @@ enum Operation {
     InsertObservation {
         spec: ObservationRequest,
     },
+    /// Records an admission event on an existing decision in the bound project;
+    /// the kernel's fixed event table decides the resulting disposition, and a
+    /// transition toward a less restrictive disposition needs a valid approval.
+    Disposition {
+        object_id: String,
+        event: DispositionEvent,
+        #[serde(default)]
+        approval_object_id: Option<String>,
+    },
+}
+
+/// The event kinds a host command may name; each is a disposition transition,
+/// never a maturity promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DispositionEvent {
+    MarkStale,
+    MarkDisputed,
+    ExplicitReject,
+    Contradict,
+    Quarantine,
+}
+
+impl DispositionEvent {
+    const fn kind(self) -> EventKind {
+        match self {
+            Self::MarkStale => EventKind::MarkStale,
+            Self::MarkDisputed => EventKind::MarkDisputed,
+            Self::ExplicitReject => EventKind::ExplicitReject,
+            Self::Contradict => EventKind::Contradict,
+            Self::Quarantine => EventKind::Quarantine,
+        }
+    }
 }
 
 /// A decision as the wire carries it: `source_kind` comes from the request
@@ -327,6 +360,24 @@ struct CommitResult {
     /// live decision. The kernel discards that spec's content and only
     /// re-points the predecessor, leaving the survivor's row unchanged.
     merged: Vec<String>,
+    /// One entry per disposition operation, in request order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dispositions: Vec<DispositionResult>,
+}
+
+/// What one disposition operation did. `outcome` is the kernel's command
+/// result and `disposition` the resulting state, both in the kernel's wire
+/// spelling. `denied` is true when the event asked for a disposition the
+/// subject did not take: a relaxation without a valid approval, which the
+/// kernel records under the same `deny` outcome an admitted tightening gets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DispositionResult {
+    object_id: String,
+    event: DispositionEvent,
+    outcome: String,
+    previous_disposition: String,
+    disposition: String,
+    denied: bool,
 }
 
 impl CommitResult {
@@ -451,6 +502,58 @@ fn scoped_object_state(
     Ok(state)
 }
 
+/// Records `event` on a live decision of the bound project.
+///
+/// The event is recorded under the subject's own admission classes: the policy
+/// refuses a class change on a subject, and a disposition speaks about the
+/// decision, not about its caller. A cited approval must itself be an object
+/// of the bound project, so an approval minted in another project cannot lift
+/// a disposition here; an out-of-project approval answers `not_found`, the
+/// same as an unknown one.
+fn record_disposition(
+    envelope: &mut Envelope<'_>,
+    filter: &mut ScopeFilter,
+    object_id: &str,
+    event: DispositionEvent,
+    approval_object_id: Option<&str>,
+) -> Result<DispositionResult, KernelError> {
+    let state = scoped_object_state(envelope, filter, object_id)?;
+    if state.object.object_kind != "decision" || state.object.invalidated_commit_seq.is_some() {
+        return Err(KernelError::NotFound);
+    }
+    if let Some(approval) = approval_object_id {
+        scoped_object_state(envelope, filter, approval)?;
+    }
+    let prior = envelope
+        .subject_admission(object_id)?
+        .ok_or(KernelError::AdmissionPolicy)?;
+    let decision = envelope.record_admission(AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(object_id.to_string()),
+        source_class: Some(prior.source_class),
+        taint_class: Some(prior.taint_class),
+        event: AdmissionEvent {
+            kind: event.kind(),
+            trigger_object_id: None,
+            approval_object_id: approval_object_id.map(str::to_string),
+            evidence_id: None,
+            reason: ADMISSION_REASON.to_string(),
+        },
+    })?;
+    let denied = event
+        .kind()
+        .requested_disposition()
+        .is_some_and(|requested| decision.disposition != requested);
+    Ok(DispositionResult {
+        object_id: object_id.to_string(),
+        event,
+        outcome: decision.outcome.as_str().to_string(),
+        previous_disposition: prior.disposition.as_str().to_string(),
+        disposition: decision.disposition.as_str().to_string(),
+        denied,
+    })
+}
+
 /// `refused` records why `apply` returns `KernelError::Conflict`, since the
 /// kernel raises that same error for storage constraints.
 fn apply(
@@ -550,6 +653,20 @@ fn apply(
             Operation::RetireDecision { object_id } => {
                 scoped_object_state(envelope, filter, object_id)?;
                 envelope.retire_decision(object_id)?;
+                result.touched.push(object_id.clone());
+            }
+            Operation::Disposition {
+                object_id,
+                event,
+                approval_object_id,
+            } => {
+                result.dispositions.push(record_disposition(
+                    envelope,
+                    filter,
+                    object_id,
+                    *event,
+                    approval_object_id.as_deref(),
+                )?);
                 result.touched.push(object_id.clone());
             }
             Operation::InsertObservation { spec } => {
@@ -695,15 +812,16 @@ impl Handler {
             .iter()
             .map(|object_id| json!({"object_id": object_id, "known_as_of": receipt.commit_seq}))
             .collect();
-        kernel_response(
-            &KernelOutcome::Available,
-            json!({
-                "receipt": {"commit_seq": receipt.commit_seq, "replayed": receipt.replayed},
-                "known_as_of": receipt.commit_seq,
-                "tokens": tokens,
-                "merged": result.merged,
-            }),
-        )
+        let mut body = json!({
+            "receipt": {"commit_seq": receipt.commit_seq, "replayed": receipt.replayed},
+            "known_as_of": receipt.commit_seq,
+            "tokens": tokens,
+            "merged": result.merged,
+        });
+        if !result.dispositions.is_empty() {
+            body["dispositions"] = json!(result.dispositions);
+        }
+        kernel_response(&KernelOutcome::Available, body)
     }
 }
 
@@ -792,15 +910,52 @@ mod tests {
     }
 
     #[test]
+    fn every_disposition_event_names_a_disposition_transition() {
+        for (event, kind) in [
+            (DispositionEvent::MarkStale, EventKind::MarkStale),
+            (DispositionEvent::MarkDisputed, EventKind::MarkDisputed),
+            (DispositionEvent::ExplicitReject, EventKind::ExplicitReject),
+            (DispositionEvent::Contradict, EventKind::Contradict),
+            (DispositionEvent::Quarantine, EventKind::Quarantine),
+        ] {
+            assert_eq!(event.kind(), kind);
+            // The wire spelling is the kernel's own event name.
+            assert_eq!(
+                serde_json::to_value(event).unwrap(),
+                serde_json::Value::String(kind.as_str().to_string())
+            );
+        }
+        assert!(serde_json::from_str::<DispositionEvent>("\"approve\"").is_err());
+    }
+
+    #[test]
     fn the_result_payload_round_trips_and_tolerates_an_unreadable_receipt() {
         let mut result = CommitResult {
             touched: vec!["b".to_string(), "a".to_string(), "b".to_string()],
             merged: vec!["c".to_string(), "c".to_string()],
+            dispositions: Vec::new(),
         };
         result.normalize();
         assert_eq!(result.touched, ["a", "b"]);
         assert_eq!(result.merged, ["c"]);
         let encoded = serde_json::to_string(&result).unwrap();
+        // Receipts recorded before disposition operations existed carry no
+        // `dispositions` key, and an envelope without one still writes none.
+        assert!(!encoded.contains("dispositions"));
+        assert_eq!(
+            serde_json::from_str::<CommitResult>(&encoded).unwrap(),
+            result
+        );
+        result.dispositions.push(DispositionResult {
+            object_id: "a".to_string(),
+            event: DispositionEvent::Quarantine,
+            outcome: "quarantine".to_string(),
+            previous_disposition: "active".to_string(),
+            disposition: "quarantined".to_string(),
+            denied: false,
+        });
+        let encoded = serde_json::to_string(&result).unwrap();
+        assert!(encoded.contains("\"event\":\"quarantine\""));
         assert_eq!(
             serde_json::from_str::<CommitResult>(&encoded).unwrap(),
             result

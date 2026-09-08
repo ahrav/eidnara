@@ -4376,3 +4376,488 @@ async fn a_stale_ready_sample_reads_as_unavailable_until_a_fresh_one_lands() {
     assert_eq!(kernel["sampled_at_ms"], fresh_at);
     daemon.handler.shutdown().await.unwrap();
 }
+
+// --- kernel.commit disposition operations ---
+
+fn disposition(object_id: &str, event: &str) -> Value {
+    json!({"op": "disposition", "object_id": object_id, "event": event})
+}
+
+fn disposition_with_approval(object_id: &str, event: &str, approval: &str) -> Value {
+    json!({
+        "op": "disposition",
+        "object_id": object_id,
+        "event": event,
+        "approval_object_id": approval,
+    })
+}
+
+fn admission_row_count(daemon: &Daemon) -> i64 {
+    core_connection(daemon)
+        .query_row("SELECT COUNT(*) FROM admission_decisions", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+fn commit_log_count(daemon: &Daemon) -> i64 {
+    core_connection(daemon)
+        .query_row("SELECT COUNT(*) FROM commit_log", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// The disposition the store holds for `object_id`, read from its latest
+/// admission row rather than from any route reply.
+fn stored_disposition(daemon: &Daemon, object_id: &str) -> String {
+    core_connection(daemon)
+        .query_row(
+            "SELECT disposition FROM admission_decisions WHERE subject_object_id=?1
+             ORDER BY commit_seq DESC, admission_decision_id DESC LIMIT 1",
+            [object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// The scope id the route stamps on the bound project's rows, read from a row
+/// it wrote.
+async fn project_scope_id(daemon: &Daemon) -> String {
+    daemon.read("explicit_search", None).await["rows"][0]["scope_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// An approval object the kernel honors: a live `adr_accepted` decision whose
+/// own admission was recorded by an explicit user, which the store API alone
+/// can create. `scope_id` places it in a project.
+fn seed_approval(daemon: &Daemon, object_id: &str, scope_id: Option<&str>) {
+    daemon
+        .store()
+        .commit(intent(&format!("approve-{object_id}")), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                decision_id: format!("{object_id}-decision"),
+                object_id: object_id.to_string(),
+                domain_id: DOMAIN.to_string(),
+                proposition_id: None,
+                scope_id: scope_id.map(str::to_string),
+                anchor_id: None,
+                evidence_id: None,
+                decision_kind: "adr_accepted".to_string(),
+                payload: DecisionPayload {
+                    summary: "Approved by the user.".to_string(),
+                    rationale: String::new(),
+                },
+                source_kind: "user".to_string(),
+                source_id: format!("{object_id}-lineage"),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            envelope.record_admission(admission(
+                object_id,
+                EventKind::AcceptedAdr,
+                None,
+                (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+            ))?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// Each event kind yields the kernel's fixed disposition; the reply carries the
+/// outcome and both dispositions, and the object becomes a token of the commit.
+#[tokio::test]
+async fn disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let cases = [
+        ("mark_stale", "deny", "stale"),
+        ("mark_disputed", "deny", "disputed"),
+        ("explicit_reject", "reject", "rejected"),
+        ("contradict", "deny", "contradicted"),
+        ("quarantine", "quarantine", "quarantined"),
+    ];
+    for (index, (event, outcome, resulting)) in (1..).zip(cases) {
+        let object_id = format!("decision-object-{index}");
+        assert_state(
+            &daemon
+                .commit(
+                    &format!("create-{index}"),
+                    vec![insert_decision(index)],
+                    vec![],
+                )
+                .await,
+            "available",
+            None,
+        );
+        let applied = daemon
+            .commit(
+                &format!("dispose-{index}"),
+                vec![disposition(&object_id, event)],
+                vec![],
+            )
+            .await;
+        assert_state(&applied, "available", None);
+        let commit_seq = applied["receipt"]["commit_seq"].as_i64().unwrap();
+        assert_eq!(
+            applied["dispositions"],
+            json!([{
+                "object_id": object_id,
+                "event": event,
+                "outcome": outcome,
+                "previous_disposition": "active",
+                "disposition": resulting,
+                "denied": false,
+            }]),
+            "{applied}"
+        );
+        assert_eq!(stored_disposition(&daemon, &object_id), resulting);
+        assert_eq!(
+            applied["tokens"],
+            json!([{"object_id": object_id, "known_as_of": commit_seq}])
+        );
+        if event == "quarantine" {
+            assert_matches_route_fixture(&applied, "commit-available-disposition-quarantine.json");
+        }
+    }
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// Tightening needs no approval; moving back toward a less restrictive
+/// disposition is denied without one and leaves the disposition unchanged,
+/// and a valid approval object lets it through.
+#[tokio::test]
+async fn a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = project_scope_id(&daemon).await;
+    let quarantined = daemon
+        .commit(
+            "quarantine",
+            vec![disposition("decision-object-1", "quarantine")],
+            vec![],
+        )
+        .await;
+    assert_state(&quarantined, "available", None);
+    let rows_after_quarantine = admission_row_count(&daemon);
+
+    let denied = daemon
+        .commit(
+            "relax-unapproved",
+            vec![disposition("decision-object-1", "mark_stale")],
+            vec![],
+        )
+        .await;
+    assert_state(&denied, "available", None);
+    assert_eq!(
+        denied["dispositions"],
+        json!([{
+            "object_id": "decision-object-1",
+            "event": "mark_stale",
+            "outcome": "deny",
+            "previous_disposition": "quarantined",
+            "disposition": "quarantined",
+            "denied": true,
+        }]),
+        "{denied}"
+    );
+    assert_matches_route_fixture(&denied, "commit-available-disposition-denied.json");
+    // The denial is itself a recorded decision, so the ledger grows by one row
+    // while the stored disposition stays put.
+    assert_eq!(admission_row_count(&daemon), rows_after_quarantine + 1);
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "quarantined"
+    );
+
+    let unknown_approval = daemon
+        .commit(
+            "relax-unknown-approval",
+            vec![disposition_with_approval(
+                "decision-object-1",
+                "mark_stale",
+                "no-such-approval",
+            )],
+            vec![],
+        )
+        .await;
+    assert_state(&unknown_approval, "invalid", Some("not_found"));
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "quarantined"
+    );
+
+    // An approval minted outside the bound project is as unknown as a missing
+    // one, so another project's authority cannot lift a disposition here.
+    seed_approval(&daemon, "approval-foreign", None);
+    let foreign_approval = daemon
+        .commit(
+            "relax-foreign-approval",
+            vec![disposition_with_approval(
+                "decision-object-1",
+                "mark_stale",
+                "approval-foreign",
+            )],
+            vec![],
+        )
+        .await;
+    assert_state(&foreign_approval, "invalid", Some("not_found"));
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "quarantined"
+    );
+
+    seed_approval(&daemon, "approval-1", Some(&scope_id));
+    let relaxed = daemon
+        .commit(
+            "relax-approved",
+            vec![disposition_with_approval(
+                "decision-object-1",
+                "mark_stale",
+                "approval-1",
+            )],
+            vec![],
+        )
+        .await;
+    assert_state(&relaxed, "available", None);
+    assert_eq!(
+        relaxed["dispositions"],
+        json!([{
+            "object_id": "decision-object-1",
+            "event": "mark_stale",
+            "outcome": "deny",
+            "previous_disposition": "quarantined",
+            "disposition": "stale",
+            "denied": false,
+        }]),
+        "{relaxed}"
+    );
+    assert_eq!(stored_disposition(&daemon, "decision-object-1"), "stale");
+
+    // Re-marking a stale decision stale asks for the disposition it already
+    // holds, so it is admitted, not denied.
+    let repeated = daemon
+        .commit(
+            "mark-stale-again",
+            vec![disposition("decision-object-1", "mark_stale")],
+            vec![],
+        )
+        .await;
+    assert_state(&repeated, "available", None);
+    assert_eq!(repeated["dispositions"][0]["denied"], false, "{repeated}");
+    assert_eq!(repeated["dispositions"][0]["disposition"], "stale");
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A disposition targets a live decision with admission history; a retired
+/// decision or a decision the store admitted nothing for is refused before
+/// any event is recorded.
+#[tokio::test]
+async fn a_disposition_needs_a_live_admitted_decision() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit(
+                "create",
+                vec![insert_decision(1), insert_decision(2)],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = project_scope_id(&daemon).await;
+    assert_state(
+        &daemon
+            .commit(
+                "retire-2",
+                vec![json!({"op": "retire_decision", "object_id": "decision-object-2"})],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    daemon
+        .store()
+        .commit(intent("unadmitted"), |envelope| {
+            envelope.insert_decision(store_decision(7, &scope_id, "unadmitted-lineage"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let rows = admission_row_count(&daemon);
+
+    let retired = daemon
+        .commit(
+            "dispose-retired",
+            vec![disposition("decision-object-2", "quarantine")],
+            vec![],
+        )
+        .await;
+    assert_state(&retired, "invalid", Some("not_found"));
+    let unadmitted = daemon
+        .commit(
+            "dispose-unadmitted",
+            vec![disposition("store-decision-object-7", "quarantine")],
+            vec![],
+        )
+        .await;
+    assert_state(&unadmitted, "invalid", Some("admission_policy"));
+    assert_eq!(admission_row_count(&daemon), rows);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// An admission event does not move the object's mutation token: a token read
+/// before a disposition still names the object the caller read, so a writer
+/// holding it is not turned back by a disposition landing in between.
+#[tokio::test]
+async fn a_disposition_leaves_the_object_token_valid() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let created = daemon
+        .commit("create", vec![insert_decision(1)], vec![])
+        .await;
+    assert_state(&created, "available", None);
+    let created_seq = created["receipt"]["commit_seq"].as_i64().unwrap();
+    assert_state(
+        &daemon
+            .commit(
+                "quarantine",
+                vec![disposition("decision-object-1", "quarantine")],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let retired = daemon
+        .commit(
+            "retire-with-old-token",
+            vec![json!({"op": "retire_decision", "object_id": "decision-object-1"})],
+            vec![token("decision-object-1", created_seq)],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// The envelope's identity and token rules cover disposition operations: a
+/// replay returns the recorded receipt and writes nothing, a reused key with
+/// another digest is refused, and a conflicting token aborts the whole
+/// envelope, including the operations beside the disposition.
+#[tokio::test]
+async fn disposition_operations_share_the_envelope_replay_and_token_rules() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let created = daemon
+        .commit(
+            "create",
+            vec![insert_decision(1), insert_decision(2)],
+            vec![],
+        )
+        .await;
+    assert_state(&created, "available", None);
+    let created_seq = created["receipt"]["commit_seq"].as_i64().unwrap();
+
+    let first = daemon
+        .commit(
+            "dispose",
+            vec![disposition("decision-object-1", "mark_disputed")],
+            vec![],
+        )
+        .await;
+    assert_state(&first, "available", None);
+    assert_eq!(first["receipt"]["replayed"], false);
+    let admission_rows = admission_row_count(&daemon);
+    let commit_rows = commit_log_count(&daemon);
+
+    let replayed = daemon
+        .commit(
+            "dispose",
+            vec![disposition("decision-object-1", "mark_disputed")],
+            vec![],
+        )
+        .await;
+    assert_state(&replayed, "available", None);
+    assert_eq!(replayed["receipt"]["replayed"], true);
+    assert_eq!(
+        replayed["receipt"]["commit_seq"],
+        first["receipt"]["commit_seq"]
+    );
+    assert_eq!(replayed["dispositions"], first["dispositions"]);
+    assert_eq!(replayed["tokens"], first["tokens"]);
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    assert_eq!(commit_log_count(&daemon), commit_rows);
+
+    let mut reused = commit_request(
+        &daemon.project,
+        SESSION,
+        "dispose",
+        vec![disposition("decision-object-1", "quarantine")],
+        vec![],
+    );
+    reused["intent"] = wire_intent("dispose", "other-bytes");
+    let reused = daemon.call(daemon.route, reused).await;
+    assert_state(&reused, "invalid", Some("operation_key_reused"));
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    assert_eq!(commit_log_count(&daemon), commit_rows);
+
+    // Retiring the second decision retracts the object a token read at
+    // `created_seq` still names, so the token conflicts and nothing in the
+    // envelope lands: neither the insert nor the disposition beside it.
+    assert_state(
+        &daemon
+            .commit(
+                "retire-2",
+                vec![json!({"op": "retire_decision", "object_id": "decision-object-2"})],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let admission_rows = admission_row_count(&daemon);
+    let commit_rows = commit_log_count(&daemon);
+    let aborted = daemon
+        .commit(
+            "mixed",
+            vec![
+                insert_decision(3),
+                disposition("decision-object-1", "quarantine"),
+            ],
+            vec![token("decision-object-2", created_seq)],
+        )
+        .await;
+    assert_state(&aborted, "conflict", Some("retracted"));
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    assert_eq!(commit_log_count(&daemon), commit_rows);
+    assert_eq!(
+        object_ids(&daemon.read("explicit_search", None).await),
+        ["decision-object-1"]
+    );
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "disputed",
+        "the aborted quarantine left the disposition where the replayed envelope put it"
+    );
+
+    // An unknown or out-of-scope target uses the existing not-found answer.
+    let missing = daemon
+        .commit(
+            "dispose-missing",
+            vec![disposition("decision-object-9", "quarantine")],
+            vec![],
+        )
+        .await;
+    assert_state(&missing, "invalid", Some("not_found"));
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    daemon.handler.shutdown().await.unwrap();
+}
