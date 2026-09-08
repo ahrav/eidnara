@@ -11,6 +11,7 @@ import { assertJsoncConfigsParseable } from "../lib/jsonc-config";
 import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
+    assertPluginListShape,
     findDcpPluginIndexes,
     hasAnthropicModel,
     preflightConfigPaths,
@@ -313,6 +314,22 @@ describe("setup-opencode preflight targets", () => {
         writeFileSync(join(root, "opencode.json"), `{"plugin":["oh-my-opencode"]}`);
         const withPlugin = preflightConfigPaths(userPaths, root, { firstTimeOmoRepair: false });
         expect(withPlugin).toContain(join(root, ".omo", "omo.json"));
+    });
+});
+
+describe("setup-opencode plugin list shape", () => {
+    it("refuses a scalar or object plugin value and accepts arrays or absence", () => {
+        const root = tempDir();
+        const scalar = join(root, "scalar.json");
+        const object = join(root, "object.json");
+        const array = join(root, "array.json");
+        writeFileSync(scalar, `{"plugin":"@other/plugin"}`);
+        writeFileSync(object, `{"plugin":{"name":"@other/plugin"}}`);
+        writeFileSync(array, `{"plugin":["@other/plugin"]}`);
+
+        expect(() => assertPluginListShape([scalar])).toThrow(/"plugin" must be an array/);
+        expect(() => assertPluginListShape([object])).toThrow(/object\.json/);
+        expect(() => assertPluginListShape([array, join(root, "missing.json")])).not.toThrow();
     });
 });
 

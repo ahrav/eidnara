@@ -15,6 +15,15 @@ describe("setup argument validation", () => {
         expect(unknownSetupArguments(["--harness", "pi", "extra"])).toEqual(["extra"]);
     });
 
+    it("reports a repeated --harness instead of silently using the first", () => {
+        expect(unknownSetupArguments(["--harness", "pi", "--harness", "omp"])).toEqual([
+            "--harness omp (repeated)",
+        ]);
+        expect(unknownSetupArguments(["--harness", "pi", "--harness"])).toEqual([
+            "--harness (repeated)",
+        ]);
+    });
+
     it("leaves a flag-shaped harness value for the harness parser to reject", () => {
         expect(unknownSetupArguments(["--harness", "--dry-run"])).toEqual([]);
         expect(unknownSetupArguments(["--harness"])).toEqual([]);
