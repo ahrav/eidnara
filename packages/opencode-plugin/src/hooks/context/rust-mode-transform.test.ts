@@ -456,6 +456,34 @@ describe("Rust mode transform request", () => {
         expect(bodies[0]?.todo_tool_present).toBe(false);
     });
 
+    it("keeps the cached todowrite verdict when the live permission read never settles", async () => {
+        const sessionId = `rust-todo-permission-hang-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const deps = makeDeps();
+        const agents = mock(() => new Promise<never>(() => {}));
+        deps.client = {
+            app: { agents },
+            session: {
+                get: async () => ({ data: { agent: "build", directory: "/tmp/project" } }),
+            },
+        } as never;
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+        const messages = makeMessages(sessionId);
+        (messages[0]!.info as { tools?: Record<string, boolean> }).tools = {};
+
+        const startedAt = performance.now();
+        await transform.run(sessionId, messages, { messages: messages as unknown[] });
+        const elapsedMs = performance.now() - startedAt;
+
+        expect(agents).toHaveBeenCalledTimes(1);
+        expect(bodies).toHaveLength(1);
+        expect(bodies[0]?.todo_tool_present).toBe(true);
+        expect(elapsedMs).toBeGreaterThanOrEqual(1_500);
+        expect(elapsedMs).toBeLessThan(10_000);
+    });
+
     it("logs a synthetic-turn cascade once after three consecutive synthetic turns", async () => {
         const sessionId = `rust-synthetic-cascade-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
@@ -644,6 +672,28 @@ describe("Rust mode transform transport", () => {
         expect(bodies[2]?.tail_delta).toBeUndefined();
         expect(bodies[2]?.messages).toHaveLength(1);
         expect(transform.getState(sessionId).passCount).toBe(1);
+    });
+
+    it("deletes the daemon session by its known directory when no pass has run in this process", async () => {
+        const sessionId = `rust-clear-before-pass-${Date.now()}`;
+        const deleteSession = mock(async () => {});
+        const closeSession = mock(() => {});
+        const { client } = recordingClient(() => ({ native_messages: [] }));
+        client.deleteSession = deleteSession;
+        client.closeSession = closeSession;
+        const deps = makeDeps();
+        deps.sessionDirectoryBySession?.set(sessionId, "/session/root-c");
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+
+        transform.clearSession(sessionId);
+        await Bun.sleep(0);
+        expect(deleteSession).toHaveBeenCalledWith(sessionId, "/session/root-c");
+        expect(closeSession).toHaveBeenCalledWith(sessionId);
+
+        const other = `${sessionId}-launch-dir`;
+        transform.clearSession(other);
+        await Bun.sleep(0);
+        expect(deleteSession).toHaveBeenCalledWith(other, "/tmp/project");
     });
 
     it("forces a full send after invalidateWireState", async () => {

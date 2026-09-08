@@ -12,6 +12,7 @@ import {
 } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
+import { withTimeout } from "../../shared/with-timeout";
 import {
     cachedToolPermissionDenied,
     resolveCtxReduceAvailability,
@@ -72,6 +73,9 @@ function activeAgentFromMessages(messages: readonly MessageLike[]): string | und
     return undefined;
 }
 
+/** Limits OpenCode SDK reads so a slow host cannot block the transform indefinitely. */
+const HOST_READ_TIMEOUT_MS = 2_000;
+
 async function resolveCombinedTodowriteVerdict(
     deps: RustModeTransformDeps,
     sessionId: string,
@@ -83,13 +87,17 @@ async function resolveCombinedTodowriteVerdict(
     let permissionDenied = cachedToolPermissionDenied(sessionId, "todowrite") ?? false;
     if (deps.client) {
         try {
-            permissionDenied = await todowritePermissionDenied(
-                deps.client,
-                sessionId,
-                activeAgentFromMessages(messages),
+            permissionDenied = await withTimeout(
+                todowritePermissionDenied(
+                    deps.client,
+                    sessionId,
+                    activeAgentFromMessages(messages),
+                ),
+                HOST_READ_TIMEOUT_MS,
+                "todowrite permission read timed out",
             );
         } catch (error) {
-            // A failed SDK read leaves the last in-memory verdict unchanged until a later read obtains authoritative data.
+            // A failed or slow SDK read leaves the last in-memory verdict unchanged until a later read obtains authoritative data.
             sessionLog(
                 sessionId,
                 "todowrite permission read failed; retaining the last successful verdict:",
@@ -590,33 +598,32 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
     return state;
 }
 
-function getSessionDirectory(
+function knownSessionDirectory(deps: RustModeTransformDeps, sessionId: string): string {
+    return deps.sessionDirectoryBySession?.get(sessionId) ?? deps.directory ?? process.cwd();
+}
+
+async function getSessionDirectory(
     deps: RustModeTransformDeps,
     sessionId: string,
-): Promise<{ directory: string; resolvedFromHost: boolean }> {
+): Promise<string> {
     const cached = deps.sessionDirectoryBySession?.get(sessionId);
-    if (cached) return Promise.resolve({ directory: cached, resolvedFromHost: true });
-    if (!deps.client)
-        return Promise.resolve({
-            directory: deps.directory ?? process.cwd(),
-            resolvedFromHost: false,
-        });
-    return Promise.resolve().then(async () => {
-        try {
-            const response = await deps.client?.session
-                ?.get({ path: { id: sessionId } })
-                .catch(() => null);
-            const directory = (response as { data?: { directory?: unknown } } | null)?.data
-                ?.directory;
-            if (typeof directory === "string" && directory.length > 0) {
-                deps.sessionDirectoryBySession?.set(sessionId, directory);
-                return { directory, resolvedFromHost: true };
-            }
-        } catch {
-            // Module routing falls back to the launch directory without failing.
+    if (cached) return cached;
+    if (!deps.client?.session?.get) return knownSessionDirectory(deps, sessionId);
+    try {
+        const response = await withTimeout(
+            deps.client.session.get({ path: { id: sessionId } }),
+            HOST_READ_TIMEOUT_MS,
+            "session directory read timed out",
+        );
+        const directory = (response as { data?: { directory?: unknown } } | null)?.data?.directory;
+        if (typeof directory === "string" && directory.length > 0) {
+            deps.sessionDirectoryBySession?.set(sessionId, directory);
+            return directory;
         }
-        return { directory: deps.directory ?? process.cwd(), resolvedFromHost: false };
-    });
+    } catch {
+        // Module routing falls back to the launch directory without failing.
+    }
+    return knownSessionDirectory(deps, sessionId);
 }
 
 function loadContextUsage(
@@ -1068,7 +1075,7 @@ export function createRustModeTransform(
         );
         try {
             if (preflightError) throw preflightError;
-            const { directory } = await getSessionDirectory(deps, sessionId);
+            const directory = await getSessionDirectory(deps, sessionId);
             const usage = passUsageSnapshot;
             const contextLimit =
                 resolvedContextLimit && resolvedContextLimit > 0
@@ -1643,10 +1650,14 @@ export function createRustModeTransform(
     return {
         run,
         clearSession(sessionId: string): void {
-            const projectRoot = states.get(sessionId)?.routeRoot ?? options.projectRoot ?? null;
+            // Without a `routeRoot`, the fallback is the root `run` would have used, so the daemon's durable state is still addressed.
+            const projectRoot =
+                states.get(sessionId)?.routeRoot ??
+                options.projectRoot ??
+                knownSessionDirectory(deps, sessionId);
             states.delete(sessionId);
             wireCaches.delete(sessionId);
-            if (projectRoot && options.moduleClient.deleteSession) {
+            if (options.moduleClient.deleteSession) {
                 void options.moduleClient
                     .deleteSession(sessionId, projectRoot)
                     .catch((error) => {
