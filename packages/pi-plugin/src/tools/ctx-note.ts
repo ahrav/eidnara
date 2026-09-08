@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import {
     compileSurfaceCondition,
     conditionCompileReplySuffix,
@@ -162,7 +163,8 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
                 },
             );
             const sessionId = ctx.sessionManager.getSessionId();
-            const projectRoot = ctx.cwd;
+            // The daemon keys routes and lineage by `(session, root)`; the commands that act on queued drops route on this same git-root spelling.
+            const projectRoot = resolveProjectRootDirectory(ctx.cwd);
             // A string-only check would classify empty content as write and reject it.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
             const wakePlaneActive =

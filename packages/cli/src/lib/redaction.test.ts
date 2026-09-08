@@ -34,4 +34,14 @@ describe("sanitizeDiagnosticEndpoint", () => {
             "https://example.com/v1/@scope/pkg",
         );
     });
+
+    it("strips credentials that contain whitespace or a raw @", () => {
+        expect(sanitizeDiagnosticEndpoint("user:pass word@example.com/v1?token=x")).toBe(
+            "example.com/v1",
+        );
+        expect(sanitizeDiagnosticEndpoint("user:p@ss@example.com/v1")).toBe("example.com/v1");
+        expect(sanitizeDiagnosticEndpoint("https://user:p@ss w0rd@example.com/v1")).toBe(
+            "https://example.com/v1",
+        );
+    });
 });

@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import type { RustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { getErrorMessage } from "@eidnara/opencode/shared/error-message";
 import { CTX_REDUCE_DESCRIPTION } from "@eidnara/opencode/tools/ctx-reduce/constants";
@@ -79,7 +80,7 @@ export function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition<typ
             try {
                 const response = await rustReduce({
                     sessionId,
-                    projectRoot: ctx.cwd,
+                    projectRoot: resolveProjectRootDirectory(ctx.cwd),
                     drop: params.drop,
                     commandId: commandIdForInvocation(sessionId, toolCallId),
                     ...(signal ? { signal } : {}),
