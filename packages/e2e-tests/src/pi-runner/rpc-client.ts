@@ -387,18 +387,29 @@ export class PiRpcClient {
         this.stopReadingStdout = null;
         this.process = null;
 
-        if (child.exitCode !== null || child.signalCode !== null) return;
-        child.kill("SIGTERM");
-        await new Promise<void>((resolve) => {
-            const timer = setTimeout(() => {
-                if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-                resolve();
-            }, timeoutMs);
-            child.once("exit", () => {
-                clearTimeout(timer);
-                resolve();
+        const exited = () => child.exitCode !== null || child.signalCode !== null;
+        const waitForExit = (ms: number) =>
+            new Promise<boolean>((resolve) => {
+                if (exited()) return resolve(true);
+                const onExit = () => {
+                    clearTimeout(timer);
+                    resolve(true);
+                };
+                const timer = setTimeout(() => {
+                    child.off("exit", onExit);
+                    resolve(exited());
+                }, ms);
+                child.once("exit", onExit);
             });
-        });
+
+        if (exited()) return;
+        child.kill("SIGTERM");
+        if (await waitForExit(timeoutMs)) return;
+        child.kill("SIGKILL");
+        if (await waitForExit(timeoutMs)) return;
+        throw new Error(
+            `Pi RPC process ${child.pid ?? "?"} did not exit within ${timeoutMs}ms of SIGKILL\n${this.stderr}`,
+        );
     }
 }
 

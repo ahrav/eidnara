@@ -53,33 +53,61 @@ function pinnedPiVersion(): string | null {
     }
 }
 
-function resolvePiPackageJson(): string | null {
+interface PiResolution {
+    packageJson: string | null;
+    /** Reports a directly resolved Pi package whose version differs from the pinned version. */
+    problem?: string;
+}
+
+function installedVersion(packageJson: string): string | null {
     try {
-        return piPluginRequire.resolve("@earendil-works/pi-coding-agent/package.json");
+        const version = (JSON.parse(readFileSync(packageJson, "utf8")) as { version?: unknown })
+            .version;
+        return typeof version === "string" ? version : null;
     } catch {
-        const bunModules = join(REPO_ROOT, "node_modules/.bun");
-        if (!existsSync(bunModules)) return null;
-        const pinned = pinnedPiVersion();
-        if (pinned === null) return null;
-        // Bun's isolated store may hold several Pi versions; only the pinned one is a valid fallback.
-        const prefix = `@earendil-works+pi-coding-agent@${pinned}+`;
-        const candidate = readdirSync(bunModules, { withFileTypes: true }).find(
-            (entry) =>
-                entry.isDirectory() &&
-                (entry.name === prefix.slice(0, -1) || entry.name.startsWith(prefix)),
-        );
-        if (candidate === undefined) return null;
-        const packageJson = join(
-            bunModules,
-            candidate.name,
-            "node_modules/@earendil-works/pi-coding-agent/package.json",
-        );
-        return existsSync(packageJson) ? packageJson : null;
+        return null;
     }
 }
 
-/** `null` when `@earendil-works/pi-coding-agent` is not installed; `detectPiPrereqs` reports it. */
-export const PI_PACKAGE_JSON = resolvePiPackageJson();
+function resolvePiPackage(): PiResolution {
+    const pinned = pinnedPiVersion();
+    let direct: string | null = null;
+    try {
+        direct = piPluginRequire.resolve("@earendil-works/pi-coding-agent/package.json");
+    } catch {
+        direct = null;
+    }
+    if (direct !== null) {
+        const installed = installedVersion(direct);
+        if (pinned !== null && installed !== pinned) {
+            return {
+                packageJson: null,
+                problem: `@earendil-works/pi-coding-agent ${installed ?? "of unknown version"} is installed under packages/pi-plugin/node_modules but ${pinned} is pinned (run bun install)`,
+            };
+        }
+        return { packageJson: direct };
+    }
+    const bunModules = join(REPO_ROOT, "node_modules/.bun");
+    if (!existsSync(bunModules) || pinned === null) return { packageJson: null };
+    // Bun's isolated store may hold several Pi versions; only the pinned one is a valid fallback.
+    const prefix = `@earendil-works+pi-coding-agent@${pinned}+`;
+    const candidate = readdirSync(bunModules, { withFileTypes: true }).find(
+        (entry) =>
+            entry.isDirectory() &&
+            (entry.name === prefix.slice(0, -1) || entry.name.startsWith(prefix)),
+    );
+    if (candidate === undefined) return { packageJson: null };
+    const packageJson = join(
+        bunModules,
+        candidate.name,
+        "node_modules/@earendil-works/pi-coding-agent/package.json",
+    );
+    return { packageJson: existsSync(packageJson) ? packageJson : null };
+}
+
+const PI_RESOLUTION = resolvePiPackage();
+/** `null` when the pinned `@earendil-works/pi-coding-agent` is not installed; `detectPiPrereqs` reports why. */
+export const PI_PACKAGE_JSON = PI_RESOLUTION.packageJson;
 export const PI_CLI =
     PI_PACKAGE_JSON === null ? null : join(dirname(PI_PACKAGE_JSON), "dist/cli.js");
 
@@ -118,7 +146,8 @@ export function detectPiPrereqs(): PiPrereqs {
     const missing: string[] = [];
     if (PI_CLI === null) {
         missing.push(
-            "@earendil-works/pi-coding-agent is not installed under packages/pi-plugin/node_modules (run bun install)",
+            PI_RESOLUTION.problem ??
+                "@earendil-works/pi-coding-agent is not installed under packages/pi-plugin/node_modules (run bun install)",
         );
     }
     const nodeVersion = nodeVersionOnPath();
