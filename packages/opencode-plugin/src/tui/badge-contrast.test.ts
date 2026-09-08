@@ -36,6 +36,15 @@ describe("badgeTextColor (AFT parity with #186 safety net)", () => {
         expect(result).toBe("#ffffff");
     });
 
+    test("translucent background is judged after compositing onto the accent", () => {
+        // Raw black vs 0.5 gray is ~5.3:1, but half-alpha black renders as 0.25 gray at ~2.6:1.
+        const grayAccent = { r: 0.5, g: 0.5, b: 0.5, a: 1 };
+        const halfBlack = { r: 0, g: 0, b: 0, a: 0.5 };
+        const result = badgeTextColor(grayAccent, halfBlack);
+        expect(result).not.toBe(halfBlack);
+        expect(result).toBe(readableTextColorOn(grayAccent));
+    });
+
     test("missing alpha is treated as opaque", () => {
         const background = { r: 0.05, g: 0.05, b: 0.07 };
         expect(badgeTextColor(accent, background)).toBe(background);
