@@ -317,6 +317,7 @@ async function guardedGitLog(
 // expected empty answer from an operational failure. `LC_ALL=C` in gitEnvironment keeps it in English.
 const EXPECTED_GIT_MISS = [
     /^fatal: No names found/m,
+    /^fatal: No tags can describe/m,
     /does not have any commits yet/,
     /^fatal: ambiguous argument 'HEAD'/m,
     /^fatal: bad revision 'HEAD'/m,

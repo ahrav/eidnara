@@ -238,6 +238,28 @@ describe("smart-note git capabilities", () => {
         });
     });
 
+    test("gitTag is null when the only tags are unreachable from HEAD", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            await git(dir, "tag", "-d", "v1.2.3");
+            await git(dir, "checkout", "-q", "--orphan", "side");
+            await git(
+                dir,
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Record the orphan history that carries the tag",
+            );
+            await git(dir, "tag", "v9.0.0");
+            await git(dir, "checkout", "-q", "main");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitTag()).toBeNull();
+        });
+    });
+
     test("ordinary git failures resolve to an empty result", async () => {
         await withTempDir(async (dir) => {
             const cap = createSmartNoteCapabilities({
