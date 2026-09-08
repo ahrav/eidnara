@@ -112,11 +112,29 @@
           "type": "object",
           "properties": {
             "edit": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
               ]
             },
             "bash": {
@@ -162,11 +180,29 @@
               ]
             },
             "external_directory": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
               ]
             }
           },
@@ -827,11 +863,29 @@
           "type": "object",
           "properties": {
             "edit": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
               ]
             },
             "bash": {
@@ -877,11 +931,29 @@
               ]
             },
             "external_directory": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
               ]
             }
           },
