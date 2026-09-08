@@ -128,14 +128,20 @@ function getSelfVersion(): string {
     return "unknown";
 }
 
-/** Text like `client_secret: value` is judged by the shared key vocabulary; booleans and null stay, a number may be a PIN. */
+/**
+ * Text like `client_secret: value` is judged by the shared key vocabulary; booleans and
+ * null stay, a number may be a PIN. A bare `key=` names a secret the way the shared text
+ * redactor reads it, while `key:` keeps the prose carve-out (`press any key: continue`).
+ */
 function redactKeyedText(value: string): string {
     return value.replace(
         /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,]+)/g,
-        (full, key: string, separator: string, secret: string) =>
-            isSecretKey(key) && !/^(?:true|false|null)$/i.test(secret)
+        (full, key: string, separator: string, secret: string) => {
+            const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
+            return (isSecretKey(key) || bareKeyAssignment) && !/^(?:true|false|null)$/i.test(secret)
                 ? `${key}${separator}<REDACTED>`
-                : full,
+                : full;
+        },
     );
 }
 

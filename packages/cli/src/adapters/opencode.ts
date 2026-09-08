@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, isAbsolute, parse as parsePath, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as stringifyJsonc } from "comment-json";
 import { resolveLinkTarget, writeFileAtomic } from "../lib/atomic-write";
 import { ensureParentDir } from "../lib/fs-utils";
 import { readJsoncConfig, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { detectOpenCode } from "../lib/opencode-detect";
-import { detectConfigPaths, getEidnaraLogPath } from "../lib/paths";
+import { detectConfigPaths, envFirstHomeDir, getEidnaraLogPath } from "../lib/paths";
 import type { HarnessAdapter, HarnessConfigPaths, PluginEntryResult } from "./types";
 
 const PLUGIN_NAME = "@eidnara/opencode";
@@ -126,8 +126,16 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
     if (!candidate) return false;
     // Windows configs spell relative entries with backslashes, which `isAbsolute` does not cover.
     return (
-        candidate.startsWith("file://") || isAbsolute(candidate) || /^\.\.?[\\/]/.test(candidate)
+        candidate.startsWith("file://") ||
+        isAbsolute(candidate) ||
+        /^\.\.?[\\/]/.test(candidate) ||
+        /^~[\\/]/.test(candidate)
     );
+}
+
+/** OpenCode expands a leading `~` in a plugin path to the home directory. */
+function expandHomePrefix(path: string): string {
+    return /^~[\\/]/.test(path) ? join(envFirstHomeDir(), path.slice(2)) : path;
 }
 
 /**
@@ -149,7 +157,7 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
         if (candidate.startsWith("file://")) {
             localPath = fileURLToPath(candidate);
         } else {
-            localPath = resolve(candidate);
+            localPath = resolve(expandHomePrefix(candidate));
         }
 
         if (statSync(localPath).isFile()) localPath = dirname(localPath);

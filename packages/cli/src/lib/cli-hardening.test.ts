@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDevPathPluginEntry } from "../adapters/opencode";
 import { resolveAdaptersForCommand } from "./harness-select";
-import { detectConfigPaths } from "./paths";
+import { detectConfigPaths, getOpenCodeConfigDir } from "./paths";
 
 const roots: string[] = [];
 const originalOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
@@ -30,6 +30,20 @@ describe("CLI hardening helpers", () => {
                 verb: "setup",
             }),
         ).rejects.toThrow("Invalid --harness value: opencdoe");
+    });
+
+    it.if(process.platform !== "win32")("ignores a relative XDG_CONFIG_HOME", () => {
+        const originalXdg = process.env.XDG_CONFIG_HOME;
+        delete process.env.OPENCODE_CONFIG_DIR;
+        process.env.XDG_CONFIG_HOME = ".config";
+        try {
+            expect(getOpenCodeConfigDir()).toBe(join(homedir(), ".config", "opencode"));
+            process.env.XDG_CONFIG_HOME = "/virt/xdg";
+            expect(getOpenCodeConfigDir()).toBe("/virt/xdg/opencode");
+        } finally {
+            if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = originalXdg;
+        }
     });
 
     it("selects opencode.jsonc for a fresh configuration", () => {

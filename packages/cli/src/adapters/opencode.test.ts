@@ -106,6 +106,34 @@ describe("OpenCodeAdapter config safety", () => {
         expect(result.action).toBe("already_present");
     });
 
+    it.if(process.platform !== "win32")(
+        "reports a home-relative dev path as present when its manifest names the plugin",
+        async () => {
+            const root = configRoot();
+            const home = join(root, "home");
+            const plugin = join(home, "src", "opencode-plugin");
+            mkdirSync(plugin, { recursive: true });
+            writeFileSync(
+                join(plugin, "package.json"),
+                JSON.stringify({ name: "@eidnara/opencode" }),
+            );
+            writeFileSync(
+                join(root, "opencode.json"),
+                JSON.stringify({ plugin: ["~/src/opencode-plugin"] }),
+            );
+            const originalHome = process.env.HOME;
+            process.env.HOME = home;
+            try {
+                const adapter = new OpenCodeAdapter();
+                expect(adapter.hasPluginEntry()).toBe(true);
+                expect((await adapter.ensurePluginEntry()).action).toBe("already_present");
+            } finally {
+                if (originalHome === undefined) delete process.env.HOME;
+                else process.env.HOME = originalHome;
+            }
+        },
+    );
+
     it("leaves a version-pinned plugin entry as written", async () => {
         const root = configRoot();
         const configPath = join(root, "opencode.json");
@@ -129,6 +157,12 @@ describe("isLocalPathPluginEntry", () => {
         expect(isLocalPathPluginEntry(".\\packages\\opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry("..\\opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry([".\\packages\\opencode-plugin", {}])).toBe(true);
+    });
+
+    it("recognizes a home-relative dev path", () => {
+        expect(isLocalPathPluginEntry("~/src/eidnara/packages/opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("~\\src\\opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("~eidnara")).toBe(false);
     });
 
     it("does not treat package names or dot-prefixed names as paths", () => {

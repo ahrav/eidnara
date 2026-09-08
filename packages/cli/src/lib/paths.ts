@@ -29,8 +29,12 @@ export function getOpenCodeConfigDir(): string {
     if (process.platform === "win32") {
         return join(homedir(), ".config", "opencode");
     }
-    const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-    return join(xdgConfig, "opencode");
+    // XDG requires an absolute value; a relative one would resolve against this process's cwd.
+    const xdgConfig = process.env.XDG_CONFIG_HOME;
+    return join(
+        xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(homedir(), ".config"),
+        "opencode",
+    );
 }
 
 function findOmoConfig(configDir: string): string | null {
