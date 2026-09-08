@@ -138,7 +138,8 @@ const server: Plugin = async (ctx) => {
     // The function-scope handle lets the `server.instance.disposed` cleanup handler stop the server.
     let rpcServer: EidnaraRpcServer | null = null;
 
-    if (pluginConfig.enabled) {
+    // A null hook means the directory has no project identity (a home directory without `allow_home_project`); the RPC handlers read kernel memory for their directory, so they honor the same refusal.
+    if (pluginConfig.enabled && eidnara) {
         // RPC communication between the TUI and server bypasses the SQLite plugin_messages bus.
         rpcServer = new EidnaraRpcServer(getEidnaraStorageDir(), ctx.directory);
         registerRpcHandlers(rpcServer, {
