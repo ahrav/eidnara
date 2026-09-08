@@ -17,9 +17,9 @@ const ALL = sourceFiles(SRC);
 const TESTS = ALL.filter((file) => /\.test\.tsx?$/.test(file));
 const MODULES = ALL.filter((file) => !/\.test\.tsx?$/.test(file));
 
-/** Not-ported subsystems; a path under any of them reachable from a test is residue. The bundler names inputs relative to `SRC`, so a subsystem directly under `src` has no leading slash and the prefix must also accept the start of the path. commentlint: allow(JUDGE) */
+/** Not-ported subsystems; a path under any of them reachable from a test is residue. The bundler names inputs relative to `SRC`, so a subsystem directly under `src` has no leading slash and the prefix must also accept the start of the path; the file alternative accepts both extensions `sourceFiles` scans. commentlint: allow(JUDGE) */
 const NOT_PORTED =
-    /(^|\/)(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.ts$)/;
+    /(^|\/)(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.tsx?$)/;
 
 /**
  * Modules no landed test reaches through a runtime import. Type-only modules
@@ -53,6 +53,7 @@ describe("module graph over the landed tree", () => {
     test("the residue pattern matches a not-ported subsystem at the source root and nested under it", () => {
         expect(NOT_PORTED.test("memory/foo.ts")).toBe(true);
         expect(NOT_PORTED.test("dreamer.ts")).toBe(true);
+        expect(NOT_PORTED.test("memory.tsx")).toBe(true);
         expect(NOT_PORTED.test("features/memory/foo.ts")).toBe(true);
         expect(NOT_PORTED.test("shared/user-memory.ts")).toBe(true);
         expect(NOT_PORTED.test("shared/memory-guard.ts")).toBe(false);

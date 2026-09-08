@@ -3,7 +3,8 @@ import { isAbsolute, join } from "node:path";
 
 const CONFIG_FILE_BASENAME = "eidnara";
 
-function homeDir(): string {
+/** The environment's home takes precedence over the account database, so a harness or test can point every home-relative path at a scratch directory. commentlint: allow(JUDGE) */
+export function homeDir(): string {
     if (process.platform === "win32") {
         return process.env.USERPROFILE || process.env.HOME || homedir();
     }
