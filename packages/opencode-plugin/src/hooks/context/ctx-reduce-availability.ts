@@ -139,7 +139,7 @@ function resolveToolAvailability(sessionId: string, toolName: string): ToolAvail
                     .prepare(
                         `SELECT json_extract(data, '$.tools') AS tools FROM message
                           WHERE session_id = ? AND json_extract(data, '$.role') = 'user'
-                          ORDER BY time_created ASC LIMIT 1`,
+                          ORDER BY time_created ASC, id ASC LIMIT 1`,
                     )
                     .get(sessionId) as { tools: string | null } | undefined,
         );

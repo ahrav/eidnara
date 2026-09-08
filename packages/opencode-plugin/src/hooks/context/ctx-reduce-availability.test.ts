@@ -35,7 +35,9 @@ describe("ctx_reduce availability (OpenCode DB)", () => {
         dataHome = undefined;
     });
 
-    function writeOpenCodeDbWithFirstUserTools(sessionId: string, tools: unknown): void {
+    function writeOpenCodeDb(
+        rows: ReadonlyArray<{ id: string; sessionId: string; timeCreated: number; tools: unknown }>,
+    ): void {
         if (!dataHome) throw new Error("dataHome is unset");
         const dir = join(dataHome, "opencode");
         mkdirSync(dir, { recursive: true });
@@ -44,12 +46,25 @@ describe("ctx_reduce availability (OpenCode DB)", () => {
             db.exec(
                 "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
             );
-            db.prepare(
+            const insert = db.prepare(
                 "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
-            ).run("msg-1", sessionId, 1, 1, JSON.stringify({ role: "user", tools }));
+            );
+            for (const row of rows) {
+                insert.run(
+                    row.id,
+                    row.sessionId,
+                    row.timeCreated,
+                    row.timeCreated,
+                    JSON.stringify({ role: "user", tools: row.tools }),
+                );
+            }
         } finally {
             closeQuietly(db);
         }
+    }
+
+    function writeOpenCodeDbWithFirstUserTools(sessionId: string, tools: unknown): void {
+        writeOpenCodeDb([{ id: "msg-1", sessionId, timeCreated: 1, tools }]);
     }
 
     it("keeps the frozen fail-open verdict when the database appears after the first read", () => {
@@ -68,6 +83,21 @@ describe("ctx_reduce availability (OpenCode DB)", () => {
 
         // Control: a fresh session reads the deny from the database.
         clearCtxReduceAvailability(sessionId);
+        expect(resolveCtxReduceAvailability(sessionId)).toEqual({ callable: false, frozen: true });
+    });
+
+    it("breaks a time_created tie by id so the canonical first user message decides", () => {
+        dataHome = mkdtempSync(join(tmpdir(), "eidnara-ctx-reduce-db-"));
+        process.env.XDG_DATA_HOME = dataHome;
+        const sessionId = "ses-db-tie";
+        clearCtxReduceAvailability(sessionId);
+
+        // Insertion order is reversed so a rowid-ordered scan would pick the later id.
+        writeOpenCodeDb([
+            { id: "msg-b", sessionId, timeCreated: 7, tools: { ctx_reduce: true } },
+            { id: "msg-a", sessionId, timeCreated: 7, tools: { ctx_reduce: false } },
+        ]);
+
         expect(resolveCtxReduceAvailability(sessionId)).toEqual({ callable: false, frozen: true });
     });
 });
