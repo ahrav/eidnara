@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,6 +87,14 @@ async function bundleInTempCwd(
 }
 
 describe("readLogTailLines", () => {
+    it.if(process.platform !== "win32")("rejects a FIFO instead of blocking on it", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        const fifo = join(root, "eidnara.log");
+        execFileSync("mkfifo", [fifo]);
+        expect(() => readLogTailLines(fifo)).toThrow("not a regular file");
+    });
+
     it("returns every line of a file smaller than the byte cap", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
         tempDirs.push(root);

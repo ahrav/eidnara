@@ -3,6 +3,7 @@
 // If the DB cannot be read, the report still includes all other diagnostics.
 import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import {
@@ -17,7 +18,7 @@ import {
 } from "@eidnara/opencode/shared/conflict-detector";
 import { getDataDir, getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
-import { resolveOpenCodeDatabasePath } from "@eidnara/opencode/shared/opencode-database-path";
+import { resolveOpenCodeDatabaseCandidates } from "@eidnara/opencode/shared/opencode-database-path";
 import {
     describeProseLength,
     sanitizeConfigValue,
@@ -199,6 +200,21 @@ export function describeProbeText(text: string): string {
         .trim();
 }
 
+function readUserOpenCodeConfigs(configDir: string): {
+    values: Array<Record<string, unknown> | null>;
+    error?: string;
+} {
+    if (!configDir) return { values: [] };
+    const parsed = ["opencode.json", "opencode.jsonc"].map((name) =>
+        readConfig(join(configDir, name)),
+    );
+    const errors = parsed.flatMap((entry) => (entry.error ? [entry.error] : []));
+    return {
+        values: parsed.map((entry) => entry.value),
+        ...(errors.length > 0 ? { error: errors.join("; ") } : {}),
+    };
+}
+
 /** A FIFO or directory at a config path is a parse error rather than a blocking read. */
 function readConfig(path: string): { value: Record<string, unknown> | null; error?: string } {
     let raw: string;
@@ -307,9 +323,9 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     // `getDataDir` applies the daemon's rules: a relative `XDG_DATA_HOME` is ignored and an
     // absolute `HOME` is required, so a checkout cannot redirect the lookup. Without a data
     // directory or a database there are no sessions to report.
-    let opencodeDbPath: string;
+    let candidates: string[];
     try {
-        opencodeDbPath = resolveOpenCodeDatabasePath(getDataDir());
+        candidates = resolveOpenCodeDatabaseCandidates(getDataDir());
     } catch {
         return [];
     }
@@ -336,6 +352,22 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
         return [];
     }
 
+    // A candidate that is not an OpenCode session database (a stray `opencode-backup.db`, a
+    // corrupt file) fails the query; the next-ranked candidate is tried instead.
+    for (const candidate of candidates) {
+        const rows = querySessions(DatabaseClass, candidate);
+        if (rows !== null) return rows;
+    }
+    return [];
+}
+
+function querySessions(
+    DatabaseClass: new (
+        path: string,
+        opts?: { readonly?: boolean },
+    ) => { prepare: (sql: string) => { all: () => unknown[] }; close: () => void },
+    opencodeDbPath: string,
+): RecentSessionSummary[] | null {
     let db: { prepare: (sql: string) => { all: () => unknown[] }; close: () => void } | null = null;
     try {
         db = new DatabaseClass(opencodeDbPath, { readonly: true });
@@ -365,7 +397,7 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
             return [{ sessionId, title, directory, lastActiveAt }];
         });
     } catch {
-        return [];
+        return null;
     } finally {
         try {
             db?.close();
@@ -410,9 +442,9 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
     const pluginVersion = getSelfVersion();
     const userLevel = resolveUserLevelPaths();
     const configPaths = userLevel.configPaths;
-    const opencodeConfig = configPaths.opencodeConfig
-        ? readConfig(configPaths.opencodeConfig)
-        : { value: null };
+    // The host merges `opencode.json` and `opencode.jsonc` from the user config directory, so a
+    // registration in either counts; parse errors from both are reported.
+    const opencodeConfig = readUserOpenCodeConfigs(configPaths.configDir);
     const tuiConfig = configPaths.tuiConfig ? readConfig(configPaths.tuiConfig) : { value: null };
     const eidnaraConfig = readUserEidnaraConfigTier();
     const projectConfig = readEidnaraConfigTier(eidnaraProjectConfigBasePath(cwd));
@@ -472,7 +504,9 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         configPaths,
         ...(userLevel.error ? { configPathsError: userLevel.error } : {}),
         projectDirectory: cwd,
-        opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value, cwd),
+        opencodeConfigHasPlugin: opencodeConfig.values.some((value) =>
+            configHasPluginEntry(value, cwd),
+        ),
         ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value, cwd),
         ...(tuiConfig.error ? { tuiConfigParseError: tuiConfig.error } : {}),

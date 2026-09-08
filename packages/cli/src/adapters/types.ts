@@ -18,6 +18,12 @@ export interface PluginEntryResult {
     /** message provides a human-readable result summary. */
     message: string;
     configPath: string;
+    /**
+     * On an error result: the registration command ran and its undo failed or could not be
+     * verified, so the plugin may still be active. A caller must then leave the host's native
+     * context managers disabled rather than run two managers at once.
+     */
+    pluginMayBeActive?: boolean;
 }
 
 export interface HarnessAdapter {

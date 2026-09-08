@@ -319,6 +319,58 @@ describe("runSetup", () => {
         expect(config.compaction?.enabled).toBe(false);
     });
 
+    it("keeps native settings disabled when a failed registration may have left the plugin active", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const configPath = join(root, "eidnara.jsonc");
+        const settingsPath = join(agentDir, "settings.json");
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => settingsPath,
+            },
+        };
+        const calls: string[] = [];
+        const host: PiCompatibleSetupHost = {
+            displayName: "Fake",
+            cliName: "fake",
+            packageSource: "npm:fake",
+            // The enable command ran but its outcome could not be verified or undone.
+            ensurePluginEntry: async () => ({
+                ok: false,
+                action: "error",
+                message:
+                    "could not verify the plugin state; restoring the prior plugin state failed",
+                configPath: settingsPath,
+                pluginMayBeActive: true,
+            }),
+            beforeWrite: async () => async () => {
+                calls.push("rollbackHost");
+            },
+            rollbackPluginEntry: async () => {
+                calls.push("rollbackPluginEntry");
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [true, false] });
+
+        const code = await runSetup({ prompts, env, host });
+
+        expect(code).toBe(1);
+        expect(calls).toEqual([]);
+        expect(existsSync(configPath)).toBe(false);
+        const log = prompts.messages.join("\n");
+        expect(log).toContain("could not verify the plugin state");
+        expect(log).toContain("may still be registered");
+        expect(log).toContain("outro:Setup stopped — check the Fake plugin state by hand");
+    });
+
     it.if(canRefuseWrites)(
         "skips the native-settings rollback when the plugin registration cannot be undone",
         async () => {

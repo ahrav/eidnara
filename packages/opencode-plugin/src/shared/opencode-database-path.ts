@@ -37,14 +37,19 @@ function listDatabaseFiles(dirPath: string, filePrefix: string): string[] {
     return files.sort((left, right) => right.activityMs - left.activityMs).map((file) => file.path);
 }
 
-/** An explicit `OPENCODE_DB_PATH` must exist; the discovery ladder ranks each directory's candidates by last activity. */
-export function resolveOpenCodeDatabasePath(dataDir: string = getDataDir()): string {
+/**
+ * Every database the discovery ladder would consider, most likely first: an explicit
+ * `OPENCODE_DB_PATH` alone, otherwise `opencode*.db` under the data directory ranked by last
+ * activity, then the storage databases. A caller that can test a candidate (open it and run a
+ * query) walks this list so a stray `opencode-backup.db` does not hide the live database.
+ */
+export function resolveOpenCodeDatabaseCandidates(dataDir: string = getDataDir()): string[] {
     const explicit = process.env.OPENCODE_DB_PATH;
     if (explicit) {
         if (!existsSync(explicit)) {
             throw new Error(`OPENCODE_DB_PATH is set to ${explicit}, which does not exist`);
         }
-        return explicit;
+        return [explicit];
     }
 
     const opencodeRoot = join(dataDir, "opencode");
@@ -52,17 +57,19 @@ export function resolveOpenCodeDatabasePath(dataDir: string = getDataDir()): str
 
     // `opencode.db` competes with the channel databases (`opencode-beta.db`, ...) on
     // last activity, so a stale stable database does not shadow the active channel.
-    const channelDbCandidates = listDatabaseFiles(opencodeRoot, "opencode");
-    if (channelDbCandidates.length > 0) {
-        return channelDbCandidates[0];
+    const candidates = [
+        ...listDatabaseFiles(opencodeRoot, "opencode"),
+        ...listDatabaseFiles(storageRoot, ""),
+    ];
+    if (candidates.length === 0) {
+        throw new Error(
+            `Unable to locate OpenCode DB. Checked opencode*.db in ${opencodeRoot} and storage DBs in ${storageRoot}`,
+        );
     }
+    return candidates;
+}
 
-    const storageDbCandidates = listDatabaseFiles(storageRoot, "");
-    if (storageDbCandidates.length > 0) {
-        return storageDbCandidates[0];
-    }
-
-    throw new Error(
-        `Unable to locate OpenCode DB. Checked opencode*.db in ${opencodeRoot} and storage DBs in ${storageRoot}`,
-    );
+/** The first candidate of `resolveOpenCodeDatabaseCandidates`. */
+export function resolveOpenCodeDatabasePath(dataDir: string = getDataDir()): string {
+    return resolveOpenCodeDatabaseCandidates(dataDir)[0];
 }

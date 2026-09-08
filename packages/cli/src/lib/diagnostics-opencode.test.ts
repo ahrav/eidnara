@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -128,6 +128,22 @@ describe("collectDiagnostics plugin registration", () => {
         const report = await collectDiagnostics(cwd);
 
         expect(report.opencodeConfigHasPlugin).toBe(false);
+    });
+
+    it("reads a registration from either user-level sibling, since the host merges both", async () => {
+        const { configHome, cwd } = isolatedRoot();
+        writeFileSync(join(configHome, "opencode", "opencode.jsonc"), '{ "plugin": [] }');
+        writeFileSync(
+            join(configHome, "opencode", "opencode.json"),
+            JSON.stringify({ plugin: ["@eidnara/opencode"] }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.configPaths.opencodeConfig).toBe(
+            join(configHome, "opencode", "opencode.jsonc"),
+        );
+        expect(report.opencodeConfigHasPlugin).toBe(true);
     });
 
     it("reports registration in the project's own opencode config", async () => {
@@ -321,6 +337,23 @@ describe("collectDiagnostics recent sessions", () => {
         const { root, cwd } = isolatedRoot();
         const dataHome = process.env.XDG_DATA_HOME as string;
         seedSessionDb(join(dataHome, "opencode", "opencode-dev.db"), join(root, "project"));
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.recentSessions.map((session) => session.sessionId)).toEqual([
+            "ses_channel01",
+        ]);
+    });
+
+    it("falls back to the next database when the newest candidate is not a session database", async () => {
+        const { root, cwd } = isolatedRoot();
+        const dataHome = process.env.XDG_DATA_HOME as string;
+        seedSessionDb(join(dataHome, "opencode", "opencode.db"), join(root, "project"));
+        // A newer file that matches `opencode*.db` but holds no session table.
+        const stray = join(dataHome, "opencode", "opencode-backup.db");
+        writeFileSync(stray, "not a database");
+        const later = Date.now() / 1000 + 60;
+        utimesSync(stray, later, later);
 
         const report = await collectDiagnostics(cwd);
 
