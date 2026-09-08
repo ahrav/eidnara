@@ -1,5 +1,5 @@
 import { stringify as stringifyJsonc } from "comment-json";
-import { writeFileAtomic } from "../lib/atomic-write";
+import { resolveLinkTarget, writeFileAtomic } from "../lib/atomic-write";
 import { ensureParentDir } from "../lib/fs-utils";
 import { readJsoncConfig, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import {
@@ -43,14 +43,15 @@ export class PiAdapter implements HarnessAdapter {
     async ensurePluginEntry(): Promise<PluginEntryResult> {
         const settingsPath = getPiUserExtensionsPath();
         try {
-            const settings = readPiSettingsForUpdate();
+            const file = resolveLinkTarget(settingsPath);
+            const settings = readJsoncConfigForUpdate(file) as PiSettingsLike;
             const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
             // A pinned entry is left as the user wrote it rather than replaced with the unversioned source.
             if (!packages.some(matchesPiPackageSource)) {
                 packages.push(PI_PACKAGE_SOURCE);
                 settings.packages = packages;
-                writePiSettings(settings);
+                writePiSettings(file, settings);
                 return {
                     ok: true,
                     action: "added",
@@ -89,15 +90,10 @@ function readPiSettings(): PiSettingsLike | null {
     return result.kind === "parsed" ? (result.value as PiSettingsLike) : null;
 }
 
-function readPiSettingsForUpdate(): PiSettingsLike {
-    return readJsoncConfigForUpdate(getPiUserExtensionsPath()) as PiSettingsLike;
-}
-
-function writePiSettings(settings: PiSettingsLike): void {
-    const settingsPath = getPiUserExtensionsPath();
-    ensureParentDir(settingsPath);
+function writePiSettings(file: string, settings: PiSettingsLike): void {
+    ensureParentDir(file);
     const text = stringifyJsonc(settings, null, 2);
-    writeFileAtomic(settingsPath, `${text}\n`);
+    writeFileAtomic(file, `${text}\n`);
 }
 
 // SETTINGS_BASENAME is exported for tests that need it.

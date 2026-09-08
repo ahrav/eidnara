@@ -132,11 +132,14 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString("fetch //opaque-private-token@example.test/v1")).toBe(
             "fetch //<REDACTED>@example.test/v1",
         );
-        expect(sanitizeString("d:/users/alice/project")).toBe("C:\\Users\\<USER>/project");
-        expect(sanitizeString("profile at d:/users/alice")).toBe("profile at C:\\Users\\<USER>");
+        expect(sanitizeString("d:/users/alice/project")).toBe("d:/Users/<USER>/project");
+        expect(sanitizeString("profile at d:/users/alice")).toBe("profile at d:/Users/<USER>");
         expect(sanitizeString("home /home/alice and /Users/alice end")).toBe(
             "home /home/<USER> and /Users/<USER> end",
         );
+        expect(
+            sanitizeString("C:\\Users\\John Doe\\AppData\\x and /Users/John Doe/Documents/x"),
+        ).toBe("C:\\Users\\<USER>\\AppData\\x and /Users/<USER>/Documents/x");
     });
 
     it("replaces the account name and home only at identifier boundaries", () => {
@@ -146,7 +149,7 @@ describe("sanitizeString home handling", () => {
             `${user}x kept, <USER> redacted, x${user} kept`,
         );
         expect(sanitizeString("/nonexistent/home2/x and /nonexistent/home/y")).toBe(
-            "/nonexistent/home2/x and <HOME>/y",
+            "/nonexistent/home2/x and ~/y",
         );
     });
 
@@ -378,7 +381,7 @@ describe("collectDiagnostics Pi path resolution", () => {
 
         expect(report.userConfig?.path).toBe(userJson);
         expect(report.userConfig?.exists).toBe(true);
-        expect(report.userConfig?.parseError).toContain("<HOME>/.config/eidnara/eidnara.json");
+        expect(report.userConfig?.parseError).toContain("~/.config/eidnara/eidnara.json");
         expect(report.userConfig?.parseError).not.toContain(home);
         expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
         expect(report.projectConfig.exists).toBe(false);

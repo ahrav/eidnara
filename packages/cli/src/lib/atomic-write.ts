@@ -39,7 +39,13 @@ export function writeFileAtomic(targetPath: string, data: string): void {
 
 const MAX_LINK_HOPS = 32;
 
-function resolveLinkTarget(path: string): string {
+/**
+ * A read-modify-write that reads through a symlink and then writes through it
+ * again resolves the link twice, and a link retargeted in between makes the
+ * write land on the new target with the old target's contents. Callers resolve
+ * once and use the result for both the read and the write.
+ */
+export function resolveLinkTarget(path: string): string {
     try {
         return realpathSync.native(path);
     } catch {
