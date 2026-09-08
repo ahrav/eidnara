@@ -626,7 +626,7 @@ describe("loadPluginConfigDetailed — substituted text never reaches diagnostic
         expect(JSON.stringify(result)).not.toContain("keypath-secret-that-must-not-leak");
     });
 
-    it("reports a parse failure from the raw text so a substituted value is not quoted", () => {
+    it("does not quote a substituted value in a parse failure", () => {
         const result = loadDetailedWithUserAndProjectConfig(
             '{ "language": {env:EIDNARA_TEST_PARSE_SECRET} }',
             "{}",
@@ -635,16 +635,8 @@ describe("loadPluginConfigDetailed — substituted text never reaches diagnostic
 
         expect(result.sources.userConfig).toBe("project-file-parse-error");
         const warnings = result.config.configWarnings?.join("\n") ?? "";
-        expect(warnings).toContain("failed to load config");
-        expect(warnings).toContain("{env:EIDNARA_TEST_PARSE_SECRET}");
+        expect(warnings).toContain("failed to load config: Invalid JSONC");
         expect(warnings).not.toContain("supersecret-value");
-    });
-
-    it("still names the user's own syntax error for a file without tokens", () => {
-        const result = loadDetailedWithUserConfig('{ "language": tr }');
-
-        expect(result.sources.userConfig).toBe("project-file-parse-error");
-        expect(result.config.configWarnings?.join("\n")).toContain("Unexpected token");
     });
 });
 

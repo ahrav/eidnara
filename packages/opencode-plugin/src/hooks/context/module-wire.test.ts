@@ -788,6 +788,37 @@ describe("resolveOrdinalsForModule message identity", () => {
             unregister();
         }
     });
+
+    it("treats an explicitly empty id as an identity, as the encoder and daemon do", async () => {
+        const sessionId = "module-wire-empty-id";
+        const unregister = setRawMessageProvider(sessionId, {
+            readMessages: () => [],
+            readMessageOrdinalPage: () => [],
+            getStoredMessageCount: () => 1,
+        });
+        try {
+            const resolved = await resolveOrdinalsForModule({
+                sessionId,
+                messages: [{ info: { id: "", role: "user", sessionID: sessionId }, parts: [] }],
+                memo: {
+                    generation: 1,
+                    memoGeneration: 1,
+                    entries: new Map([["", 1]]),
+                    anchor: { timeCreated: 1, id: "" },
+                    storedCount: 1,
+                    canonicalCount: 1,
+                },
+            });
+            expect(resolved.ok).toBe(true);
+            if (!resolved.ok) throw new Error(resolved.reason);
+            expect(encodeOpenCodeMessagesToCk(resolved.annotatedInput)[0]).toMatchObject({
+                mid: "",
+                ordinal: 1,
+            });
+        } finally {
+            unregister();
+        }
+    });
 });
 
 describe("resolveOrdinalsForModule stored-count races", () => {

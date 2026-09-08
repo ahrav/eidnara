@@ -4,6 +4,7 @@ export {
     type HostClientOptions,
     type HostDiagnosticsEvent,
     type HostDiagnosticsObserver,
+    isConnectTransient,
     isConsumerReconnectTransient,
     isRetryableRouteOpenCode,
 } from "./client";

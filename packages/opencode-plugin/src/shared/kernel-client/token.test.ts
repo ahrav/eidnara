@@ -54,5 +54,6 @@ describe("TokenCache", () => {
         const cache = new TokenCache();
         cache.rememberTokens("/a", [{ object_id: "o1", known_as_of: 12 }], 12);
         expect(cache.get("/a", "o1")?.known_as_of).toBe(12);
+        expect(cache.knownAsOfFor("/a")).toBe(12);
     });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { type ModuleGraph, reachableModules } from "./module-graph";
 
 const SRC = resolve(import.meta.dir, "..");
 
@@ -37,7 +38,6 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ["shared/opencode-config-dir-types.ts", "type-only"],
     ["shared/rpc-types.ts", "type-only"],
     ["shared/format-bytes.ts", "TUI (U4)"],
-    ["shared/format-threshold.ts", "TUI (U4)"],
     ["shared/kernel-client-testing/state-table.ts", "tool tests (U3)"],
     ["shared/prompt-surface-a1-golden.ts", "prompt-surface test (U4)"],
     ["shared/subagent-runner.ts", "sidekick (U3)"],
@@ -47,7 +47,6 @@ const AWAITING_CONSUMER = new Map<string, string>([
         "testing/module-graph-report.ts",
         "test infrastructure: run as a child process, never imported",
     ],
-    ["testing/module-graph.ts", "test infrastructure: imported only by the child process"],
 ]);
 
 describe("module graph over the landed tree", () => {
@@ -89,4 +88,33 @@ describe("module graph over the landed tree", () => {
             .sort();
         expect(orphans).toEqual([...AWAITING_CONSUMER.keys()].sort());
     }, 120_000);
+});
+const graph: ModuleGraph = {
+    inputs: ["src/a/forbidden.ts", "src/b/forbidden.ts", "src/c/allowed.ts"],
+    externals: ["@scope/forbidden-external", "@scope/allowed-external"],
+    text: "",
+};
+
+describe("reachableModules", () => {
+    test("returns every input and external matching the pattern", () => {
+        expect(reachableModules(graph, /forbidden/)).toEqual([
+            "src/a/forbidden.ts",
+            "src/b/forbidden.ts",
+            "@scope/forbidden-external",
+        ]);
+    });
+
+    test("returns an empty list when nothing matches", () => {
+        expect(reachableModules(graph, /never-present/)).toEqual([]);
+    });
+
+    // `RegExp.prototype.test` advances `lastIndex` on `g` and `y` patterns, so a
+    // silent under-count would make a reachable module look unreachable.
+    test("rejects a global pattern instead of under-counting", () => {
+        expect(() => reachableModules(graph, /forbidden/g)).toThrow(TypeError);
+    });
+
+    test("rejects a sticky pattern instead of under-counting", () => {
+        expect(() => reachableModules(graph, /forbidden/y)).toThrow(TypeError);
+    });
 });

@@ -18,6 +18,7 @@ import { access } from "node:fs/promises";
 import {
     type ConnectionDiagnosticEvent,
     ConnectionGeneration,
+    type ConnectionGenerationOptions,
     type JsonReceiveBody,
     type PendingRequest,
     type RequestTerminal,
@@ -30,7 +31,7 @@ import {
     readConnectionFile,
 } from "./connection-file";
 import { credentialFingerprints } from "./credential-fingerprint";
-import { armExpiryTimer, Deadline, type MonotonicClock } from "./deadline";
+import { armExpiryTimer, Deadline, defaultMonotonicClock, type MonotonicClock } from "./deadline";
 import {
     DAEMON_GENERATION_CHANGED_CODE,
     HostCallError,
@@ -60,7 +61,7 @@ import type {
     RequestOptions,
     RouteTarget,
 } from "./types";
-import { sameDaemonId } from "./types";
+import { AdmissionClass, sameDaemonId } from "./types";
 
 /** Preserves the repo's current 2-second TypeScript handshake budget. */
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 2_000;
@@ -107,6 +108,12 @@ export interface HostDiagnosticsEvent {
 export type HostDiagnosticsObserver = (event: HostDiagnosticsEvent) => void;
 
 /**
+ * Channel-0 control operations take the same daemon fence as routed requests: `host.shutdown` stops whichever host
+ * the client is connected to, and reconnect after retirement can bind a successor incarnation the caller never validated.
+ */
+export type ControlCallOptions = Pick<RequestOptions, "timeoutMs" | "expectedDaemonId">;
+
+/**
  * `ConnectOptions` defines consumer-facing construction options; remaining options bound policy or inject dependencies.
  */
 export interface HostClientOptions extends ConnectOptions {
@@ -127,6 +134,8 @@ export interface HostClientOptions extends ConnectOptions {
      */
     diagnostics?: HostDiagnosticsObserver;
     maxDiagnosticEventsPerSecond?: number;
+    /** @internal Test-only complete-frame channel seam forwarded to every `ConnectionGeneration`. */
+    channelFactory?: ConnectionGenerationOptions["channelFactory"];
 }
 
 interface ActiveConnection {
@@ -135,11 +144,22 @@ interface ActiveConnection {
     readonly token: object;
     readonly snapshot: ConnectionSnapshot;
     readonly liveRoutes: Map<number, RouteHandle>;
+    /**
+     * `earlyRouteGoodbyes` records route Goodbyes received after `route.open` responds but before its caller installs
+     * the route handle; one drain can deliver both frames before the opener's continuation runs.
+     */
+    readonly earlyRouteGoodbyes: Map<number, number>;
 }
 
 interface CachedManagedRoute {
     readonly target: Extract<RouteTarget, { kind: ManagedRouteKind }>;
-    identity: BindIdentity;
+    /**
+     * Every `route.open` derives `credential_fingerprints` from this caller-supplied identity under the current connection key.
+     * Deriving from a previous derivation would carry a fingerprint the current credential row no longer produces.
+     */
+    readonly identity: BindIdentity;
+    /** The identity the `route.open` that produced `handle` carried; null until a route is bound. */
+    boundIdentity: BindIdentity | null;
     readonly consumerIdentity: ConsumerIdentity | undefined;
     handle: RouteHandle | null;
     opening: SetupFlight<RouteHandle> | null;
@@ -152,7 +172,7 @@ interface CachedManagedRoute {
 /**
  * `SetupFlight` shares a connect or managed route open and records explicit replacement eligibility.
  * `SetupFlight`'s creator awaits `promise` directly; each joiner races it against its own stage deadline.
- * `replaceable` becomes true only at owner-budget-exhaustion exits, so a surviving joiner may coalesce one replacement; permanent failures and close outcomes leave it false.
+ * `replaceable` becomes true only at owner-budget-exhaustion exits and at an owner's daemon-fence rejection, so a surviving joiner may coalesce one replacement; permanent failures and close outcomes leave it false.
  */
 interface SetupFlight<T> {
     promise: Promise<T>;
@@ -193,12 +213,69 @@ function connectionStageError(): SocketTimeoutError {
     );
 }
 
+/**
+ * `settleWithinDeadline` returns once `flight` settles or `deadline` passes, whichever is first, and discards the
+ * flight's outcome: teardown only needs to know that setup is no longer running.
+ */
+async function settleWithinDeadline(flight: Promise<unknown>, deadline: Deadline): Promise<void> {
+    let cancelWait: (() => void) | undefined;
+    const wait = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, deadline.remainingMs());
+        cancelWait = () => {
+            clearTimeout(timer);
+            resolve();
+        };
+    });
+    try {
+        await Promise.race([
+            flight.then(
+                () => undefined,
+                () => undefined,
+            ),
+            wait,
+        ]);
+    } finally {
+        cancelWait?.();
+    }
+}
+
 function routeStageError(): HostCallError {
     return new HostCallError(
         "not_sent",
         "route.open deadline expired before a route was opened",
         "deadline_expired",
     );
+}
+
+function routeAbortError(): HostCallError {
+    const error = new HostCallError(
+        "not_sent",
+        "request aborted before a route was opened",
+        "aborted",
+    );
+    error.cleanup = Promise.resolve();
+    return error;
+}
+
+/** `raceAgainstAbort` rejects for an aborted caller without cancelling the shared `flight`. */
+async function raceAgainstAbort<T>(
+    flight: Promise<T>,
+    signal: AbortSignal | undefined,
+): Promise<T> {
+    if (!signal) return flight;
+    if (signal.aborted) throw routeAbortError();
+    let onAbort: (() => void) | undefined;
+    try {
+        return await Promise.race([
+            flight,
+            new Promise<never>((_resolve, reject) => {
+                onAbort = () => reject(routeAbortError());
+                signal.addEventListener("abort", onAbort, { once: true });
+            }),
+        ]);
+    } finally {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
 }
 
 /**
@@ -257,15 +334,25 @@ function causeMessage(cause: unknown): string {
     return `: ${cause instanceof Error ? cause.message : String(cause)}`;
 }
 
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+    return (
+        typeof value === "object" &&
+        value !== null &&
+        typeof (value as { then?: unknown }).then === "function"
+    );
+}
+
 /**
  * These `route.open` rejection codes indicate transient target unavailability, so a later `route.open` may succeed.
+ * `route_gone` is the client's own classification of a route the host closed before its opener resumed.
  */
 export function isRetryableRouteOpenCode(code: string | undefined): boolean {
     return (
         code === "unknown_module" ||
         code === "module_reloading" ||
         code === "target_unavailable" ||
-        code === "module_timeout"
+        code === "module_timeout" ||
+        code === "route_gone"
     );
 }
 
@@ -306,6 +393,18 @@ export function isConsumerReconnectTransient(err: unknown): boolean {
 }
 
 /**
+ * The connect-time superset of `isConsumerReconnectTransient`: a
+ * `ConnectionFileError` is transient only with code `deadline_expired`; every
+ * other connection-file code is terminal. Recognition works cross-bundle by
+ * error `name`.
+ */
+export function isConnectTransient(err: unknown): boolean {
+    if (isConsumerReconnectTransient(err)) return true;
+    const name = err instanceof Error ? err.name : undefined;
+    return name === "ConnectionFileError" && errorCode(err) === "deadline_expired";
+}
+
+/**
  * The consumer-facing client: connect, route open, raw request, managed
  * call, catalog, and bounded close over one active connection generation.
  */
@@ -318,16 +417,15 @@ export class HostClient {
     private readonly defaultIdentity: BindIdentity | undefined;
     private readonly defaultTargetKind: ManagedRouteKind;
     private readonly credentialSource: Record<string, string | undefined> | undefined;
-    private readonly clock: MonotonicClock | undefined;
+    private readonly clock: MonotonicClock;
     private readonly sleep: (ms: number) => Promise<void>;
     private readonly connectionFileAfterOpen: (() => void | Promise<void>) | undefined;
     private readonly diagnostics: HostDiagnosticsObserver | undefined;
     private readonly maxDiagnosticEventsPerSecond: number;
+    private readonly channelFactory: ConnectionGenerationOptions["channelFactory"];
 
     private active: ActiveConnection | null = null;
     private connecting: SetupFlight<ActiveConnection> | null = null;
-    /** Route handles opened by the managed-route cache. */
-    private readonly managedHandles = new WeakSet<RouteHandle>();
     private readonly routes = new Map<string, CachedManagedRoute>();
     /** Owner close bounds draining in-flight `route.open` attempts. */
     private readonly pendingRouteOpens = new Set<Promise<void>>();
@@ -346,13 +444,14 @@ export class HostClient {
         this.defaultIdentity = options.identity;
         this.defaultTargetKind = options.targetKind ?? DEFAULT_MANAGED_TARGET_KIND;
         this.credentialSource = options.credentialSource;
-        this.clock = options.clock;
+        this.clock = options.clock ?? defaultMonotonicClock;
         this.sleep =
             options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
         this.connectionFileAfterOpen = options.connectionFileAfterOpen;
         this.diagnostics = options.diagnostics;
         this.maxDiagnosticEventsPerSecond =
             options.maxDiagnosticEventsPerSecond ?? DEFAULT_MAX_DIAGNOSTIC_EVENTS_PER_SECOND;
+        this.channelFactory = options.channelFactory;
     }
 
     /**
@@ -400,21 +499,30 @@ export class HostClient {
         return this.closeStarted;
     }
 
+    /** @internal Test-only seam; slots with no live handle and no in-flight open must not be counted here. */
+    get cachedManagedRouteCount(): number {
+        return this.routes.size;
+    }
+
     /**
      * routeOpen makes one attempt under one bounded deadline and returns a connection-bound immutable handle.
      * Retry policy belongs to callers; managed call() owns an allowlisted retry loop.
+     * `credentialSource` fixes the environment used to derive credential fingerprints; absent, the
+     * client's own source is read at bind time.
      */
     async routeOpen(
         target: RouteTarget,
         identity: BindIdentity,
-        options: Pick<RequestOptions, "expectedDaemonId"> = {},
+        options: Pick<RequestOptions, "expectedDaemonId"> & {
+            credentialSource?: Record<string, string | undefined>;
+        } = {},
     ): Promise<RouteHandle> {
         const deadline = Deadline.start(this.routeOpenDeadlineMs, this.clock);
         const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         return this.controlRouteOpen(
             active,
             target,
-            this.identityForConnection(active, identity),
+            this.identityForConnection(active, identity, options.credentialSource),
             this.envConsumerIdentity(),
             deadline,
         );
@@ -555,7 +663,7 @@ export class HostClient {
     }
 
     /* */
-    async catalogList(options: { timeoutMs?: number } = {}): Promise<CatalogEntry[]> {
+    async catalogList(options: ControlCallOptions = {}): Promise<CatalogEntry[]> {
         return (await this.catalogSnapshot(options)).modules;
     }
 
@@ -569,11 +677,17 @@ export class HostClient {
      *
      * timeoutMs overrides the client-wide request timeout so callers can spend only their remaining aggregate-deadline budget.
      */
-    async catalogSnapshot(options: { timeoutMs?: number } = {}): Promise<CatalogSnapshot> {
+    async catalogSnapshot(options: ControlCallOptions = {}): Promise<CatalogSnapshot> {
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
-        const active = await this.ensureConnection(deadline);
+        const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         const bodyText = JSON.stringify({ op: "catalog.list" });
-        const parsed = await this.controlRequest(active, bodyText, "catalog.list", deadline);
+        const parsed = await this.controlRequest(
+            active,
+            bodyText,
+            "catalog.list",
+            deadline,
+            options,
+        );
         return parseCatalogResponse(parsed);
     }
 
@@ -583,19 +697,25 @@ export class HostClient {
      * `close()` and `closeAsync()` never call `host.shutdown`; they only tear down the connection.
      * `close()` and `closeAsync()` perform connection teardown only.
      */
-    async hostShutdown(options: { timeoutMs?: number } = {}): Promise<void> {
+    async hostShutdown(options: ControlCallOptions = {}): Promise<void> {
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
-        const active = await this.ensureConnection(deadline);
+        const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         const bodyText = JSON.stringify({ op: "host.shutdown" });
-        await this.controlRequest(active, bodyText, "host.shutdown", deadline);
+        await this.controlRequest(active, bodyText, "host.shutdown", deadline, options);
     }
 
     /** The readiness operation reads host-owned component readiness without opening a routed module. */
-    async hostStatus(options: { timeoutMs?: number } = {}): Promise<HostStatusSnapshot> {
+    async hostStatus(options: ControlCallOptions = {}): Promise<HostStatusSnapshot> {
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
-        const active = await this.ensureConnection(deadline);
+        const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         const bodyText = JSON.stringify({ op: "host.status" });
-        const parsed = await this.controlRequest(active, bodyText, "host.status", deadline);
+        const parsed = await this.controlRequest(
+            active,
+            bodyText,
+            "host.status",
+            deadline,
+            options,
+        );
         return parseHostStatusResponse(parsed);
     }
 
@@ -733,12 +853,14 @@ export class HostClient {
             // configured; the generation's hook check short-circuits on
             // undefined.
             onDiagnostic: this.diagnostics ? (event) => this.emitDiagnostics(event) : undefined,
+            channelFactory: this.channelFactory,
         });
         conn = {
             generation,
             token: newConnectionToken(),
             snapshot,
             liveRoutes: new Map(),
+            earlyRouteGoodbyes: new Map(),
         };
         try {
             await generation.start(stage);
@@ -762,8 +884,8 @@ export class HostClient {
     private onGenerationRetired(conn: ActiveConnection, info: RetirementInfo): void {
         if (this.active === conn) {
             this.active = null;
-            for (const cached of this.routes.values()) {
-                cached.handle = null;
+            for (const [key, cached] of this.routes) {
+                this.releaseSlot(key, cached);
             }
         }
         this.emitDiagnostics({ type: "retired", reason: info.reason });
@@ -772,7 +894,12 @@ export class HostClient {
     private onRouteGoodbye(conn: ActiveConnection, channel: number, epoch: number): void {
         if (this.active !== conn) return;
         const handle = conn.liveRoutes.get(channel);
-        if (!handle || handle.epoch !== epoch) return;
+        if (!handle || handle.epoch !== epoch) {
+            // Store an unmatched Goodbye only while a route open is pending so its opener can observe it; otherwise
+            // ignore it.
+            if (this.pendingRouteOpens.size > 0) conn.earlyRouteGoodbyes.set(channel, epoch);
+            return;
+        }
         conn.liveRoutes.delete(channel);
         this.detachCachedHandle(handle);
     }
@@ -831,11 +958,22 @@ export class HostClient {
         const detached: [string, CachedManagedRoute][] = [];
         for (const [key, cached] of this.routes) {
             if (cached.handle === handle) {
-                cached.handle = null;
+                this.releaseSlot(key, cached);
                 detached.push([key, cached]);
             }
         }
         return detached;
+    }
+
+    /**
+     * A slot with neither a live handle nor an in-flight open has nothing left to serve, so it leaves the cache;
+     * otherwise per-session identities would accumulate one dead slot per retirement for the client's lifetime.
+     * A slot with an in-flight open stays because that open still installs into it and callers compare against it.
+     */
+    private releaseSlot(key: string, cached: CachedManagedRoute): void {
+        cached.handle = null;
+        cached.boundIdentity = null;
+        if (cached.opening === null && this.routes.get(key) === cached) this.routes.delete(key);
     }
 
     private emitConnected(conn: ActiveConnection): void {
@@ -862,7 +1000,27 @@ export class HostClient {
     ): Promise<RequestTerminal> {
         // The daemon-binding gate runs before `generation.request` sends any bytes.
         this.assertExpectedDaemon(generation, params.options.expectedDaemonId);
+        if (params.options.admissionClass === AdmissionClass.Sheddable) {
+            // Wire doc 6.2 permits Sheddable only on Push and StreamData. Reject before encoding so the error
+            // reports `not_sent`.
+            throw new HostCallError(
+                "not_sent",
+                "Sheddable admission is illegal on Request frames",
+                "invalid_admission_class",
+            );
+        }
         const signal = params.options.signal;
+        // An already-aborted signal rejects before admission because `generation.request` synchronously publishes
+        // the body; aborting afterward yields `outcome_unknown`.
+        if (signal?.aborted) {
+            const aborted = new HostCallError(
+                "not_sent",
+                "request aborted before admission",
+                "aborted",
+            );
+            aborted.cleanup = Promise.resolve();
+            throw aborted;
+        }
         const pending: PendingRequest = generation.request({
             channel: params.channel,
             epoch: params.epoch,
@@ -881,8 +1039,7 @@ export class HostClient {
         const onAbort = (): void => {
             cleanup = pending.abort().cleanup;
         };
-        if (signal?.aborted) onAbort();
-        else signal?.addEventListener("abort", onAbort, { once: true });
+        signal?.addEventListener("abort", onAbort, { once: true });
         try {
             const terminal = await pending.result;
             if (terminal.kind === "error") {
@@ -910,6 +1067,7 @@ export class HostClient {
         bodyText: string,
         expectedOp: string,
         deadline: Deadline,
+        options: Pick<RequestOptions, "expectedDaemonId"> = {},
     ): Promise<Record<string, unknown>> {
         const body = Buffer.from(bodyText, "utf8");
         if (body.length > MAX_CONTROL_BODY_LEN) {
@@ -924,7 +1082,7 @@ export class HostClient {
             epoch: 0,
             body,
             deadline,
-            options: {},
+            options,
         });
         const responseBody = requireJsonReceiveBody(terminal.body);
         const parsed = responseBody.valid ? responseBody.value : undefined;
@@ -967,6 +1125,8 @@ export class HostClient {
         this.pendingRouteOpens.add(tracked);
         void tracked.finally(() => {
             this.pendingRouteOpens.delete(tracked);
+            // With no opener left to consume them, the recorded Goodbyes are ordinary no-ops.
+            if (this.pendingRouteOpens.size === 0) active.earlyRouteGoodbyes.clear();
         });
         return run;
     }
@@ -1000,11 +1160,35 @@ export class HostClient {
             }
             handle = createRouteHandle(channel, epoch, active.token);
         } catch (error) {
-            throw new HostCallError(
+            // The host may have bound a route the client cannot name, so it cannot send route Goodbye for it. Retiring
+            // the generation obliges the host to settle every route on it instead of stranding the binding.
+            const malformed = new HostCallError(
                 "terminal",
                 `route.open returned a malformed route handle${causeMessage(error)}`,
                 "malformed_control_response",
                 error,
+            );
+            active.generation.retire("protocol_violation", malformed);
+            throw malformed;
+        }
+        if (active.liveRoutes.has(handle.channel)) {
+            // Wire doc 9.4 requires route cleanup before channel reuse; installing the duplicate would strand the
+            // prior route without a Goodbye.
+            const duplicate = new HostCallError(
+                "terminal",
+                `route.open returned channel ${handle.channel}, which is already live on this connection`,
+                "malformed_control_response",
+            );
+            active.generation.retire("protocol_violation", duplicate);
+            throw duplicate;
+        }
+        if (active.earlyRouteGoodbyes.get(handle.channel) === handle.epoch) {
+            // The host closed this route before its opener resumed; the Goodbye already settled it host-side.
+            active.earlyRouteGoodbyes.delete(handle.channel);
+            throw new HostCallError(
+                "terminal",
+                "host closed the route before route.open completed",
+                "route_gone",
             );
         }
         if (this.closeStarted) {
@@ -1052,12 +1236,15 @@ export class HostClient {
         // One immutable route-open stage per caller is derived once and kept through every join and replacement decision.
         const stage = deadline.stage(this.routeOpenDeadlineMs);
         const pace = makeReplacementPacer(stage, this.sleep);
+        const signal = options.signal;
         for (;;) {
+            if (signal?.aborted) throw routeAbortError();
             let cached = this.routes.get(key);
             if (!cached) {
                 cached = {
                     target,
                     identity,
+                    boundIdentity: null,
                     consumerIdentity,
                     handle: null,
                     opening: null,
@@ -1066,21 +1253,16 @@ export class HostClient {
                 this.routes.set(key, cached);
             }
             // Only the active generation serves cached managed handles.
-            if (cached.handle && this.isPrimaryLiveHandle(cached.handle)) {
-                const active = this.active;
-                // Without a live connection, the identity cannot be refreshed, so the cached handle remains authoritative for its channel.
-                if (active === null) return cached.handle;
-                const currentIdentity = this.identityForConnection(active, baseIdentity);
-                if (
-                    JSON.stringify(currentIdentity.credential_fingerprints ?? {}) ===
-                    JSON.stringify(cached.identity.credential_fingerprints ?? {})
-                ) {
+            const active = cached.handle ? this.connectionFor(cached.handle) : null;
+            if (cached.handle && active) {
+                const currentIdentity = this.identityForConnection(active, identity);
+                if (sameCredentialFingerprints(currentIdentity, cached.boundIdentity)) {
                     return cached.handle;
                 }
                 active.liveRoutes.delete(cached.handle.channel);
                 active.generation.enqueueRouteGoodbye(cached.handle.channel, cached.handle.epoch);
                 cached.handle = null;
-                cached.identity = currentIdentity;
+                cached.boundIdentity = null;
             }
             let flight = cached.opening;
             let owner = false;
@@ -1090,17 +1272,23 @@ export class HostClient {
                 flight = makeSetupFlight(
                     (f) => this.openCachedRoute(slot, stage, f, options.expectedDaemonId),
                     (f) => {
-                        if (slot.opening === f) slot.opening = null;
+                        if (slot.opening !== f) return;
+                        slot.opening = null;
+                        if (slot.handle === null) this.releaseSlot(key, slot);
                     },
                 );
                 cached.opening = flight;
             }
             let handle: RouteHandle;
             try {
-                // The owner awaits directly; a joiner races its own stage.
+                // The owner awaits directly; a joiner races its own stage. Either detaches when its signal aborts.
                 handle = owner
-                    ? await flight.promise
-                    : await raceAgainstStage(flight.promise, stage, routeStageError);
+                    ? await raceAgainstAbort(flight.promise, signal)
+                    : await raceAgainstStage(
+                          raceAgainstAbort(flight.promise, signal),
+                          stage,
+                          routeStageError,
+                      );
             } catch (error) {
                 if (owner || !flight.replaceable || stage.isExpired() || this.closeStarted) {
                     throw error;
@@ -1160,13 +1348,15 @@ export class HostClient {
             try {
                 active = await this.ensureConnection(deadline, expectedDaemonId);
             } catch (error) {
-                if (error instanceof HostCallError) throw error;
+                if (error instanceof HostCallError) {
+                    // The fence rejects only this owner's `expectedDaemonId`, so joiners may replace the flight.
+                    if (error.code === DAEMON_GENERATION_CHANGED_CODE) flight.replaceable = true;
+                    throw error;
+                }
                 // A stage-expired snapshot reconnects under the clamped handshake budget; other `ConnectionFileError`s are terminal.
                 // A snapshot that outlives its stage uses the clamped handshake budget, not the route budget, and reconnects as a transient setup failure.
                 // Every other connection-file failure is terminal.
-                const transient =
-                    isConsumerReconnectTransient(error) ||
-                    (error instanceof ConnectionFileError && error.code === "deadline_expired");
+                const transient = isConnectTransient(error);
                 if (transient && !this.closeStarted) {
                     if (await backoff()) continue;
                     // Transient reconnects continue until the owner's budget expires or a connection succeeds.
@@ -1180,12 +1370,12 @@ export class HostClient {
                 );
             }
             if (cached.handle && this.isPrimaryLiveHandle(cached.handle)) return cached.handle;
-            cached.identity = this.identityForConnection(active, cached.identity);
+            const boundIdentity = this.identityForConnection(active, cached.identity);
             try {
                 const handle = await this.controlRouteOpen(
                     active,
                     cached.target,
-                    cached.identity,
+                    boundIdentity,
                     cached.consumerIdentity,
                     deadline,
                 );
@@ -1199,7 +1389,7 @@ export class HostClient {
                     );
                 }
                 cached.handle = handle;
-                this.managedHandles.add(handle);
+                cached.boundIdentity = boundIdentity;
                 return handle;
             } catch (error) {
                 if (!isHostCallError(error)) {
@@ -1242,33 +1432,23 @@ export class HostClient {
 
     private async runClose(): Promise<void> {
         const deadline = Deadline.start(this.shutdownDeadlineMs, this.clock);
+        // Both waits are bounded by the shutdown deadline, not by the handshake or route-open budgets they observe.
         if (this.connecting) {
-            try {
-                await this.connecting.promise;
-            } catch {
-                // A failed connect has nothing to tear down.
-            }
+            await settleWithinDeadline(this.connecting.promise, deadline);
         }
         if (this.pendingRouteOpens.size > 0) {
-            let cancelWait: (() => void) | undefined;
-            const wait = new Promise<void>((resolve) => {
-                const timer = setTimeout(resolve, Math.max(0, deadline.remainingMs()));
-                cancelWait = () => {
-                    clearTimeout(timer);
-                    resolve();
-                };
-            });
-            try {
-                await Promise.race([Promise.all([...this.pendingRouteOpens]), wait]);
-            } finally {
-                cancelWait?.();
-            }
+            await settleWithinDeadline(Promise.all([...this.pendingRouteOpens]), deadline);
         }
         const conns =
             this.active !== null && !this.active.generation.isRetired() ? [this.active] : [];
-        for (const conn of conns) conn.generation.enqueueConnectionGoodbye();
-        await Promise.all(conns.map((conn) => conn.generation.flushWrites(deadline)));
-        for (const conn of conns) conn.generation.retire("owner_close");
+        try {
+            for (const conn of conns) conn.generation.enqueueConnectionGoodbye();
+            await Promise.all(conns.map((conn) => conn.generation.flushWrites(deadline)));
+        } catch {
+            // Goodbye is best-effort; an unsent Goodbye must not leave the generation live after close.
+        } finally {
+            for (const conn of conns) conn.generation.retire("owner_close");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1277,15 +1457,19 @@ export class HostClient {
     private emitDiagnostics(event: Omit<HostDiagnosticsEvent, "atMs">): void {
         const observer = this.diagnostics;
         if (!observer) return;
-        const now = Date.now();
-        if (now - this.diagWindowStartMs >= 1_000) {
-            this.diagWindowStartMs = now;
+        // The window rolls on the monotonic clock: a backward wall-clock step would otherwise leave the elapsed
+        // value negative and latch the limiter shut until wall time passed the frozen window start.
+        const monotonicMs = this.clock();
+        if (!(monotonicMs - this.diagWindowStartMs < 1_000)) {
+            this.diagWindowStartMs = monotonicMs;
             this.diagWindowCount = 0;
         }
         this.diagWindowCount += 1;
         if (this.diagWindowCount > this.maxDiagnosticEventsPerSecond) return;
         try {
-            observer(Object.freeze({ ...event, atMs: now }));
+            // A void-typed observer may still be an `async` function; its rejection is swallowed too.
+            const result: unknown = observer(Object.freeze({ ...event, atMs: Date.now() }));
+            if (isThenable(result)) result.then(undefined, () => {});
         } catch {
             // Observer exceptions must never affect protocol work.
         }
@@ -1298,9 +1482,17 @@ export class HostClient {
         return { module_id: moduleId, launch_nonce: launchNonce };
     }
 
-    private identityForConnection(active: ActiveConnection, identity: BindIdentity): BindIdentity {
+    /**
+     * Managed harnesses derive `credential_fingerprints` solely from `active.snapshot.key`; the host rejects values
+     * retained from a prior key, so an empty derivation removes a caller-supplied claim instead of forwarding it.
+     */
+    private identityForConnection(
+        active: ActiveConnection,
+        identity: BindIdentity,
+        credentialSource: Record<string, string | undefined> | undefined = this.credentialSource,
+    ): BindIdentity {
         if (
-            this.credentialSource === undefined ||
+            credentialSource === undefined ||
             (identity.harness !== "opencode" && identity.harness !== "pi")
         ) {
             return identity;
@@ -1308,11 +1500,12 @@ export class HostClient {
         const fingerprints = credentialFingerprints(
             active.snapshot.key,
             identity.harness,
-            this.credentialSource,
+            credentialSource,
         );
+        const { credential_fingerprints: _supplied, ...base } = identity;
         return Object.keys(fingerprints).length === 0
-            ? identity
-            : { ...identity, credential_fingerprints: fingerprints };
+            ? base
+            : { ...base, credential_fingerprints: fingerprints };
     }
 }
 
@@ -1381,7 +1574,7 @@ function requireJsonReceiveBody(body: RequestTerminal["body"]): JsonReceiveBody 
     return body;
 }
 
-/* */
+/** `code` drives retry policy, so it is read only from a canonical body; unknown members are ignored. */
 function terminalFromErrorBody(body: JsonReceiveBody): HostCallError {
     if (typeof body.value === "object" && body.value !== null && !Array.isArray(body.value)) {
         const parsed = body.value as {
@@ -1389,19 +1582,30 @@ function terminalFromErrorBody(body: JsonReceiveBody): HostCallError {
             message?: unknown;
             retry_after_ms?: unknown;
         };
-        const code = typeof parsed.code === "string" ? parsed.code : undefined;
-        const message = typeof parsed.message === "string" ? parsed.message : undefined;
-        const error = new HostCallError("terminal", message ?? "daemon error", code);
-        if (
-            typeof parsed.retry_after_ms === "number" &&
-            Number.isSafeInteger(parsed.retry_after_ms) &&
-            parsed.retry_after_ms >= 0
-        ) {
-            error.retry_after_ms = parsed.retry_after_ms;
+        const retryAfterMs = parsed.retry_after_ms;
+        const canonical =
+            typeof parsed.code === "string" &&
+            typeof parsed.message === "string" &&
+            (retryAfterMs === undefined ||
+                (typeof retryAfterMs === "number" &&
+                    Number.isSafeInteger(retryAfterMs) &&
+                    retryAfterMs >= 0));
+        if (canonical) {
+            const error = new HostCallError(
+                "terminal",
+                parsed.message as string,
+                parsed.code as string,
+            );
+            if (retryAfterMs !== undefined) error.retry_after_ms = retryAfterMs as number;
+            return error;
         }
-        return error;
+        return new HostCallError(
+            "terminal",
+            "daemon error body was not a canonical ErrorBody",
+            "malformed_error_body",
+        );
     }
-    return new HostCallError("terminal", body.text || "daemon error");
+    return new HostCallError("terminal", body.text || "daemon error", "malformed_error_body");
 }
 
 function parseResponseJson<Response = JsonValue>(terminal: RequestTerminal): Response {
@@ -1419,6 +1623,15 @@ const MAX_CATALOG_OPS = 32;
 const MAX_CATALOG_ROLES = 32;
 const MAX_CATALOG_STRING_LEN = 128;
 const OP_NAME_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
+/** Wire doc 7.3 and 7.7: the direct profile advertises exactly these channel-0 operations. */
+const PROTOCOL_HOST_OPS: readonly string[] = [
+    "route.open",
+    "catalog.list",
+    "host.shutdown",
+    "host.status",
+];
+/** Wire doc 7.3: an unfiltered `catalog.list` returns exactly these modules in this order. */
+const PROTOCOL_MODULE_IDS: readonly string[] = ["context", "synapse", "broca"];
 
 function malformedCatalog(detail: string): HostCallError {
     return new HostCallError(
@@ -1470,6 +1683,15 @@ function parseHostStatusResponse(parsed: Record<string, unknown>): HostStatusSna
             "malformed_control_response",
         );
     }
+    // Wire doc 7.6 requires `metrics.components` to be an object.
+    const components = (parsed.metrics as Record<string, unknown>).components;
+    if (components === null || typeof components !== "object" || Array.isArray(components)) {
+        throw new HostCallError(
+            "terminal",
+            "host.status response rejected: metrics.components is not an object",
+            "malformed_control_response",
+        );
+    }
     const sharedMemory = parsed.shared_memory;
     if (
         sharedMemory !== undefined &&
@@ -1490,9 +1712,15 @@ function parseHostStatusResponse(parsed: Record<string, unknown>): HostStatusSna
     };
 }
 
+function sameStringList(actual: readonly string[], expected: readonly string[]): boolean {
+    return actual.length === expected.length && actual.every((entry, i) => entry === expected[i]);
+}
+
 /**
  * The decoder treats `catalog.list` as an open-shape control response: it ignores unknown fields but rejects missing, ill-typed, or out-of-bounds required fields.
  * The decoder rejects responses whose required exposed fields are absent, ill-typed, or out of bounds.
+ * Treat `host_ops` and the module list as closed-shape: values differing from the protocol's fixed lists make the
+ * daemon incompatible, not less capable.
  */
 function parseCatalogResponse(parsed: Record<string, unknown>): CatalogSnapshot {
     const generation = parsed.generation;
@@ -1500,6 +1728,9 @@ function parseCatalogResponse(parsed: Record<string, unknown>): CatalogSnapshot 
         throw malformedCatalog("generation is not a nonnegative integer");
     }
     const hostOps = requireOpArray(parsed.host_ops, "host_ops", false);
+    if (!sameStringList(hostOps, PROTOCOL_HOST_OPS)) {
+        throw malformedCatalog(`host_ops must be exactly ${PROTOCOL_HOST_OPS.join(", ")}`);
+    }
     const rawModules = parsed.modules;
     if (!Array.isArray(rawModules)) throw malformedCatalog("modules is not an array");
     if (rawModules.length > MAX_CATALOG_MODULES) {
@@ -1541,6 +1772,16 @@ function parseCatalogResponse(parsed: Record<string, unknown>): CatalogSnapshot 
             control_ops: controlOps,
         };
     });
+    if (
+        !sameStringList(
+            modules.map((module) => module.module_id),
+            PROTOCOL_MODULE_IDS,
+        )
+    ) {
+        throw malformedCatalog(
+            `modules must be exactly ${PROTOCOL_MODULE_IDS.join(", ")} in that order`,
+        );
+    }
     return { generation, hostOps, modules };
 }
 
@@ -1562,18 +1803,34 @@ function toManagedCallError(error: unknown): HostCallError {
     );
 }
 
+function credentialFingerprintKey(identity: BindIdentity): string {
+    return JSON.stringify(
+        Object.entries(identity.credential_fingerprints ?? {})
+            // Sort with UTF-16 code-unit comparison so the key does not depend on runtime collation.
+            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+    );
+}
+
+/** A route bound with no identity never matches, so the caller reopens it. */
+function sameCredentialFingerprints(current: BindIdentity, bound: BindIdentity | null): boolean {
+    return bound !== null && credentialFingerprintKey(current) === credentialFingerprintKey(bound);
+}
+
+/**
+ * The key is a JSON array so a delimiter byte inside one component can never make two distinct bindings share a slot.
+ */
 function routeCacheKey(
     target: Extract<RouteTarget, { kind: ManagedRouteKind }>,
     identity: BindIdentity,
     consumerIdentity: ConsumerIdentity | undefined,
 ): string {
-    const consumerPart = consumerIdentity
-        ? `${consumerIdentity.module_id}\0${consumerIdentity.launch_nonce}`
-        : "";
-    const credentialPart = Object.entries(identity.credential_fingerprints ?? {})
-        // Sort with UTF-16 code-unit comparison so the key does not depend on runtime collation.
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([provider, fingerprint]) => `${provider}:${fingerprint}`)
-        .join(",");
-    return `${target.kind}\0${target.module_id}\0${identity.project_root}\0${identity.harness}\0${identity.session}\0${credentialPart}\0${consumerPart}`;
+    return JSON.stringify([
+        target.kind,
+        target.module_id,
+        identity.project_root,
+        identity.harness,
+        identity.session,
+        credentialFingerprintKey(identity),
+        consumerIdentity ? [consumerIdentity.module_id, consumerIdentity.launch_nonce] : null,
+    ]);
 }

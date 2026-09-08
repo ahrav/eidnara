@@ -3,17 +3,22 @@
  * the `KernelTransport` surface so consumers are tested against the same
  * client they ship with. It keeps the semantics the client relies on:
  * `known_as_of` tokens, the three conflict reasons, replay by operation key,
- * supersession chains, and per-surface visibility: a `labeled` row serves only
+ * supersession chains, admission classes derived from `source_kind` and
+ * lowered by the asserted classes, the envelope limits, and per-surface
+ * visibility: a `labeled` row serves only
  * on `explicit_search`, `sensitive` rows hide from the automatic surfaces, and
  * `secret` rows hide everywhere. Rows carry the project root they were written
  * under and serve only to that project. Scripted surface and commit states
  * override the row-backed replies.
  */
 
+import { HostCallError } from "../host-client";
 import {
     type KernelMemorySnapshot,
     type KernelTransport,
     type KernelTransportCall,
+    MAX_COMMIT_OPERATIONS,
+    MAX_COMMIT_TOKENS,
     type MemoryState,
     parseReadResponse,
     type Surface,
@@ -82,19 +87,104 @@ function conflict(reason: string): unknown {
     return { state: { kind: "conflict", reason } };
 }
 
+/** Thrown rather than returned: the daemon answers this code as an error frame with no kernel `state`, which the client maps to `invalid:invalid_input`. commentlint: allow(JUDGE) */
+function invalidParams(message: string): HostCallError {
+    return new HostCallError("terminal", message, "invalid_params");
+}
+
+/** Lower ranks are more trusted; an asserted class may only use a rank equal to or above the derived class. Keyed on the daemon's serialized class names. commentlint: allow(JUDGE) */
+const SOURCE_RANK: Record<string, number> = {
+    explicit_user: 0,
+    trusted_local_code: 1,
+    trusted_tool_result: 2,
+    untrusted_repo_text: 3,
+    untrusted_web: 4,
+    model_inference: 5,
+};
+
+const TAINT_RANK: Record<string, number> = {
+    user_explicit: 0,
+    current_code: 1,
+    current_test: 1,
+    current_config: 1,
+    user_inferred: 2,
+    repo_untrusted_text: 3,
+    tool_untrusted_output: 3,
+    assistant_inference: 4,
+    dreamer_inference: 4,
+    personal: 5,
+    unclassifiable: 5,
+};
+
+/** Everything a plugin relays is model output about something, so the derived source class is always `model_inference`; the taint class records what it is about. commentlint: allow(JUDGE) */
+const DERIVED_CLASSES: Record<string, { source: string; taint: string }> = {
+    assistant: { source: "model_inference", taint: "assistant_inference" },
+    model: { source: "model_inference", taint: "assistant_inference" },
+    dreamer: { source: "model_inference", taint: "dreamer_inference" },
+    user: { source: "model_inference", taint: "user_inferred" },
+};
+
+/** The taints `model_inference` admits; a pair outside the table is malformed input, not an over-declaration. commentlint: allow(JUDGE) */
+const MODEL_INFERENCE_TAINTS: ReadonlySet<string> = new Set([
+    "user_inferred",
+    "assistant_inference",
+    "dreamer_inference",
+    "personal",
+    "unclassifiable",
+]);
+
+/** An assertion above the derived class is refused rather than clamped so the caller learns its claim was not accepted. commentlint: allow(JUDGE) */
+function resolveClasses(
+    body: Record<string, unknown>,
+): { sourceKind: string } | { reply: unknown } {
+    const sourceKind = body.source_kind;
+    if (typeof sourceKind !== "string") throw invalidParams("kernel.commit requires source_kind");
+    const derived = DERIVED_CLASSES[sourceKind];
+    if (!derived) return { reply: invalid("invalid_input") };
+    let source = derived.source;
+    if (body.asserted_source_class !== undefined) {
+        const asserted = body.asserted_source_class;
+        if (typeof asserted !== "string" || !(asserted in SOURCE_RANK)) {
+            return { reply: invalid("invalid_input") };
+        }
+        if ((SOURCE_RANK[asserted] as number) < (SOURCE_RANK[derived.source] as number)) {
+            return { reply: invalid("class_over_declared") };
+        }
+        source = asserted;
+    }
+    let taint = derived.taint;
+    if (body.asserted_taint_class !== undefined) {
+        const asserted = body.asserted_taint_class;
+        if (typeof asserted !== "string" || !(asserted in TAINT_RANK)) {
+            return { reply: invalid("invalid_input") };
+        }
+        if ((TAINT_RANK[asserted] as number) < (TAINT_RANK[derived.taint] as number)) {
+            return { reply: invalid("class_over_declared") };
+        }
+        taint = asserted;
+    }
+    // Every derived source is `model_inference` and a lower-ranked assertion was refused above, so this is the only source row the table needs. commentlint: allow(JUDGE)
+    if (source !== "model_inference" || !MODEL_INFERENCE_TAINTS.has(taint)) {
+        return { reply: invalid("invalid_input") };
+    }
+    return { sourceKind };
+}
+
 export class FakeKernel {
     tip = 0;
     readonly objects = new Map<string, FakeObject>();
     /** Latest commit that changed each object; `kernel.commit` compares tokens against it. */
     readonly lastChange = new Map<string, number>();
     readonly receipts = new Map<string, Receipt>();
+    /** Every `decision_id` the store has held, live or retired; the daemon's `decisions` primary key refuses a second insert under any of them. commentlint: allow(JUDGE) */
+    readonly decisionIds = new Set<string>();
     /** Forces every read on a surface to answer with this state instead of rows. */
     readonly surfaceStates = new Map<Surface, MemoryState>();
     /** Forces the next commit to answer with this state. */
     nextCommitState: MemoryState | null = null;
     /** Every read reply carries this `truncated` flag, standing in for a daemon that dropped rows to fit its per-read bounds. commentlint: allow(JUDGE) */
     readTruncated = false;
-    /** Rows served per read when set, standing in for the daemon's newest-rows cap: the `object_ids` filter applies before the cap, so a filtered read reaches a row a capped unfiltered read drops. commentlint: allow(JUDGE) */
+    /** Rows served per unfiltered read when set, standing in for the daemon's newest-rows cap; a read with an `object_ids` filter ignores it, as the daemon's cap never binds a filter-sized read. commentlint: allow(JUDGE) */
     readRowCap: number | null = null;
     /** Rows served per filtered read when set, standing in for the daemon's serialization byte budget: the `object_ids` filter bypasses the row cap but not the budget, and the budget keeps a newest-first prefix of the filtered rows. commentlint: allow(JUDGE) */
     filteredReadRowCap: number | null = null;
@@ -110,10 +200,11 @@ export class FakeKernel {
      * Seeds a live decision object as if a prior commit had written it. Route
      * writes are `labeled`; `labeled: false` stands in for a verified object
      * only a direct store commit can produce. Without `projectRoot` the row
-     * serves to every project.
+     * serves to every project. `decision_id` defaults to `object_id`.
      */
     seedDecision(input: {
         object_id: string;
+        decision_id?: string;
         decision_kind: string;
         summary: string;
         rationale?: string;
@@ -146,6 +237,7 @@ export class FakeKernel {
         };
         this.objects.set(object.object_id, object);
         this.lastChange.set(object.object_id, seq);
+        this.decisionIds.add(input.decision_id ?? input.object_id);
         return object;
     }
 
@@ -187,6 +279,14 @@ export class FakeKernel {
         return !object.labeled && object.sensitivity !== "sensitive";
     }
 
+    /** Newest `created_commit_seq` first, then ascending `object_id` within one commit. */
+    private static servingOrder(left: FakeObject, right: FakeObject): number {
+        if (left.created_commit_seq !== right.created_commit_seq) {
+            return right.created_commit_seq - left.created_commit_seq;
+        }
+        return left.object_id < right.object_id ? -1 : left.object_id > right.object_id ? 1 : 0;
+    }
+
     /** Whether a row is in the calling project's scope; a seeded row without a root, or a call without one, passes. */
     private static inProject(object: FakeObject, projectRoot: string | null): boolean {
         return (
@@ -216,31 +316,25 @@ export class FakeKernel {
         if (objectIds !== null) {
             visible = visible.filter((object) => objectIds.has(object.object_id));
         }
-        // The daemon scopes rows to the id filter before its newest-rows cap, so the cap applies after the filter here too; the filtered cap stands in for the byte budget, which binds even when the id filter bypasses the row cap. commentlint: allow(JUDGE)
+        // The daemon serves rows newest first, then by object id, and keeps that order's prefix when a cap binds. The row cap never binds a filtered read (a filter names at most `MAX_READ_OBJECT_IDS` rows, far under the cap), so it applies to unfiltered reads alone; the filtered cap stands in for the byte budget, which binds either way. commentlint: allow(JUDGE)
+        visible.sort(FakeKernel.servingOrder);
         let truncated = this.readTruncated;
-        const caps = [this.readRowCap, objectIds === null ? null : this.filteredReadRowCap].filter(
-            (cap): cap is number => cap !== null,
-        );
-        const cap = caps.length > 0 ? Math.min(...caps) : null;
+        const cap = objectIds === null ? this.readRowCap : this.filteredReadRowCap;
         if (cap !== null && visible.length > cap) {
-            visible = [...visible]
-                .sort((left, right) => right.created_commit_seq - left.created_commit_seq)
-                .slice(0, cap);
+            visible = visible.slice(0, cap);
             truncated = true;
         }
-        const rows = visible
-            .sort((left, right) => (left.object_id < right.object_id ? -1 : 1))
-            .map((object) => {
-                const { labeled, project_root, decision, ...row } = object;
-                return {
-                    object: row,
-                    visibility: labeled ? "labeled" : "visible",
-                    labeled,
-                    scope_id: fakeProjectScopeId(project_root ?? projectRoot ?? ""),
-                    token: { object_id: object.object_id, known_as_of: asOf },
-                    decision: decision ?? null,
-                };
-            });
+        const rows = visible.map((object) => {
+            const { labeled, project_root, decision, ...row } = object;
+            return {
+                object: row,
+                visibility: labeled ? "labeled" : "visible",
+                labeled,
+                scope_id: fakeProjectScopeId(project_root ?? projectRoot ?? ""),
+                token: { object_id: object.object_id, known_as_of: asOf },
+                decision: decision ?? null,
+            };
+        });
         return {
             state: { kind: "available" },
             known_as_of: asOf,
@@ -279,12 +373,26 @@ export class FakeKernel {
         return null;
     }
 
+    /** Class resolution precedes the receipt lookup, so an over-declared class cannot replay a receipt. commentlint: allow(JUDGE) */
     private commitReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
         if (this.nextCommitState) {
             const state = this.nextCommitState;
             this.nextCommitState = null;
             return { state };
         }
+        const operations = (body.operations as Operation[] | undefined) ?? [];
+        if (operations.length > MAX_COMMIT_OPERATIONS) {
+            throw invalidParams(
+                `kernel.commit carries at most ${MAX_COMMIT_OPERATIONS} operations`,
+            );
+        }
+        const tokens = (body.tokens as { object_id: string; known_as_of: number }[]) ?? [];
+        if (tokens.length > MAX_COMMIT_TOKENS) {
+            throw invalidParams(`kernel.commit carries at most ${MAX_COMMIT_TOKENS} tokens`);
+        }
+        const classes = resolveClasses(body);
+        if ("reply" in classes) return classes.reply;
+        const { sourceKind } = classes;
         const intent = body.intent as { operation_key: string; request_digest: string };
         const replayed = this.receipts.get(intent.operation_key);
         if (replayed) {
@@ -300,14 +408,12 @@ export class FakeKernel {
             };
         }
         this.beforeCommit?.();
-        const tokens = (body.tokens as { object_id: string; known_as_of: number }[]) ?? [];
         const tokenConflict = this.conflictFor(tokens, projectRoot);
         if (tokenConflict) return tokenConflict;
-        const operations = body.operations as Operation[];
-        const sourceKind = typeof body.source_kind === "string" ? body.source_kind : "assistant";
         // One envelope is atomic: rows change on a staged overlay in envelope order, and a refusal at any operation leaves the store and the tip untouched. commentlint: allow(JUDGE)
         const seq = this.tip + 1;
         const staged = new Map<string, FakeObject>();
+        const stagedDecisionIds = new Set<string>();
         const touched = new Set<string>();
         const merged = new Set<string>();
         const view = (objectId: string): FakeObject | undefined =>
@@ -332,8 +438,13 @@ export class FakeKernel {
             }
             return target;
         };
+        // The daemon's `decisions` primary key refuses a `decision_id` any row has ever carried, live or retired, in this envelope or an earlier commit. commentlint: allow(JUDGE)
+        const decisionIdHeld = (spec: Record<string, unknown>): boolean =>
+            typeof spec.decision_id === "string" &&
+            (this.decisionIds.has(spec.decision_id) || stagedDecisionIds.has(spec.decision_id));
         const insert = (spec: Record<string, unknown>, sensitivity: Sensitivity): void => {
             const objectId = spec.object_id as string;
+            if (typeof spec.decision_id === "string") stagedDecisionIds.add(spec.decision_id);
             staged.set(objectId, {
                 object_id: objectId,
                 object_kind: "decision",
@@ -365,6 +476,7 @@ export class FakeKernel {
                 const spec = operation.spec as Record<string, unknown>;
                 // The registry's primary key refuses any held id, live or retired, this project's or another's. commentlint: allow(JUDGE)
                 if (view(spec.object_id as string)) return invalid("already_exists");
+                if (decisionIdHeld(spec)) return invalid("already_exists");
                 insert(spec, (spec.sensitivity as Sensitivity | undefined) ?? "normal");
             } else if (operation.op === "supersede_decision") {
                 const replaced = liveTarget(operation.replaced_object_id as string);
@@ -401,6 +513,9 @@ export class FakeKernel {
                     return invalid("invalid_input");
                 }
                 if (replacement && !survivor) return invalid("already_exists");
+                if (!survivor && decisionIdHeld(spec)) {
+                    return invalid("already_exists");
+                }
                 if (survivor) {
                     merged.add(survivor.object_id);
                     touched.add(survivor.object_id);
@@ -433,6 +548,7 @@ export class FakeKernel {
             }
         }
         for (const objectId of touched) this.lastChange.set(objectId, seq);
+        for (const decisionId of stagedDecisionIds) this.decisionIds.add(decisionId);
         const receipt: Receipt = {
             commit_seq: seq,
             request_digest: intent.request_digest,

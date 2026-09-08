@@ -38,14 +38,6 @@ export interface EidnaraPluginConfig extends EidnaraConfig {
     >;
 }
 
-function getUserConfigBasePath(): string {
-    return eidnaraUserConfigBasePath();
-}
-
-function getProjectConfigBasePath(directory: string): string {
-    return eidnaraProjectConfigBasePath(directory);
-}
-
 interface LoadedConfigFile {
     config: Record<string, unknown>;
     /** The loader prefixes {env:} and {file:} substitution warnings with the config path. */
@@ -86,20 +78,6 @@ function describeRejectedKeyPath(path: readonly (string | number)[]): string {
     return path.length > 1 ? `"${key}" at depth ${path.length}` : `"${key}"`;
 }
 
-/**
- * `comment-json` quotes the whole source in a `SyntaxError`, and the substituted source can hold
- * resolved secrets. The raw text is parsed again so the diagnostic quotes only what the user wrote.
- */
-function describeParseFailure(rawText: string, error: unknown): string {
-    try {
-        parseConfigJsonc(rawText);
-    } catch (rawError) {
-        return rawError instanceof Error ? rawError.message : String(rawError);
-    }
-    const name = error instanceof Error ? error.name : "Error";
-    return `${name}: the config parses before {env:}/{file:} substitution and fails after it`;
-}
-
 function loadConfigFileDetailed(
     configPath: string,
     source: "user" | "project",
@@ -130,14 +108,9 @@ function loadConfigFileDetailed(
             isProjectConfig: source === "project",
         });
         const rejectedKeyPaths: (string | number)[][] = [];
-        let parsed: unknown;
-        try {
-            parsed = parseConfigJsonc(substituted.text, {
-                onRejectedKey: (path) => rejectedKeyPaths.push([...path]),
-            });
-        } catch (error) {
-            throw new Error(describeParseFailure(rawText, error));
-        }
+        const parsed: unknown = parseConfigJsonc(substituted.text, {
+            onRejectedKey: (path) => rejectedKeyPaths.push([...path]),
+        });
         // The generic parser returns whatever JSON value the file holds; a `null`, array, or scalar top level would throw inside `parsePluginConfig`, outside this try.
         if (!isRecord(parsed)) {
             throw new Error(
@@ -517,11 +490,15 @@ function combinedOutcome(args: {
 }
 
 export function loadPluginConfigDetailed(directory: string): LoadResultDetailed {
-    const userDetected = detectConfigFile(getUserConfigBasePath());
-    const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
+    // Without an absolute home from the environment there is no user tier to read.
+    const userBasePath = eidnaraUserConfigBasePath();
+    const userDetected = userBasePath === undefined ? undefined : detectConfigFile(userBasePath);
+    const projectDetected = detectConfigFile(eidnaraProjectConfigBasePath(directory));
 
     const userLoaded =
-        userDetected.format !== "none" ? loadConfigFileDetailed(userDetected.path, "user") : null;
+        userDetected && userDetected.format !== "none"
+            ? loadConfigFileDetailed(userDetected.path, "user")
+            : null;
     const projectLoaded =
         projectDetected.format !== "none"
             ? loadConfigFileDetailed(projectDetected.path, "project")
