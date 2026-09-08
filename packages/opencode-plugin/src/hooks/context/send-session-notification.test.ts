@@ -46,7 +46,7 @@ describe("sendIgnoredMessage", () => {
     // `messages` supplies the last assistant turn to `resolvePromptContext`.
     // `get` supplies a title so `sendIgnoredMessage` does not skip the session.
     function titledClientWithLastTurn() {
-        const prompt = mock(async () => ({}));
+        const prompt = mock(async (_input: unknown) => ({}));
         const get = mock(async () => ({ title: "Real title" }));
         const messages = mock(async () => ({
             data: [
@@ -138,6 +138,70 @@ describe("sendIgnoredMessage", () => {
         await flushIgnoredMessages("ses-retry");
         expect(session.prompt).toHaveBeenCalledTimes(MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS);
         expect(__ignoredNotificationTest.pendingTexts("ses-retry")).toEqual([]);
+    });
+
+    it("stops the flush at a retained failure so later notices are not delivered first", async () => {
+        const session = titledClientWithLastTurn();
+        let failNext = true;
+        session.prompt.mockImplementation(async () => {
+            if (failNext) {
+                failNext = false;
+                throw new Error("transient prompt failure");
+            }
+            return {};
+        });
+        let active = true;
+        __ignoredNotificationTest.setMidTurnDetector(() => active);
+
+        await sendIgnoredMessage({ session }, "ses-order", "older", {});
+        await sendIgnoredMessage({ session }, "ses-order", "newer", {});
+        active = false;
+
+        await flushIgnoredMessages("ses-order");
+        expect(session.prompt).toHaveBeenCalledTimes(1);
+        expect(__ignoredNotificationTest.pendingTexts("ses-order")).toEqual(["older", "newer"]);
+
+        await flushIgnoredMessages("ses-order");
+        expect(
+            session.prompt.mock.calls.map((call) => {
+                const input = call[0] as { body?: { parts?: Array<{ text?: string }> } };
+                return input.body?.parts?.[0]?.text;
+            }),
+        ).toEqual(["older", "older", "newer"]);
+        expect(__ignoredNotificationTest.pendingTexts("ses-order")).toEqual([]);
+    });
+
+    it("drops a notice at the attempt cap and delivers the tail in the same flush", async () => {
+        const session = titledClientWithLastTurn();
+        session.prompt.mockImplementation(async (input: unknown) => {
+            const text = (input as { body?: { parts?: Array<{ text?: string }> } }).body?.parts?.[0]
+                ?.text;
+            if (text === "poison") throw new Error("permanent prompt failure");
+            return {};
+        });
+        let active = true;
+        __ignoredNotificationTest.setMidTurnDetector(() => active);
+
+        await sendIgnoredMessage({ session }, "ses-poison", "poison", {});
+        await sendIgnoredMessage({ session }, "ses-poison", "healthy", {});
+        active = false;
+
+        for (let attempt = 1; attempt < MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS; attempt += 1) {
+            await flushIgnoredMessages("ses-poison");
+            expect(__ignoredNotificationTest.pendingTexts("ses-poison")).toEqual([
+                "poison",
+                "healthy",
+            ]);
+        }
+
+        await flushIgnoredMessages("ses-poison");
+        expect(__ignoredNotificationTest.pendingTexts("ses-poison")).toEqual([]);
+        expect(
+            session.prompt.mock.calls.map((call) => {
+                const input = call[0] as { body?: { parts?: Array<{ text?: string }> } };
+                return input.body?.parts?.[0]?.text;
+            }),
+        ).toEqual(["poison", "poison", "poison", "healthy"]);
     });
 
     it("re-inserts an interrupted flush batch ahead of notices queued during the flush", async () => {

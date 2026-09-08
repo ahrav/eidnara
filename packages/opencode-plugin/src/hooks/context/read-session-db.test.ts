@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "../../shared/sqlite";
@@ -7,6 +7,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     closeReadOnlySessionDb,
     findLastAssistantModelFromOpenCodeDb,
+    isMidTurn,
     isMidTurnFromOpenCodeDb,
 } from "./read-session-db";
 
@@ -407,13 +408,24 @@ function createOpenCodeDb(rows: MessageRow[]): void {
                 time_updated INTEGER NOT NULL,
                 data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
         `);
         const insert = db.prepare(
             `INSERT INTO message (id, session_id, time_created, time_updated, data)
              VALUES (?, ?, ?, ?, ?)`,
         );
         for (const row of rows) {
-            const data: Record<string, unknown> = { role: row.role };
+            const data: Record<string, unknown> = {
+                role: row.role,
+                time: { created: row.timeCreated, completed: row.timeCreated },
+            };
             if (row.providerID !== undefined) data.providerID = row.providerID;
             if (row.modelID !== undefined) data.modelID = row.modelID;
             if (row.agent !== undefined) data.agent = row.agent;
@@ -429,6 +441,39 @@ function createOpenCodeDb(rows: MessageRow[]): void {
         closeQuietly(db);
     }
 }
+
+describe("isMidTurn", () => {
+    it("reports idle when the OpenCode DB does not exist", () => {
+        useTempDataHome("read-session-db-midturn-missing-");
+
+        expect(isMidTurn(undefined, "ses_A")).toBe(false);
+    });
+
+    it("reports mid-turn when the OpenCode DB exists but cannot be read", () => {
+        useTempDataHome("read-session-db-midturn-unreadable-");
+        const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+        mkdirSync(dirname(dbPath), { recursive: true });
+        writeFileSync(dbPath, "not a sqlite database");
+
+        expect(isMidTurn(undefined, "ses_A")).toBe(true);
+    });
+
+    it("reports idle for a readable DB with no active run", () => {
+        useTempDataHome("read-session-db-midturn-idle-");
+        createOpenCodeDb([
+            {
+                id: "msg_asst",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-opus-4-7",
+                timeCreated: 1000,
+            },
+        ]);
+
+        expect(isMidTurn(undefined, "ses_A")).toBe(false);
+    });
+});
 
 describe("findLastAssistantModelFromOpenCodeDb", () => {
     it("returns null for a session with no assistant messages", () => {

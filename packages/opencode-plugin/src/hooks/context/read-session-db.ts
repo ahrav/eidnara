@@ -82,12 +82,14 @@ export function getRawSessionMessageCountFromDb(db: Database, sessionId: string)
     return typeof row?.count === "number" ? row.count : 0;
 }
 
+/** Treat errors reading an existing database as mid-turn; a missing database is idle. */
 export function isMidTurn(_deps: unknown, sessionId: string): boolean {
+    if (!openCodeDbExists()) return false;
     try {
         return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
     } catch (error) {
-        log("[eidnara] failed to inspect OpenCode mid-turn state:", error);
-        return false;
+        log("[eidnara] failed to inspect OpenCode mid-turn state; treating as mid-turn:", error);
+        return true;
     }
 }
 

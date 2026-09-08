@@ -288,10 +288,6 @@ export async function sendIgnoredMessage(
 /**
  * Flush queued status lines only when the session is idle.
  * midTurnDetector prevents sends while the session is non-idle.
- *
- * An interrupted batch is re-inserted ahead of later arrivals to preserve chronological order.
- * A failed delivery stays queued until `MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS` is reached.
- * A `"skipped"` result drops the entry.
  */
 export async function flushIgnoredMessages(sessionId: string): Promise<void> {
     if (flushingIgnoredNotifications.has(sessionId) || midTurnDetector(sessionId)) return;
@@ -301,23 +297,23 @@ export async function flushIgnoredMessages(sessionId: string): Promise<void> {
     queuedIgnoredNotifications.delete(sessionId);
     flushingIgnoredNotifications.add(sessionId);
     try {
-        const retained: IgnoredNotification[] = [];
+        let retained: IgnoredNotification[] = [];
         for (const [index, notification] of queued.entries()) {
             const disposition = await deliverIgnoredMessage(notification);
             if (disposition === "queued") {
-                retained.push(notification, ...queued.slice(index + 1));
+                retained = queued.slice(index);
                 break;
             }
             if (disposition === "failed") {
                 notification.attempts += 1;
                 if (notification.attempts < MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS) {
-                    retained.push(notification);
-                } else {
-                    sessionLog(
-                        sessionId,
-                        `dropped queued notification after ${notification.attempts} failed deliveries`,
-                    );
+                    retained = queued.slice(index);
+                    break;
                 }
+                sessionLog(
+                    sessionId,
+                    `dropped queued notification after ${notification.attempts} failed deliveries`,
+                );
             }
         }
         if (retained.length > 0) requeueFlushBatch(sessionId, retained);
