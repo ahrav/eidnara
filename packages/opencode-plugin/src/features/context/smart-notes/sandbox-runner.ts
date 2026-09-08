@@ -113,6 +113,11 @@ const DEFAULT_HEAP_LIMIT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_STACK_LIMIT_BYTES = 512 * 1024;
 const MAX_COMPILED_CHECK_BYTES = 64 * 1024;
 const MAX_SANDBOX_ERROR_CHARS = 2 * 1024;
+// A synchronous guest loop is stopped only by the interrupt deadline, so the budget a caller may
+// request is bounded; the memory limits are bounded for the same reason a limit exists at all.
+const MAX_TIMEOUT_MS = 60_000;
+const MAX_HEAP_LIMIT_BYTES = 1024 * 1024 * 1024;
+const MAX_STACK_LIMIT_BYTES = 64 * 1024 * 1024;
 
 // Capabilities that outlive VM interruption must observe signal.
 // A tarpit request can keep the shared QuickJS module suspended past the sandbox budget.
@@ -145,15 +150,15 @@ export async function runCompiledSmartNoteCheck(
     if (Buffer.byteLength(options.compiledCheck, "utf8") > MAX_COMPILED_CHECK_BYTES) {
         return failureResult("compiled check exceeds 64 KiB", false);
     }
-    // A non-finite deadline never interrupts a synchronous guest loop, and the timer cannot run while
-    // that loop holds the thread; the run would wedge the process-wide lock.
-    for (const [name, value] of [
-        ["timeoutMs", options.timeoutMs],
-        ["heapLimitBytes", options.heapLimitBytes],
-        ["stackLimitBytes", options.stackLimitBytes],
+    // A non-finite or unreachable deadline never interrupts a synchronous guest loop, and the timer
+    // cannot run while that loop holds the thread; the run would wedge the process-wide lock.
+    for (const [name, value, max] of [
+        ["timeoutMs", options.timeoutMs, MAX_TIMEOUT_MS],
+        ["heapLimitBytes", options.heapLimitBytes, MAX_HEAP_LIMIT_BYTES],
+        ["stackLimitBytes", options.stackLimitBytes, MAX_STACK_LIMIT_BYTES],
     ] as const) {
-        if (value !== undefined && !(Number.isFinite(value) && value > 0)) {
-            return failureResult(`${name} must be a positive finite number`, false);
+        if (value !== undefined && !(Number.isFinite(value) && value > 0 && value <= max)) {
+            return failureResult(`${name} must be a positive number no greater than ${max}`, false);
         }
     }
     // The lock initializes each check's timeout and host-capability controller.

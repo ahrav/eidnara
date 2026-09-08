@@ -75,6 +75,24 @@ describe("smart-note readFile capability", () => {
         });
     });
 
+    test("rejects a file limit that would disable the size check", async () => {
+        for (const fileLimitBytes of [
+            Number.NaN,
+            Number.POSITIVE_INFINITY,
+            0,
+            -1,
+            16 * 1024 * 1024 + 1,
+        ]) {
+            expect(() =>
+                createSmartNoteCapabilities({
+                    projectRoot: "/",
+                    signal: new AbortController().signal,
+                    fileLimitBytes,
+                }),
+            ).toThrow(RangeError);
+        }
+    });
+
     test("accepts in-tree names whose first component begins with dots", async () => {
         await withTempDir(async (dir) => {
             await mkdir(path.join(dir, "..generated"));
@@ -292,7 +310,8 @@ describe("smart-note git capabilities", () => {
             });
             const [latest] = await cap.gitLog({ maxCount: 1 });
             expect(latest?.subject).toBe(subject);
-            expect(latest?.authorDate).toBe("2020-01-01T00:00:00Z");
+            // `%aI` renders UTC as `Z` on newer git and `+00:00` on older git; compare the instant.
+            expect(Date.parse(latest?.authorDate ?? "")).toBe(Date.parse(COMMIT_DATE));
             expect(latest?.sha).toMatch(/^[0-9a-f]{40}$/);
         });
     });

@@ -10,6 +10,7 @@ import { SmartNoteNetworkError, smartNoteAbortError } from "./types";
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_FILE_LIMIT_BYTES = 64 * 1024;
+const MAX_FILE_LIMIT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_GIT_TIMEOUT_MS = 3_000;
 const MAX_GIT_SINCE_CHARS = 128;
 
@@ -65,6 +66,18 @@ export function createSmartNoteCapabilities(
 ): SmartNoteCapabilityApi {
     const projectRoot = path.resolve(options.projectRoot);
     const fileLimitBytes = options.fileLimitBytes ?? DEFAULT_FILE_LIMIT_BYTES;
+    // `size > NaN` and `size > Infinity` are both false, which would turn the limit off.
+    if (
+        !(
+            Number.isFinite(fileLimitBytes) &&
+            fileLimitBytes > 0 &&
+            fileLimitBytes <= MAX_FILE_LIMIT_BYTES
+        )
+    ) {
+        throw new RangeError(
+            `fileLimitBytes must be a positive number no greater than ${MAX_FILE_LIMIT_BYTES}`,
+        );
+    }
     return {
         readFile: (repoRelativePath) =>
             guardedReadFile(projectRoot, repoRelativePath, options.signal, fileLimitBytes),

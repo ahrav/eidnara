@@ -47,9 +47,12 @@ describe("compiled smart-note QuickJS runner", () => {
         for (const options of [
             { timeoutMs: Number.NaN },
             { timeoutMs: Number.POSITIVE_INFINITY },
+            { timeoutMs: Number.MAX_VALUE },
+            { timeoutMs: 60_001 },
             { timeoutMs: 0 },
             { timeoutMs: -5 },
             { heapLimitBytes: Number.NaN },
+            { heapLimitBytes: Number.MAX_SAFE_INTEGER },
             { stackLimitBytes: Number.POSITIVE_INFINITY },
         ]) {
             const startedAt = Date.now();
@@ -61,7 +64,7 @@ describe("compiled smart-note QuickJS runner", () => {
             expect(result.ok).toBe(false);
             if (!result.ok) {
                 expect(result.cancelled).toBe(false);
-                expect(result.error).toMatch(/must be a positive finite number/);
+                expect(result.error).toMatch(/must be a positive number no greater than/);
             }
             expect(Date.now() - startedAt).toBeLessThan(500);
         }
