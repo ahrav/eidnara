@@ -2,6 +2,7 @@ import { describe, expect, setSystemTime, test } from "bun:test";
 import { KernelClient, TokenCache } from "../../shared/kernel-client";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import { createCtxMemoryTools } from "./tools";
+import { CTX_MEMORY_ACTIONS, type CtxMemoryAction } from "./types";
 
 const PROJECT = "git:kernel-opencode";
 const ROOT = "/tmp/kernel-opencode";
@@ -1147,6 +1148,64 @@ describe("ctx_memory human authority", () => {
             "human-host-owned",
         );
         expect(await tool.execute({ action: "delete" }, "call-delete")).toContain("not allowed");
+    });
+});
+
+describe("ctx_memory action allowlist", () => {
+    function toolWith(allowedActions: CtxMemoryAction[] | undefined) {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: "mem_allow",
+            decision_kind: "ARCHITECTURE",
+            summary: "Allowlist probe.",
+        });
+        const transport = new FakeKernelTransport(kernel);
+        const definition = createCtxMemoryTools({
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+            resolveProjectPath: () => PROJECT,
+            ...(allowedActions === undefined ? {} : { allowedActions }),
+        }).ctx_memory;
+        const execute = (args: Record<string, unknown>, callID: string) =>
+            definition.execute(
+                args as never,
+                { sessionID: SESSION, directory: ROOT, callID, agent: "primary" } as never,
+            ) as Promise<string>;
+        return { execute, transport };
+    }
+
+    test("an explicitly empty allowlist admits no action and sends nothing to the daemon", async () => {
+        const tool = toolWith([]);
+        for (const action of CTX_MEMORY_ACTIONS) {
+            const text = await tool.execute(
+                { action, objectIds: ["mem_allow"], category: "ARCHITECTURE", content: "x" },
+                `call-${action}`,
+            );
+            expect(text).toBe(`Error: Action '${action}' is not allowed in this context.`);
+        }
+        expect(tool.transport.calls).toHaveLength(0);
+    });
+
+    test("an omitted allowlist admits every action", async () => {
+        const tool = toolWith(undefined);
+        const text = await tool.execute(
+            { action: "get", objectIds: ["mem_allow"] },
+            "call-get-default",
+        );
+        expect(text.startsWith("Error:")).toBeFalse();
+        expect(text).toContain("mem_allow");
+    });
+
+    test("a partial allowlist admits only the listed actions", async () => {
+        const tool = toolWith(["get"]);
+        expect(
+            await tool.execute(
+                { action: "create", category: "ARCHITECTURE", content: "x" },
+                "call-create-denied",
+            ),
+        ).toBe("Error: Action 'create' is not allowed in this context.");
+        const got = await tool.execute({ action: "get", objectIds: ["mem_allow"] }, "call-get-ok");
+        expect(got.startsWith("Error:")).toBeFalse();
     });
 });
 
