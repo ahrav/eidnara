@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 
@@ -314,7 +314,7 @@ describe("substituteConfigVariables", () => {
             expect(result.text).toBe(`{ "api_key": "" }`);
             expect(result.warnings).toHaveLength(1);
             expect(result.warnings[0]).toContain("not found");
-            expect(result.warnings[0]).toContain("{file:{env:EIDNARA_SECRET_DIR}");
+            expect(result.warnings[0]).toContain("{file:{env:EIDNARA_SECRET_DIR}/missing.txt}");
             expect(result.warnings[0]).toContain("path withheld");
             expect(result.warnings[0]).not.toContain("hunter2-secret-dir");
             delete process.env.EIDNARA_SECRET_DIR;
@@ -331,6 +331,77 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings[0]).not.toContain("hunter2-secret-dir");
             expect(result.warnings[1]).toContain(literalMissing);
             delete process.env.EIDNARA_SECRET_DIR;
+        });
+
+        it("env values inside {file:} stay raw paths even when the directory name needs JSON escaping", () => {
+            const quotedDir = join(tmpDir, 'a"b\\c');
+            mkdirSync(quotedDir);
+            writeFileSync(join(quotedDir, "secret.txt"), "quoted-dir-value");
+            process.env.EIDNARA_FILE_DIR = quotedDir;
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_FILE_DIR}/secret.txt}", "dir": "{env:EIDNARA_FILE_DIR}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            // The file token read the directory verbatim; the standalone env token is still JSON-escaped for the string literal.
+            expect(result.text).toBe(
+                `{ "api_key": "quoted-dir-value", "dir": "${JSON.stringify(quotedDir).slice(1, -1)}" }`,
+            );
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("a closing brace in an env-supplied directory does not end the {file:} token early", () => {
+            const bracedDir = join(tmpDir, "a}b");
+            mkdirSync(bracedDir);
+            writeFileSync(join(bracedDir, "secret.txt"), "braced-dir-value");
+            process.env.EIDNARA_FILE_DIR = bracedDir;
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_FILE_DIR}/secret.txt}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "braced-dir-value" }`);
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("an env value that spells a {file:} token is inlined as text, never read as a file", () => {
+            const keyFile = join(tmpDir, "must-not-be-read.txt");
+            writeFileSync(keyFile, "leaked");
+            process.env.EIDNARA_TEST_KEY = `{file:${keyFile}}`;
+
+            const input = `{ "api_key": "{env:EIDNARA_TEST_KEY}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "{file:${keyFile}}" }`);
+            expect(result.text).not.toContain("leaked");
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("file contents that spell an {env:} token are inlined as text, never expanded", () => {
+            process.env.EIDNARA_TEST_KEY = "must-not-expand";
+            const keyFile = join(tmpDir, "template.txt");
+            writeFileSync(keyFile, "{env:EIDNARA_TEST_KEY}");
+
+            const input = `{ "template": "{file:${keyFile}}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "template": "{env:EIDNARA_TEST_KEY}" }`);
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("a missing env inside a {file:} token empties the whole token instead of reading the shortened path", () => {
+            // With the directory fragment gone, the remainder would name `<configDir>/secret.txt`, which exists here.
+            writeFileSync(join(tmpDir, "secret.txt"), "must-not-be-read");
+            delete process.env.EIDNARA_MISSING_DIR;
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_MISSING_DIR}/secret.txt}" }`;
+            const result = substituteConfigVariables({
+                text: input,
+                configPath: join(tmpDir, "eidnara.jsonc"),
+            });
+
+            expect(result.text).toBe(`{ "api_key": "" }`);
+            expect(result.text).not.toContain("must-not-be-read");
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("EIDNARA_MISSING_DIR is not set");
         });
     });
 
@@ -413,6 +484,49 @@ describe("substituteConfigVariables", () => {
             const input = `{ "prompt": "{file:~/notes/context.md}" }`;
             const result = substituteConfigVariables({ text: input });
             expect(result.warnings.some((w) => w.includes("sensitive path"))).toBe(false);
+        });
+
+        it("does NOT warn for a sibling whose name merely extends a sensitive directory", () => {
+            const input = `{ "prompt": "{file:~/.ssh-backup/notes.md}" }`;
+            const result = substituteConfigVariables({ text: input });
+            expect(result.warnings.some((w) => w.includes("sensitive path"))).toBe(false);
+        });
+
+        it("warns when the path reaches a sensitive directory through a parent segment", () => {
+            const input = `{ "key": "{file:~/notes/../.aws/credentials}" }`;
+            const result = substituteConfigVariables({ text: input });
+            expect(result.warnings.some((w) => w.includes("AWS credentials"))).toBe(true);
+        });
+
+        it("warns when a symlink outside the credential directories points into one", () => {
+            // `homedir()` follows HOME, so the credential directories live under the temp home for this test.
+            process.env.HOME = tmpDir;
+            mkdirSync(join(tmpDir, ".ssh"));
+            writeFileSync(join(tmpDir, ".ssh", "id_rsa"), "private-key");
+            const link = join(tmpDir, "innocent-link");
+            symlinkSync(join(tmpDir, ".ssh", "id_rsa"), link);
+
+            const result = substituteConfigVariables({ text: `{ "key": "{file:${link}}" }` });
+
+            expect(result.text).toBe(`{ "key": "private-key" }`);
+            const warning = result.warnings.find((w) => w.includes("sensitive path"));
+            expect(warning).toContain("SSH keys");
+            expect(warning).toContain(`${link} -> `);
+        });
+
+        it("warns when the credential directory is itself a symlink and the file is named by its real location", () => {
+            process.env.HOME = tmpDir;
+            const vault = join(tmpDir, "vault-ssh");
+            mkdirSync(vault);
+            writeFileSync(join(vault, "id_rsa"), "private-key");
+            symlinkSync(vault, join(tmpDir, ".ssh"));
+
+            const result = substituteConfigVariables({
+                text: `{ "key": "{file:${join(vault, "id_rsa")}}" }`,
+            });
+
+            expect(result.text).toBe(`{ "key": "private-key" }`);
+            expect(result.warnings.some((w) => w.includes("SSH keys"))).toBe(true);
         });
     });
 });

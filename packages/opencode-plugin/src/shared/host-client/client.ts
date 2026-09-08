@@ -260,7 +260,7 @@ function causeMessage(cause: unknown): string {
 /**
  * These `route.open` rejection codes indicate transient target unavailability, so a later `route.open` may succeed.
  */
-function isRetryableRouteOpenCode(code: string | undefined): boolean {
+export function isRetryableRouteOpenCode(code: string | undefined): boolean {
     return (
         code === "unknown_module" ||
         code === "module_reloading" ||
