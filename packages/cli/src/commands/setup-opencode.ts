@@ -21,12 +21,8 @@ import {
     matchesPluginEntry,
 } from "../adapters/opencode";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { readEidnaraModes } from "../lib/eidnara-modes";
-import {
-    assertJsoncConfigsParseable,
-    readJsoncConfigForUpdate,
-    readJsoncLenient,
-} from "../lib/jsonc-config";
+import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
@@ -45,9 +41,10 @@ function resolveCompactionEnabledForWriter(sharedConfigPath: string, directory: 
         );
     }
     const projectConfigPath = resolveEidnaraProjectConfigPath(directory);
-    if (readJsoncLenient(projectConfigPath).value.enabled === false) {
+    const overrides = projectModeOverrides(projectConfigPath, modes);
+    if (overrides.length > 0) {
         log.warn(
-            `Eidnara is disabled (\`enabled: false\`) by the project config ${projectConfigPath}; it will not run in this project after setup.`,
+            `Project config ${projectConfigPath} overrides ${overrides.join(", ")}; OpenCode's native settings follow the shared config, so this project may run both Eidnara and native compaction, or neither. Adjust one of the configs if that is not intended.`,
         );
     }
     return modes.compactionEnabled;

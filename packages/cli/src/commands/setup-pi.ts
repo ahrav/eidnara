@@ -6,12 +6,8 @@ import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
 import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { type EidnaraModes, readEidnaraModes } from "../lib/eidnara-modes";
-import {
-    assertJsoncConfigsParseable,
-    readJsoncConfigForUpdate,
-    readJsoncLenient,
-} from "../lib/jsonc-config";
+import { type EidnaraModes, projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentDir, getPiUserExtensionsPath, getSharedUserConfigPath } from "../lib/paths";
 import {
@@ -374,12 +370,11 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             `Eidnara is disabled (\`enabled: false\`) in ${configPath}; setup keeps that setting and leaves ${host.displayName}'s native context managers on.`,
         );
     }
-    // Project config is a per-project opt-out layered over the shared config.
-    // Native host settings are global, so `eidnara` follows the shared config.
     const projectConfigPath = resolveEidnaraProjectConfigPath(process.cwd());
-    if (readJsoncLenient(projectConfigPath).value.enabled === false) {
+    const overrides = projectModeOverrides(projectConfigPath, eidnara);
+    if (overrides.length > 0) {
         prompts.log.warn(
-            `Eidnara is disabled (\`enabled: false\`) by the project config ${projectConfigPath}; it will not run in this project after setup.`,
+            `Project config ${projectConfigPath} overrides ${overrides.join(", ")}; ${host.displayName}'s native settings follow the shared config, so this project may run both Eidnara and the native manager, or neither. Adjust one of the configs if that is not intended.`,
         );
     }
     const rollbackHost =
