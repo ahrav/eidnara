@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -30,16 +30,72 @@ export interface BundledIssueReport {
     bodyMarkdown: string;
 }
 
+/** The logger appends without rotation, so the bundle reads a bounded tail. */
+const LOG_TAIL_MAX_BYTES = 8 * 1024 * 1024;
+
+export function readLogTailLines(path: string, maxBytes = LOG_TAIL_MAX_BYTES): string[] {
+    const fd = openSync(path, "r");
+    try {
+        const size = fstatSync(fd).size;
+        const start = Math.max(0, size - maxBytes);
+        // One byte before the tail tells whether the tail begins on a line boundary.
+        const probe = start > 0 ? 1 : 0;
+        const buffer = Buffer.alloc(size - start + probe);
+        // A read may return fewer bytes than asked; keep going until the tail is full or EOF.
+        let filled = 0;
+        while (filled < buffer.length) {
+            const bytesRead = readSync(
+                fd,
+                buffer,
+                filled,
+                buffer.length - filled,
+                start - probe + filled,
+            );
+            if (bytesRead === 0) break;
+            filled += bytesRead;
+        }
+        const text = buffer.toString("utf-8", 0, filled);
+        if (probe === 0) return text.split(/\r?\n/);
+        if (text.startsWith("\n")) return text.slice(1).split(/\r?\n/);
+        const lines = text.split(/\r?\n/);
+        // The tail begins inside a line, so the first entry is a fragment.
+        lines.shift();
+        return lines;
+    } finally {
+        closeSync(fd);
+    }
+}
+
+const TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/g;
+
+/** `log` opens every entry with `[<ISO timestamp>]`; an `Error` stack continues on bare lines. */
+const ENTRY_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T[^\]]*\]/;
+
 /**
+ * `sessionId` may end with `_<uuid>` because log tags contain bare UUIDs.
+ * The filter keeps an entry only if it has tags and every tag matches `sessionId`.
+ * Continuation lines retain the preceding entry's keep decision; lines before the first entry are excluded.
  */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    const isWanted = (tag: string) => tag === sessionId || sessionId.endsWith(`_${tag}`);
+    let keep = false;
     return lines.filter((line) => {
-        const matches = line.match(otherSessionPattern);
-        if (!matches) return true;
-        return matches.every((id) => id === sessionId);
+        if (ENTRY_START_PATTERN.test(line)) {
+            const tags = [...line.matchAll(TAG_PATTERN)].map((match) => match[1] ?? "");
+            keep = tags.length > 0 && tags.every(isWanted);
+        }
+        return keep;
     });
+}
+
+/**
+ * A log line starting with up to three spaces and three or more backticks
+ * would close the bundle fence; escaping its first backtick prevents that.
+ * A bare carriage return also starts a Markdown line, so a fence after one is escaped too.
+ */
+function escapeFenceOpeners(lines: string[]): string[] {
+    return lines.map((line) => line.replace(/(^|\r)( {0,3})(`{3,})/g, "$1$2\\$3"));
 }
 
 export async function bundleIssueReport(
@@ -49,10 +105,18 @@ export async function bundleIssueReport(
     options: { cwd?: string; now?: Date; sessionFilter?: string | null } = {},
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists
-        ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
-        : [];
-    const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
+    let allLogLines: string[] = [];
+    let logReadError: string | null = null;
+    if (report.logFile.exists) {
+        try {
+            allLogLines = readLogTailLines(report.logFile.path);
+        } catch (error) {
+            logReadError = error instanceof Error ? error.message : String(error);
+        }
+    }
+    const logLines = escapeFenceOpeners(
+        filterLogLinesBySession(allLogLines, options.sessionFilter ?? null),
+    );
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // The error scan uses 4,000 lines so trailing log output does not exclude earlier errors.
@@ -68,7 +132,7 @@ export async function bundleIssueReport(
         "",
         "## Environment",
         `- Pi plugin: v${report.pluginVersion}`,
-        `- Pi: ${report.piVersion ?? "not installed"}`,
+        `- Pi: ${report.piInstalled ? (report.piVersion ?? "installed, version unavailable") : "not installed"}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
         "",
@@ -82,14 +146,37 @@ export async function bundleIssueReport(
         "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
         "```",
-        recentLog || "<no log output>",
+        logReadError
+            ? `<log unreadable: ${sanitizeLogContent(logReadError)}>`
+            : recentLog || "<no log output>",
         "```",
     ].join("\n");
 
     const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
     const cwd = options.cwd ?? process.cwd();
-    const path = join(cwd, `eidnara-pi-issue-${formatTimestamp(options.now ?? new Date())}.md`);
-    writeFileSync(path, `${bodyMarkdown}\n`);
+    const stem = join(cwd, `eidnara-pi-issue-${formatTimestamp(options.now ?? new Date())}`);
+    const path = writeNewFile(stem, `${bodyMarkdown}\n`);
     return { path, bodyMarkdown };
+}
+
+const MAX_BUNDLE_NAME_ATTEMPTS = 100;
+
+/**
+ * The timestamp has one-second resolution, so a second bundle in the same
+ * second takes a numbered suffix instead of replacing the first.
+ */
+function writeNewFile(stem: string, data: string): string {
+    for (let attempt = 1; attempt <= MAX_BUNDLE_NAME_ATTEMPTS; attempt++) {
+        const path = attempt === 1 ? `${stem}.md` : `${stem}-${attempt}.md`;
+        try {
+            writeFileSync(path, data, { flag: "wx" });
+            return path;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+    }
+    throw new Error(
+        `Could not find a free bundle name after ${MAX_BUNDLE_NAME_ATTEMPTS} tries at ${stem}`,
+    );
 }

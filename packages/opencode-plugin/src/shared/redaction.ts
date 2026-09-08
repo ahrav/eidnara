@@ -190,12 +190,6 @@ const SECRET_TEXT_PATTERNS: Array<{
     pattern: RegExp;
     replacement: string | ((match: string, ...groups: string[]) => string);
 }> = [
-    // A terminated PEM block is replaced whole; an unterminated header takes its `Proc-Type:`/`DEK-Info:` lines and base64 body with it.
-    {
-        pattern:
-            /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|(?:\r?\n(?:[A-Za-z-]+:[^\r\n]*|[A-Za-z0-9+/=]{16,}(?=\r?\n|$)|(?=\r?\n)))*)/g,
-        replacement: "<PRIVATE_KEY_REDACTED>",
-    },
     {
         pattern: /\bsk-ant-(?:api03-)?[A-Za-z0-9_-]{32,}/g,
         replacement: "<ANTHROPIC_API_KEY_REDACTED>",
@@ -279,9 +273,11 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     // The negative lookahead excludes recognized authorization schemes from this pattern.
     // `[ \t]*` around the colon keeps a bare `key:` at end of line from consuming the next line's first word.
+    // A bare value ends at whitespace so the prose after `token: abc` in a log line survives; a
+    // multiword value must be quoted to be consumed whole.
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential|cookie)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s'"`,;}\])][^\r\n,;}\])]*))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential|cookie)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s'"`,;}\])]+))/gi,
         replacement: (
             full: string,
             key: string,
@@ -353,8 +349,17 @@ export function redactSecretText(value: string): string {
     return redacted;
 }
 
+// A terminated PEM block is replaced whole; an unterminated header takes its `Proc-Type:`/`DEK-Info:`
+// lines and base64 body with it. Callers of `redactSecretText` alone keep their own PEM handling.
+const PRIVATE_KEY_BLOCK_PATTERN =
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|(?:\r?\n(?:[A-Za-z-]+:[^\r\n]*|[A-Za-z0-9+/=]{16,}(?=\r?\n|$)|(?=\r?\n)))*)/g;
+
+export function redactPrivateKeyBlocks(value: string): string {
+    return value.replace(PRIVATE_KEY_BLOCK_PATTERN, "<PRIVATE_KEY_REDACTED>");
+}
+
 export function sanitizeDiagnosticText(value: string): string {
-    return redactSecretText(sanitizePathString(value));
+    return redactSecretText(redactPrivateKeyBlocks(sanitizePathString(value)));
 }
 
 // `sanitizeDiagnosticText` excludes shareability-only patterns.

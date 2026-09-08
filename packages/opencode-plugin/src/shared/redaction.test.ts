@@ -76,7 +76,7 @@ describe("redactSecretText — unquoted colon assignments and quoted env values"
     test("redacts `key: value` with an unquoted key", () => {
         expect(redactSecretText("token: abc123")).toBe("token: <REDACTED:token>");
         expect(redactSecretText("set api_key: sk-live-abc in the env")).toBe(
-            "set api_key: <REDACTED:api_key>",
+            "set api_key: <REDACTED:api_key> in the env",
         );
         expect(redactSecretText('password: "hunter two"')).toBe('password: "<REDACTED:password>"');
     });
@@ -333,12 +333,12 @@ describe("sanitizeConfigValue unqualified password keys", () => {
 });
 
 describe("redactSecretText — passphrases and CLI arguments", () => {
-    test("consumes an unquoted multiword colon value", () => {
-        expect(redactSecretText("password: correct horse battery staple")).toBe(
-            "password: <REDACTED:password>",
+    test("a bare colon value ends at whitespace; quoting consumes a multiword value whole", () => {
+        expect(redactSecretText("token: abc123 refreshed for bob")).toBe(
+            "token: <REDACTED:token> refreshed for bob",
         );
-        expect(redactSecretText("token: abc123 def, temperature: 0.2")).toBe(
-            "token: <REDACTED:token>, temperature: 0.2",
+        expect(redactSecretText('password: "correct horse battery staple"')).toBe(
+            'password: "<REDACTED:password>"',
         );
     });
 
@@ -409,14 +409,14 @@ describe("redactSecretText — round-eight edge cases", () => {
             "-----END PRIVATE KEY-----",
         ].join("\n");
         // The `=` rule then treats the marker as the assigned value, as it does for `AWS_ACCESS_KEY_ID=`.
-        expect(redactSecretText(`PRIVATE_KEY=${pem} trailing`)).toBe(
+        expect(sanitizeDiagnosticText(`PRIVATE_KEY=${pem} trailing`)).toBe(
             "PRIVATE_KEY=<REDACTED:private_key> trailing",
         );
-        expect(redactSecretText(`key material:\n${pem}\ndone`)).toBe(
+        expect(sanitizeDiagnosticText(`key material:\n${pem}\ndone`)).toBe(
             "key material:\n<PRIVATE_KEY_REDACTED>\ndone",
         );
         const unterminated = "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkq\nhkiG9w0BAQEFAASC";
-        expect(redactSecretText(`${unterminated}\nnext log line`)).toBe(
+        expect(sanitizeDiagnosticText(`${unterminated}\nnext log line`)).toBe(
             "<PRIVATE_KEY_REDACTED>\nnext log line",
         );
     });
@@ -468,7 +468,7 @@ describe("sanitizePathString with hostile OS identities", () => {
         );
         try {
             expect(sanitizeDiagnosticText("token: abc123 at /home/token/app")).toBe(
-                "token: <REDACTED:token>",
+                "token: <REDACTED:token> at /home/<USER>/app",
             );
             expect(sanitizeDiagnosticText("/home/token/app.log")).toBe("/home/<USER>/app.log");
             expect(spy).toHaveBeenCalled();
@@ -485,7 +485,7 @@ describe("redactSecretText — round-nine edge cases", () => {
         );
         try {
             expect(sanitizeDiagnosticText("password: hunter2 by /home/pass/x")).toBe(
-                "password: <REDACTED:password>",
+                "password: <REDACTED:password> by /home/<USER>/x",
             );
             expect(sanitizeDiagnosticText("/srv/pass/app.log by pass")).toBe(
                 "/srv/<USER>/app.log by <USER>",
@@ -504,7 +504,7 @@ describe("redactSecretText — round-nine edge cases", () => {
             "MIIEpAIBAAKCAQEA7Vv3xkQzq0Fh6",
             "hkiG9w0BAQEFAASCBKcwggSjAgEA",
         ].join("\n");
-        expect(redactSecretText(`${block}\nnext log line`)).toBe(
+        expect(sanitizeDiagnosticText(`${block}\nnext log line`)).toBe(
             "<PRIVATE_KEY_REDACTED>\nnext log line",
         );
     });

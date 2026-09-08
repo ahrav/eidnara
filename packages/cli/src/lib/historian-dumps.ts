@@ -88,6 +88,8 @@ export function listDumpsInDir(
                 // An entry removed or made unreadable mid-walk drops only itself, not the directory.
                 try {
                     const stat = statSync(join(dir, name));
+                    // Reading a FIFO with no writer blocks, so only regular files are dumps.
+                    if (!stat.isFile()) return [];
                     return [{ name, mtime: stat.mtimeMs, sizeKb: Math.round(stat.size / 1024) }];
                 } catch {
                     return [];

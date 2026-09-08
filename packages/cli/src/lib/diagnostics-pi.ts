@@ -1,12 +1,15 @@
-import { createHash } from "node:crypto";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, userInfo } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join, parse } from "node:path";
 
-import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
+import {
+    eidnaraProjectConfigBasePath,
+    eidnaraUserConfigBasePath,
+} from "@eidnara/opencode/config/config-paths";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
-import { escapeRegex, redactSecretText } from "@eidnara/opencode/shared/redaction";
+import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
+import { escapeRegex, isSecretKey, redactSecretText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import {
     type HistorianDumpMeta,
@@ -20,7 +23,6 @@ import {
     getPiAgentDir,
     getPiSessionsRoot,
     getPiUserExtensionsPath,
-    getSharedUserConfigPath,
 } from "./paths";
 import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
 
@@ -73,8 +75,8 @@ export interface PiDiagnosticReport {
      * `recentSessions` contains the five JSONL sessions with the newest mtimes.
      * `--issue` uses these sessions in its session picker.
      * Pi stores session JSONL files under `~/.pi/agent/sessions/<slug>/*.jsonl`.
-     * Pi derives each session slug by replacing `/` in the project directory with `-`.
-     * Pi wraps each session slug in `--`.
+     * Each session's `directory` comes from the `cwd` in its JSONL header line.
+     * The session-slug folder is the fallback when a header carries no `cwd`.
      */
     recentSessions: PiRecentSessionSummary[];
     /** The report keeps legacy tmp-dir dumps separate from project-grouped dumps. */
@@ -83,7 +85,7 @@ export interface PiDiagnosticReport {
 
 export interface PiRecentSessionSummary {
     sessionId: string;
-    /** Pi's session-slug folder determines `directory`. */
+    /** The session header's `cwd`, or the reversed session slug when the header has none. */
     directory: string;
     /** The JSONL file's mtime determines `lastActiveAt` in ISO format. */
     lastActiveAt: string;
@@ -121,56 +123,103 @@ function getSelfVersion(): string {
     return "unknown";
 }
 
-function currentUserHash(): string {
-    const username = userInfo().username || "unknown";
-    return createHash("sha256").update(username).digest("hex").slice(0, 12);
+function currentHome(): string {
+    if (process.env.HOME) return process.env.HOME;
+    try {
+        return homedir();
+    } catch {
+        return "";
+    }
+}
+
+function currentUsername(): string | undefined {
+    try {
+        const username = userInfo().username;
+        if (username) return username;
+    } catch {}
+    const home = currentHome();
+    const fromHome = home ? basename(home) : "";
+    return fromHome || undefined;
+}
+
+/** Text like `client_secret: value` is judged by the shared key vocabulary; numbers and booleans stay. */
+function redactKeyedText(value: string): string {
+    return value.replace(
+        /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s&;,]+)/g,
+        (full, key: string, separator: string, secret: string) =>
+            isSecretKey(key) && !/^(?:true|false|null|[+-]?\d+(?:\.\d+)?)$/i.test(secret)
+                ? `${key}${separator}<REDACTED>`
+                : full,
+    );
 }
 
 function redactSecretString(value: string): string {
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
-    return redactSecretText(value)
-        .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
-        .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>")
-        .replace(/api[_-]?key=([^\s&]+)/gi, "api_key=<REDACTED>")
-        .replace(/token=([^\s&]+)/gi, "token=<REDACTED>");
+    const redacted = redactSecretText(value)
+        .replace(/-----BEGIN [A-Z ]+-----[\s\S]*?(?:-----END [A-Z ]+-----|$)/g, "<REDACTED PEM>")
+        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1<REDACTED>@")
+        .replace(
+            /(\b(?:Proxy-)?Authorization\s*[:=]\s*|\b(?:Set-)?Cookie\s*[:=]\s*|\bX-API-Key\s*[:=]\s*)[^\r\n]+/gi,
+            "$1<REDACTED>",
+        )
+        .replace(/\bBearer\s+[A-Za-z0-9._~+\-/=]+/gi, "Bearer <REDACTED>")
+        .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>");
+    return redactKeyedText(redacted);
 }
 
 /**
  * `sanitizeString` redacts paths, usernames, and secret material before issue reports are written.
- * `sanitizeString` replaces the exact home path with `<HOME>`.
- * `sanitizeString` replaces the local username with a stable short hash.
- * The stable hash correlates repeated occurrences without exposing the account name.
+ * Home roots are not redacted because they would match every path separator.
  */
 export function sanitizeString(value: string): string {
-    const home = process.env.HOME || homedir();
-    const username = userInfo().username;
-    const userHash = `<USER:${currentUserHash()}>`;
+    const home = currentHome();
+    const username = currentUsername();
+    // Windows paths compare case-insensitively, so home and account matches do too there.
+    const flags = process.platform === "win32" ? "gi" : "g";
     let sanitized = redactSecretString(value);
-    if (home) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "<HOME>");
+    if (home && parse(home).root !== home) {
+        sanitized = sanitized.replace(new RegExp(escapeRegex(home), flags), "<HOME>");
     }
-    sanitized = sanitized.replace(/\/Users\/[^/]+\//g, `/Users/${userHash}/`);
-    sanitized = sanitized.replace(/\/home\/[^/]+\//g, `/home/${userHash}/`);
-    sanitized = sanitized.replace(/C:\\Users\\[^\\]+\\/g, `C:\\Users\\${userHash}\\`);
+    sanitized = sanitized.replace(/(\/Users\/)[^/\s"'`]+/gi, "$1<USER>");
+    sanitized = sanitized.replace(/(\/home\/)[^/\s"'`]+/gi, "$1<USER>");
+    sanitized = sanitized.replace(/[A-Za-z]:[\\/]Users[\\/][^\\/\s"'`]+/gi, "C:\\Users\\<USER>");
     if (username) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), userHash);
+        sanitized = sanitized.replace(new RegExp(escapeRegex(username), flags), "<USER>");
     }
     return sanitized;
 }
 
 function shouldRedactKey(key: string): boolean {
-    return /api[_-]?key|token|secret|password|authorization|cookie/i.test(key);
+    return isSecretKey(key) || /cookie/i.test(key);
+}
+
+/** Prompt fields hold arbitrary private prose; the report keeps only presence and length. */
+function isPromptKey(key: string): boolean {
+    return /^(prompt|system_prompt|description|tool_descriptions|skip_signatures)$/.test(key);
+}
+
+function redactProse(value: unknown): unknown {
+    if (typeof value === "string") return `<REDACTED ${value.length} chars>`;
+    if (Array.isArray(value)) return value.map(redactProse);
+    if (value && typeof value === "object") {
+        return Object.fromEntries(
+            Object.entries(value).map(([entryKey, entry]) => [entryKey, redactProse(entry)]),
+        );
+    }
+    return value;
 }
 
 export function sanitizeValue(value: unknown, key = ""): unknown {
     if (value === null || typeof value === "number" || typeof value === "boolean") return value;
     if (shouldRedactKey(key)) return "<REDACTED>";
+    if (isPromptKey(key)) return redactProse(value);
     if (typeof value === "string") return sanitizeString(value);
     if (Array.isArray(value)) return value.map((entry) => sanitizeValue(entry));
     if (value && typeof value === "object") {
+        // Dynamic-key records such as `permission.bash` carry user text in the key itself.
         return Object.fromEntries(
             Object.entries(value).map(([entryKey, entry]) => [
-                entryKey,
+                sanitizeString(entryKey),
                 sanitizeValue(entry, entryKey),
             ]),
         );
@@ -178,16 +227,25 @@ export function sanitizeValue(value: unknown, key = ""): unknown {
     return value;
 }
 
-function getProjectConfigPath(cwd: string): string {
-    return resolveEidnaraProjectConfigPath(cwd);
+/**
+ * `detectConfigFile` applies the Pi loader's precedence: `.jsonc`, then `.json`,
+ * and the `.jsonc` path when neither exists.
+ */
+function getUserConfigPath(): string {
+    return detectConfigFile(eidnaraUserConfigBasePath()).path;
 }
 
+function getProjectConfigPath(cwd: string): string {
+    return detectConfigFile(eidnaraProjectConfigBasePath(cwd)).path;
+}
+
+/** Parse errors carry the absolute config path, so they are sanitized like any other path. */
 function readConfigDiagnostic(path: string): PiConfigDiagnostic {
     const parsed = readJsoncLenient(path);
     return {
         path,
         exists: existsSync(path),
-        ...(parsed.parseError ? { parseError: parsed.parseError } : {}),
+        ...(parsed.parseError ? { parseError: sanitizeString(parsed.parseError) } : {}),
         flags: sanitizeValue(parsed.value) as Record<string, unknown>,
     };
 }
@@ -211,13 +269,37 @@ function describePackageEntry(entry: unknown): string {
  *
  * Pi strips the leading `/`, replaces `/` with `-`, and wraps the result in `--`.
  *
- * Literal `-` characters in path components make session-slug reversal lossy.
+ * Literal `-` characters in path components make session-slug reversal lossy,
+ * so the slug is the fallback when the header does not provide an absolute `cwd`.
  */
 function reverseSlugToDirectory(slug: string): string | null {
     if (!slug.startsWith("--") || !slug.endsWith("--")) return null;
     const inner = slug.slice(2, -2);
-    if (!inner) return null;
     return `/${inner.replace(/-/g, "/")}`;
+}
+
+const SESSION_HEADER_MAX_BYTES = 8 * 1024;
+
+/**
+ * The first JSONL line is Pi's session header, whose `cwd` is the exact project
+ * path. The read is bounded because the rest of the file is the transcript.
+ */
+function readSessionHeaderCwd(file: string): string | null {
+    let fd: number | null = null;
+    try {
+        fd = openSync(file, "r");
+        const buffer = Buffer.alloc(SESSION_HEADER_MAX_BYTES);
+        const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+        const text = buffer.toString("utf-8", 0, bytesRead);
+        const newline = text.indexOf("\n");
+        if (newline === -1) return null;
+        const header = JSON.parse(text.slice(0, newline)) as { cwd?: unknown };
+        return typeof header.cwd === "string" && isAbsolute(header.cwd) ? header.cwd : null;
+    } catch {
+        return null;
+    } finally {
+        if (fd !== null) closeSync(fd);
+    }
 }
 
 /**
@@ -235,13 +317,14 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
 
         const candidates: Array<{
             sessionId: string;
-            directory: string;
+            file: string;
+            slugDirectory: string;
             mtime: number;
         }> = [];
 
         for (const slug of slugs) {
-            const directory = reverseSlugToDirectory(slug);
-            if (!directory) continue;
+            const slugDirectory = reverseSlugToDirectory(slug);
+            if (!slugDirectory) continue;
             const slugDir = join(sessionsRoot, slug);
             let files: string[];
             try {
@@ -249,11 +332,14 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
             } catch {
                 continue;
             }
-            for (const file of files) {
+            for (const name of files) {
+                const file = join(slugDir, name);
                 try {
-                    const mtime = statSync(join(slugDir, file)).mtimeMs;
-                    const sessionId = file.replace(/\.jsonl$/, "");
-                    candidates.push({ sessionId, directory, mtime });
+                    const stat = statSync(file);
+                    // Opening a FIFO with no writer blocks, so only a regular file is a candidate.
+                    if (!stat.isFile()) continue;
+                    const sessionId = name.replace(/\.jsonl$/, "");
+                    candidates.push({ sessionId, file, slugDirectory, mtime: stat.mtimeMs });
                 } catch {}
             }
         }
@@ -261,7 +347,7 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
         candidates.sort((a, b) => b.mtime - a.mtime);
         return candidates.slice(0, 5).map((entry) => ({
             sessionId: entry.sessionId,
-            directory: entry.directory,
+            directory: readSessionHeaderCwd(entry.file) ?? entry.slugDirectory,
             lastActiveAt: new Date(entry.mtime).toISOString(),
         }));
     } catch {
@@ -274,8 +360,6 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
     for (const session of recentSessions) {
         const dir = session.directory;
         if (!dir) continue;
-        const projectHistorianDir = getProjectEidnaraHistorianDir(dir);
-        const listing = listDumpsInDir(projectHistorianDir, 5);
         const existing = buckets.get(dir);
         if (existing) {
             if (!existing.sessionIds.includes(session.sessionId)) {
@@ -283,6 +367,7 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
             }
             continue;
         }
+        const listing = listDumpsInDir(getProjectEidnaraHistorianDir(dir), 5);
         if (listing.count === 0) continue;
         buckets.set(dir, {
             directory: dir,
@@ -306,16 +391,34 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
     };
 }
 
+/**
+ * One `stat` decides both fields, so a file removed or made unreadable between
+ * two probes cannot abort the report; it reads as absent.
+ */
+function statLogFile(path: string): PiDiagnosticReport["logFile"] {
+    try {
+        const stat = statSync(path);
+        // Opening a FIFO with no writer blocks, so only a regular file counts as readable.
+        if (!stat.isFile()) return { path, exists: false, sizeKb: 0 };
+        return { path, exists: true, sizeKb: Math.round(stat.size / 1024) };
+    } catch {
+        return { path, exists: false, sizeKb: 0 };
+    }
+}
+
+function sanitizeOptional(value: string | null): string | null {
+    return value === null ? null : oneLine(sanitizeString(value));
+}
+
 export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnosticReport> {
     const pi = detectPiBinary();
     const settingsPath = getPiUserExtensionsPath();
     const settingsParsed = readJsoncLenient(settingsPath);
     const packages = packageEntries(settingsParsed.value);
-    const userConfigPath = getSharedUserConfigPath();
+    const userConfigPath = getUserConfigPath();
     const projectConfigPath = getProjectConfigPath(cwd);
     const loaded = loadPiConfig({ cwd });
-    const logPath = getEidnaraLogPath("pi");
-    const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
+    const logFile = statLogFile(getEidnaraLogPath("pi"));
     const otherPiExtensions = packages
         .filter((entry) => entry !== PI_PACKAGE_SOURCE)
         .map(describePackageEntry);
@@ -330,11 +433,13 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         pluginVersion: getSelfVersion(),
         piInstalled: pi !== null,
         piPath: pi?.path ?? null,
-        piVersion: pi ? getPiVersion(pi.path) : null,
+        piVersion: pi ? sanitizeOptional(getPiVersion(pi.path)) : null,
         settings: {
             path: settingsPath,
             exists: existsSync(settingsPath),
-            ...(settingsParsed.parseError ? { parseError: settingsParsed.parseError } : {}),
+            ...(settingsParsed.parseError
+                ? { parseError: sanitizeString(settingsParsed.parseError) }
+                : {}),
             hasEidnaraPackage: packages.some((entry) => entry === PI_PACKAGE_SOURCE),
             packages: sanitizeValue(packages) as unknown[],
         },
@@ -351,14 +456,18 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             knownConflicts: [],
             otherPiExtensions: otherPiExtensions.map(sanitizeString),
         },
-        logFile: {
-            path: logPath,
-            exists: existsSync(logPath),
-            sizeKb: Math.round(logFileSize / 1024),
-        },
+        logFile,
         recentSessions,
         historianDumps,
     };
+}
+
+/**
+ * Strings rendered outside a fenced block stay on one line so a newline inside
+ * a config key or parser message cannot inject a Markdown heading.
+ */
+function oneLine(value: string): string {
+    return value.replace(/\s*[\r\n]+\s*/g, " ");
 }
 
 export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
@@ -370,11 +479,11 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         `- Pi plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- Pi installed: ${report.piInstalled}${report.piVersion ? ` (${report.piVersion})` : ""}`,
+        `- Pi installed: ${report.piInstalled}${report.piVersion ? ` (${oneLine(report.piVersion)})` : ""}`,
         `- Eidnara package registered: ${report.settings.hasEidnaraPackage}`,
-        `- User config parse error: ${report.userConfig.parseError ?? "none"}`,
-        `- Project config parse error: ${report.projectConfig.parseError ?? "none"}`,
-        `- Known Pi extension conflicts: ${report.conflicts.knownConflicts.length === 0 ? "none" : report.conflicts.knownConflicts.join("; ")}`,
+        `- User config parse error: ${oneLine(report.userConfig.parseError ?? "none")}`,
+        `- Project config parse error: ${oneLine(report.projectConfig.parseError ?? "none")}`,
+        `- Known Pi extension conflicts: ${report.conflicts.knownConflicts.length === 0 ? "none" : oneLine(report.conflicts.knownConflicts.join("; "))}`,
         "",
         "### Pi settings",
         "```json",
@@ -399,12 +508,12 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         "### Loaded config paths",
         report.loadedConfigPaths.length === 0
             ? "_No config files loaded; defaults are in use._"
-            : report.loadedConfigPaths.map((path) => `- ${path}`).join("\n"),
+            : report.loadedConfigPaths.map((path) => `- ${oneLine(path)}`).join("\n"),
         "",
         "### Config load warnings",
         report.loadWarnings.length === 0
             ? "_None._"
-            : report.loadWarnings.map((warning) => `- ${warning}`).join("\n"),
+            : report.loadWarnings.map((warning) => `- ${oneLine(warning)}`).join("\n"),
         "",
         "### Pi extension conflicts",
         "No known conflicting Pi extensions are currently registered. Other Pi packages are informational only.",
