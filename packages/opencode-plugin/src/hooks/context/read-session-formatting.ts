@@ -47,20 +47,50 @@ function trimText(text: string): string {
 }
 
 // Remove system injections before stripping tag prefixes because removal can expose a leading tag.
+// The tag scan is anchored at offset 0, so leading whitespace is trimmed before it runs.
 function cleanUserText(text: string): string {
-    return trimText(stripTagPrefix(removeSystemInjections(text)));
+    return trimText(stripTagPrefix(trimText(removeSystemInjections(text))));
 }
 
 export function isMeaningfulUserText(text: string): boolean {
     return cleanUserText(text).length > 0;
 }
 
+function isMediaPart(part: Record<string, unknown>): boolean {
+    return part.type === "file" || part.type === "image";
+}
+
+function stringField(part: Record<string, unknown>, key: string): string | undefined {
+    const value = part[key];
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+// The placeholder carries media type and filename only; the data URL never reaches a summary.
+function mediaPlaceholder(part: Record<string, unknown>): string {
+    const mediaType =
+        stringField(part, "mime") ?? stringField(part, "mimeType") ?? "application/octet-stream";
+    const filename = stringField(part, "filename") ?? stringField(part, "name");
+    const kind = mediaKind(mediaType);
+    return filename === undefined
+        ? `[media:${kind} ${mediaType}]`
+        : `[media:${kind} ${mediaType} ${filename}]`;
+}
+
+function mediaKind(mediaType: string): string {
+    if (mediaType.startsWith("image/")) return "image";
+    if (mediaType.startsWith("audio/")) return "audio";
+    if (mediaType.startsWith("video/")) return "video";
+    if (mediaType === "application/pdf") return "document";
+    return "file";
+}
+
 export function hasMeaningfulUserText(parts: unknown[]): boolean {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const candidate = part as Record<string, unknown>;
-        if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
         if (isMachineAuthoredPart(candidate)) continue;
+        if (isMediaPart(candidate)) return true;
+        if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
         if (isMeaningfulUserText(candidate.text)) return true;
     }
 
@@ -72,8 +102,12 @@ export function extractTexts(parts: unknown[], role: string): string[] {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
-        if (p.type !== "text" || typeof p.text !== "string") continue;
         if (isMachineAuthoredPart(p)) continue;
+        if (isMediaPart(p)) {
+            texts.push(mediaPlaceholder(p));
+            continue;
+        }
+        if (p.type !== "text" || typeof p.text !== "string") continue;
         // `hasMeaningfulUserText` evaluates cleaned text, so summaries clean user text too.
         const text = role === "user" ? cleanUserText(p.text) : trimText(p.text);
         if (text.length === 0) continue;
@@ -204,14 +238,15 @@ export function compactTextForSummary(
     if (!COMMIT_VERB_PATTERN.test(text)) return { text, commitHashes };
 
     const removable = new Set([...recorded, ...commitHashes]);
+    const marker = unusedMarker(text);
     let removed = 0;
     const withoutHashes = text
         .replace(createCommitHashExtractPattern(), (match, hash: string) => {
             if (!removable.has(hash.toLowerCase())) return match;
             removed += 1;
-            return removeHashKeepUnpairedBacktick(match) + REMOVED_HASH;
+            return removeHashKeepUnpairedBacktick(match) + marker;
         })
-        .replace(EMPTIED_PARENS_OR_MARKER, "")
+        .replace(emptiedParensOrMarkerPattern(marker), "")
         .replace(/\s+,/g, ",")
         .replace(/,\s*,+/g, ", ")
         .replace(/\s{2,}/g, " ")
@@ -225,9 +260,21 @@ export function compactTextForSummary(
     };
 }
 
-// The marker lets cleanup remove only parentheses emptied by hash removal; `foo()` elsewhere is kept.
-const REMOVED_HASH = "\ue000";
-const EMPTIED_PARENS_OR_MARKER = /\(\s*\ue000(?:\s*,\s*\ue000)*\s*\)|\ue000/g;
+/**
+ * Each removed hash leaves a marker so cleanup removes only parentheses emptied by that removal.
+ * Choosing a Private Use Area code point absent from the text keeps authored characters intact.
+ */
+function unusedMarker(text: string): string {
+    for (let code = 0xe000; code <= 0xf8ff; code += 1) {
+        const candidate = String.fromCharCode(code);
+        if (!text.includes(candidate)) return candidate;
+    }
+    throw new Error("text contains every Private Use Area code point");
+}
+
+function emptiedParensOrMarkerPattern(marker: string): RegExp {
+    return new RegExp(String.raw`\(\s*${marker}(?:\s*,\s*${marker})*\s*\)|${marker}`, "g");
+}
 
 /**
  * The extract pattern makes each backtick independently optional, so a hash inside a longer code

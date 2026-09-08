@@ -99,6 +99,15 @@ describe("stripTagPrefix (transform §N§ notation only)", () => {
         expect(stripTagPrefix(`${SECTION}42${SECTION} Hello`)).toBe("Hello");
     });
 
+    it("#given tags separated by U+0085 #when stripTagPrefix runs #then removes them all", () => {
+        expect(
+            stripTagPrefix(`${SECTION}42${SECTION}\u0085${SECTION}43${SECTION}\u0085Hello`),
+        ).toBe("Hello");
+        expect(stripTagPrefix(`${SECTION}42">${SECTION}\u0085${SECTION}7$\u0085Hello`)).toBe(
+            "Hello",
+        );
+    });
+
     it("#given malformed xml hybrid prefix #when stripTagPrefix runs #then removes it", () => {
         expect(stripTagPrefix(`${SECTION}15298">${SECTION}15298${SECTION} hello`)).toBe("hello");
     });

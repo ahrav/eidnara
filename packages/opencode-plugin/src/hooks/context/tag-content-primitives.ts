@@ -15,9 +15,9 @@ const DANGLING_TAG_GLOBAL_REGEX = new RegExp(DANGLING_TAG_CORE, "gu");
 // Sticky (`y`) makes each rule match only at the current offset. The malformed rule precedes the
 // dangling rule because both can match `§N">`, and only the malformed rule consumes the whole hybrid.
 const LEADING_TAG_RULES: readonly RegExp[] = [
-    /\u00a7\d+">\u00a7(?:\d+\u00a7)?\s*/y,
-    /\u00a7\d+\u00a7\s*/y,
-    new RegExp(String.raw`${DANGLING_TAG_CORE}\s*`, "uy"),
+    /\u00a7\d+">\u00a7(?:\d+\u00a7)?[\s\u0085]*/y,
+    /\u00a7\d+\u00a7[\s\u0085]*/y,
+    new RegExp(String.raw`${DANGLING_TAG_CORE}[\s\u0085]*`, "uy"),
 ];
 
 /* */
