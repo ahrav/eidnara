@@ -112,33 +112,39 @@ export interface RawMessageProvider {
     getStoredMessageCount?: () => number;
 }
 
-const sessionProviders = new Map<string, RawMessageProvider>();
-
 /**
- * historian.
+ * Providers registered for one session, innermost last.
+ *
+ * Reads use the most recently registered provider. The stack preserves outer registrations
+ * when a nested or overlapping scope releases.
  */
+const sessionProviders = new Map<string, RawMessageProvider[]>();
+
+function activeRawMessageProvider(sessionId: string): RawMessageProvider | undefined {
+    return sessionProviders.get(sessionId)?.at(-1);
+}
+
+/** The release function removes only its registration. Releasing twice is a no-op. */
 export function setRawMessageProvider(sessionId: string, provider: RawMessageProvider): () => void {
-    sessionProviders.set(sessionId, provider);
+    const stack = sessionProviders.get(sessionId) ?? [];
+    stack.push(provider);
+    sessionProviders.set(sessionId, stack);
     return () => {
         const current = sessionProviders.get(sessionId);
-        if (current === provider) sessionProviders.delete(sessionId);
+        if (!current) return;
+        const index = current.lastIndexOf(provider);
+        if (index < 0) return;
+        current.splice(index, 1);
+        if (current.length === 0) sessionProviders.delete(sessionId);
     };
 }
 
 /**
- * `withRawMessageProvider` unregisters the provider after `fn` throws or returns, except after a returned promise settles.
+ * Runs `fn` and calls `cleanup` after it returns, throws, or its returned promise settles.
  *
- * A synchronous `finally` unregisters the provider when `fn` returns a pending promise, before later awaited reads.
- * A synchronous `finally` would route later awaited reads to OpenCode's session DB.
- * OpenCode's session DB is empty for Pi sessions and may be absent on Pi-only installs.
- * On Pi-only installs, reading OpenCode's absent session DB throws `unable to open database file`.
+ * A synchronous `finally` would run at the callback's first `await`, before later awaited reads.
  */
-export function withRawMessageProvider<T>(
-    sessionId: string,
-    provider: RawMessageProvider,
-    fn: () => T,
-): T {
-    const cleanup = setRawMessageProvider(sessionId, provider);
+function withScopedCleanup<T>(fn: () => T, cleanup: () => void): T {
     let result: T;
     try {
         result = fn();
@@ -151,10 +157,24 @@ export function withRawMessageProvider<T>(
         typeof result === "object" &&
         typeof (result as { then?: unknown }).then === "function"
     ) {
-        return (result as unknown as Promise<unknown>).finally(cleanup) as unknown as T;
+        return Promise.resolve(result).finally(cleanup) as unknown as T;
     }
     cleanup();
     return result;
+}
+
+/**
+ * The provider stays registered until `fn` returns, throws, or its returned promise settles.
+ *
+ * Unregistering at the callback's first `await` would route later awaited reads to OpenCode's
+ * session DB instead of the provider.
+ */
+export function withRawMessageProvider<T>(
+    sessionId: string,
+    provider: RawMessageProvider,
+    fn: () => T,
+): T {
+    return withScopedCleanup(fn, setRawMessageProvider(sessionId, provider));
 }
 
 /** Chunk compaction strips system-reminder blocks and OMO markers from user text. */
@@ -185,20 +205,13 @@ export interface SessionChunk {
 }
 
 export function withRawSessionMessageCache<T>(fn: () => T): T {
-    const outerCache = activeRawMessageCache;
-    if (!outerCache) {
-        activeRawMessageCache = new Map();
-        activeAbsoluteCountCache = new Map();
-    }
-
-    try {
-        return fn();
-    } finally {
-        if (!outerCache) {
-            activeRawMessageCache = null;
-            activeAbsoluteCountCache = null;
-        }
-    }
+    if (activeRawMessageCache) return fn();
+    activeRawMessageCache = new Map();
+    activeAbsoluteCountCache = new Map();
+    return withScopedCleanup(fn, () => {
+        activeRawMessageCache = null;
+        activeAbsoluteCountCache = null;
+    });
 }
 
 export function readRawSessionMessages(sessionId: string): RawMessage[] {
@@ -222,7 +235,7 @@ export function readRawSessionMessagePage(
     limit: number,
     finalWatermark: number,
 ): RawMessage[] {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider?.readMessagePage) {
         return provider.readMessagePage(afterOrdinal, limit, finalWatermark);
     }
@@ -241,7 +254,7 @@ export function readRawSessionMessagePage(
 }
 
 export function getRawSessionMessageOrdinalCount(sessionId: string): number {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider) {
         if (provider.getMessageCount) return provider.getMessageCount();
         return provider.readMessages().length;
@@ -311,12 +324,27 @@ export function primeInMemoryTailRawMessageCache(args: {
     return true;
 }
 
+/**
+ * Orders entries by `(timeCreated, id)` using code-unit id comparison. The anchor filter and
+ * the page sort must share one order, or an entry that falls on different sides of the anchor
+ * under the two orders is never paged.
+ */
+function compareOrdinalAnchors(
+    left: RawMessageOrdinalAnchor,
+    right: RawMessageOrdinalAnchor,
+): number {
+    if (left.timeCreated !== right.timeCreated) return left.timeCreated - right.timeCreated;
+    if (left.id < right.id) return -1;
+    if (left.id > right.id) return 1;
+    return 0;
+}
+
 export function readRawSessionMessageOrdinalPage(
     sessionId: string,
     after: RawMessageOrdinalAnchor | null,
     limit: number,
 ): RawMessageOrdinalEntry[] {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider?.readMessageOrdinalPage) return provider.readMessageOrdinalPage(after, limit);
     if (provider) {
         const rows = provider
@@ -327,16 +355,8 @@ export function readRawSessionMessageOrdinalPage(
                 contributesOrdinal: true,
                 hasValidInfo: true,
             }))
-            .filter(
-                (row) =>
-                    !after ||
-                    row.timeCreated > after.timeCreated ||
-                    (row.timeCreated === after.timeCreated && row.id > after.id),
-            )
-            .sort(
-                (left, right) =>
-                    left.timeCreated - right.timeCreated || left.id.localeCompare(right.id),
-            );
+            .filter((row) => !after || compareOrdinalAnchors(row, after) > 0)
+            .sort(compareOrdinalAnchors);
         return rows.slice(0, Math.max(1, Math.floor(limit)));
     }
     if (!openCodeDbExists()) return [];
@@ -346,7 +366,7 @@ export function readRawSessionMessageOrdinalPage(
 }
 
 export function getRawSessionStoredMessageCount(sessionId: string): number {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider?.getStoredMessageCount) return provider.getStoredMessageCount();
     if (provider) return provider.readMessages().length;
     if (!openCodeDbExists()) return 0;
@@ -357,7 +377,7 @@ export function readRawSessionMessagePartsById(
     sessionId: string,
     messageId: string,
 ): RawMessageParts | null {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider?.readMessagePartsById) return provider.readMessagePartsById(messageId);
     if (provider?.readMessageById) return provider.readMessageById(messageId);
     if (provider) {
@@ -373,7 +393,7 @@ export function readRawSessionMessageOrdinalById(
     sessionId: string,
     messageId: string,
 ): number | null {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider?.readMessageOrdinalById) {
         return provider.readMessageOrdinalById(messageId);
     }
@@ -408,7 +428,7 @@ export function readRawSessionMessageOrdinalById(
 }
 
 export function readRawSessionMessageById(sessionId: string, messageId: string): RawMessage | null {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider?.readMessageById) {
         return provider.readMessageById(messageId);
     }
@@ -420,14 +440,14 @@ export function readRawSessionMessageById(sessionId: string, messageId: string):
 }
 
 function readRawSessionMessagesFromSource(sessionId: string): RawMessage[] {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider) return provider.readMessages();
     if (!openCodeDbExists()) return [];
     return withReadOnlySessionDb((db) => readRawSessionMessagesFromDb(db, sessionId));
 }
 
 export function getRawSessionMessageCount(sessionId: string): number {
-    const provider = sessionProviders.get(sessionId);
+    const provider = activeRawMessageProvider(sessionId);
     if (provider) {
         if (provider.getMessageCount) return provider.getMessageCount();
         return provider.readMessages().length;
@@ -529,8 +549,6 @@ export function readSessionChunk(
     eligibleEndOrdinal?: number,
 ): SessionChunk {
     const messages = readRawSessionMessages(sessionId);
-    // `lastOrdinal` must be compared with the absolute message count; using `messages.length` would leave `hasMore` true for tail slices.
-    const totalMessageCount = getCachedAbsoluteMessageCount(sessionId) ?? messages.length;
     const startOrdinal = Math.max(1, offset);
     const lines: string[] = [];
     const lineMeta: SessionChunkLine[] = [];
@@ -541,20 +559,18 @@ export function readSessionChunk(
     let totalTokens = 0;
     let messagesProcessed = 0;
     let lastOrdinal = startOrdinal - 1;
-    let highestScannedOrdinal = startOrdinal - 1;
     let lastMessageId = "";
     let firstMessageId = "";
     let currentBlock: ChunkBlock | null = null;
     let pendingNoiseMeta: SessionChunkLine[] = [];
     let commitClusters = 0;
     let lastFlushedRole = "";
-
-    function recordFilteredNoise(meta: SessionChunkLine): void {
-        pendingNoiseMeta.push(meta);
-        if (!currentBlock) {
-            highestScannedOrdinal = Math.max(highestScannedOrdinal, meta.ordinal);
-        }
-    }
+    /**
+     * `hasMore` derives from this flag, not from an ordinal-count comparison. Raw readers count
+     * malformed rows but emit no message for them, and an ordinal comparison stays true forever
+     * once the final emitted message precedes such a row.
+     */
+    let budgetExhausted = false;
 
     function flushCurrentBlock(): boolean {
         if (!currentBlock) return true;
@@ -576,7 +592,6 @@ export function readSessionChunk(
         if (!firstMessageId) firstMessageId = currentBlock.meta[0]?.messageId ?? "";
         lastOrdinal =
             currentBlock.meta[currentBlock.meta.length - 1]?.ordinal ?? currentBlock.endOrdinal;
-        highestScannedOrdinal = Math.max(highestScannedOrdinal, lastOrdinal);
         lastMessageId = currentBlock.meta[currentBlock.meta.length - 1]?.messageId ?? "";
         messagesProcessed += currentBlock.meta.length;
         lines.push(blockText);
@@ -605,7 +620,7 @@ export function readSessionChunk(
         if (msg.role === "user" && !hasMeaningfulUserText(msg.parts)) {
             const tcSummaries = extractToolCallSummaries(msg.parts);
             if (tcSummaries.length === 0) {
-                recordFilteredNoise(meta);
+                pendingNoiseMeta.push(meta);
                 continue;
             }
             const tcText = tcSummaries.join(" / ");
@@ -616,7 +631,10 @@ export function readSessionChunk(
                 // `TC-only` content merged into an existing `"A"` block does not change that block's `isToolOnly` status.
                 pendingNoiseMeta = [];
             } else {
-                if (!flushCurrentBlock()) break;
+                if (!flushCurrentBlock()) {
+                    budgetExhausted = true;
+                    break;
+                }
                 currentBlock = {
                     role: "A",
                     startOrdinal: pendingNoiseMeta[0]?.ordinal ?? msg.ordinal,
@@ -644,7 +662,7 @@ export function readSessionChunk(
         const text = compacted.text;
 
         if (!text) {
-            recordFilteredNoise(meta);
+            pendingNoiseMeta.push(meta);
             continue;
         }
 
@@ -664,7 +682,10 @@ export function readSessionChunk(
             continue;
         }
 
-        if (!flushCurrentBlock()) break;
+        if (!flushCurrentBlock()) {
+            budgetExhausted = true;
+            break;
+        }
 
         currentBlock = {
             role,
@@ -678,12 +699,7 @@ export function readSessionChunk(
         pendingNoiseMeta = [];
     }
 
-    if (flushCurrentBlock() && pendingNoiseMeta.length > 0) {
-        highestScannedOrdinal = Math.max(
-            highestScannedOrdinal,
-            pendingNoiseMeta[pendingNoiseMeta.length - 1]?.ordinal ?? highestScannedOrdinal,
-        );
-    }
+    if (!flushCurrentBlock()) budgetExhausted = true;
 
     // `toolOnlyRanges` represents maximal contiguous tool-only ordinal ranges.
     const toolOnlyRanges: Array<{ start: number; end: number }> = [];
@@ -707,11 +723,7 @@ export function readSessionChunk(
         endMessageId: lastMessageId,
         messageCount: messagesProcessed,
         tokenEstimate: totalTokens,
-        hasMore:
-            Math.max(lastOrdinal, highestScannedOrdinal) <
-            (eligibleEndOrdinal !== undefined
-                ? Math.min(eligibleEndOrdinal - 1, totalMessageCount)
-                : totalMessageCount),
+        hasMore: budgetExhausted,
         text: lines.join("\n"),
         lines: lineMeta,
         commitClusterCount: commitClusters,

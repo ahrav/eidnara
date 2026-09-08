@@ -9,10 +9,15 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     getProtectedTailStartOrdinal,
     getRawSessionMessageIdsThrough,
+    primeTailRawMessageCache,
+    readRawSessionMessageOrdinalPage,
     readRawSessionMessages,
     readSessionChunk,
+    setRawMessageProvider,
+    withRawMessageProvider,
     withRawSessionMessageCache,
 } from "./read-session-chunk";
+import type { RawMessage } from "./read-session-raw";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -173,6 +178,30 @@ function appendOpenCodeMessage(
     }
 }
 
+/** A row whose `data` is not JSON consumes an ordinal slot but the raw reader emits no message for it. */
+function appendMalformedOpenCodeMessage(sessionId: string, id: string, timestamp: number): void {
+    const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+    const db = new Database(dbPath);
+    try {
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        ).run(id, sessionId, timestamp, timestamp, "not json");
+    } finally {
+        closeQuietly(db);
+    }
+}
+
+function providerMessage(id: string, ordinal: number, createdAt: number): RawMessage {
+    return {
+        id,
+        ordinal,
+        role: "user",
+        parts: [{ type: "text", text: `message ${id}` }],
+        createdAt,
+        version: null,
+    };
+}
+
 describe("readSessionChunk", () => {
     it("reads raw OpenCode messages with stable ordinals and ids", () => {
         useTempDataHome("read-session-chunk-");
@@ -222,6 +251,111 @@ describe("readSessionChunk", () => {
 
         const freshRead = readRawSessionMessages("ses-cache");
         expect(freshRead).toHaveLength(2);
+    });
+
+    it("keeps the raw-message cache alive until an async scope settles", async () => {
+        useTempDataHome("read-session-async-cache-scope-");
+        createOpenCodeDbWithMessages("ses-async-cache", [
+            { id: "m-1", role: "user", part: { type: "text", text: "turn 1" } },
+        ]);
+
+        const reads = await withRawSessionMessageCache(async () => {
+            const beforeAwait = readRawSessionMessages("ses-async-cache");
+            await Promise.resolve();
+            appendOpenCodeMessage(
+                "ses-async-cache",
+                { id: "m-2", role: "assistant", part: { type: "text", text: "turn 2" } },
+                2,
+            );
+            const afterAwait = readRawSessionMessages("ses-async-cache");
+            return { beforeAwait, afterAwait };
+        });
+
+        expect(reads.afterAwait).toBe(reads.beforeAwait);
+        expect(reads.afterAwait).toHaveLength(1);
+        expect(readRawSessionMessages("ses-async-cache")).toHaveLength(2);
+    });
+
+    it("clears the raw-message cache when an async scope rejects", async () => {
+        useTempDataHome("read-session-async-cache-reject-");
+        createOpenCodeDbWithMessages("ses-async-reject", [
+            { id: "m-1", role: "user", part: { type: "text", text: "turn 1" } },
+        ]);
+
+        await expect(
+            withRawSessionMessageCache(async () => {
+                readRawSessionMessages("ses-async-reject");
+                await Promise.resolve();
+                throw new Error("boom");
+            }),
+        ).rejects.toThrow("boom");
+
+        appendOpenCodeMessage(
+            "ses-async-reject",
+            { id: "m-2", role: "assistant", part: { type: "text", text: "turn 2" } },
+            2,
+        );
+        expect(readRawSessionMessages("ses-async-reject")).toHaveLength(2);
+    });
+
+    it("restores the outer provider when a nested provider scope ends", () => {
+        useTempDataHome("read-session-nested-provider-");
+        const outer = { readMessages: () => [providerMessage("outer-1", 1, 1)] };
+        const inner = { readMessages: () => [providerMessage("inner-1", 1, 1)] };
+
+        withRawMessageProvider("ses-nested", outer, () => {
+            expect(readRawSessionMessages("ses-nested").map((m) => m.id)).toEqual(["outer-1"]);
+            withRawMessageProvider("ses-nested", inner, () => {
+                expect(readRawSessionMessages("ses-nested").map((m) => m.id)).toEqual(["inner-1"]);
+            });
+            expect(readRawSessionMessages("ses-nested").map((m) => m.id)).toEqual(["outer-1"]);
+        });
+
+        expect(readRawSessionMessages("ses-nested")).toEqual([]);
+    });
+
+    it("releases each provider on its own cleanup when scopes overlap out of order", () => {
+        useTempDataHome("read-session-overlap-provider-");
+        const first = { readMessages: () => [providerMessage("first-1", 1, 1)] };
+        const second = { readMessages: () => [providerMessage("second-1", 1, 1)] };
+
+        const releaseFirst = setRawMessageProvider("ses-overlap", first);
+        const releaseSecond = setRawMessageProvider("ses-overlap", second);
+
+        releaseFirst();
+        expect(readRawSessionMessages("ses-overlap").map((m) => m.id)).toEqual(["second-1"]);
+
+        releaseSecond();
+        expect(readRawSessionMessages("ses-overlap")).toEqual([]);
+
+        releaseSecond();
+        expect(readRawSessionMessages("ses-overlap")).toEqual([]);
+    });
+
+    it("pages provider ordinal entries with the ordering the anchor filter uses", () => {
+        // "B" sorts before "a" by code unit (66 < 97) but after it under locale collation.
+        const provider = {
+            readMessages: () => [providerMessage("a", 1, 5), providerMessage("B", 2, 5)],
+        };
+
+        withRawMessageProvider("ses-ordinal-page", provider, () => {
+            const firstPage = readRawSessionMessageOrdinalPage("ses-ordinal-page", null, 1);
+            expect(firstPage.map((entry) => entry.id)).toEqual(["B"]);
+
+            const secondPage = readRawSessionMessageOrdinalPage(
+                "ses-ordinal-page",
+                { timeCreated: firstPage[0].timeCreated, id: firstPage[0].id },
+                1,
+            );
+            expect(secondPage.map((entry) => entry.id)).toEqual(["a"]);
+
+            const thirdPage = readRawSessionMessageOrdinalPage(
+                "ses-ordinal-page",
+                { timeCreated: secondPage[0].timeCreated, id: secondPage[0].id },
+                1,
+            );
+            expect(thirdPage).toEqual([]);
+        });
     });
 
     it("returns raw message ids through an ordinal", () => {
@@ -477,6 +611,38 @@ describe("readSessionChunk", () => {
             expect(chunk.text).toContain("first content");
             expect(chunk.text).not.toContain("second content");
             expect(chunk.hasMore).toBe(true);
+        });
+
+        it("reports hasMore false when the primed tail ends in an omitted malformed row", () => {
+            //#given
+            useTempDataHome("read-session-omitted-tail-slot-");
+            createOpenCodeDbWithMessages("ses-omitted-slot", [
+                { id: "m-1", role: "user", part: { type: "text", text: "boundary" } },
+                { id: "m-2", role: "assistant", part: { type: "text", text: "after boundary" } },
+            ]);
+            appendMalformedOpenCodeMessage("ses-omitted-slot", "m-3", 3);
+
+            withRawSessionMessageCache(() => {
+                expect(
+                    primeTailRawMessageCache({
+                        sessionId: "ses-omitted-slot",
+                        lastCompartmentEnd: 1,
+                        anchorMessageId: "m-1",
+                    }),
+                ).toBe(true);
+
+                //#when
+                const chunk = readSessionChunk("ses-omitted-slot", 100_000, 2);
+
+                //#then
+                expect(chunk.endIndex).toBe(2);
+                expect(chunk.text).toContain("after boundary");
+                expect(chunk.hasMore).toBe(false);
+
+                const next = readSessionChunk("ses-omitted-slot", 100_000, chunk.endIndex + 1);
+                expect(next.messageCount).toBe(0);
+                expect(next.hasMore).toBe(false);
+            });
         });
     });
 });
