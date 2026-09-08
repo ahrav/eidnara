@@ -1,39 +1,32 @@
 const SYSTEM_DIRECTIVE_PREFIX = "[SYSTEM DIRECTIVE: EIDNARA";
 
-const SYSTEM_REMINDER_OPEN = "<system-reminder>";
-const SYSTEM_REMINDER_CLOSE = "</system-reminder>";
-
 export function isSystemDirective(text: string): boolean {
     return text.trimStart().startsWith(SYSTEM_DIRECTIVE_PREFIX);
+}
+
+function createSystemReminderTagPattern(): RegExp {
+    return /<(\/?)system-reminder>/gi;
 }
 
 /**
  * Tracks nesting depth so `<a><b>x</b> y</a>` drops `y` and the outer closer too; a non-greedy
  * regex stops at the first closer and leaves ` y</system-reminder>` in the output. An unmatched
- * closer at depth zero is dropped rather than echoed.
+ * closing tag at depth zero is dropped. The pattern matches the original string because case
+ * folding can change character length, making lowercased-string indices invalid.
  */
 export function removeSystemReminders(text: string): string {
-    const lower = text.toLowerCase();
     let output = "";
     let depth = 0;
-    let offset = 0;
-    while (offset < text.length) {
-        if (lower.startsWith(SYSTEM_REMINDER_OPEN, offset)) {
-            depth += 1;
-            offset += SYSTEM_REMINDER_OPEN.length;
-            continue;
-        }
-        if (lower.startsWith(SYSTEM_REMINDER_CLOSE, offset)) {
-            depth = Math.max(0, depth - 1);
-            offset += SYSTEM_REMINDER_CLOSE.length;
-            continue;
-        }
-        const codePoint = text.codePointAt(offset) as number;
-        const width = codePoint > 0xffff ? 2 : 1;
+    let consumed = 0;
+    for (const match of text.matchAll(createSystemReminderTagPattern())) {
         if (depth === 0) {
-            output += text.slice(offset, offset + width);
+            output += text.slice(consumed, match.index);
         }
-        offset += width;
+        depth = match[1] === "/" ? Math.max(0, depth - 1) : depth + 1;
+        consumed = match.index + match[0].length;
+    }
+    if (depth === 0) {
+        output += text.slice(consumed);
     }
     return output.trim();
 }

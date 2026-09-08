@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import {
+    compactTextForSummary,
     extractTexts,
     extractToolCallSummaries,
     hasMeaningfulUserText,
@@ -116,5 +117,42 @@ describe("mergeCommitHashes", () => {
 
     it("returns existing unchanged when next is empty", () => {
         expect(mergeCommitHashes(five, [])).toBe(five);
+    });
+});
+
+describe("compactTextForSummary", () => {
+    it("removes a hash together with both enclosing backticks", () => {
+        const result = compactTextForSummary("Committed `abc1234` done", "assistant");
+
+        expect(result.text).toBe("Committed done");
+        expect(result.commitHashes).toEqual(["abc1234"]);
+    });
+
+    it("removes a bare hash", () => {
+        expect(compactTextForSummary("Committed abc1234 done", "assistant").text).toBe(
+            "Committed done",
+        );
+    });
+
+    it("keeps the code span balanced when the hash ends a longer span", () => {
+        expect(
+            compactTextForSummary("Committed via `git show abc1234` now", "assistant").text,
+        ).toBe("Committed via `git show ` now");
+    });
+
+    it("keeps the code span balanced when the hash starts a longer span", () => {
+        expect(compactTextForSummary("Committed `abc1234-fix`", "assistant").text).toBe(
+            "Committed `-fix`",
+        );
+    });
+
+    it("leaves user text and hash-free assistant text untouched", () => {
+        expect(compactTextForSummary("Committed `abc1234`", "user")).toEqual({
+            text: "Committed `abc1234`",
+            commitHashes: [],
+        });
+        expect(compactTextForSummary("Looked at abc1234", "assistant").text).toBe(
+            "Looked at abc1234",
+        );
     });
 });

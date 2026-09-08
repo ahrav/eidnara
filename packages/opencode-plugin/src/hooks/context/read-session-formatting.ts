@@ -26,18 +26,18 @@ function cleanUserText(text: string): string {
     return removeSystemReminders(text).replaceAll(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
 }
 
+export function isMeaningfulUserText(text: string): boolean {
+    const cleaned = cleanUserText(text);
+    return cleaned.length > 0 && !isSystemDirective(cleaned);
+}
+
 export function hasMeaningfulUserText(parts: unknown[]): boolean {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const candidate = part as Record<string, unknown>;
         if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
         if (candidate.ignored === true) continue;
-
-        const cleaned = cleanUserText(candidate.text);
-
-        if (!cleaned) continue;
-        if (isSystemDirective(cleaned)) continue;
-        return true;
+        if (isMeaningfulUserText(candidate.text)) return true;
     }
 
     return false;
@@ -156,7 +156,7 @@ export function compactTextForSummary(
     }
 
     const withoutHashes = text
-        .replace(createCommitHashExtractPattern(), "")
+        .replace(createCommitHashExtractPattern(), removeHashKeepUnpairedBacktick)
         .replace(/\(\s*\)/g, "")
         .replace(/\s+,/g, ",")
         .replace(/,\s*,+/g, ", ")
@@ -168,6 +168,17 @@ export function compactTextForSummary(
         text: withoutHashes.length > 0 ? withoutHashes : text,
         commitHashes,
     };
+}
+
+/**
+ * The extract pattern makes each backtick independently optional, so a hash inside a longer code
+ * span (`git show abc1234`) matches with one backtick only. Dropping the whole match would leave
+ * the span unbalanced; the lone backtick is put back.
+ */
+function removeHashKeepUnpairedBacktick(match: string): string {
+    const opens = match.startsWith("`");
+    const closes = match.endsWith("`");
+    return opens === closes ? "" : "`";
 }
 
 export function mergeCommitHashes(existing: string[], next: string[]): string[] {

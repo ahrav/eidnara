@@ -38,6 +38,14 @@ describe("removeSystemReminders", () => {
         expect(removeSystemReminders("😀 <system-reminder>😈</system-reminder> 🎉")).toBe("😀  🎉");
     });
 
+    it("locates tags correctly after characters whose lowercase form changes length", () => {
+        // `İ` (U+0130) lowercases to two code units, so a lowercased copy would shift every offset.
+        const prefix = "İ".repeat(40);
+        expect(
+            removeSystemReminders(`${prefix}<system-reminder>SECRET</system-reminder>AFTER`),
+        ).toBe(`${prefix}AFTER`);
+    });
+
     it("returns text without reminders unchanged apart from trimming", () => {
         expect(removeSystemReminders("  plain text  ")).toBe("plain text");
     });

@@ -4,6 +4,7 @@ import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { isMeaningfulUserText } from "./read-session-formatting";
 
 interface AssistantMidTurnRow {
     id?: string;
@@ -11,8 +12,8 @@ interface AssistantMidTurnRow {
     timeCreated?: number;
 }
 
-interface ExistenceRow {
-    one?: number;
+interface MessageIdRow {
+    id?: string;
 }
 
 interface PartDataRow {
@@ -146,9 +147,10 @@ function hasNewerRealUserMessage(
     if (typeof latestAssistantTimeCreated !== "number") return false;
     // "Newer" is the `(time_created, id)` tuple ordering, so a user row that shares the
     // assistant's millisecond still counts when its id sorts after the assistant's.
-    const row = db
+    // A `compaction` part excludes the whole message.
+    const candidates = db
         .prepare(
-            `SELECT 1 as one
+            `SELECT m.id
              FROM message m
              WHERE m.session_id = ?
                AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
@@ -158,31 +160,72 @@ function hasNewerRealUserMessage(
                  WHERE p.message_id = m.id
                    AND ${jsonField("p.data", "$.type")} = 'compaction'
                )
-               AND NOT (
-                 EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
-                 AND NOT EXISTS (
-                   SELECT 1 FROM part p
-                   WHERE p.message_id = m.id
-                     AND json_valid(p.data) = 1
-                     AND COALESCE(${jsonField("p.data", "$.synthetic")}, 0) NOT IN (1, 'true')
-                     AND ${jsonField("p.data", "$.metadata.marker.kind")} IS NULL
-                     AND COALESCE(${jsonField("p.data", "$.ignored")}, 0) NOT IN (1, 'true')
-                 )
-               )
-             LIMIT 1`,
+             ORDER BY m.time_created ASC, m.id ASC`,
         )
-        .get(
+        .all(
             sessionId,
             latestAssistantTimeCreated,
             latestAssistantTimeCreated,
             latestAssistantId,
-        ) as ExistenceRow | null;
-    // A `compaction` part excludes the whole message before real-part filtering: the summary-prompt
-    // text part beside it is unflagged and would otherwise satisfy the per-part predicate.
-    // Parts with synthetic=true, metadata.marker.kind, or an ignored flag do not make a user message real.
-    // A user message with at least one non-synthetic, unmarked, non-ignored part counts as real.
-    // A partless user message counts as real. A malformed part is not evidence of a real turn.
-    return row?.one === 1;
+        ) as MessageIdRow[];
+
+    const selectParts = db.prepare("SELECT data FROM part WHERE message_id = ?");
+    for (const candidate of candidates) {
+        if (typeof candidate.id !== "string") continue;
+        const partRows = selectParts.all(candidate.id) as PartDataRow[];
+        if (isRealUserMessage(partRows)) return true;
+    }
+    return false;
+}
+
+/**
+ * A partless user message counts as real. Otherwise at least one part must be real; a malformed
+ * part is not evidence of a real turn.
+ */
+function isRealUserMessage(partRows: PartDataRow[]): boolean {
+    if (partRows.length === 0) return true;
+    return partRows.some((row) => {
+        const part = parsePart(row);
+        return part !== null && isRealUserPart(part);
+    });
+}
+
+/**
+ * Parts with `synthetic`, `ignored`, or `metadata.marker.kind` do not count. Text parts count only
+ * when `isMeaningfulUserText` returns true; other unflagged part types count.
+ */
+function isRealUserPart(part: Record<string, unknown>): boolean {
+    if (isTruthyFlag(part.synthetic) || isTruthyFlag(part.ignored)) return false;
+    if (markerKind(part) !== null) return false;
+    if (part.type === "text") {
+        return typeof part.text === "string" && isMeaningfulUserText(part.text);
+    }
+    return true;
+}
+
+function parsePart(row: PartDataRow): Record<string, unknown> | null {
+    if (typeof row.data !== "string" || row.data.length === 0) return null;
+    try {
+        const parsed: unknown = JSON.parse(row.data);
+        return parsed !== null && typeof parsed === "object"
+            ? (parsed as Record<string, unknown>)
+            : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Persisted flags appear as JSON `true`, SQLite `1`, or the string `"true"`. */
+function isTruthyFlag(value: unknown): boolean {
+    return value === true || value === 1 || value === "true";
+}
+
+function markerKind(part: Record<string, unknown>): unknown {
+    const metadata = part.metadata;
+    if (metadata === null || typeof metadata !== "object") return null;
+    const marker = (metadata as Record<string, unknown>).marker;
+    if (marker === null || typeof marker !== "object") return null;
+    return (marker as Record<string, unknown>).kind ?? null;
 }
 
 interface AssistantModelRow {

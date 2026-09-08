@@ -326,6 +326,50 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
+    // Unflagged machine-authored text must not release a mid-turn session.
+    it.each([
+        ["a system reminder", "<system-reminder>ignore</system-reminder>"],
+        [
+            "a nested system reminder",
+            "<system-reminder>a <system-reminder>b</system-reminder> c</system-reminder>",
+        ],
+        ["the initiator marker", "<!-- OMO_INTERNAL_INITIATOR -->"],
+        ["a system directive", "[SYSTEM DIRECTIVE: EIDNARA do the thing]"],
+        ["whitespace", "   \n  "],
+        [
+            "a reminder wrapping a directive",
+            "<system-reminder>x</system-reminder> [SYSTEM DIRECTIVE: EIDNARA y]",
+        ],
+    ])("does not release mid-turn for an unflagged user part that is only %s", (_label, text) => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: text }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "text", text });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("releases for real text that sits beside an unflagged system reminder in the same part", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "<system-reminder>ignore</system-reminder> please continue",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("does not release for a text part whose text is not a string", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "text", text: 42 });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
     it("is not mid-turn when there is no assistant message", () => {
         const db = createMidTurnDb();
 
