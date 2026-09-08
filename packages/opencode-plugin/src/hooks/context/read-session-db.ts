@@ -13,6 +13,7 @@ interface AssistantMidTurnRow {
     id?: string;
     finish?: string | null;
     timeCreated?: number;
+    timeCompleted?: number | null;
 }
 
 interface ExistenceRow {
@@ -95,6 +96,7 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         .prepare(
             `SELECT id,
                     json_extract(data, '$.finish') as finish,
+                    json_extract(data, '$.time.completed') as timeCompleted,
                     time_created as timeCreated
              FROM message
              WHERE session_id = ?
@@ -106,6 +108,8 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
 
     if (typeof latestAssistant?.id !== "string") return false;
     if (hasNewerRealUserMessage(db, sessionId, latestAssistant.timeCreated)) return false;
+    // A missing `time.completed` marks an assistant message that is still being produced.
+    if (typeof latestAssistant.timeCompleted !== "number") return true;
     if (latestAssistant.finish === "tool-calls") return true;
 
     const partRows = db

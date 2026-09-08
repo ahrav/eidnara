@@ -38,6 +38,7 @@ function createMidTurnDb(): Database {
     return db;
 }
 
+// A finished assistant row carries `time.completed`; pass `time: { created }` for a message still being produced.
 function insertAssistant(
     db: Database,
     sessionId: string,
@@ -47,7 +48,17 @@ function insertAssistant(
 ): void {
     db.prepare(
         "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
-    ).run(id, sessionId, timeCreated, timeCreated, JSON.stringify({ role: "assistant", ...data }));
+    ).run(
+        id,
+        sessionId,
+        timeCreated,
+        timeCreated,
+        JSON.stringify({
+            role: "assistant",
+            time: { created: timeCreated, completed: timeCreated },
+            ...data,
+        }),
+    );
 }
 
 function insertUser(
@@ -75,6 +86,50 @@ function insertPart(
 }
 
 describe("isMidTurnFromOpenCodeDb", () => {
+    it("is mid-turn while the latest assistant is still streaming text", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { time: { created: 100 } }, 100);
+        insertPart(db, "session-1", "assistant-1", "part-1", { type: "step-start" });
+        insertPart(db, "session-1", "assistant-1", "part-2", {
+            type: "text",
+            text: "partial answer",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is mid-turn while the latest assistant has no parts yet", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { time: { created: 100 } }, 100);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is not mid-turn for an aborted assistant that completed without a finish reason", () => {
+        const db = createMidTurnDb();
+        insertAssistant(
+            db,
+            "session-1",
+            "assistant-1",
+            { error: { name: "MessageAbortedError" }, time: { created: 100, completed: 150 } },
+            100,
+        );
+        insertPart(db, "session-1", "assistant-1", "part-1", {
+            type: "text",
+            text: "partial answer",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("is not mid-turn when a newer real user message follows an unfinished assistant", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { time: { created: 100 } }, 100);
+        insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
     it("is mid-turn when the latest assistant finished with tool-calls", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);

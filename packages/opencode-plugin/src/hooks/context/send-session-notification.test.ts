@@ -3,6 +3,7 @@ import {
     __ignoredNotificationTest,
     flushIgnoredMessages,
     MAX_QUEUED_IGNORED_NOTIFICATIONS,
+    MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS,
     sendIgnoredMessage,
 } from "./send-session-notification";
 
@@ -115,6 +116,79 @@ describe("sendIgnoredMessage", () => {
             ),
         );
         expect(session.prompt).not.toHaveBeenCalled();
+    });
+
+    it("retains a queued notice whose deferred delivery fails and drops it after the attempt cap", async () => {
+        const session = titledClientWithLastTurn();
+        session.prompt.mockImplementation(async () => {
+            throw new Error("transient prompt failure");
+        });
+        let active = true;
+        __ignoredNotificationTest.setMidTurnDetector(() => active);
+
+        await sendIgnoredMessage({ session }, "ses-retry", "flaky status", {});
+        active = false;
+
+        for (let attempt = 1; attempt < MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS; attempt += 1) {
+            await flushIgnoredMessages("ses-retry");
+            expect(session.prompt).toHaveBeenCalledTimes(attempt);
+            expect(__ignoredNotificationTest.pendingTexts("ses-retry")).toEqual(["flaky status"]);
+        }
+
+        await flushIgnoredMessages("ses-retry");
+        expect(session.prompt).toHaveBeenCalledTimes(MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS);
+        expect(__ignoredNotificationTest.pendingTexts("ses-retry")).toEqual([]);
+    });
+
+    it("re-inserts an interrupted flush batch ahead of notices queued during the flush", async () => {
+        const session = titledClientWithLastTurn();
+        let active = true;
+        __ignoredNotificationTest.setMidTurnDetector(() => active);
+
+        await sendIgnoredMessage({ session }, "ses-reorder", "old-1", {});
+        await sendIgnoredMessage({ session }, "ses-reorder", "old-2", {});
+        active = false;
+
+        // The title lookup is the flush's first await; use it to interleave a new notice and a
+        // new active run before the first delivery calls `session.prompt`.
+        session.get.mockImplementation(async () => {
+            active = true;
+            await sendIgnoredMessage({ session }, "ses-reorder", "new", {});
+            return { title: "Real title" };
+        });
+
+        await flushIgnoredMessages("ses-reorder");
+
+        expect(session.prompt).not.toHaveBeenCalled();
+        expect(__ignoredNotificationTest.pendingTexts("ses-reorder")).toEqual([
+            "old-1",
+            "old-2",
+            "new",
+        ]);
+    });
+
+    it("evicts the oldest entries when an interrupted flush batch overflows the cap", async () => {
+        const session = titledClientWithLastTurn();
+        let active = true;
+        __ignoredNotificationTest.setMidTurnDetector(() => active);
+
+        for (let index = 0; index < MAX_QUEUED_IGNORED_NOTIFICATIONS; index += 1) {
+            await sendIgnoredMessage({ session }, "ses-cap", `old-${index}`, {});
+        }
+        active = false;
+
+        session.get.mockImplementation(async () => {
+            active = true;
+            await sendIgnoredMessage({ session }, "ses-cap", "new", {});
+            return { title: "Real title" };
+        });
+
+        await flushIgnoredMessages("ses-cap");
+
+        const pending = __ignoredNotificationTest.pendingTexts("ses-cap");
+        expect(pending).toHaveLength(MAX_QUEUED_IGNORED_NOTIFICATIONS);
+        expect(pending[0]).toBe("old-1");
+        expect(pending.at(-1)).toBe("new");
     });
 
     it("pins the last assistant turn's agent+model+variant by default (mid-session)", async () => {
