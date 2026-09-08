@@ -25,6 +25,7 @@ import {
     createToolExecuteAfterHook,
     getLiveNotificationParams,
 } from "./hook-handlers";
+import { closeKernelSession } from "./kernel-transport";
 import {
     addBoundedSession,
     type LiveSessionState,
@@ -376,6 +377,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             } else {
                 moduleClient.closeSession?.(sessionId);
             }
+            // Memory reads from hooks, tools, and sidebar polls hold kernel routes on the shared transport; host route capacity is finite. commentlint: allow(JUDGE)
+            closeKernelSession(deps.config, sessionId);
             systemPromptHash.clearSession(sessionId);
             lastHeuristicsTurnId.delete(sessionId);
             clearToolPermissionDenied(sessionId);
