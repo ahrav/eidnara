@@ -65,13 +65,11 @@ export function capBodyToGithubLimit(
 ): string {
     if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
 
-    let capped = body;
-
     if (body.lastIndexOf(LOG_HEADING) === -1) {
-        const markerBytes = Buffer.byteLength(FALLBACK_TRUNCATION_MARKER, "utf8");
-        capped = truncateToByteBudget(body, maxBytes - markerBytes) + FALLBACK_TRUNCATION_MARKER;
-        return enforceFinalBodyLimit(capped, maxBytes);
+        return truncateWithBalancedFences(body, maxBytes, FALLBACK_TRUNCATION_MARKER);
     }
+
+    let capped = body;
 
     const fenceCloseIdx = body.lastIndexOf(FENCE_CLOSE);
     const logStart = findMainLogStart(body, fenceCloseIdx);
@@ -126,16 +124,20 @@ function findMainLogStart(body: string, fenceCloseIdx: number): number {
     return -1;
 }
 
+function enforceFinalBodyLimit(body: string, maxBytes: number): string {
+    if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
+    return truncateWithBalancedFences(body, maxBytes, FINAL_TRUNCATION_MARKER);
+}
+
 /**
  * A byte cut inside a fence line can leave an unclosed Markdown fence.
  * Drop a trailing partial backtick line and close any open fence.
  */
-function enforceFinalBodyLimit(body: string, maxBytes: number): string {
-    if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
-    const markerBytes = Buffer.byteLength(FINAL_TRUNCATION_MARKER, "utf8");
+function truncateWithBalancedFences(body: string, maxBytes: number, marker: string): string {
+    const markerBytes = Buffer.byteLength(marker, "utf8");
     const fenceBytes = Buffer.byteLength(FENCE_CLOSE, "utf8");
     if (markerBytes + fenceBytes >= maxBytes) {
-        return truncateToByteBudget(FINAL_TRUNCATION_MARKER, maxBytes);
+        return truncateToByteBudget(marker, maxBytes);
     }
     let kept = truncateToByteBudget(body, maxBytes - markerBytes - fenceBytes);
     const lastLineStart = kept.lastIndexOf("\n") + 1;
@@ -143,7 +145,7 @@ function enforceFinalBodyLimit(body: string, maxBytes: number): string {
         kept = kept.slice(0, Math.max(0, lastLineStart - 1));
     }
     if (hasOpenFence(kept)) kept += FENCE_CLOSE;
-    return kept + FINAL_TRUNCATION_MARKER;
+    return kept + marker;
 }
 
 function hasOpenFence(markdown: string): boolean {

@@ -377,4 +377,15 @@ describe("capBodyToGithubLimit", () => {
         expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(10_000);
         expect(capped).toContain("[truncated for GitHub 64KB limit]");
     });
+
+    it("closes an open fence in the no-log-heading fallback", () => {
+        const body = `## Other\n\`\`\`\n${"x".repeat(50_000)}\n\`\`\`\n## End`;
+        const capped = capBodyToGithubLimit(body, 10_000);
+        const fenceLines = capped.split("\n").filter((line) => line.startsWith("```")).length;
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(10_000);
+        expect(capped).toContain("[truncated for GitHub 64KB limit]");
+        expect(fenceLines).toBe(2);
+        expect(capped.indexOf("\n```\n\n[truncated for GitHub 64KB limit]")).toBeGreaterThan(0);
+    });
 });

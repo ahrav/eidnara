@@ -369,6 +369,30 @@ describe("parseCompartmentOutput — fact scoping (audit Fix 6)", () => {
         // "NAMING" inside the event must not leak in via the fallback path.
         expect(parsed.facts.some((f) => f.category === "NAMING")).toBe(false);
     });
+
+    it("strips every <events> block before the fallback scan, not only the first", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<PROJECT_RULES>
+* Follow the project release checklist.
+</PROJECT_RULES>
+<events>
+<trajectory_correction at_compartment="1">
+<from>first block</from>
+</trajectory_correction>
+</events>
+<events>
+<causal_incident at_compartment="1">
+<PROJECT_RULES>
+* phantom rule
+</PROJECT_RULES>
+</causal_incident>
+</events>
+</output>`);
+        expect(parsed.facts).toEqual([
+            { category: "PROJECT_RULES", content: "Follow the project release checklist." },
+        ]);
+    });
 });
 
 describe("parseCompartmentOutput — lenient tier closing (issue #246)", () => {

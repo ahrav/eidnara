@@ -41,6 +41,9 @@ export function modelOptions(models: string[]): SelectOption[] {
     return sortModelsForPicker(models).map((model) => ({ label: model, value: model }));
 }
 
+/** Matches `MAX_MODEL_FIELD_BYTES` in `crates/host-runtime/src/broca/protocol.rs`. */
+const MAX_MODEL_SEGMENT_BYTES = 256;
+
 export function validateModelId(value: string): string | undefined {
     const trimmed = value.trim();
     if (trimmed.length === 0) return "A model id is required";
@@ -48,8 +51,16 @@ export function validateModelId(value: string): string | undefined {
     if (slash <= 0 || slash === trimmed.length - 1 || /\s/.test(trimmed)) {
         return "Use the canonical provider/model form without spaces (e.g. anthropic/claude-haiku-4-5)";
     }
-    if (trimmed.startsWith("-") || trimmed.startsWith("-", slash + 1)) {
+    const provider = trimmed.slice(0, slash);
+    const model = trimmed.slice(slash + 1);
+    if (provider.startsWith("-") || model.startsWith("-")) {
         return "Neither the provider nor the model may start with '-'";
+    }
+    if (
+        Buffer.byteLength(provider, "utf8") > MAX_MODEL_SEGMENT_BYTES ||
+        Buffer.byteLength(model, "utf8") > MAX_MODEL_SEGMENT_BYTES
+    ) {
+        return `The provider and model must each be at most ${MAX_MODEL_SEGMENT_BYTES} bytes`;
     }
     return undefined;
 }

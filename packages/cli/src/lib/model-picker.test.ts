@@ -38,4 +38,12 @@ describe("validateModelId", () => {
         expect(validateModelId("openai/-gpt-5")).toMatch(/start with '-'/);
         expect(validateModelId("openai/gpt-5-mini")).toBeUndefined();
     });
+
+    it("rejects a provider or model segment over 256 UTF-8 bytes", () => {
+        const emoji = "🙂".repeat(100); // 400 bytes, 200 UTF-16 code units
+        expect(validateModelId(`p/${emoji}`)).toMatch(/at most 256 bytes/);
+        expect(validateModelId(`${emoji}/m`)).toMatch(/at most 256 bytes/);
+        expect(validateModelId(`p/${"m".repeat(256)}`)).toBeUndefined();
+        expect(validateModelId(`p/${"m".repeat(257)}`)).toMatch(/at most 256 bytes/);
+    });
 });
