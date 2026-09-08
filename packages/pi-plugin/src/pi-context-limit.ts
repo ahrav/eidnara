@@ -79,13 +79,12 @@ export function resolvePiWindowGeometry(
     if (!result || outputReserveOverride !== undefined || !isSaneLimit(persistedUsable))
         return result;
     const usableSoft = Math.round(persistedUsable);
-    // A detected overflow is the final downward cap: a persisted estimate above the capped
-    // hard wall contradicts the wire and must not postpone compaction past it.
-    if (contextCap !== undefined && usableSoft > result.usableHard) return result;
+    // `result.usableHard` already reflects the runtime window and any detected overflow.
+    // A persisted estimate above `result.usableHard` cannot postpone compaction past the wall.
+    if (usableSoft > result.usableHard) return result;
     return {
         ...result,
         usableSoft,
-        usableHard: Math.max(usableSoft, result.usableHard),
         derivation: {
             ...result.derivation,
             reserve: Math.max(0, result.derivation.window - usableSoft),

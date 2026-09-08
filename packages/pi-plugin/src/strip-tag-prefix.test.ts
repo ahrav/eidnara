@@ -123,7 +123,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
             expect(texts.join("")).toBe("Hello  big  world");
         });
 
-        it("empties a part that held only tag notation", () => {
+        it("empties an edge part that held only tag notation", () => {
             const msg = {
                 role: "assistant",
                 content: [
@@ -134,6 +134,21 @@ describe("stripTagPrefixFromAssistantMessage", () => {
             expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
             expect((msg.content[0] as { type: string; text: string }).text).toBe("");
             expect((msg.content[1] as { type: string; text: string }).text).toBe("Hello");
+        });
+
+        it("keeps the separator when an interior part held only tag notation", () => {
+            const msg = {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "Hello" },
+                    { type: "text", text: " §4§ " },
+                    { type: "text", text: "world" },
+                ],
+            };
+            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+            const texts = (msg.content as Array<{ text: string }>).map((part) => part.text);
+            expect(texts).toEqual(["Hello", "  ", "world"]);
+            expect(texts.join("")).toMatch(/^Hello\s+world$/);
         });
 
         it("ignores non-text parts (thinking, toolCall, image)", () => {

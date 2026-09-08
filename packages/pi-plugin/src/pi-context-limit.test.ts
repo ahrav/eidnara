@@ -72,7 +72,19 @@ describe("resolvePiUsableContextLimit", () => {
         expect(geometry?.usableHard).toBe(120_000 - 4_096);
     });
 
-    test("a persisted estimate below the detected hard wall refines the soft threshold only", () => {
+    test("a persisted estimate above the runtime window leaves the derived geometry intact", () => {
+        const geometry = resolvePiWindowGeometry({
+            rawContextWindow: 120_000,
+            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
+            persistedInputTokens: 139_400,
+            persistedPercentage: (139_400 / 204_000) * 100,
+        });
+        expect(geometry?.derivation.window).toBe(120_000);
+        expect(geometry?.usableSoft).toBe(100_000);
+        expect(geometry?.usableHard).toBe(120_000 - 4_096);
+    });
+
+    test("a persisted estimate below the hard wall refines the soft threshold only", () => {
         const geometry = resolvePiWindowGeometry({
             rawContextWindow: 272_000,
             detectedContextLimit: 120_000,

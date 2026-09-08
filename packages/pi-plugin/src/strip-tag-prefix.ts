@@ -22,7 +22,8 @@ function isTextPart(part: unknown): part is TextPart {
  * Whitespace at interior part boundaries separates words after parts are joined.
  * Only the first text part loses leading whitespace and only the last loses trailing whitespace.
  * Parts without a `§` carry no tag notation and stay untouched.
- * A part reduced to nothing but tag notation becomes empty.
+ * A first or last part reduced to nothing but tag notation becomes empty; an interior one keeps
+ * its boundary whitespace so the words on either side stay separated.
  *
  * Mutates in place; returns `true` after modifying at least one part.
  */
@@ -45,7 +46,8 @@ export function stripTagPrefixFromAssistantMessage(message: {
         const core = stripPersistedAssistantText(text);
         const leading = index === 0 ? "" : (LEADING_WHITESPACE_REGEX.exec(text)?.[0] ?? "");
         const trailing = index === last ? "" : (TRAILING_WHITESPACE_REGEX.exec(text)?.[0] ?? "");
-        const stripped = core.length === 0 ? "" : leading + core + trailing;
+        const atEdge = index === 0 || index === last;
+        const stripped = core.length === 0 && atEdge ? "" : leading + core + trailing;
 
         if (stripped !== text) {
             textPart.text = stripped;
