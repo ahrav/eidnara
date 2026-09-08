@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { encodeOpenCodeMessagesToCk } from "@eidnara/opencode/hooks/context/module-wire";
 import { convertEntriesToRawMessages } from "./read-session-pi";
 
 describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () => {
@@ -373,5 +374,30 @@ describe("convertEntriesToRawMessages: part synthesis", () => {
                 state: { status: "error", output: "command not found" },
             },
         ]);
+    });
+
+    it("encodes one tool_call and one tool_result per Pi tool call through the shared encoder", () => {
+        const raws = convertEntriesToRawMessages([
+            messageEntry("asst-1", {
+                role: "assistant",
+                content: [{ type: "toolCall", id: "tc-1", name: "read", arguments: { path: "a" } }],
+            }),
+            messageEntry("tr-1", {
+                role: "toolResult",
+                toolCallId: "tc-1",
+                toolName: "read",
+                content: [{ type: "text", text: "contents" }],
+                isError: false,
+            }),
+            messageEntry("asst-2", { role: "assistant", content: [{ type: "text", text: "ok" }] }),
+        ]);
+
+        const kinds = encodeOpenCodeMessagesToCk(raws).map((message) =>
+            (message.ck.content as Array<{ kind: { type: string; id?: string } }>).map(
+                (c) => `${c.kind.type}${c.kind.id ? `:${c.kind.id}` : ""}`,
+            ),
+        );
+
+        expect(kinds).toEqual([["tool_call:tc-1"], ["tool_result:tc-1"], ["text"]]);
     });
 });
