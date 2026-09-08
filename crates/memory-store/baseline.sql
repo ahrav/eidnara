@@ -336,16 +336,56 @@ CREATE TABLE authority_route_bindings (
 CREATE INDEX idx_authority_route_bindings_authority
             ON authority_route_bindings(context_store_uuid, project);
 
-CREATE TABLE dream_task_commands (
-            session_id   TEXT NOT NULL,
-            command_id   TEXT NOT NULL,
-            response_json TEXT NOT NULL,
-            created_at   INTEGER NOT NULL,
-            PRIMARY KEY (session_id, command_id)
+CREATE TABLE dreamer_receipts (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 256),
+            operation_key TEXT NOT NULL CHECK (length(operation_key) BETWEEN 1 AND 256),
+            database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) > 0),
+            authority_generation INTEGER NOT NULL CHECK (authority_generation >= 0),
+            request_encoding_version INTEGER NOT NULL CHECK (request_encoding_version = 1),
+            request_digest TEXT NOT NULL CHECK (length(request_digest) = 64),
+            ledger_session TEXT NOT NULL CHECK (length(ledger_session) > 0),
+            command_id TEXT NOT NULL CHECK (length(command_id) BETWEEN 1 AND 256),
+            state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown')),
+            result_json TEXT,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, producer, operation_key),
+            CHECK (
+                (state = 'in_progress' AND result_json IS NULL AND terminal_kind IS NULL)
+                OR (state = 'complete' AND result_json IS NOT NULL AND terminal_kind IS NOT NULL)
+            )
         );
 
-CREATE INDEX idx_dream_task_commands_created
-            ON dream_task_commands(session_id, created_at, command_id);
+CREATE INDEX idx_dreamer_receipts_in_progress
+            ON dreamer_receipts(state, created_at_ms, project, producer, operation_key);
+
+CREATE TABLE dreamer_attempts (
+            project TEXT NOT NULL,
+            producer TEXT NOT NULL,
+            operation_key TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            attempt_index INTEGER NOT NULL CHECK (attempt_index >= 0),
+            model TEXT NOT NULL CHECK (length(model) > 0),
+            prompt_template_version INTEGER NOT NULL CHECK (prompt_template_version >= 1),
+            system_prompt_hash TEXT NOT NULL CHECK (length(system_prompt_hash) = 64),
+            schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+            child_session TEXT NOT NULL CHECK (length(child_session) > 0),
+            dispatched_at_ms INTEGER NOT NULL,
+            run_handle TEXT,
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown')),
+            terminal_at_ms INTEGER,
+            session_released_at_ms INTEGER,
+            PRIMARY KEY (project, producer, operation_key, generation, attempt_index),
+            FOREIGN KEY (project, producer, operation_key)
+                REFERENCES dreamer_receipts(project, producer, operation_key),
+            CHECK ((terminal_kind IS NULL) = (terminal_at_ms IS NULL))
+        );
+
+CREATE INDEX idx_dreamer_attempts_project_dispatched
+            ON dreamer_attempts(project, dispatched_at_ms);
 
 CREATE TABLE transform_session_roots (
             session_id  TEXT NOT NULL,

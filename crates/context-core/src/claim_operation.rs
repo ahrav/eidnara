@@ -27,6 +27,9 @@ pub const CLAIM_RESULT_ENCODING_VERSION: u32 = 1;
 pub const CLAIM_INTENT_PROTOCOL_VERSION: u32 = 1;
 
 pub const CLAIM_REQUEST_DIGEST_PROTOCOL: &str = "eidnara-claim-request-v1";
+/// Version of the effect-defining input set a Dreamer request receipt digests.
+pub const DREAMER_REQUEST_ENCODING_VERSION: u32 = 1;
+pub const DREAMER_REQUEST_DIGEST_PROTOCOL: &str = "eidnara-dreamer-request-v1";
 pub const CLAIM_MUTATION_TOKEN_DIGEST_PROTOCOL: &str = "eidnara-claim-mutation-token-v1";
 pub const SNAPSHOT_VECTOR_DIGEST_PROTOCOL: &str = "eidnara-claim-snapshot-vector-v1";
 pub const APPLICABILITY_HEADS_DIGEST_PROTOCOL: &str = "eidnara-claim-applicability-heads-v1";
@@ -164,6 +167,13 @@ fn wire_value<T: Serialize>(value: &T) -> Result<Value, ContractError> {
 /// canonical JSON cannot represent.
 pub fn compute_claim_operation_request_digest(request: &Value) -> Result<String, ContractError> {
     protocol_digest(CLAIM_REQUEST_DIGEST_PROTOCOL, request)
+}
+
+/// Computes the digest a Dreamer receipt binds its request to, over the
+/// effect-defining inputs the caller assembled. The protocol prefix keeps it
+/// distinct from a claim-operation digest over identical bytes.
+pub fn compute_dreamer_request_digest(inputs: &Value) -> Result<String, ContractError> {
+    protocol_digest(DREAMER_REQUEST_DIGEST_PROTOCOL, inputs)
 }
 
 /// Reports whether `text` contains exactly `expected_len` lowercase ASCII hex bytes.

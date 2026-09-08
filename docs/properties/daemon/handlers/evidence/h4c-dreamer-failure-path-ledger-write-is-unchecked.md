@@ -1,5 +1,7 @@
 # h4c-dreamer-failure-path-ledger-write-is-unchecked
 
+Superseding note: the `dream_task_commands` table and `record_dream_task_command` this file quotes were replaced by the Dreamer receipt ledger (`crates/memory-store/src/dreamer_ledger.rs`). The failure path now calls `complete_dreamer_receipt` with a failed terminal kind and fails the request closed (`dreamer_ledger_failed`, `dreamer_ledger_fenced`) when that write does not land. The trail below records the defect as it stood before that change.
+
 ## Discovery trigger
 
 `handle_dreamer_run_task` writes its ledger row twice, on two different exits, and

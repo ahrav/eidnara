@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod claim_mirror;
+pub mod dreamer_ledger;
 
 use cache_stability::{DurabilityClass, FrozenUnit};
 use context_core::claim_operation::{
@@ -3962,12 +3963,6 @@ pub struct ChangefeedPage {
     pub next_cursor: i64,
     pub has_more: bool,
     pub rows: Vec<ChangefeedRow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DreamTaskCommandRow {
-    pub response_json: String,
-    pub created_at: i64,
 }
 
 /// A context row used by the crash-idempotent authority seed. The JSON payload is
@@ -8156,82 +8151,6 @@ impl MemoryStore {
                         rounds: rounds.max(0) as usize,
                         summary: row.get(2)?,
                         created_at: row.get(3)?,
-                    })
-                },
-            )?;
-            Ok(if inserted == 0 {
-                WriteDisposition::Replay(row)
-            } else {
-                WriteDisposition::Applied(row)
-            })
-        })
-    }
-
-    /// Return a recorded dream-task result for command-id retry deduplication.
-    pub fn load_dream_task_command(
-        &self,
-        session_id: &str,
-        command_id: &str,
-    ) -> Result<Option<DreamTaskCommandRow>, MemoryStoreError> {
-        Ok(self.inner.with_conn(|conn| {
-            conn.query_row(
-                "SELECT response_json, created_at
-                   FROM dream_task_commands
-                  WHERE session_id = ?1 AND command_id = ?2",
-                params![session_id, command_id],
-                |row| {
-                    Ok(DreamTaskCommandRow {
-                        response_json: row.get(0)?,
-                        created_at: row.get(1)?,
-                    })
-                },
-            )
-            .optional()
-        })?)
-    }
-
-    /// Record the first terminal dream-task response. INSERT OR IGNORE makes a response-loss
-    /// retry replay the original provider outcome instead of executing a second child session.
-    pub fn record_dream_task_command(
-        &self,
-        session_id: &str,
-        command_id: &str,
-        response_json: &str,
-        created_at: i64,
-    ) -> Result<DreamTaskCommandRow, MemoryStoreError> {
-        if let Some(existing) = self.load_dream_task_command(session_id, command_id)? {
-            return Ok(existing);
-        }
-        let mut write = PreparedWrite::new(DurableWriteFamily::CommandLedgers);
-        write.domain_owner(
-            "session",
-            session_id,
-            active_scan_owner_key(&["dream", command_id]),
-        );
-        write.existing_identity("session_id", session_id)?;
-        write.identity("command_id", command_id)?;
-        let response_json = write.json_content(
-            "response_json",
-            response_json,
-            JsonScanPolicy::DurableRejectProtected,
-        )?;
-        write.execute(&self.inner, |coordinated| {
-            let tx = coordinated.tx();
-            let inserted = tx.execute(
-                "INSERT OR IGNORE INTO dream_task_commands
-                     (session_id, command_id, response_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![session_id, command_id, response_json, created_at],
-            )?;
-            let row = tx.query_row(
-                "SELECT response_json, created_at
-                   FROM dream_task_commands
-                  WHERE session_id = ?1 AND command_id = ?2",
-                params![session_id, command_id],
-                |row| {
-                    Ok(DreamTaskCommandRow {
-                        response_json: row.get(0)?,
-                        created_at: row.get(1)?,
                     })
                 },
             )?;
@@ -17043,10 +16962,6 @@ mod tests {
             "compartments",
             "INSERT INTO compartments(session_id, sequence, start_message, end_message, title, content)
              VALUES (?1, 1, 1, 2, 't', 'c')",
-        ),
-        (
-            "dream_task_commands",
-            "INSERT INTO dream_task_commands(session_id, command_id, response_json, created_at) VALUES (?1, 'c', '{}', 1)",
         ),
         (
             "historian_side_channel_outbox",

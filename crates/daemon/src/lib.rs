@@ -69,6 +69,10 @@ use host_runtime::{
 use lease::LeaseError;
 #[cfg(test)]
 use memory_store::TagNumberRow;
+use memory_store::dreamer_ledger::{
+    DreamerAttemptSpec, DreamerBeginOutcome, DreamerReceiptBinding, DreamerReceiptKey,
+    DreamerTerminalKind, DreamerTransition, dreamer_request_digest,
+};
 use memory_store::{
     AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, MemoryStore,
     MemoryStoreError, ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest,
@@ -9539,17 +9543,83 @@ impl Handler {
             key: command_key,
         };
 
-        match store.load_dream_task_command(&ledger_session, command_id) {
-            Ok(Some(recorded)) => return replay_dream_task_response(&recorded.response_json),
-            Ok(None) => {}
+        // The receipt is the durable authority over this request; the in-process
+        // guard above only spares a concurrent duplicate the ledger round trip.
+        let operation_key = dreamer_operation_key(&ledger_session, command_id);
+        let receipt_key = DreamerReceiptKey {
+            project: &authority_project,
+            producer: DREAMER_RECEIPT_PRODUCER,
+            operation_key: &operation_key,
+        };
+        let system_prompt_hash = sha256_hex(CLASSIFY_SYSTEM_PROMPT.as_bytes());
+        // Everything that decides what the model is asked and how its answer is
+        // read is digested, so a template or schema change cannot replay a result
+        // produced under the old one.
+        let request_digest = match dreamer_request_digest(&json!({
+            "task": task,
+            "prompt_body": prompt_body,
+            "items": expected_ids,
+            "model_chain": model_chain,
+            "prompt_template_version": CLASSIFY_PROMPT_TEMPLATE_VERSION,
+            "schema_version": CLASSIFY_SCHEMA_VERSION,
+            "system_prompt_hash": system_prompt_hash,
+        })) {
+            Ok(digest) => digest,
             Err(error) => {
                 return PreparedOutcome::Error {
                     code: "dreamer_ledger_failed".to_string(),
                     message: error.to_string(),
                 };
             }
-        }
-
+        };
+        let binding_record = DreamerReceiptBinding {
+            database_incarnation_id: context_store_uuid.clone(),
+            authority_generation,
+            request_digest,
+            ledger_session: ledger_session.clone(),
+            command_id: command_id.to_string(),
+        };
+        let generation = match store.begin_dreamer_receipt(receipt_key, &binding_record, now_ms()) {
+            Ok(DreamerBeginOutcome::Begun { generation }) => generation,
+            Ok(DreamerBeginOutcome::Complete { result_json, .. }) => {
+                return replay_dream_task_response(&result_json);
+            }
+            // A dispatch marker from an earlier run exists and its outcome is not
+            // known here; the request fails closed rather than dispatching again.
+            Ok(DreamerBeginOutcome::InProgress { generation }) => {
+                return PreparedOutcome::Error {
+                    code: "dreamer_outcome_unknown".to_string(),
+                    message: format!(
+                        "this command is recorded in progress at generation {generation}; its outcome is unknown and it is not dispatched again"
+                    ),
+                };
+            }
+            Ok(DreamerBeginOutcome::DigestConflict { .. }) => {
+                return PreparedOutcome::Error {
+                    code: "dreamer_request_conflict".to_string(),
+                    message: "this command id was recorded for a request with different inputs"
+                        .to_string(),
+                };
+            }
+            Ok(DreamerBeginOutcome::BindingMismatch {
+                field,
+                expected,
+                found,
+            }) => {
+                return PreparedOutcome::Error {
+                    code: "dreamer_request_conflict".to_string(),
+                    message: format!(
+                        "this command id was recorded under {field} {expected}, request used {found}"
+                    ),
+                };
+            }
+            Err(error) => {
+                return PreparedOutcome::Error {
+                    code: "dreamer_ledger_failed".to_string(),
+                    message: error.to_string(),
+                };
+            }
+        };
         let mut attempts = 0usize;
         let mut last_error = String::new();
         let mut output = None;
@@ -9567,6 +9637,27 @@ impl Handler {
                 attempt,
                 model,
             );
+            let Ok(attempt_index) = u32::try_from(attempt) else {
+                return invalid_params_error("classify model_chain is too long to record");
+            };
+            // The attempt row is the dispatch marker: it exists before the model is
+            // called, so a crash between here and the terminal write leaves proof
+            // that a dispatch may have happened.
+            if let Err(stop) = ledger_stop(store.begin_dreamer_attempt(
+                receipt_key,
+                generation,
+                &DreamerAttemptSpec {
+                    attempt_index,
+                    model,
+                    prompt_template_version: CLASSIFY_PROMPT_TEMPLATE_VERSION,
+                    system_prompt_hash: &system_prompt_hash,
+                    schema_version: CLASSIFY_SCHEMA_VERSION,
+                    child_session: &child_session,
+                },
+                now_ms(),
+            )) {
+                return stop;
+            }
             let _dreamer_run_guard = self.register_dreamer_run(&child_session);
             let mut producer = match self
                 .producer_factory
@@ -9580,11 +9671,29 @@ impl Handler {
                 Ok(producer) => producer,
                 Err(error) => {
                     last_error = error.to_string();
+                    if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
+                        receipt_key,
+                        generation,
+                        attempt_index,
+                        DreamerTerminalKind::Failed,
+                        now_ms(),
+                    )) {
+                        return stop;
+                    }
                     continue;
                 }
             };
             if Instant::now() >= deadline {
                 last_error = "classify time budget exhausted during producer startup".to_string();
+                if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
+                    receipt_key,
+                    generation,
+                    attempt_index,
+                    DreamerTerminalKind::Cancelled,
+                    now_ms(),
+                )) {
+                    return stop;
+                }
                 break;
             }
             let started = match tokio::time::timeout(
@@ -9625,8 +9734,33 @@ impl Handler {
                 Err(error) => Err(error),
             };
             //
+            let attempt_terminal = match &attempt_output {
+                Ok(_) => DreamerTerminalKind::Complete,
+                Err(HistorianProducerError::TimedOut) => DreamerTerminalKind::Cancelled,
+                // The runtime already holds a run under this child session, so the
+                // dispatch happened somewhere this run cannot observe.
+                Err(error) if error.is_idempotency_conflict() => DreamerTerminalKind::Unknown,
+                Err(_) => DreamerTerminalKind::Failed,
+            };
+            if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
+                receipt_key,
+                generation,
+                attempt_index,
+                attempt_terminal,
+                now_ms(),
+            )) {
+                // The model was dispatched but the ledger cannot follow it, so the
+                // request settles as unknown rather than staying open forever.
+                let _ = producer.purge_session(&child_session).await;
+                return settle_dispatched_attempt_as_unknown(
+                    &store,
+                    receipt_key,
+                    generation,
+                    attempt_index,
+                    stop,
+                );
+            }
             match attempt_output {
-                //
                 Ok(result) => match length_capped_or_invalid(&result, &expected_ids) {
                     Ok(()) => {
                         output = Some((model.clone(), result, child_session, producer));
@@ -9645,10 +9779,12 @@ impl Handler {
                     },
                 },
                 Err(primary) => {
-                    // response.
                     if primary.is_idempotency_conflict() {
+                        // The runtime already holds a run under this child session, so the
+                        // request's outcome is whatever that run produces; the receipt
+                        // stays in progress for a later takeover to settle.
                         return PreparedOutcome::Error {
-                            code: "dreamer_run_failed".to_string(),
+                            code: "dreamer_outcome_unknown".to_string(),
                             message: primary.to_string(),
                         };
                     }
@@ -9669,15 +9805,21 @@ impl Handler {
                 "code": "dreamer_run_failed",
                 "message": if last_error.is_empty() { "classify producer has no usable model" } else { &last_error },
             });
-            let _ = store.record_dream_task_command(
-                &ledger_session,
-                command_id,
+            // A failure that cannot be recorded is not a terminal answer: an
+            // unrecorded failure would let a retry dispatch the whole chain again.
+            return match store.complete_dreamer_receipt(
+                receipt_key,
+                generation,
+                DreamerTerminalKind::Failed,
                 &response.to_string(),
                 now_ms(),
-            );
-            return PreparedOutcome::Error {
-                code: "dreamer_run_failed".to_string(),
-                message: last_error,
+            ) {
+                Ok(DreamerTransition::Applied) => PreparedOutcome::Error {
+                    code: "dreamer_run_failed".to_string(),
+                    message: last_error,
+                },
+                Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
+                Err(error) => dreamer_ledger_failed(error),
             };
         }
         let (model, result, child_session, mut producer) = output.expect("classifier output set");
@@ -9696,22 +9838,22 @@ impl Handler {
                 "recovery_timeout_ms": CLASSIFY_RECOVERY_TIMEOUT.as_millis(),
             }
         });
-        match store.record_dream_task_command(
-            &ledger_session,
-            command_id,
-            &response.to_string(),
+        let response_json = response.to_string();
+        match store.complete_dreamer_receipt(
+            receipt_key,
+            generation,
+            DreamerTerminalKind::Complete,
+            &response_json,
             now_ms(),
         ) {
-            Ok(recorded) => {
-                // retention.
+            Ok(DreamerTransition::Applied) => {
+                // The child session is deleted only once the response is durable, so a
+                // crash between the two leaves the run reattachable rather than lost.
                 let _ = producer.purge_session(&child_session).await;
-                replay_dream_task_response(&recorded.response_json)
+                replay_dream_task_response(&response_json)
             }
-            // tombstone.
-            Err(error) => PreparedOutcome::Error {
-                code: "dreamer_ledger_failed".to_string(),
-                message: error.to_string(),
-            },
+            Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
+            Err(error) => dreamer_ledger_failed(error),
         }
     }
 
@@ -13205,6 +13347,90 @@ fn length_capped_or_invalid(
         return Err("a length-capped generation".to_owned());
     }
     validate_classify_manifest(&result.text, expected_ids)
+}
+
+/// The receipt producer every `dreamer.run_task` request is recorded under.
+const DREAMER_RECEIPT_PRODUCER: &str = "dreamer.run_task";
+/// Version of the classify prompt template the attempt rows record.
+const CLASSIFY_PROMPT_TEMPLATE_VERSION: u32 = 1;
+/// Version of the classify output schema the attempt rows record.
+const CLASSIFY_SCHEMA_VERSION: u32 = 1;
+
+/// The receipt's operation key for one client request: a digest of the
+/// length-prefixed ledger session and command id, so the two cannot alias and
+/// the key fits the ledger's bound whatever the command id's length.
+fn dreamer_operation_key(ledger_session: &str, command_id: &str) -> String {
+    let mut bytes = Vec::with_capacity(ledger_session.len() + command_id.len() + 32);
+    for part in [ledger_session, command_id] {
+        bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    sha256_hex(&bytes)
+}
+
+fn dreamer_ledger_failed(error: MemoryStoreError) -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "dreamer_ledger_failed".to_string(),
+        message: error.to_string(),
+    }
+}
+
+/// Another generation owns the receipt, so this run writes nothing further and
+/// reports no outcome of its own.
+fn dreamer_ledger_fenced() -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "dreamer_ledger_fenced".to_string(),
+        message: "another daemon generation took over this command; its outcome is recorded there"
+            .to_string(),
+    }
+}
+
+/// Turns a guarded ledger transition into the response that stops the request
+/// when it did not land: `Fenced` and store errors each end the request.
+fn ledger_stop(
+    transition: Result<DreamerTransition, MemoryStoreError>,
+) -> Result<(), PreparedOutcome> {
+    match transition {
+        Ok(DreamerTransition::Applied) => Ok(()),
+        Ok(DreamerTransition::Fenced) => Err(dreamer_ledger_fenced()),
+        Err(error) => Err(dreamer_ledger_failed(error)),
+    }
+}
+
+/// Settles a request whose model was dispatched but whose ledger bookkeeping
+/// failed afterwards: the attempt and the receipt are recorded as `unknown` on
+/// a best-effort basis so a retry replays the unknown outcome instead of
+/// dispatching the chain again. The caller's `stop` is returned unless even the
+/// receipt cannot be written, which is reported as the ledger failure.
+fn settle_dispatched_attempt_as_unknown(
+    store: &MemoryStore,
+    key: DreamerReceiptKey<'_>,
+    generation: u64,
+    attempt_index: u32,
+    stop: PreparedOutcome,
+) -> PreparedOutcome {
+    let _ = store.finish_dreamer_attempt(
+        key,
+        generation,
+        attempt_index,
+        DreamerTerminalKind::Unknown,
+        now_ms(),
+    );
+    let envelope = json!({
+        "ok": false,
+        "code": "dreamer_outcome_unknown",
+        "message": "the model was dispatched but its outcome could not be recorded",
+    });
+    match store.complete_dreamer_receipt(
+        key,
+        generation,
+        DreamerTerminalKind::Unknown,
+        &envelope.to_string(),
+        now_ms(),
+    ) {
+        Ok(_) => stop,
+        Err(error) => dreamer_ledger_failed(error),
+    }
 }
 
 fn replay_dream_task_response(response_json: &str) -> PreparedOutcome {
@@ -26445,38 +26671,296 @@ mod tests {
     /// The test uses a classify budget that setup cannot exhaust, so payload shape rather than deadline behavior determines the result.
     const TEST_CLASSIFY_TIMEOUT_MS: u64 = 600_000;
 
+    /// A handler bound to one route with the memories authority in `MODULE`,
+    /// ready to run classify commands against `store`.
+    struct DreamerHarness {
+        handler: Handler,
+        store: Arc<MemoryStore>,
+        _dir: tempfile::TempDir,
+        generation: u64,
+    }
+
+    impl DreamerHarness {
+        fn start(producer: &Arc<ProducerState>) -> Self {
+            let (handler, store, dir, project) =
+                handler_with_store(Arc::clone(producer), default_test_config());
+            let route_root = project.to_str().unwrap();
+            // A poisoned historian chain verifies that the classify loop does not read route config models.
+            let mut route_binding = binding_with_harness(route_root, "pi", "ses");
+            route_binding.config.model_chain = vec!["test/route-only-model".to_string()];
+            handler.bind_route(test_route(7), route_binding);
+            activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+            let generation = store
+                .authority_status("context", "git:identity", "memories")
+                .unwrap()
+                .unwrap()
+                .generation;
+            Self {
+                handler,
+                store,
+                _dir: dir,
+                generation,
+            }
+        }
+
+        async fn classify(&self, payload: Value, command_id: &str) -> PreparedOutcome {
+            self.handler
+                .handle_dreamer_run_task(
+                    test_route(7),
+                    &json!({
+                        "v": 1,
+                        "session_id": "ses",
+                        "task": CLASSIFY_TASK,
+                        "command_id": command_id,
+                        "authority_generation": self.generation,
+                        "payload": payload,
+                    }),
+                )
+                .await
+        }
+
+        fn receipt(&self, command_id: &str) -> memory_store::dreamer_ledger::DreamerReceipt {
+            let operation_key = dreamer_operation_key("ses", command_id);
+            self.store
+                .lookup_dreamer_receipt(DreamerReceiptKey {
+                    project: "git:identity",
+                    producer: DREAMER_RECEIPT_PRODUCER,
+                    operation_key: &operation_key,
+                })
+                .unwrap()
+                .expect("the command has a receipt")
+        }
+    }
+
     async fn dreamer_classify_outcome(
         producer: &Arc<ProducerState>,
         payload: Value,
         command_id: &str,
     ) -> (Arc<ProducerState>, PreparedOutcome) {
-        let (handler, store, _dir, project) =
-            handler_with_store(Arc::clone(producer), default_test_config());
-        let route_root = project.to_str().unwrap();
-        // A poisoned historian chain verifies that the classify loop does not read route config models.
-        let mut route_binding = binding_with_harness(route_root, "pi", "ses");
-        route_binding.config.model_chain = vec!["test/route-only-model".to_string()];
-        handler.bind_route(test_route(7), route_binding);
-        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
-        let generation = store
-            .authority_status("context", "git:identity", "memories")
-            .unwrap()
-            .unwrap()
-            .generation;
-        let outcome = handler
-            .handle_dreamer_run_task(
-                test_route(7),
-                &json!({
-                    "v": 1,
-                    "session_id": "ses",
-                    "task": CLASSIFY_TASK,
-                    "command_id": command_id,
-                    "authority_generation": generation,
-                    "payload": payload,
-                }),
-            )
-            .await;
+        let harness = DreamerHarness::start(producer);
+        let outcome = harness.classify(payload, command_id).await;
         (Arc::clone(producer), outcome)
+    }
+
+    fn response_of(outcome: PreparedOutcome) -> Value {
+        match outcome {
+            PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("expected a response: {other:?}"),
+        }
+    }
+
+    fn error_code_of(outcome: &PreparedOutcome) -> &str {
+        match outcome {
+            PreparedOutcome::Error { code, .. } => code,
+            other => panic!("expected an error: {other:?}"),
+        }
+    }
+
+    /// The receipt is the replay authority: the same command replays the recorded
+    /// response without a second dispatch, the same command with other inputs is
+    /// refused, and the attempt row carries the model run's identities.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_replays_from_the_receipt_and_refuses_a_changed_request() {
+        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+        let claims = [test_claim_id(1), test_claim_id(2)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: claim_manifest(&claims),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer);
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let first = response_of(harness.classify(payload.clone(), "replayed").await);
+        assert_eq!(first["ok"], json!(true));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(producer.purges.lock().unwrap().len(), 1);
+
+        let replayed = response_of(harness.classify(payload.clone(), "replayed").await);
+        assert_eq!(replayed, first);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+
+        let receipt = harness.receipt("replayed");
+        assert!(matches!(
+            receipt.state,
+            DreamerReceiptState::Complete {
+                generation: 1,
+                terminal_kind: DreamerTerminalKind::Complete,
+                ..
+            }
+        ));
+        assert_eq!(receipt.binding.ledger_session, "ses");
+        assert_eq!(receipt.binding.command_id, "replayed");
+        assert_eq!(receipt.binding.database_incarnation_id, "context");
+        let operation_key = dreamer_operation_key("ses", "replayed");
+        let attempts = harness
+            .store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].model, "test/model");
+        assert_eq!(
+            attempts[0].terminal_kind,
+            Some(DreamerTerminalKind::Complete)
+        );
+        assert_eq!(
+            attempts[0].child_session,
+            first["diagnostics"]["child_session_id"].as_str().unwrap()
+        );
+
+        // A changed prompt under the same command id is a different request.
+        let mut changed = payload;
+        changed["prompt_body"] = json!("classify differently");
+        let conflict = harness.classify(changed, "replayed").await;
+        assert_eq!(error_code_of(&conflict), "dreamer_request_conflict");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// Each model in the fallback chain is its own attempt row under one receipt:
+    /// the failed first model and the completing second model both stay recorded.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_records_one_attempt_row_per_model_in_the_chain() {
+        use memory_store::dreamer_ledger::DreamerTerminalKind;
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        {
+            let mut results = producer.await_results.lock().unwrap();
+            results.push_back(Err(HistorianProducerError::Protocol(
+                "first model refused".to_string(),
+            )));
+            results.push_back(Ok(ProducerOutput {
+                text: claim_manifest(&claims),
+                length_capped: false,
+            }));
+        }
+        let harness = DreamerHarness::start(&producer);
+        let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        payload["model_chain"] = json!(["test/first", "test/second"]);
+        let response = response_of(harness.classify(payload, "chain").await);
+        assert_eq!(response["ok"], json!(true));
+        assert_eq!(response["diagnostics"]["model"], json!("test/second"));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
+        let operation_key = dreamer_operation_key("ses", "chain");
+        let attempts = harness
+            .store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap();
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| (
+                    attempt.attempt_index,
+                    attempt.model.as_str(),
+                    attempt.terminal_kind
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "test/first", Some(DreamerTerminalKind::Failed)),
+                (1, "test/second", Some(DreamerTerminalKind::Complete)),
+            ]
+        );
+        assert_eq!(
+            harness
+                .store
+                .count_dreamer_attempts("git:identity", 0)
+                .unwrap(),
+            2
+        );
+    }
+
+    /// A failure-path write that does not land fails the request closed, leaves
+    /// the receipt in progress, and a retry over that receipt reports the
+    /// outcome unknown without dispatching again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_fails_closed_when_the_failure_record_cannot_be_written() {
+        use memory_store::dreamer_ledger::DreamerReceiptState;
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Err(HistorianProducerError::Protocol(
+                "provider refused".to_string(),
+            )));
+        let harness = DreamerHarness::start(&producer);
+        harness
+            .store
+            .execute_tag_sql_for_test(
+                "CREATE TRIGGER dreamer_receipt_completion_fault
+                 BEFORE UPDATE OF state ON dreamer_receipts
+                 BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END;",
+            )
+            .unwrap();
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let outcome = harness.classify(payload.clone(), "faulted").await;
+        assert_eq!(error_code_of(&outcome), "dreamer_ledger_failed");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.receipt("faulted").state,
+            DreamerReceiptState::InProgress { generation: 1 }
+        );
+
+        harness
+            .store
+            .execute_tag_sql_for_test("DROP TRIGGER dreamer_receipt_completion_fault;")
+            .unwrap();
+        let retried = harness.classify(payload, "faulted").await;
+        assert_eq!(error_code_of(&retried), "dreamer_outcome_unknown");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.receipt("faulted").state,
+            DreamerReceiptState::InProgress { generation: 1 }
+        );
+    }
+
+    /// A chain that fails on every model completes the receipt as failed, and a
+    /// retry replays the failure instead of dispatching the chain again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure() {
+        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Err(HistorianProducerError::Protocol(
+                "provider refused".to_string(),
+            )));
+        let harness = DreamerHarness::start(&producer);
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let failed = harness.classify(payload.clone(), "exhausted").await;
+        assert_eq!(error_code_of(&failed), "dreamer_run_failed");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        let receipt = harness.receipt("exhausted");
+        match &receipt.state {
+            DreamerReceiptState::Complete {
+                terminal_kind,
+                result_json,
+                ..
+            } => {
+                assert_eq!(*terminal_kind, DreamerTerminalKind::Failed);
+                let recorded: Value = serde_json::from_str(result_json).unwrap();
+                assert_eq!(recorded["ok"], json!(false));
+            }
+            other => panic!("the failure must complete the receipt: {other:?}"),
+        }
+
+        let replayed = harness.classify(payload, "exhausted").await;
+        assert_eq!(error_code_of(&replayed), "dreamer_run_failed");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
     /// Each `seed` produces a distinct, well-formed public claim ID.
