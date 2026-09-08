@@ -751,7 +751,7 @@ export class HostLifecyclePolicy {
                 runNativeLifecycle(launchTarget, {
                     command: command as NativeLifecycleCommand,
                     deadlineMs,
-                    env: this.nativeEnv(preflight.root),
+                    dataRoot: preflight.root,
                     ...(payloadDir !== undefined && command !== "stop" ? { payloadDir } : {}),
                     ...(command !== "stop" && this.payloadManifestDigest !== undefined
                         ? { payloadManifestDigest: this.payloadManifestDigest }
@@ -812,7 +812,7 @@ export class HostLifecyclePolicy {
             const native = await runNativeLifecycle(this.launchTarget, {
                 command: "probe",
                 deadlineMs: preflight.deadlineMs,
-                env: this.nativeEnv(preflight.root),
+                dataRoot: preflight.root,
             });
             const relabeled = this.relabel(native, "status", command);
             if (
@@ -939,11 +939,16 @@ export class HostLifecyclePolicy {
         }
         const moduleVersion = (moduleId: string): string | null =>
             snapshot.catalog.find((entry) => entry.module_id === moduleId)?.module_version ?? null;
+        const ok = result.ok && verdict.ok;
+        // Only a successful start or restart vouches for the running code; an
+        // observation reports the authenticated version without claiming proof.
+        const proof =
+            ok && (result.command === "start" || result.command === "restart") ? "current" : null;
         return {
             verdict,
             result: {
                 ...result,
-                ok: result.ok && verdict.ok,
+                ok,
                 reason: verdict.ok ? result.reason : verdict.reason,
                 remediation: verdict.ok ? result.remediation : remediationForReason(verdict.reason),
                 checks: [...checksById.values()].sort((left, right) =>
@@ -951,7 +956,7 @@ export class HostLifecyclePolicy {
                 ),
                 versions: {
                     ...result.versions,
-                    proof: "current",
+                    proof,
                     daemon: snapshot.authenticatedPeer.daemonVer,
                     context: moduleVersion("context"),
                     synapse: moduleVersion("synapse"),
@@ -987,13 +992,6 @@ export class HostLifecyclePolicy {
             return localResult(command, false, "wedged", "internal_error", false);
         }
         return { ...native, command };
-    }
-
-    private nativeEnv(root: string): Record<string, string> {
-        // Minimal explicit child environment: only the admitted absolute data
-        // root travels, and only through the resolver variable the native
-        // binary already honors.
-        return { XDG_DATA_HOME: root };
     }
 
     private launchFailure(command: LifecycleCommand, root: string, error: unknown): DaemonResultV1 {
@@ -1035,8 +1033,8 @@ export class HostLifecyclePolicy {
                 case "output_cap_exceeded":
                 case "exit_disagreement":
                 case "malformed_output":
-                    // The child ran and was cut short or disagreed with itself;
-                    // its effects are equally unknown.
+                case "command_mismatch":
+                    // The child ran, so these failures leave command effects unknown.
                     return localResult(command, false, state, "internal_error", false);
                 case "spawn_failed":
                 case "usage_error":

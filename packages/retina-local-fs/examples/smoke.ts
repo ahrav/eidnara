@@ -1,10 +1,11 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const directory = await mkdtemp(join(tmpdir(), "retina-local-fs-smoke-"));
 const path = join(directory, "ready.txt");
-const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 async function invoke(scalar: object | null): Promise<{ events: unknown[]; scalar: object }> {
     const child = Bun.spawn({

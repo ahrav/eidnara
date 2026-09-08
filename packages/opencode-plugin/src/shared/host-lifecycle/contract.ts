@@ -5,6 +5,7 @@
  */
 
 import { lstatSync } from "node:fs";
+import * as path from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import type {
     CheckId,
@@ -66,23 +67,32 @@ export function reasonPrecedence(reason: DaemonReason): number | null {
     return FAILING_REASONS.get(reason)?.precedence ?? null;
 }
 
-const FIXED_REASON_STATES: Partial<Record<DaemonReason, DaemonState>> = {
-    healthy: "running",
-    started: "running",
-    already_running: "running",
-    stopped: "stopped",
-    already_stopped: "stopped",
-    not_running: "stopped",
-    no_data_dir: "unavailable",
-    starting: "starting",
-    stopping: "stopping",
-    wedged: "wedged",
-    shutdown_timeout: "stopping",
-};
+// `shutdown_timeout` carries the state the stop phase last observed; the binary reports `running` when the shutdown request's commit is uncertain. commentlint: allow(JUDGE)
+const FIXED_REASON_STATES: Partial<Record<DaemonReason, readonly [DaemonState, ...DaemonState[]]>> =
+    {
+        healthy: ["running"],
+        started: ["running"],
+        already_running: ["running"],
+        stopped: ["stopped"],
+        already_stopped: ["stopped"],
+        not_running: ["stopped"],
+        no_data_dir: ["unavailable"],
+        starting: ["starting"],
+        stopping: ["stopping"],
+        wedged: ["wedged"],
+        shutdown_timeout: ["stopping", "running"],
+    };
 
-/** The one top-level state a reason admits, or `undefined` when the reason leaves the state free. */
-export function fixedStateForReason(reason: DaemonReason): DaemonState | undefined {
+/** The top-level states a reason admits, or `undefined` when the reason leaves the state free. */
+export function statesForReason(
+    reason: DaemonReason,
+): readonly [DaemonState, ...DaemonState[]] | undefined {
     return FIXED_REASON_STATES[reason];
+}
+
+/** Where a reason admits several states, the first is the one that asserts no daemon observation. commentlint: allow(JUDGE) */
+export function fixedStateForReason(reason: DaemonReason): DaemonState | undefined {
+    return FIXED_REASON_STATES[reason]?.[0];
 }
 
 /**
@@ -94,6 +104,23 @@ export function remediationForReason(reason: DaemonReason): Remediation | null {
     if (!entry) return (WARN_REMEDIATIONS.get(reason) as Remediation | undefined) ?? null;
     return (entry.remediation as Remediation | null) ?? null;
 }
+
+/** `harness_unavailable` permits only `null` or `restart_with_supported_harness` remediation. */
+function remediationFitsReason(reason: DaemonReason, remediation: string | null): boolean {
+    if (reason === "harness_unavailable") {
+        return remediation === null || remediation === "restart_with_supported_harness";
+    }
+    return remediation === remediationForReason(reason);
+}
+
+/**
+ * `no_data_dir` denotes an unresolved data root. The binary's `envelope_failure_result` pairs the other two with the probed state, which is `unavailable` when the probe finds no data root. commentlint: allow(JUDGE)
+ */
+const UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
+    "no_data_dir",
+    "harness_unavailable",
+    "internal_error",
+]);
 
 const HARNESS_REASONS = new Map<string, string | null>(
     hostRelease.harness_unavailable.reasons_by_precedence.map((entry) => [
@@ -138,7 +165,8 @@ export interface RestartEffects {
 
 export interface DaemonVersions {
     release: string | null;
-    proof: string | null;
+    /** The binary emits `"current"` only on a successful `start` or `restart`. */
+    proof: "current" | null;
     daemon: string | null;
     context: string | null;
     synapse: string | null;
@@ -200,6 +228,36 @@ function nullableString(value: unknown, what: string): string | null {
     return value;
 }
 
+// Authentication-frame literals from `docs/host-wire-protocol.md`. commentlint: allow(JUDGE)
+const MAX_AUTH_MESSAGE_LEN = 4096;
+const DAEMON_ID_LEN = 16;
+const NONCE_LEN = 32;
+const PROOF_LEN = 32;
+
+/** Uses the widest JSON byte-array encodings to bound every real `ServerProof` frame carrying `daemonVer`. */
+function serverProofMessageBytes(daemonVer: string): number {
+    return Buffer.byteLength(
+        JSON.stringify({
+            daemon_id: new Array(DAEMON_ID_LEN).fill(255),
+            server_nonce: new Array(NONCE_LEN).fill(255),
+            daemon_ver: daemonVer,
+            server_proof: new Array(PROOF_LEN).fill(255),
+        }),
+    );
+}
+
+function nullableDaemonVersion(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    if (
+        typeof value !== "string" ||
+        value.length === 0 ||
+        serverProofMessageBytes(value) > MAX_AUTH_MESSAGE_LEN
+    ) {
+        fail("versions.daemon does not fit the authentication frame");
+    }
+    return value;
+}
+
 function parseReadinessRecord(value: unknown, component: string): ReadinessRecord {
     const record = requireObject(value, `readiness.${component}`);
     requireExactKeys(record, ["state", "reason"], `readiness.${component}`);
@@ -256,6 +314,7 @@ function parseReadinessRecord(value: unknown, component: string): ReadinessRecor
  * The parser validates the native binary's stdout as one v1 result.
  * The input must contain one JSON object; `JSON.parse` rejects trailing non-whitespace input.
  * The result must have the exact v1 key set, and each value must belong to its closed union.
+ * `readiness` and `shared_memory` are optional keys.
  */
 export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     const trimmed = stdoutText.trim();
@@ -275,10 +334,10 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         "reason",
         "remediation",
         "effects",
-        "readiness",
         "checks",
         "versions",
     ];
+    if ("readiness" in record) resultKeys.push("readiness");
     if ("shared_memory" in record) resultKeys.push("shared_memory");
     requireExactKeys(record, resultKeys, "result");
     if (record.schema !== DAEMON_RESULT_SCHEMA) fail("schema is not eidnara.daemon/v1");
@@ -304,8 +363,8 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     if (record.ok !== NON_FAILING_REASONS.has(reason)) {
         fail("ok disagrees with reason class");
     }
-    if (state === "unavailable" && reason !== "no_data_dir") {
-        fail("unavailable is legal only with no_data_dir");
+    if (state === "unavailable" && !UNAVAILABLE_REASONS.has(reason)) {
+        fail("unavailable is legal only with an unresolved-data-root reason");
     }
     const remediation = record.remediation;
     if (
@@ -318,24 +377,28 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     if (record.ok !== expectedOk) {
         fail("ok contradicts the selected reason");
     }
-    // A reason may use only its configured remediation.
-    //
-    const expectedRemediation = remediationForReason(reason);
-    const remediationMatches =
-        reason === "harness_unavailable"
-            ? remediation === null || remediation === "restart_with_supported_harness"
-            : remediation === expectedRemediation;
-    if (!remediationMatches) {
+    if (!remediationFitsReason(reason, remediation as string | null)) {
         fail("remediation does not match its reason");
     }
     // Non-failing top-level verdicts require a fixed daemon state; component-only
     // reasons such as `kernel_lagging` are rejected here.
-    if (NON_FAILING_REASONS.has(reason) && fixedStateForReason(reason) === undefined) {
+    if (NON_FAILING_REASONS.has(reason) && statesForReason(reason) === undefined) {
         fail("a component-only reason is not a top-level verdict");
     }
-    const expectedState = fixedStateForReason(reason);
-    if (expectedState !== undefined && state !== expectedState) {
+    const expectedStates = statesForReason(reason);
+    if (expectedStates !== undefined && !expectedStates.includes(state as DaemonState)) {
         fail("state contradicts the selected reason");
+    }
+    // A success verdict names the effect its command produced, so one command cannot borrow another's.
+    const successReasons: Record<string, readonly string[]> = {
+        start: ["started", "already_running"],
+        restart: ["started"],
+        stop: ["stopped", "already_stopped"],
+        status: ["healthy"],
+        doctor: ["healthy"],
+    };
+    if (record.ok && !successReasons[command]?.includes(reason)) {
+        fail("a successful result carries a verdict its command cannot produce");
     }
     let effects: RestartEffects | null = null;
     if (record.effects !== null) {
@@ -364,7 +427,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         fail("a successful restart must carry its effects");
     }
     let readiness: DaemonReadiness | null = null;
-    if (record.readiness !== null) {
+    if (record.readiness !== null && record.readiness !== undefined) {
         const rawReadiness = requireObject(record.readiness, "readiness");
         readiness = {};
         for (const [component, value] of Object.entries(rawReadiness)) {
@@ -421,11 +484,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         if (status === "fail" && NON_FAILING_REASONS.has(checkReason)) {
             fail("a failing check carries a non-failing reason");
         }
-        const expectedCheckRemediation = remediationForReason(checkReason);
-        if (
-            checkReason !== "harness_unavailable" &&
-            checkRemediation !== expectedCheckRemediation
-        ) {
+        if (!remediationFitsReason(checkReason, checkRemediation as string | null)) {
             fail("check remediation contradicts its reason");
         }
         return {
@@ -449,10 +508,19 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         ["release", "proof", "daemon", "context", "synapse", "broca"],
         "versions",
     );
+    const proof = nullableString(rawVersions.proof, "versions.proof");
+    if (proof !== null && proof !== "current") {
+        fail("versions.proof is outside its closed literal");
+    }
+    // Only an authenticated, successful start or restart vouches for the running code; status and stop never authenticate.
+    const provesCurrent = record.ok && (command === "start" || command === "restart");
+    if (proof === "current" && !provesCurrent) {
+        fail("versions.proof claims current from a result that cannot authenticate");
+    }
     const versions: DaemonVersions = {
         release: nullableString(rawVersions.release, "versions.release"),
-        proof: nullableString(rawVersions.proof, "versions.proof"),
-        daemon: nullableString(rawVersions.daemon, "versions.daemon"),
+        proof,
+        daemon: nullableDaemonVersion(rawVersions.daemon),
         context: nullableString(rawVersions.context, "versions.context"),
         synapse: nullableString(rawVersions.synapse, "versions.synapse"),
         broca: nullableString(rawVersions.broca, "versions.broca"),
@@ -485,27 +553,64 @@ export function exitAgreesWithResult(exitCode: number, result: DaemonResultV1): 
 export type PreNativeRootsClassification =
     | { kind: "absent" }
     | { kind: "residual" }
-    | { kind: "hazard"; hazard: "symlink" | "special" | "access_error" | "race" };
+    | {
+          kind: "hazard";
+          hazard:
+              | "symlink"
+              | "special"
+              | "access_error"
+              | "race"
+              | "unsafe_ancestor"
+              | "parent_component";
+      };
 
-type ProbeOutcome = "absent" | "directory" | "symlink" | "special" | "access_error";
+type ProbeOutcome =
+    | "absent"
+    | "directory"
+    | "symlink"
+    | "special"
+    | "access_error"
+    | "unsafe_ancestor";
+
+const S_ISVTX = 0o1000;
+const GROUP_OR_OTHER_WRITABLE = 0o022;
+
+/** A safe ancestor is owned by the caller or root and is not group- or other-writable unless sticky. */
+function isSafeAncestor(stat: { uid: number; mode: number }): boolean {
+    const ours = process.geteuid?.();
+    if (ours !== undefined && stat.uid !== ours && stat.uid !== 0) return false;
+    return (stat.mode & GROUP_OR_OTHER_WRITABLE) === 0 || (stat.mode & S_ISVTX) !== 0;
+}
 
 function probeEntry(entryPath: string): ProbeOutcome {
-    try {
-        const stat = lstatSync(entryPath);
-        if (stat.isSymbolicLink()) return "symlink";
-        if (stat.isDirectory()) return "directory";
-        return "special";
-    } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ENOENT" || code === "ENOTDIR") return "absent";
-        return "access_error";
+    const absolute = path.resolve(entryPath);
+    const { root } = path.parse(absolute);
+    const components = path.relative(root, absolute).split(path.sep).filter(Boolean);
+    let current = root;
+    for (let index = -1; index < components.length; index++) {
+        if (index >= 0) current = path.join(current, components[index] as string);
+        try {
+            const stat = lstatSync(current);
+            if (stat.isSymbolicLink()) return "symlink";
+            if (!stat.isDirectory()) return "special";
+            if (index < components.length - 1 && !isSafeAncestor(stat)) return "unsafe_ancestor";
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code === "ENOENT") return "absent";
+            if (code === "ENOTDIR") return "special";
+            return "access_error";
+        }
     }
+    return "directory";
 }
 
 /**
  *
  */
 export function classifyPreNativeRoots(dataRoot: string): PreNativeRootsClassification {
+    if (dataRoot.split(path.sep).includes("..")) {
+        return { kind: "hazard", hazard: "parent_component" };
+    }
     const entries = [coordinationDirPath(dataRoot), runtimeDirPath(dataRoot)];
     const first = entries.map(probeEntry);
     const second = entries.map(probeEntry);
@@ -516,6 +621,7 @@ export function classifyPreNativeRoots(dataRoot: string): PreNativeRootsClassifi
         if (outcome === "symlink") return { kind: "hazard", hazard: "symlink" };
         if (outcome === "special") return { kind: "hazard", hazard: "special" };
         if (outcome === "access_error") return { kind: "hazard", hazard: "access_error" };
+        if (outcome === "unsafe_ancestor") return { kind: "hazard", hazard: "unsafe_ancestor" };
     }
     if (second.every((outcome) => outcome === "absent")) return { kind: "absent" };
     return { kind: "residual" };

@@ -7,8 +7,9 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { getErrorMessage } from "./error-message";
 
 // Synchronous `require` preserves the `estimateTokens` API and defers both package loads until the first non-empty call.
 type TokenizerLike = {
@@ -22,6 +23,8 @@ const TOKENIZER_PACKAGE_DIRS = [
 ] as const;
 let tokenizer: TokenizerLike | undefined;
 /** `tokenizerLoadAttempted` prevents `getTokenizer` from retrying a failed bare `require`.
+ * `getTokenizer` leaves it unset while `tokenizerLoadPromise` is pending, so an in-flight
+ * `preloadTokenizer` still publishes its result.
  * */
 let tokenizerLoadAttempted = false;
 /** `tokenizerPreloadAttempted` gates `preloadTokenizer`'s asynchronous installed-package search.
@@ -33,29 +36,39 @@ let tokenizerPreloadAttempted = false;
  * */
 let tokenizerPoisoned = false;
 let tokenizerLoadPromise: Promise<boolean> | undefined;
-let tokenizerWarningSent = false;
+/** Each failure cause warns once, so an encode failure after a recovered load is still reported. */
+const tokenizerWarningsSent = new Set<"load" | "encode">();
 
+/** The XDG base directory spec says a relative or empty `XDG_CACHE_HOME` must be ignored. */
+function xdgCacheHome(): string {
+    const configured = process.env.XDG_CACHE_HOME;
+    return configured && isAbsolute(configured) ? configured : join(homedir(), ".cache");
+}
+
+/**
+ * Candidate `ai-tokenizer` locations: the OpenCode cache and the runtime entry's ancestors.
+ * `process.cwd()` is excluded so a checked-out repository cannot supply the module this process
+ * imports.
+ */
 function tokenizerPackageRoots(): string[] {
-    const cwd = process.cwd();
-    const openCodeCache = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "opencode");
-    const roots = [cwd, openCodeCache];
+    const openCodeCache = join(xdgCacheHome(), "opencode");
     const candidates: string[] = [];
-    for (const root of roots) {
-        for (const packageDir of TOKENIZER_PACKAGE_DIRS) {
-            // `tokenizerPackageRoots` prefers the plugin-nested `ai-tokenizer` dependency to a conflicting host-hoisted version.
-            candidates.push(
-                join(root, "node_modules", ...packageDir, "node_modules", "ai-tokenizer"),
-            );
-        }
-        candidates.push(join(root, "node_modules", "ai-tokenizer"));
+    for (const packageDir of TOKENIZER_PACKAGE_DIRS) {
+        // `tokenizerPackageRoots` prefers the plugin-nested `ai-tokenizer` dependency to a conflicting host-hoisted version.
+        candidates.push(
+            join(openCodeCache, "node_modules", ...packageDir, "node_modules", "ai-tokenizer"),
+        );
     }
+    candidates.push(join(openCodeCache, "node_modules", "ai-tokenizer"));
 
-    let ancestor = process.argv[1] ? dirname(resolve(process.argv[1])) : cwd;
-    while (true) {
-        candidates.push(join(ancestor, "node_modules", "ai-tokenizer"));
-        const parent = dirname(ancestor);
-        if (parent === ancestor) break;
-        ancestor = parent;
+    if (process.argv[1]) {
+        let ancestor = dirname(resolve(process.argv[1]));
+        while (true) {
+            candidates.push(join(ancestor, "node_modules", "ai-tokenizer"));
+            const parent = dirname(ancestor);
+            if (parent === ancestor) break;
+            ancestor = parent;
+        }
     }
     return [...new Set(candidates)];
 }
@@ -67,7 +80,11 @@ function packageImportTarget(value: unknown): string | undefined {
     return packageImportTarget(conditions.import) ?? packageImportTarget(conditions.default);
 }
 
-function findTokenizerImportPaths(): { tokenizerPath: string; encodingPath: string } | undefined {
+type TokenizerImportPaths = { tokenizerPath: string; encodingPath: string };
+
+/** Every candidate root whose `package.json` resolves both entry points, in search order. */
+function findTokenizerImportPaths(): TokenizerImportPaths[] {
+    const found: TokenizerImportPaths[] = [];
     for (const packageRoot of tokenizerPackageRoots()) {
         const packageJsonPath = join(packageRoot, "package.json");
         if (!existsSync(packageJsonPath)) continue;
@@ -83,13 +100,28 @@ function findTokenizerImportPaths(): { tokenizerPath: string; encodingPath: stri
                 (typeof packageJson.main === "string" ? packageJson.main : undefined);
             const encodingTarget = packageImportTarget(packageJson.exports?.["./encoding/claude"]);
             if (!tokenizerTarget || !encodingTarget) continue;
-            return {
+            found.push({
                 tokenizerPath: realpathSync(join(packageRoot, tokenizerTarget)),
                 encodingPath: realpathSync(join(packageRoot, encodingTarget)),
-            };
+            });
         } catch {}
     }
-    return undefined;
+    return found;
+}
+
+/**
+ * `ai-tokenizer` reads `stringEncoder[piece]` with property access, so `valueOf` resolves to
+ * `Object.prototype.valueOf` instead of a rank. A null-prototype table makes that lookup miss;
+ * `ai-tokenizer` then falls through to byte-pair merging.
+ */
+function withNullPrototypeStringEncoder(claudeEncoding: unknown): unknown {
+    if (!claudeEncoding || typeof claudeEncoding !== "object") return claudeEncoding;
+    const encoding = claudeEncoding as { stringEncoder?: unknown };
+    const table = encoding.stringEncoder;
+    if (!table || typeof table !== "object" || Object.getPrototypeOf(table) === null) {
+        return claudeEncoding;
+    }
+    return { ...encoding, stringEncoder: Object.assign(Object.create(null), table) };
 }
 
 function constructTokenizer(tokenizerModule: unknown, claudeEncoding: unknown): TokenizerLike {
@@ -101,7 +133,7 @@ function constructTokenizer(tokenizerModule: unknown, claudeEncoding: unknown): 
     if (!Tokenizer) {
         throw new Error("ai-tokenizer does not expose a Tokenizer constructor");
     }
-    return new Tokenizer(claudeEncoding);
+    return new Tokenizer(withNullPrototypeStringEncoder(claudeEncoding));
 }
 
 function loadTokenizer(): TokenizerLike {
@@ -113,26 +145,39 @@ function loadTokenizer(): TokenizerLike {
     );
 }
 
+/** A candidate that fails to import or construct does not shadow a later working install. */
 async function loadTokenizerFromInstalledPackage(): Promise<TokenizerLike> {
-    const installedPaths = findTokenizerImportPaths();
-    if (!installedPaths) {
+    const candidates = findTokenizerImportPaths();
+    if (candidates.length === 0) {
         throw new Error(
-            "ai-tokenizer was not found under the project, runtime, or OpenCode cache node_modules roots",
+            "ai-tokenizer was not found under the OpenCode cache or runtime node_modules roots",
         );
     }
-    const [tokenizerModule, claudeEncoding] = await Promise.all([
-        import(pathToFileURL(installedPaths.tokenizerPath).href),
-        import(pathToFileURL(installedPaths.encodingPath).href),
-    ]);
-    return constructTokenizer(tokenizerModule, claudeEncoding);
+    let lastError: unknown;
+    for (const paths of candidates) {
+        try {
+            const [tokenizerModule, claudeEncoding] = await Promise.all([
+                import(pathToFileURL(paths.tokenizerPath).href),
+                import(pathToFileURL(paths.encodingPath).href),
+            ]);
+            return constructTokenizer(tokenizerModule, claudeEncoding);
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError;
 }
 
-function warnTokenizerFallback(error: unknown): void {
-    if (tokenizerWarningSent) return;
-    tokenizerWarningSent = true;
-    const reason = error instanceof Error ? error.message : String(error);
+function warnTokenizerFallback(cause: "load" | "encode", error: unknown): void {
+    if (tokenizerWarningsSent.has(cause)) return;
+    tokenizerWarningsSent.add(cause);
+    const reason = getErrorMessage(error);
+    const event =
+        cause === "load"
+            ? "ai-tokenizer is unavailable"
+            : "ai-tokenizer failed to encode and is disabled";
     console.warn(
-        "[eidnara] ai-tokenizer is unavailable; using approximate character-based token counts for this process. Token budgets, persisted per-message counts, and protected-tail/compartment boundaries may be less accurate until restart:",
+        `[eidnara] ${event}; using approximate character-based token counts for this process. Token budgets, persisted per-message counts, and protected-tail/compartment boundaries may be less accurate until restart:`,
         reason,
     );
 }
@@ -153,7 +198,7 @@ export async function preloadTokenizer(): Promise<boolean> {
             return true;
         } catch (error) {
             tokenizerLoadAttempted = true;
-            warnTokenizerFallback(error);
+            warnTokenizerFallback("load", error);
             return false;
         } finally {
             tokenizerPreloadAttempted = true;
@@ -165,11 +210,13 @@ export async function preloadTokenizer(): Promise<boolean> {
 
 function getTokenizer(): TokenizerLike | undefined {
     if (tokenizer || tokenizerLoadAttempted) return tokenizer;
+    // Do not start a synchronous load while `tokenizerLoadPromise` is set.
+    if (tokenizerLoadPromise) return undefined;
     tokenizerLoadAttempted = true;
     try {
         tokenizer = loadTokenizer();
     } catch (error) {
-        warnTokenizerFallback(error);
+        warnTokenizerFallback("load", error);
     }
     return tokenizer;
 }
@@ -190,7 +237,7 @@ export function estimateTokens(text: string): number {
         tokenizer = undefined;
         tokenizerLoadAttempted = true;
         tokenizerPoisoned = true;
-        warnTokenizerFallback(error);
+        warnTokenizerFallback("encode", error);
         return estimateTokensHeuristically(text);
     }
 }

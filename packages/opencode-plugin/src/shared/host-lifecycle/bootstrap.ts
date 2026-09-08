@@ -17,11 +17,13 @@ import {
     lstatSync,
     mkdirSync,
     openSync,
-    readlinkSync,
+    readdirSync,
+    readFileSync,
     readSync,
     realpathSync,
     renameSync,
     statfsSync,
+    statSync,
     unlinkSync,
     writeSync,
 } from "node:fs";
@@ -51,19 +53,16 @@ export class BootstrapError extends Error {
 }
 
 /**
- * The uid every ownership check in this module compares against. A host
- * without `process.getuid` cannot express file ownership, which is an
- * unsupported platform and not a property of any inspected file: comparing a
- * numeric `stat.uid` against a missing function yields `undefined` and would
- * misreport every correctly-owned object as foreign. Callers resolve the uid
- * before their first filesystem effect so such a host fails without leaving
- * a directory or a temp object behind.
+ * Kernel permission checks and newly created files use the effective UID, so
+ * ownership checks compare against the effective UID rather than the real one.
+ * A missing `process.geteuid` is an unsupported platform, not a file defect.
+ * Comparing numeric `stat.uid` with `undefined` reports owned files as foreign.
  */
 function currentUid(): number {
-    if (typeof process.getuid !== "function") {
+    if (typeof process.geteuid !== "function") {
         throw new BootstrapError("unsupported_platform", "cannot determine process uid");
     }
-    return process.getuid();
+    return process.geteuid();
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +94,11 @@ function detectGlibcVersion(): string | null {
     return null;
 }
 
+/** `statfs` reports `PROC_SUPER_MAGIC` as `f_type` for procfs mounts. */
+const PROC_SUPER_MAGIC = 0x9fa0n;
+
+const PROC_SELF_FD = "/proc/self/fd";
+
 /**
  * Whether this host can execute a retained payload through `/proc/self/fd`,
  * the Linux `procfs_self_fd_exec` capability the certified lane requires.
@@ -104,19 +108,19 @@ function detectGlibcVersion(): string | null {
  * the platform gate never evaluated.
  */
 export function detectProcSelfFd(): boolean {
-    // Probing `/proc/self/fd/0` would report the caller's *stdin state* rather
-    // than the procfs capability this gate is about: a process that closed fd 0
-    // has no `/proc/self/fd/0` entry, so readlink answers ENOENT on a fully
-    // usable procfs and every lifecycle command is refused as
-    // `unsupported_platform`. Open a descriptor this check owns and resolve
-    // that instead. `/` is used because it is the one path guaranteed to be
-    // openable wherever the gate can run at all.
     let fd: number | null = null;
     try {
-        fd = openSync("/", fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
-        // A real procfs resolves an open descriptor's link target; a masked or
-        // absent /proc throws here and the gate fails closed.
-        return readlinkSync(`/proc/self/fd/${fd}`).length > 0;
+        // `/proc/self/fd` must be mounted from procfs; reject other filesystem
+        // types. Only procfs gives its `fd` entries magic-link semantics.
+        if (statfsSync(PROC_SELF_FD, { bigint: true }).type !== PROC_SUPER_MAGIC) return false;
+        // `/proc/self/fd/0` disappears when file descriptor 0 is closed, so the probe opens its own descriptor.
+        // Path traversal requires search permission, not read permission, on `/`.
+        fd = openSync(PROC_SELF_FD, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+        // A magic link resolves to the open description itself, so the path and
+        // the descriptor name one inode.
+        const viaLink = statSync(`${PROC_SELF_FD}/${fd}`);
+        const direct = fstatSync(fd);
+        return viaLink.dev === direct.dev && viaLink.ino === direct.ino;
     } catch {
         return false;
     } finally {
@@ -249,6 +253,20 @@ export function resolvePayloadPackageDir(options: {
     explicitExternalRoot?: string;
 }): LayoutResolution {
     const { declaringParentRoot, packageName } = options;
+    // A relative root is resolved against `process.cwd()` by every syscall
+    // below, so an install elsewhere could certify a payload from whatever
+    // directory the process happens to run in.
+    if (
+        (declaringParentRoot !== undefined && !path.isAbsolute(declaringParentRoot)) ||
+        (options.explicitExternalRoot !== undefined &&
+            !path.isAbsolute(options.explicitExternalRoot))
+    ) {
+        return {
+            ok: false,
+            reason: "unsupported_install_layout",
+            detail: "install root is not an absolute path",
+        };
+    }
     if (options.explicitExternalRoot !== undefined) {
         const externalCandidate = path.join(
             options.explicitExternalRoot,
@@ -470,37 +488,55 @@ export interface RetainedBootstrap {
     sha256: string;
 }
 
-function sha256OfFd(fd: number): string {
-    const hash = createHash("sha256");
-    const buffer = Buffer.alloc(64 * 1024);
-    let position = 0;
-    for (;;) {
-        const read = readSync(fd, buffer, 0, buffer.length, position);
-        if (read === 0) break;
-        hash.update(buffer.subarray(0, read));
-        position += read;
-    }
-    return hash.digest("hex");
-}
-
 function invalid(detail: string): BootstrapError {
     return new BootstrapError("native_payload_invalid", detail);
 }
 
 /**
- * Copy exactly `expectedBytes` from `sourceFd` to `outFd`, hashing as it goes,
- * and prove the source was neither longer nor shorter than that.
- *
- * The byte count is the one capacity was preflighted against. Following the
- * live EOF instead would let a source still being appended to drag the copy
- * past the reserve `checkCapacity` approved — without bound, since a writer
- * that never stops appending means `readSync` never returns 0 and staging
- * never returns.
- *
- * The digest cannot stand in for either check: it is computed over whatever was
- * actually read, so a grown source yields a mismatch that reads as corruption
- * rather than as the concurrent mutation it is. Reaching EOF early is the same
- * event seen from the other side.
+ * Sparse files can report large logical sizes without occupying blocks.
+ * A debug `eidnara-host` with full debuginfo measures about 380 MiB. commentlint: allow(JUDGE)
+ */
+const MAX_LAUNCHER_BYTES = 1 << 30;
+
+function assertLauncherSize(size: number, what: string): void {
+    if (size > MAX_LAUNCHER_BYTES) throw invalid(`${what} exceeds the launcher size cap`);
+}
+
+/**
+ * Reading until live EOF lets an endlessly appended object block the reader indefinitely.
+ * A digest covers only bytes read; a grown object produces a corruption-like mismatch.
+ */
+function readExactBytes(
+    fd: number,
+    expectedBytes: number,
+    sink: (chunk: Buffer) => void,
+    mismatch: { shrank: string; grew: string },
+): void {
+    const buffer = Buffer.alloc(64 * 1024);
+    let position = 0;
+    while (position < expectedBytes) {
+        const want = Math.min(buffer.length, expectedBytes - position);
+        const read = readSync(fd, buffer, 0, want, position);
+        if (read === 0) throw invalid(mismatch.shrank);
+        sink(buffer.subarray(0, read));
+        position += read;
+    }
+    // One readable byte past the expected size means the object exceeds its certified size.
+    if (readSync(fd, buffer, 0, 1, position) !== 0) throw invalid(mismatch.grew);
+}
+
+function sha256OfFd(fd: number, expectedBytes: number): string {
+    const hash = createHash("sha256");
+    readExactBytes(fd, expectedBytes, (chunk) => hash.update(chunk), {
+        shrank: "retained bootstrap shrank during revalidation",
+        grew: "retained bootstrap grew during revalidation",
+    });
+    return hash.digest("hex");
+}
+
+/**
+ * The byte count is the one capacity was preflighted against, so a source that
+ * grows cannot drag the copy past the reserve `checkCapacity` approved.
  */
 export function copyExactBytes(
     sourceFd: number,
@@ -508,25 +544,21 @@ export function copyExactBytes(
     expectedBytes: number,
     hash: Hash,
 ): void {
-    const buffer = Buffer.alloc(64 * 1024);
-    let position = 0;
-    while (position < expectedBytes) {
-        const want = Math.min(buffer.length, expectedBytes - position);
-        const read = readSync(sourceFd, buffer, 0, want, position);
-        if (read === 0) throw invalid("launcher source shrank during staging");
-        hash.update(buffer.subarray(0, read));
-        let written = 0;
-        while (written < read) {
-            written += writeSync(outFd, buffer, written, read - written);
-        }
-        position += read;
-    }
-    // One readable byte past the preflighted size means the source grew while it
-    // was being staged, so the bytes just copied are a prefix of a file that no
-    // longer matches what was certified.
-    if (readSync(sourceFd, buffer, 0, 1, position) !== 0) {
-        throw invalid("launcher source grew during staging");
-    }
+    readExactBytes(
+        sourceFd,
+        expectedBytes,
+        (chunk) => {
+            hash.update(chunk);
+            let written = 0;
+            while (written < chunk.length) {
+                written += writeSync(outFd, chunk, written, chunk.length - written);
+            }
+        },
+        {
+            shrank: "launcher source shrank during staging",
+            grew: "launcher source grew during staging",
+        },
+    );
 }
 
 /**
@@ -553,13 +585,10 @@ export function revalidateRetainedBootstrap(
             fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
         );
     } catch (error) {
-        // Same line the launcher source draws: only true
-        // absence is "missing". A retained object that is present but rejected
-        // by O_NOFOLLOW or by its mode is a tampered or damaged artifact, and
-        // reporting it as absent would both name a remedy that does not apply
-        // and discard the evidence that something replaced it.
+        // Only ENOENT means the retained bootstrap is absent.
+        // ENOTDIR denotes a non-directory path component, not an absent bootstrap.
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ENOENT" || code === "ENOTDIR") {
+        if (code === "ENOENT") {
             throw new BootstrapError("native_payload_missing", "retained bootstrap is absent");
         }
         throw invalid("retained bootstrap is not openable");
@@ -567,6 +596,7 @@ export function revalidateRetainedBootstrap(
     try {
         const stat = fstatSync(fd);
         if (!stat.isFile()) throw invalid("retained bootstrap is not a regular file");
+        assertLauncherSize(stat.size, "retained bootstrap");
         if (stat.nlink !== 1) throw invalid("retained bootstrap is not single-link");
         if (stat.uid !== uid) throw invalid("retained bootstrap has a foreign owner");
         if ((stat.mode & 0o077) !== 0)
@@ -584,7 +614,7 @@ export function revalidateRetainedBootstrap(
         // rewrite it, so the digest-to-exec window is only truly closed by a
         // sealed object, which needs the native layer.
         if ((stat.mode & 0o200) !== 0) throw invalid("retained bootstrap is owner-writable");
-        const digest = sha256OfFd(fd);
+        const digest = sha256OfFd(fd, stat.size);
         if (digest !== expectedSha256) throw invalid("retained bootstrap digest mismatch");
         // This is the one path-addressed stat
         // in the sequence, so a bootstrap unlinked after its descriptor was read
@@ -600,8 +630,69 @@ export function revalidateRetainedBootstrap(
         }
         return { fd, path: bootstrapPath, sha256: digest };
     } catch (error) {
-        closeSync(fd);
-        throw error;
+        try {
+            closeSync(fd);
+        } catch {
+            // The outer catch reports the original failure.
+        }
+        // `fstat` and hashing reads can fail with filesystem errors after opening the descriptor.
+        // Wrap filesystem failures so callers receive a `BootstrapError` reason.
+        if (error instanceof BootstrapError) throw error;
+        const code = (error as { code?: string } | null)?.code;
+        throw invalid(
+            `retained bootstrap revalidation failed: ${code ?? "unknown filesystem error"}`,
+        );
+    }
+}
+
+const STAGING_TEMP_PREFIX = ".staging-";
+const STAGING_TEMP_NAME = /^\.staging-(\d+)-(\d+)-\d+$/;
+
+/**
+ * `/proc/<pid>/stat` field 22 is the process start time in clock ticks since boot.
+ * A PID alone does not identify a process because PIDs can be reused.
+ * Start ticks distinguish a reused PID from its prior process.
+ * `comm` may contain spaces and parentheses, so split fields after the last `)`.
+ */
+function processStartTicks(pid: number): bigint | null {
+    let stat: string;
+    try {
+        stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    } catch {
+        return null;
+    }
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    const ticks = stat.slice(close + 2).split(" ")[19];
+    return ticks !== undefined && /^\d+$/.test(ticks) ? BigInt(ticks) : null;
+}
+
+/**
+ * Only regular, single-link, owner-owned entries qualify, so a foreign object
+ * planted under the prefix is left alone.
+ */
+function reclaimStaleStagingTemps(destDir: string, uid: number): void {
+    for (const name of readdirSync(destDir)) {
+        const match = STAGING_TEMP_NAME.exec(name);
+        if (!match) continue;
+        const pid = Number.parseInt(match[1] as string, 10);
+        if (!Number.isSafeInteger(pid) || pid < 1) continue;
+        const started = BigInt(match[2] as string);
+        const tempPath = path.join(destDir, name);
+        let stat: ReturnType<typeof lstatSync>;
+        try {
+            stat = lstatSync(tempPath);
+        } catch {
+            continue;
+        }
+        if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid) continue;
+        // Matching start ticks name a live stager, including this process.
+        if (processStartTicks(pid) === started) continue;
+        try {
+            unlinkSync(tempPath);
+        } catch {
+            // Another stager may have reclaimed the same temp first.
+        }
     }
 }
 
@@ -609,10 +700,13 @@ export function revalidateRetainedBootstrap(
  * Open the staging destination through one retained descriptor and prove it is
  * an owner-only real directory. `O_NOFOLLOW` makes a symlink at `destDir` fail
  * the open instead of redirecting every path built beneath it, `O_DIRECTORY`
- * rejects a non-directory at the same name, and the owner and write-bit checks
+ * rejects a non-directory at the same name, and the owner and mode checks
  * reject an existing insecure directory — `mkdirSync` with a mode applies that
  * mode only when it creates the directory and never chmods one that is
- * already there.
+ * already there. The mode check rejects every group and world bit, matching
+ * the 0o700 a fresh destination is created with and the 0o077 test the
+ * retained object itself must pass: a traversable or listable store lets other
+ * users inspect what staging reports as private.
  *
  * The proof binds to this descriptor. What it does NOT establish: Node exposes
  * no `openat`/`renameat`, so the temp create and the rename below still address
@@ -637,8 +731,8 @@ function openStagingDir(destDir: string, uid: number): number {
         const stat = fstatSync(fd);
         if (!stat.isDirectory()) throw invalid("staging destination is not a directory");
         if (stat.uid !== uid) throw invalid("staging destination has a foreign owner");
-        if ((stat.mode & 0o022) !== 0) {
-            throw invalid("staging destination is group/world writable");
+        if ((stat.mode & 0o077) !== 0) {
+            throw invalid("staging destination is group/world accessible");
         }
         return fd;
     } catch (error) {
@@ -656,9 +750,9 @@ function openStagingDir(destDir: string, uid: number): number {
  * retained descriptor is returned. The destination is proved to be an
  * owner-only real directory through a retained descriptor before any output
  * exists, with the residual pathname race documented on
- * {@link openStagingDir}. Capacity is preflighted with the checked reserve
- * before the temp is created; post-preflight failures remove only the owned
- * temp.
+ * {@link openStagingDir}. Temps left by stagers whose process is gone are
+ * reclaimed, then capacity is preflighted with the checked reserve before the
+ * temp is created; post-preflight failures remove only the owned temp.
  */
 export function stageBootstrap(options: {
     sourcePath: string;
@@ -668,9 +762,12 @@ export function stageBootstrap(options: {
 }): RetainedBootstrap {
     const { sourcePath, destDir, expectedSha256 } = options;
     if (!SHA256_HEX.test(expectedSha256)) throw invalid("expected digest is noncanonical");
-    // The uid is resolved before the first filesystem effect so a host that
-    // cannot report one fails without creating the destination or a temp.
+    // Resolve uid and process identity before filesystem effects so unavailable identity fails without creating destination or temp.
     const uid = currentUid();
+    const ownStart = processStartTicks(process.pid);
+    if (ownStart === null) {
+        throw new BootstrapError("unsupported_platform", "cannot determine process start time");
+    }
     let sourceFd: number;
     try {
         sourceFd = openSync(
@@ -684,10 +781,10 @@ export function stageBootstrap(options: {
         // cannot be trusted, which the contract calls `native_payload_invalid`
         // with `reinstall_eidnara`. Reporting `install_native_payload`
         // instead tells the operator to install what is already installed, and
-        // also lowers the reason's precedence. `classifyEntry` already draws
-        // the line this way.
+        // also lowers the reason's precedence.
+        // ENOTDIR denotes a non-directory path component, not an absent launcher.
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ENOENT" || code === "ENOTDIR") {
+        if (code === "ENOENT") {
             throw new BootstrapError("native_payload_missing", "launcher source is absent");
         }
         throw invalid("launcher source is not openable");
@@ -697,9 +794,12 @@ export function stageBootstrap(options: {
     try {
         const before = fstatSync(sourceFd);
         if (!before.isFile()) throw invalid("launcher source is not a regular file");
+        assertLauncherSize(before.size, "launcher source");
         mkdirSync(destDir, { recursive: true, mode: 0o700 });
         destFd = openStagingDir(destDir, uid);
         const destBefore = fstatSync(destFd);
+        // Reclaim before preflight so the freed bytes count toward capacity.
+        reclaimStaleStagingTemps(destDir, uid);
         const capacity = checkCapacity(
             BigInt(before.size),
             options.availableBytesOverride ?? availableBytesFor(destDir),
@@ -707,7 +807,7 @@ export function stageBootstrap(options: {
         if (!capacity.ok) throw new BootstrapError(capacity.reason, capacity.detail);
         tempPath = path.join(
             destDir,
-            `.staging-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`,
+            `${STAGING_TEMP_PREFIX}${process.pid}-${ownStart}-${Math.floor(Math.random() * 1e9)}`,
         );
         const outFd = openSync(
             tempPath,
@@ -761,8 +861,20 @@ export function stageBootstrap(options: {
         }
         throw invalid(`staging failed: ${code ?? "unknown filesystem error"}`);
     } finally {
-        closeSync(sourceFd);
-        if (destFd !== null) closeSync(destFd);
+        // A close error escaping here would replace a successful return with a
+        // raw error and skip the remaining cleanup.
+        try {
+            closeSync(sourceFd);
+        } catch {
+            // best-effort
+        }
+        if (destFd !== null) {
+            try {
+                closeSync(destFd);
+            } catch {
+                // best-effort
+            }
+        }
         if (tempPath !== null) {
             try {
                 unlinkSync(tempPath);

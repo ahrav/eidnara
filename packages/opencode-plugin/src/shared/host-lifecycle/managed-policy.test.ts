@@ -82,7 +82,7 @@ function client(options: {
 
 function verdict(snapshot: Awaited<ReturnType<typeof readCompatibilitySnapshot>>) {
     return evaluateCompatibility({
-        authenticatedDaemonVer: snapshot.authenticatedDaemonVersion,
+        authenticatedPeer: snapshot.authenticatedPeer,
         catalog: snapshot.catalog,
         epochs: snapshot.epochs,
     });

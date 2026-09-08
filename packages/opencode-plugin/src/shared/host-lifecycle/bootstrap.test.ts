@@ -14,6 +14,7 @@ import {
     readFileSync,
     rmSync,
     symlinkSync,
+    truncateSync,
     writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
@@ -24,6 +25,7 @@ import {
     checkPlatform,
     containedWithin,
     copyExactBytes,
+    detectProcSelfFd,
     type PlatformReaders,
     resolvePayloadPackageDir,
     revalidateRetainedBootstrap,
@@ -39,17 +41,16 @@ function sha256(bytes: Buffer | string): string {
 }
 
 /**
- * Run `body` without `process.getuid` to simulate a host whose ownership checks cannot determine a UID.
- * Run `body` without `process.getuid` to simulate a host whose ownership checks cannot determine a UID.
+ * Run `body` without `process.geteuid` to simulate a host whose ownership checks cannot determine a UID.
  */
-function withoutGetuid<T>(body: () => T): T {
-    const holder = process as { getuid?: () => number };
-    const original = holder.getuid;
-    holder.getuid = undefined;
+function withoutGeteuid<T>(body: () => T): T {
+    const holder = process as { geteuid?: () => number };
+    const original = holder.geteuid;
+    holder.geteuid = undefined;
     try {
         return body();
     } finally {
-        holder.getuid = original;
+        holder.geteuid = original;
     }
 }
 
@@ -104,6 +105,11 @@ describe("platform gate (U3 scenario 5)", () => {
         expect(checkPlatform(linuxReaders({ platform: "darwin" })).ok).toBe(false);
         expect(checkPlatform(linuxReaders({ platform: "win32" })).ok).toBe(false);
         expect(checkPlatform(linuxReaders({ platform: "freebsd" })).ok).toBe(false);
+    });
+
+    test("the self-fd probe certifies a real procfs", () => {
+        if (process.platform !== "linux") return;
+        expect(detectProcSelfFd()).toBe(true);
     });
 });
 
@@ -323,6 +329,72 @@ describe("install layout resolution (U3 scenario 4)", () => {
             rmSync(root, { recursive: true, force: true });
         }
     });
+
+    test("a dangling ancestor symlink is absence, so the walk still climbs; a redirecting one is refused", () => {
+        const root = tempDir("eidnara-layout-dangling-");
+        try {
+            const hoisted = path.join(root, "node_modules", PKG);
+            mkdirSync(hoisted, { recursive: true });
+
+            // A dangling `node_modules` cannot contain the candidate, exactly like a deleted one.
+            const dangling = path.join(root, "dangling");
+            mkdirSync(dangling);
+            symlinkSync(path.join(root, "nonexistent"), path.join(dangling, "node_modules"));
+            expect(
+                resolvePayloadPackageDir({ declaringParentRoot: dangling, packageName: PKG }),
+            ).toEqual({ ok: true, layout: "npm_hoisted", packageDir: hoisted });
+
+            // A `node_modules` symlink that resolves to a foreign install is present, so it does
+            // not license climbing, and containment rejects it.
+            const foreign = path.join(root, "foreign", "node_modules", PKG);
+            mkdirSync(foreign, { recursive: true });
+            const redirecting = path.join(root, "redirecting");
+            mkdirSync(redirecting);
+            symlinkSync(
+                path.join(root, "foreign", "node_modules"),
+                path.join(redirecting, "node_modules"),
+            );
+            const resolved = resolvePayloadPackageDir({
+                declaringParentRoot: redirecting,
+                packageName: PKG,
+            });
+            expect(resolved.ok).toBe(false);
+            if (!resolved.ok) expect(resolved.reason).toBe("unsupported_install_layout");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("relative install roots are refused before any candidate is inspected", () => {
+        // A relative root would resolve against process.cwd(), which the trust contract never consults.
+        const root = tempDir("eidnara-layout-relative-");
+        const previousCwd = process.cwd();
+        try {
+            mkdirSync(path.join(root, "node_modules", PKG), { recursive: true });
+            process.chdir(root);
+            const nested = resolvePayloadPackageDir({ declaringParentRoot: ".", packageName: PKG });
+            expect(nested.ok).toBe(false);
+            if (!nested.ok) expect(nested.reason).toBe("unsupported_install_layout");
+
+            const external = resolvePayloadPackageDir({
+                declaringParentRoot: root,
+                packageName: PKG,
+                explicitExternalRoot: ".",
+            });
+            expect(external.ok).toBe(false);
+            if (!external.ok) expect(external.reason).toBe("unsupported_install_layout");
+
+            // The same install certifies once addressed absolutely.
+            const absolute = resolvePayloadPackageDir({
+                declaringParentRoot: root,
+                packageName: PKG,
+            });
+            expect(absolute.ok).toBe(true);
+        } finally {
+            process.chdir(previousCwd);
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -510,8 +582,8 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
             // O_NOFOLLOW rejects the symlink with ELOOP: present, untrustworthy.
             expect(reasonFor(link)).toBe("native_payload_invalid");
             expect(reasonFor(path.join(dir, "no-such-launcher"))).toBe("native_payload_missing");
-            // ENOTDIR — a file used as a directory component — is also absence.
-            expect(reasonFor(path.join(real, "under-a-file"))).toBe("native_payload_missing");
+            // ENOTDIR: a regular file where a launcher-path directory belongs makes the package invalid rather than missing.
+            expect(reasonFor(path.join(real, "under-a-file"))).toBe("native_payload_invalid");
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
@@ -717,6 +789,13 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
                 absentReason = (error as BootstrapError).reason;
             }
             expect(absentReason).toBe("native_payload_missing");
+
+            // ENOTDIR: a regular file where the store directory belongs is a damaged store, not an absent bootstrap.
+            const fileStore = path.join(dir, "file-store");
+            writeFileSync(fileStore, "not a dir");
+            expect(
+                reasonOf(() => revalidateRetainedBootstrap(path.join(fileStore, digest), digest)),
+            ).toBe("native_payload_invalid");
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
@@ -839,6 +918,13 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
             expect(stage(openStore)).toBe("native_payload_invalid");
             expect(readdirSync(openStore)).toEqual([]);
 
+            // Group search or read bits let other users traverse or list the store even without write access.
+            const traversableStore = path.join(dir, "traversable-store");
+            mkdirSync(traversableStore, { mode: 0o700 });
+            chmodSync(traversableStore, 0o750);
+            expect(stage(traversableStore)).toBe("native_payload_invalid");
+            expect(readdirSync(traversableStore)).toEqual([]);
+
             const fileStore = path.join(dir, "file-store");
             writeFileSync(fileStore, "not a dir");
             expect(stage(fileStore)).not.toBeNull();
@@ -857,7 +943,7 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
         }
     });
 
-    test("a host without process.getuid is unsupported_platform before any staging effect", () => {
+    test("a host without process.geteuid is unsupported_platform before any staging effect", () => {
         const dir = tempDir("eidnara-stage-nouid-");
         try {
             const source = path.join(dir, "launcher");
@@ -866,7 +952,7 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
             const digest = sha256(bytes);
 
             const destDir = path.join(dir, "store");
-            const stageReason = withoutGetuid(() =>
+            const stageReason = withoutGeteuid(() =>
                 reasonOf(() =>
                     stageBootstrap({
                         sourcePath: source,
@@ -886,10 +972,92 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
                 availableBytesOverride: 1n << 40n,
             });
             closeSync(staged.fd);
-            const retainedReason = withoutGetuid(() =>
+            const retainedReason = withoutGeteuid(() =>
                 reasonOf(() => revalidateRetainedBootstrap(staged.path, staged.sha256)),
             );
             expect(retainedReason).toBe("unsupported_platform");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("staging temps left by dead or reused pids are reclaimed; live and foreign ones are kept", () => {
+        const dir = tempDir("eidnara-stage-reclaim-");
+        try {
+            const source = path.join(dir, "launcher");
+            const bytes = Buffer.from("reclaim-launcher\n");
+            writeFileSync(source, bytes, { mode: 0o755 });
+            const store = path.join(dir, "store");
+            mkdirSync(store, { mode: 0o700 });
+            const procStat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+            const ownStart = procStat.slice(procStat.lastIndexOf(")") + 2).split(" ")[19];
+
+            // A pid above the kernel's maximum can never name a live process.
+            const dead = path.join(store, ".staging-4194305-1-1");
+            writeFileSync(dead, "partial");
+            // This pid is alive but the start ticks belong to an earlier incarnation of it.
+            const reused = path.join(store, `.staging-${process.pid}-1-1`);
+            writeFileSync(reused, "from a previous life");
+            // Matching pid and start ticks name this process, which is alive.
+            const live = path.join(store, `.staging-${process.pid}-${ownStart}-1`);
+            writeFileSync(live, "in flight");
+            // A directory under the prefix is not a staging temp this code produced.
+            const foreign = path.join(store, ".staging-4194305-2-2");
+            mkdirSync(foreign);
+            // A name outside the prefix grammar is untouched.
+            const unrelated = path.join(store, "not-a-temp");
+            writeFileSync(unrelated, "keep");
+
+            const staged = stageBootstrap({
+                sourcePath: source,
+                destDir: store,
+                expectedSha256: sha256(bytes),
+                availableBytesOverride: 1n << 40n,
+            });
+            closeSync(staged.fd);
+
+            expect(existsSync(dead)).toBe(false);
+            expect(existsSync(reused)).toBe(false);
+            expect(existsSync(live)).toBe(true);
+            expect(existsSync(foreign)).toBe(true);
+            expect(existsSync(unrelated)).toBe(true);
+            expect(readFileSync(staged.path)).toEqual(bytes);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("an oversized launcher is invalid before any destination effect or hashing", () => {
+        const dir = tempDir("eidnara-size-cap-");
+        try {
+            // A sparse file reports the logical size without allocating blocks, so the
+            // test is fast and the cap, not the digest, is what rejects it.
+            const oversized = path.join(dir, "oversized");
+            writeFileSync(oversized, "", { mode: 0o755 });
+            truncateSync(oversized, (1 << 30) + 1);
+            const digest = "a".repeat(64);
+
+            const destDir = path.join(dir, "store");
+            const stageReason = reasonOf(() =>
+                stageBootstrap({
+                    sourcePath: oversized,
+                    destDir,
+                    expectedSha256: digest,
+                    availableBytesOverride: 1n << 50n,
+                }),
+            );
+            expect(stageReason).toBe("native_payload_invalid");
+            expect(existsSync(destDir)).toBe(false);
+
+            const store = path.join(dir, "retained-store");
+            mkdirSync(store, { mode: 0o700 });
+            const retained = path.join(store, digest);
+            writeFileSync(retained, "", { mode: 0o500 });
+            execFileSync("chmod", ["0700", retained]);
+            truncateSync(retained, (1 << 30) + 1);
+            execFileSync("chmod", ["0500", retained]);
+            const retainedReason = reasonOf(() => revalidateRetainedBootstrap(retained, digest));
+            expect(retainedReason).toBe("native_payload_invalid");
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }

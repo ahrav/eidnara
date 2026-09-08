@@ -27,12 +27,13 @@ function authenticatedPeerAt(daemonVer: string) {
 let counter = 0;
 
 function startResultJson(command: string): string {
+    const mutating = command === "start" || command === "restart";
     return JSON.stringify({
         schema: "eidnara.daemon/v1",
         command,
         ok: true,
         state: "running",
-        reason: command === "start" || command === "restart" ? "started" : "healthy",
+        reason: mutating ? "started" : "healthy",
         remediation: null,
         // A successful restart must carry its commit evidence, so a fixture that
         // reported null here would be rejected by the parser and land as
@@ -42,7 +43,8 @@ function startResultJson(command: string): string {
         checks: [],
         versions: {
             release: "0.38.0",
-            proof: "current",
+            // Only a successful start or restart authenticates the running code.
+            proof: mutating ? "current" : null,
             daemon: "eidnara-host/0.1.0",
             context: null,
             synapse: null,
@@ -82,12 +84,15 @@ function restartResultJson(): string {
 }
 
 function harnessUnavailableResultJson(): string {
+    const base = JSON.parse(startResultJson("start"));
     return JSON.stringify({
-        ...JSON.parse(startResultJson("start")),
+        ...base,
         ok: false,
         state: "running",
         reason: "harness_unavailable",
         readiness: null,
+        // A failed start authenticates nothing.
+        versions: { ...base.versions, proof: null },
     });
 }
 
