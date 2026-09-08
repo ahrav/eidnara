@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
+import { getEventListeners } from "node:events";
 import * as https from "node:https";
+import * as net from "node:net";
 
 import {
     createPinnedLookup,
@@ -253,5 +255,97 @@ describe("guarded HTTPS request agent", () => {
         } finally {
             https.globalAgent.addRequest = originalAddRequest;
         }
+    });
+});
+
+describe("guarded HTTPS request lifetime", () => {
+    const validation = (port: number) => ({
+        url: new URL(`https://example.test:${port}/`),
+        hostname: "example.test",
+        addresses: [],
+    });
+    const pinned = { address: "127.0.0.1", family: 4 as const, classification: "global" as const };
+
+    // A TLS record header that announces a 16 KiB body, followed by one byte every 20 ms,
+    // keeps the client waiting for the rest of the record. A socket inactivity timeout never
+    // fires against this stream; only a wall-clock deadline ends it.
+    async function listenDripping(): Promise<{ port: number; close: () => void }> {
+        const server = net.createServer((socket) => {
+            socket.on("error", () => {});
+            socket.write(Buffer.from([0x16, 0x03, 0x03, 0x40, 0x00]));
+            const drip = setInterval(() => socket.write(Buffer.from([0x00])), 20);
+            socket.on("close", () => clearInterval(drip));
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+        const { port } = server.address() as net.AddressInfo;
+        return { port, close: () => server.close() };
+    }
+
+    test("enforces a wall-clock deadline against a server that keeps the socket active", async () => {
+        const server = await listenDripping();
+        try {
+            const started = Date.now();
+            const error = await requestValidatedAddress(validation(server.port), pinned, {
+                signal,
+                timeoutMs: 200,
+                bodyLimitBytes: 1024,
+            }).catch((error) => error);
+            const elapsed = Date.now() - started;
+
+            expect(error).toBeInstanceOf(SmartNoteNetworkError);
+            expect((error as SmartNoteNetworkError).message).toMatch(/timed out/);
+            expect((error as SmartNoteNetworkError).terminal).toBe(true);
+            expect(elapsed).toBeLessThan(1500);
+        } finally {
+            server.close();
+        }
+    });
+
+    test("removes its abort listener once the request settles", async () => {
+        const controller = new AbortController();
+        for (let i = 0; i < 3; i++) {
+            await requestValidatedAddress(validation(1), pinned, {
+                signal: controller.signal,
+                timeoutMs: 100,
+                bodyLimitBytes: 1024,
+            }).catch(() => undefined);
+        }
+        expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    });
+
+    test("rejects without opening a connection when the signal is already aborted", async () => {
+        const controller = new AbortController();
+        controller.abort();
+        let connections = 0;
+        const server = net.createServer(() => {
+            connections += 1;
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+        try {
+            const { port } = server.address() as net.AddressInfo;
+            await expect(
+                requestValidatedAddress(validation(port), pinned, {
+                    signal: controller.signal,
+                    timeoutMs: 100,
+                    bodyLimitBytes: 1024,
+                }),
+            ).rejects.toThrow(/aborted/);
+            expect(connections).toBe(0);
+        } finally {
+            server.close();
+        }
+    });
+});
+
+describe("default resolver abort listener hygiene", () => {
+    test("does not accumulate abort listeners across lookups sharing one signal", async () => {
+        const controller = new AbortController();
+        for (let i = 0; i < 3; i++) {
+            // `localhost` resolves to loopback, so validation rejects after the lookup settles.
+            await validateSmartNoteHttpUrl("https://localhost/", {
+                signal: controller.signal,
+            }).catch(() => undefined);
+        }
+        expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
     });
 });

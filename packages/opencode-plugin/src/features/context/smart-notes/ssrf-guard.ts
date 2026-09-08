@@ -219,7 +219,13 @@ export function requestValidatedAddress(
 ): Promise<{ status: number; body: string }> {
     // A request-local agent prevents reuse of sockets not opened through the pinned lookup.
     const agent = createSmartNoteRequestAgent();
+    let release: (() => void) | undefined;
     return new Promise<{ status: number; body: string }>((resolve, reject) => {
+        // An already-aborted signal never fires "abort" again, so the listener below would not run.
+        if (options.signal.aborted) {
+            reject(new SmartNoteNetworkError("SMART_NOTE_NETWORK: aborted"));
+            return;
+        }
         const url = validation.url;
         const hostHeader = url.host;
         const request = https.request(
@@ -236,10 +242,8 @@ export function requestValidatedAddress(
                     Accept: "text/plain, application/json;q=0.9, */*;q=0.1",
                 },
                 // The connector uses the prevalidated IP while TLS verifies the original hostname.
-                // network-touching check.
                 lookup: createPinnedLookup(candidate),
                 agent,
-                timeout: options.timeoutMs,
             },
             (response) => {
                 const chunks: Buffer[] = [];
@@ -284,21 +288,28 @@ export function requestValidatedAddress(
             request.destroy();
         };
         options.signal.addEventListener("abort", onAbort, { once: true });
-        request.on("timeout", () => {
+        // A wall-clock deadline bounds total request duration. The socket `timeout` option resets
+        // on every byte of I/O, so periodic bytes from the server never trigger it.
+        const deadline = setTimeout(() => {
             reject(
                 new SmartNoteNetworkError("SMART_NOTE_NETWORK: request timed out", {
                     terminal: true,
                 }),
             );
             request.destroy();
-        });
-        request.on("error", (error) => {
+        }, options.timeoutMs);
+        release = () => {
+            clearTimeout(deadline);
             options.signal.removeEventListener("abort", onAbort);
+        };
+        request.on("error", (error) => {
             reject(toNetworkError(error, "request failed"));
         });
-        request.on("close", () => options.signal.removeEventListener("abort", onAbort));
         request.end();
-    }).finally(() => agent.destroy());
+    }).finally(() => {
+        release?.();
+        agent.destroy();
+    });
 }
 
 export function createSmartNoteRequestAgent(): https.Agent {
@@ -454,6 +465,7 @@ async function withAbortAndTimeout<T>(
 ): Promise<T> {
     throwIfAborted(signal);
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     try {
         return await Promise.race([
             promise,
@@ -462,15 +474,14 @@ async function withAbortAndTimeout<T>(
                     () => reject(new SmartNoteNetworkError(timeoutMessage)),
                     timeoutMs,
                 );
-                signal.addEventListener(
-                    "abort",
-                    () => reject(new SmartNoteNetworkError("SMART_NOTE_NETWORK: aborted")),
-                    { once: true },
-                );
+                onAbort = () => reject(new SmartNoteNetworkError("SMART_NOTE_NETWORK: aborted"));
+                signal.addEventListener("abort", onAbort, { once: true });
             }),
         ]);
     } finally {
         if (timer) clearTimeout(timer);
+        // `once` removes `onAbort` only if `signal` aborts.
+        if (onAbort) signal.removeEventListener("abort", onAbort);
     }
 }
 
