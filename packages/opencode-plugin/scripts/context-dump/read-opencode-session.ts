@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 import { Database } from "bun:sqlite";
 import type { DumpMessage, DumpMessageInfo } from "./types";
 
