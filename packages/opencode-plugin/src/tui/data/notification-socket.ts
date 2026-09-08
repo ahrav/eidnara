@@ -136,10 +136,16 @@ async function connect(): Promise<void> {
     const rpcGeneration = getRpcGeneration();
     inFlightAttemptId = attemptId;
     const endpoint = await client.resolveEndpoint();
-    if (closed || inFlightAttemptId !== attemptId || getRpcGeneration() !== rpcGeneration) {
+    // A stop, or a restart that launched a newer attempt, already owns `inFlightAttemptId`.
+    if (closed || inFlightAttemptId !== attemptId) {
         return;
     }
     inFlightAttemptId = null;
+    if (getRpcGeneration() !== rpcGeneration) {
+        // The endpoint belongs to a replaced client; the retry resolves it against the current one.
+        scheduleReconnect();
+        return;
+    }
     if (!endpoint) {
         scheduleReconnect();
         return;

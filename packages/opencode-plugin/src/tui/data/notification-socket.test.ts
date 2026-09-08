@@ -189,6 +189,29 @@ describe("notification socket", () => {
         expect(deliveries).toBe(1);
     });
 
+    test("an RPC client replaced during endpoint lookup still gets a socket", async () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const dataHome = makeDataHome();
+        const directory = "/repo-replaced-client";
+        await startServer(dataHome, directory);
+        initRpcClient(directory);
+
+        let deliveries = 0;
+        startNotificationSocket({
+            getSessionId: () => "ses_replaced",
+            onNotification: () => {
+                deliveries += 1;
+                return true;
+            },
+        });
+        // The lookup for the first client is in flight; replacing the client bumps the generation.
+        initRpcClient(directory);
+
+        await waitFor(() => isTuiConnected("ses_replaced"), "connection for the replaced client");
+        pushNotification("after-replace", { ok: true }, "ses_replaced");
+        await waitFor(() => deliveries === 1, "delivery after client replacement");
+    });
+
     test("uses the active session cursor when switching sessions", async () => {
         drainNotifications(Number.MAX_SAFE_INTEGER);
         const dataHome = makeDataHome();
