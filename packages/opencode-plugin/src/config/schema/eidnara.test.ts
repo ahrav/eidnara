@@ -327,6 +327,30 @@ describe("EidnaraConfigSchema", () => {
             ).toThrow();
         });
 
+        it("rejects whitespace-only trimmed path and model fields but keeps trimming valid ones", () => {
+            const blank = [
+                { mural: { model: "   " } },
+                { models: { window_overlay_path: "\t" } },
+                { subc: { connection_file: " " } },
+            ];
+            for (const input of blank) {
+                expect([input, EidnaraConfigSchema.safeParse(input).success]).toEqual([
+                    input,
+                    false,
+                ]);
+            }
+
+            expect(EidnaraConfigSchema.parse({ mural: { model: " m " } }).mural.model).toBe("m");
+            expect(
+                EidnaraConfigSchema.parse({ models: { window_overlay_path: " ./o.json " } }).models
+                    ?.window_overlay_path,
+            ).toBe("./o.json");
+            expect(
+                EidnaraConfigSchema.parse({ pi: { subagent_extensions: [" ext "] } }).pi
+                    ?.subagent_extensions,
+            ).toEqual(["ext"]);
+        });
+
         it("rejects protected_tags greater than 100", () => {
             expect(() => EidnaraConfigSchema.parse({ protected_tags: 101 })).toThrow();
         });

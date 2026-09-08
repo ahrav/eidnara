@@ -624,7 +624,9 @@ describe("loadPluginConfig — project compaction trust boundary", () => {
 
         expect(result.config.execute_threshold_percentage).toBe(90);
         expect(result.recoveredTopLevelKeys).toEqual([]);
-        expect(result.config.configWarnings?.join("\n")).toContain("invalid value");
+        const warnings = result.config.configWarnings?.join("\n") ?? "";
+        expect(warnings).toContain("Ignoring execute_threshold_percentage from project config");
+        expect(warnings).toContain("not a valid threshold");
     });
 
     it("keeps the whole user config when a project threshold object has an invalid default", () => {

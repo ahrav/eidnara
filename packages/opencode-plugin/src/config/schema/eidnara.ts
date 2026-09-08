@@ -18,6 +18,18 @@ export const DEFAULT_HISTORIAN_TIMEOUT_MS = 300_000;
 export const MAX_MEMORY_INJECTION_BUDGET_TOKENS = 20_000;
 export const DEFAULT_HISTORY_BUDGET_PERCENTAGE = 0.15;
 const LANGUAGE_CODE_MESSAGE = 'language must be a 2-letter ISO 639-1 code (e.g. "tr", "es", "de")';
+// `.regex(/\S/)` publishes as a JSON Schema `pattern`. `.trim().min(1)` publishes only
+// `minLength: 1`, and a `.refine` on `trim().length` publishes nothing, so both let editors
+// accept whitespace-only values the loader rejects.
+const NON_BLANK_PATTERN = /\S/;
+
+/** The schema generator matches `LanguageCodeSchema` by identity and publishes the codes `isValidLanguageCode` accepts as a `pattern`. */
+export const LanguageCodeSchema = z
+    .string()
+    .regex(/^\s*[A-Za-z]{2}\s*$/, { message: LANGUAGE_CODE_MESSAGE, abort: true })
+    .trim()
+    .toLowerCase()
+    .refine((s) => isValidLanguageCode(s), LANGUAGE_CODE_MESSAGE);
 
 /** Top-level keys the schema no longer defines; the loader warns when a configuration still carries one. */
 export const REMOVED_CONFIG_KEYS = ["auto_update", "dreamer", "embedding"] as const;
@@ -35,7 +47,7 @@ export type PiThinkingLevel = z.infer<typeof PiThinkingLevelSchema>;
 export const PiConfigSchema = z
     .object({
         subagent_extensions: z
-            .array(z.string().trim().min(1))
+            .array(z.string().trim().regex(NON_BLANK_PATTERN))
             .optional()
             .describe(
                 "User-only allowlist of Pi extensions for Eidnara subagent children. When set, children use --no-extensions and load only these entries (plus Eidnara's scoped child extension where applicable). Relative paths resolve from ~/.pi/agent, matching Pi's settings.json package location. Unset preserves normal Pi extension discovery.",
@@ -55,8 +67,6 @@ const PromptSurfaceModelKeySchema = z.string().regex(PROMPT_SURFACE_MODEL_KEY_PA
     message:
         "Use a non-empty bare model key, provider/model key, or the literal provider/* wildcard; model IDs may contain additional slashes and matching is case-sensitive.",
 });
-// `.regex(/\S/)` publishes as a JSON Schema `pattern`; a `.refine` on `trim().length` would be dropped from the generated asset.
-const NON_BLANK_PATTERN = /\S/;
 // Harness-specific known-tool validation runs when a user override is applied.
 const PromptSurfaceToolKeySchema = z.string().regex(NON_BLANK_PATTERN, {
     message: "tool description keys must not be empty or whitespace-only",
@@ -324,7 +334,7 @@ export const EidnaraConfigSchema = z
                 model: z
                     .string()
                     .trim()
-                    .min(1)
+                    .regex(NON_BLANK_PATTERN)
                     .optional()
                     .describe(
                         "Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model).",
@@ -340,26 +350,17 @@ export const EidnaraConfigSchema = z
             .describe(
                 'Experimental: routes the project through the direct Rust daemon (requires the user-level subc.connection_file path); "ts" is the current TypeScript pipeline.',
             ),
-        language: z
-            .string()
-            // The regex emits a JSON Schema `pattern`; `isValidLanguageCode` remains runtime-only
-            // validation because JSON Schema cannot express whether a code names a language.
-            .regex(/^\s*[A-Za-z]{2}\s*$/, { message: LANGUAGE_CODE_MESSAGE, abort: true })
-            .trim()
-            .toLowerCase()
-            .refine((s) => isValidLanguageCode(s), LANGUAGE_CODE_MESSAGE)
-            .optional()
-            .describe(
-                "Output language for Eidnara's generated content and guidance, as a " +
-                    '2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the ' +
-                    "historian, dreamer, sidekick, and the agent-guidance block instruct the model to " +
-                    "write its PROSE in this language while keeping all structural tokens (XML tags, " +
-                    "the five memory category names, code identifiers, file paths) in English. " +
-                    "USER-LEVEL ONLY (ignored in project config for security). Unset = today's " +
-                    "behavior (model mirrors the conversation; English scaffolding). Changing it " +
-                    "triggers one cache re-materialization; existing compartments/memories keep their " +
-                    "original language until naturally rewritten.",
-            ),
+        language: LanguageCodeSchema.optional().describe(
+            "Output language for Eidnara's generated content and guidance, as a " +
+                '2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the ' +
+                "historian, dreamer, sidekick, and the agent-guidance block instruct the model to " +
+                "write its PROSE in this language while keeping all structural tokens (XML tags, " +
+                "the five memory category names, code identifiers, file paths) in English. " +
+                "USER-LEVEL ONLY (ignored in project config for security). Unset = today's " +
+                "behavior (model mirrors the conversation; English scaffolding). Changing it " +
+                "triggers one cache re-materialization; existing compartments/memories keep their " +
+                "original language until naturally rewritten.",
+        ),
         historian: HistorianConfigSchema.describe(
             "Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.)",
         ),
@@ -394,7 +395,7 @@ export const EidnaraConfigSchema = z
             ),
         models: z
             .object({
-                window_overlay_path: z.string().trim().min(1).optional(),
+                window_overlay_path: z.string().trim().regex(NON_BLANK_PATTERN).optional(),
             })
             .optional()
             .describe(
@@ -554,7 +555,7 @@ export const EidnaraConfigSchema = z
                 connection_file: z
                     .string()
                     .trim()
-                    .min(1)
+                    .regex(NON_BLANK_PATTERN)
                     .transform(expandConfigPath)
                     .describe("Path to the owner-only subc connection file."),
             })
