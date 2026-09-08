@@ -77,6 +77,34 @@ describe("writeFileAtomic", () => {
         expect(readFileSync(link, "utf-8")).toBe("v1\n");
     });
 
+    it("follows a multi-hop dangling chain and creates only the final target", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-chain-"));
+        roots.push(root);
+        const missing = join(root, "dotfiles", "opencode.jsonc");
+        const managed = join(root, "managed-link.jsonc");
+        const link = join(root, "opencode.jsonc");
+        symlinkSync(missing, managed);
+        symlinkSync(managed, link);
+
+        writeFileAtomic(link, "v1\n");
+
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(lstatSync(managed).isSymbolicLink()).toBe(true);
+        expect(readFileSync(missing, "utf-8")).toBe("v1\n");
+        expect(readFileSync(link, "utf-8")).toBe("v1\n");
+    });
+
+    it("refuses a symlink cycle instead of looping", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-cycle-"));
+        roots.push(root);
+        const a = join(root, "a.jsonc");
+        const b = join(root, "b.jsonc");
+        symlinkSync(b, a);
+        symlinkSync(a, b);
+
+        expect(() => writeFileAtomic(a, "v1\n")).toThrow(/symbolic links/);
+    });
+
     it("resolves a relative dangling link text against the link's directory", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-relative-"));
         roots.push(root);

@@ -98,6 +98,28 @@ describe("setup-opencode config safety", () => {
         });
     });
 
+    it("keeps comments inside existing agent blocks", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(
+            path,
+            `{\n  // top keep\n  "historian": {\n    // inner keep\n    "model": "old"\n  },\n  "sidekick": {\n    // sidekick keep\n    "disable": true\n  }\n}\n`,
+        );
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: false,
+            sidekickModel: null,
+            claudeMax: false,
+        });
+
+        const text = readFileSync(path, "utf-8");
+        expect(text).toContain("top keep");
+        expect(text).toContain("inner keep");
+        expect(text).toContain("sidekick keep");
+        const written = parseJsonc(text) as Record<string, unknown>;
+        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
+    });
+
     it("clears a historian opt-out when a historian model is chosen", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(
