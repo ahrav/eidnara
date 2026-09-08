@@ -52,7 +52,7 @@ const DAEMON_STATUS: RustSessionStatus = {
 /** Registers against a handler map: the fake server captures registrations without starting a transport. */
 function register(
     configOverrides: Record<string, unknown> = {},
-    status: RustSessionStatus = {},
+    status: RustSessionStatus | Error = {},
 ): { handlers: Map<string, Handler>; calls: string[]; roots: string[] } {
     const handlers = new Map<string, Handler>();
     const calls: string[] = [];
@@ -66,6 +66,7 @@ function register(
         async call(args) {
             calls.push(args.method);
             roots.push(args.projectRoot);
+            if (status instanceof Error) throw status;
             return { ok: true, result: status };
         },
     };
@@ -160,6 +161,46 @@ describe("registerRpcHandlers", () => {
 
         expect(calls).toEqual(["session.status", "session.status"]);
         expect(roots).toEqual([rootA, rootB]);
+    });
+
+    test("a daemon that cannot answer fails the poll instead of returning a zero snapshot", async () => {
+        const { handlers, calls } = register({}, new Error("route closed"));
+        const sessionId = "ses-handler-daemon-down";
+
+        expect(await handlers.get("sidebar-snapshot")?.({ sessionId })).toEqual({
+            error: "sidebar snapshot unavailable",
+        });
+        expect(await handlers.get("status-detail")?.({ sessionId })).toEqual({
+            error: "status detail unavailable",
+        });
+        // A failure is not cached, so the next poll asks the daemon again.
+        expect(calls).toEqual(["session.status", "session.status"]);
+    });
+
+    test("a daemon error response fails the poll the same way", async () => {
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: process.cwd(),
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: null,
+            liveSessionState: createLiveSessionState(),
+            rustModeModuleClient: {
+                async call() {
+                    return { ok: false, error: { code: "store_load_failed", message: "io" } };
+                },
+            },
+        });
+        expect(await handlers.get("sidebar-snapshot")?.({ sessionId: "ses-daemon-error" })).toEqual(
+            { error: "sidebar snapshot unavailable" },
+        );
     });
 
     test("sidebar-snapshot reports disabled memory and rejects an empty session id", async () => {

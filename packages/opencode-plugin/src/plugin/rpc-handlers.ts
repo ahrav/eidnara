@@ -147,6 +147,7 @@ function resolveSidebarWorkMetrics(sessionId: string): {
     }
 }
 
+/** Resolves to `undefined` only when no module client exists; transport failures and daemon error responses throw, so callers cannot mistake an unreachable daemon for a session with no state. commentlint: allow(JUDGE) */
 async function loadRustSessionStatus(
     client: RustModeModuleClient | undefined,
     sessionId: string,
@@ -158,27 +159,30 @@ async function loadRustSessionStatus(
     if (cached !== undefined) {
         return cached;
     }
-    try {
-        const response = await client.call({
-            sessionId,
-            projectRoot: directory,
-            method: "session.status",
-            body: { method: "session.status", v: 1, session_id: sessionId },
-        });
-        const raw =
-            response && typeof response === "object" ? (response as Record<string, unknown>) : {};
-        const value =
-            raw.result && typeof raw.result === "object"
-                ? (raw.result as Record<string, unknown>)
-                : raw;
-        if (value.error || value.ok === false) return undefined;
-        const status = value as RustSessionStatus;
-        rustStatusCache.set(cacheKey, status);
-        return status;
-    } catch (error) {
-        log(`[rpc] Rust session.status unavailable for ${sessionId}:`, error);
-        return undefined;
+    const response = await client.call({
+        sessionId,
+        projectRoot: directory,
+        method: "session.status",
+        body: { method: "session.status", v: 1, session_id: sessionId },
+    });
+    const raw =
+        response && typeof response === "object" ? (response as Record<string, unknown>) : {};
+    const value =
+        raw.result && typeof raw.result === "object"
+            ? (raw.result as Record<string, unknown>)
+            : raw;
+    if (value.error || value.ok === false) {
+        const detail =
+            value.error && typeof value.error === "object"
+                ? (value.error as Record<string, unknown>)
+                : undefined;
+        throw new Error(
+            `session.status returned ${String(detail?.code ?? detail?.message ?? value.error ?? "ok=false")}`,
+        );
     }
+    const status = value as RustSessionStatus;
+    rustStatusCache.set(cacheKey, status);
+    return status;
 }
 
 function resolveConfiguredCacheTtl(
@@ -588,23 +592,38 @@ export function registerRpcHandlers(
         return snapshot;
     };
 
+    // An unreachable daemon fails the poll rather than yielding zero counts, because `applyStickySnapshotCache` treats zero counts as lost state and blanks the sidebar. commentlint: allow(JUDGE)
+    const loadPollInputs = async (
+        sessionId: string,
+        dir: string,
+    ): Promise<{ moduleStatus?: RustSessionStatus; memory: KernelMemorySnapshot } | undefined> => {
+        try {
+            const [moduleStatus, memory] = await Promise.all([
+                config.transform_mode === "rust"
+                    ? loadRustSessionStatus(rustModeModuleClient, sessionId, dir)
+                    : Promise.resolve(undefined),
+                readMemory(sessionId, dir),
+            ]);
+            return { moduleStatus, memory };
+        } catch (error) {
+            log(`[rpc] session.status unavailable for ${sessionId}:`, error);
+            return undefined;
+        }
+    };
+
     rpcServer.handle("sidebar-snapshot", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         const dir = String(params.directory ?? directory);
         if (!sessionId) return { error: "unavailable" };
-        const [moduleStatus, memory] = await Promise.all([
-            config.transform_mode === "rust"
-                ? loadRustSessionStatus(rustModeModuleClient, sessionId, dir)
-                : Promise.resolve(undefined),
-            readMemory(sessionId, dir),
-        ]);
+        const inputs = await loadPollInputs(sessionId, dir);
+        if (!inputs) return { error: "sidebar snapshot unavailable" };
         return buildSidebarSnapshotRpcResponse(
             sessionId,
             dir,
             liveSessionState,
-            memory,
+            inputs.memory,
             rawConfig,
-            moduleStatus,
+            inputs.moduleStatus,
             compactionEnabled,
         );
     });
@@ -614,20 +633,16 @@ export function registerRpcHandlers(
         const dir = String(params.directory ?? directory);
         const modelKey = params.modelKey ? String(params.modelKey) : undefined;
         if (!sessionId) return { error: "unavailable" };
-        const [moduleStatus, memory] = await Promise.all([
-            config.transform_mode === "rust"
-                ? loadRustSessionStatus(rustModeModuleClient, sessionId, dir)
-                : Promise.resolve(undefined),
-            readMemory(sessionId, dir),
-        ]);
+        const inputs = await loadPollInputs(sessionId, dir);
+        if (!inputs) return { error: "status detail unavailable" };
         return buildStatusDetail(
             sessionId,
             dir,
             modelKey,
             rawConfig,
             liveSessionState,
-            memory,
-            moduleStatus,
+            inputs.memory,
+            inputs.moduleStatus,
             compactionEnabled,
         ) as unknown as Record<string, unknown>;
     });
