@@ -230,13 +230,24 @@ function checkCompaction(directory: string): { auto: boolean; prune: boolean } {
     return { auto: true, prune: false };
 }
 
+/** Project-level OpenCode config paths in precedence order, as `.jsonc`/`.json` pairs per directory. */
+export function projectOpenCodeConfigPaths(
+    directory: string,
+): readonly [string, string, string, string] {
+    return [
+        join(directory, ".opencode", "opencode.jsonc"),
+        join(directory, ".opencode", "opencode.json"),
+        join(directory, "opencode.jsonc"),
+        join(directory, "opencode.json"),
+    ];
+}
+
 function readProjectCompaction(directory: string): {
     auto: boolean;
     prune: boolean;
     resolved: boolean;
 } {
-    const dotOcJsonc = join(directory, ".opencode", "opencode.jsonc");
-    const dotOcJson = join(directory, ".opencode", "opencode.json");
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
     const dotOcConfig =
         readJsoncFile<OpenCodeConfig>(dotOcJsonc) ?? readJsoncFile<OpenCodeConfig>(dotOcJson);
 
@@ -247,8 +258,6 @@ function readProjectCompaction(directory: string): {
         }
     }
 
-    const rootJsonc = join(directory, "opencode.jsonc");
-    const rootJson = join(directory, "opencode.json");
     const rootConfig =
         readJsoncFile<OpenCodeConfig>(rootJsonc) ?? readJsoncFile<OpenCodeConfig>(rootJson);
 
@@ -337,12 +346,7 @@ function collectPluginEntries(directory: string): string[] {
     };
 
     // Project-level configs
-    for (const configPath of [
-        join(directory, ".opencode", "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, "opencode.json"),
-    ]) {
+    for (const configPath of projectOpenCodeConfigPaths(directory)) {
         const config = readJsoncFile<OpenCodeConfig>(configPath);
         pushFrom(config?.plugin);
     }

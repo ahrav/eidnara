@@ -2,7 +2,10 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
-import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
+import {
+    detectConflicts,
+    projectOpenCodeConfigPaths,
+} from "@eidnara/opencode/shared/conflict-detector";
 import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import {
     appendJsoncArrayValues,
@@ -242,14 +245,32 @@ export function writeEidnaraConfig(
     }
 
     if (options.claudeMax) {
-        const cacheTtl = (config.cache_ttl as Record<string, string>) ?? {};
-        if (!cacheTtl.default) cacheTtl.default = "5m";
-        cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
-        cacheTtl["anthropic/claude-opus-4-6"] = "59m";
-        config.cache_ttl = cacheTtl;
+        config.cache_ttl = withClaudeMaxCacheTtl(config.cache_ttl);
     }
 
     writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+}
+
+/**
+ * Normalize a scalar `cache_ttl` into `{ default: existing }` before adding
+ * per-model overrides. Setting a key on a string primitive throws under strict mode.
+ */
+export function withClaudeMaxCacheTtl(existing: unknown): Record<string, string> {
+    const cacheTtl: Record<string, string> =
+        typeof existing === "string"
+            ? { default: existing }
+            : typeof existing === "object" && existing !== null && !Array.isArray(existing)
+              ? { ...(existing as Record<string, string>) }
+              : {};
+    if (!cacheTtl.default) cacheTtl.default = "5m";
+    cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
+    cacheTtl["anthropic/claude-opus-4-6"] = "59m";
+    return cacheTtl;
+}
+
+/** Chosen models count too: `pickModel` accepts manual entry when discovery returns nothing. */
+export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
+    return models.some((model) => model?.startsWith("anthropic/") ?? false);
 }
 
 export async function runSetup(dryRun = false): Promise<number> {
@@ -295,10 +316,14 @@ export async function runSetup(dryRun = false): Promise<number> {
     }
 
     const paths = detectConfigPaths();
+    // A project-level OpenCode config counts: `detectConflicts` and
+    // `fixConflicts` read and repair those files, so a first-time user running
+    // setup inside such a project must not skip the conflict pass.
     const hadExistingSetup =
         paths.opencodeConfigFormat !== "none" ||
         existsSync(paths.eidnaraConfig) ||
-        paths.tuiConfigFormat !== "none";
+        paths.tuiConfigFormat !== "none" ||
+        projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
 
     if (!dryRun) {
         try {
@@ -366,7 +391,7 @@ export async function runSetup(dryRun = false): Promise<number> {
         log.success(`Sidekick: ${sidekickModel}`);
     }
 
-    const hasAnthropic = allModels.some((m) => m.startsWith("anthropic/"));
+    const hasAnthropic = hasAnthropicModel([...allModels, historianModel, sidekickModel]);
     let claudeMax = false;
     if (hasAnthropic) {
         log.message(

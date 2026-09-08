@@ -7,6 +7,8 @@ import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
     findDcpPluginIndexes,
+    hasAnthropicModel,
+    withClaudeMaxCacheTtl,
     writeEidnaraConfig,
 } from "./setup-opencode";
 
@@ -66,6 +68,47 @@ describe("setup-opencode config safety", () => {
         const rewritten = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
         expect(rewritten.$schema).toBe(written.$schema);
         expect(rewritten.sidekick).toEqual({ model: "openai/gpt-5-nano" });
+    });
+
+    it("lifts a scalar cache_ttl into the record default when Claude Max is selected", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(path, `{"cache_ttl":"10m","historian":{"model":"openai/gpt-5"}}`);
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-sonnet-4-6",
+            sidekickEnabled: false,
+            sidekickModel: null,
+            claudeMax: true,
+        });
+
+        const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(written.cache_ttl).toEqual({
+            default: "10m",
+            "anthropic/claude-sonnet-4-6": "59m",
+            "anthropic/claude-opus-4-6": "59m",
+        });
+    });
+
+    it("normalizes every cache_ttl shape before adding the Claude Max overrides", () => {
+        const overrides = {
+            "anthropic/claude-sonnet-4-6": "59m",
+            "anthropic/claude-opus-4-6": "59m",
+        };
+        expect(withClaudeMaxCacheTtl(undefined)).toEqual({ default: "5m", ...overrides });
+        expect(withClaudeMaxCacheTtl("never")).toEqual({ default: "never", ...overrides });
+        expect(withClaudeMaxCacheTtl({ "openai/gpt-5": "1h" })).toEqual({
+            default: "5m",
+            "openai/gpt-5": "1h",
+            ...overrides,
+        });
+        expect(withClaudeMaxCacheTtl(["5m"])).toEqual({ default: "5m", ...overrides });
+    });
+
+    it("offers the Claude Max prompt for a manually entered Anthropic model", () => {
+        expect(hasAnthropicModel([])).toBe(false);
+        expect(hasAnthropicModel(["openai/gpt-5", null])).toBe(false);
+        expect(hasAnthropicModel(["anthropic/claude-haiku-4-5"])).toBe(true);
+        expect(hasAnthropicModel(["openai/gpt-5", "anthropic/claude-haiku-4-5", null])).toBe(true);
     });
 
     it("appends the bare plugin name once and leaves a second run unchanged", () => {

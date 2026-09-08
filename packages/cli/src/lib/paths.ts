@@ -1,7 +1,8 @@
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
+import { eidnaraUserConfigBasePath } from "@eidnara/opencode/config/config-paths";
+import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 
 // ============================================================================
 // OpenCode paths
@@ -86,7 +87,7 @@ export function detectConfigPaths(): ConfigPaths {
         configDir,
         opencodeConfig,
         opencodeConfigFormat,
-        eidnaraConfig: resolveEidnaraUserConfigPath(),
+        eidnaraConfig: getSharedUserConfigPath(),
         omoConfig: findOmoConfig(configDir),
         tuiConfig,
         tuiConfigFormat,
@@ -119,9 +120,14 @@ export function getPiCacheRoot(): string {
     return join(dirname(getPiAgentDir()), "cache");
 }
 
-/** Shared Eidnara user config, independent of any harness agent settings dir. */
+/**
+ * Shared Eidnara user config, independent of any harness agent settings dir.
+ * `getSharedUserConfigPath` returns the file the runtime loads: an existing
+ * `.jsonc`, otherwise an existing `.json`, otherwise the `.jsonc` path for a
+ * fresh write. A new `.jsonc` beside an existing `.json` would shadow it.
+ */
 export function getSharedUserConfigPath(): string {
-    return resolveEidnaraUserConfigPath();
+    return detectConfigFile(eidnaraUserConfigBasePath()).path;
 }
 
 /**

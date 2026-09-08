@@ -8,6 +8,7 @@ import {
     DCP_PACKAGE_NAMES,
     extractPluginName,
     matchesPackageName,
+    projectOpenCodeConfigPaths,
 } from "./conflict-detector";
 import { appendJsoncArrayValues, removeJsoncArrayEntries, setJsoncValue } from "./jsonc-edit";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
@@ -77,12 +78,7 @@ function collectOpenCodeConfigPaths(directory: string): string[] {
         paths.add(userConfig);
     }
 
-    for (const filePath of [
-        join(directory, ".opencode", "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, "opencode.json"),
-    ]) {
+    for (const filePath of projectOpenCodeConfigPaths(directory)) {
         if (existsSync(filePath)) {
             paths.add(filePath);
         }
