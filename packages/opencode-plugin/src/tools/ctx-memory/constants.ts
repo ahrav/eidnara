@@ -27,7 +27,6 @@ Actions:
 - merge: objectIds into one survivor + content/category or antiMemory.
 
 Memories created here surface in the project's automatic memory context and in explicit search. Agent calls to approve/enforce are rejected.`;
-export const DEFAULT_SEARCH_LIMIT = 10;
 export const GET_MAX_CLAIMS = 20;
 /** Byte budget for the memories a get/list response serializes, matching the ~16 KiB scale of ctx_search's 4096-token render budget; entries past the budget are elided and reported. commentlint: allow(JUDGE) */
 export const CTX_MEMORY_RESPONSE_BUDGET_BYTES = 16 * 1024;
