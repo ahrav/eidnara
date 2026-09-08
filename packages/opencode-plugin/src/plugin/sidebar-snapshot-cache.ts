@@ -11,33 +11,63 @@ import type { SidebarSnapshot } from "../shared/rpc-types";
 interface CachedSnapshot {
     snapshot: SidebarSnapshot;
     cachedAt: number;
+    modelKey: string | undefined;
+}
+
+/** Identifies one sticky snapshot. Token totals are measured against one model's window, so a different `modelKey` resets the entry instead of reusing it. commentlint: allow(JUDGE) */
+export interface StickySnapshotScope {
+    sessionId: string;
+    directory: string;
+    modelKey?: string;
 }
 
 const MAX_CACHED_SESSIONS = 100;
+/** Roots retained per session. A session lives under one root; the slack covers alternate spellings of that root without letting a long-lived session accumulate a snapshot per directory it was ever polled from. commentlint: allow(JUDGE) */
+export const MAX_CACHED_ROOTS_PER_SESSION = 4;
 const STALE_SNAPSHOT_AGE_MS = 5 * 60 * 1000; // 5 minutes
 
-const cache = new BoundedSessionMap<CachedSnapshot>(MAX_CACHED_SESSIONS);
+// The daemon scopes session state by project root, so a session polled under two roots needs one sticky snapshot per root. Both levels are LRU-bounded.
+const cache = new BoundedSessionMap<BoundedSessionMap<CachedSnapshot>>(MAX_CACHED_SESSIONS);
+
+function peekCached(scope: StickySnapshotScope): CachedSnapshot | undefined {
+    return cache.peek(scope.sessionId)?.peek(scope.directory);
+}
+
+function storeCached(scope: StickySnapshotScope, entry: CachedSnapshot): void {
+    const byRoot =
+        cache.get(scope.sessionId) ??
+        new BoundedSessionMap<CachedSnapshot>(MAX_CACHED_ROOTS_PER_SESSION);
+    byRoot.set(scope.directory, entry);
+    cache.set(scope.sessionId, byRoot);
+}
+
+function dropCached(scope: StickySnapshotScope): void {
+    const byRoot = cache.peek(scope.sessionId);
+    if (!byRoot) return;
+    byRoot.delete(scope.directory);
+    if (byRoot.size === 0) cache.delete(scope.sessionId);
+}
 
 /**
  *
  */
 export function applyStickySnapshotCache(
-    sessionId: string,
+    scope: StickySnapshotScope,
     fresh: SidebarSnapshot,
 ): SidebarSnapshot {
     const now = Date.now();
 
     if (fresh.inputTokens > 0) {
-        cache.set(sessionId, { snapshot: fresh, cachedAt: now });
+        storeCached(scope, { snapshot: fresh, cachedAt: now, modelKey: scope.modelKey });
         return fresh;
     }
 
-    const cached = cache.peek(sessionId);
+    const cached = peekCached(scope);
     if (!cached) {
         return fresh;
     }
-    if (now - cached.cachedAt > STALE_SNAPSHOT_AGE_MS) {
-        cache.delete(sessionId);
+    if (now - cached.cachedAt > STALE_SNAPSHOT_AGE_MS || cached.modelKey !== scope.modelKey) {
+        dropCached(scope);
         return fresh;
     }
     //
@@ -46,7 +76,7 @@ export function applyStickySnapshotCache(
         fresh.compartmentCount >= cached.snapshot.compartmentCount &&
         fresh.memoryCount >= cached.snapshot.memoryCount;
     if (!hasInFlightEvidence(fresh) && !stateSurvived) {
-        cache.delete(sessionId);
+        dropCached(scope);
         return fresh;
     }
 
@@ -54,6 +84,7 @@ export function applyStickySnapshotCache(
     return {
         ...fresh,
         usagePercentage: cached.snapshot.usagePercentage,
+        native_context_usage_percentage: cached.snapshot.native_context_usage_percentage,
         inputTokens: cached.snapshot.inputTokens,
         systemPromptTokens: cached.snapshot.systemPromptTokens,
         compartmentTokens: cached.snapshot.compartmentTokens,

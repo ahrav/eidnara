@@ -12,6 +12,7 @@ import type { RustModeModuleClient } from "./rust-mode-transform";
 
 interface RecordedCall {
     method: string;
+    projectRoot: string;
     body: Record<string, unknown>;
     timeoutMs?: number;
 }
@@ -28,6 +29,7 @@ function setup(
         call: async (request) => {
             const call: RecordedCall = {
                 method: request.method,
+                projectRoot: request.projectRoot,
                 body: request.body as Record<string, unknown>,
                 timeoutMs: (request as { timeoutMs?: number }).timeoutMs,
             };
@@ -38,7 +40,12 @@ function setup(
     const sendNotification = mock(
         async (_sessionId: string, _text: string, _params: unknown) => {},
     );
-    const handler = createEidnaraCommandHandler({ moduleClient, sendNotification, ...extra });
+    const handler = createEidnaraCommandHandler({
+        moduleClient,
+        sendNotification,
+        isSubagentSession: () => false,
+        ...extra,
+    });
     const texts = (): string[] =>
         (sendNotification.mock.calls as unknown as Array<[string, string]>).map(([, text]) => text);
     const run = (command: string, sessionID: string, args = "", params = {}): Promise<void> =>
@@ -81,10 +88,24 @@ async function expectSentinel(promise: Promise<unknown>, command: string): Promi
 
 const STATUS_RESPONSE = {
     ok: true,
+    summary:
+        "session ses-status (last active 3m ago): 4 compartments, coverage ordinal 17, boundary present, 2 pending drops, 1 tag, pending m1 delta false, last historian: published, publish failures: 0, surface active",
     usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
     boundary_present: true,
     coverage_ordinal: 17,
     compartment_count: 4,
+    pending_drop_count: 2,
+    tag_count: 1,
+    pending_m1_delta: false,
+    pending_m1_age_ms: null,
+    wrapup_active: false,
+    wrapup_rounds: null,
+    historian: { consecutive_publish_failures: 0, publish_health_degraded: false },
+    pass_trace: {
+        receive_count: 12,
+        reject_count: 0,
+        last_reject_error: null,
+    },
 };
 
 describe("createEidnaraCommandHandler", () => {
@@ -148,6 +169,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(calls).toEqual([
                 {
                     method: "session.flush",
+                    projectRoot: process.cwd(),
                     body: { method: "session.flush", v: 1, session_id: "ses-flush" },
                     timeoutMs: undefined,
                 },
@@ -204,6 +226,18 @@ describe("createEidnaraCommandHandler", () => {
     });
 
     describe("ctx-status", () => {
+        it("routes the daemon call by the session's resolved directory", async () => {
+            const resolveProjectRoot = mock(async (sessionId: string) => `/repos/${sessionId}`);
+            const { run, calls } = setup(() => STATUS_RESPONSE, { resolveProjectRoot });
+
+            await expectSentinel(run("ctx-status", "ses-routed"), "ctx-status");
+
+            expect(resolveProjectRoot).toHaveBeenCalledWith("ses-routed");
+            expect(calls.map((call) => [call.method, call.projectRoot])).toEqual([
+                ["session.status", "/repos/ses-routed"],
+            ]);
+        });
+
         it("sends session.status and renders the daemon text", async () => {
             const { run, calls, texts } = setup(() => STATUS_RESPONSE);
 
@@ -212,6 +246,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(calls).toEqual([
                 {
                     method: "session.status",
+                    projectRoot: process.cwd(),
                     body: { method: "session.status", v: 1, session_id: "ses-status" },
                     timeoutMs: undefined,
                 },
@@ -223,8 +258,64 @@ describe("createEidnaraCommandHandler", () => {
             expect(text).toContain("- Boundary: present");
             expect(text).toContain("- Coverage ordinal: 17");
             expect(text).toContain("- Compartments: 4");
+            expect(text).toContain("- Pending: 2 drops, 1 tag, m1 delta none");
+            expect(text).toContain("- Wrapup: idle");
+            expect(text).toContain(
+                "- Historian publish health: ok (0 consecutive publish failures)",
+            );
+            expect(text).toContain("- Passes: 12 received, 0 rejected");
+            expect(text).toContain(`- Daemon: ${STATUS_RESPONSE.summary}`);
             expect(text).not.toContain("### Tail Hygiene");
             expect(text).not.toContain("**Compaction:** disabled");
+        });
+
+        it("renders pending work, a running wrapup, degraded publish health, and the last reject", async () => {
+            const { run, texts } = setup(() => ({
+                ...STATUS_RESPONSE,
+                pending_m1_delta: true,
+                pending_m1_age_ms: 42_500,
+                wrapup_active: true,
+                wrapup_rounds: 3,
+                historian: { consecutive_publish_failures: 4, publish_health_degraded: true },
+                pass_trace: {
+                    receive_count: 20,
+                    reject_count: 2,
+                    last_reject_error: `snapshot stale ${"x".repeat(200)}`,
+                },
+            }));
+
+            await expectSentinel(run("ctx-status", "ses-status-degraded"), "ctx-status");
+
+            const [text] = texts();
+            expect(text).toContain("- Pending: 2 drops, 1 tag, m1 delta pending (43s)");
+            expect(text).toContain("- Wrapup: running (3 rounds complete)");
+            expect(text).toContain(
+                "- Historian publish health: degraded (4 consecutive publish failures)",
+            );
+            expect(text).toContain(
+                "- Passes: 20 received, 2 rejected; last reject: snapshot stale ",
+            );
+            const passesLine = text.split("\n").find((line) => line.startsWith("- Passes:"));
+            expect(passesLine?.length).toBeLessThan(220);
+        });
+
+        it("omits the pass and summary lines when the daemon does not supply them", async () => {
+            const { run, texts } = setup(() => ({
+                ok: true,
+                usage: { current_total_input_tokens: 10, context_limit_tokens: 100 },
+                compartment_count: 0,
+            }));
+
+            await expectSentinel(run("ctx-status", "ses-status-minimal"), "ctx-status");
+
+            const [text] = texts();
+            expect(text).toContain("- Pending: 0 drops, 0 tags, m1 delta none");
+            expect(text).toContain("- Wrapup: idle");
+            expect(text).toContain(
+                "- Historian publish health: ok (0 consecutive publish failures)",
+            );
+            expect(text).not.toContain("- Passes:");
+            expect(text).not.toContain("- Daemon:");
         });
 
         it("renders tail hygiene when the daemon reports a baseline", async () => {
@@ -429,6 +520,19 @@ describe("createEidnaraCommandHandler", () => {
                 "## Eidnara Wrapup — Invalid Arguments\n\nmessages_to_keep must be a positive integer.",
             ]);
         });
+
+        it("refuses a subagent session without a daemon call", async () => {
+            const isSubagentSession = mock((sessionId: string) => sessionId === "ses-child");
+            const { run, calls, texts } = setup(undefined, { isSubagentSession });
+
+            await expectSentinel(run("ctx-wrapup", "ses-child", "50"), "ctx-wrapup");
+
+            expect(isSubagentSession).toHaveBeenCalledWith("ses-child");
+            expect(calls).toHaveLength(0);
+            expect(texts()).toEqual([
+                "## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.",
+            ]);
+        });
     });
 
     describe("ctx-aug", () => {
@@ -453,7 +557,7 @@ describe("createEidnaraCommandHandler", () => {
                 sidekick: {
                     config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
-                    sessionDirectory: "/repo/project",
+                    resolveSessionDirectory: () => "/repo/project",
                     client: sidekickClient as never,
                 },
             });
@@ -489,6 +593,43 @@ describe("createEidnaraCommandHandler", () => {
             await expectSentinel(run("ctx-aug", "ses-aug-missing", "Help"), "ctx-aug");
 
             expect(texts().join("\n")).toContain("Sidekick is not configured");
+        });
+
+        it("tells the user when the augmented prompt cannot be sent", async () => {
+            const sidekickClient = {
+                session: {
+                    create: mock(async () => ({ data: { id: "sidekick-child" } })),
+                    prompt: mock(async () => undefined),
+                    promptAsync: mock(async () => {
+                        throw new Error("session is busy");
+                    }),
+                    messages: mock(async () => ({
+                        data: [
+                            {
+                                info: { role: "assistant", time: { created: Date.now() } },
+                                parts: [{ type: "text", text: "Use Bun for commands" }],
+                            },
+                        ],
+                    })),
+                    delete: mock(async () => ({ data: undefined })),
+                },
+            };
+            const { run, texts } = setup(undefined, {
+                sidekick: {
+                    config: { timeout_ms: 5_000 },
+                    projectPath: "/repo/project",
+                    resolveSessionDirectory: () => "/repo/project",
+                    client: sidekickClient as never,
+                },
+            });
+
+            await expectSentinel(run("ctx-aug", "ses-aug-lost", "Ship the migration"), "ctx-aug");
+
+            expect(sidekickClient.session.promptAsync).toHaveBeenCalledTimes(1);
+            const failure = texts().find((text) => text.startsWith("## /ctx-aug — Failed"));
+            expect(failure).toBeDefined();
+            expect(failure).toContain("session is busy");
+            expect(failure).toContain("Ship the migration");
         });
     });
 

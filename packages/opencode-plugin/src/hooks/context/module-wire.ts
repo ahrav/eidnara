@@ -80,6 +80,8 @@ export interface ModuleOrdinalMemo {
     anchor?: RawMessageOrdinalAnchor | null;
     storedCount?: number | null;
     canonicalCount?: number;
+    /** Highest ordinal from the prior lineage; priming assigns persisted rows ordinals starting at `continuationBase + 1`. */
+    continuationBase?: number;
 }
 
 /**
@@ -113,14 +115,17 @@ export async function resolveOrdinalsForModule(args: {
     const generationChanged = args.memo.memoGeneration !== args.memo.generation;
     if (generationChanged) memo.clear();
 
+    const continuationBase = Math.max(0, args.memo.continuationBase ?? 0);
     let anchor = generationChanged ? null : (args.memo.anchor ?? null);
     let storedCount = generationChanged ? null : (args.memo.storedCount ?? null);
-    let canonicalCount = generationChanged ? 0 : (args.memo.canonicalCount ?? 0);
+    let canonicalCount = generationChanged
+        ? continuationBase
+        : (args.memo.canonicalCount ?? continuationBase);
     const priming = storedCount === null;
     if (priming) {
         memo.clear();
         anchor = null;
-        canonicalCount = 0;
+        canonicalCount = continuationBase;
     }
 
     const newEntries: Array<ReturnType<typeof readRawSessionMessageOrdinalPage>[number]> = [];

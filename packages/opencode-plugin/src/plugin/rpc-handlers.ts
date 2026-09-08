@@ -10,6 +10,8 @@ import {
     type WorkMetricsCarry,
 } from "../features/context/work-metrics";
 import {
+    DEFAULT_CACHE_TTL_MS,
+    parseCacheTtlMs,
     resolveCacheTtl,
     resolveContextLimit,
     resolveContextWindowGeometry,
@@ -41,12 +43,28 @@ import {
 } from "../shared/tail-hygiene-status";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 
+/** Sessions whose work-metrics carry stays resident. Matches the sticky sidebar cache's session cap, since both hold one entry per polled session. commentlint: allow(JUDGE) */
+const WORK_METRICS_CARRY_MAX_SESSIONS = 100;
+// Each poll processes only assistant rows newer than its watermark because the long-lived RPC server retains each session's carry across polls.
+// Losing a carry is safe: a restart, an LRU eviction, and `session.deleted` all make the next poll re-read that session's assistant rows from the start.
+const workMetricsCarryBySession = new BoundedSessionMap<WorkMetricsCarry>(
+    WORK_METRICS_CARRY_MAX_SESSIONS,
+);
 const RUST_STATUS_CACHE_TTL_MS = 2_000;
 /** Live entries per poll cache. Each open sidebar pane polls one `(session, directory)` pair, so the cap covers concurrent panes while bounding growth across sessions and projects. commentlint: allow(JUDGE) */
 const POLL_CACHE_MAX_ENTRIES = 32;
-// Each poll processes only assistant rows newer than its watermark because the long-lived RPC server retains each session's carry across polls.
-// A restart or an eviction discards the in-memory carry; the next poll re-reads the session's assistant rows from the start.
-const workMetricsCarryBySession = new BoundedSessionMap<WorkMetricsCarry>(POLL_CACHE_MAX_ENTRIES);
+
+export function clearWorkMetricsCarry(sessionId: string): void {
+    workMetricsCarryBySession.delete(sessionId);
+}
+
+/**
+ * The module transport routes by `(sessionId, projectRoot)`, so every per-poll cache keys by both:
+ * one session id polled under two project roots must not share a daemon answer.
+ */
+function pollCacheKey(sessionId: string, directory: string): string {
+    return `${sessionId}\u001f${directory}`;
+}
 
 /** Every `get` and `set` sweeps expired entries, and a full cache evicts its oldest entry before inserting, so a long-lived RPC server polling many sessions never accumulates dead snapshots. commentlint: allow(JUDGE) */
 export class BoundedTtlCache<V> {
@@ -103,6 +121,7 @@ export interface RustSessionStatus {
     pending_m1_age_ms?: number | null;
     wrapup_active?: boolean;
     wrapup_rounds?: number | null;
+    pass_trace?: { last_reject_error?: string | null } | null;
 }
 const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
@@ -131,58 +150,104 @@ function resolveSidebarWorkMetrics(sessionId: string): {
     }
 }
 
+/** Resolves to `undefined` only when no module client exists; transport failures and daemon error responses throw, so callers cannot mistake an unreachable daemon for a session with no state. commentlint: allow(JUDGE) */
 async function loadRustSessionStatus(
     client: RustModeModuleClient | undefined,
     sessionId: string,
     directory: string,
 ): Promise<RustSessionStatus | undefined> {
     if (!client) return undefined;
-    const cached = rustStatusCache.get(sessionId);
+    const cacheKey = pollCacheKey(sessionId, directory);
+    const cached = rustStatusCache.get(cacheKey);
     if (cached !== undefined) {
         return cached;
     }
-    try {
-        const response = await client.call({
-            sessionId,
-            projectRoot: directory,
-            method: "session.status",
-            body: { method: "session.status", v: 1, session_id: sessionId },
-        });
-        const raw =
-            response && typeof response === "object" ? (response as Record<string, unknown>) : {};
-        const value =
-            raw.result && typeof raw.result === "object"
-                ? (raw.result as Record<string, unknown>)
-                : raw;
-        if (value.error || value.ok === false) return undefined;
-        const status = value as RustSessionStatus;
-        rustStatusCache.set(sessionId, status);
-        return status;
-    } catch (error) {
-        log(`[rpc] Rust session.status unavailable for ${sessionId}:`, error);
-        return undefined;
+    const response = await client.call({
+        sessionId,
+        projectRoot: directory,
+        method: "session.status",
+        body: { method: "session.status", v: 1, session_id: sessionId },
+    });
+    const raw =
+        response && typeof response === "object" ? (response as Record<string, unknown>) : {};
+    const value =
+        raw.result && typeof raw.result === "object"
+            ? (raw.result as Record<string, unknown>)
+            : raw;
+    if (value.error || value.ok === false) {
+        const detail =
+            value.error && typeof value.error === "object"
+                ? (value.error as Record<string, unknown>)
+                : undefined;
+        throw new Error(
+            `session.status returned ${String(detail?.code ?? detail?.message ?? value.error ?? "ok=false")}`,
+        );
     }
+    const status = value as RustSessionStatus;
+    rustStatusCache.set(cacheKey, status);
+    return status;
 }
 
-function resolveConfigValue<T>(
-    cfg: Record<string, unknown> | undefined,
-    key: string,
+function resolveConfiguredCacheTtl(
+    config: Record<string, unknown> | undefined,
     modelKey: string | undefined,
-    defaultValue: T,
-): T {
-    if (!cfg) return defaultValue;
-    const val = cfg[key];
-    if (typeof val === typeof defaultValue) return val as T;
-    if (val && typeof val === "object") {
-        const obj = val as Record<string, T>;
-        if (modelKey && obj[modelKey] !== undefined) return obj[modelKey];
-        if (modelKey) {
-            const bare = modelKey.split("/").slice(1).join("/");
-            if (bare && obj[bare] !== undefined) return obj[bare];
+): string {
+    const cacheTtlConfig = config?.cache_ttl;
+    return typeof cacheTtlConfig === "string" ||
+        (cacheTtlConfig !== null && typeof cacheTtlConfig === "object")
+        ? resolveCacheTtl(cacheTtlConfig as EidnaraConfig["cache_ttl"], modelKey)
+        : "5m";
+}
+
+function resolveToastDurationMs(config: Record<string, unknown>): number {
+    const value = config.toast_duration_ms;
+    return typeof value === "number" && Number.isFinite(value) ? value : 5000;
+}
+
+interface ActiveModel {
+    providerID: string;
+    modelID: string;
+}
+
+function parseModelKey(modelKey: string | undefined): ActiveModel | undefined {
+    const slash = modelKey?.indexOf("/") ?? -1;
+    if (!modelKey || slash <= 0 || slash === modelKey.length - 1) return undefined;
+    return { providerID: modelKey.slice(0, slash), modelID: modelKey.slice(slash + 1) };
+}
+
+function modelKeyOf(model: ActiveModel | undefined): string | undefined {
+    return model ? `${model.providerID}/${model.modelID}` : undefined;
+}
+
+/**
+ * A model named by the request wins over live state. The live lookup still runs so a missing model or
+ * agent is recovered from OpenCode's SQLite database and cached for later polls and hooks.
+ */
+function resolveActiveModel(
+    sessionId: string,
+    liveSessionState: LiveSessionState | undefined,
+    requestedModelKey: string | undefined,
+): ActiveModel | undefined {
+    let liveModel: ActiveModel | undefined;
+    if (liveSessionState) {
+        let model = liveSessionState.liveModelBySession.get(sessionId);
+        let agent = liveSessionState.agentBySession.get(sessionId);
+        if (!model || !agent) {
+            const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
+            if (recovered) {
+                if (!model) {
+                    model = { providerID: recovered.providerID, modelID: recovered.modelID };
+                    liveSessionState.liveModelBySession.set(sessionId, model);
+                }
+                if (!agent && recovered.agent) {
+                    agent = recovered.agent;
+                    liveSessionState.agentBySession.set(sessionId, agent);
+                }
+            }
         }
-        if (obj.default !== undefined) return obj.default;
+        liveModel = model;
     }
-    return defaultValue;
+    return parseModelKey(requestedModelKey) ?? liveModel;
 }
 
 export function buildSidebarSnapshot(
@@ -195,6 +260,7 @@ export function buildSidebarSnapshot(
     config?: Record<string, unknown>,
     moduleStatus?: RustSessionStatus,
     compactionEnabled = true,
+    requestedModelKey?: string,
 ): SidebarSnapshot {
     try {
         const projectIdentity = resolveProjectIdentity(directory);
@@ -202,15 +268,14 @@ export function buildSidebarSnapshot(
         const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
+        // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
+        const liveUsage = liveSessionState?.contextUsageBySession.get(sessionId)?.usage;
         const effectiveInputTokens =
-            typeof moduleInputTokens === "number" && moduleInputTokens > 0 ? moduleInputTokens : 0;
-        const effectiveUsagePercentage =
-            typeof moduleInputTokens === "number" &&
-            moduleInputTokens > 0 &&
-            typeof moduleContextLimit === "number" &&
-            moduleContextLimit > 0
-                ? (moduleInputTokens / moduleContextLimit) * 100
-                : 0;
+            typeof moduleInputTokens === "number" && moduleInputTokens > 0
+                ? moduleInputTokens
+                : liveUsage && liveUsage.inputTokens > 0
+                  ? liveUsage.inputTokens
+                  : 0;
         // The sidebar computes work metrics lazily and incrementally to keep computation off the transform hot path.
         const { newWorkTokens, totalInputTokens } = resolveSidebarWorkMetrics(sessionId);
 
@@ -237,36 +302,10 @@ export function buildSidebarSnapshot(
         const memoryTruncated = memory?.truncated === true;
         const memoryState = memory ? stateKey(memory.state) : null;
 
-        // When the live maps lack a model or agent, the handler recovers missing values from OpenCode's SQLite database.
-        // Caching recovered values keeps later polls and hooks from repeating the lookup.
-        let activeProviderID: string | undefined;
-        let activeModelID: string | undefined;
-        if (liveSessionState) {
-            let model = liveSessionState.liveModelBySession.get(sessionId);
-            let agent = liveSessionState.agentBySession.get(sessionId);
-            if (!model || !agent) {
-                const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
-                if (recovered) {
-                    if (!model) {
-                        model = {
-                            providerID: recovered.providerID,
-                            modelID: recovered.modelID,
-                        };
-                        liveSessionState.liveModelBySession.set(sessionId, model);
-                    }
-                    if (!agent && recovered.agent) {
-                        agent = recovered.agent;
-                        liveSessionState.agentBySession.set(sessionId, agent);
-                    }
-                }
-            }
-            if (model) {
-                activeProviderID = model.providerID;
-                activeModelID = model.modelID;
-            }
-        }
-        const modelKey =
-            activeProviderID && activeModelID ? `${activeProviderID}/${activeModelID}` : undefined;
+        const activeModel = resolveActiveModel(sessionId, liveSessionState, requestedModelKey);
+        const activeProviderID = activeModel?.providerID;
+        const activeModelID = activeModel?.modelID;
+        const modelKey = modelKeyOf(activeModel);
 
         const contextLimit =
             typeof moduleContextLimit === "number" && moduleContextLimit > 0
@@ -274,6 +313,9 @@ export function buildSidebarSnapshot(
                 : activeProviderID && activeModelID
                   ? resolveContextLimit(activeProviderID, activeModelID)
                   : 0;
+        // Usage divides by the same limit the snapshot reports, so a daemon that sent tokens without a limit still yields a percentage once the model supplies one.
+        const effectiveUsagePercentage =
+            contextLimit > 0 ? (effectiveInputTokens / contextLimit) * 100 : 0;
 
         // The sidebar uses the configured default threshold when no live model is known.
         let executeThreshold = 65;
@@ -295,24 +337,21 @@ export function buildSidebarSnapshot(
             executeThresholdClamped = thresholdDetail.clamped === true;
         }
 
-        const cacheTtlConfig = config?.cache_ttl;
-        const cacheTtl =
-            typeof cacheTtlConfig === "string" ||
-            (cacheTtlConfig !== null && typeof cacheTtlConfig === "object")
-                ? resolveCacheTtl(cacheTtlConfig as EidnaraConfig["cache_ttl"], modelKey)
-                : "5m";
+        const cacheTtl = resolveConfiguredCacheTtl(config, modelKey);
 
-        // Native compaction uses the model's full context window rather than Eidnara's reserved limit.
-        // nativeContextUsagePercentage uses the unreserved context limit because native compaction watches the model's full window.
+        // Native compaction uses the model's unreserved context window. The daemon reports the reserved limit, so native usage remains unset without a resolved model.
         const nativeContextLimit =
             activeProviderID && activeModelID
                 ? resolveContextLimit(activeProviderID, activeModelID, { reservation: "none" })
-                : contextLimit;
+                : 0;
         const nativeContextUsagePercentage =
             nativeContextLimit > 0 ? (effectiveInputTokens / nativeContextLimit) * 100 : undefined;
 
         const calibration = resolveModelCalibration(activeProviderID, activeModelID);
         const tailHygiene = resolveTailHygieneStatus(moduleStatus?.tail_hygiene);
+        const lastRejectError = moduleStatus?.pass_trace?.last_reject_error;
+        const lastTransformError =
+            typeof lastRejectError === "string" && lastRejectError !== "" ? lastRejectError : null;
 
         // Display-layer attribution.
         //
@@ -352,7 +391,7 @@ export function buildSidebarSnapshot(
             sessionNoteCount: 0,
             readySmartNoteCount: 0,
             cacheTtl,
-            lastTransformError: null,
+            lastTransformError,
             lastDreamerRunAt: null,
             projectIdentity,
             compartmentTokens: calibrated.compartmentTokens,
@@ -373,7 +412,7 @@ export function buildSidebarSnapshot(
             recompProgress: null,
         };
         // The breakdown retains its last nonzero value when inputTokens is 0 to prevent bar flicker.
-        return applyStickySnapshotCache(sessionId, fresh);
+        return applyStickySnapshotCache({ sessionId, directory, modelKey }, fresh);
     } catch (err) {
         log("[rpc] sidebar-snapshot error:", err);
         throw err;
@@ -425,17 +464,23 @@ export function buildStatusDetail(
         config,
         moduleStatus,
         compactionEnabled,
+        modelKey,
     );
+    const activeModel = resolveActiveModel(sessionId, liveSessionState, modelKey);
+    const effectiveModelKey = modelKeyOf(activeModel);
+    // The daemon counts every minted tag and publishes no per-tag state, so only the total is known here.
+    const totalTags = typeof moduleStatus?.tag_count === "number" ? moduleStatus.tag_count : 0;
+    const lastResponseTime =
+        liveSessionState?.contextUsageBySession.get(sessionId)?.lastResponseTime ?? 0;
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
         activeTags: 0,
         droppedTags: 0,
-        totalTags: 0,
+        totalTags,
         activeBytes: 0,
-        lastResponseTime: 0,
+        lastResponseTime,
         lastNudgeTokens: 0,
-        lastTransformError: null,
         isSubagent: liveSessionState?.subagentSessions.has(sessionId) ?? false,
         pendingOps: [],
         contextLimit: 0,
@@ -455,11 +500,10 @@ export function buildStatusDetail(
     };
 
     try {
-        const modelSlash = modelKey?.indexOf("/") ?? -1;
-        if (modelKey && modelSlash > 0) {
+        if (activeModel) {
             detail.windowGeometry = resolveContextWindowGeometry(
-                modelKey.slice(0, modelSlash),
-                modelKey.slice(modelSlash + 1),
+                activeModel.providerID,
+                activeModel.modelID,
             );
         }
 
@@ -479,11 +523,16 @@ export function buildStatusDetail(
                 | { default?: number; [k: string]: number | undefined }
                 | undefined;
             // The RPC uses resolveExecuteThresholdDetail to return the threshold mode and absolute-token threshold.
-            const thresholdDetail = resolveExecuteThresholdDetail(pctCfg ?? 65, modelKey, 65, {
-                tokensConfig: tokensCfg,
-                contextLimit: contextLimitForTokens || undefined,
-                sessionId,
-            });
+            const thresholdDetail = resolveExecuteThresholdDetail(
+                pctCfg ?? 65,
+                effectiveModelKey,
+                65,
+                {
+                    tokensConfig: tokensCfg,
+                    contextLimit: contextLimitForTokens || undefined,
+                    sessionId,
+                },
+            );
             detail.executeThreshold = thresholdDetail.percentage;
             detail.executeThresholdMode = thresholdDetail.mode;
             detail.executeThresholdClamped = thresholdDetail.clamped;
@@ -491,8 +540,7 @@ export function buildStatusDetail(
                 detail.executeThresholdTokens = thresholdDetail.absoluteTokens;
             }
 
-            const ct = resolveConfigValue<string>(config, "cache_ttl", modelKey, "5m");
-            detail.cacheTtl = ct;
+            detail.cacheTtl = resolveConfiguredCacheTtl(config, effectiveModelKey);
 
             if (typeof config.protected_tags === "number") {
                 detail.protectedTagCount = config.protected_tags;
@@ -500,12 +548,21 @@ export function buildStatusDetail(
             if (typeof config.history_budget_percentage === "number") {
                 detail.historyBudgetPercentage = config.history_budget_percentage;
             }
-            detail.toastDurationMs = resolveConfigValue<number>(
-                config,
-                "toast_duration_ms",
-                modelKey,
-                5000,
-            );
+            detail.toastDurationMs = resolveToastDurationMs(config);
+        }
+
+        // `cacheRemainingMs` is set only after a response has been seen.
+        const cacheTtlMs = parseCacheTtlMs(detail.cacheTtl) ?? DEFAULT_CACHE_TTL_MS;
+        if (cacheTtlMs === Number.POSITIVE_INFINITY) {
+            detail.cacheTtlMs = -1;
+            detail.cacheRemainingMs = -1;
+            detail.cacheNeverExpires = true;
+        } else {
+            detail.cacheTtlMs = cacheTtlMs;
+            if (lastResponseTime > 0) {
+                detail.cacheRemainingMs = Math.max(0, lastResponseTime + cacheTtlMs - Date.now());
+                detail.cacheExpired = detail.cacheRemainingMs === 0;
+            }
         }
 
         // Derived values
@@ -565,7 +622,7 @@ export function registerRpcHandlers(
         if (config.memory?.enabled === false) {
             return { state: disabled(), rows: [], knownAsOf: null };
         }
-        const cacheKey = `${sessionId}\u001f${dir}`;
+        const cacheKey = pollCacheKey(sessionId, dir);
         const cached = memorySnapshotCache.get(cacheKey);
         if (cached !== undefined) {
             return cached;
@@ -578,23 +635,38 @@ export function registerRpcHandlers(
         return snapshot;
     };
 
+    // An unreachable daemon fails the poll rather than yielding zero counts, because `applyStickySnapshotCache` treats zero counts as lost state and blanks the sidebar. commentlint: allow(JUDGE)
+    const loadPollInputs = async (
+        sessionId: string,
+        dir: string,
+    ): Promise<{ moduleStatus?: RustSessionStatus; memory: KernelMemorySnapshot } | undefined> => {
+        try {
+            const [moduleStatus, memory] = await Promise.all([
+                config.transform_mode === "rust"
+                    ? loadRustSessionStatus(rustModeModuleClient, sessionId, dir)
+                    : Promise.resolve(undefined),
+                readMemory(sessionId, dir),
+            ]);
+            return { moduleStatus, memory };
+        } catch (error) {
+            log(`[rpc] session.status unavailable for ${sessionId}:`, error);
+            return undefined;
+        }
+    };
+
     rpcServer.handle("sidebar-snapshot", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         const dir = String(params.directory ?? directory);
         if (!sessionId) return { error: "unavailable" };
-        const [moduleStatus, memory] = await Promise.all([
-            config.transform_mode === "rust"
-                ? loadRustSessionStatus(rustModeModuleClient, sessionId, dir)
-                : Promise.resolve(undefined),
-            readMemory(sessionId, dir),
-        ]);
+        const inputs = await loadPollInputs(sessionId, dir);
+        if (!inputs) return { error: "sidebar snapshot unavailable" };
         return buildSidebarSnapshotRpcResponse(
             sessionId,
             dir,
             liveSessionState,
-            memory,
+            inputs.memory,
             rawConfig,
-            moduleStatus,
+            inputs.moduleStatus,
             compactionEnabled,
         );
     });
@@ -604,30 +676,21 @@ export function registerRpcHandlers(
         const dir = String(params.directory ?? directory);
         const modelKey = params.modelKey ? String(params.modelKey) : undefined;
         if (!sessionId) return { error: "unavailable" };
-        const [moduleStatus, memory] = await Promise.all([
-            config.transform_mode === "rust"
-                ? loadRustSessionStatus(rustModeModuleClient, sessionId, dir)
-                : Promise.resolve(undefined),
-            readMemory(sessionId, dir),
-        ]);
+        const inputs = await loadPollInputs(sessionId, dir);
+        if (!inputs) return { error: "status detail unavailable" };
         return buildStatusDetail(
             sessionId,
             dir,
             modelKey,
             rawConfig,
             liveSessionState,
-            memory,
-            moduleStatus,
+            inputs.memory,
+            inputs.moduleStatus,
             compactionEnabled,
         ) as unknown as Record<string, unknown>;
     });
 
-    rpcServer.handle("toast-duration", async () => {
-        const resolved =
-            typeof config.toast_duration_ms === "number" &&
-            Number.isFinite(config.toast_duration_ms)
-                ? config.toast_duration_ms
-                : 5000;
-        return { toastDurationMs: resolved };
-    });
+    rpcServer.handle("toast-duration", async () => ({
+        toastDurationMs: resolveToastDurationMs(rawConfig),
+    }));
 }
