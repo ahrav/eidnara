@@ -993,14 +993,16 @@ export class HostModuleTransport {
                 const credentialSource = snapshotCredentialSource(process.env);
                 bindVersion = managedCredentialSourceVersion(credentialSource);
                 routeOpening.credentialSourceVersion = bindVersion;
+                const open = client.routeOpen(target, identity, { ...fence, credentialSource });
                 try {
-                    route = await this.beforeDeadline(
-                        client.routeOpen(target, identity, { ...fence, credentialSource }),
-                        deadline,
-                        "opening the module route",
-                    );
+                    route = await this.beforeDeadline(open, deadline, "opening the module route");
                     break;
                 } catch (error) {
+                    // The facade's own route-open deadline outlives this wait; a bind that succeeds after it would install a handle nobody owns.
+                    void open.then(
+                        (late) => void client.closeRoute(late).catch(() => undefined),
+                        () => undefined,
+                    );
                     const retryable =
                         isHostCallError(error) &&
                         error.kind === "terminal" &&

@@ -450,6 +450,33 @@ describe("credential rotation during a route bind", () => {
 });
 
 describe("route opening observes the caller's abort", () => {
+    test("a route that binds after the transport deadline is closed, not stranded", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let finishOpen: ((route: RouteHandle) => void) | undefined;
+        const closed: RouteHandle[] = [];
+        const client = {
+            routeOpen: () =>
+                new Promise<RouteHandle>((resolve) => {
+                    finishOpen = resolve;
+                }),
+            closeRoute: async (route: RouteHandle) => {
+                closed.push(route);
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const outcome = await transport
+            .ensureRoute("s", "/tmp", Deadline.start(10))
+            .catch((error: unknown) => error);
+        expect(outcome).toMatchObject({ code: "ETIMEDOUT" });
+
+        const late = { channel: 5, epoch: 1 } as unknown as RouteHandle;
+        finishOpen?.(late);
+        await Bun.sleep(0);
+        expect(closed).toEqual([late]);
+    });
+
     test("an abort while routeOpen is pending settles the caller and lets the open finish into the cache", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         let finishOpen: ((route: RouteHandle) => void) | undefined;
