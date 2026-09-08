@@ -65,18 +65,19 @@ function toolSummaryLine(firstIndex: number, toolCount: number): string {
 
 /**
  * OpenCode creates an assistant message before its parts arrive and sets `time.completed` when the turn ends.
- * A trailing assistant message with no parts and no completion time is still being written,
- * so consuming it would make `endIndex + 1` skip its text once it lands.
+ * A trailing assistant message whose `time` lacks `completed` is still being written, with or without parts,
+ * so consuming it would make `endIndex + 1` skip whatever text lands after this read.
+ * A message with no `time` object carries no completion signal and is treated as complete.
  */
 function isUnfinishedTrailingMessage(
     messages: DumpMessage[],
     index: number,
     role: string,
-    hasContent: boolean,
 ): boolean {
-    if (hasContent || role !== "assistant" || index !== messages.length - 1) return false;
-    const time = (messages[index] as DumpMessage).info.time as { completed?: unknown } | undefined;
-    return time?.completed == null;
+    if (role !== "assistant" || index !== messages.length - 1) return false;
+    const time = (messages[index] as DumpMessage).info.time;
+    if (time === null || typeof time !== "object") return false;
+    return (time as { completed?: unknown }).completed == null;
 }
 
 /**
@@ -138,6 +139,7 @@ export function concatSessionMessages(
     for (let i = offset; i < messages.length; i++) {
         const msg = messages[i] as DumpMessage;
         const role = String(msg.info.role ?? "unknown");
+        if (isUnfinishedTrailingMessage(messages, i, role)) break;
         const texts = extractTextParts(msg.parts);
         const toolCount = countToolParts(msg.parts);
 
@@ -152,7 +154,6 @@ export function concatSessionMessages(
         if (pendingToolCount > 0 && !admitPendingTools()) break;
 
         if (texts.length === 0) {
-            if (isUnfinishedTrailingMessage(messages, i, role, toolCount > 0)) break;
             lastIndex = i;
             continue;
         }

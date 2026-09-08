@@ -96,7 +96,7 @@ describe("concatSessionMessages", () => {
         expect(page.hasMore).toBe(false);
     });
 
-    test("a trailing assistant message without parts or time.completed is left unconsumed", () => {
+    test("a trailing assistant message without time.completed is left unconsumed", () => {
         const inProgress: DumpMessage = {
             info: { role: "assistant", time: { created: 1 } },
             parts: [],
@@ -106,6 +106,22 @@ describe("concatSessionMessages", () => {
         expect(page.output).toBe("[0] User: hello");
         expect(page.endIndex).toBe(0);
         expect(page.hasMore).toBe(true);
+
+        // Partial text and streamed tool calls are held too; only completion releases the message.
+        for (const parts of [
+            [{ type: "text", text: "partial" }],
+            [{ type: "tool" }],
+            [{ type: "tool" }, { type: "text", text: "partial" }],
+        ]) {
+            const streaming: DumpMessage = {
+                info: { role: "assistant", time: { created: 1 } },
+                parts,
+            };
+            const held = concatSessionMessages([text("user", "hello"), streaming], 1000);
+            expect(held.output).toBe("[0] User: hello");
+            expect(held.endIndex).toBe(0);
+            expect(held.hasMore).toBe(true);
+        }
 
         // Resuming at the unfinished message reports no progress rather than skipping it.
         const retry = concatSessionMessages(messages, 1000, page.endIndex + 1);
