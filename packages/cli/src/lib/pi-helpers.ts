@@ -15,6 +15,12 @@ export interface PiBinaryInfo {
 
 export const PI_PACKAGE_SOURCE = "npm:@eidnara/pi";
 
+/** A pinned source such as `npm:@eidnara/pi@0.1.0` still names the plugin package. */
+export function matchesPiPackageSource(entry: unknown): boolean {
+    if (typeof entry !== "string") return false;
+    return entry === PI_PACKAGE_SOURCE || entry.startsWith(`${PI_PACKAGE_SOURCE}@`);
+}
+
 const PI_BINARY_ENV = "EIDNARA_PI_BINARY";
 
 export function getPiCommandInvocation(piPath: string, args: string[]): CommandInvocation {

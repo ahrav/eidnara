@@ -8,7 +8,7 @@ import {
     getPiUserExtensionsPath,
     getSharedUserConfigPath,
 } from "../lib/paths";
-import { detectPiBinary, PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
+import { detectPiBinary, matchesPiPackageSource, PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
 import type { HarnessAdapter, HarnessConfigPaths, PluginEntryResult } from "./types";
 
 const PLUGIN_NAME = "@eidnara/pi";
@@ -27,7 +27,7 @@ export class PiAdapter implements HarnessAdapter {
         const settings = readPiSettings();
         if (!settings) return false;
         const packages = Array.isArray(settings.packages) ? settings.packages : [];
-        return packages.some((entry) => entry === PI_PACKAGE_SOURCE);
+        return packages.some(matchesPiPackageSource);
     }
 
     getConfigPaths(): HarnessConfigPaths {
@@ -46,8 +46,8 @@ export class PiAdapter implements HarnessAdapter {
             const settings = readPiSettingsForUpdate();
             const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
-            const idx = packages.indexOf(PI_PACKAGE_SOURCE);
-            if (idx === -1) {
+            // A pinned entry is left as the user wrote it rather than replaced with the unversioned source.
+            if (!packages.some(matchesPiPackageSource)) {
                 packages.push(PI_PACKAGE_SOURCE);
                 settings.packages = packages;
                 writePiSettings(settings);
