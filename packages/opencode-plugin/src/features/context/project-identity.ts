@@ -18,7 +18,8 @@ import { log } from "../../shared/logger";
 // The cooldown prevents repeated failed Git probes.
 const GIT_TIMEOUT_MS = 5_000;
 const TRANSIENT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
-const identityCache = new Map<string, string>();
+/** A cached `git:` identity is valid only while the directory still resolves to the Git root it was derived from. */
+const identityCache = new Map<string, { identity: string; gitRoot: string }>();
 const lastKnownGitIdentityCache = new Map<string, string>();
 // `directoryFallbackCache` stores `dir:` fallbacks only when no ancestor has a `.git` entry.
 // Resolution bypasses `directoryFallbackCache` when an ancestor has a `.git` entry.
@@ -246,14 +247,18 @@ function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentity
  */
 export function resolveProjectIdentityStrict(directory: string): string {
     const canonical = path.resolve(directory);
+    // A subdirectory of one repository can later be initialized as its own, so a hit is honoured only while the nearest `.git` is unchanged. An unreadable directory yields no root and cannot prove a change, so its hit stands.
+    const gitRoot = gitRootDirectory(canonical);
     const cached = identityCache.get(canonical);
     if (cached !== undefined) {
-        return cached;
+        if (gitRoot === null || cached.gitRoot === gitRoot) return cached.identity;
+        identityCache.delete(canonical);
+        lastKnownGitIdentityCache.delete(canonical);
     }
 
     assertDirectoryUsable(canonical, directory);
 
-    if (!hasGitDir(canonical)) {
+    if (gitRoot === null) {
         throw new ProjectIdentityError(
             "not_git_repo",
             directory,
@@ -289,7 +294,7 @@ export function resolveProjectIdentityStrict(directory: string): string {
     }
 
     const identity = `git:${rootCommit}`;
-    identityCache.set(canonical, identity);
+    identityCache.set(canonical, { identity, gitRoot });
     lastKnownGitIdentityCache.set(canonical, identity);
     transientFailureCooldown.delete(canonical);
     dubiousOwnershipFallbackDirectories.delete(canonical);
@@ -310,7 +315,7 @@ function getActiveCooldown(canonical: string): number | undefined {
 }
 
 function lastKnownGitIdentity(canonical: string): string | undefined {
-    return lastKnownGitIdentityCache.get(canonical) ?? identityCache.get(canonical);
+    return lastKnownGitIdentityCache.get(canonical) ?? identityCache.get(canonical)?.identity;
 }
 
 function nearestLastKnownGitIdentity(

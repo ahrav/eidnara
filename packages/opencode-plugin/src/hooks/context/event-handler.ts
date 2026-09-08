@@ -12,7 +12,7 @@ import {
     getSessionProperties,
 } from "./event-payloads";
 import { resolveContextLimit, resolveSessionId } from "./event-resolvers";
-import { addBoundedSession } from "./live-session-state";
+import { recordChildSession } from "./live-session-state";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
@@ -38,9 +38,6 @@ export interface EventHandlerDeps {
     /** `subagentSessions` records every session created with a non-empty `parentID`, in memory only. */
     subagentSessions?: Set<string>;
 }
-
-/** Hidden Eidnara child sessions carry this title prefix at creation. */
-const INTERNAL_CHILD_TITLE_PREFIX = "eidnara-";
 
 function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry>): void {
     const now = Date.now();
@@ -81,19 +78,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
-            const isChild = (info.parentID ?? "").length > 0;
-            if (isChild && deps.subagentSessions) {
-                addBoundedSession(deps.subagentSessions, info.id);
-            }
-
-            // The handler adds hidden sessions titled `eidnara-` to `internalChildSessions` so transform and system-prompt hooks exempt them; the set is not persisted across restarts.
-            if (
-                deps.internalChildSessions &&
-                isChild &&
-                typeof info.title === "string" &&
-                info.title.startsWith(INTERNAL_CHILD_TITLE_PREFIX)
-            ) {
-                addBoundedSession(deps.internalChildSessions, info.id);
+            // Transform and system-prompt hooks exempt hidden `eidnara-` children; the sets are in memory only, and the session-directory read re-derives them after a restart.
+            if (recordChildSession(deps, info.id, info).internalChild) {
                 sessionLog(
                     info.id,
                     `marked internal eidnara child (title="${info.title}") — exempt from transform + injection`,

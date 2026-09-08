@@ -42,6 +42,31 @@ describe("createChildSession", () => {
             createChildSession({ client: { session: { create } } as never, title: "t" }),
         ).rejects.toThrow("child session create timed out");
     });
+
+    it("deletes a child whose create settles after the deadline so no orphan remains", async () => {
+        let settle: ((value: { data: { id: string } }) => void) | undefined;
+        const create = mock(
+            () =>
+                new Promise<{ data: { id: string } }>((resolve) => {
+                    settle = resolve;
+                }),
+        );
+        const del = mock(async (_input: unknown) => ({}));
+        __childSessionSpawnTest.setLifecycleTimeoutMs(20);
+        await expect(
+            createChildSession({
+                client: { session: { create, delete: del } } as never,
+                title: "t",
+            }),
+        ).rejects.toThrow("child session create timed out");
+        expect(del).not.toHaveBeenCalled();
+
+        __childSessionSpawnTest.reset();
+        settle?.({ data: { id: "ses_late" } });
+        await Bun.sleep(0);
+        await Bun.sleep(0);
+        expect(del).toHaveBeenCalledWith({ path: { id: "ses_late" } });
+    });
 });
 
 describe("deleteChildSession", () => {

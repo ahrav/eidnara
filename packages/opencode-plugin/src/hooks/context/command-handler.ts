@@ -281,6 +281,7 @@ async function executeAugmentation(
     },
     sessionId: string,
     userPrompt: string,
+    promptContext: NotificationParams,
 ): Promise<never> {
     if (!deps.sidekick?.config) {
         await deps.sendNotification(
@@ -328,7 +329,8 @@ async function executeAugmentation(
     }
 
     try {
-        await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt);
+        // The replacement turn keeps the agent, model, and variant the intercepted command carried; a bare text prompt would run under the session default.
+        await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt, promptContext);
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         sessionLog(sessionId, `/ctx-aug: failed to send augmented prompt: ${reason}`);
@@ -348,7 +350,7 @@ export function createEidnaraCommandHandler(deps: {
     compactionOff?: boolean;
     getLiveModelKey?: (sessionId: string) => string | undefined;
     /** The `session.wrapup` request carries no subagent flag, so the handler gates `/ctx-wrapup` on this predicate. */
-    isSubagentSession: (sessionId: string) => boolean;
+    isSubagentSession: (sessionId: string) => boolean | Promise<boolean>;
     onFlush?: (sessionId: string) => void;
     sendNotification: (
         sessionId: string,
@@ -404,7 +406,7 @@ export function createEidnaraCommandHandler(deps: {
         "command.execute.before": async (
             input: CommandExecuteInput,
             _output: CommandExecuteOutput,
-            _params: NotificationParams,
+            params: NotificationParams,
         ): Promise<void> => {
             const isStatus = isStatusCommand(input.command);
             const isFlush = isFlushCommand(input.command);
@@ -430,7 +432,7 @@ export function createEidnaraCommandHandler(deps: {
             }
 
             if (isAug) {
-                await executeAugmentation(deps, sessionId, input.arguments);
+                await executeAugmentation(deps, sessionId, input.arguments, params);
                 return; // executeAugmentation throws sentinel internally
             }
 
@@ -527,7 +529,7 @@ export function createEidnaraCommandHandler(deps: {
 
             if (isWrapup) {
                 const parsed = parseWrapupArgs(input.arguments);
-                if (deps.isSubagentSession(sessionId)) {
+                if (await deps.isSubagentSession(sessionId)) {
                     result =
                         "## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.";
                 } else if (!parsed.ok) {

@@ -209,6 +209,23 @@ describe("sendUserPrompt", () => {
         });
     });
 
+    it("carries the caller's agent, model, and variant and omits absent ones", async () => {
+        const promptAsync = mock(async () => ({}));
+        await sendUserPrompt({ session: { promptAsync } }, "ses-user-ctx", "hello", {
+            agent: "plan",
+            providerId: "anthropic",
+            modelId: "claude-opus-4-8",
+        });
+        expect(promptAsync).toHaveBeenCalledWith({
+            path: { id: "ses-user-ctx" },
+            body: {
+                agent: "plan",
+                model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
+                parts: [{ type: "text", text: "hello" }],
+            },
+        });
+    });
+
     it("falls back to prompt when promptAsync is absent", async () => {
         const prompt = mock(() => ({}));
 

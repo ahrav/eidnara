@@ -338,15 +338,23 @@ export async function sendUserPrompt(
     client: unknown,
     sessionId: string,
     text: string,
+    promptContext: NotificationParams = {},
 ): Promise<void> {
     if (!hasNotificationSessionClient(client)) {
         throw new Error("session prompt API unavailable for user prompt");
     }
     const c = client as NotificationClient;
 
+    const model =
+        promptContext.providerId && promptContext.modelId
+            ? { providerID: promptContext.providerId, modelID: promptContext.modelId }
+            : undefined;
     const input = {
         path: { id: sessionId },
         body: {
+            ...(promptContext.agent ? { agent: promptContext.agent } : {}),
+            ...(model ? { model } : {}),
+            ...(promptContext.variant ? { variant: promptContext.variant } : {}),
             parts: [{ type: "text", text }],
         },
     };

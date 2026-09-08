@@ -534,6 +534,18 @@ describe("createEidnaraCommandHandler", () => {
                 "## Eidnara Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.",
             ]);
         });
+
+        it("awaits an asynchronous subagent classification before deciding", async () => {
+            const isSubagentSession = mock(async (sessionId: string) => {
+                await Bun.sleep(0);
+                return sessionId === "ses-restored-child";
+            });
+            const { run, calls } = setup(undefined, { isSubagentSession });
+
+            await expectSentinel(run("ctx-wrapup", "ses-restored-child", "50"), "ctx-wrapup");
+
+            expect(calls).toHaveLength(0);
+        });
     });
 
     describe("ctx-aug", () => {
@@ -564,7 +576,12 @@ describe("createEidnaraCommandHandler", () => {
             });
 
             await expectSentinel(
-                run("ctx-aug", "ses-aug", "Implement sidekick migration"),
+                run("ctx-aug", "ses-aug", "Implement sidekick migration", {
+                    agent: "plan",
+                    variant: "thinking",
+                    providerId: "anthropic",
+                    modelId: "claude-opus-4-8",
+                }),
                 "ctx-aug",
             );
 
@@ -578,6 +595,9 @@ describe("createEidnaraCommandHandler", () => {
             expect(sidekickClient.session.promptAsync).toHaveBeenCalledWith({
                 path: { id: "ses-aug" },
                 body: {
+                    agent: "plan",
+                    model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
+                    variant: "thinking",
                     parts: [
                         {
                             type: "text",

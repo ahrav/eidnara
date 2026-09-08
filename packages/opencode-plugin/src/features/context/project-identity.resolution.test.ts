@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    realpathSync,
+    rmSync,
+    symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import {
@@ -193,6 +201,24 @@ describe("project identity", () => {
 
         expect(resolveProjectIdentity(link)).toBe(resolveProjectIdentity(target));
         expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(target));
+    });
+
+    it("re-resolves a cached subdirectory once it becomes its own repository", () => {
+        const outer = makeRepoWithGitMetadata("project-identity-outer-then-nested-");
+        const nested = join(outer, "packages", "child");
+        mkdirSync(nested, { recursive: true });
+        // Git answers for the nearest `.git` above its cwd, so the mock keys on whether the nested repository exists yet.
+        const execMock = mock(() =>
+            existsSync(join(nested, ".git")) ? `${SECOND_ROOT_COMMIT}\n` : `${FIRST_ROOT_COMMIT}\n`,
+        );
+        __setProjectIdentityTestHooks({ execFileSync: execMock as unknown as typeof execFileSync });
+
+        expect(resolveProjectIdentity(nested)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(resolveProjectIdentity(nested)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(execMock).toHaveBeenCalledTimes(1);
+        mkdirSync(join(nested, ".git"));
+        expect(resolveProjectIdentity(nested)).toBe(`git:${SECOND_ROOT_COMMIT}`);
+        expect(execMock).toHaveBeenCalledTimes(2);
     });
 
     it("does not reuse an enclosing repository's identity for a nested repository during a transient failure", () => {

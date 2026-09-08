@@ -1,3 +1,6 @@
+/** Limits OpenCode SDK reads so a slow host cannot hold a hook open indefinitely. */
+export const HOST_SDK_READ_TIMEOUT_MS = 2_000;
+
 /** The wrapped promise did not settle within the deadline; its underlying operation may still complete. */
 export class TimeoutError extends Error {
     constructor(message: string) {

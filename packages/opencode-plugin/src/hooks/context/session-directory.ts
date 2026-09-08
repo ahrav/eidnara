@@ -1,9 +1,6 @@
 import type { PluginContext } from "../../plugin/types";
-import { withTimeout } from "../../shared/with-timeout";
-import { addBoundedSession } from "./live-session-state";
-
-/** Limits OpenCode SDK reads so a slow host cannot hold a hook open indefinitely. */
-export const HOST_SDK_READ_TIMEOUT_MS = 2_000;
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
+import { recordChildSession } from "./live-session-state";
 
 export interface SessionDirectoryDeps {
     client?: PluginContext["client"];
@@ -13,6 +10,8 @@ export interface SessionDirectoryDeps {
     sessionDirectoryBySession?: Map<string, string>;
     /** Tracks sessions whose directory response has a non-empty string `parentID`. */
     subagentSessions?: Set<string>;
+    /** Tracks child sessions whose directory response carries the internal `eidnara-` title prefix. */
+    internalChildSessions?: Set<string>;
 }
 
 export function knownSessionDirectory(deps: SessionDirectoryDeps, sessionId: string): string {
@@ -39,15 +38,9 @@ export async function resolveSessionDirectory(
             "session directory read timed out",
         );
         const session = (response as { data?: unknown } | null)?.data as
-            | { directory?: unknown; parentID?: unknown }
+            | { directory?: unknown; parentID?: unknown; title?: unknown }
             | undefined;
-        if (
-            deps.subagentSessions &&
-            typeof session?.parentID === "string" &&
-            session.parentID.length > 0
-        ) {
-            addBoundedSession(deps.subagentSessions, sessionId);
-        }
+        if (session) recordChildSession(deps, sessionId, session);
         const directory = session?.directory;
         if (typeof directory === "string" && directory.length > 0) {
             return pin(deps, sessionId, directory);

@@ -11,7 +11,7 @@ import {
 } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
-import { withTimeout } from "../../shared/with-timeout";
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import {
     cachedToolPermissionDenied,
     resolveCtxReduceAvailability,
@@ -41,7 +41,6 @@ import {
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
 import {
-    HOST_SDK_READ_TIMEOUT_MS,
     knownSessionDirectory,
     resolveSessionDirectory,
     type SessionDirectoryDeps,

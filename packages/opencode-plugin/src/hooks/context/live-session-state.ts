@@ -23,6 +23,26 @@ export interface LiveSessionState {
     subagentSessions: Set<string>;
 }
 
+/** Hidden Eidnara child sessions carry this title prefix at creation. */
+export const INTERNAL_CHILD_TITLE_PREFIX = "eidnara-";
+
+/** A session the host reports with a parent is a subagent; one whose title carries the internal prefix is also a hidden Eidnara child. */
+export function recordChildSession(
+    sets: { subagentSessions?: Set<string>; internalChildSessions?: Set<string> },
+    sessionId: string,
+    session: { parentID?: unknown; title?: unknown },
+): { internalChild: boolean } {
+    const isChild = typeof session.parentID === "string" && session.parentID.length > 0;
+    if (!isChild) return { internalChild: false };
+    if (sets.subagentSessions) addBoundedSession(sets.subagentSessions, sessionId);
+    const internalChild =
+        typeof session.title === "string" && session.title.startsWith(INTERNAL_CHILD_TITLE_PREFIX);
+    if (internalChild && sets.internalChildSessions) {
+        addBoundedSession(sets.internalChildSessions, sessionId);
+    }
+    return { internalChild };
+}
+
 /** Bounds retained child session IDs when deletion events are absent; matches the plugin's other per-session caps. */
 const CHILD_SESSION_CAPACITY = 1000;
 
