@@ -3,12 +3,13 @@
  *
  * Production launch maps the retained verified launcher descriptor to one
  * fixed child fd through Node/Bun stdio numeric mapping and spawns the
- * Linux descriptor exec path (`/proc/self/fd/<n>`) with `shell:false`, a
- * minimal environment, and the
- * startup envelope on stdin only. A dev/test injection point spawns an
- * explicit binary path instead (this repo's cargo-built `eidnara-host`);
- * production callers never take that branch with untrusted input because the
- * target is constructed by policy, not configuration.
+ * Linux descriptor exec path (`/proc/self/fd/<n>`) with `shell:false`, an
+ * environment holding only the caller's data root as `XDG_DATA_HOME` plus
+ * any explicit additions, and the startup envelope on stdin only. A dev/test
+ * injection point spawns an explicit binary path instead (this repo's
+ * cargo-built `eidnara-host`); production callers never take that branch
+ * with untrusted input because the target is constructed by policy, not
+ * configuration.
  *
  * Output handling is fail-closed: stdout must be exactly one v1 JSON object,
  * the exit code must agree with `ok`, and stderr is tainted — drained and
@@ -63,6 +64,11 @@ export class NativeLaunchError extends Error {
 export interface NativeLaunchOptions {
     command: NativeLifecycleCommand;
     /**
+     * Exported to the child as `XDG_DATA_HOME`. The binary derives its data
+     * directory only from `XDG_DATA_HOME` and `HOME`; `dataRoot` must be absolute.
+     */
+    dataRoot: string;
+    /**
      * Dev/test staging source forwarded as `--payload-dir`. MUST be absolute:
      * the child runs with `cwd: "/"` and resolves it there.
      */
@@ -73,7 +79,7 @@ export interface NativeLaunchOptions {
     envelope?: unknown;
     /** Absolute wall-clock budget; the child is killed at expiry. */
     deadlineMs: number;
-    /** Explicit environment for the child; defaults to a minimal set. */
+    /** Additional child environment. `XDG_DATA_HOME` is owned by `dataRoot` and may not appear here. */
     env?: Record<string, string>;
     /** Host platform override for the retained-descriptor exec path; tests only. */
     platform?: NodeJS.Platform;
@@ -197,7 +203,6 @@ export async function runNativeLifecycle(
     if (options.payloadManifestDigest !== undefined) {
         args.push("--payload-manifest-digest", options.payloadManifestDigest);
     }
-    const env = options.env ?? {};
     // Validated before anything is spawned, for the same reason the envelope is:
     // an exhausted or malformed budget must produce a typed error with no child
     // in flight. `setTimeout` coerces a nonpositive or non-finite delay to 1ms,
@@ -227,6 +232,17 @@ export async function runNativeLifecycle(
     if (options.payloadDir !== undefined && !path.isAbsolute(options.payloadDir)) {
         throw new NativeLaunchError("usage_error", "native payload directory is not absolute");
     }
+    // `host_runtime::data_dir_path` ignores a relative `XDG_DATA_HOME` and answers `no_data_dir`.
+    if (!path.isAbsolute(options.dataRoot)) {
+        throw new NativeLaunchError("usage_error", "native lifecycle data root is not absolute");
+    }
+    if (options.env !== undefined && "XDG_DATA_HOME" in options.env) {
+        throw new NativeLaunchError(
+            "usage_error",
+            "native lifecycle environment may not override the data root",
+        );
+    }
+    const env: Record<string, string> = { ...options.env, XDG_DATA_HOME: options.dataRoot };
     // The envelope is serialized before anything is spawned: a value with no
     // JSON form must fail as a typed error with no child in flight, and the
     // stdin `error` listener below only sees stream errors, never a synchronous

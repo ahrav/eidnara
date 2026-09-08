@@ -81,13 +81,13 @@ describe("native launcher output handling (U3 scenario 17)", () => {
             await expect(
                 runNativeLifecycle(
                     { kind: "retained-fd", fd },
-                    { command: "probe", deadlineMs: 10_000, platform: "win32" },
+                    { command: "probe", dataRoot: dir, deadlineMs: 10_000, platform: "win32" },
                 ),
             ).rejects.toThrow(NativeLaunchError);
             await expect(
                 runNativeLifecycle(
                     { kind: "retained-fd", fd },
-                    { command: "probe", deadlineMs: 10_000, platform: "win32" },
+                    { command: "probe", dataRoot: dir, deadlineMs: 10_000, platform: "win32" },
                 ),
             ).rejects.toMatchObject({ code: "unsupported_platform" });
         } finally {
@@ -101,7 +101,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             const result = await runNativeLifecycle(
                 { kind: "retained-fd", fd },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
             expect(result.reason).toBe("not_running");
         } finally {
@@ -113,7 +113,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         const binary = scriptBinary(dir, `echo '${probeResultJson(false)}'\nexit 1`);
         const result = await runNativeLifecycle(
             { kind: "test-binary", path: binary },
-            { command: "probe", deadlineMs: 10_000 },
+            { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
         );
         expect(result.state).toBe("stopped");
         expect(result.reason).toBe("not_running");
@@ -128,7 +128,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "start", deadlineMs: 10_000 },
+                { command: "start", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -137,7 +137,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         // The same object answers a `stop` invocation.
         const stopped = await runNativeLifecycle(
             { kind: "test-binary", path: binary },
-            { command: "stop", deadlineMs: 10_000 },
+            { command: "stop", dataRoot: dir, deadlineMs: 10_000 },
         );
         expect(stopped.command).toBe("stop");
     });
@@ -146,14 +146,14 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         const binary = scriptBinary(dir, `echo '${successfulResultJson("start")}'\nexit 0`);
         const started = await runNativeLifecycle(
             { kind: "test-binary", path: binary },
-            { command: "start", deadlineMs: 10_000 },
+            { command: "start", dataRoot: dir, deadlineMs: 10_000 },
         );
         expect(started.versions.proof).toBe("current");
         let error: NativeLaunchError | null = null;
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "restart", deadlineMs: 10_000 },
+                { command: "restart", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -170,7 +170,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -190,7 +190,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
             try {
                 await runNativeLifecycle(
                     { kind: "test-binary", path: binary },
-                    { command: "probe", deadlineMs: 10_000 },
+                    { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
                 );
             } catch (caught) {
                 error = caught as NativeLaunchError;
@@ -205,7 +205,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -219,7 +219,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -235,7 +235,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -250,7 +250,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 500 },
+                { command: "probe", dataRoot: dir, deadlineMs: 500 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -278,7 +278,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
             try {
                 await runNativeLifecycle(
                     { kind: "test-binary", path: binary },
-                    { command: "start", deadlineMs },
+                    { command: "start", dataRoot: dir, deadlineMs },
                 );
             } catch (caught) {
                 error = caught as NativeLaunchError;
@@ -302,7 +302,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: relative },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             targetError = caught as NativeLaunchError;
@@ -314,7 +314,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: absolute },
-                { command: "start", deadlineMs: 10_000, payloadDir: "./dist" },
+                { command: "start", dataRoot: dir, deadlineMs: 10_000, payloadDir: "./dist" },
             );
         } catch (caught) {
             payloadError = caught as NativeLaunchError;
@@ -353,7 +353,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -369,7 +369,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -377,16 +377,51 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         expect(error?.code).toBe("usage_error");
     });
 
-    test("the child receives the envelope on stdin and a minimal environment", async () => {
+    test("the child receives the envelope on stdin and only the data root in its environment", async () => {
+        // `eidnara-host` reads `XDG_DATA_HOME` and `HOME` when resolving its data directory.
         const binary = scriptBinary(
             dir,
-            `input=$(cat)\nif [ "$input" = '{"probe":true}' ] && [ -z "$HOME" ] && [ -z "$LD_PRELOAD" ]; then\n  echo '${probeResultJson(false)}'\n  exit 1\nfi\nexit 2`,
+            `input=$(cat)\nif [ "$input" = '{"probe":true}' ] && [ "$XDG_DATA_HOME" = '${dir}' ] && [ -z "$HOME" ] && [ -z "$LD_PRELOAD" ]; then\n  echo '${probeResultJson(false)}'\n  exit 1\nfi\nexit 2`,
         );
         const result = await runNativeLifecycle(
             { kind: "test-binary", path: binary },
-            { command: "probe", deadlineMs: 10_000, envelope: { probe: true } },
+            { command: "probe", dataRoot: dir, deadlineMs: 10_000, envelope: { probe: true } },
         );
         expect(result.reason).toBe("not_running");
+    });
+
+    test("a relative data root or an env override of it is rejected before a child is spawned", async () => {
+        const sentinel = path.join(dir, "data-root-ran");
+        const binary = scriptBinary(dir, `touch ${sentinel}`);
+        let relativeError: NativeLaunchError | null = null;
+        try {
+            await runNativeLifecycle(
+                { kind: "test-binary", path: binary },
+                { command: "start", dataRoot: "share", deadlineMs: 10_000 },
+            );
+        } catch (caught) {
+            relativeError = caught as NativeLaunchError;
+        }
+        expect(relativeError?.code).toBe("usage_error");
+        expect(relativeError?.message).toContain("data root is not absolute");
+
+        let overrideError: NativeLaunchError | null = null;
+        try {
+            await runNativeLifecycle(
+                { kind: "test-binary", path: binary },
+                {
+                    command: "start",
+                    dataRoot: dir,
+                    deadlineMs: 10_000,
+                    env: { XDG_DATA_HOME: "/elsewhere" },
+                },
+            );
+        } catch (caught) {
+            overrideError = caught as NativeLaunchError;
+        }
+        expect(overrideError?.code).toBe("usage_error");
+        expect(overrideError?.message).toContain("may not override the data root");
+        expect(existsSync(sentinel)).toBe(false);
     });
 
     test("an envelope that cannot be serialized fails before a child exists", async () => {
@@ -398,7 +433,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 250, envelope },
+                { command: "probe", dataRoot: dir, deadlineMs: 250, envelope },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -418,7 +453,12 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", deadlineMs: 10_000, envelope: () => "no json form" },
+                {
+                    command: "probe",
+                    dataRoot: dir,
+                    deadlineMs: 10_000,
+                    envelope: () => "no json form",
+                },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -449,7 +489,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         );
         const result = await runNativeLifecycle(
             { kind: "test-binary", path: binary },
-            { command: "probe", deadlineMs: 10_000 },
+            { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
         );
         expect(result.reason).toBe("not_running");
     }, 15_000);
@@ -459,7 +499,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: path.join(dir, "does-not-exist") },
-                { command: "probe", deadlineMs: 10_000 },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000 },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
@@ -472,7 +512,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         try {
             await runNativeLifecycle(
                 { kind: "retained-fd", fd: 0 },
-                { command: "probe", deadlineMs: 10_000, platform: "win32" },
+                { command: "probe", dataRoot: dir, deadlineMs: 10_000, platform: "win32" },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
