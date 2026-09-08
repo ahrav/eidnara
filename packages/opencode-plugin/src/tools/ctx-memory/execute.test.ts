@@ -395,4 +395,35 @@ describe("executeCtxMemory", () => {
             "merge accepts at most 20 objectIds; 21 were given. Merge in smaller batches.",
         );
     });
+
+    test("merge without survivor content is rejected before any target is retired", async () => {
+        const { kernel, client } = harness();
+        kernel.seedDecision({ object_id: "mem_a", decision_kind: "NAMING", summary: "A." });
+        kernel.seedDecision({ object_id: "mem_b", decision_kind: "NAMING", summary: "B." });
+        await expect(
+            run(client, "merge", { objectIds: ["mem_a", "mem_b"] }, "call-merge-no-content"),
+        ).rejects.toThrow("merge requires content (with category) or antiMemory for the survivor");
+        expect(kernel.liveRows()).toHaveLength(2);
+    });
+
+    test("get bounds the echoed missing ids to the response budget", async () => {
+        const { client } = harness();
+        const longIds = Array.from(
+            { length: 20 },
+            (_, index) => `mem_${index}_${"x".repeat(2_000)}`,
+        );
+        const text = await run(client, "get", { objectIds: longIds }, "call-get-long-missing");
+        const reply = JSON.parse(text) as {
+            memories: unknown[];
+            missingObjectIds: string[];
+            elidedRequestedIdCount?: number;
+        };
+        expect(Buffer.byteLength(text, "utf8")).toBeLessThan(
+            CTX_MEMORY_RESPONSE_BUDGET_BYTES + 512,
+        );
+        expect(reply.memories).toEqual([]);
+        expect(reply.missingObjectIds.length).toBeGreaterThan(0);
+        expect(reply.missingObjectIds.length + (reply.elidedRequestedIdCount ?? 0)).toBe(20);
+        expect(reply.elidedRequestedIdCount).toBeGreaterThan(0);
+    });
 });
