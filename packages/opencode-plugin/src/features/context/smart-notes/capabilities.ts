@@ -206,14 +206,15 @@ async function guardedReadFileBody(
 // `O_NOFOLLOW` protects only the final path component; a parent-directory symlink swap redirects a
 // pathname-based `open` to another file, and Node exposes no `openat` to bind the open to a checked
 // directory descriptor. Linux publishes the opened dentry's path under procfs; that path must equal the
-// validated canonical path. Elsewhere the caller's `dev`/`ino` comparison is the only ancestry check.
+// validated canonical path, and a Linux host that cannot read it fails closed. Other platforms have no
+// such publication, so the caller's `dev`/`ino` comparison is their only ancestry check.
 async function openedPathIs(handle: FileHandle, canonicalTarget: string): Promise<boolean> {
     if (process.platform !== "linux") return true;
     let opened: string;
     try {
         opened = await readlink(`/proc/self/fd/${handle.fd}`);
     } catch {
-        return true;
+        return false;
     }
     return opened === canonicalTarget;
 }
@@ -289,14 +290,16 @@ async function guardedGitLog(
         .map((line) => line.trim())
         .filter(Boolean)
         .map((line) => {
-            const [sha, authorDate, subject] = line.split("\x1f");
-            return { sha: sha ?? "", authorDate: authorDate ?? "", subject: subject ?? "" };
+            // Git passes U+001F through `%s`, so only the first two delimiters are structural.
+            const [sha, authorDate, ...subject] = line.split("\x1f");
+            return { sha: sha ?? "", authorDate: authorDate ?? "", subject: subject.join("\x1f") };
         })
         .filter((row) => row.sha.length > 0);
 }
 
 // Ordinary git failures (not a repository, unknown ref) resolve to "" so the guest sees `null`.
-// Abort and timeout reject so the runner reports a network failure instead of a fabricated result.
+// Abort, timeout, and a failure to run git at all reject so the runner reports a network-class failure
+// instead of a fabricated result.
 async function runGit(projectRoot: string, args: string[], signal: AbortSignal): Promise<string> {
     throwIfAborted(signal);
     try {
@@ -312,11 +315,14 @@ async function runGit(projectRoot: string, args: string[], signal: AbortSignal):
         );
         return result.stdout;
     } catch (error) {
-        if (
-            signal.aborted ||
-            (error as { killed?: boolean; signal?: string }).signal === "SIGTERM"
-        ) {
+        const failure = error as { code?: unknown; signal?: string | null };
+        if (signal.aborted || failure.signal === "SIGTERM") {
             throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: git command timed out or aborted");
+        }
+        // A numeric `code` is git's exit status; a string `code` (ENOENT, EACCES, stdio overflow) means
+        // the process never ran to completion.
+        if (typeof failure.code === "string") {
+            throw new SmartNoteNetworkError(`SMART_NOTE_NETWORK: git unavailable: ${failure.code}`);
         }
         return "";
     }

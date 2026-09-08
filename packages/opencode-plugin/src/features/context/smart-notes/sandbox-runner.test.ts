@@ -43,6 +43,30 @@ describe("compiled smart-note QuickJS runner", () => {
         if (!result.ok) expect(result.cancelled).toBe(false);
     });
 
+    test("rejects non-finite or non-positive limits before running guest code", async () => {
+        for (const options of [
+            { timeoutMs: Number.NaN },
+            { timeoutMs: Number.POSITIVE_INFINITY },
+            { timeoutMs: 0 },
+            { timeoutMs: -5 },
+            { heapLimitBytes: Number.NaN },
+            { stackLimitBytes: Number.POSITIVE_INFINITY },
+        ]) {
+            const startedAt = Date.now();
+            const result = await runCompiledSmartNoteCheck({
+                compiledCheck: `function check() { while (true) {} }`,
+                capabilities: fakeCap,
+                ...options,
+            });
+            expect(result.ok).toBe(false);
+            if (!result.ok) {
+                expect(result.cancelled).toBe(false);
+                expect(result.error).toMatch(/must be a positive finite number/);
+            }
+            expect(Date.now() - startedAt).toBeLessThan(500);
+        }
+    });
+
     test("returns a typed cancelled result for a pre-aborted run", async () => {
         const controller = new AbortController();
         controller.abort(new Error("sweep deadline"));

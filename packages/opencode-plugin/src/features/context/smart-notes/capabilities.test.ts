@@ -281,6 +281,41 @@ describe("smart-note git capabilities", () => {
         });
     });
 
+    test("a commit subject keeps every delimiter character git passes through", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            const subject = "Record a subject\u001fwith an embedded separator\u001ftwice";
+            await git(dir, "commit", "--allow-empty", "-m", subject);
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            const [latest] = await cap.gitLog({ maxCount: 1 });
+            expect(latest?.subject).toBe(subject);
+            expect(latest?.authorDate).toBe("2020-01-01T00:00:00Z");
+            expect(latest?.sha).toMatch(/^[0-9a-f]{40}$/);
+        });
+    });
+
+    test("a git binary that cannot be spawned rejects instead of reporting empty history", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            const savedPath = process.env.PATH;
+            process.env.PATH = path.join(dir, "no-such-bin");
+            try {
+                const cap = createSmartNoteCapabilities({
+                    projectRoot: dir,
+                    signal: new AbortController().signal,
+                });
+                await expect(cap.gitHeadSha()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+                await expect(cap.gitLog()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            } finally {
+                if (savedPath === undefined) delete process.env.PATH;
+                else process.env.PATH = savedPath;
+            }
+        });
+    });
+
     test("aborted git calls reject instead of masquerading as empty results", async () => {
         await withTempDir(async (dir) => {
             await createTaggedRepository(dir);

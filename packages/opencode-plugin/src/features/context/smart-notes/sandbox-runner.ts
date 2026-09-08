@@ -145,6 +145,17 @@ export async function runCompiledSmartNoteCheck(
     if (Buffer.byteLength(options.compiledCheck, "utf8") > MAX_COMPILED_CHECK_BYTES) {
         return failureResult("compiled check exceeds 64 KiB", false);
     }
+    // A non-finite deadline never interrupts a synchronous guest loop, and the timer cannot run while
+    // that loop holds the thread; the run would wedge the process-wide lock.
+    for (const [name, value] of [
+        ["timeoutMs", options.timeoutMs],
+        ["heapLimitBytes", options.heapLimitBytes],
+        ["stackLimitBytes", options.stackLimitBytes],
+    ] as const) {
+        if (value !== undefined && !(Number.isFinite(value) && value > 0)) {
+            return failureResult(`${name} must be a positive finite number`, false);
+        }
+    }
     // The lock initializes each check's timeout and host-capability controller.
     // A queued check's timeout starts after it acquires the lock.
     return withSandboxLock(() => runCompiledSmartNoteCheckLocked(options));
