@@ -880,3 +880,58 @@ describe("keepsScalarValue", () => {
         expect(keepsScalarValue("api_key", "sk-live")).toBe(false);
     });
 });
+
+describe("redactSecretText — authorization assignments", () => {
+    test("redacts the credential after a scheme in the `=` form and under other secret keys", () => {
+        expect(redactSecretText("Authorization=Bearer abc123secret")).toBe(
+            "Authorization=Bearer <REDACTED:bearer>",
+        );
+        expect(redactSecretText("AUTHORIZATION=Bearer abc123 next=1")).toBe(
+            "AUTHORIZATION=Bearer <REDACTED:bearer> next=1",
+        );
+        expect(redactSecretText('Authorization=Digest username="a", response="b" tail')).toBe(
+            "Authorization=Digest <REDACTED:digest> tail",
+        );
+        expect(redactSecretText("auth=Bearer abc123 next=1")).toBe(
+            "auth=Bearer <REDACTED:bearer> next=1",
+        );
+        expect(redactSecretText("token=Basic dXNlcjpwYXNz")).toBe("token=Basic <REDACTED:basic>");
+    });
+
+    test("redacts a scheme-less authorization value and leaves a lone scheme alone", () => {
+        expect(redactSecretText("authorization: abc123")).toBe(
+            "authorization: <REDACTED:authorization>",
+        );
+        expect(redactSecretText("Authorization=abc123")).toBe(
+            "Authorization=<REDACTED:authorization>",
+        );
+        expect(redactSecretText("Authorization: abc123\nHost: y")).toBe(
+            "Authorization: <REDACTED:authorization>\nHost: y",
+        );
+        expect(redactSecretText("Authorization: Bearer\nContent-Type: x")).toBe(
+            "Authorization: Bearer\nContent-Type: x",
+        );
+    });
+});
+
+describe("sanitizeConfigValue prompt record keys", () => {
+    test("sanitizes keys under prompt-bearing fields as well as their values", () => {
+        expect(
+            sanitizeConfigValue({
+                prompt_surface: {
+                    tool_descriptions: {
+                        "X-API-Key: live-abc": "run it",
+                        "/home/alice/tool": "x",
+                    },
+                },
+            }),
+        ).toEqual({
+            prompt_surface: {
+                tool_descriptions: {
+                    "X-API-Key: <REDACTED:x_api_key>": "<REDACTED 6 chars>",
+                    "/home/<USER>/tool": "<REDACTED 1 chars>",
+                },
+            },
+        });
+    });
+});

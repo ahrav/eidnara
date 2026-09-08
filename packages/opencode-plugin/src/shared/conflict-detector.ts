@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { detectConfigFile, parseConfigJsonc, readJsoncFile } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
@@ -364,6 +364,31 @@ export function projectPluginEntries(directory: string): unknown[] {
         const config = readJsoncFile<unknown>(configPath);
         if (!isRecord(config) || !Array.isArray(config.plugin)) continue;
         entries.push(...config.plugin);
+    }
+    return entries;
+}
+
+/**
+ * Raw `plugin` entries from every layer the host loads except `excludePath`: the other user
+ * config sibling, `OPENCODE_CONFIG`, the project files, and inline `OPENCODE_CONFIG_CONTENT`.
+ * A writer targeting `excludePath` uses this to see what is already registered elsewhere.
+ */
+export function pluginEntriesOutside(directory: string, excludePath: string): unknown[] {
+    const excluded = resolve(excludePath);
+    const entries: unknown[] = [];
+    for (const configPath of openCodeConfigLayerPaths(directory)) {
+        if (resolve(configPath) === excluded) continue;
+        const config = readJsoncFile<unknown>(configPath);
+        if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
+    }
+    const inline = process.env.OPENCODE_CONFIG_CONTENT;
+    if (inline) {
+        try {
+            const config = parseConfigJsonc<unknown>(inline);
+            if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
+        } catch {
+            /* The host rejects the same malformed content, so it contributes nothing. */
+        }
     }
     return entries;
 }

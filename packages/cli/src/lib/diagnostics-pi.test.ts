@@ -234,6 +234,10 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString('client_secret: "prefix\\" LIVE suffix" done')).toBe(
             "client_secret: <REDACTED>",
         );
+        // A bare `key=` is an assignment, so its value goes even when numeric; `key:` stays prose.
+        expect(sanitizeString("key=123456 and press any key: continue")).toBe(
+            "key=<REDACTED> and press any key: continue",
+        );
         expect(sanitizeString("bearer opaque-live-token and BEARER x.y")).toBe(
             "Bearer <REDACTED> and Bearer <REDACTED>",
         );

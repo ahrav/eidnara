@@ -350,6 +350,28 @@ describe("capBodyToGithubLimit", () => {
         expect(capped.split("\n").filter((line) => line.startsWith("```")).length % 2).toBe(0);
     });
 
+    it("closes a longer fence with a run of the same length when the cut lands inside it", () => {
+        // A four-backtick opener (from `codeFenceFor` around content holding a ``` run) must be
+        // closed by four backticks; three would be content under CommonMark.
+        const body = [
+            "## Diagnostics",
+            "````json",
+            `{ "note": "has \`\`\` inside", "pad": "${"p".repeat(9_000)}" }`,
+            "````",
+            "",
+            "## Log (last 1 lines, sanitized)",
+            "```",
+            "tiny log",
+            "```",
+        ].join("\n");
+        const capped = capBodyToGithubLimit(body, 3_000);
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(3_000);
+        expect(capped).toContain("[truncated further to fit GitHub body limit]");
+        const runs = capped.split("\n").flatMap((line) => /^`{3,}/.exec(line)?.[0] ?? []);
+        expect(runs).toEqual(["````", "````"]);
+    });
+
     it("truncates an oversized newest entry even when the log ends with a newline", () => {
         const newest = `NEWEST: ${"y".repeat(70_000)}`;
         const body = [

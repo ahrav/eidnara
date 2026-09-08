@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
     chmodSync,
     existsSync,
+    lstatSync,
     mkdirSync,
     mkdtempSync,
     readFileSync,
+    readlinkSync,
     rmSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -46,6 +49,44 @@ describe("snapshotFiles / restoreFiles", () => {
         expect(readFileSync(existing, "utf-8")).toBe("original\n");
         expect(existsSync(created)).toBe(false);
     });
+
+    it.if(process.platform !== "win32")(
+        "keeps a dangling symlink and removes the target a write created through it",
+        () => {
+            const root = tempRoot();
+            const target = join(root, "dotfiles", "eidnara.jsonc");
+            const link = join(root, "eidnara.jsonc");
+            symlinkSync(target, link);
+            expect(existsSync(link)).toBe(false);
+
+            const snapshot = snapshotFiles([link]);
+            mkdirSync(join(root, "dotfiles"));
+            writeFileSync(target, "{}\n");
+            expect(readFileSync(link, "utf-8")).toBe("{}\n");
+
+            restoreFiles(snapshot);
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(readlinkSync(link)).toBe(target);
+            expect(existsSync(target)).toBe(false);
+        },
+    );
+
+    it.if(process.platform !== "win32")(
+        "writes a restored value through a resolving symlink",
+        () => {
+            const root = tempRoot();
+            const target = join(root, "real.jsonc");
+            const link = join(root, "link.jsonc");
+            writeFileSync(target, "before\n");
+            symlinkSync(target, link);
+
+            const snapshot = snapshotFiles([link]);
+            writeFileSync(link, "after\n");
+            restoreFiles(snapshot);
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(readFileSync(target, "utf-8")).toBe("before\n");
+        },
+    );
 
     it("restores a file that was deleted after the snapshot", () => {
         const root = tempRoot();

@@ -156,11 +156,11 @@ export function writePiSettingsPackage(
         );
     }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
-    // A local checkout or pinned spec of the same package counts as present;
-    // adding the npm entry beside it would load the plugin twice.
+    // A version-pinned source (`npm:@eidnara/pi@0.1.0`), a local checkout, or the object form of
+    // the same package counts as present; a second entry would load the extension twice.
     const present = packages.some(
         (entry) =>
-            entry === packageSource ||
+            matchesPackageSource(entry, packageSource) ||
             (packageSource === PI_PACKAGE_SOURCE &&
                 isEidnaraPiPackageEntry(entry, dirname(settingsPath))),
     );
@@ -171,6 +171,13 @@ export function writePiSettingsPackage(
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return true;
 }
+function matchesPackageSource(entry: unknown, packageSource: string): boolean {
+    return (
+        typeof entry === "string" &&
+        (entry === packageSource || entry.startsWith(`${packageSource}@`))
+    );
+}
+
 export function removePiSettingsPackage(
     settingsPath: string,
     packageSource = PI_PACKAGE_SOURCE,

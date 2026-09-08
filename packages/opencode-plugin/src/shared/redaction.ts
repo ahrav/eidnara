@@ -36,6 +36,9 @@ const BACKTICK_QUOTED_BODY = String.raw`(?:[^\`\\\n]|\\.)*`;
 const BARE_VALUE = String.raw`(?:[^\s'"\`\\]|\\.)+`;
 /** The characters of an HTTP `token`: an auth scheme or parameter name such as `AWS4-HMAC-SHA256` or `Foo+Bar`. */
 const HTTP_TOKEN = "[A-Za-z0-9!#$%&*+.^_|~-]+";
+/** HTTP authentication schemes whose credential follows as the next word. */
+const AUTH_SCHEME_NAMES = "(?:Bearer|Basic|Digest|Token|ApiKey|Api-Key|Negotiate|NTLM|Hawk|OAuth)";
+const AUTH_SCHEME_PATTERN = new RegExp(`^${AUTH_SCHEME_NAMES}$`, "i");
 /** One `name=value` parameter of a `Digest`-style header, with the whitespace RFC 7235 allows around `=`; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. commentlint: allow(JUDGE) */
 const AUTH_PARAM = String.raw`${HTTP_TOKEN}\s*=\s*(?:"${DOUBLE_QUOTED_BODY}"|[^\s,"]+)`;
 /** A PEM header with no footer stops the body scan here instead of reading to the end of the input. */
@@ -232,8 +235,8 @@ function textKeyNamesASecret(key: string): boolean {
  * which has already rewritten its credential.
  */
 function colonSeparatedKeyNamesASecret(key: string, separator: string): boolean {
-    if (!separator.includes(":")) return textKeyNamesASecret(key);
     if (keySegments(key).includes("authorization")) return false;
+    if (!separator.includes(":")) return textKeyNamesASecret(key);
     return isSecretKey(key);
 }
 
@@ -357,12 +360,22 @@ const SECRET_TEXT_PATTERNS: Array<{
         // opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
         // has no minimum length once the header names it: `Basic YTpi` encodes `a:b`. The gap
         // after the scheme stays on the header line so the next header's name is not consumed.
+        // The `=` form (`Authorization=Bearer x` in an environment dump) is the same header
+        // written as an assignment. A lone value that is not a scheme name and ends the line is
+        // a credential with no scheme and is redacted under the header name.
         pattern: new RegExp(
-            `\\b(Authorization\\s*:\\s*)(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)`,
+            `\\b(Authorization\\s*[:=]\\s*)(?:(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(?!${AUTH_SCHEME_NAMES}(?![A-Za-z0-9]))[A-Za-z0-9._~+/=-]+(?=[ \\t]*(?:$|[\\r\\n])))`,
             "gi",
         ),
-        replacement: (_full: string, prefix: string, scheme: string, space: string) =>
-            `${prefix}${scheme}${space}<REDACTED:${scheme.toLowerCase()}>`,
+        replacement: (
+            _full: string,
+            prefix: string,
+            scheme: string | undefined,
+            space: string | undefined,
+        ) =>
+            scheme !== undefined && space !== undefined
+                ? `${prefix}${scheme}${space}<REDACTED:${scheme.toLowerCase()}>`
+                : `${prefix}<REDACTED:authorization>`,
     },
     {
         // `Cookie` carries `name=value` pairs and every value is a credential; `Set-Cookie`
@@ -596,6 +609,21 @@ function keyedValue(
         };
     }
     if (/^["'`]/.test(word)) return { end: wordEnd, replacement: `${word[0]}${marker}${word[0]}` };
+    if (AUTH_SCHEME_PATTERN.test(word)) {
+        // `auth=Bearer abc`: the scheme is a label, and the credential is the following word.
+        SHELL_WORD_PATTERN.lastIndex = wordEnd;
+        const credential = /^[ \t]+/.exec(text.slice(wordEnd));
+        if (credential) {
+            SHELL_WORD_PATTERN.lastIndex = wordEnd + credential[0].length;
+            const credentialMatch = SHELL_WORD_PATTERN.exec(text);
+            if (credentialMatch && !/^-/.test(credentialMatch[0])) {
+                return {
+                    end: SHELL_WORD_PATTERN.lastIndex,
+                    replacement: `${word}${credential[0]}<REDACTED:${word.toLowerCase()}>`,
+                };
+            }
+        }
+    }
     return { end: wordEnd, replacement: isNonSecretScalarValue(word) ? null : marker };
 }
 
@@ -737,8 +765,12 @@ function redactProse(value: unknown): unknown {
     if (typeof value === "string") return describeProseLength(value);
     if (Array.isArray(value)) return value.map(redactProse);
     if (value && typeof value === "object") {
+        // Record keys under a prompt field (`tool_descriptions`) are user data as well.
         return Object.fromEntries(
-            Object.entries(value).map(([entryKey, entry]) => [entryKey, redactProse(entry)]),
+            Object.entries(value).map(([entryKey, entry]) => [
+                sanitizeDiagnosticText(entryKey),
+                redactProse(entry),
+            ]),
         );
     }
     return value;
