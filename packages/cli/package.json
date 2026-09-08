@@ -1,0 +1,43 @@
+{
+  "name": "@eidnara/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Eidnara command line: setup and doctor for OpenCode, Pi, and OMP, and daemon lifecycle",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahrav/eidnara",
+    "directory": "packages/cli"
+  },
+  "bin": {
+    "eidnara": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external @eidnara/shm-native --external jsonc-parser",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.6.0",
+    "@eidnara/shm-native": "0.1.0",
+    "comment-json": "^5.0.0",
+    "jsonc-parser": "^3.3.1"
+  },
+  "optionalDependencies": {
+    "@eidnara/host-linux-x64-gnu": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "@types/node": "^22.20.0",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
