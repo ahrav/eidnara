@@ -44,9 +44,18 @@ requests.
 
 `doctor` reports the harness installation, the plugin entry, the user and
 project configuration, configuration conflicts, the log file, and historian
-dumps. It writes nothing. `doctor --force` repairs configuration only: it adds
-a missing plugin entry, writes a missing default configuration, and applies the
-conflict fixes it reports. `doctor --issue` writes `eidnara-issue-*.md`,
+dumps. It writes nothing. `doctor --force` repairs configuration only, and what
+it repairs depends on the harness:
+
+- OpenCode: applies the conflict fixes it reports (native compaction, DCP,
+  OMO hooks). A missing plugin entry in `opencode.jsonc` or `tui.jsonc` and a
+  missing `eidnara.jsonc` are reported; run `setup` to write them.
+- Pi: adds the missing `npm:@eidnara/pi` package entry and writes a missing
+  default `eidnara.jsonc`.
+- OMP: installs the missing plugin, writes a missing default `eidnara.jsonc`,
+  and turns off `compaction.enabled` and `memory.backend`.
+
+`doctor --issue` writes `eidnara-issue-*.md`,
 `eidnara-pi-issue-*.md`, or `eidnara-omp-issue-*.md` in the current directory
 with secrets and personal paths redacted, and offers to open a GitHub issue
 through `gh` when it is installed and authenticated.

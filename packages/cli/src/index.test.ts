@@ -127,6 +127,10 @@ describe("import-safe CLI dispatch", () => {
         [["doctor", "repair-db"], "Unknown doctor argument: repair-db"],
         [["doctor", "--clear"], "Unknown doctor argument: --clear"],
         [["doctor", "--harness", "pi", "migrate"], "Unknown doctor argument: migrate"],
+        [
+            ["doctor", "--harness", "pi", "--harness", "repair-db"],
+            "Unknown doctor arguments: --harness repair-db",
+        ],
         [["setup", "migrate", "--clear"], "Unknown setup arguments: migrate --clear"],
     ])("%p is rejected as an argument error", async (argv, message) => {
         const h = dependencies();

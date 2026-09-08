@@ -19,7 +19,7 @@ import {
     PI_PACKAGE_SOURCE,
     type PiBinaryInfo,
 } from "../lib/pi-helpers";
-import { type PromptIO, promptIO } from "../lib/prompts";
+import { isPromptCancelledError, type PromptIO, promptIO } from "../lib/prompts";
 import { writePiSettingsPackage } from "./setup-pi";
 
 // Pi 0.74.0 changed the package scope from `@mariozechner/pi-coding-agent` to `@earendil-works/pi-coding-agent`; older Pi versions cannot load this extension because its peerDependency uses the new scope.
@@ -489,6 +489,7 @@ async function runIssueFlow(options: {
         options.prompts.outro("Issue report ready");
         return 0;
     } catch (error) {
+        if (isPromptCancelledError(error)) throw error;
         spinner.stop("Diagnostic collection failed");
         console.error(error instanceof Error ? error.message : String(error));
         options.prompts.outro("Issue report failed");

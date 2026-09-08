@@ -71,12 +71,13 @@ const HELP_FLAGS: ReadonlySet<string> = new Set(["--help", "-h"]);
 const SETUP_FLAGS: ReadonlySet<string> = new Set(["--dry-run", ...HELP_FLAGS]);
 const DOCTOR_FLAGS: ReadonlySet<string> = new Set(["--force", "--issue", ...HELP_FLAGS]);
 
-/** Tokens in `argv` that `allowed` does not name. `--harness` consumes the next token, so that token is never reported. */
 function unknownArguments(argv: string[], allowed: ReadonlySet<string>): string[] {
     const unknown: string[] = [];
+    let harnessSeen = false;
     for (let i = 0; i < argv.length; i++) {
         const token = argv[i];
-        if (token === "--harness") {
+        if (token === "--harness" && !harnessSeen) {
+            harnessSeen = true;
             i++;
             continue;
         }
