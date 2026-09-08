@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { detectRustPrerequisites } from "./check-rust-prerequisites";
 
 const temporaryRoots: string[] = [];
+const channelAvailable = () => ({ available: true });
 
 afterEach(() => {
     for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -38,6 +39,7 @@ describe("Rust direct-host prerequisite detector", () => {
         const result = detectRustPrerequisites({
             repoRoot: root,
             env: { PATH: bin },
+            channelProbe: channelAvailable,
         });
 
         expect(result).toEqual({ ok: true, missing: [] });
@@ -55,6 +57,7 @@ describe("Rust direct-host prerequisite detector", () => {
             repoRoot: root,
             allowBuild: false,
             env: { PATH: bin },
+            channelProbe: channelAvailable,
         });
 
         expect(result).toEqual({ ok: true, missing: [], fixtureBin: fixture });
@@ -65,10 +68,24 @@ describe("Rust direct-host prerequisite detector", () => {
         const result = detectRustPrerequisites({
             repoRoot: root,
             env: { PATH: bin },
+            channelProbe: channelAvailable,
         });
         expect(result.ok).toBe(false);
         expect(result.missing).toContain(
             "cargo workspace: direct_host_fixture example is unavailable",
         );
+    });
+
+    it("reports an unavailable shared-memory channel as a missing prerequisite", () => {
+        const { root, bin } = fakeWorkspace();
+        const result = detectRustPrerequisites({
+            repoRoot: root,
+            env: { PATH: bin },
+            channelProbe: () => ({ available: false, reason: "runtime_mechanism_unavailable" }),
+        });
+        expect(result.ok).toBe(false);
+        expect(result.missing).toEqual([
+            "shared-memory channel unavailable on this runtime: runtime_mechanism_unavailable",
+        ]);
     });
 });

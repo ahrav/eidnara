@@ -9,7 +9,7 @@ export const E2E_ROOT = resolve(import.meta.dir, "..");
 export const MANIFEST_PATH = resolve(E2E_ROOT, "mode-manifest.json");
 const TEST_GLOB = "tests/**/*.test.ts";
 
-export const TIERS = ["rust-only"] as const;
+export const TIERS = ["rust-only", "pi-smoke"] as const;
 export type Tier = (typeof TIERS)[number];
 export type Mode = "rust";
 

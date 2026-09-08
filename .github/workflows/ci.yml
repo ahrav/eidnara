@@ -281,6 +281,16 @@ jobs:
         if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
         run: bun run check:repo
 
+      - name: Incident history and verifier gates
+        # Both validators use the pull request base SHA or protected push `before` SHA.
+        # An unprotected push, a scheduled run, and a manual dispatch have no trusted base, so the step is skipped there.
+        # The validators import `typescript`, so the install above must have run: a path-filtered pull request without TypeScript changes installs here instead.
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_protected)
+        run: |
+          if [ ! -d node_modules ]; then bun install --frozen-lockfile; fi
+          bun run --cwd packages/e2e-tests validate:incident-history:ci
+          bun run --cwd packages/e2e-tests validate:incident-verifiers:ci
+
       # `bun test` resolves QuickJS and the TUI from source and node_modules, so only these smokes exercise the shipped bundles.
       - name: Plugin bundle smokes
         run: bun run --cwd packages/opencode-plugin smoke
@@ -606,6 +616,10 @@ jobs:
         # runner's Bun; OpenCode embeds Bun, so the probe predicts the plugin.
         # The fixture contract probe requires the built native addon;
         # `check:repo` does not build it.
+        # The Pi smoke fails if Node, the Pi package, or the built extension is
+        # missing.
+        env:
+          EIDNARA_E2E_REQUIRE_PI: "1"
         run: |
           npm install -g opencode-ai@1.18.22
           cargo +1.98 build -p daemon --example direct_host_fixture \

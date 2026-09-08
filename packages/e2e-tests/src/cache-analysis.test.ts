@@ -54,7 +54,32 @@ describe("cache-bust oracle", () => {
                 //#then
                 expect(passes[0].verdict).toBe("BASE");
                 expect(passes.slice(1).every((c) => c.verdict === "STABLE")).toBe(true);
+                expect(passes.slice(1).every((c) => c.prevHadBreakpoint)).toBe(true);
                 expect(findBusts(requests)).toHaveLength(0);
+            });
+        });
+    });
+
+    describe("#given a conversation that never emits a cache_control breakpoint", () => {
+        describe("#when an earlier message mutates in place between passes", () => {
+            it("#then zero busts is vacuous and every transition reports no previous breakpoint", () => {
+                const first = req([
+                    { role: "user", content: "a" },
+                    { role: "user", content: "b" },
+                ]);
+                const second = req([
+                    { role: "user", content: "a-mutated" },
+                    { role: "user", content: "b" },
+                    { role: "user", content: "c" },
+                ]);
+
+                //#when
+                const passes = analyzePasses([first, second, structuredClone(second)]);
+
+                //#then
+                expect(passes.map((c) => c.verdict)).toEqual(["BASE", "STABLE", "SAME"]);
+                expect(passes.slice(1).every((c) => !c.prevHadBreakpoint)).toBe(true);
+                expect(findBusts([first, second])).toHaveLength(0);
             });
         });
     });

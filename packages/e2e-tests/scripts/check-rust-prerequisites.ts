@@ -3,11 +3,17 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { probeCapabilities } from "@eidnara/shm-native";
+
+/** The plugin reaches the daemon only through the shared-memory channel, so the channel probe is a prerequisite alongside Cargo. */
+export type ChannelProbe = () => { available: boolean; reason?: string };
 
 export interface RustPrerequisiteOptions {
     repoRoot?: string;
     allowBuild?: boolean;
     env?: NodeJS.ProcessEnv;
+    /** Defaults to the shm-native capability probe; tests substitute a fixed verdict. */
+    channelProbe?: ChannelProbe;
 }
 
 export interface RustPrerequisiteResult {
@@ -114,6 +120,12 @@ export function detectRustPrerequisites(
         } else {
             missing.push("direct host fixture build failed");
         }
+    }
+    const channel = (options.channelProbe ?? probeCapabilities)();
+    if (!channel.available) {
+        missing.push(
+            `shared-memory channel unavailable on this runtime: ${channel.reason ?? "unknown"}`,
+        );
     }
 
     return {

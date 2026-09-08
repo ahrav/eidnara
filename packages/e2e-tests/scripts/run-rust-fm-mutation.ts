@@ -1,0 +1,163 @@
+#!/usr/bin/env bun
+
+import { readFileSync, writeFileSync } from "node:fs";
+import { relative, resolve } from "node:path";
+import { bunTestEvidence } from "./mutation-evidence-output";
+import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
+
+type MutationCase = {
+    name: string;
+    source: string;
+    oldText: string;
+    replacement: string;
+    /** The `it(...)` title Bun prints on the `(fail)` line when the mutation reaches the drill's assertion. */
+    expectedFailingTest: string;
+};
+
+type CommandResult = {
+    exit_status: number;
+    output: string;
+};
+
+const e2eRoot = resolve(import.meta.dir, "..");
+const repoRoot = resolve(e2eRoot, "../..");
+const pluginRoot = resolve(e2eRoot, "../opencode-plugin");
+const pluginTransform = resolve(pluginRoot, "src/hooks/context/rust-mode-transform.ts");
+const commandFor = (drill: string) =>
+    `bun run build (packages/opencode-plugin) && bun test --timeout 600000 --max-concurrency=1 tests/rust-fm-oc-${drill}.test.ts`;
+
+const mutations: Record<string, MutationCase[]> = {
+    "2": [
+        {
+            name: "FM_OC_2_RUNG_DELETION",
+            source: pluginTransform,
+            oldText:
+                'sessionLog(sessionId, "rust transform failed; serving the input unchanged:", error);',
+            replacement: "",
+            expectedFailingTest: "continues through the outage with a loud module failure",
+        },
+    ],
+    "3": [
+        {
+            name: "FM_OC_3_RUNG_SWAP",
+            source: pluginTransform,
+            oldText: "if (needFullSync || nativeContentOmitted) {",
+            replacement: "if (nativeContentOmitted) {",
+            expectedFailingTest:
+                "serves passes from transform again after the host restarts, without restarting the session",
+        },
+    ],
+    "5": [
+        {
+            name: "FM_OC_5_RUNG_SWAP",
+            source: pluginTransform,
+            oldText: 'servedFrom = "raw";',
+            replacement: 'servedFrom = "transform";',
+            expectedFailingTest: "continues through a transport timeout and recovers after SIGCONT",
+        },
+    ],
+};
+
+function runBuildAndDrill(drill: string): CommandResult {
+    const build = Bun.spawnSync({
+        cmd: ["bun", "run", "build"],
+        cwd: pluginRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: process.env,
+    });
+    const decoder = new TextDecoder();
+    const buildOutput = `${decoder.decode(build.stdout)}${decoder.decode(build.stderr)}`;
+    if (build.exitCode !== 0) {
+        return { exit_status: build.exitCode, output: buildOutput };
+    }
+    const test = Bun.spawnSync({
+        cmd: [
+            "bun",
+            "test",
+            "--timeout",
+            "600000",
+            "--max-concurrency=1",
+            `tests/rust-fm-oc-${drill}.test.ts`,
+        ],
+        cwd: e2eRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, EIDNARA_E2E_MODE: "rust" },
+    });
+    return {
+        exit_status: test.exitCode,
+        output: `${buildOutput}${decoder.decode(test.stdout)}${decoder.decode(test.stderr)}`,
+    };
+}
+
+function applyCase(mutation: MutationCase): { before: string; after: string } {
+    const before = readFileSync(mutation.source, "utf8");
+    const occurrences = before.split(mutation.oldText).length - 1;
+    if (occurrences !== 1) {
+        throw new Error(`${mutation.name}: expected one mutation target, found ${occurrences}`);
+    }
+    const after = before.replace(mutation.oldText, mutation.replacement);
+    writeFileSync(mutation.source, after);
+    return { before, after };
+}
+
+const drill = Bun.argv[2];
+if (!drill || !mutations[drill]) {
+    console.error(`usage: bun scripts/run-rust-fm-mutation.ts ${Object.keys(mutations).join("|")}`);
+    process.exit(2);
+}
+
+const command = commandFor(drill);
+const results: Array<Record<string, unknown>> = [];
+for (const mutation of mutations[drill]) {
+    const { before, after } = applyCase(mutation);
+    let observedFailure: CommandResult;
+    try {
+        observedFailure = runBuildAndDrill(drill);
+    } finally {
+        writeFileSync(mutation.source, before);
+    }
+
+    // The reverted rerun runs before any verdict so `packages/opencode-plugin/dist` is rebuilt from the restored source even when the record is refused.
+    const revertedRerun = runBuildAndDrill(drill);
+    if (observedFailure.exit_status === 0) {
+        throw new Error(`${mutation.name}: mutation did not redden the drill`);
+    }
+    // A failed plugin build or harness start also exits nonzero; only the drill's own test failing proves the mutation reached its assertion.
+    const failedTests = [
+        ...observedFailure.output.matchAll(/^\(fail\) (.+?)(?: \[[\d.]+m?s\])?$/gmu),
+    ].map((match) => match[1] ?? "");
+    if (!failedTests.some((test) => test.includes(mutation.expectedFailingTest))) {
+        throw new Error(
+            `${mutation.name}: mutated run went red without failing "${mutation.expectedFailingTest}" (failed: ${failedTests.join("; ") || "none reported"})`,
+        );
+    }
+    if (revertedRerun.exit_status !== 0) {
+        throw new Error(`${mutation.name}: reverted rerun did not pass`);
+    }
+    results.push({
+        name: mutation.name,
+        applied_diff: {
+            path: relative(repoRoot, mutation.source),
+            before: mutation.oldText,
+            after: mutation.replacement,
+            changed: before !== after,
+        },
+        observed_failure: { ...observedFailure, output: bunTestEvidence(observedFailure.output) },
+        reverted_rerun: {
+            ...revertedRerun,
+            output: bunTestEvidence(revertedRerun.output),
+            status: "pass",
+        },
+        adequacy_finding: null,
+    });
+}
+
+const recordPath = resolve(e2eRoot, `mutations/fm-oc-${drill}.json`);
+writeFileSync(
+    recordPath,
+    `${JSON.stringify({ drill: `FM-OC-${drill}`, command, mutations: results }, null, 2)}\n`,
+);
+console.log(`wrote ${recordPath}`);
+reportMutationInventorySync(syncMutationInventory());

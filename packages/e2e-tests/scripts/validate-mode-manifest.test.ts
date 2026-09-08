@@ -21,7 +21,7 @@ const VALID_TEST_SOURCE = 'import { it } from "bun:test";\nit("x", () => {});\n'
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(9);
+        expect(validation.files.length).toBe(18);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -31,16 +31,19 @@ describe("mode manifest validator", () => {
         );
     });
 
-    it("selects every entry for rust and every entry is rust-only", () => {
+    it("selects every entry for rust; only the Pi smoke entry is pi-smoke", () => {
         expect(filesForMode(validation, "rust")).toEqual(validation.files);
-        expect(validation.manifest.entries.every((entry) => entry.tier === "rust-only")).toBe(true);
+        const tiers = new Map(validation.manifest.entries.map((entry) => [entry.path, entry.tier]));
+        expect(tiers.get("tests/pi-smoke.test.ts")).toBe("pi-smoke");
+        tiers.delete("tests/pi-smoke.test.ts");
+        expect([...tiers.values()].every((tier) => tier === "rust-only")).toBe(true);
     });
 
     it("fails when a test file lacks an entry", () => {
         const entries = validation.manifest.entries;
         expect(() =>
             validateManifestDocument(manifestWith(entries.slice(0, -1)), validation.files),
-        ).toThrow(/missing manifest entries: tests\/rust-tail-mutation-readopt\.test\.ts/);
+        ).toThrow(/missing manifest entries: tests\/thinking-block-safety\.test\.ts/);
     });
 
     it("rejects a duplicated or dead manifest path", () => {
@@ -59,7 +62,7 @@ describe("mode manifest validator", () => {
         ).toThrow(/dead or out-of-scope/);
     });
 
-    it("rejects tiers other than rust-only and unknown entry fields", () => {
+    it("rejects unknown tiers and unknown entry fields", () => {
         const entries = validation.manifest.entries;
         expect(() =>
             validateManifestDocument(
