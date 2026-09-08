@@ -41,9 +41,14 @@ export function isMachineAuthoredPart(part: Record<string, unknown>): boolean {
     return (marker as Record<string, unknown>).kind != null;
 }
 
+// `String#trim` leaves U+0085 (NEXT LINE) in place; `normalizeText` already treats it as whitespace.
+function trimText(text: string): string {
+    return text.replace(/^[\s\u0085]+|[\s\u0085]+$/g, "");
+}
+
 // Remove system injections before stripping tag prefixes because removal can expose a leading tag.
 function cleanUserText(text: string): string {
-    return stripTagPrefix(removeSystemInjections(text)).trim();
+    return trimText(stripTagPrefix(removeSystemInjections(text)));
 }
 
 export function isMeaningfulUserText(text: string): boolean {
@@ -70,7 +75,7 @@ export function extractTexts(parts: unknown[], role: string): string[] {
         if (p.type !== "text" || typeof p.text !== "string") continue;
         if (isMachineAuthoredPart(p)) continue;
         // `hasMeaningfulUserText` evaluates cleaned text, so summaries clean user text too.
-        const text = role === "user" ? cleanUserText(p.text) : p.text.trim();
+        const text = role === "user" ? cleanUserText(p.text) : trimText(p.text);
         if (text.length === 0) continue;
         texts.push(text);
     }
@@ -204,9 +209,9 @@ export function compactTextForSummary(
         .replace(createCommitHashExtractPattern(), (match, hash: string) => {
             if (!removable.has(hash.toLowerCase())) return match;
             removed += 1;
-            return removeHashKeepUnpairedBacktick(match);
+            return removeHashKeepUnpairedBacktick(match) + REMOVED_HASH;
         })
-        .replace(/\(\s*\)/g, "")
+        .replace(EMPTIED_PARENS_OR_MARKER, "")
         .replace(/\s+,/g, ",")
         .replace(/,\s*,+/g, ", ")
         .replace(/\s{2,}/g, " ")
@@ -219,6 +224,10 @@ export function compactTextForSummary(
         commitHashes,
     };
 }
+
+// The marker lets cleanup remove only parentheses emptied by hash removal; `foo()` elsewhere is kept.
+const REMOVED_HASH = "\ue000";
+const EMPTIED_PARENS_OR_MARKER = /\(\s*\ue000(?:\s*,\s*\ue000)*\s*\)|\ue000/g;
 
 /**
  * The extract pattern makes each backtick independently optional, so a hash inside a longer code

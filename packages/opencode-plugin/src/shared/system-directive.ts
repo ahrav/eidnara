@@ -53,7 +53,7 @@ export function removeSystemInjections(text: string): string {
         );
     }
     // Cutting a whole paragraph leaves the blank lines on both sides of it adjacent.
-    return cleaned.replace(/\n{3,}/g, "\n\n").trim();
+    return cleaned.replace(/((?:\r?\n){2})(?:\r?\n)+/g, "$1").trim();
 }
 
 /** Collecting kept segments avoids copying the remaining tail for each marker. `endOf` must return an index past `start`. */
@@ -81,15 +81,21 @@ function directiveBlockEnd(text: string, start: number): number {
     if (close === -1) return text.length;
     let searchFrom = close + 1;
     for (;;) {
-        const boundary = text.indexOf("\n\n", searchFrom);
-        if (boundary === -1) return text.length;
-        const next = text.slice(boundary + 2).trimStart()[0];
-        if (next !== "-" && next !== "*") return boundary;
-        searchFrom = boundary + 2;
+        const blank = findBlankLine(text, searchFrom);
+        if (blank === null) return text.length;
+        const next = text.slice(blank.end).trimStart()[0];
+        if (next !== "-" && next !== "*") return blank.start;
+        searchFrom = blank.end;
     }
 }
 
 function blankLineEnd(text: string, from: number): number {
-    const boundary = text.indexOf("\n\n", from);
-    return boundary === -1 ? text.length : boundary;
+    return findBlankLine(text, from)?.start ?? text.length;
+}
+
+function findBlankLine(text: string, from: number): { start: number; end: number } | null {
+    const pattern = /\r?\n\r?\n/g;
+    pattern.lastIndex = from;
+    const match = pattern.exec(text);
+    return match === null ? null : { start: match.index, end: match.index + match[0].length };
 }

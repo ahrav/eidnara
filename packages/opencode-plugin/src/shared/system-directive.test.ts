@@ -117,6 +117,17 @@ describe("removeSystemInjections", () => {
         expect(removeSystemInjections(text)).toBe("keep\n\nafter the directive");
     });
 
+    it("recognizes CRLF blank lines as block boundaries", () => {
+        expect(
+            removeSystemInjections("before\r\n\r\n[Category+Skill Reminder] injected\r\n\r\nafter"),
+        ).toBe("before\r\n\r\nafter");
+        expect(
+            removeSystemInjections(
+                "before\r\n\r\n[SYSTEM DIRECTIVE: EIDNARA] do:\r\n- one\r\n\r\n- two\r\n\r\nafter",
+            ),
+        ).toBe("before\r\n\r\nafter");
+    });
+
     it("removes a directive with no closing bracket through the end of the text", () => {
         expect(removeSystemInjections("keep\n\n[SYSTEM DIRECTIVE: EIDNARA never closed")).toBe(
             "keep",
