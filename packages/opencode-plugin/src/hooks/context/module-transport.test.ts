@@ -321,6 +321,43 @@ describe("generation-sensitive not-sent outcomes", () => {
             }),
         ).resolves.toMatchObject({ transport_status: "connection_generation_changed" });
     });
+
+    test("a body built under an older generation is not sent once the route settles on a newer one", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let sent = 0;
+        fakeRoute(transport, async () => {
+            sent += 1;
+            return { ok: true };
+        });
+        // The route settles on generation 0 (the fake's), so a body built under 3 was overtaken in the lane.
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: {},
+                generationSensitive: true,
+                expectedGeneration: 3,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: 3,
+            current_generation: 0,
+        });
+        expect(sent).toBe(0);
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: {},
+                generationSensitive: true,
+                expectedGeneration: 0,
+            }),
+        ).resolves.toEqual({ ok: true });
+        expect(sent).toBe(1);
+    });
 });
 
 describe("managed startup envelope harness closures", () => {

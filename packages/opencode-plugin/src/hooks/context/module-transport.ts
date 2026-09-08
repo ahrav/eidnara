@@ -675,6 +675,8 @@ export class HostModuleTransport {
         signal?: AbortSignal;
         /** `call()` does not retry after reconnecting; callers rebuild for the new connection. */
         generationSensitive?: boolean;
+        /** The connection generation the body was built under. Checked after lane admission and route settlement, right before the send, so a turnover that lands while this call waits in the session lane returns `connection_generation_changed` instead of delivering the body to the new connection. commentlint: allow(JUDGE) */
+        expectedGeneration?: number;
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
     }): Promise<unknown> {
@@ -734,6 +736,16 @@ export class HostModuleTransport {
                     );
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
+                    }
+                    if (
+                        args.expectedGeneration !== undefined &&
+                        ensuredRoute.generation !== args.expectedGeneration
+                    ) {
+                        return {
+                            transport_status: "connection_generation_changed",
+                            previous_generation: args.expectedGeneration,
+                            current_generation: ensuredRoute.generation,
+                        } satisfies ModuleTransportGenerationChangedResult;
                     }
                     requestInvoked = true;
                     const response = await this.beforeDeadline(

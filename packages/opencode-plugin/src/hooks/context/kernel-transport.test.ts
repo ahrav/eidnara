@@ -359,11 +359,14 @@ describe("createKernelTransport connection identity", () => {
         ).rejects.toBeInstanceOf(ConnectionIdentityChangedError);
     });
 
-    test("sends generation-sensitive and turns the module's generation-changed answer into a refusal", async () => {
+    test("sends generation-sensitive with the expected generation and turns the module's generation-changed answer into a refusal", async () => {
         const module = managedTransport();
-        const seen: Array<{ generationSensitive?: boolean }> = [];
+        const seen: Array<{ generationSensitive?: boolean; expectedGeneration?: number }> = [];
         module.call = async (args) => {
-            seen.push({ generationSensitive: args.generationSensitive });
+            seen.push({
+                generationSensitive: args.generationSensitive,
+                expectedGeneration: args.expectedGeneration,
+            });
             return {
                 transport_status: "connection_generation_changed",
                 previous_generation: 0,
@@ -379,7 +382,7 @@ describe("createKernelTransport connection identity", () => {
                 body: { method: "kernel.read", v: 1 },
             }),
         ).rejects.toBeInstanceOf(ConnectionIdentityChangedError);
-        expect(seen).toEqual([{ generationSensitive: true }]);
+        expect(seen).toEqual([{ generationSensitive: true, expectedGeneration: 0 }]);
     });
 });
 

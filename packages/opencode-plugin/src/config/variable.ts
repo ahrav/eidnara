@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { stripJsonComments } from "../shared/jsonc-parser";
+import { homeDir } from "./config-paths";
 
 export interface SubstituteInput {
     /** Raw config text before JSONC parsing. */
@@ -45,7 +45,7 @@ function isWithinDirectory(dir: string, candidate: string): boolean {
  * User-level configs warn, rather than block, when `{file:}` resolves under these directories.
  */
 function sensitiveFilePathReason(resolvedPath: string): string | null {
-    const home = homedir();
+    const home = homeDir();
     const sensitiveDirs: Array<{ dir: string; label: string }> = [
         { dir: resolve(home, ".ssh"), label: "SSH keys" },
         { dir: resolve(home, ".aws"), label: "AWS credentials" },
@@ -129,29 +129,49 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             const prefix = source.slice(lineStart, index).trimStart();
             if (prefix.startsWith("//")) return token;
 
+            // A missing fragment must not leave a shorter path that names some other existing file (`{file:{env:DIR}/secret}` with `DIR` unset would read `/secret`), so the whole token yields the empty string the env warning already announced. commentlint: allow(JUDGE)
+            let nestedEnvMissing = false;
             let filePath = rawPath
-                .replace(ENV_PATTERN, (_, rawName: string) => envValue(rawName) ?? "")
+                .replace(ENV_PATTERN, (_, rawName: string) => {
+                    const value = envValue(rawName);
+                    if (value === undefined) nestedEnvMissing = true;
+                    return value ?? "";
+                })
                 .trim();
+            if (nestedEnvMissing) return "";
             if (filePath.startsWith("~/")) {
-                filePath = resolve(homedir(), filePath.slice(2));
+                filePath = resolve(homeDir(), filePath.slice(2));
             } else if (!isAbsolute(filePath)) {
                 filePath = resolve(configDir, filePath);
             }
 
-            // Inlining a sensitive file exposes its contents in the substituted config.
-            const sensitiveReason = sensitiveFilePathReason(filePath);
-            if (sensitiveReason) {
+            // Inlining a sensitive file exposes its contents in the substituted config. The spelled path is classified before the existence check so the warning fires whether or not the file is there. commentlint: allow(JUDGE)
+            const warnSensitive = (reason: string, target: string): void => {
                 warnings.push(
-                    `${token} resolves to a sensitive path (${sensitiveReason}: ${filePath}); ` +
+                    `${token} resolves to a sensitive path (${reason}: ${target}); ` +
                         "inlining its contents into config — make sure this is intentional.",
                 );
-            }
+            };
+            const spelledReason = sensitiveFilePathReason(filePath);
+            if (spelledReason) warnSensitive(spelledReason, filePath);
 
             if (!existsSync(filePath)) {
                 warnings.push(
                     `File not found for ${token} (resolved to ${filePath}); using empty string`,
                 );
                 return "";
+            }
+
+            // The read follows symlinks, so an existing file's real path is classified too; a link elsewhere into a credential directory is still a credential read. commentlint: allow(JUDGE)
+            if (!spelledReason) {
+                let realPath = filePath;
+                try {
+                    realPath = realpathSync.native(filePath);
+                } catch {
+                    // A path that exists but cannot be resolved keeps its spelling and fails the read below.
+                }
+                const realReason = realPath === filePath ? null : sensitiveFilePathReason(realPath);
+                if (realReason) warnSensitive(realReason, `${filePath} -> ${realPath}`);
             }
 
             let contents: string;

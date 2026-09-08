@@ -44,7 +44,7 @@ function storeLifecycleReason(error: unknown): StoreLifecycleReason | undefined 
         : undefined;
 }
 
-/** A demand-start-capable transport is reachable with no connection file because `call` starts its daemon; every other origin keeps the synchronous stat that answers `daemon_absent` before any dial. The daemon dispatches on the method encoded in the body, so `call` refuses a body whose `method` differs from the checked one; otherwise a permitted `args.method` could carry a non-kernel body to a destructive handler. The connection identity is the module's generation: a body built under an older one is refused before any send, and the module's own proven-not-sent replay is disabled with `generationSensitive`, so a body carrying one daemon's tokens is never delivered to its successor. commentlint: allow(JUDGE) */
+/** A demand-start-capable transport is reachable with no connection file because `call` starts its daemon; every other origin keeps the synchronous stat that answers `daemon_absent` before any dial. The daemon dispatches on the method encoded in the body, so `call` refuses a body whose `method` differs from the checked one; otherwise a permitted `args.method` could carry a non-kernel body to a destructive handler. The connection identity is the module's generation: a body built under an older one is refused before any send, the same generation is handed to the module as `expectedGeneration` so it re-checks after lane admission and route settlement, and the module's own proven-not-sent replay is disabled with `generationSensitive`; a body carrying one daemon's tokens is therefore never delivered to its successor. commentlint: allow(JUDGE) */
 export function createKernelTransport(transport: HostModuleTransport): KernelTransport {
     const connectionIdentity = (): string => String(transport.generation);
     return {
@@ -60,10 +60,11 @@ export function createKernelTransport(transport: HostModuleTransport): KernelTra
                     `kernel transport refuses a body whose encoded method is not ${args.method}`,
                 );
             }
-            if (
-                args.connectionIdentity !== undefined &&
-                args.connectionIdentity !== connectionIdentity()
-            ) {
+            const expectedGeneration =
+                args.connectionIdentity === undefined
+                    ? transport.generation
+                    : Number(args.connectionIdentity);
+            if (expectedGeneration !== transport.generation) {
                 throw new ConnectionIdentityChangedError();
             }
             let result: unknown;
@@ -74,6 +75,7 @@ export function createKernelTransport(transport: HostModuleTransport): KernelTra
                     method: args.method,
                     body: args.body,
                     generationSensitive: true,
+                    expectedGeneration,
                     ...(args.signal ? { signal: args.signal } : {}),
                     ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
                 });

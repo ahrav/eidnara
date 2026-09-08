@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 
@@ -358,6 +358,23 @@ describe("substituteConfigVariables", () => {
             expect(result.text).toBe(`{ "template": "{env:EIDNARA_TEST_KEY}" }`);
             expect(result.warnings).toHaveLength(0);
         });
+
+        it("a missing env inside a {file:} token empties the whole token instead of reading the shortened path", () => {
+            // With the directory fragment gone, the remainder would name `<configDir>/secret.txt`, which exists here.
+            writeFileSync(join(tmpDir, "secret.txt"), "must-not-be-read");
+            delete process.env.EIDNARA_MISSING_DIR;
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_MISSING_DIR}/secret.txt}" }`;
+            const result = substituteConfigVariables({
+                text: input,
+                configPath: join(tmpDir, "eidnara.jsonc"),
+            });
+
+            expect(result.text).toBe(`{ "api_key": "" }`);
+            expect(result.text).not.toContain("must-not-be-read");
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("EIDNARA_MISSING_DIR is not set");
+        });
     });
 
     describe("no-op cases", () => {
@@ -451,6 +468,22 @@ describe("substituteConfigVariables", () => {
             const input = `{ "key": "{file:~/notes/../.aws/credentials}" }`;
             const result = substituteConfigVariables({ text: input });
             expect(result.warnings.some((w) => w.includes("AWS credentials"))).toBe(true);
+        });
+
+        it("warns when a symlink outside the credential directories points into one", () => {
+            // `homedir()` follows HOME, so the credential directories live under the temp home for this test.
+            process.env.HOME = tmpDir;
+            mkdirSync(join(tmpDir, ".ssh"));
+            writeFileSync(join(tmpDir, ".ssh", "id_rsa"), "private-key");
+            const link = join(tmpDir, "innocent-link");
+            symlinkSync(join(tmpDir, ".ssh", "id_rsa"), link);
+
+            const result = substituteConfigVariables({ text: `{ "key": "{file:${link}}" }` });
+
+            expect(result.text).toBe(`{ "key": "private-key" }`);
+            const warning = result.warnings.find((w) => w.includes("sensitive path"));
+            expect(warning).toContain("SSH keys");
+            expect(warning).toContain(`${link} -> `);
         });
     });
 });
