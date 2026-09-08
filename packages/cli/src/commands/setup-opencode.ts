@@ -304,10 +304,15 @@ export function withClaudeMaxCacheTtl(
     existing: unknown,
     selectedModels: readonly (string | null)[] = [],
 ): Record<string, string> {
-    const cacheTtl =
-        typeof existing === "string"
-            ? { default: existing }
-            : (asPlainRecord(existing) as Record<string, string>);
+    // The schema types every `cache_ttl` value as a string; a non-string value would fail the whole record.
+    const cacheTtl: Record<string, string> = {};
+    if (typeof existing === "string") {
+        cacheTtl.default = existing;
+    } else {
+        for (const [key, value] of Object.entries(asPlainRecord(existing))) {
+            if (typeof value === "string" && value.length > 0) cacheTtl[key] = value;
+        }
+    }
     if (!cacheTtl.default) cacheTtl.default = "5m";
     cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
     cacheTtl["anthropic/claude-opus-4-6"] = "59m";

@@ -164,6 +164,12 @@ describe("setup-opencode config safety", () => {
             ...overrides,
         });
         expect(withClaudeMaxCacheTtl(["5m"])).toEqual({ default: "5m", ...overrides });
+        // Non-string members would fail the schema for the whole record; they are dropped.
+        expect(withClaudeMaxCacheTtl({ default: 10, "openai/gpt-5": 30, "x/y": "1h" })).toEqual({
+            default: "5m",
+            "x/y": "1h",
+            ...overrides,
+        });
     });
 
     it("extends the Claude Max overrides to the selected Anthropic models only", () => {
