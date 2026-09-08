@@ -116,7 +116,7 @@ describe("detectOpenCode", () => {
         ]);
     });
 
-    it("deduplicates PATH and home-bin symlink aliases by realpath", () => {
+    it("deduplicates PATH and home-bin symlink aliases by realpath but keeps the launcher path", () => {
         const homeBin = join(HOME, ".opencode", "bin", "opencode");
         const pathBin = "/somewhere/opencode";
         const target = "/opt/opencode/1.18.0/opencode";
@@ -124,7 +124,19 @@ describe("detectOpenCode", () => {
             ...deps(new Set([homeBin, pathBin]), "darwin", () => pathBin),
             realpath: (path) => (path === pathBin || path === homeBin ? target : path),
         });
-        expect(installations).toEqual([{ path: target, source: "PATH", kind: "cli" }]);
+        expect(installations).toEqual([{ path: pathBin, source: "PATH", kind: "cli" }]);
+    });
+
+    it("reports desktop from the opencode.global.dat state file alone", () => {
+        const dat = join(
+            HOME,
+            "Library",
+            "Application Support",
+            "ai.opencode.desktop",
+            "opencode.global.dat",
+        );
+        expect(openCodeDesktopSettingsMarkers(deps(new Set()))).toContain(dat);
+        expect(detectOpenCode(deps(new Set([dat])))).toEqual({ kind: "desktop", marker: dat });
     });
 
     it("enumerates Desktop settings and GUI app probes after CLI probes", () => {

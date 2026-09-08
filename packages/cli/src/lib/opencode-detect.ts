@@ -30,8 +30,10 @@ export const OPENCODE_DESKTOP_APP_IDS = [
     "ai.opencode.desktop.dev",
 ] as const;
 
-// Desktop writes `opencode.settings` in its electron-store userData directory.
-const OPENCODE_DESKTOP_SETTINGS_FILE = "opencode.settings";
+// Desktop writes both files in its userData directory once it has run:
+// `opencode.settings` holds electron-store preferences and `opencode.global.dat`
+// holds the sidecar server state that the plugin's conflict-warning hook reads.
+const OPENCODE_DESKTOP_STATE_FILES = ["opencode.settings", "opencode.global.dat"] as const;
 
 /**
  * Injectable dependencies let tests avoid the host filesystem and real `$HOME`.
@@ -44,7 +46,7 @@ export interface DetectDeps {
     env: NodeJS.ProcessEnv;
     /** `onPath` searches PATH for a bare `opencode` binary. */
     onPath: (binary: string) => string | null;
-    /** `addCandidate` uses `realpath` to collapse symlink aliases. */
+    /** `addCandidate` uses `realpath` as the deduplication key for symlink aliases. */
     realpath?: (path: string) => string;
 }
 
@@ -101,7 +103,10 @@ function canonicalPath(d: DetectDeps, path: string): string {
     }
 }
 
-/** `addCandidate` uses each candidate's real path to collapse symlink aliases. */
+/**
+ * The real path is only the deduplication key. The candidate path must remain
+ * because `getCommandInvocation` adds its directory to the child `PATH`.
+ */
 function addCandidate(
     installations: OpenCodeInstallation[],
     seenRealpaths: Set<string>,
@@ -110,10 +115,10 @@ function addCandidate(
     source: OpenCodeInstallSource,
     kind: OpenCodeInstallation["kind"],
 ): void {
-    const path = canonicalPath(d, candidate);
-    if (seenRealpaths.has(path)) return;
-    seenRealpaths.add(path);
-    installations.push({ path, source, kind });
+    const key = canonicalPath(d, candidate);
+    if (seenRealpaths.has(key)) return;
+    seenRealpaths.add(key);
+    installations.push({ path: candidate, source, kind });
 }
 
 /** Linux Desktop userData uses the XDG config base. */
@@ -165,8 +170,8 @@ function desktopAppPaths(d: DetectDeps): string[] {
 }
 export function openCodeDesktopSettingsMarkers(deps?: Partial<DetectDeps>): string[] {
     const d = { ...defaultDeps(), ...deps };
-    return OPENCODE_DESKTOP_APP_IDS.map((appId) =>
-        join(desktopUserDataDir(d, appId), OPENCODE_DESKTOP_SETTINGS_FILE),
+    return OPENCODE_DESKTOP_APP_IDS.flatMap((appId) =>
+        OPENCODE_DESKTOP_STATE_FILES.map((file) => join(desktopUserDataDir(d, appId), file)),
     );
 }
 
@@ -192,8 +197,7 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
         }
     }
 
-    for (const appId of OPENCODE_DESKTOP_APP_IDS) {
-        const marker = join(desktopUserDataDir(d, appId), OPENCODE_DESKTOP_SETTINGS_FILE);
+    for (const marker of openCodeDesktopSettingsMarkers(d)) {
         if (d.exists(marker)) {
             addCandidate(installations, seenRealpaths, d, marker, "desktop", "desktop");
         }
