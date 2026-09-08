@@ -45,8 +45,8 @@ export function validateModelId(value: string): string | undefined {
     const trimmed = value.trim();
     if (trimmed.length === 0) return "A model id is required";
     const slash = trimmed.indexOf("/");
-    if (slash <= 0 || slash === trimmed.length - 1) {
-        return "Use the canonical provider/model form (e.g. anthropic/claude-haiku-4-5)";
+    if (slash <= 0 || slash === trimmed.length - 1 || /\s/.test(trimmed)) {
+        return "Use the canonical provider/model form without spaces (e.g. anthropic/claude-haiku-4-5)";
     }
     return undefined;
 }

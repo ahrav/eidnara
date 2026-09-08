@@ -259,6 +259,21 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).not.toContain("LINE000000:");
     });
 
+    it("ignores a Log heading that appears inside the main log content", () => {
+        // A logged Error message can carry a copied report, heading included.
+        const body = makeBody({ logLineCount: 5000, lineSize: 200 }).replace(
+            "LINE004990: ",
+            "## Log (last 400 lines, sanitized)\nLINE004990: ",
+        );
+        const capped = capBodyToGithubLimit(body, 60_000);
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(60_000);
+        expect(capped).toContain("LINE004999:");
+        expect(capped).not.toContain("LINE000000:");
+        expect(capped).toContain("[truncated for GitHub 64KB limit — older log lines dropped]");
+        expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
+    });
+
     it("preserves the Description and Environment sections", () => {
         const body = makeBody({ logLineCount: 5000, lineSize: 200 });
         const capped = capBodyToGithubLimit(body, 60_000);

@@ -17,6 +17,7 @@ const FINAL_TRUNCATION_MARKER = "\n\n[truncated further to fit GitHub body limit
 const FALLBACK_TRUNCATION_MARKER = "\n\n[truncated for GitHub 64KB limit]\n";
 const FENCE = "```";
 const FENCE_CLOSE = `\n${FENCE}`;
+const LOG_HEADING = "## Log (last";
 
 /**
  * The stack-frame patterns retain frames to identify the failing call site.
@@ -53,9 +54,8 @@ export function extractRecentErrors(sanitized: string, limit = 20): string[] {
 
 /**
  * When the expected log fence exists, the function drops oldest log lines before enforcing the final limit.
- * The main log must follow the last `## Log (last` heading and be the final
- * fenced block; a user-supplied description can contain a copied heading, and
- * a log line can begin with three backticks.
+ * The main log is the final fenced block following the last `## Log (last`
+ * heading whose fence opens before that block's closing fence.
  *
  * `capBodyToGithubLimit` measures its budget in UTF-8 bytes.
  */
@@ -67,19 +67,15 @@ export function capBodyToGithubLimit(
 
     let capped = body;
 
-    const heading = "## Log (last";
-    const headingIdx = body.lastIndexOf(heading);
-    if (headingIdx === -1) {
+    if (body.lastIndexOf(LOG_HEADING) === -1) {
         const markerBytes = Buffer.byteLength(FALLBACK_TRUNCATION_MARKER, "utf8");
         capped = truncateToByteBudget(body, maxBytes - markerBytes) + FALLBACK_TRUNCATION_MARKER;
         return enforceFinalBodyLimit(capped, maxBytes);
     }
 
-    const fenceOpenIdx = body.indexOf(FENCE_CLOSE, headingIdx);
-    if (fenceOpenIdx === -1) return enforceFinalBodyLimit(body, maxBytes);
-    const logStart = fenceOpenIdx + `${FENCE_CLOSE}\n`.length;
     const fenceCloseIdx = body.lastIndexOf(FENCE_CLOSE);
-    if (fenceCloseIdx < logStart) return enforceFinalBodyLimit(body, maxBytes);
+    const logStart = findMainLogStart(body, fenceCloseIdx);
+    if (logStart === -1) return enforceFinalBodyLimit(body, maxBytes);
 
     const head = body.slice(0, logStart);
     const log = body.slice(logStart, fenceCloseIdx);
@@ -109,6 +105,23 @@ export function capBodyToGithubLimit(
 
     capped = `${head}${LOG_TRUNCATION_MARKER}${kept}${tail}`;
     return enforceFinalBodyLimit(capped, maxBytes);
+}
+
+/**
+ * Search backward so a duplicate description heading cannot outrank the main log.
+ * Ignore headings whose log begins after `fenceCloseIdx` because they occur inside the main log.
+ */
+function findMainLogStart(body: string, fenceCloseIdx: number): number {
+    let idx = body.lastIndexOf(LOG_HEADING);
+    while (idx !== -1) {
+        const fenceOpenIdx = body.indexOf(FENCE_CLOSE, idx);
+        if (fenceOpenIdx !== -1) {
+            const logStart = fenceOpenIdx + `${FENCE_CLOSE}\n`.length;
+            if (logStart <= fenceCloseIdx) return logStart;
+        }
+        idx = idx === 0 ? -1 : body.lastIndexOf(LOG_HEADING, idx - 1);
+    }
+    return -1;
 }
 
 /**

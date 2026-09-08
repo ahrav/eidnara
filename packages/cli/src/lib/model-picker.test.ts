@@ -25,4 +25,11 @@ describe("validateModelId", () => {
         expect(validateModelId("anthropic/")).toMatch(/provider\/model/);
         expect(validateModelId("/")).toMatch(/provider\/model/);
     });
+
+    it("rejects whitespace inside the id", () => {
+        expect(validateModelId("openai / gpt-5")).toMatch(/without spaces/);
+        expect(validateModelId("openai/ gpt-5")).toMatch(/without spaces/);
+        expect(validateModelId("open ai/gpt-5")).toMatch(/without spaces/);
+        expect(validateModelId("openai/gpt\t5")).toMatch(/without spaces/);
+    });
 });
