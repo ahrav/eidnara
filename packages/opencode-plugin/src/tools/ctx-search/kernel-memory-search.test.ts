@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import type { ReadRow } from "../../shared/kernel-client";
+import { KernelClient, type ReadRow } from "../../shared/kernel-client";
 import {
     ANTI_MEMORY_CATEGORY,
     renderAntiMemoryContent,
 } from "../../shared/kernel-client/anti-memory";
+import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import {
     memoryResultFromRow,
     parseObjectIdQuery,
+    readObjectRowsChunked,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 
@@ -338,5 +340,76 @@ describe("searchKernelMemoryRows tie-breaking", () => {
         ];
         const hits = searchKernelMemoryRows({ rows, query: "alpha beta", limit: 5 });
         expect(hits?.map((hit) => hit.publicClaimId)).toEqual([OBJECT_A, OBJECT_B]);
+    });
+});
+
+describe("readObjectRowsChunked snapshot pin", () => {
+    const IDS = ["a", "b", "c", "d"].map((letter) => `mem_${letter.repeat(32)}`);
+
+    /** A two-row cap makes the four-id read split into two complete reads after truncation. */
+    function harness(afterFirstReply: (kernel: FakeKernel) => void) {
+        const kernel = new FakeKernel();
+        for (const id of IDS) {
+            kernel.seedDecision({ object_id: id, decision_kind: "ARCHITECTURE", summary: id });
+        }
+        kernel.filteredReadRowCap = 2;
+        const transport = new FakeKernelTransport(kernel);
+        const inner = transport.call.bind(transport);
+        let replies = 0;
+        transport.call = async (args) => {
+            const reply = await inner(args);
+            replies += 1;
+            if (replies === 1) afterFirstReply(kernel);
+            return reply;
+        };
+        const client = new KernelClient({
+            transport,
+            enabled: true,
+            sessionId: "ses-chunked",
+            projectRoot: "/tmp/chunked",
+        });
+        return { kernel, transport, client };
+    }
+
+    function asOfBodies(transport: FakeKernelTransport): unknown[] {
+        return transport.calls.map((call) => (call.body as { as_of: unknown }).as_of);
+    }
+
+    test("a retire landing between chunk reads leaves the assembled rows at the first snapshot", async () => {
+        const { transport, client } = harness((kernel) => {
+            kernel.tip += 1;
+            const oldest = kernel.objects.get(IDS[0] as string);
+            if (oldest) oldest.invalidated_commit_seq = kernel.tip;
+        });
+        const read = await readObjectRowsChunked({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            objectIds: IDS,
+        });
+        expect(read.ok).toBe(true);
+        if (!read.ok) return;
+        expect(asOfBodies(transport)).toEqual([null, 4, 4]);
+        expect(read.knownAsOf).toBe(4);
+        expect(read.rows.map((row) => row.object.object_id).sort()).toEqual([...IDS].sort());
+        expect(read.unresolvedObjectIds).toEqual([]);
+    });
+
+    test("a pinned chunk answered from another snapshot fails closed as snapshot_diverged", async () => {
+        const { transport, client } = harness((kernel) => {
+            kernel.tip = 1;
+        });
+        const read = await readObjectRowsChunked({
+            client,
+            surface: "explicit_search",
+            gated: false,
+            objectIds: IDS,
+        });
+        expect(read).toEqual({
+            ok: false,
+            state: { kind: "unavailable", reason: "snapshot_diverged" },
+        });
+        // The client re-reads the tip once after the daemon answers the pin as diverged; the chunked read rejects that tip reply instead of mixing it in. commentlint: allow(JUDGE)
+        expect(asOfBodies(transport)).toEqual([null, 4, null]);
     });
 });
