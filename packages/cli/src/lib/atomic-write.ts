@@ -18,6 +18,8 @@ import { dirname, resolve } from "node:path";
  * The staged file is created no more permissively than the existing regular file.
  * A failed write or rename removes the staged sibling before the error propagates.
  * Callers need not create the parent directory.
+ *
+ * A symlink resolves to its target before renameSync, preserving the symlink.
  */
 export function writeFileAtomic(targetPath: string, data: string): void {
     const finalPath = resolveLinkTarget(targetPath);

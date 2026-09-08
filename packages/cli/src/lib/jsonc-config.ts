@@ -150,10 +150,11 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
         // The shared parser strips a leading BOM before it assigns node offsets, so the same
         // stripped text feeds both parsers and the offset-based literal slices.
         const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
-        // The shared parser rejects what `comment-json` accepts but the daemon's reader does not,
-        // such as an unpaired surrogate escape inside a string.
-        const root = parseJsoncTree(text);
+        // `comment-json` runs first because its syntax errors carry a line and column; the shared
+        // parser then rejects what `comment-json` accepts but the daemon's reader does not, such
+        // as an unpaired surrogate escape inside a string.
         const tree = parseCommentJson(text);
+        const root = parseJsoncTree(text);
         const rejectedKeyPaths: string[] = [];
         const plain = sanitizeParsedJson(tree, {
             onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),

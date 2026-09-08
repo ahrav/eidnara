@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { detectConfigFile, parseConfigJsonc, readJsoncFile } from "./jsonc-parser";
 import { log } from "./logger";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
@@ -68,6 +68,10 @@ export interface DetectConflictsOptions {
     resolvedCompaction?: ResolvedCompaction;
 }
 
+/** The `reasons` entry `detectConflicts` emits for `conflicts.dcpPlugin`. */
+export const DCP_CONFLICT_REASON =
+    "opencode-dcp plugin is installed — it conflicts with Eidnara's context management";
+
 /**
  *
  *
@@ -108,9 +112,7 @@ export function detectConflicts(
     const dcpFound = checkDcpPlugin(directory);
     if (dcpFound) {
         conflicts.dcpPlugin = true;
-        reasons.push(
-            "opencode-dcp plugin is installed — it conflicts with Eidnara's context management",
-        );
+        reasons.push(DCP_CONFLICT_REASON);
     }
 
     const omoResult = checkOmoHooks(directory);
@@ -237,6 +239,21 @@ export function openCodeConfigLayerPaths(directory: string): string[] {
 }
 
 /**
+ * `.opencode/` paths precede project-root paths; `.jsonc` precedes `.json` in each directory.
+ * All four paths are returned regardless of file existence; callers probe for existence.
+ */
+export function projectOpenCodeConfigPaths(
+    directory: string,
+): readonly [string, string, string, string] {
+    return [
+        join(directory, ".opencode", "opencode.jsonc"),
+        join(directory, ".opencode", "opencode.json"),
+        join(directory, "opencode.jsonc"),
+        join(directory, "opencode.json"),
+    ];
+}
+
+/**
  * The host merges the inline `OPENCODE_CONFIG_CONTENT` JSON after every file layer, so it
  * is the highest-precedence entry here. Missing, unparseable, and non-object layers are skipped.
  */
@@ -334,6 +351,53 @@ export function asStringArray(value: unknown): string[] {
         : [];
 }
 
+/**
+ * Raw `plugin` entries from the project-level OpenCode config files under `directory`, in
+ * `projectOpenCodeConfigPaths` order. Entries keep their original shape so a caller can match
+ * tuple options as well as names. `OPENCODE_DISABLE_PROJECT_CONFIG` yields an empty list because
+ * the host loads none of these files then.
+ */
+/** Mirrors the host: `OPENCODE_DISABLE_PROJECT_CONFIG=true|1` removes every project config layer. */
+export function projectConfigDisabled(): boolean {
+    return hostFlagEnabled("OPENCODE_DISABLE_PROJECT_CONFIG");
+}
+
+export function projectPluginEntries(directory: string): unknown[] {
+    if (projectConfigDisabled()) return [];
+    const entries: unknown[] = [];
+    for (const configPath of projectOpenCodeConfigPaths(directory)) {
+        const config = readJsoncFile<unknown>(configPath);
+        if (!isRecord(config) || !Array.isArray(config.plugin)) continue;
+        entries.push(...config.plugin);
+    }
+    return entries;
+}
+
+/**
+ * Raw `plugin` entries from every layer the host loads: the user config siblings,
+ * `OPENCODE_CONFIG`, the project files, and inline `OPENCODE_CONFIG_CONTENT`. A writer passes the
+ * file it is about to write as `excludePath` to see what is already registered elsewhere.
+ */
+export function pluginEntriesOutside(directory: string, excludePath?: string): unknown[] {
+    const excluded = excludePath === undefined ? null : resolve(excludePath);
+    const entries: unknown[] = [];
+    for (const configPath of openCodeConfigLayerPaths(directory)) {
+        if (excluded !== null && resolve(configPath) === excluded) continue;
+        const config = readJsoncFile<unknown>(configPath);
+        if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
+    }
+    const inline = process.env.OPENCODE_CONFIG_CONTENT;
+    if (inline) {
+        try {
+            const config = parseConfigJsonc<unknown>(inline);
+            if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
+        } catch {
+            /* The host rejects the same malformed content, so it contributes nothing. */
+        }
+    }
+    return entries;
+}
+
 function collectPluginEntries(directory: string): string[] {
     const plugins: string[] = [];
 
@@ -353,6 +417,11 @@ function collectPluginEntries(directory: string): string[] {
  *
  */
 const OMO_PACKAGE_NAMES = new Set(["oh-my-opencode", "oh-my-openagent"]);
+
+/** Whether any OpenCode config layer the host loads lists an OMO plugin entry. */
+export function hasOmoPlugin(directory: string): boolean {
+    return collectPluginEntries(directory).some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
+}
 
 /**
  * Hook names oh-my-opencode activates by default that overlap Eidnara's context
@@ -386,10 +455,22 @@ function activeOmoConfigFile(dir: string, basenames: readonly string[]): string 
     return null;
 }
 
+/**
+ * `homedir()` throws for a UID without a passwd entry when `HOME` is unset; that process has
+ * no user-level `.omo` location, so the lookup reports none instead of failing.
+ */
+function userOmoDir(): string | null {
+    if (process.env.HOME) return join(process.env.HOME, ".omo");
+    try {
+        return join(homedir(), ".omo");
+    } catch {
+        return null;
+    }
+}
+
 /** Shared by the detector and the fixer so their read and write sets cannot drift. commentlint: allow(JUDGE) */
 export function omoConfigCandidatePaths(directory: string): OmoConfigCandidate[] {
     const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
-    const omoHomeDir = join(process.env.HOME || homedir(), ".omo");
     const locations: Array<{ dir: string; basenames: readonly string[]; unified: boolean }> = [
         { dir: configDir, basenames: OMO_LEGACY_CONFIG_BASENAMES, unified: false },
         {
@@ -397,9 +478,20 @@ export function omoConfigCandidatePaths(directory: string): OmoConfigCandidate[]
             basenames: OMO_LEGACY_CONFIG_BASENAMES,
             unified: false,
         },
-        { dir: omoHomeDir, basenames: [OMO_UNIFIED_CONFIG_BASENAME], unified: true },
-        { dir: join(directory, ".omo"), basenames: [OMO_UNIFIED_CONFIG_BASENAME], unified: true },
     ];
+    const omoHomeDir = userOmoDir();
+    if (omoHomeDir) {
+        locations.push({
+            dir: omoHomeDir,
+            basenames: [OMO_UNIFIED_CONFIG_BASENAME],
+            unified: true,
+        });
+    }
+    locations.push({
+        dir: join(directory, ".omo"),
+        basenames: [OMO_UNIFIED_CONFIG_BASENAME],
+        unified: true,
+    });
 
     const candidates: OmoConfigCandidate[] = [];
     for (const { dir, basenames, unified } of locations) {
@@ -420,9 +512,7 @@ function checkOmoHooks(directory: string): {
         anthropicRecovery: false,
     };
 
-    const plugins = collectPluginEntries(directory);
-    const hasOmo = plugins.some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
-    if (!hasOmo) return result;
+    if (!hasOmoPlugin(directory)) return result;
 
     const disabledHooks = readOmoDisabledHooks(directory);
 

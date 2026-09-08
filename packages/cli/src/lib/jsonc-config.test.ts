@@ -166,6 +166,52 @@ describe("readJsoncConfig prototype-pollution hardening", () => {
             rmSync(directory, { recursive: true, force: true });
         }
     });
+
+    it("rejects a document whose root prototype was overridden", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-"));
+        const path = join(directory, "config.jsonc");
+        writeFileSync(path, `{ "__proto__": { "polluted": true }, "a": 1 }`);
+
+        try {
+            const result = readJsoncConfig(path);
+            expect(result.kind).toBe("parse-error");
+            expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("readJsoncConfigForUpdate comment round-trip", () => {
+    it("returns a tree that stringifies with the file's comments intact", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-"));
+        const path = join(directory, "config.jsonc");
+        writeFileSync(
+            path,
+            [
+                "{",
+                "  // leading comment",
+                '  "historian": { "model": "a" }, // trailing comment',
+                "  /* block comment */",
+                '  "packages": [ /* inside array */ "one" ]',
+                "}",
+            ].join("\n"),
+        );
+
+        try {
+            const config = readJsoncConfigForUpdate(path);
+            expect(config).toEqual({ historian: { model: "a" }, packages: ["one"] });
+            config.added = true;
+            const written = stringify(config, null, 2);
+            expect(written).toContain("// leading comment");
+            expect(written).toContain("// trailing comment");
+            expect(written).toContain("/* block comment */");
+            expect(written).toContain("/* inside array */");
+            expect(written).toContain('"added": true');
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
 });
 
 describe("readJsoncConfig I/O failure boundary", () => {

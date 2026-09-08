@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
-import { envFirstHomeDir } from "./paths";
+import { absoluteHomeDir } from "./paths";
 export type OpenCodeInstallSource = "PATH" | "home-bin" | "desktop" | "app";
 export interface OpenCodeInstallation {
     /** CLI installs execute `path`; all installations display `path`. */
@@ -54,7 +54,8 @@ function defaultDeps(): DetectDeps {
     return {
         exists: existsSync,
         isExecutable: isExecutableFile,
-        home: envFirstHomeDir(),
+        // Without a home there are no home-relative installs to probe; every probe requires an absolute path.
+        home: absoluteHomeDir() ?? "",
         platform: process.platform,
         env: process.env,
         onPath: findOnPath,
@@ -188,20 +189,27 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
     const d = { ...defaultDeps(), ...deps };
     const installations: OpenCodeInstallation[] = [];
     const seenRealpaths = new Set<string>();
+    // With no home directory the home-derived candidates collapse to cwd-relative paths such as
+    // `.opencode/bin/opencode`; probing (and later executing) those would trust the project checkout.
+    const probeExecutable = (path: string) => isAbsolute(path) && d.isExecutable(path);
+    const probeExists = (path: string) => isAbsolute(path) && d.exists(path);
 
-    // PATH is first because shells resolve it when multiple installations exist.
+    // PATH is first because shells resolve it when multiple installations exist. A relative PATH
+    // entry yields a relative hit that the shell would run from the current directory, so it is
+    // resolved before the absolute-path gate.
     const onPath = d.onPath("opencode");
-    if (onPath && d.isExecutable(onPath)) {
-        addCandidate(installations, seenRealpaths, d, onPath, "PATH", "cli");
+    const onPathResolved = onPath ? resolve(onPath) : null;
+    if (onPathResolved && probeExecutable(onPathResolved)) {
+        addCandidate(installations, seenRealpaths, d, onPathResolved, "PATH", "cli");
     }
 
     const stockBin = stockCliBinary(d);
-    if (d.isExecutable(stockBin)) {
+    if (probeExecutable(stockBin)) {
         addCandidate(installations, seenRealpaths, d, stockBin, "home-bin", "cli");
     }
 
     for (const candidate of extraCliCandidates(d)) {
-        if (d.isExecutable(candidate)) {
+        if (probeExecutable(candidate)) {
             addCandidate(installations, seenRealpaths, d, candidate, "PATH", "cli");
         }
     }
@@ -211,7 +219,7 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
     for (const appId of OPENCODE_DESKTOP_APP_IDS) {
         const marker = OPENCODE_DESKTOP_STATE_FILES.map((file) =>
             join(desktopUserDataDir(d, appId), file),
-        ).find((candidate) => d.exists(candidate));
+        ).find((candidate) => probeExists(candidate));
         if (marker) {
             channelsWithState.add(appId);
             addCandidate(installations, seenRealpaths, d, marker, "desktop", "desktop");
@@ -221,7 +229,7 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
     // macOS bundles and the Windows executable name no channel, so they are always reported.
     for (const app of desktopAppPaths(d)) {
         if (app.appId && channelsWithState.has(app.appId)) continue;
-        if (d.exists(app.path)) {
+        if (probeExists(app.path)) {
             addCandidate(installations, seenRealpaths, d, app.path, "app", "desktop");
         }
     }

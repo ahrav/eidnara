@@ -9,6 +9,7 @@ import {
     getOmpFallbackCandidates,
     getOmpSetting,
     getOmpVersion,
+    listOmpPlugins,
     parseOmpModelsOutput,
     runOmpCommand,
 } from "./omp-helpers";
@@ -220,6 +221,33 @@ describe("OMP command execution", () => {
         ]);
         expect(result.ok).toBe(true);
         expect(result.stdout.length).toBe(2 * 1024 * 1024);
+    });
+});
+
+describe("OMP plugin listing", () => {
+    it("returns null for an unknown payload shape instead of an empty list", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-list-"));
+        try {
+            for (const [index, payload] of ["{}", '{"npm":{}}', "[]", "null"].entries()) {
+                const fake = join(root, `omp-${index}`);
+                writeFileSync(fake, `#!/bin/sh\nprintf '%s' '${payload}'\n`);
+                chmodSync(fake, 0o755);
+                expect(listOmpPlugins(fake)).toBeNull();
+            }
+            const malformedRow = join(root, "omp-malformed-row");
+            writeFileSync(
+                malformedRow,
+                `#!/bin/sh\nprintf '%s' '{"npm":[{"name":"@eidnara/pi","enabled":true}]}'\n`,
+            );
+            chmodSync(malformedRow, 0o755);
+            expect(listOmpPlugins(malformedRow)).toBeNull();
+            const empty = join(root, "omp-empty");
+            writeFileSync(empty, `#!/bin/sh\nprintf '%s' '{"npm":[],"marketplace":[]}'\n`);
+            chmodSync(empty, 0o755);
+            expect(listOmpPlugins(empty)).toEqual([]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });
 

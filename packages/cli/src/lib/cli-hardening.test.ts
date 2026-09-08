@@ -10,10 +10,13 @@ import { detectConfigPaths, envFirstHomeDir, getOpenCodeConfigDir } from "./path
 
 const roots: string[] = [];
 const originalOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
+const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 
 afterEach(() => {
     if (originalOpenCodeConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
     else process.env.OPENCODE_CONFIG_DIR = originalOpenCodeConfigDir;
+    if (originalXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -66,6 +69,22 @@ describe("CLI hardening helpers", () => {
         const paths = detectConfigPaths();
         expect(paths.opencodeConfig).toBe(join(root, "opencode.jsonc"));
         expect(paths.opencodeConfigFormat).toBe("none");
+    });
+
+    it("targets an existing eidnara.json instead of shadowing it with a new eidnara.jsonc", () => {
+        const root = tempRoot();
+        process.env.OPENCODE_CONFIG_DIR = join(root, "opencode");
+        process.env.XDG_CONFIG_HOME = root;
+        const eidnaraDir = join(root, "eidnara");
+        mkdirSync(eidnaraDir, { recursive: true });
+
+        expect(detectConfigPaths().eidnaraConfig).toBe(join(eidnaraDir, "eidnara.jsonc"));
+
+        writeFileSync(join(eidnaraDir, "eidnara.json"), `{"compaction":{"enabled":false}}`);
+        expect(detectConfigPaths().eidnaraConfig).toBe(join(eidnaraDir, "eidnara.json"));
+
+        writeFileSync(join(eidnaraDir, "eidnara.jsonc"), "{}");
+        expect(detectConfigPaths().eidnaraConfig).toBe(join(eidnaraDir, "eidnara.jsonc"));
     });
 
     it("accepts only local development paths with the exact package name", () => {

@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, statSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import os from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
@@ -27,12 +27,12 @@ export function getOpenCodeConfigDir(): string {
     const envDir = process.env.OPENCODE_CONFIG_DIR?.trim();
     if (envDir) return envDir;
     if (process.platform === "win32") {
-        return join(homedir(), ".config", "opencode");
+        return join(os.homedir(), ".config", "opencode");
     }
     // XDG requires an absolute value; a relative one would resolve against this process's cwd.
     const xdgConfig = process.env.XDG_CONFIG_HOME;
     return join(
-        xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(homedir(), ".config"),
+        xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(os.homedir(), ".config"),
         "opencode",
     );
 }
@@ -104,7 +104,7 @@ export function detectConfigPaths(): ConfigPaths {
         configDir,
         opencodeConfig,
         opencodeConfigFormat,
-        eidnaraConfig: resolveEidnaraUserConfigPath(),
+        eidnaraConfig: getSharedUserConfigPath(),
         omoConfig: findOmoConfig(configDir),
         tuiConfig,
         tuiConfigFormat,
@@ -115,24 +115,45 @@ export function detectConfigPaths(): ConfigPaths {
 // Pi paths
 // ============================================================================
 
-/** The home the harnesses themselves resolve: `os.homedir()` on Windows (which reads `USERPROFILE`), `HOME` first elsewhere. */
+/**
+ * The home the harnesses themselves resolve: `os.homedir()` on Windows (which reads `USERPROFILE`),
+ * `HOME` first elsewhere. Throws unless the result is absolute: every caller builds config or
+ * binary paths from it, and a cwd-relative `.pi/bin/pi` would let a checkout supply the binary
+ * setup runs.
+ */
 export function envFirstHomeDir(): string {
-    if (process.platform === "win32") return homedir();
-    const home = process.env.HOME?.trim();
+    const home = process.platform === "win32" ? undefined : process.env.HOME?.trim();
     if (home && isAbsolute(home)) return home;
-    // A relative `HOME` would resolve against the working directory, and `homedir()` reads
-    // the same variable, so the passwd entry is the fallback.
+    // A relative `HOME` would resolve against the working directory, and Bun's `os.homedir()`
+    // echoes the same variable, so the passwd entry comes first and the result is checked.
+    let fallback: string;
     try {
-        return userInfo().homedir;
+        fallback = process.platform === "win32" ? os.homedir() : os.userInfo().homedir;
     } catch {
-        return homedir();
+        try {
+            fallback = os.homedir();
+        } catch (error) {
+            throw new Error(
+                "No home directory: set HOME to an absolute path so harness paths can be resolved.",
+                { cause: error },
+            );
+        }
     }
+    if (!isAbsolute(fallback)) {
+        throw new Error(
+            `Relative home directory ${JSON.stringify(fallback)}: set HOME to an absolute path so harness paths cannot resolve under the working directory.`,
+        );
+    }
+    return fallback;
 }
 
-/** The home for executable probes; a relative home would make the working directory a search root, so none is returned instead. */
+/** The home for executable probes: `undefined` when no absolute home exists, so probes skip home-relative candidates instead of aborting detection. */
 export function absoluteHomeDir(): string | undefined {
-    const home = envFirstHomeDir();
-    return isAbsolute(home) ? home : undefined;
+    try {
+        return envFirstHomeDir();
+    } catch {
+        return undefined;
+    }
 }
 
 /* */

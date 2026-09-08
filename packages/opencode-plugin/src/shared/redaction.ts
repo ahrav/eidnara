@@ -19,8 +19,10 @@ export const SECRET_WORDS = [
     "bearer",
     "credential",
 ];
+// `cookie` is a label word for key matching only; the fixture-pinned `SECRET_WORDS` stays unchanged.
+const SECRET_WORD_ALIASES = ["cookie"];
 const SECRET_SEGMENT_PATTERN = new RegExp(
-    `^(?:${SECRET_WORDS.map((w) => `${w}s?`).join("|")})$`,
+    `^(?:${[...SECRET_WORDS, ...SECRET_WORD_ALIASES].map((w) => `${w}s?`).join("|")})$`,
     "i",
 );
 
@@ -34,6 +36,14 @@ const BACKTICK_QUOTED_BODY = String.raw`(?:[^\`\\\n]|\\.)*`;
 const BARE_VALUE = String.raw`(?:[^\s'"\`\\]|\\.)+`;
 /** The characters of an HTTP `token`: an auth scheme or parameter name such as `AWS4-HMAC-SHA256` or `Foo+Bar`. */
 const HTTP_TOKEN = "[A-Za-z0-9!#$%&*+.^_|~-]+";
+/**
+ * HTTP authentication schemes whose credential follows as the next word or parameter list: the
+ * IANA registry plus the vendor schemes that appear in service logs. Longer names precede their
+ * prefixes so `AWS4-HMAC-SHA256` is not read as `AWS`.
+ */
+const AUTH_SCHEME_NAMES =
+    "(?:AWS4-HMAC-SHA256|AWS|Bearer|Basic|Digest|Token|ApiKey|Api-Key|Negotiate|NTLM|Hawk|OAuth|SharedKeyLite|SharedKey|Signature|HMAC-SHA256|HMAC|SCRAM-SHA-256|SCRAM-SHA-1|DPoP|GNAP|HOBA|Mutual|PrivateToken|Concealed|vapid|GoogleLogin|SSWS)";
+const AUTH_SCHEME_PATTERN = new RegExp(`^${AUTH_SCHEME_NAMES}$`, "i");
 /** One `name=value` parameter of a `Digest`-style header, with the whitespace RFC 7235 allows around `=`; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. commentlint: allow(JUDGE) */
 const AUTH_PARAM = String.raw`${HTTP_TOKEN}\s*=\s*(?:"${DOUBLE_QUOTED_BODY}"|[^\s,"]+)`;
 /** A PEM header with no footer stops the body scan here instead of reading to the end of the input. */
@@ -218,8 +228,8 @@ function textKeyNamesASecret(key: string): boolean {
  * which has already rewritten its credential.
  */
 function colonSeparatedKeyNamesASecret(key: string, separator: string): boolean {
-    if (!separator.includes(":")) return textKeyNamesASecret(key);
     if (keySegments(key).includes("authorization")) return false;
+    if (!separator.includes(":")) return textKeyNamesASecret(key);
     return isSecretKey(key);
 }
 
@@ -291,6 +301,29 @@ export function sanitizePathString(value: string): string {
     return sanitized;
 }
 
+function authorizationReplacement(
+    _full: string,
+    prefix: string,
+    scheme: string | undefined,
+    space: string | undefined,
+): string {
+    return scheme !== undefined && space !== undefined
+        ? `${prefix}${scheme}${space}<REDACTED:${scheme.toLowerCase()}>`
+        : `${prefix}<REDACTED:authorization>`;
+}
+
+function quotedAwareAuthorizationReplacement(
+    full: string,
+    prefix: string,
+    scheme: string | undefined,
+    space: string | undefined,
+    quote: string | undefined,
+): string {
+    return quote !== undefined
+        ? `${prefix}${quote}<REDACTED:authorization>${quote}`
+        : authorizationReplacement(full, prefix, scheme, space);
+}
+
 const SECRET_TEXT_PATTERNS: Array<{
     pattern: RegExp;
     replacement: string | ((match: string, ...groups: string[]) => string);
@@ -339,16 +372,28 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<STRIPE_KEY_REDACTED>",
     },
     {
-        // The scheme is kept and the credential after it is replaced, whether it is one
-        // opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
+        // Header form. A known scheme is kept and the credential after it is replaced, whether it
+        // is one opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
         // has no minimum length once the header names it: `Basic YTpi` encodes `a:b`. The gap
         // after the scheme stays on the header line so the next header's name is not consumed.
+        // A quoted value (`Authorization: "Bearer x"` in YAML or JSON-like text) is replaced whole
+        // inside its quotes. Any other value is a credential with no scheme and is redacted up to
+        // the next field: a `,` or `;`, a line end, or a following `name:`/`name=`.
         pattern: new RegExp(
-            `\\b(Authorization\\s*:\\s*)(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)`,
+            `\\b(Authorization\\s*:\\s*)(?:(${AUTH_SCHEME_NAMES})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(["'])(?:${DOUBLE_QUOTED_BODY}|[^'\\n]*)\\4|(?!${AUTH_SCHEME_NAMES}(?![A-Za-z0-9]))[A-Za-z0-9._~+/=-]+(?:[ \\t]+(?![A-Za-z][A-Za-z0-9_-]*[ \\t]*[:=])[^\\s,;]+)*)`,
             "gi",
         ),
-        replacement: (_full: string, prefix: string, scheme: string, space: string) =>
-            `${prefix}${scheme}${space}<REDACTED:${scheme.toLowerCase()}>`,
+        replacement: quotedAwareAuthorizationReplacement,
+    },
+    {
+        // Assignment form (`Authorization=Bearer x` in an environment dump). Only a known scheme
+        // takes the following token or parameter list as its credential; any other first token is
+        // the credential itself and ends at whitespace, so `Authorization=abc123 OTHER=v` keeps `OTHER=v`.
+        pattern: new RegExp(
+            `\\b(Authorization\\s*=\\s*)(?:(${AUTH_SCHEME_NAMES})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(["'])(?:${DOUBLE_QUOTED_BODY}|[^'\\n]*)\\4|[^\\s]+)`,
+            "gi",
+        ),
+        replacement: quotedAwareAuthorizationReplacement,
     },
     {
         // `Cookie` carries `name=value` pairs and every value is a credential; `Set-Cookie`
@@ -368,8 +413,33 @@ const SECRET_TEXT_PATTERNS: Array<{
     {
         // URL userinfo, in a full or protocol-relative (`//user:pw@host`) URL: the user name,
         // which may be empty, stays to identify the account; the password goes.
-        pattern: /(\/\/[^\s/:@"'`]*:)[^\s/@"'`]+@/g,
+        // The password runs to the last `@` before the host so a password containing `@` is
+        // redacted whole.
+        pattern: /(\/\/[^\s/:@"'`]*:)[^\s/"'`]+@/g,
         replacement: "$1<REDACTED:password>@",
+    },
+    // `--api-key abc` / `--password "a b"`: the value after a secret-bearing flag; a value beginning
+    // with `-` is the next flag.
+    {
+        pattern: new RegExp(
+            String.raw`(^|\s)(--?[A-Za-z0-9-]*(?:${SECRET_WORD_ALTERNATION}|cookie)[A-Za-z0-9-]*)(\s+)(?:"(${DOUBLE_QUOTED_BODY})"|'([^'\n]*)'|([^\s"'-]\S*))`,
+            "gi",
+        ),
+        replacement: (
+            full: string,
+            lead: string,
+            flag: string,
+            space: string,
+            doubleQuoted: string | undefined,
+            singleQuoted: string | undefined,
+            bare: string | undefined,
+        ) => {
+            const key = flag.replace(/^--?/, "");
+            const value = doubleQuoted ?? singleQuoted ?? bare ?? "";
+            if (!textKeyNamesASecret(key) || isNonSecretScalarValue(value)) return full;
+            const q = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : "";
+            return `${lead}${flag}${space}${q}<REDACTED:${redactionTypeForKey(key)}>${q}`;
+        },
     },
 ];
 
@@ -557,6 +627,21 @@ function keyedValue(
         };
     }
     if (/^["'`]/.test(word)) return { end: wordEnd, replacement: `${word[0]}${marker}${word[0]}` };
+    if (AUTH_SCHEME_PATTERN.test(word)) {
+        // `auth=Bearer abc`: the scheme is a label, and the credential is the following word.
+        SHELL_WORD_PATTERN.lastIndex = wordEnd;
+        const credential = /^[ \t]+/.exec(text.slice(wordEnd));
+        if (credential) {
+            SHELL_WORD_PATTERN.lastIndex = wordEnd + credential[0].length;
+            const credentialMatch = SHELL_WORD_PATTERN.exec(text);
+            if (credentialMatch && !/^-/.test(credentialMatch[0])) {
+                return {
+                    end: SHELL_WORD_PATTERN.lastIndex,
+                    replacement: `${word}${credential[0]}<REDACTED:${word.toLowerCase()}>`,
+                };
+            }
+        }
+    }
     return { end: wordEnd, replacement: isNonSecretScalarValue(word) ? null : marker };
 }
 
@@ -678,9 +763,36 @@ export function hasShareabilitySensitiveText(text: string): boolean {
     }
 }
 
+// Prompt fields hold arbitrary private prose; a shareable report keeps only presence and length.
+const PROMPT_KEY_PATTERN =
+    /^(?:prompt|system_prompt|description|tool_descriptions|skip_signatures)$/;
+const PROSE_MARKER_PATTERN = /^<REDACTED \d+ chars>$/;
+
+/** Idempotent: a value already reduced to its marker keeps the original length. */
+export function describeProseLength(text: string): string {
+    return PROSE_MARKER_PATTERN.test(text) ? text : `<REDACTED ${text.length} chars>`;
+}
+
+function redactProse(value: unknown): unknown {
+    if (typeof value === "string") return describeProseLength(value);
+    if (Array.isArray(value)) return value.map(redactProse);
+    if (value && typeof value === "object") {
+        // Record keys under a prompt field (`tool_descriptions`) are user data as well.
+        return Object.fromEntries(
+            Object.entries(value).map(([entryKey, entry]) => [
+                sanitizeDiagnosticText(entryKey),
+                redactProse(entry),
+            ]),
+        );
+    }
+    return value;
+}
+
 export function sanitizeConfigValue(value: unknown, keyPath: string[] = []): unknown {
-    if (value === null || typeof value === "number" || typeof value === "boolean") return value;
     const key = keyPath.at(-1) ?? "";
+    if (PROMPT_KEY_PATTERN.test(key)) return redactProse(value);
+    // Numbers and booleans stay under any key, matching the Rust key gate in `crates/context-core`.
+    if (value === null || typeof value === "number" || typeof value === "boolean") return value;
     if (key && isSecretKey(key)) {
         return `<REDACTED:${redactionTypeForKey(key)}>`;
     }
@@ -689,9 +801,11 @@ export function sanitizeConfigValue(value: unknown, keyPath: string[] = []): unk
         return value.map((entry, index) => sanitizeConfigValue(entry, [...keyPath, String(index)]));
     }
     if (value && typeof value === "object") {
+        // Record keys are user data too (`permission.bash` maps command patterns, which can carry
+        // paths or credentials), so they pass through the same text sanitizer as values.
         return Object.fromEntries(
             Object.entries(value).map(([entryKey, entry]) => [
-                entryKey,
+                sanitizeDiagnosticText(entryKey),
                 sanitizeConfigValue(entry, [...keyPath, entryKey]),
             ]),
         );

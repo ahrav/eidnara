@@ -1,0 +1,109 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resolveOpenCodeDatabasePath } from "./opencode-database-path";
+
+const tempRoots: string[] = [];
+const originalExplicit = process.env.OPENCODE_DB_PATH;
+
+afterEach(() => {
+    if (originalExplicit === undefined) delete process.env.OPENCODE_DB_PATH;
+    else process.env.OPENCODE_DB_PATH = originalExplicit;
+    for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function dataDir(): string {
+    const root = mkdtempSync(join(tmpdir(), "eidnara-opencode-db-"));
+    tempRoots.push(root);
+    mkdirSync(join(root, "opencode", "storage"), { recursive: true });
+    delete process.env.OPENCODE_DB_PATH;
+    return root;
+}
+
+describe("resolveOpenCodeDatabasePath", () => {
+    test("prefers an existing OPENCODE_DB_PATH", () => {
+        const root = dataDir();
+        const explicit = join(root, "elsewhere.db");
+        writeFileSync(explicit, "");
+        writeFileSync(join(root, "opencode", "opencode.db"), "");
+        process.env.OPENCODE_DB_PATH = explicit;
+        expect(resolveOpenCodeDatabasePath(root)).toBe(explicit);
+    });
+
+    test.if(process.platform !== "win32")(
+        "skips a FIFO candidate and refuses a FIFO OPENCODE_DB_PATH",
+        () => {
+            const root = dataDir();
+            const real = join(root, "opencode", "opencode.db");
+            writeFileSync(real, "");
+            const fifo = join(root, "opencode", "opencode-beta.db");
+            execFileSync("mkfifo", [fifo]);
+            const later = Date.now() / 1000 + 60;
+            utimesSync(fifo, later, later);
+            expect(resolveOpenCodeDatabasePath(root)).toBe(real);
+
+            process.env.OPENCODE_DB_PATH = fifo;
+            expect(() => resolveOpenCodeDatabasePath(root)).toThrow("not a regular file");
+        },
+    );
+
+    test("throws when OPENCODE_DB_PATH is set but does not exist", () => {
+        const root = dataDir();
+        writeFileSync(join(root, "opencode", "opencode.db"), "");
+        const missing = join(root, "missing.db");
+        process.env.OPENCODE_DB_PATH = missing;
+        expect(() => resolveOpenCodeDatabasePath(root)).toThrow(
+            `OPENCODE_DB_PATH is set to ${missing}, which does not exist`,
+        );
+    });
+
+    test("ranks opencode*.db by last activity, counting a newer -wal sidecar", () => {
+        const root = dataDir();
+        const stable = join(root, "opencode", "opencode.db");
+        const beta = join(root, "opencode", "opencode-beta.db");
+        writeFileSync(stable, "");
+        writeFileSync(beta, "");
+        const now = Date.now() / 1000;
+        utimesSync(stable, now - 3600, now - 3600);
+        utimesSync(beta, now, now);
+        expect(resolveOpenCodeDatabasePath(root)).toBe(beta);
+
+        utimesSync(stable, now + 60, now + 60);
+        expect(resolveOpenCodeDatabasePath(root)).toBe(stable);
+
+        const betaWal = `${beta}-wal`;
+        writeFileSync(betaWal, "");
+        utimesSync(betaWal, now + 120, now + 120);
+        expect(resolveOpenCodeDatabasePath(root)).toBe(beta);
+    });
+
+    test("falls back to the newest channel database", () => {
+        const root = dataDir();
+        const older = join(root, "opencode", "opencode-beta.db");
+        const newer = join(root, "opencode", "opencode-dev.db");
+        writeFileSync(older, "");
+        writeFileSync(newer, "");
+        utimesSync(older, new Date(1_000_000), new Date(1_000_000));
+        utimesSync(newer, new Date(2_000_000), new Date(2_000_000));
+        expect(resolveOpenCodeDatabasePath(root)).toBe(newer);
+    });
+
+    test("skips a candidate that vanishes before it is statted", () => {
+        const root = dataDir();
+        const valid = join(root, "opencode", "opencode-dev.db");
+        writeFileSync(valid, "");
+        // A dangling symlink is listed by readdir but fails stat, like a database rotated mid-walk.
+        symlinkSync(join(root, "gone.db"), join(root, "opencode", "opencode-beta.db"));
+        expect(resolveOpenCodeDatabasePath(root)).toBe(valid);
+    });
+
+    test("falls back to a storage database and otherwise throws", () => {
+        const root = dataDir();
+        expect(() => resolveOpenCodeDatabasePath(root)).toThrow(/Unable to locate OpenCode DB/);
+        const storage = join(root, "opencode", "storage", "sessions.db");
+        writeFileSync(storage, "");
+        expect(resolveOpenCodeDatabasePath(root)).toBe(storage);
+    });
+});

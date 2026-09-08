@@ -152,7 +152,7 @@ function expandHomePrefix(path: string): string {
  * OpenCode Eidnara package. A basename substring is not sufficient: paths
  * such as `eidnara-theme` must not suppress the real plugin registration.
  */
-export function isDevPathPluginEntry(entry: unknown): boolean {
+export function isDevPathPluginEntry(entry: unknown, baseDir: string = process.cwd()): boolean {
     const candidate =
         typeof entry === "string"
             ? entry
@@ -166,7 +166,9 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
         if (isFileUrl(candidate)) {
             localPath = fileURLToPath(candidate);
         } else {
-            localPath = resolve(expandHomePrefix(candidate));
+            // A `~` entry is home-relative; any other relative entry is relative to the project
+            // whose config declares it.
+            localPath = resolve(baseDir, expandHomePrefix(candidate));
         }
 
         if (statSync(localPath).isFile()) localPath = dirname(localPath);

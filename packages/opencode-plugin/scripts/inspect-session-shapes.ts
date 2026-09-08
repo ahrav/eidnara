@@ -2,8 +2,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { resolveOpenCodeDatabasePath } from "../src/shared/opencode-database-path";
 import { Database } from "../src/shared/sqlite";
-import { resolveOpenCodeDatabasePath } from "./context-dump/database-paths";
 
 const piSessionsDir = join(homedir(), ".pi", "agent", "sessions");
 
