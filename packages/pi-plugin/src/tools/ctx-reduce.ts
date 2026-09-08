@@ -1,9 +1,10 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { RustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import { getErrorMessage } from "@eidnara/opencode/shared/error-message";
 import { CTX_REDUCE_DESCRIPTION } from "@eidnara/opencode/tools/ctx-reduce/constants";
 import { unwrapImitatedReducedArgs } from "@eidnara/opencode/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
+import type { PiRustToolBackends } from "../rust-tool-backends";
 import { boundedCommandId } from "./command-id";
 
 const ParamsSchema = Type.Object(
@@ -43,7 +44,7 @@ function formatRawDropForAck(rawDrop: string): string {
 }
 
 export interface CtxReduceToolDeps {
-    rustToolBackends: RustToolBackends;
+    rustToolBackends: PiRustToolBackends;
 }
 
 export function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition<typeof ParamsSchema> {
@@ -62,7 +63,7 @@ export function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition<typ
         label: "Eidnara: Reduce",
         description: CTX_REDUCE_DESCRIPTION,
         parameters: ParamsSchema,
-        async execute(toolCallId, params: CtxReduceParams, _signal, _onUpdate, ctx) {
+        async execute(toolCallId, params: CtxReduceParams, signal, _onUpdate, ctx) {
             params = unwrapImitatedReducedArgs(params, ["drop"], { drop: "string" });
             const sessionId = ctx.sessionManager.getSessionId();
 
@@ -79,9 +80,10 @@ export function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition<typ
             try {
                 const response = await rustReduce({
                     sessionId,
-                    projectRoot: ctx.cwd,
+                    projectRoot: resolveProjectRootDirectory(ctx.cwd),
                     drop: params.drop,
                     commandId: commandIdForInvocation(sessionId, toolCallId),
+                    ...(signal ? { signal } : {}),
                 });
                 const value =
                     response !== null && typeof response === "object" && "result" in response

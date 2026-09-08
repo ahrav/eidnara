@@ -1,0 +1,91 @@
+import type { PromptIO, SelectOption } from "./prompts";
+
+export type ModelRole = "historian" | "sidekick";
+
+interface RoleCopy {
+    title: string;
+    blurb: string;
+    pickMessage: string;
+    placeholder: string;
+}
+
+const ROLE_COPY: Record<ModelRole, RoleCopy> = {
+    historian: {
+        title: "Historian",
+        blurb:
+            "The historian runs in the background and condenses older conversation into\n" +
+            "compact summaries, so your context never overflows. It works on one bounded\n" +
+            "chunk at a time and runs often — it does NOT need a frontier model. A smaller,\n" +
+            "cheaper, faster model (a mini / flash / haiku tier) works well here and keeps\n" +
+            "your costs down.",
+        pickMessage: "Select a model for the historian",
+        placeholder: "type to filter (e.g. haiku, flash, mini)…",
+    },
+    sidekick: {
+        title: "Sidekick",
+        blurb:
+            "The sidekick augments your prompt with relevant project context when you run\n" +
+            "/ctx-aug. Fast models are preferred here.",
+        pickMessage: "Select a model for the sidekick",
+        placeholder: "type to filter…",
+    },
+};
+
+/**
+ * Model IDs use `provider/model`, so sorting groups them by provider. */
+export function sortModelsForPicker(models: string[]): string[] {
+    return [...new Set(models)].sort((a, b) => a.localeCompare(b));
+}
+
+export function modelOptions(models: string[]): SelectOption[] {
+    return sortModelsForPicker(models).map((model) => ({ label: model, value: model }));
+}
+
+/** Matches `MAX_MODEL_FIELD_BYTES` in `crates/host-runtime/src/broca/protocol.rs`. */
+const MAX_MODEL_SEGMENT_BYTES = 256;
+
+export function validateModelId(value: string): string | undefined {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return "A model id is required";
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0 || slash === trimmed.length - 1 || /[\s\p{Cc}]/u.test(trimmed)) {
+        return "Use the canonical provider/model form without spaces or control characters (e.g. anthropic/claude-haiku-4-5)";
+    }
+    const provider = trimmed.slice(0, slash);
+    const model = trimmed.slice(slash + 1);
+    if (provider.startsWith("-") || model.startsWith("-")) {
+        return "Neither the provider nor the model may start with '-'";
+    }
+    if (
+        Buffer.byteLength(provider, "utf8") > MAX_MODEL_SEGMENT_BYTES ||
+        Buffer.byteLength(model, "utf8") > MAX_MODEL_SEGMENT_BYTES
+    ) {
+        return `The provider and model must each be at most ${MAX_MODEL_SEGMENT_BYTES} bytes`;
+    }
+    return undefined;
+}
+
+/**
+ * Free-text entry prevents an empty catalog from blocking setup.
+ */
+export async function pickModel(
+    prompts: PromptIO,
+    allModels: string[],
+    role: ModelRole,
+): Promise<string> {
+    const copy = ROLE_COPY[role];
+    prompts.note(copy.blurb, copy.title);
+
+    const options = modelOptions(allModels);
+    if (options.length === 0) {
+        return (
+            await prompts.text(`${copy.pickMessage} (type a provider/model id)`, {
+                placeholder: "e.g. anthropic/claude-haiku-4-5",
+                validate: validateModelId,
+            })
+        ).trim();
+    }
+    return prompts.selectAutocomplete(copy.pickMessage, options, {
+        placeholder: copy.placeholder,
+    });
+}

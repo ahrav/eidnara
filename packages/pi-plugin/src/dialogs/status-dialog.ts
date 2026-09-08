@@ -128,7 +128,7 @@ export async function showStatusDialog(
 ): Promise<void> {
     const sessionId = resolveSessionId(ctx);
     if (!sessionId) throw new Error("No active Pi session is available.");
-    const memory = await readStatusMemory(deps, sessionId, ctx.cwd);
+    const memory = await readStatusMemory(deps, sessionId, ctx.cwd, ctx.signal);
 
     await ctx.ui.custom<undefined>(
         (tui, theme, _keybindings, done) =>
@@ -178,12 +178,19 @@ export async function readStatusMemory(
     deps: Pick<StatusDialogDeps, "kernelClient">,
     sessionId: string,
     directory: string,
+    signal?: AbortSignal,
 ): Promise<KernelMemorySnapshot> {
     const client = deps.kernelClient({
         sessionId,
         projectRoot: resolveProjectRootDirectory(directory),
     });
-    return kernelMemorySnapshotFrom(await client.read({ surface: "explicit_search", gated: true }));
+    return kernelMemorySnapshotFrom(
+        await client.read({
+            surface: "explicit_search",
+            gated: true,
+            ...(signal ? { signal } : {}),
+        }),
+    );
 }
 
 /**
@@ -219,7 +226,12 @@ class StatusDialogComponent implements Component {
         this.refreshing = true;
         try {
             const [memory, daemonStatus] = await Promise.all([
-                readStatusMemory(this.props.deps, this.props.sessionId, this.props.ctx.cwd),
+                readStatusMemory(
+                    this.props.deps,
+                    this.props.sessionId,
+                    this.props.ctx.cwd,
+                    this.props.ctx.signal,
+                ),
                 this.readDaemonStatus(),
             ]);
             if (this.closed) return;

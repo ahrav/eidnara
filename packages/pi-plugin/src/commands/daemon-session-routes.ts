@@ -41,10 +41,12 @@ export function rustCommandId(operation: string): string {
  * The daemon reads `session_id` from the body; the transport routes on the same id.
  *
  * `projectRoot` follows the invocation cwd: session lineage and `session.wrapup` authority are keyed by `(session, root)`, in the same git-root spelling the kernel memory routes bind, so a Pi `/cd` moves later commands with it. commentlint: allow(JUDGE)
+ *
+ * `ctx.signal` is the command's abort signal; the transport settles an aborted call without waiting out the request budget.
  */
 export async function callDaemonSession(
     deps: DaemonSessionDeps,
-    ctx: { cwd: string },
+    ctx: { cwd: string; signal?: AbortSignal | undefined },
     method: DaemonSessionMethod,
     body: Record<string, unknown>,
     timeoutMs?: number,
@@ -55,6 +57,7 @@ export async function callDaemonSession(
             projectRoot: resolveProjectRootDirectory(ctx.cwd),
             method,
             body,
+            ...(ctx.signal ? { signal: ctx.signal } : {}),
             ...(timeoutMs === undefined ? {} : { timeoutMs }),
         }),
     );

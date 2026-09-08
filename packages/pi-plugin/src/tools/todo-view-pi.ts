@@ -119,31 +119,9 @@ export function parseTodos(input: unknown): TodoItem[] | null {
     return todos;
 }
 
-function parseTodoStateJson(stateJson: string | null | undefined): TodoItem[] | null {
-    if (!stateJson) return null;
-    try {
-        return parseTodos(JSON.parse(stateJson));
-    } catch {
-        return null;
-    }
-}
-
 export function setTodoSnapshot(sessionId: string, todos: unknown): boolean {
     const parsed = parseTodos(todos);
     if (parsed === null) return false;
-    snapshotsBySession.set(sessionId, { todos: parsed });
-    return true;
-}
-
-function seedTodoSnapshotFromStateJson(
-    sessionId: string,
-    stateJson: string | null | undefined,
-): boolean {
-    const parsed = parseTodoStateJson(stateJson);
-    if (parsed === null) {
-        snapshotsBySession.delete(sessionId);
-        return false;
-    }
     snapshotsBySession.set(sessionId, { todos: parsed });
     return true;
 }
@@ -511,16 +489,12 @@ export class TodoOverlay {
     }
 }
 
-export function registerTodoOverlay(
-    pi: Pick<ExtensionAPI, "on">,
-    deps: { readLastTodoState: (sessionId: string) => string | null | undefined },
-): TodoOverlay {
+export function registerTodoOverlay(pi: Pick<ExtensionAPI, "on">): TodoOverlay {
     const overlay = new TodoOverlay();
 
     pi.on("session_start", async (_event, ctx) => {
         const sessionId = getSessionId(ctx);
         if (!sessionId) return;
-        seedTodoSnapshotFromStateJson(sessionId, deps.readLastTodoState(sessionId));
         if (!ctx.hasUI) return;
         overlay.setUICtx(sessionId, ctx.ui);
         overlay.update(sessionId);
@@ -549,16 +523,7 @@ export function registerTodoOverlay(
     return overlay;
 }
 
-export function registerTodoStateLifecycle(
-    pi: Pick<ExtensionAPI, "on">,
-    deps: { readLastTodoState: (sessionId: string) => string | null | undefined },
-): void {
-    pi.on("session_start", async (_event, ctx) => {
-        const sessionId = getSessionId(ctx);
-        if (!sessionId) return;
-        seedTodoSnapshotFromStateJson(sessionId, deps.readLastTodoState(sessionId));
-    });
-
+export function registerTodoStateLifecycle(pi: Pick<ExtensionAPI, "on">): void {
     pi.on("session_shutdown", async (_event, ctx) => {
         clearTodowriteToolCallTodos();
         const sessionId = getSessionId(ctx);

@@ -125,7 +125,7 @@ describe("Pi /ctx-status", () => {
         moduleClient,
         compactionOff,
         kernelClient: fakeKernelResolver().kernelClient,
-        projectIdentity: "proj",
+        resolveProjectSettings: () => ({ projectIdentity: "proj" }),
     });
     const DAEMON_STATUS = {
         usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
@@ -216,6 +216,26 @@ describe("Pi /ctx-status", () => {
         const [, , noLimit] = await run("ctx-status", "", reservedModel);
         expect(noLimit?.text).toContain("- Usage: 42,000 tokens");
         expect(noLimit?.text).toContain("42k / 80k usable (52.5%)");
+    });
+
+    it("resolves project settings and the daemon route from the same invoking cwd", async () => {
+        const { pi, run } = harness();
+        const module = fakeModuleClient(() => ({ result: {} }));
+        const resolvedFor: string[] = [];
+        registerCtxStatusCommand(pi, {
+            ...statusDeps(module.client),
+            resolveProjectSettings: ({ cwd }) => {
+                resolvedFor.push(cwd);
+                return { projectIdentity: `proj:${cwd}` };
+            },
+        });
+        await run("ctx-status", "", { cwd: "/tmp/project-a" });
+        await run("ctx-status", "", { cwd: "/tmp/project-b" });
+        expect(resolvedFor).toEqual(["/tmp/project-a", "/tmp/project-b"]);
+        expect(module.calls.map((call) => call.projectRoot)).toEqual([
+            resolveProjectRootDirectory("/tmp/project-a"),
+            resolveProjectRootDirectory("/tmp/project-b"),
+        ]);
     });
 
     it("reports the unavailable line when session.status fails and notes compaction-off", async () => {

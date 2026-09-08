@@ -19,7 +19,13 @@ import {
 } from "./daemon-session-routes";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
 
-export type RegisterCtxStatusDeps = DaemonSessionDeps & StatusDialogDeps;
+export type StatusProjectSettings = Omit<StatusDialogDeps, "kernelClient">;
+
+export type RegisterCtxStatusDeps = DaemonSessionDeps &
+    Pick<StatusDialogDeps, "kernelClient"> & {
+        /** Resolves the invoking context's project settings; the daemon request and the dialog then describe the same project. */
+        resolveProjectSettings: (ctx: { cwd: string }) => StatusProjectSettings;
+    };
 
 export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStatusDeps): void {
     pi.registerCommand("ctx-status", {
@@ -34,6 +40,10 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
                 });
                 return;
             }
+            const dialogDeps: StatusDialogDeps = {
+                kernelClient: deps.kernelClient,
+                ...deps.resolveProjectSettings(ctx),
+            };
 
             const readDaemonStatus = async () =>
                 (await callDaemonSession(deps, ctx, "session.status", {
@@ -55,7 +65,7 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
                 // The dialog renders a missing daemon answer as zero counts and cannot render
                 // compaction-off status, so both cases use the text path.
                 if (ctx.hasUI && daemonStatus && !deps.compactionOff) {
-                    await showStatusDialog(pi, ctx, deps, {
+                    await showStatusDialog(pi, ctx, dialogDeps, {
                         initial: daemonStatus,
                         read: readDaemonStatus,
                     });

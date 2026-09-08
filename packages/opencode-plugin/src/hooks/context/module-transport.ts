@@ -39,6 +39,7 @@ import {
 import { defaultConnectionFilePath } from "../../shared/host-lifecycle/paths";
 import { isRecord } from "../../shared/record-type-guard";
 import type { ModuleMethod } from "./module-wire";
+import type { RustModeModuleClient } from "./rust-mode-transform";
 
 const DEFAULT_MODULE_ID = "context";
 const CONNECT_BACKOFF_INITIAL_MS = 1_000;
@@ -1411,3 +1412,23 @@ export const __moduleTransportTest = {
     lockedHarnessClosure,
     managedCredentialSourceVersion,
 };
+
+/**
+ * The daemon client every harness hands to the transform, tool backends, and session commands.
+ * `connectionFile` undefined selects the default connection file for the current harness.
+ */
+export function createHostModuleClient(connectionFile: string | undefined): HostModuleClient {
+    const transport = new HostModuleTransport(connectionFile);
+    return {
+        call: (args) => transport.call(args),
+        deleteSession: (sessionId, projectRoot) => transport.deleteSession(sessionId, projectRoot),
+        closeSession: (sessionId) => transport.closeSession(sessionId),
+        hasSessionRoute: (sessionId) => transport.hasSessionRoute(sessionId),
+        disconnect: () => transport.disconnect(),
+    };
+}
+
+/** The daemon client plus the teardown its owner calls when the runtime that created it is disposed. A disposed runtime that only closed its sessions would leave the transport's socket, channel poller, and ring mappings cached for the process lifetime, and a reload with a different connection file would then hold one live transport per reload. commentlint: allow(JUDGE) */
+export interface HostModuleClient extends RustModeModuleClient {
+    disconnect(): void;
+}

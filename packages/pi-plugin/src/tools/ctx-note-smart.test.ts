@@ -8,12 +8,9 @@ import {
     __wakePlaneTest,
     WAKE_PLANE_CAPABILITY,
 } from "@eidnara/opencode/features/context/smart-notes/wake-plane";
-import type {
-    RustNoteToolRequest,
-    RustToolBackends,
-} from "@eidnara/opencode/plugin/rust-tool-backends";
 
 import { fakeContext } from "../__tests__/test-utils";
+import type { PiRustNoteToolRequest, PiRustToolBackends } from "../rust-tool-backends";
 import { createCtxNoteTool } from "./ctx-note";
 
 const CWD = "/workspace/project-a";
@@ -27,8 +24,8 @@ const resolveProjectPath = (directory: string) =>
     directory.includes("project-b") ? "git:project-b" : "git:project-a";
 
 function recordingNote(response: unknown = "module note result") {
-    const requests: RustNoteToolRequest[] = [];
-    const note: NonNullable<RustToolBackends["note"]> = async (request) => {
+    const requests: PiRustNoteToolRequest[] = [];
+    const note: NonNullable<PiRustToolBackends["note"]> = async (request) => {
         requests.push(request);
         return response;
     };
@@ -36,11 +33,12 @@ function recordingNote(response: unknown = "module note result") {
 }
 
 async function callNote(args: {
-    rustToolBackends: RustToolBackends;
+    rustToolBackends: PiRustToolBackends;
     resolveProjectPath?: (directory: string) => string | undefined;
     callId?: string;
     sessionId?: string;
     cwd?: string;
+    signal?: AbortSignal;
     params: Record<string, unknown>;
 }) {
     const tool = createCtxNoteTool({
@@ -50,7 +48,7 @@ async function callNote(args: {
     const result = await tool.execute(
         args.callId ?? "call-1",
         args.params as never,
-        new AbortController().signal,
+        args.signal ?? new AbortController().signal,
         undefined,
         fakeContext(args.sessionId ?? SESSION, args.cwd ?? CWD) as never,
     );
@@ -69,11 +67,13 @@ describe("Pi ctx_note", () => {
         expect(requests[0]?.action).toBe("read");
     });
 
-    it("sends writes to the daemon facade with the project identity", async () => {
+    it("sends writes to the daemon facade with the project identity and the abort signal", async () => {
         const { requests, note } = recordingNote({
             content: [{ type: "text", text: "Saved session note #1." }],
         });
+        const signal = new AbortController().signal;
         const { isError, text } = await callNote({
+            signal,
             rustToolBackends: {
                 authorityState: async ({ domain }) => (domain === "notes" ? "MODULE" : "TS"),
                 note,
@@ -88,7 +88,6 @@ describe("Pi ctx_note", () => {
             commandId: "call-1",
             sessionId: SESSION,
             projectRoot: CWD,
-            projectPath: "git:project-a",
             memoryProject: "git:project-a",
             action: "write",
             content: "module owned note",
@@ -97,6 +96,7 @@ describe("Pi ctx_note", () => {
             limit: undefined,
             offset: undefined,
             noteId: undefined,
+            signal,
         });
     });
 

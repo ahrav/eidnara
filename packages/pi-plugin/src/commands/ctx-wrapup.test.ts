@@ -11,6 +11,8 @@ interface RecordedCall {
     method: string;
     body: Record<string, unknown>;
     timeoutMs?: number;
+    projectRoot: string;
+    signal?: AbortSignal;
 }
 
 function wrapupHarness(respond: (call: RecordedCall) => unknown, compactionOff = false) {
@@ -21,6 +23,8 @@ function wrapupHarness(respond: (call: RecordedCall) => unknown, compactionOff =
                 method: args.method,
                 body: args.body as Record<string, unknown>,
                 timeoutMs: (args as { timeoutMs?: number }).timeoutMs,
+                projectRoot: args.projectRoot,
+                signal: args.signal,
             };
             calls.push(call);
             return respond(call);
@@ -35,11 +39,15 @@ function wrapupHarness(respond: (call: RecordedCall) => unknown, compactionOff =
         },
     } as unknown as ExtensionAPI;
     registerCtxWrapupCommand(pi, { moduleClient, compactionOff });
-    const run = async (args = "") => {
+    const run = async (args = "", signal?: AbortSignal) => {
         const command = fake.commands.get("ctx-wrapup") as {
             handler: (args: string, ctx: unknown) => Promise<void>;
         };
-        await command.handler(args, { ...fakeContext("ses-1", "/tmp/pi"), hasUI: false });
+        await command.handler(args, {
+            ...fakeContext("ses-1", "/tmp/pi"),
+            hasUI: false,
+            ...(signal ? { signal } : {}),
+        });
         return entries;
     };
     return { calls, run };
@@ -59,9 +67,17 @@ describe("Pi /ctx-wrapup", () => {
             keep: 20,
         });
         expect(String(calls[0]?.body.command_id)).toMatch(/^opencode-wrapup-/);
+        expect(calls[0]?.projectRoot).toBe("/tmp/pi");
         expect(entries[0]?.text).toBe("## Eidnara Wrapup\n\nStarting wrapup…");
         expect(entries[1]?.text).toBe("## Eidnara Wrapup\n\nWrapup completed.");
         expect(entries[1]?.level).toBe("info");
+    });
+
+    it("forwards the command's abort signal so a cancelled wrapup does not wait out its budget", async () => {
+        const { calls, run } = wrapupHarness(() => ({ result: { disposition: "completed" } }));
+        const signal = new AbortController().signal;
+        await run("", signal);
+        expect(calls[0]?.signal).toBe(signal);
     });
 
     it("parses an explicit messages_to_keep into the keep field", async () => {

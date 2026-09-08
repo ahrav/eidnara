@@ -31,7 +31,7 @@ import {
     type LiveSessionState,
     MAX_LIVE_USAGE_SESSIONS,
 } from "./live-session-state";
-import { HostModuleTransport } from "./module-transport";
+import { createHostModuleClient } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -205,18 +205,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const rustMode = deps.config.transform_mode === "rust";
 
     const moduleClient: RustModeModuleClient =
-        deps.rustModeModuleClient ??
-        (() => {
-            const transport = new HostModuleTransport(deps.config.subc?.connection_file);
-            const client: RustModeModuleClient = {
-                call: (args) => transport.call(args),
-                deleteSession: (sessionId, projectRoot) =>
-                    transport.deleteSession(sessionId, projectRoot),
-                closeSession: (sessionId) => transport.closeSession(sessionId),
-                hasSessionRoute: (sessionId) => transport.hasSessionRoute(sessionId),
-            };
-            return client;
-        })();
+        deps.rustModeModuleClient ?? createHostModuleClient(deps.config.subc?.connection_file);
 
     const rustToolBackends: RustToolBackends = {
         reduce: async ({ sessionId, drop, commandId }) => {
