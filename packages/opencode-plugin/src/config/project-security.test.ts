@@ -193,6 +193,45 @@ describe("stripUnsafeProjectConfigFields", () => {
         ]);
     });
 
+    it("strips hidden-agent thinking_level and variant so a project cannot raise reasoning depth", () => {
+        const raw: Record<string, unknown> = {
+            historian: { thinking_level: "max", variant: "high", temperature: 0.2 },
+            sidekick: { thinking_level: "xhigh", model: "x" },
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect(raw.historian).toEqual({ temperature: 0.2 });
+        expect(raw.sidekick).toEqual({ model: "x" });
+        expect(warnings).toEqual([
+            expect.stringContaining("historian.thinking_level/variant"),
+            expect.stringContaining("sidekick.thinking_level"),
+        ]);
+    });
+
+    it("strips keep_subagents and memory.injection_budget_tokens from project config", () => {
+        const raw: Record<string, unknown> = {
+            keep_subagents: true,
+            memory: { injection_budget_tokens: 20_000, enabled: true },
+            sidekick: { model: "x" },
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect(raw).toEqual({ memory: { enabled: true }, sidekick: { model: "x" } });
+        expect(warnings).toEqual([
+            expect.stringContaining("keep_subagents"),
+            expect.stringContaining("memory.injection_budget_tokens"),
+        ]);
+
+        const replaced: Record<string, unknown> = { memory: null };
+        const replacedWarnings = stripUnsafeProjectConfigFields(replaced);
+        expect(replaced).toEqual({});
+        expect(replacedWarnings).toEqual([
+            expect.stringContaining("Ignoring memory from project config"),
+        ]);
+    });
+
     it("strips top-level enabled and historian_timeout_ms from project config", () => {
         for (const enabled of [true, false]) {
             const raw: Record<string, unknown> = {
@@ -353,6 +392,7 @@ describe("stripUnsafeProjectConfigFields", () => {
             historian: null,
             sidekick: false,
             mural: null,
+            memory: 7,
             experimental: null,
             transform_mode: "ts",
         };
@@ -360,7 +400,7 @@ describe("stripUnsafeProjectConfigFields", () => {
         const warnings = stripUnsafeProjectConfigFields(raw);
 
         expect(raw).toEqual({ transform_mode: "ts" });
-        expect(warnings).toHaveLength(9);
+        expect(warnings).toHaveLength(10);
         for (const key of [
             "compaction",
             "models",
@@ -370,6 +410,7 @@ describe("stripUnsafeProjectConfigFields", () => {
             "historian",
             "sidekick",
             "mural",
+            "memory",
             "experimental",
         ]) {
             expect(warnings.some((w) => w.startsWith(`Ignoring ${key} from project config`))).toBe(
@@ -513,31 +554,72 @@ describe("constrainProjectThresholdOverrides", () => {
         }
     });
 
-    it("requires a bare project key to clear every trusted wildcard and dash-prefix", () => {
-        const trusted = { default: 65, "openai/*": 80, gpt: 75 };
+    it("requires a bare project key to clear a trusted wildcard only when no bare dash-prefix shadows it", () => {
+        // With trusted bare `gpt`, every provider resolves `gpt-4` through `gpt` before any
+        // `provider/*`, so the wildcard is unreachable and the baseline is 75.
+        const shadowed = { default: 65, "openai/*": 80, gpt: 75 };
+        const accepted: Record<string, unknown> = {
+            execute_threshold_percentage: { ...shadowed, "gpt-4": 78 },
+        };
+        const acceptedWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: accepted,
+            projectRaw: { execute_threshold_percentage: { "gpt-4": 78 } },
+            trustedBaseConfig: { execute_threshold_percentage: shadowed },
+        });
+        expect(accepted.execute_threshold_percentage).toEqual({ ...shadowed, "gpt-4": 78 });
+        expect(acceptedWarnings).toHaveLength(0);
+
+        const belowBare: Record<string, unknown> = {
+            execute_threshold_percentage: { ...shadowed, "gpt-4": 75 },
+        };
+        const belowBareWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: belowBare,
+            projectRaw: { execute_threshold_percentage: { "gpt-4": 75 } },
+            trustedBaseConfig: { execute_threshold_percentage: shadowed },
+        });
+        expect(belowBare.execute_threshold_percentage).toEqual(shadowed);
+        expect(belowBareWarnings).toHaveLength(1);
+
+        // Without a bare dash-prefix the wildcard is reachable and must be cleared.
+        const unshadowed = { default: 65, "openai/*": 80 };
         const rejected: Record<string, unknown> = {
-            execute_threshold_percentage: { ...trusted, "gpt-4": 78 },
+            execute_threshold_percentage: { ...unshadowed, "gpt-4": 78 },
         };
         const rejectedWarnings = constrainProjectThresholdOverrides({
             mergedRaw: rejected,
             projectRaw: { execute_threshold_percentage: { "gpt-4": 78 } },
-            trustedBaseConfig: { execute_threshold_percentage: trusted },
+            trustedBaseConfig: { execute_threshold_percentage: unshadowed },
         });
-        expect(rejected.execute_threshold_percentage).toEqual(trusted);
+        expect(rejected.execute_threshold_percentage).toEqual(unshadowed);
         expect(rejectedWarnings).toEqual([
             expect.stringContaining("execute_threshold_percentage.gpt-4"),
         ]);
 
-        const accepted: Record<string, unknown> = {
-            execute_threshold_percentage: { ...trusted, "gpt-4": 85 },
+        // A qualified key at a level before the first trusted bare key is still reachable.
+        const qualifiedFirst = { default: 65, "openai/gpt-4": 90, gpt: 70 };
+        const viaQualified: Record<string, unknown> = {
+            execute_threshold_percentage: { ...qualifiedFirst, "gpt-4-turbo": 80 },
         };
-        const acceptedWarnings = constrainProjectThresholdOverrides({
-            mergedRaw: accepted,
-            projectRaw: { execute_threshold_percentage: { "gpt-4": 85 } },
-            trustedBaseConfig: { execute_threshold_percentage: trusted },
+        const viaQualifiedWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: viaQualified,
+            projectRaw: { execute_threshold_percentage: { "gpt-4-turbo": 80 } },
+            trustedBaseConfig: { execute_threshold_percentage: qualifiedFirst },
         });
-        expect(accepted.execute_threshold_percentage).toEqual({ ...trusted, "gpt-4": 85 });
-        expect(acceptedWarnings).toHaveLength(0);
+        expect(viaQualified.execute_threshold_percentage).toEqual(qualifiedFirst);
+        expect(viaQualifiedWarnings).toHaveLength(1);
+
+        // A qualified key at a level after the first trusted bare key is unreachable.
+        const bareFirst = { default: 65, "gpt-4": 70, "openai/gpt": 90 };
+        const viaBare: Record<string, unknown> = {
+            execute_threshold_percentage: { ...bareFirst, "gpt-4-turbo": 80 },
+        };
+        const viaBareWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: viaBare,
+            projectRaw: { execute_threshold_percentage: { "gpt-4-turbo": 80 } },
+            trustedBaseConfig: { execute_threshold_percentage: bareFirst },
+        });
+        expect(viaBare.execute_threshold_percentage).toEqual({ ...bareFirst, "gpt-4-turbo": 80 });
+        expect(viaBareWarnings).toHaveLength(0);
     });
 
     it("does not let unrelated trusted keys block a qualified project raise", () => {

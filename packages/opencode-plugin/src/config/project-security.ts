@@ -26,8 +26,13 @@ const HISTORIAN_USER_ONLY_FIELDS = [
     "two_pass",
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
-/** The project tier replaces these caps, so a project value could raise a bound the user set to limit cost or runaway tool loops. */
-const AGENT_COST_CAP_FIELDS = ["maxSteps", "maxTokens", "timeout_ms"] as const;
+const AGENT_COST_CAP_FIELDS = [
+    "maxSteps",
+    "maxTokens",
+    "timeout_ms",
+    "thinking_level",
+    "variant",
+] as const;
 /**
  * Every block below has at least one leaf that only user config may set. The leaf sanitizers
  * skip non-object blocks, so a project `null`, string, or array here would survive to the merge
@@ -42,6 +47,7 @@ const USER_ONLY_LEAF_PARENTS = [
     "historian",
     "sidekick",
     "mural",
+    "memory",
     "experimental",
 ] as const;
 
@@ -221,19 +227,11 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
     return `Ignoring ${field} from project config (${reason})`;
 }
 
-/** Model IDs sharing a non-dash prefix (`gpt-4` and `gpt-40`) do not shadow each other. */
-function isDashPrefix(candidate: string, key: string): boolean {
-    return (
-        key.startsWith(candidate) &&
-        (key.length === candidate.length || key[candidate.length] === "-")
-    );
-}
-
 /**
  * Returns the trusted threshold that a project per-model key would shadow at runtime.
  *
  * The qualified reading follows `modelKeyLookupOrder`.
- * The bare reading applies under every provider and competes with each trusted wildcard and bare dash-prefix.
+ * The bare reading applies under every provider and competes with the trusted keys that follow the bare key in that walk.
  * A key with a slash keeps the bare reading because model IDs may contain slashes: `openrouter/foo/bar` resolves bare `foo/bar` before `openrouter/*`.
  * The project override must exceed both trusted baselines.
  * Without a trusted default, only a trusted bare dash-prefix covers the bare reading; an uncovered reading is an introduction.
@@ -272,26 +270,47 @@ function qualifiedBaseline<T extends number | undefined>(
     return base.defaultValue;
 }
 
+/** A bare key at some level applies to every provider, so later levels, provider wildcards, and the default are unreachable once one is found. */
 function bareBaseline<T extends number | undefined>(
     base: { defaultValue: T; overrides: Map<string, number> },
     projectKey: string,
 ): { effective: T | number; covered: boolean } {
-    let effective: T | number = base.defaultValue;
-    let covered = base.defaultValue !== undefined;
-    for (const [key, value] of base.overrides) {
-        const slash = key.indexOf("/");
-        if (slash < 0) {
-            if (!isDashPrefix(key, projectKey)) continue;
-            covered = true;
-        } else {
-            const modelPart = key.slice(slash + 1);
-            // `provider/<bare>` precedes the bare key in the walk, so the bare key cannot shadow it.
-            if (modelPart === projectKey) continue;
-            if (modelPart !== "*" && !isDashPrefix(modelPart, projectKey)) continue;
-        }
+    let effective: number | undefined;
+    let covered = false;
+    const consider = (value: number): void => {
         if (effective === undefined || value > effective) effective = value;
+    };
+
+    let level = projectKey;
+    let reachedBare = false;
+    while (!reachedBare) {
+        const lastDash = level.lastIndexOf("-");
+        if (lastDash <= 0) break;
+        level = level.slice(0, lastDash);
+        for (const [key, value] of base.overrides) {
+            const slash = key.indexOf("/");
+            if (slash >= 0 && key.slice(slash + 1) === level) consider(value);
+        }
+        const bare = base.overrides.get(level);
+        if (bare !== undefined) {
+            consider(bare);
+            covered = true;
+            reachedBare = true;
+        }
     }
-    return { effective, covered };
+
+    if (!reachedBare) {
+        for (const [key, value] of base.overrides) {
+            const slash = key.indexOf("/");
+            if (slash >= 0 && key.slice(slash + 1) === "*") consider(value);
+        }
+        if (base.defaultValue !== undefined) {
+            consider(base.defaultValue);
+            covered = true;
+        }
+    }
+
+    return { effective: effective ?? base.defaultValue, covered };
 }
 
 /**
@@ -350,6 +369,21 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.historian_timeout_ms;
         warnings.push(
             "Ignoring historian_timeout_ms from project config (security: the historian timeout is a user-level cost bound; a repository cannot raise it).",
+        );
+    }
+
+    if ("keep_subagents" in projectRaw) {
+        delete projectRaw.keep_subagents;
+        warnings.push(
+            "Ignoring keep_subagents from project config (security: retaining subagent sessions is a user-level debug setting; a repository cannot grow the host session store).",
+        );
+    }
+
+    const memory = projectRaw.memory;
+    if (isPlainObject(memory) && "injection_budget_tokens" in memory) {
+        delete memory.injection_budget_tokens;
+        warnings.push(
+            "Ignoring memory.injection_budget_tokens from project config (security: the injection budget bounds input tokens per request and is user-level only; a repository cannot raise it).",
         );
     }
 
@@ -531,7 +565,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
         if (removedCaps.length > 0) {
             warnings.push(
-                `Ignoring ${agentKey}.${removedCaps.join("/")} from project config (security: step, output-token, and timeout caps are user-level only; a repository cannot raise a bound the user set on hidden-agent cost).`,
+                `Ignoring ${agentKey}.${removedCaps.join("/")} from project config (security: step, output-token, timeout, and reasoning-depth controls are user-level only; a repository cannot raise a bound the user set on hidden-agent cost).`,
             );
         }
     }
