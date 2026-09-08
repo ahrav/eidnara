@@ -94,6 +94,12 @@ describe("readJsoncConfigForUpdate", () => {
                 // Reading for diagnostics still works; only the rewrite is refused.
                 expect(readJsoncConfig(path).kind).toBe("parsed");
             }
+            // A duplicate property keeps one value once materialized, so the rewrite is refused.
+            writeFileSync(path, `{"timeout": 1, "timeout": 2, "plugin": []}`);
+            expect(() => readJsoncConfigForUpdate(path)).toThrow('duplicate "timeout" property');
+            writeFileSync(path, `{"nested": {"model": "a", "model": "b"}, "plugin": []}`);
+            expect(() => readJsoncConfigForUpdate(path)).toThrow('duplicate "model" property');
+            expect(readJsoncConfig(path).kind).toBe("parsed");
             // An overflowing literal is already invalid JSON to the shared parser.
             writeFileSync(path, `{"n": 1e400, "plugin": []}`);
             expect(() => readJsoncConfigForUpdate(path)).toThrow();

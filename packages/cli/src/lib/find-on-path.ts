@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { envFirstHomeDir } from "./paths";
+import { absoluteHomeDir } from "./paths";
 
 /**
  *
@@ -57,23 +57,29 @@ export function isExecutableFile(path: string, isWindows = process.platform === 
 export function packageManagerBinCandidates(
     binary: string,
     platform: NodeJS.Platform,
-    home: string,
+    home: string | undefined,
     appData?: string,
 ): string[] {
     if (platform !== "win32") {
         return [
-            join(home, ".bun", "bin", binary),
-            join(home, ".local", "bin", binary),
+            ...(home
+                ? [join(home, ".bun", "bin", binary), join(home, ".local", "bin", binary)]
+                : []),
             `/usr/local/bin/${binary}`,
             `/opt/homebrew/bin/${binary}`,
         ];
     }
-    const npmRoot = appData?.trim() || join(home, "AppData", "Roaming");
+    const npmRoot = appData?.trim() || (home ? join(home, "AppData", "Roaming") : undefined);
     return [
-        join(npmRoot, "npm", `${binary}.cmd`),
-        join(npmRoot, "npm", `${binary}.exe`),
-        join(home, ".bun", "bin", `${binary}.exe`),
-        join(home, ".bun", "bin", `${binary}.cmd`),
+        ...(npmRoot
+            ? [join(npmRoot, "npm", `${binary}.cmd`), join(npmRoot, "npm", `${binary}.exe`)]
+            : []),
+        ...(home
+            ? [
+                  join(home, ".bun", "bin", `${binary}.exe`),
+                  join(home, ".bun", "bin", `${binary}.cmd`),
+              ]
+            : []),
     ];
 }
 
@@ -81,11 +87,10 @@ export function packageManagerBinCandidates(
 export function findBunRuntime(): string | null {
     const onPath = findOnPath("bun");
     if (onPath) return onPath;
-    const home = envFirstHomeDir();
     const candidates = packageManagerBinCandidates(
         "bun",
         process.platform,
-        home,
+        absoluteHomeDir(),
         process.env.APPDATA,
     );
     return candidates.find((candidate) => isExecutableFile(candidate)) ?? null;

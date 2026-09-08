@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import {
     type CommandInvocation,
     getCommandInvocation,
@@ -12,7 +13,7 @@ import {
     isExecutableFile,
     packageManagerBinCandidates,
 } from "./find-on-path";
-import { envFirstHomeDir, getOmpPackageDir } from "./paths";
+import { absoluteHomeDir, getOmpPackageDir } from "./paths";
 export interface OmpBinaryInfo {
     path: string;
     source: "path" | "home" | "package";
@@ -46,7 +47,7 @@ function detectOmpPackageCli(): string | null {
     if (!packageDir) return null;
     if (!findBunRuntime()) return null;
     try {
-        const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")) as {
+        const manifest = JSON.parse(readRegularFileSync(join(packageDir, "package.json"))) as {
             name?: unknown;
         };
         if (manifest.name !== "@oh-my-pi/pi-coding-agent") return null;
@@ -69,7 +70,7 @@ export function getOmpCommandInvocation(ompPath: string, args: string[]): Comman
 
 export function getOmpFallbackCandidates(
     platform: NodeJS.Platform,
-    home: string,
+    home: string | undefined,
     appData?: string,
 ): string[] {
     return packageManagerBinCandidates("omp", platform, home, appData);
@@ -82,8 +83,11 @@ export function detectOmpBinary(): OmpBinaryInfo | null {
     const fromPackage = detectOmpPackageCli();
     if (fromPackage) return { path: fromPackage, source: "package" };
 
-    const home = envFirstHomeDir();
-    const candidates = getOmpFallbackCandidates(process.platform, home, process.env.APPDATA);
+    const candidates = getOmpFallbackCandidates(
+        process.platform,
+        absoluteHomeDir(),
+        process.env.APPDATA,
+    );
     const candidate = candidates.find((path) => isExecutableFile(path));
     return candidate ? { path: candidate, source: "home" } : null;
 }
