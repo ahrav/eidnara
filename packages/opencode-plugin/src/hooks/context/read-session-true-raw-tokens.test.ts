@@ -538,6 +538,55 @@ describe("tool arcs", () => {
             estimateTrueRawMessageTokens(inUser, { providerShapeVersion: "pi-folded-v1" }).other,
         ).toBeGreaterThan(1000);
     });
+
+    it("accepts a folded toolResult part only under the Pi shape", () => {
+        const call: RawMessage = {
+            id: "c",
+            role: "assistant",
+            parts: [{ type: "tool_use", id: "c", input: {} }],
+            ordinal: 1,
+        };
+        const folded: RawMessage = {
+            id: "r",
+            role: "user",
+            parts: [
+                {
+                    role: "toolResult",
+                    toolCallId: "c",
+                    content: [{ type: "text", text: "x" }],
+                    payload: "Q".repeat(8000),
+                },
+            ],
+            ordinal: 2,
+        };
+        expect(buildToolArcs([call, folded], "opencode-v1")).toEqual([
+            { callId: "c", invOrdinal: 1, resOrdinal: null },
+        ]);
+        expect(
+            estimateTrueRawMessageTokens(folded, { providerShapeVersion: "opencode-v1" }).other,
+        ).toBeGreaterThan(1000);
+        expect(buildToolArcs([call, folded], "pi-folded-v1")).toEqual([
+            { callId: "c", invOrdinal: 1, resOrdinal: 2 },
+        ]);
+    });
+
+    it("names a folded Pi result by toolCallId alone", () => {
+        const call: RawMessage = {
+            id: "c",
+            role: "assistant",
+            parts: [{ type: "toolCall", id: "real", name: "x", arguments: {} }],
+            ordinal: 1,
+        };
+        const result: RawMessage = {
+            id: "r",
+            role: "user",
+            parts: [{ role: "toolResult", id: "real", content: [{ type: "text", text: "ok" }] }],
+            ordinal: 2,
+        };
+        expect(buildToolArcs([call, result], "pi-folded-v1")).toEqual([
+            { callId: "real", invOrdinal: 1, resOrdinal: null },
+        ]);
+    });
 });
 
 describe("tool token accounting", () => {
@@ -805,6 +854,83 @@ describe("tool token accounting", () => {
         expect(fingerprintOf(part(10), "pi-folded-v1")).not.toBe(
             fingerprintOf(part(5000), "pi-folded-v1"),
         );
+    });
+
+    it("counts and fingerprints a Pi toolCall thought signature", () => {
+        const message = (size: number): RawMessage => ({
+            id: "call",
+            role: "assistant",
+            parts: [
+                {
+                    type: "toolCall",
+                    id: "tc",
+                    name: "x",
+                    arguments: {},
+                    thoughtSignature: "S".repeat(size),
+                },
+            ],
+            ordinal: 1,
+        });
+        const breakdown = estimateTrueRawMessageTokens(message(8000), {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolInput).toBeLessThan(10);
+        expect(breakdown.other).toBeGreaterThan(1000);
+        expect(computeRawRangeFingerprint([message(10)], 1, 2, "pi-folded-v1")).not.toBe(
+            computeRawRangeFingerprint([message(5000)], 1, 2, "pi-folded-v1"),
+        );
+    });
+
+    it("keeps the metadata sidecar on redacted OpenCode reasoning", () => {
+        const part = (size: number) => ({
+            type: "reasoning",
+            text: "",
+            metadata: { redacted: "R".repeat(100), extra: "E".repeat(size) },
+        });
+        expect(
+            estimateTrueRawMessageTokens(singlePartMessage(part(8000)), {
+                providerShapeVersion: "opencode-v1",
+            }).other,
+        ).toBeGreaterThan(1000);
+        expect(fingerprintOf(part(10))).not.toBe(fingerprintOf(part(5000)));
+    });
+
+    it("treats a Pi image block as media only in user messages", () => {
+        const part = { type: "image", data: "I".repeat(8000) };
+        const inAssistant: RawMessage = { id: "a", role: "assistant", parts: [part], ordinal: 1 };
+        const inUser: RawMessage = { id: "u", role: "user", parts: [part], ordinal: 2 };
+        const options = {
+            providerShapeVersion: "pi-folded-v1" as const,
+            imageTokenHeuristic: () => 300,
+        };
+        expect(estimateTrueRawMessageTokens(inAssistant, options).image).toBe(0);
+        expect(estimateTrueRawMessageTokens(inAssistant, options).other).toBeGreaterThan(1000);
+        expect(estimateTrueRawMessageTokens(inUser, options).image).toBe(300);
+    });
+
+    it("stores a folded Pi text block whole unless it is the single plain text block", () => {
+        const withExtra = (size: number) =>
+            singlePartMessage({
+                role: "toolResult",
+                toolCallId: "c",
+                content: [{ type: "text", text: "ok", payload: "P".repeat(size) }],
+            });
+        expect(
+            estimateTrueRawMessageTokens(withExtra(8000), { providerShapeVersion: "pi-folded-v1" })
+                .toolOutput,
+        ).toBeGreaterThan(1000);
+        expect(computeRawRangeFingerprint([withExtra(10)], 1, 2, "pi-folded-v1")).not.toBe(
+            computeRawRangeFingerprint([withExtra(5000)], 1, 2, "pi-folded-v1"),
+        );
+        const plain = singlePartMessage({
+            role: "toolResult",
+            toolCallId: "c",
+            content: [{ type: "text", text: "just text" }],
+        });
+        expect(
+            estimateTrueRawMessageTokens(plain, { providerShapeVersion: "pi-folded-v1" })
+                .toolOutput,
+        ).toBeLessThan(10);
     });
 
     it("ignores a retained input field on a Pi toolCall", () => {
@@ -1427,6 +1553,12 @@ describe("raw range fingerprints", () => {
         ];
         expect(computeRawRangeFingerprint(message("user"), 1, 2, "opencode-v1")).not.toBe(
             computeRawRangeFingerprint(message("assistant"), 1, 2, "opencode-v1"),
+        );
+    });
+
+    it("changes when a message becomes fully synthetic", () => {
+        expect(fingerprintOf({ type: "text", text: "same" })).not.toBe(
+            fingerprintOf({ type: "text", text: "same", synthetic: true }),
         );
     });
 
