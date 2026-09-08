@@ -80,6 +80,19 @@ describe("sendIgnoredMessage", () => {
         expect(__ignoredNotificationTest.pendingTexts("ses-active")).toEqual(["background status"]);
     });
 
+    it("reports failed and releases the flush when the prompt endpoint never settles", async () => {
+        const session = titledClientWithLastTurn();
+        session.prompt = mock(() => new Promise<never>(() => {}));
+        __ignoredNotificationTest.setMidTurnDetector(() => false);
+        __ignoredNotificationTest.setSendTimeoutMs(20);
+
+        const result = await sendIgnoredMessage({ session }, "ses-hung-prompt", "status", {});
+
+        expect(result).toBe("failed");
+        expect(session.prompt).toHaveBeenCalledTimes(1);
+        expect(__ignoredNotificationTest.pendingTexts("ses-hung-prompt")).toEqual([]);
+    });
+
     it("flushes queued notices in order after the session becomes idle", async () => {
         const session = titledClientWithLastTurn();
         let active = true;

@@ -26,6 +26,7 @@ import { HostModuleTransport } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
+import { resolveSessionDirectory } from "./session-directory";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
@@ -121,6 +122,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         deps.liveSessionState?.sessionDirectoryBySession ?? new Map<string, string>();
     const internalChildSessions = deps.liveSessionState?.internalChildSessions ?? new Set<string>();
     const subagentSessions = deps.liveSessionState?.subagentSessions ?? new Set<string>();
+    // One resolver serves the transform, the commands, and the Sidekick child, so every daemon call for a session shares one route root.
+    const sessionDirectoryDeps = {
+        client: deps.client,
+        directory: deps.directory,
+        sessionDirectoryBySession,
+    };
+    const sessionDirectoryFor = (sessionId: string): Promise<string> =>
+        resolveSessionDirectory(sessionDirectoryDeps, sessionId);
 
     /**
      * `resolveLiveModel` prefers entries in `liveModelBySession` populated by chat and event hooks.
@@ -313,7 +322,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const commandHandler = createEidnaraCommandHandler({
         moduleClient,
         compactionOff,
-        projectRoot: deps.directory,
+        resolveProjectRoot: sessionDirectoryFor,
         isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
         // The DB fallback gives /ctx-status the model-specific threshold before the first hook after a restart.
         getLiveModelKey: (sessionId) => {
@@ -342,7 +351,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             ? {
                   config: sidekickConfig,
                   projectPath,
-                  sessionDirectory: deps.directory,
+                  resolveSessionDirectory: sessionDirectoryFor,
                   client: deps.client,
                   language: deps.config.language,
               }

@@ -272,7 +272,8 @@ async function executeAugmentation(
         sidekick?: {
             config: SidekickConfig;
             projectPath: string;
-            sessionDirectory?: string;
+            /** The Sidekick child runs in the session's own directory, not the plugin launch directory. */
+            resolveSessionDirectory?: (sessionId: string) => Promise<string> | string;
             client: PluginContext["client"];
             language?: string;
         };
@@ -310,7 +311,7 @@ async function executeAugmentation(
         client: deps.sidekick.client,
         sessionId,
         projectPath: deps.sidekick.projectPath,
-        sessionDirectory: deps.sidekick.sessionDirectory,
+        sessionDirectory: await deps.sidekick.resolveSessionDirectory?.(sessionId),
         userMessage: prompt,
         config: deps.sidekick.config,
         language: deps.sidekick.language,
@@ -353,11 +354,12 @@ export function createEidnaraCommandHandler(deps: {
         params: NotificationParams,
     ) => Promise<void>;
     moduleClient: RustModeModuleClient;
-    projectRoot?: string;
+    /** The daemon keys session state by `(session, project_root)`; commands route by the same directory the transform resolved for the session. */
+    resolveProjectRoot?: (sessionId: string) => Promise<string> | string;
     sidekick?: {
         config: SidekickConfig;
         projectPath: string;
-        sessionDirectory?: string;
+        resolveSessionDirectory?: (sessionId: string) => Promise<string> | string;
         client: PluginContext["client"];
         language?: string;
     };
@@ -388,7 +390,8 @@ export function createEidnaraCommandHandler(deps: {
         moduleResponseValue(
             await deps.moduleClient.call({
                 sessionId: body.session_id as string,
-                projectRoot: deps.projectRoot ?? process.cwd(),
+                projectRoot:
+                    (await deps.resolveProjectRoot?.(body.session_id as string)) ?? process.cwd(),
                 method,
                 body,
                 ...(timeoutMs === undefined ? {} : { timeoutMs }),

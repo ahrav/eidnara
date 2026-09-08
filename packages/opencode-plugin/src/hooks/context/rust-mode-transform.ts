@@ -41,6 +41,11 @@ import {
 } from "./module-wire";
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
+import {
+    HOST_SDK_READ_TIMEOUT_MS,
+    knownSessionDirectory,
+    resolveSessionDirectory,
+} from "./session-directory";
 import type { MessageLike } from "./tag-content-primitives";
 import { logTransformTiming } from "./transform-stage-logger";
 
@@ -73,9 +78,6 @@ function activeAgentFromMessages(messages: readonly MessageLike[]): string | und
     return undefined;
 }
 
-/** Limits OpenCode SDK reads so a slow host cannot block the transform indefinitely. */
-const HOST_READ_TIMEOUT_MS = 2_000;
-
 async function resolveCombinedTodowriteVerdict(
     deps: RustModeTransformDeps,
     sessionId: string,
@@ -93,7 +95,7 @@ async function resolveCombinedTodowriteVerdict(
                     sessionId,
                     activeAgentFromMessages(messages),
                 ),
-                HOST_READ_TIMEOUT_MS,
+                HOST_SDK_READ_TIMEOUT_MS,
                 "todowrite permission read timed out",
             );
         } catch (error) {
@@ -598,34 +600,6 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
     return state;
 }
 
-function knownSessionDirectory(deps: RustModeTransformDeps, sessionId: string): string {
-    return deps.sessionDirectoryBySession?.get(sessionId) ?? deps.directory ?? process.cwd();
-}
-
-async function getSessionDirectory(
-    deps: RustModeTransformDeps,
-    sessionId: string,
-): Promise<string> {
-    const cached = deps.sessionDirectoryBySession?.get(sessionId);
-    if (cached) return cached;
-    if (!deps.client?.session?.get) return knownSessionDirectory(deps, sessionId);
-    try {
-        const response = await withTimeout(
-            deps.client.session.get({ path: { id: sessionId } }),
-            HOST_READ_TIMEOUT_MS,
-            "session directory read timed out",
-        );
-        const directory = (response as { data?: { directory?: unknown } } | null)?.data?.directory;
-        if (typeof directory === "string" && directory.length > 0) {
-            deps.sessionDirectoryBySession?.set(sessionId, directory);
-            return directory;
-        }
-    } catch {
-        // Module routing falls back to the launch directory without failing.
-    }
-    return knownSessionDirectory(deps, sessionId);
-}
-
 function loadContextUsage(
     deps: RustModeTransformDeps,
     sessionId: string,
@@ -1075,7 +1049,7 @@ export function createRustModeTransform(
         );
         try {
             if (preflightError) throw preflightError;
-            const directory = await getSessionDirectory(deps, sessionId);
+            const directory = await resolveSessionDirectory(deps, sessionId);
             const usage = passUsageSnapshot;
             const contextLimit =
                 resolvedContextLimit && resolvedContextLimit > 0

@@ -1,5 +1,6 @@
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import { withTimeout } from "../../shared/with-timeout";
 import { isMidTurn } from "./read-session-db";
 
 export interface NotificationParams {
@@ -12,6 +13,10 @@ export interface NotificationParams {
 }
 
 export type NotificationDeliveryDisposition = "sent" | "queued" | "skipped" | "failed";
+
+/** A `noReply` prompt only persists a row, so a delivery still pending after this long is treated as failed rather than left to stall the hook that awaits it. */
+const NOTIFICATION_SEND_TIMEOUT_MS = 10_000;
+let notificationSendTimeoutMs = NOTIFICATION_SEND_TIMEOUT_MS;
 
 /**
  * Because notifications are status lines rather than user input, the queue keeps only the newest entries.
@@ -89,9 +94,13 @@ export const __ignoredNotificationTest = {
         queuedIgnoredNotifications.clear();
         flushingIgnoredNotifications.clear();
         midTurnDetector = (sessionId: string): boolean => isMidTurn(undefined, sessionId);
+        notificationSendTimeoutMs = NOTIFICATION_SEND_TIMEOUT_MS;
     },
     setMidTurnDetector(detector: (sessionId: string) => boolean): void {
         midTurnDetector = detector;
+    },
+    setSendTimeoutMs(timeoutMs: number): void {
+        notificationSendTimeoutMs = timeoutMs;
     },
 };
 
@@ -238,11 +247,19 @@ async function sendIgnoredMessageNow(
 
     try {
         if (typeof c.session?.prompt === "function") {
-            await Promise.resolve(c.session.prompt(input));
+            await withTimeout(
+                Promise.resolve(c.session.prompt(input)),
+                notificationSendTimeoutMs,
+                "notification delivery timed out",
+            );
             return "sent";
         }
         if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(input);
+            await withTimeout(
+                c.session.promptAsync(input),
+                notificationSendTimeoutMs,
+                "notification delivery timed out",
+            );
             return "sent";
         }
         sessionLog(sessionId, "session prompt API unavailable for notification");

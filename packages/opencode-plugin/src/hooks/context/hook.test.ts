@@ -471,4 +471,34 @@ describe("eidnara hook", () => {
             }),
         );
     });
+
+    it("routes ctx commands by the session's own directory like the transform", async () => {
+        useTempDataHome("hook-command-route-");
+        const fake = createFakeModuleClient(() => ({ result: { armed: false } }));
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await expectSentinel(
+            hook["command.execute.before"](
+                { command: "ctx-flush", sessionID: "ses-routed-cmd", arguments: "" },
+                { parts: [{ type: "text", text: "" }] },
+            ),
+            "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+        );
+
+        expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
+            ["session.flush", "/other/repo"],
+        ]);
+        expect(liveSessionState.sessionDirectoryBySession.get("ses-routed-cmd")).toBe(
+            "/other/repo",
+        );
+    });
 });
