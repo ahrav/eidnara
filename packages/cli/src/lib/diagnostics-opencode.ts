@@ -13,6 +13,7 @@ import {
 import {
     type ConflictResult,
     detectConflicts,
+    pluginEntriesOutside,
     projectConfigDisabled,
     projectOpenCodeConfigPaths,
 } from "@eidnara/opencode/shared/conflict-detector";
@@ -81,6 +82,11 @@ export interface DiagnosticReport {
     opencodeConfigHasPlugin: boolean;
     /** A malformed or unreadable `opencode.json(c)` reports `false` for `opencodeConfigHasPlugin`; the error explains why. */
     opencodeConfigParseError?: string;
+    /**
+     * Whether any layer the host loads registers the plugin: user siblings, `OPENCODE_CONFIG`,
+     * project files, or inline `OPENCODE_CONFIG_CONTENT`. This is the registration the runtime sees.
+     */
+    pluginRegisteredInLoadedLayers: boolean;
     tuiConfigHasPlugin: boolean;
     tuiConfigParseError?: string;
     projectOpencodeConfig: ProjectOpenCodeConfigReport;
@@ -507,6 +513,10 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         opencodeConfigHasPlugin: opencodeConfig.values.some((value) =>
             configHasPluginEntry(value, cwd),
         ),
+        pluginRegisteredInLoadedLayers: pluginEntriesOutside(cwd).some(
+            (entry) =>
+                matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) || isDevPathPluginEntry(entry, cwd),
+        ),
         ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value, cwd),
         ...(tuiConfig.error ? { tuiConfigParseError: tuiConfig.error } : {}),
@@ -624,6 +634,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
             ? [`- User-level paths unavailable: ${sanitizeDiagnosticText(report.configPathsError)}`]
             : []),
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
+        `- Plugin registered in any loaded OpenCode config layer: ${report.pluginRegisteredInLoadedLayers}`,
         `- opencode config parse error: ${describeParseError(report.opencodeConfigParseError)}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
         `- tui config parse error: ${describeParseError(report.tuiConfigParseError)}`,

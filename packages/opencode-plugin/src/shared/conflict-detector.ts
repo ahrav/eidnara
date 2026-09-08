@@ -374,15 +374,15 @@ export function projectPluginEntries(directory: string): unknown[] {
 }
 
 /**
- * Raw `plugin` entries from every layer the host loads except `excludePath`: the other user
- * config sibling, `OPENCODE_CONFIG`, the project files, and inline `OPENCODE_CONFIG_CONTENT`.
- * A writer targeting `excludePath` uses this to see what is already registered elsewhere.
+ * Raw `plugin` entries from every layer the host loads: the user config siblings,
+ * `OPENCODE_CONFIG`, the project files, and inline `OPENCODE_CONFIG_CONTENT`. A writer passes the
+ * file it is about to write as `excludePath` to see what is already registered elsewhere.
  */
-export function pluginEntriesOutside(directory: string, excludePath: string): unknown[] {
-    const excluded = resolve(excludePath);
+export function pluginEntriesOutside(directory: string, excludePath?: string): unknown[] {
+    const excluded = excludePath === undefined ? null : resolve(excludePath);
     const entries: unknown[] = [];
     for (const configPath of openCodeConfigLayerPaths(directory)) {
-        if (resolve(configPath) === excluded) continue;
+        if (excluded !== null && resolve(configPath) === excluded) continue;
         const config = readJsoncFile<unknown>(configPath);
         if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
     }

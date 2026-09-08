@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os, { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { envFirstHomeDir, resolveOmpPaths } from "./paths";
 
 const ENV_KEYS = [
@@ -50,6 +50,24 @@ describe("envFirstHomeDir", () => {
         setEnv("HOME", "C:\\msys64\\home\\fox");
         expect(envFirstHomeDir()).toBe(homedir());
     });
+
+    it.if(process.platform !== "win32")(
+        "rejects a relative HOME instead of resolving under the working directory",
+        () => {
+            // A relative HOME is ignored in favor of the passwd entry; a relative passwd entry
+            // (Bun echoes HOME) is refused outright.
+            setEnv("HOME", "rel/home");
+            const resolved = envFirstHomeDir();
+            expect(isAbsolute(resolved)).toBe(true);
+            expect(resolved).not.toBe("rel/home");
+            const spy = spyOn(os, "homedir").mockImplementation(() => "rel/home");
+            try {
+                expect(() => envFirstHomeDir()).toThrow("Relative home directory");
+            } finally {
+                spy.mockRestore();
+            }
+        },
+    );
 
     it.if(process.platform !== "win32")(
         "throws instead of yielding cwd-relative paths without a home",
