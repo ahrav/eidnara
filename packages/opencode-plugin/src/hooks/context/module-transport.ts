@@ -89,6 +89,14 @@ export interface LazyManagedDemandStartOptions {
 
 let configuredManagedDemandStart: ManagedDemandStart | undefined;
 
+function snapshotCredentialSource(
+    env: Record<string, string | undefined>,
+): Readonly<Record<string, string | undefined>> {
+    const snapshot: Record<string, string | undefined> = {};
+    for (const name of BROCA_CREDENTIAL_NAMES) snapshot[name] = env[name];
+    return Object.freeze(snapshot);
+}
+
 function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
     const hash = createHash("sha256").update("eidnara-host-route-credentials-v1");
     for (const name of BROCA_CREDENTIAL_NAMES) {
@@ -782,6 +790,14 @@ export class HostModuleTransport {
                     if (sessionClosedSinceStart()) {
                         throw this.sessionClosedError(args.sessionId);
                     }
+                    // The facade admits synchronously, so an already-expired budget is refused here rather than after the body is on the wire.
+                    if (deadline.isExpired()) {
+                        throw new HostCallError(
+                            "not_sent",
+                            "module transport deadline expired before the request was written",
+                            "deadline_expired",
+                        );
+                    }
                     if (
                         args.expectedGeneration !== undefined &&
                         ensuredRoute.generation !== args.expectedGeneration
@@ -967,11 +983,12 @@ export class HostModuleTransport {
         const opening = this.routeOpenings.get(routeKey);
         if (opening?.client === client && opening.generation === generation) {
             if ((opening.credentialSourceVersion ?? "") === (credentialSourceVersion ?? "")) {
-                // A joiner keeps its own deadline and signal; the shared open runs on.
+                // A joiner keeps its own deadline and signal; the shared open runs on. Its expiry is a waiter detach, not a connection failure.
                 return await this.beforeDeadline(
                     untilAborted(opening.promise, signal),
                     deadline,
                     "opening the module route",
+                    () => new WaiterDetachedError("deadline"),
                 );
             }
             // An open bound under older credentials must not be reused; its late success closes the route instead of caching it.
@@ -993,16 +1010,20 @@ export class HostModuleTransport {
             let route: RouteHandle;
             let bindVersion: string;
             for (;;) {
-                // Accept a route only if the credential source version is unchanged across binding; otherwise close it and retry.
-                bindVersion = managedCredentialSourceVersion(process.env);
+                // One credential-source snapshot, so `bindVersion` identifies the credentials sent to `routeOpen`.
+                const credentialSource = snapshotCredentialSource(process.env);
+                bindVersion = managedCredentialSourceVersion(credentialSource);
                 routeOpening.credentialSourceVersion = bindVersion;
+                const open = client.routeOpen(target, identity, { ...fence, credentialSource });
                 try {
-                    route = await this.beforeDeadline(
-                        client.routeOpen(target, identity, fence),
-                        deadline,
-                        "opening the module route",
-                    );
+                    route = await this.beforeDeadline(open, deadline, "opening the module route");
+                    break;
                 } catch (error) {
+                    // The facade's own route-open deadline outlives this wait; a bind that succeeds after it would install a handle nobody owns.
+                    void open.then(
+                        (late) => void client.closeRoute(late).catch(() => undefined),
+                        () => undefined,
+                    );
                     const retryable =
                         isHostCallError(error) &&
                         error.kind === "terminal" &&
@@ -1013,14 +1034,16 @@ export class HostModuleTransport {
                     );
                     delayMs = Math.min(delayMs * 2, ROUTE_OPEN_RETRY_CAP_MS);
                     if (deadline.isExpired()) throw error;
-                    continue;
-                }
-                if (managedCredentialSourceVersion(process.env) === bindVersion) break;
-                void client.closeRoute(route).catch(() => undefined);
-                if (state.closed || this.client !== client || deadline.isExpired()) {
-                    throw this.connectionChangedError(
-                        "credentials changed while opening module route",
-                    );
+                    // The fence and the connection can both move during the sleep; a local close or turnover must not start another bind.
+                    if (
+                        state.closed ||
+                        this.client !== client ||
+                        generation !== this.connectionGeneration
+                    ) {
+                        throw this.connectionChangedError(
+                            "daemon connection changed while opening module route",
+                        );
+                    }
                 }
             }
             if (

@@ -403,18 +403,22 @@ export class HostClient {
     /**
      * routeOpen makes one attempt under one bounded deadline and returns a connection-bound immutable handle.
      * Retry policy belongs to callers; managed call() owns an allowlisted retry loop.
+     * `credentialSource` fixes the environment used to derive credential fingerprints; absent, the
+     * client's own source is read at bind time.
      */
     async routeOpen(
         target: RouteTarget,
         identity: BindIdentity,
-        options: Pick<RequestOptions, "expectedDaemonId"> = {},
+        options: Pick<RequestOptions, "expectedDaemonId"> & {
+            credentialSource?: Record<string, string | undefined>;
+        } = {},
     ): Promise<RouteHandle> {
         const deadline = Deadline.start(this.routeOpenDeadlineMs, this.clock);
         const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         return this.controlRouteOpen(
             active,
             target,
-            this.identityForConnection(active, identity),
+            this.identityForConnection(active, identity, options.credentialSource),
             this.envConsumerIdentity(),
             deadline,
         );
@@ -1298,9 +1302,13 @@ export class HostClient {
         return { module_id: moduleId, launch_nonce: launchNonce };
     }
 
-    private identityForConnection(active: ActiveConnection, identity: BindIdentity): BindIdentity {
+    private identityForConnection(
+        active: ActiveConnection,
+        identity: BindIdentity,
+        credentialSource: Record<string, string | undefined> | undefined = this.credentialSource,
+    ): BindIdentity {
         if (
-            this.credentialSource === undefined ||
+            credentialSource === undefined ||
             (identity.harness !== "opencode" && identity.harness !== "pi")
         ) {
             return identity;
@@ -1308,7 +1316,7 @@ export class HostClient {
         const fingerprints = credentialFingerprints(
             active.snapshot.key,
             identity.harness,
-            this.credentialSource,
+            credentialSource,
         );
         return Object.keys(fingerprints).length === 0
             ? identity
