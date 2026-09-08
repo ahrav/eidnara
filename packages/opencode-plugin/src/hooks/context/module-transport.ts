@@ -1423,6 +1423,7 @@ export function createHostModuleClient(connectionFile: string | undefined): Host
         call: (args) => transport.call(args),
         deleteSession: (sessionId, projectRoot) => transport.deleteSession(sessionId, projectRoot),
         closeSession: (sessionId) => transport.closeSession(sessionId),
+        hasSessionRoute: (sessionId) => transport.hasSessionRoute(sessionId),
         disconnect: () => transport.disconnect(),
     };
 }

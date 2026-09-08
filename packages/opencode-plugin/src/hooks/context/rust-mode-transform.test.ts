@@ -681,6 +681,31 @@ describe("Rust mode transform transport", () => {
         expect(transform.getState(sessionId).passCount).toBe(1);
     });
 
+    it("cancels an active wrapup route before daemon deletion and closes the cleanup route", async () => {
+        const sessionId = `rust-clear-active-wrapup-${Date.now()}`;
+        const events: string[] = [];
+        let activeRoute: "wrapup" | "delete" | null = "wrapup";
+        const deleteSession = mock(async () => {
+            events.push("delete");
+            if (activeRoute === "wrapup") throw new Error("active wrapup still owns the route");
+            activeRoute = "delete";
+        });
+        const closeSession = mock(() => {
+            events.push(`close:${activeRoute ?? "none"}`);
+            activeRoute = null;
+        });
+        const { client } = recordingClient(() => ({ native_messages: [] }));
+        client.deleteSession = deleteSession;
+        client.closeSession = closeSession;
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+
+        transform.clearSession(sessionId);
+        await Bun.sleep(0);
+
+        expect(events).toEqual(["close:wrapup", "delete", "close:delete"]);
+        expect(activeRoute).toBeNull();
+    });
+
     it("serves the input unchanged without sending when the session is cleared during preflight", async () => {
         const sessionId = `rust-cleared-during-preflight-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));

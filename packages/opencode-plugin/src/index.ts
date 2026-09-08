@@ -131,6 +131,7 @@ const server: Plugin = async (ctx) => {
     const tools = createToolRegistry({
         pluginConfig,
         rustToolBackends: hooks.rustToolBackends ?? {},
+        resolveSessionDirectory: hooks.resolveSessionDirectory,
         promptSurfaceRuntime,
         registrationPromptSurface: loadedPluginConfig.registrationPromptSurface,
     });

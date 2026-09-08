@@ -490,6 +490,53 @@ describe("a local close wins over recovery", () => {
         expect(await queued).toMatchObject({ code: "session_closed" });
         expect(requests).toBe(1);
     });
+
+    test("a call started after closeSession can use the lane after active work settles", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let requests = 0;
+        let finishFirst: ((value: unknown) => void) | undefined;
+        const route = { channel: 9, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            closeRoute: async () => {},
+            request: () => {
+                requests += 1;
+                if (requests === 1) {
+                    return new Promise<unknown>((resolve) => {
+                        finishFirst = resolve;
+                    });
+                }
+                return Promise.resolve({ deleted: true });
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.routes.set("s\0/tmp", { route, generation: 0 });
+        transport.ensureRoute = async (sessionId) => ({
+            client,
+            route,
+            routeKey: `${sessionId}\0/tmp`,
+            generation: 0,
+        });
+
+        const active = transport.call({
+            sessionId: "s",
+            projectRoot: "/tmp",
+            method: "session.wrapup",
+            body: { method: "session.wrapup" },
+        });
+        await Bun.sleep(0);
+        transport.closeSession("s");
+        const deletion = transport.call({
+            sessionId: "s",
+            projectRoot: "/tmp",
+            method: "session.delete",
+            body: { method: "session.delete" },
+        });
+        finishFirst?.({ wrapped: true });
+
+        expect(await active).toEqual({ wrapped: true });
+        expect(await deletion).toEqual({ deleted: true });
+        expect(requests).toBe(2);
+    });
 });
 
 describe("credential rotation during a route bind", () => {

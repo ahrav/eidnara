@@ -4,6 +4,7 @@ import { isCompactionEnabled } from "../config/agent-disable";
 import { resolveProjectIdentityForSession } from "../features/context/project-identity";
 import { setCtxReduceRegisteredGlobally } from "../hooks/context/ctx-reduce-availability";
 import { kernelClientResolver } from "../hooks/context/kernel-transport";
+import type { SessionDirectoryResolver } from "../hooks/context/session-directory";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "../shared/prompt-surface-runtime";
@@ -24,6 +25,7 @@ export function getCompactionOffRemovedToolIds(): readonly string[] {
 export function createToolRegistry(args: {
     pluginConfig: EidnaraPluginConfig;
     rustToolBackends: RustToolBackends;
+    resolveSessionDirectory?: SessionDirectoryResolver;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
     registrationPromptSurface?: PromptSurfaceConfig;
 }): Record<string, ToolDefinition> {
@@ -44,10 +46,15 @@ export function createToolRegistry(args: {
     const allTools: Record<string, ToolDefinition> = {
         ...(compactionOff ? {} : createCtxReduceTools({ rustToolBackends })),
         ...createCtxNoteTools({ resolveProjectPath, rustToolBackends }),
-        ...createCtxSearchTools({ kernelClient, resolveProjectPath }),
+        ...createCtxSearchTools({
+            kernelClient,
+            resolveProjectPath,
+            resolveSessionDirectory: args.resolveSessionDirectory,
+        }),
         ...createCtxMemoryTools({
             kernelClient,
             resolveProjectPath,
+            resolveSessionDirectory: args.resolveSessionDirectory,
             allowedActions: [...CTX_MEMORY_ACTIONS],
         }),
     };

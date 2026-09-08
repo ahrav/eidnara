@@ -1730,6 +1730,8 @@ export function createRustModeTransform(
                 knownSessionDirectory(deps, sessionId);
             states.delete(sessionId);
             wireCaches.delete(sessionId);
+            // Route close asks the host to settle active work within its close budget before deletion acquires the lane; cleanup closes the replacement route.
+            options.moduleClient.closeSession?.(sessionId);
             if (options.moduleClient.deleteSession) {
                 void options.moduleClient
                     .deleteSession(sessionId, projectRoot)
@@ -1737,8 +1739,6 @@ export function createRustModeTransform(
                         sessionLog(sessionId, "rust module session deletion failed:", error);
                     })
                     .finally(() => options.moduleClient.closeSession?.(sessionId));
-            } else {
-                options.moduleClient.closeSession?.(sessionId);
             }
         },
         invalidateWireState,
