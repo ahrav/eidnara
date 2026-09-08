@@ -245,6 +245,17 @@ describe("git predicates", () => {
         expect(numeric.events.map((event) => event.observed)).toEqual([
             { tag: "v2.0.0-9007199254740994" },
         ]);
+
+        // `01` is not a SemVer numeric identifier, so the tag is not a version and cannot fire.
+        await git(repo, "tag", "v3.0.0-01");
+        await git(repo, "tag", "v3.0.0-1");
+        const malformed = await poll({
+            kind: "git_tag_matching",
+            repo_path: repo,
+            pattern: "v3.0.0-*",
+            above: "3.0.0-0",
+        });
+        expect(malformed.events.map((event) => event.observed)).toEqual([{ tag: "v3.0.0-1" }]);
     });
 
     test("git_tag_matching treats an option-shaped pattern as a glob, not a git flag", async () => {
@@ -298,6 +309,45 @@ describe("compound scalar behavior", () => {
         expect(
             validateProviderConfig({ kind: "path_exists", path: "/tmp/future", guessed: true }),
         ).toMatchObject({ success: false, reason: expect.stringContaining("unknown field") });
+    });
+
+    test.each([
+        "1.0.0-01",
+        "1.0.0-a..b",
+        "1.0.0-",
+        "1.0.0-a.",
+        "01.0.0",
+        "1.0.0+",
+        "1.0.0+a..b",
+    ])("rejects the malformed SemVer threshold %s", (above) => {
+        expect(
+            validateProviderConfig({
+                kind: "git_tag_matching",
+                repo_path: "/tmp/repo",
+                pattern: "v*",
+                above,
+            }),
+        ).toMatchObject({
+            success: false,
+            reason: expect.stringContaining("Invalid semantic version"),
+        });
+    });
+
+    test.each([
+        "1.0.0-0",
+        "1.0.0-0a",
+        "1.0.0-a-b.1",
+        "v1.0.0-rc.1+build.5",
+        "1.0.0+001",
+    ])("accepts the well-formed SemVer threshold %s", (above) => {
+        expect(
+            validateProviderConfig({
+                kind: "git_tag_matching",
+                repo_path: "/tmp/repo",
+                pattern: "v*",
+                above,
+            }),
+        ).toMatchObject({ success: true });
     });
 
     test("rejects compounds larger than four", async () => {

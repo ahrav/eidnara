@@ -359,11 +359,17 @@ interface Semver {
     prerelease: Array<bigint | string>;
 }
 
+// The SemVer 2.0.0 grammar: numeric identifiers carry no leading zeros, alphanumeric
+// identifiers contain at least one non-digit, and no identifier is empty.
+const SEMVER_IDENTIFIER = String.raw`(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)`;
+const SEMVER_PATTERN = new RegExp(
+    String.raw`^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)` +
+        String.raw`(?:-(${SEMVER_IDENTIFIER}(?:\.${SEMVER_IDENTIFIER})*))?` +
+        String.raw`(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`,
+);
+
 function parseSemver(value: string): Semver {
-    const match =
-        /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(
-            value,
-        );
+    const match = SEMVER_PATTERN.exec(value);
     if (!match) {
         throw new ProviderError("invalid_config", `Invalid semantic version: ${value}`);
     }
