@@ -32,6 +32,10 @@
         "@eidnara/host-linux-x64-gnu": "0.1.0",
       },
     },
+    "packages/host-linux-x64-gnu": {
+      "name": "@eidnara/host-linux-x64-gnu",
+      "version": "0.1.0",
+    },
     "packages/opencode-plugin": {
       "name": "@eidnara/opencode",
       "version": "0.1.0",
@@ -268,6 +272,8 @@
     "@earendil-works/pi-tui": ["@earendil-works/pi-tui@0.80.2", "", { "dependencies": { "get-east-asian-width": "1.6.0", "marked": "18.0.5" } }, "sha512-OvOAMIbXiC9OSse17YMiXIsI9AS5XM/ZV8N/k+UzdlRpPILDQYmLElevgGW92kkXR8qHBClIdzhCjuzlBGvphA=="],
 
     "@eidnara/cli": ["@eidnara/cli@workspace:packages/cli"],
+
+    "@eidnara/host-linux-x64-gnu": ["@eidnara/host-linux-x64-gnu@workspace:packages/host-linux-x64-gnu"],
 
     "@eidnara/opencode": ["@eidnara/opencode@workspace:packages/opencode-plugin"],
 

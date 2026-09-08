@@ -1,0 +1,27 @@
+{
+  "name": "@eidnara/host-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "Eidnara native eidnara-host daemon and fixed-ring addon payload for Linux x64 glibc (kernel >=4.18, glibc >=2.28). Install-filtered platform package; contains no lifecycle scripts and performs no network access.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahrav/eidnara",
+    "directory": "packages/host-linux-x64-gnu"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "payload",
+    "payload-manifest.json",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ]
+}
