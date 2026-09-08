@@ -20,6 +20,8 @@ export interface ContextUsageEntry {
     updatedAt: number;
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
+    /** The model whose window `usage` was measured against; readers must not pair it with another model's limit. */
+    model?: { providerID: string; modelID: string };
 }
 
 export interface EventHandlerDeps {
@@ -195,6 +197,10 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     updatedAt: now,
                     lastResponseTime: now,
                     hasUsageTokens: true,
+                    model:
+                        info.providerID && info.modelID
+                            ? { providerID: info.providerID, modelID: info.modelID }
+                            : undefined,
                 });
             } catch (error) {
                 sessionLog(info.sessionID, "event message.updated usage tracking failed:", error);

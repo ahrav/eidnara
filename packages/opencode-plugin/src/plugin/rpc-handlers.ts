@@ -265,11 +265,20 @@ export function buildSidebarSnapshot(
     try {
         const projectIdentity = resolveProjectIdentity(directory);
 
+        const activeModel = resolveActiveModel(sessionId, liveSessionState, requestedModelKey);
+        const activeProviderID = activeModel?.providerID;
+        const activeModelID = activeModel?.modelID;
+        const modelKey = modelKeyOf(activeModel);
+
         const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
-        // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
-        const liveUsage = liveSessionState?.contextUsageBySession.get(sessionId)?.usage;
+        // The daemon's usage wins. The live event usage covers `ts` mode and a daemon that has not persisted usage yet, but only when it was measured against the active model: after a model switch the previous model's tokens must not be shown against the new window. commentlint: allow(JUDGE)
+        const liveEntry = liveSessionState?.contextUsageBySession.get(sessionId);
+        const liveUsage =
+            liveEntry?.model && modelKeyOf(liveEntry.model) === modelKey
+                ? liveEntry.usage
+                : undefined;
         const effectiveInputTokens =
             typeof moduleInputTokens === "number" && moduleInputTokens > 0
                 ? moduleInputTokens
@@ -301,11 +310,6 @@ export function buildSidebarSnapshot(
             : 0;
         const memoryTruncated = memory?.truncated === true;
         const memoryState = memory ? stateKey(memory.state) : null;
-
-        const activeModel = resolveActiveModel(sessionId, liveSessionState, requestedModelKey);
-        const activeProviderID = activeModel?.providerID;
-        const activeModelID = activeModel?.modelID;
-        const modelKey = modelKeyOf(activeModel);
 
         const contextLimit =
             typeof moduleContextLimit === "number" && moduleContextLimit > 0
@@ -578,9 +582,10 @@ export function buildStatusDetail(
             detail.historyBlockTokens = histTokens;
 
             if (detail.contextLimit > 0) {
+                // Mirrors `resolveHistoryBudgetTokens`: the runtime budget applies the effective threshold with no extra cap.
                 const budget = Math.floor(
                     detail.contextLimit *
-                        (Math.min(detail.executeThreshold, 80) / 100) *
+                        (detail.executeThreshold / 100) *
                         detail.historyBudgetPercentage,
                 );
                 detail.compressionBudget = budget;
