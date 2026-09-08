@@ -24,9 +24,14 @@ import {
     findLastAssistantModelFromOpenCodeDb,
     findLastAssistantUsageFromOpenCodeDb,
     openCodeDbExists,
+    sessionHasCompactionSummaryInOpenCodeDb,
     withReadOnlySessionDb,
 } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
+import {
+    resolveSessionDirectory,
+    type SessionDirectoryDeps,
+} from "../hooks/context/session-directory";
 import { calibrateBuckets, resolveModelCalibration } from "../hooks/context/tokenizer-calibration";
 import { BoundedSessionMap } from "../shared/bounded-session-map";
 import {
@@ -44,6 +49,7 @@ import {
     type WireTailHygieneBaseline,
 } from "../shared/tail-hygiene-status";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
+import type { PluginContext } from "./types";
 
 /** Sessions whose work-metrics carry stays resident. Matches the sticky sidebar cache's session cap, since both hold one entry per polled session. commentlint: allow(JUDGE) */
 const WORK_METRICS_CARRY_MAX_SESSIONS = 100;
@@ -124,6 +130,47 @@ export class BoundedTtlCache<V> {
     }
 }
 
+/**
+ * A `BoundedTtlCache` whose concurrent misses for one key share one in-flight load. `invalidate`
+ * drops cached values and in-flight slots for a key prefix; a load whose slot is gone when it
+ * settles rejects, so neither the cache nor the waiting caller sees an answer for an invalidated key.
+ */
+export class CoalescedTtlCache<V> {
+    private readonly values: BoundedTtlCache<V>;
+    private readonly inFlight = new Map<string, Promise<V>>();
+
+    constructor(ttlMs: number, maxEntries: number) {
+        this.values = new BoundedTtlCache<V>(ttlMs, maxEntries);
+    }
+
+    async getOrLoad(key: string, load: () => Promise<V>): Promise<V> {
+        const cached = this.values.get(key);
+        if (cached !== undefined) return cached;
+        const inFlight = this.inFlight.get(key);
+        if (inFlight) return inFlight;
+        const request: Promise<V> = load().then((value) => {
+            if (this.inFlight.get(key) !== request) {
+                throw new Error(`load for ${key} discarded: key invalidated`);
+            }
+            this.values.set(key, value);
+            return value;
+        });
+        this.inFlight.set(key, request);
+        const releaseSlot = () => {
+            if (this.inFlight.get(key) === request) this.inFlight.delete(key);
+        };
+        request.then(releaseSlot, releaseSlot);
+        return request;
+    }
+
+    invalidate(keyPrefix: string): void {
+        this.values.deleteWhere((key) => key.startsWith(keyPrefix));
+        for (const key of this.inFlight.keys()) {
+            if (key.startsWith(keyPrefix)) this.inFlight.delete(key);
+        }
+    }
+}
+
 export interface RustSessionStatus {
     usage?: { current_total_input_tokens?: number; context_limit_tokens?: number };
     tail_hygiene?: WireTailHygieneBaseline | null;
@@ -139,19 +186,25 @@ export interface RustSessionStatus {
     wrapup_rounds?: number | null;
     pass_trace?: { last_reject_error?: string | null } | null;
 }
-const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
+const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
 );
-const rustStatusInFlight = new Map<string, Promise<RustSessionStatus>>();
+// The memory snapshot shares the status cache's TTL so one sidebar poll costs at most one daemon read per surface. commentlint: allow(JUDGE)
+const memorySnapshotCache = new CoalescedTtlCache<KernelMemorySnapshot>(
+    RUST_STATUS_CACHE_TTL_MS,
+    POLL_CACHE_MAX_ENTRIES,
+);
 
-/** Forgets a deleted session's cached daemon status under every root. An in-flight request is dropped from the map, and `fetchRustSessionStatus` caches only while it still holds the map slot, so a late answer cannot resurrect the session. commentlint: allow(JUDGE) */
-export function clearRustSessionStatus(sessionId: string): void {
+/**
+ * Forgets a session's cached and in-flight daemon status and memory snapshot under every root. After
+ * a deletion a late answer cannot resurrect the session; after a turn the next poll reads state the
+ * turn's transform and tool calls changed. commentlint: allow(JUDGE)
+ */
+export function clearSessionPollCaches(sessionId: string): void {
     const prefix = pollCacheKey(sessionId, "");
-    rustStatusCache.deleteWhere((key) => key.startsWith(prefix));
-    for (const key of rustStatusInFlight.keys()) {
-        if (key.startsWith(prefix)) rustStatusInFlight.delete(key);
-    }
+    rustStatusCache.invalidate(prefix);
+    memorySnapshotCache.invalidate(prefix);
 }
 
 /**
@@ -183,34 +236,9 @@ async function loadRustSessionStatus(
     directory: string,
 ): Promise<RustSessionStatus | undefined> {
     if (!client) return undefined;
-    const cacheKey = pollCacheKey(sessionId, directory);
-    const cached = rustStatusCache.get(cacheKey);
-    if (cached !== undefined) {
-        return cached;
-    }
-    // Polls that miss the cache while a request is in flight share it. The module transport serializes calls per session, so one status request queued behind a long wrapup must not become one queued request per poll. commentlint: allow(JUDGE)
-    const inFlight = rustStatusInFlight.get(cacheKey);
-    if (inFlight) return inFlight;
-    const request: Promise<RustSessionStatus> = fetchRustSessionStatus(
-        client,
-        sessionId,
-        directory,
-    ).then((status) => {
-        // `clearRustSessionStatus` removes the slot when the session is deleted mid-request; the answer is then stale for the cache and for the poll that is still waiting on it.
-        if (rustStatusInFlight.get(cacheKey) !== request) {
-            throw new Error(
-                `session.status answer for ${sessionId} discarded: session invalidated`,
-            );
-        }
-        rustStatusCache.set(cacheKey, status);
-        return status;
-    });
-    rustStatusInFlight.set(cacheKey, request);
-    const releaseSlot = () => {
-        if (rustStatusInFlight.get(cacheKey) === request) rustStatusInFlight.delete(cacheKey);
-    };
-    request.then(releaseSlot, releaseSlot);
-    return request;
+    return rustStatusCache.getOrLoad(pollCacheKey(sessionId, directory), () =>
+        fetchRustSessionStatus(client, sessionId, directory),
+    );
 }
 
 async function fetchRustSessionStatus(
@@ -277,7 +305,6 @@ function modelKeyOf(model: ActiveModel | undefined): string | undefined {
 function liveUsageEntryFor(
     liveSessionState: LiveSessionState | undefined,
     sessionId: string,
-    modelKey: string | undefined,
 ): ContextUsageEntry | undefined {
     if (!liveSessionState) return undefined;
     let entry = liveSessionState.contextUsageBySession.get(sessionId);
@@ -300,6 +327,14 @@ function liveUsageEntryFor(
             liveSessionState.contextUsageBySession.set(sessionId, entry);
         }
     }
+    return entry;
+}
+
+/** `usage` was measured against `entry.model`'s window, so it pairs only with that model's limit. */
+function usageForModel(
+    entry: ContextUsageEntry | undefined,
+    modelKey: string | undefined,
+): ContextUsageEntry | undefined {
     return entry?.model && modelKeyOf(entry.model) === modelKey ? entry : undefined;
 }
 
@@ -334,6 +369,17 @@ function resolveActiveModel(
     return parseModelKey(requestedModelKey) ?? liveModel;
 }
 
+/**
+ * Resolved at boot. `nativeActive` is whether OpenCode's own `compaction.auto` or `compaction.prune`
+ * owns the window when Eidnara does not; `undefined` when the host's setting could not be read.
+ */
+export interface CompactionOwnership {
+    enabled: boolean;
+    nativeActive?: boolean;
+}
+
+const EIDNARA_COMPACTION: CompactionOwnership = { enabled: true };
+
 export function buildSidebarSnapshot(
     sessionId: string,
     directory: string,
@@ -343,7 +389,7 @@ export function buildSidebarSnapshot(
     // If the execute-threshold config is omitted, the snapshot uses the 65% runtime default.
     config?: Record<string, unknown>,
     moduleStatus?: RustSessionStatus,
-    compactionEnabled = true,
+    ownership: CompactionOwnership = EIDNARA_COMPACTION,
     requestedModelKey?: string,
 ): SidebarSnapshot {
     try {
@@ -357,13 +403,19 @@ export function buildSidebarSnapshot(
         const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
-        // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
-        const liveUsage = liveUsageEntryFor(liveSessionState, sessionId, modelKey)?.usage;
+        // The live entry is the newest measured sample; the daemon's is the copy a transform forwarded earlier, so it fills in only when no live or persisted sample exists. A compacted session with no later response is zero, not the daemon's pre-compaction copy. commentlint: allow(JUDGE)
+        const usageEntry = liveUsageEntryFor(liveSessionState, sessionId);
+        const liveUsage = usageForModel(usageEntry, modelKey)?.usage;
+        const compactedWithoutResponse =
+            usageEntry === undefined && sessionHasCompactionSummaryInOpenCodeDb(sessionId);
+        const liveInputTokens = liveUsage && liveUsage.inputTokens > 0 ? liveUsage.inputTokens : 0;
         const effectiveInputTokens =
-            typeof moduleInputTokens === "number" && moduleInputTokens > 0
-                ? moduleInputTokens
-                : liveUsage && liveUsage.inputTokens > 0
-                  ? liveUsage.inputTokens
+            liveInputTokens > 0
+                ? liveInputTokens
+                : !compactedWithoutResponse &&
+                    typeof moduleInputTokens === "number" &&
+                    moduleInputTokens > 0
+                  ? moduleInputTokens
                   : 0;
         // The sidebar computes work metrics lazily and incrementally to keep computation off the transform hot path.
         const { newWorkTokens, totalInputTokens } = resolveSidebarWorkMetrics(sessionId);
@@ -391,12 +443,23 @@ export function buildSidebarSnapshot(
         const memoryTruncated = memory?.truncated === true;
         const memoryState = memory ? stateKey(memory.state) : null;
 
-        const contextLimit =
+        const modelContextLimit =
+            activeProviderID && activeModelID
+                ? resolveContextLimit(activeProviderID, activeModelID)
+                : 0;
+        const daemonContextLimit =
             typeof moduleContextLimit === "number" && moduleContextLimit > 0
                 ? moduleContextLimit
-                : activeProviderID && activeModelID
-                  ? resolveContextLimit(activeProviderID, activeModelID)
-                  : 0;
+                : 0;
+        // Each sample divides by the limit it was measured against: the live entry by the model's window, the daemon's copy by the limit sent with it; either falls back to the other when its own is unknown. commentlint: allow(JUDGE)
+        const contextLimit =
+            liveInputTokens > 0
+                ? modelContextLimit > 0
+                    ? modelContextLimit
+                    : daemonContextLimit
+                : daemonContextLimit > 0
+                  ? daemonContextLimit
+                  : modelContextLimit;
         // Usage divides by the same limit the snapshot reports, so a daemon that sent tokens without a limit still yields a percentage once the model supplies one.
         const effectiveUsagePercentage =
             contextLimit > 0 ? (effectiveInputTokens / contextLimit) * 100 : 0;
@@ -462,7 +525,10 @@ export function buildSidebarSnapshot(
             inputTokens: effectiveInputTokens,
             contextLimit,
             native_context_usage_percentage: nativeContextUsagePercentage,
-            compaction_enabled: compactionEnabled,
+            compaction_enabled: ownership.enabled,
+            ...(ownership.enabled || ownership.nativeActive === undefined
+                ? {}
+                : { native_compaction_active: ownership.nativeActive }),
             systemPromptTokens: calibrated.systemTokens,
             compartmentCount,
             memoryCount,
@@ -512,7 +578,7 @@ export function buildSidebarSnapshotRpcResponse(
     memory?: KernelMemorySnapshot,
     config?: Record<string, unknown>,
     moduleStatus?: RustSessionStatus,
-    compactionEnabled = true,
+    ownership: CompactionOwnership = EIDNARA_COMPACTION,
 ): Record<string, unknown> {
     try {
         // SAFETY: RPC results serialize to JSON; the handler map's value type is the JSON-object envelope.
@@ -523,7 +589,7 @@ export function buildSidebarSnapshotRpcResponse(
             memory,
             config,
             moduleStatus,
-            compactionEnabled,
+            ownership,
         ) as unknown as Record<string, unknown>;
     } catch {
         return { error: "sidebar snapshot unavailable" };
@@ -538,7 +604,7 @@ export function buildStatusDetail(
     liveSessionState?: LiveSessionState,
     memory?: KernelMemorySnapshot,
     moduleStatus?: RustSessionStatus,
-    compactionEnabled = true,
+    ownership: CompactionOwnership = EIDNARA_COMPACTION,
 ): StatusDetail {
     const base = buildSidebarSnapshot(
         sessionId,
@@ -547,7 +613,7 @@ export function buildStatusDetail(
         memory,
         config,
         moduleStatus,
-        compactionEnabled,
+        ownership,
         modelKey,
     );
     const activeModel = resolveActiveModel(sessionId, liveSessionState, modelKey);
@@ -555,7 +621,8 @@ export function buildStatusDetail(
     // The daemon counts every minted tag and publishes no per-tag state, so only the total is known here.
     const totalTags = typeof moduleStatus?.tag_count === "number" ? moduleStatus.tag_count : 0;
     const lastResponseTime =
-        liveUsageEntryFor(liveSessionState, sessionId, effectiveModelKey)?.lastResponseTime ?? 0;
+        usageForModel(liveUsageEntryFor(liveSessionState, sessionId), effectiveModelKey)
+            ?.lastResponseTime ?? 0;
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
@@ -684,13 +751,39 @@ export function registerRpcHandlers(
     args: {
         directory: string;
         config: EidnaraConfig;
-        client: unknown;
+        client: PluginContext["client"] | null;
         liveSessionState: LiveSessionState;
         rustModeModuleClient?: RustModeModuleClient;
+        /** OpenCode's resolved compaction settings from boot conflict detection. */
+        nativeCompaction?: { auto: boolean; prune: boolean };
     },
 ): void {
     const { directory, config, liveSessionState, rustModeModuleClient } = args;
-    const compactionEnabled = isCompactionEnabled(config);
+    const ownership: CompactionOwnership = {
+        enabled: isCompactionEnabled(config),
+        nativeActive: args.nativeCompaction
+            ? args.nativeCompaction.auto || args.nativeCompaction.prune
+            : undefined,
+    };
+    // The same maps the hooks share, so a metadata read here pins the route root and records child classification for them too. commentlint: allow(JUDGE)
+    const sessionDirectoryDeps: Omit<SessionDirectoryDeps, "directory"> = {
+        client: args.client ?? undefined,
+        sessionDirectoryBySession: liveSessionState.sessionDirectoryBySession,
+        sessionMetadataReadStateBySession: liveSessionState.sessionMetadataReadStateBySession,
+        subagentSessions: liveSessionState.subagentSessions,
+        internalChildSessions: liveSessionState.internalChildSessions,
+    };
+    // Daemon state is keyed by (session, project_root), so a poll reads the root the hooks write under; the caller's directory is the fallback when the host reports none. commentlint: allow(JUDGE)
+    const routeRootFor = (sessionId: string, requested: unknown): Promise<string> =>
+        resolveSessionDirectory(
+            {
+                ...sessionDirectoryDeps,
+                // The TUI sends "" when it has no directory; an empty fallback would pin an empty root for the session.
+                directory:
+                    typeof requested === "string" && requested.length > 0 ? requested : directory,
+            },
+            sessionId,
+        );
 
     // RPC results serialize to JSON, so handler-map values use the JSON-object envelope.
     const rawConfig = config as unknown as Record<string, unknown>;
@@ -698,26 +791,19 @@ export function registerRpcHandlers(
     // The status surface reports what an explicit search would see, lag included,
     // so the sidebar shows `stale` when the projector is behind.
     const kernelClient = kernelClientResolver(config);
-    // The cache reuses snapshots for `RUST_STATUS_CACHE_TTL_MS` to avoid a daemon read on each sidebar poll. commentlint: allow(JUDGE)
-    const memorySnapshotCache = new BoundedTtlCache<KernelMemorySnapshot>(
-        RUST_STATUS_CACHE_TTL_MS,
-        POLL_CACHE_MAX_ENTRIES,
-    );
     const readMemory = async (sessionId: string, dir: string): Promise<KernelMemorySnapshot> => {
         if (config.memory?.enabled === false) {
             return { state: disabled(), rows: [], knownAsOf: null };
         }
-        const cacheKey = pollCacheKey(sessionId, dir);
-        const cached = memorySnapshotCache.get(cacheKey);
-        if (cached !== undefined) {
-            return cached;
-        }
-        const client = kernelClient({ sessionId, projectRoot: resolveProjectRootDirectory(dir) });
-        const snapshot = kernelMemorySnapshotFrom(
-            await client.read({ surface: "explicit_search", gated: true }),
-        );
-        memorySnapshotCache.set(cacheKey, snapshot);
-        return snapshot;
+        return memorySnapshotCache.getOrLoad(pollCacheKey(sessionId, dir), async () => {
+            const client = kernelClient({
+                sessionId,
+                projectRoot: resolveProjectRootDirectory(dir),
+            });
+            return kernelMemorySnapshotFrom(
+                await client.read({ surface: "explicit_search", gated: true }),
+            );
+        });
     };
 
     // An unreachable daemon fails the poll rather than yielding zero counts, because `applyStickySnapshotCache` treats zero counts as lost state and blanks the sidebar. commentlint: allow(JUDGE)
@@ -741,8 +827,8 @@ export function registerRpcHandlers(
 
     rpcServer.handle("sidebar-snapshot", async (params) => {
         const sessionId = String(params.sessionId ?? "");
-        const dir = String(params.directory ?? directory);
         if (!sessionId) return { error: "unavailable" };
+        const dir = await routeRootFor(sessionId, params.directory);
         const inputs = await loadPollInputs(sessionId, dir);
         if (!inputs) return { error: "sidebar snapshot unavailable" };
         return buildSidebarSnapshotRpcResponse(
@@ -752,15 +838,16 @@ export function registerRpcHandlers(
             inputs.memory,
             rawConfig,
             inputs.moduleStatus,
-            compactionEnabled,
+            ownership,
         );
     });
 
     rpcServer.handle("status-detail", async (params) => {
         const sessionId = String(params.sessionId ?? "");
-        const dir = String(params.directory ?? directory);
         const modelKey = params.modelKey ? String(params.modelKey) : undefined;
         if (!sessionId) return { error: "unavailable" };
+        // The same host read also classifies a restored child, so it runs before `isSubagent` is read.
+        const dir = await routeRootFor(sessionId, params.directory);
         const inputs = await loadPollInputs(sessionId, dir);
         if (!inputs) return { error: "status detail unavailable" };
         return buildStatusDetail(
@@ -771,7 +858,7 @@ export function registerRpcHandlers(
             liveSessionState,
             inputs.memory,
             inputs.moduleStatus,
-            compactionEnabled,
+            ownership,
         ) as unknown as Record<string, unknown>;
     });
 

@@ -21,13 +21,17 @@ export async function createSessionHooksAsync(args: {
     ctx: PluginContext;
     pluginConfig: EidnaraPluginConfig;
     liveSessionState: LiveSessionState;
-    rustModeModuleClient?: RustModeModuleClient;
+    rustModeModuleClient: RustModeModuleClient;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
 }) {
     const { ctx, pluginConfig, liveSessionState } = args;
 
     if (pluginConfig.enabled !== true) {
-        return { eidnara: null, rustToolBackends: undefined };
+        return {
+            eidnara: null,
+            rustToolBackends: undefined,
+            resolveSessionDirectory: undefined,
+        };
     }
 
     const hookResult = await createEidnaraHookAsync({
@@ -42,5 +46,6 @@ export async function createSessionHooksAsync(args: {
     return {
         eidnara: hookResult,
         rustToolBackends: hookResult?.rustToolBackends,
+        resolveSessionDirectory: hookResult?.resolveSessionDirectory,
     };
 }

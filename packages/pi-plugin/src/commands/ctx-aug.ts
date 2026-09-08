@@ -106,7 +106,22 @@ export function registerCtxAugCommand(
                         "/ctx-aug: this directory has no project identity (sessions started in the home directory are excluded unless user-level config sets `allow_home_project`). Run from a project directory, or send the prompt without /ctx-aug.",
                         "warning",
                     );
+                    return;
                 }
+                // Without a UI, `notify` is a no-op, so send the original prompt unless the user
+                // aborted; `sendUserMessage` after an abort would start a new turn.
+                if (ctx.signal?.aborted) {
+                    sessionLog(
+                        sessionLabel,
+                        "/ctx-aug: aborted before sidekick spawn; prompt not sent",
+                    );
+                    return;
+                }
+                sessionLog(
+                    sessionLabel,
+                    "/ctx-aug: no project identity and no UI; sending prompt without augmentation",
+                );
+                pi.sendUserMessage(prompt);
                 return;
             }
             sessionLog(sessionLabel, "/ctx-aug: project identity", projectIdentity);

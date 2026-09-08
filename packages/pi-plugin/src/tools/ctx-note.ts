@@ -9,13 +9,13 @@ import { wakePlaneStatus } from "@eidnara/opencode/features/context/smart-notes/
 import type {
     RustAuthorityState,
     RustNoteToolRequest,
-    RustToolBackends,
 } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { isRustAuthorityDrainingError } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { CTX_NOTE_DESCRIPTION } from "@eidnara/opencode/tools/ctx-note/constants";
 import type { CtxNoteArgs } from "@eidnara/opencode/tools/ctx-note/types";
 import { unwrapImitatedReducedArgs } from "@eidnara/opencode/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
+import type { PiRustNoteToolRequest, PiRustToolBackends } from "../rust-tool-backends";
 import { boundedCommandId } from "./command-id";
 
 const ACTION_VALUES = ["write", "read", "dismiss", "update"] as const;
@@ -90,7 +90,7 @@ export interface CtxNoteToolDeps {
      * when resolveProjectPath is undefined or yields no identity.
      */
     resolveProjectPath?: (directory: string) => string | undefined;
-    rustToolBackends: RustToolBackends;
+    rustToolBackends: PiRustToolBackends;
 }
 
 function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["action"]): string {
@@ -216,11 +216,10 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
                     );
                 }
             }
-            const request: RustNoteToolRequest = {
+            const request: PiRustNoteToolRequest = {
                 ...(commandId ? { commandId } : {}),
                 sessionId,
                 projectRoot,
-                projectPath: projectIdentity,
                 memoryProject: projectIdentity,
                 action,
                 content: args.content,

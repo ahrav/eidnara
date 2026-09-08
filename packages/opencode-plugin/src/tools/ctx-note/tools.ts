@@ -15,6 +15,7 @@ import type {
 import {
     boundedCommandId,
     isRustAuthorityDrainingError,
+    isRustToolSessionDeletedError,
     toolCallIdFromContext,
 } from "../../plugin/rust-tool-backends";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
@@ -25,9 +26,8 @@ export { CTX_NOTE_LIGHT_DESCRIPTION } from "../light-descriptions";
 
 export interface CtxNoteToolDeps {
     /**
-     * The tool resolves the session directory's project identity at call time.
-     * Every action needs the identity; the tool returns an explanatory error
-     * when resolveProjectPath is undefined or yields no identity.
+     * Optional authority and condition-evaluation hooks use this identity.
+     * The Rust note backend owns the authoritative route and project identity.
      */
     resolveProjectPath?: (directory: string) => string | undefined;
     rustToolBackends: RustToolBackends;
@@ -196,14 +196,18 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             }
             const surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
 
-            // The tool resolves toolContext.directory on every call.
-            const projectIdentity = deps.resolveProjectPath?.(toolContext.directory);
-            if (!projectIdentity) {
-                return "Error: Could not resolve project identity for ctx_note.";
+            const needsProjectIdentity =
+                deps.rustToolBackends.authorityState !== undefined ||
+                deps.rustToolBackends.noteEvaluationAvailable !== undefined;
+            const projectIdentity = needsProjectIdentity
+                ? deps.resolveProjectPath?.(toolContext.directory)
+                : undefined;
+            if (needsProjectIdentity && !projectIdentity) {
+                return "Error: Could not resolve project identity for ctx_note preflight checks.";
             }
 
             let notesAuthority: RustAuthorityState | null = null;
-            if (deps.rustToolBackends.authorityState) {
+            if (deps.rustToolBackends.authorityState && projectIdentity) {
                 try {
                     notesAuthority = await deps.rustToolBackends.authorityState({
                         projectPath: projectIdentity,
@@ -227,6 +231,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             if (
                 (action === "write" || action === "update") &&
                 surfaceCondition &&
+                projectIdentity !== undefined &&
                 deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true
             ) {
                 // Resolve relative paths and default repository predicates against the repository root.
@@ -237,9 +242,6 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             const request: RustNoteToolRequest = {
                 ...(commandId ? { commandId } : {}),
                 sessionId,
-                projectRoot: toolContext.directory,
-                projectPath: projectIdentity,
-                memoryProject: projectIdentity,
                 action,
                 content: args.content,
                 surfaceCondition,
@@ -261,6 +263,17 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 if (compilation) return text + conditionCompileReplySuffix(compilation);
                 return text;
             } catch (error) {
+                if (isRustToolSessionDeletedError(error)) {
+                    const outcome =
+                        action === "read"
+                            ? "nothing was read"
+                            : action === "write"
+                              ? "the note was not written"
+                              : action === "update"
+                                ? "the note was not updated"
+                                : "the note was not dismissed";
+                    return `Error: Session was deleted before ctx_note could run; ${outcome}.`;
+                }
                 if (isRustAuthorityDrainingError(error)) {
                     return noteAuthorityRefusal(args, action);
                 }

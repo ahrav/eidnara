@@ -308,7 +308,7 @@ async function executeAugmentation(
         throwSentinel("CTX-AUG");
     }
 
-    await deps.sendNotification(
+    void deps.sendNotification(
         sessionId,
         "🔍 Preparing augmentation… this may take 2-10s depending on your sidekick provider.",
         {},
@@ -554,7 +554,7 @@ export function createEidnaraCommandHandler(deps: {
                     const projectRoot =
                         (await deps.resolveProjectRoot?.(sessionId)) ?? process.cwd();
                     if (deps.isSessionDeleted?.(sessionId)) throwSentinel(input.command);
-                    await deps.sendNotification(
+                    void deps.sendNotification(
                         sessionId,
                         "## Eidnara Wrapup\n\nStarting wrapup…",
                         {},

@@ -293,6 +293,7 @@ jobs:
 
       # `bun test` resolves QuickJS and the TUI from source and node_modules, so only these smokes exercise the shipped bundles.
       - name: Plugin bundle smokes
+        if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
         run: bun run --cwd packages/opencode-plugin smoke
 
       - name: Rust toolchain

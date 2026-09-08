@@ -8,11 +8,11 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveProjectIdentityForSession } from "@eidnara/opencode/features/context/project-identity";
-import type { RustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
 import type { KernelClientResolver } from "@eidnara/opencode/shared/kernel-client";
 import type { PromptSurfaceConfig } from "@eidnara/opencode/shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "@eidnara/opencode/shared/prompt-surface-runtime";
 import { createPromptSurfaceRuntime } from "@eidnara/opencode/shared/prompt-surface-runtime";
+import type { PiRustToolBackends } from "../rust-tool-backends";
 import { createCtxMemoryTool } from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";
 import { createCtxReduceTool } from "./ctx-reduce";
@@ -24,7 +24,7 @@ export interface RegisterToolsOptions {
     /** Serves `ctx_memory` and the `memory` source of `ctx_search`. */
     kernelClient: KernelClientResolver;
     /** Serves `ctx_reduce` and `ctx_note` through the daemon facades. */
-    rustToolBackends: RustToolBackends;
+    rustToolBackends: PiRustToolBackends;
     /** The resolver uses the user-level home-project setting to resolve the current directory's project identity. */
     resolveProjectIdentity?: (ctx: { cwd: string }) => string | undefined;
     /** `memoryToolEnabled=false` omits `ctx_memory` from the registered surface.

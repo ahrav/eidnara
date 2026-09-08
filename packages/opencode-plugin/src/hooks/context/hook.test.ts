@@ -8,9 +8,18 @@ import {
     clearHookInitFailure,
     getLastHookInitFailure,
 } from "../../features/context/fail-closed-block";
-import { __resetProjectIdentityForTests } from "../../features/context/project-identity";
+import {
+    __resetProjectIdentityForTests,
+    resolveProjectIdentityForSession,
+} from "../../features/context/project-identity";
 import { createEidnaraHook, type EidnaraDeps } from "./hook";
+import {
+    createKernelClient,
+    resetKernelClientsForTest,
+    sharedStateForTest,
+} from "./kernel-transport";
 import { createLiveSessionState } from "./live-session-state";
+import { isModuleCallBodyValid } from "./module-transport";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { RawMessage } from "./read-session-raw";
@@ -68,6 +77,7 @@ function installOneRawMessage(sessionId: string): MessageLike[] {
 
 afterEach(() => {
     closeReadOnlySessionDb();
+    resetKernelClientsForTest();
     for (const unregister of unregisterProviders.splice(0)) unregister();
     __resetProjectIdentityForTests();
     clearHookInitFailure();
@@ -90,6 +100,9 @@ function createFakeModuleClient(
     const closeSession = mock(() => {});
     const client: RustModeModuleClient = {
         call: async ({ sessionId, projectRoot, method, body }) => {
+            if (!isModuleCallBodyValid(method, body)) {
+                throw new TypeError(`invalid fake module body for ${method}`);
+            }
             const call = { sessionId, projectRoot, method, body };
             calls.push(call);
             return respond(call);
@@ -119,6 +132,7 @@ function createDeps(overrides: Partial<EidnaraDeps> = {}): EidnaraDeps {
         client: createClientMock(),
         directory: "/tmp",
         config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "rust" },
+        rustModeModuleClient: createFakeModuleClient().client,
         ...overrides,
     };
 }
@@ -154,6 +168,7 @@ describe("eidnara hook", () => {
         expect("tool.definition" in hook).toBe(false);
         expect("config" in hook).toBe(false);
         expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+        expect(typeof hook.resolveSessionDirectory).toBe("function");
         expect("noteEvaluationAvailable" in hook.rustToolBackends).toBe(false);
     });
 
@@ -269,6 +284,49 @@ describe("eidnara hook", () => {
         );
     });
 
+    it("classifies a restored child before forwarding its first todo snapshot", async () => {
+        useTempDataHome("hook-todo-restored-child-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        let postResolutionGate = false;
+        const hasSubagent = liveSessionState.subagentSessions.has.bind(
+            liveSessionState.subagentSessions,
+        );
+        liveSessionState.subagentSessions.has = mock((sessionId: string) => {
+            const result = hasSubagent(sessionId);
+            if (result) postResolutionGate = true;
+            return result;
+        });
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(async () => ({
+            data: { directory: "/other/repo", parentID: "ses-parent" },
+        }));
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-restored-todo-child",
+            args: { todos: [{ status: "pending", priority: "high", content: "Child task" }] },
+        });
+        for (let attempt = 0; attempt < 20 && !postResolutionGate; attempt += 1) {
+            await Bun.sleep(0);
+        }
+
+        expect(postResolutionGate).toBe(true);
+        expect(liveSessionState.subagentSessions.has("ses-restored-todo-child")).toBe(true);
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
+    });
+
     it("drops a detached todo snapshot whose session was deleted while it awaited the directory", async () => {
         useTempDataHome("hook-todo-deleted-race-");
         const fake = createFakeModuleClient();
@@ -279,8 +337,17 @@ describe("eidnara hook", () => {
         };
         client.session.get = mock(
             () =>
-                new Promise<{ data: { directory: string } }>((resolve) => {
-                    releaseDirectoryRead = () => resolve({ data: { directory: "/other/repo" } });
+                new Promise<{
+                    data: { directory: string; parentID: string; title: string };
+                }>((resolve) => {
+                    releaseDirectoryRead = () =>
+                        resolve({
+                            data: {
+                                directory: "/other/repo",
+                                parentID: "ses-parent",
+                                title: "eidnara-late-child",
+                            },
+                        });
                 }),
         );
         const hook = requireHook(
@@ -306,6 +373,43 @@ describe("eidnara hook", () => {
         await Bun.sleep(0);
         await Bun.sleep(0);
 
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
+        expect(liveSessionState.sessionDirectoryBySession.has("ses-todo-deleted")).toBe(false);
+        expect(liveSessionState.sessionMetadataReadStateBySession.has("ses-todo-deleted")).toBe(
+            false,
+        );
+        expect(liveSessionState.subagentSessions.has("ses-todo-deleted")).toBe(false);
+        expect(liveSessionState.internalChildSessions.has("ses-todo-deleted")).toBe(false);
+    });
+
+    it("skips a todo snapshot without a second directory read when the session is already deleted", async () => {
+        useTempDataHome("hook-todo-already-deleted-");
+        const fake = createFakeModuleClient();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                }),
+            ),
+        );
+        const sessionId = "ses-todo-already-deleted";
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        client.session.get.mockClear();
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: sessionId,
+            args: { todos: [{ status: "pending", priority: "high", content: "Too late" }] },
+        });
+        await Bun.sleep(0);
+
+        expect(client.session.get).toHaveBeenCalledTimes(1);
         expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
     });
 
@@ -374,7 +478,7 @@ describe("eidnara hook", () => {
         expect(transformBody?.is_subagent).toBe(true);
     });
 
-    it("sends agent_drops.append through rustToolBackends.reduce", async () => {
+    it("routes rustToolBackends.reduce through the session directory fallback", async () => {
         useTempDataHome("hook-reduce-");
         const fake = createFakeModuleClient();
         const hook = requireHook(
@@ -383,7 +487,6 @@ describe("eidnara hook", () => {
 
         await hook.rustToolBackends?.reduce?.({
             sessionId: "ses-reduce",
-            projectRoot: "/repo",
             drop: "tool output summary",
             commandId: "cmd-1",
         });
@@ -391,7 +494,7 @@ describe("eidnara hook", () => {
         expect(fake.calls).toEqual([
             {
                 sessionId: "ses-reduce",
-                projectRoot: "/repo",
+                projectRoot: "/tmp",
                 method: "agent_drops.append",
                 body: {
                     method: "agent_drops.append",
@@ -404,19 +507,26 @@ describe("eidnara hook", () => {
         ]);
     });
 
-    it("sends ctx_note facade arguments through rustToolBackends.note", async () => {
+    it("routes ctx_note through the pinned root and derives its memory project", async () => {
         useTempDataHome("hook-note-");
         const fake = createFakeModuleClient(() => ({ result: { note_id: 7 } }));
+        const liveSessionState = createLiveSessionState();
+        liveSessionState.sessionDirectoryBySession.set("ses-note", "/pinned/repo");
         const hook = requireHook(
-            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
         );
+        const memoryProject = resolveProjectIdentityForSession("/pinned/repo");
+        expect(memoryProject).toBeDefined();
 
         const response = await hook.rustToolBackends?.note?.({
             commandId: "cmd-note",
             sessionId: "ses-note",
-            projectRoot: "/repo",
-            projectPath: "git:abc",
-            memoryProject: "git:abc",
             action: "write",
             content: "Remember the build flag",
             surfaceCondition: "file exists",
@@ -430,7 +540,7 @@ describe("eidnara hook", () => {
         expect(fake.calls).toEqual([
             {
                 sessionId: "ses-note",
-                projectRoot: "/repo",
+                projectRoot: "/pinned/repo",
                 method: "ctx_note",
                 body: {
                     name: "ctx_note",
@@ -438,7 +548,7 @@ describe("eidnara hook", () => {
                         command_id: "cmd-note",
                         action: "write",
                         content: "Remember the build flag",
-                        memory_project: "git:abc",
+                        memory_project: memoryProject,
                         surface_condition: "file exists",
                         compiled_provider: "quickjs",
                         compiled_config: "{}",
@@ -463,9 +573,6 @@ describe("eidnara hook", () => {
 
         await hook.rustToolBackends?.note?.({
             sessionId: "ses-note",
-            projectRoot: "/repo",
-            projectPath: "git:abc",
-            memoryProject: "git:abc",
             action: "read",
             filter: "active",
             limit: 5,
@@ -477,6 +584,87 @@ describe("eidnara hook", () => {
         expect(args).toEqual(
             expect.objectContaining({ action: "read", filter: "active", limit: 5 }),
         );
+    });
+
+    it("gates both rust tool backends before and after a pending session directory read", async () => {
+        useTempDataHome("hook-tools-deleted-race-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        let releaseDirectoryRead: (() => void) | undefined;
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(
+            () =>
+                new Promise<{
+                    data: { directory: string; parentID: string; title: string };
+                }>((resolve) => {
+                    releaseDirectoryRead = () =>
+                        resolve({
+                            data: {
+                                directory: "/other/repo",
+                                parentID: "ses-parent",
+                                title: "eidnara-late-child",
+                            },
+                        });
+                }),
+        );
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+        const sessionId = "ses-tools-deleted";
+
+        const reduce = hook.rustToolBackends?.reduce?.({
+            sessionId,
+            drop: "1",
+            commandId: "cmd-reduce",
+        });
+        const note = hook.rustToolBackends?.note?.({ sessionId, action: "read" });
+        while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        releaseDirectoryRead();
+
+        const outcomes = await Promise.allSettled([reduce, note]);
+        expect(outcomes).toHaveLength(2);
+        for (const outcome of outcomes) {
+            expect(outcome.status).toBe("rejected");
+            if (outcome.status === "rejected") {
+                expect(outcome.reason).toHaveProperty(
+                    "message",
+                    "Session was deleted before the Rust tool could run.",
+                );
+            }
+        }
+        expect(
+            fake.calls.filter(
+                (call) => call.method === "agent_drops.append" || call.method === "ctx_note",
+            ),
+        ).toHaveLength(0);
+        expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.sessionMetadataReadStateBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.subagentSessions.has(sessionId)).toBe(false);
+        expect(liveSessionState.internalChildSessions.has(sessionId)).toBe(false);
+
+        const readsAfterRace = client.session.get.mock.calls.length;
+        await expect(
+            hook.rustToolBackends?.reduce?.({
+                sessionId,
+                drop: "2",
+                commandId: "cmd-after-delete",
+            }),
+        ).rejects.toThrow("Session was deleted before the Rust tool could run.");
+        await expect(hook.rustToolBackends?.note?.({ sessionId, action: "read" })).rejects.toThrow(
+            "Session was deleted before the Rust tool could run.",
+        );
+        expect(client.session.get).toHaveBeenCalledTimes(readsAfterRace);
     });
 
     it("routes the transform by the session's own directory and skips hidden eidnara- children", async () => {
@@ -510,6 +698,88 @@ describe("eidnara hook", () => {
         expect(fake.calls).toHaveLength(1);
     });
 
+    it("skips a transform for a session deleted while its directory read is pending", async () => {
+        useTempDataHome("hook-transform-deleted-race-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        const liveSessionState = createLiveSessionState();
+        let releaseDirectoryRead: (() => void) | undefined;
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(
+            () =>
+                new Promise<{
+                    data: { directory: string; parentID: string; title: string };
+                }>((resolve) => {
+                    releaseDirectoryRead = () =>
+                        resolve({
+                            data: {
+                                directory: "/other/repo",
+                                parentID: "ses-parent",
+                                title: "eidnara-late-child",
+                            },
+                        });
+                }),
+        );
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+        const sessionId = "ses-transform-deleted-race";
+        const messages = installOneRawMessage(sessionId);
+        const pass = hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        releaseDirectoryRead();
+        await pass;
+
+        expect(fake.deleteSession).toHaveBeenCalled();
+        expect(fake.calls.filter((call) => call.method === "transform")).toHaveLength(0);
+        expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.sessionMetadataReadStateBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.subagentSessions.has(sessionId)).toBe(false);
+        expect(liveSessionState.internalChildSessions.has(sessionId)).toBe(false);
+    });
+
+    it("skips a transform for an already deleted session without reading its directory", async () => {
+        useTempDataHome("hook-transform-already-deleted-");
+        const fake = createFakeModuleClient();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                }),
+            ),
+        );
+        const sessionId = "ses-transform-already-deleted";
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        client.session.get.mockClear();
+        const messages = installOneRawMessage(sessionId);
+
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+
+        expect(client.session.get).not.toHaveBeenCalled();
+        expect(fake.calls.filter((call) => call.method === "transform")).toHaveLength(0);
+    });
+
     it("clears the transform session and prompt state on session.deleted", async () => {
         useTempDataHome("hook-session-deleted-");
         const fake = createFakeModuleClient(({ method }) =>
@@ -518,16 +788,33 @@ describe("eidnara hook", () => {
                 : { ok: true },
         );
         const liveSessionState = createLiveSessionState();
+        const kernelConfig = {
+            subc: { connection_file: "/nonexistent/eidnara-hook-test/subc.json" },
+        };
         const hook = requireHook(
             createEidnaraHook(
                 createDeps({
                     client: createClientMock(undefined, "/other/repo"),
                     rustModeModuleClient: fake.client,
                     liveSessionState,
+                    config: {
+                        protected_tags: 3,
+                        cache_ttl: "5m",
+                        transform_mode: "rust",
+                        ...kernelConfig,
+                    },
                 }),
             ),
         );
         const sessionId = "ses-deleted";
+        // A memory read holds a kernel route on the shared transport until the session closes it.
+        createKernelClient({ sessionId, projectRoot: "/other/repo", config: kernelConfig });
+        const sharedKernel = sharedStateForTest(kernelConfig)?.module;
+        if (!sharedKernel) throw new Error("the kernel client must resolve a shared transport");
+        const closedKernelSessions: string[] = [];
+        sharedKernel.closeSession = (closing: string) => {
+            closedKernelSessions.push(closing);
+        };
         const selectModel = () =>
             hook["chat.message"]({
                 sessionID: sessionId,
@@ -555,9 +842,15 @@ describe("eidnara hook", () => {
         // Session deletion uses the transform's recorded project root, not the plugin launch directory.
         expect(fake.deleteSession).toHaveBeenCalledWith(sessionId, "/other/repo");
         expect(fake.closeSession).toHaveBeenCalledWith(sessionId);
+        expect(closedKernelSessions).toEqual([sessionId]);
         expect(liveSessionState.liveModelBySession.has(sessionId)).toBe(false);
         expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
         expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
+
+        await expect(
+            hook.resolveSessionDirectory(sessionId, "/late/tool-directory"),
+        ).rejects.toThrow("Session was deleted before the Rust tool could run.");
+        expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
 
         // A prompt change after deletion finds no persisted hash, so it initializes instead of flagging a change.
         await selectModel();
@@ -566,6 +859,109 @@ describe("eidnara hook", () => {
             { system: ["third prompt"] },
         );
         expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
+    });
+
+    it("routes rust cleanup from the deleted event directory without an SDK read", async () => {
+        useTempDataHome("hook-session-deleted-route-");
+        const fake = createFakeModuleClient();
+        const client = createClientMock(undefined, "/wrong/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                }),
+            ),
+        );
+
+        await hook.event({
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: "ses-delete-route", directory: "/actual/repo" } },
+            },
+        });
+        await Bun.sleep(0);
+
+        expect(client.session.get).not.toHaveBeenCalled();
+        expect(fake.deleteSession).toHaveBeenCalledWith("ses-delete-route", "/actual/repo");
+    });
+
+    it("preserves an existing route pin when the deleted event reports another directory", async () => {
+        useTempDataHome("hook-session-deleted-pinned-route-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        liveSessionState.sessionDirectoryBySession.set("ses-delete-pinned", "/pinned/repo");
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook.event({
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: "ses-delete-pinned", directory: "/event/repo" } },
+            },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.deleteSession).toHaveBeenCalledWith("ses-delete-pinned", "/pinned/repo");
+    });
+
+    it("closes local route state without invoking daemon deletion in ts mode", async () => {
+        useTempDataHome("hook-session-deleted-ts-");
+        const fake = createFakeModuleClient();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    rustModeModuleClient: fake.client,
+                    config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "ts" },
+                }),
+            ),
+        );
+
+        await hook.event({
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: "ses-delete-ts", directory: "/actual/repo" } },
+            },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.deleteSession).not.toHaveBeenCalled();
+        expect(fake.closeSession).toHaveBeenCalledWith("ses-delete-ts");
+    });
+
+    it("deletes daemon state for a ts-mode session with an existing route", async () => {
+        useTempDataHome("hook-session-deleted-ts-route-");
+        const fake = createFakeModuleClient();
+        fake.client.hasSessionRoute = (sessionId) => sessionId === "ses-delete-ts-routed";
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    rustModeModuleClient: fake.client,
+                    config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "ts" },
+                }),
+            ),
+        );
+
+        await hook.event({
+            event: {
+                type: "session.deleted",
+                properties: {
+                    info: { id: "ses-delete-ts-routed", directory: "/actual/repo" },
+                },
+            },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.deleteSession).toHaveBeenCalledWith("ses-delete-ts-routed", "/actual/repo");
+        expect(fake.closeSession).toHaveBeenCalledWith("ses-delete-ts-routed");
     });
 
     it("forwards /ctx-flush to session.flush and throws the sentinel", async () => {
@@ -648,5 +1044,57 @@ describe("eidnara hook", () => {
         expect(liveSessionState.sessionDirectoryBySession.get("ses-routed-cmd")).toBe(
             "/other/repo",
         );
+    });
+
+    it("clears late command-route metadata when the session is deleted during resolution", async () => {
+        useTempDataHome("hook-command-deleted-race-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        let releaseDirectoryRead: (() => void) | undefined;
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(
+            () =>
+                new Promise<{
+                    data: { directory: string; parentID: string; title: string };
+                }>((resolve) => {
+                    releaseDirectoryRead = () =>
+                        resolve({
+                            data: {
+                                directory: "/other/repo",
+                                parentID: "ses-parent",
+                                title: "eidnara-late-child",
+                            },
+                        });
+                }),
+        );
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+        const sessionId = "ses-command-deleted-race";
+        const command = hook["command.execute.before"](
+            { command: "ctx-flush", sessionID: sessionId, arguments: "" },
+            { parts: [{ type: "text", text: "" }] },
+        );
+        while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        releaseDirectoryRead();
+        await expectSentinel(command, "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__");
+
+        expect(fake.calls.filter((call) => call.method === "session.flush")).toHaveLength(0);
+        expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.sessionMetadataReadStateBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.subagentSessions.has(sessionId)).toBe(false);
+        expect(liveSessionState.internalChildSessions.has(sessionId)).toBe(false);
     });
 });

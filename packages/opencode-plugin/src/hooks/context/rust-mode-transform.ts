@@ -49,7 +49,7 @@ import type { MessageLike } from "./tag-content-primitives";
 import { logTransformTiming } from "./transform-stage-logger";
 
 export interface RustModeTransformDeps extends SessionDirectoryDeps {
-    contextUsageMap: Map<string, ContextUsageEntry>;
+    contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     protectedTags?: number;
     clearReasoningAge: number;
     executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
@@ -117,6 +117,7 @@ export interface RustModeModuleClient {
     }): Promise<unknown>;
     deleteSession?(sessionId: string, projectRoot: string): Promise<void>;
     closeSession?(sessionId: string): void;
+    hasSessionRoute?(sessionId: string): boolean;
 }
 
 type ContentSnapshotField = string | number | boolean | symbol;
@@ -860,6 +861,13 @@ export function createRustModeTransform(
         }
     }
 
+    /** A newer session pass started before this pass could send or commit shared state. */
+    class PassSupersededDuringPass extends Error {
+        constructor(sessionId: string) {
+            super(`rust session ${sessionId} pass was superseded by a newer pass`);
+        }
+    }
+
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
         state.consecutiveFailures += 1;
         state.failureCount += 1;
@@ -902,7 +910,11 @@ export function createRustModeTransform(
         const passStartedAt = performance.now();
         const state = ensureState(states, sessionId);
         const timings = emptyRustPassTimings();
-        state.passCount += 1;
+        const passSequence = ++state.passCount;
+        const assertCurrentPass = (): void => {
+            if (states.get(sessionId) !== state) throw new SessionClearedDuringPass(sessionId);
+            if (state.passCount !== passSequence) throw new PassSupersededDuringPass(sessionId);
+        };
         const syntheticTurn = observeSyntheticTurn(state, messages);
         if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
             state.syntheticCascadeLogged = true;
@@ -1053,6 +1065,7 @@ export function createRustModeTransform(
             todoAvailability,
         );
         try {
+            assertCurrentPass();
             if (preflightError) throw preflightError;
             const usage = passUsageSnapshot;
             const contextLimit =
@@ -1201,6 +1214,7 @@ export function createRustModeTransform(
                 provisionalBase,
             });
             logStage(sessionId, "ordinalResolve", ordinalStartedAt, timings);
+            assertCurrentPass();
             if (!resolved.ok) {
                 wireDelta = undefined;
                 resetOrdinalMemo(state);
@@ -1218,6 +1232,7 @@ export function createRustModeTransform(
                     timings,
                     "fallback=clean_full",
                 );
+                assertCurrentPass();
             }
             if (!resolved.ok) {
                 throw new Error(
@@ -1361,8 +1376,7 @@ export function createRustModeTransform(
                 let response: Record<string, unknown> | undefined;
                 for (const [index, { page, bytes }] of pages.entries()) {
                     // A `session.deleted` that landed during preflight or an earlier page has already queued the daemon-side delete; sending now would recreate the session's durable state.
-                    if (states.get(sessionId) !== state)
-                        throw new SessionClearedDuringPass(sessionId);
+                    assertCurrentPass();
                     const transportStartedAt = performance.now();
                     let moduleResponse: unknown;
                     try {
@@ -1440,6 +1454,55 @@ export function createRustModeTransform(
             };
             let response = await sendTransformSeriesWithSingleRestart(body);
             captureResponseTelemetry(response);
+            const allDeliveryPassIds = new Set(noteDeliveryPassIds(response));
+            const sendNoteDeliveryDisposition = async (
+                method: "transform.ack" | "transform.nack",
+                transformPassIds: ReadonlySet<string>,
+            ): Promise<void> => {
+                const errors: unknown[] = [];
+                for (const transformPassId of transformPassIds) {
+                    try {
+                        await callModule({
+                            sessionId,
+                            projectRoot,
+                            method,
+                            body: {
+                                method,
+                                v: 1,
+                                session_id: sessionId,
+                                transform_pass_id: transformPassId,
+                            },
+                        });
+                    } catch (error) {
+                        errors.push(error);
+                    }
+                }
+                if (errors.length > 0) {
+                    throw new AggregateError(
+                        errors,
+                        `${method} failed for ${errors.length} note delivery disposition(s)`,
+                    );
+                }
+            };
+            const nackPendingRetryDeliveries = async (): Promise<void> => {
+                try {
+                    await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
+                } catch (nackError) {
+                    sessionLog(
+                        sessionId,
+                        "rust retry note delivery nack failed (ignored):",
+                        nackError,
+                    );
+                }
+            };
+            const assertCurrentRetryPass = async (): Promise<void> => {
+                try {
+                    assertCurrentPass();
+                } catch (error) {
+                    await nackPendingRetryDeliveries();
+                    throw error;
+                }
+            };
             const needFullSync = isNeedFullSync(response);
             const nativeContentOmitted = !hasNativeResponseContent(response);
             if (needFullSync || nativeContentOmitted) {
@@ -1449,6 +1512,7 @@ export function createRustModeTransform(
                         "native_delta_fallback_reason=adapter_response_omitted_native_content retry=full",
                     );
                 }
+                await assertCurrentRetryPass();
                 state.forceFullWire = true;
                 if (wireDelta) {
                     const retryOrdinalStartedAt = performance.now();
@@ -1465,6 +1529,7 @@ export function createRustModeTransform(
                         timings,
                         "retry=full",
                     );
+                    await assertCurrentRetryPass();
                     if (!retryResolved.ok) {
                         resetOrdinalMemo(state);
                         retryResolved = await resolveOrdinalsForModule({
@@ -1472,8 +1537,10 @@ export function createRustModeTransform(
                             messages,
                             memo: ordinalMemoOf(state),
                         });
+                        await assertCurrentRetryPass();
                     }
                     if (!retryResolved.ok) {
+                        await nackPendingRetryDeliveries();
                         throw new Error(`rust ordinal ${retryResolved.reason} during full retry`);
                     }
                     state.idOrdinalMemoGeneration = retryResolved.memoGeneration;
@@ -1521,33 +1588,32 @@ export function createRustModeTransform(
                         "retry=full",
                     );
                 }
-                response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
+                try {
+                    response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
+                } catch (error) {
+                    await nackPendingRetryDeliveries();
+                    throw error;
+                }
                 captureResponseTelemetry(response);
+                for (const transformPassId of noteDeliveryPassIds(response)) {
+                    allDeliveryPassIds.add(transformPassId);
+                }
                 if (isNeedFullSync(response)) {
+                    await nackPendingRetryDeliveries();
                     throw new Error("rust module still requires full sync after a full-array send");
                 }
                 if (!hasNativeResponseContent(response)) {
+                    await nackPendingRetryDeliveries();
                     throw new Error("rust module omitted native content after a full-array retry");
                 }
             }
-            const deliveryPassIds = noteDeliveryPassIds(response);
-            const sendNoteDeliveryDisposition = async (
-                method: "transform.ack" | "transform.nack",
-            ) => {
-                for (const transformPassId of deliveryPassIds) {
-                    await callModule({
-                        sessionId,
-                        projectRoot,
-                        method,
-                        body: {
-                            method,
-                            v: 1,
-                            session_id: sessionId,
-                            transform_pass_id: transformPassId,
-                        },
-                    });
-                }
-            };
+            await assertCurrentRetryPass();
+            const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
+            const discardedDeliveryPassIds = new Set(
+                [...allDeliveryPassIds].filter(
+                    (transformPassId) => !appliedDeliveryPassIds.has(transformPassId),
+                ),
+            );
             let appliedMessages: unknown[];
             const applyStartedAt = performance.now();
             try {
@@ -1573,46 +1639,64 @@ export function createRustModeTransform(
             } catch (error) {
                 logStage(sessionId, "apply", applyStartedAt, timings, "failed=true");
                 try {
-                    await sendNoteDeliveryDisposition("transform.nack");
+                    await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
                 } catch (nackError) {
                     sessionLog(sessionId, "rust note delivery nack failed (ignored):", nackError);
                 }
                 throw error;
             }
-            if (deliveryPassIds.length > 0) {
+            if (discardedDeliveryPassIds.size > 0) {
                 try {
-                    await sendNoteDeliveryDisposition("transform.ack");
+                    await sendNoteDeliveryDisposition("transform.nack", discardedDeliveryPassIds);
+                } catch (nackError) {
+                    sessionLog(
+                        sessionId,
+                        "rust discarded note delivery nack failed (will retry):",
+                        nackError,
+                    );
+                }
+            }
+            if (appliedDeliveryPassIds.size > 0) {
+                try {
+                    await sendNoteDeliveryDisposition("transform.ack", appliedDeliveryPassIds);
                 } catch (ackError) {
                     sessionLog(sessionId, "rust note delivery ack failed (will retry):", ackError);
                 }
             }
-            const ordinalContinuationBase = response.ordinal_continuation_base;
-            if (
-                typeof ordinalContinuationBase === "number" &&
-                Number.isSafeInteger(ordinalContinuationBase) &&
-                ordinalContinuationBase > 0
-            ) {
-                if (state.ordinalContinuationBase === null) {
-                    for (const [messageId, ordinal] of state.idOrdinalMemo) {
-                        state.idOrdinalMemo.set(messageId, ordinal + ordinalContinuationBase);
+            const ownsSharedState =
+                states.get(sessionId) === state && state.passCount === passSequence;
+            if (ownsSharedState) {
+                const ordinalContinuationBase = response.ordinal_continuation_base;
+                if (
+                    typeof ordinalContinuationBase === "number" &&
+                    Number.isSafeInteger(ordinalContinuationBase) &&
+                    ordinalContinuationBase > 0
+                ) {
+                    if (state.ordinalContinuationBase === null) {
+                        for (const [messageId, ordinal] of state.idOrdinalMemo) {
+                            state.idOrdinalMemo.set(messageId, ordinal + ordinalContinuationBase);
+                        }
+                        state.ordinalMemoCanonicalCount += ordinalContinuationBase;
                     }
-                    state.ordinalMemoCanonicalCount += ordinalContinuationBase;
+                    state.ordinalContinuationBase = ordinalContinuationBase;
                 }
-                state.ordinalContinuationBase = ordinalContinuationBase;
-            }
-            state.initialized = true;
-            state.consecutiveFailures = 0;
-            if (
-                states.get(sessionId) === state &&
-                state.wireInvalidations === wireInvalidationsAtRead
-            ) {
-                state.forceFullWire = false;
-                wireCaches.set(sessionId, pendingWireCache);
+                state.initialized = true;
+                state.consecutiveFailures = 0;
+                if (state.wireInvalidations === wireInvalidationsAtRead) {
+                    state.forceFullWire = false;
+                    wireCaches.set(sessionId, pendingWireCache);
+                } else {
+                    // The wire state was invalidated while this pass awaited the daemon. The applied output stands, but the cache built from the pre-invalidation array does not.
+                    sessionLog(
+                        sessionId,
+                        "rust wire state changed during the pass; discarding this pass's wire cache",
+                    );
+                }
             } else {
-                // The session was cleared or its wire state invalidated while this pass awaited the daemon. The applied output stands; the cache built from the pre-invalidation array does not, and `forceFullWire` keeps the invalidator's value.
+                // A newer pass or session deletion owns shared state. The applied output and note dispositions stand, but this pass publishes no cache or memo state.
                 sessionLog(
                     sessionId,
-                    "rust wire state changed during the pass; discarding this pass's wire cache",
+                    "rust pass lost shared-state ownership after apply; discarding its cache update",
                 );
             }
             appliedAt = performance.now();
@@ -1620,8 +1704,11 @@ export function createRustModeTransform(
         } catch (error) {
             servedFrom = "raw";
             materializeReason = "none";
-            if (error instanceof SessionClearedDuringPass) {
-                decision = "cleared";
+            if (
+                error instanceof SessionClearedDuringPass ||
+                error instanceof PassSupersededDuringPass
+            ) {
+                decision = error instanceof SessionClearedDuringPass ? "cleared" : "superseded";
                 sessionLog(sessionId, error.message);
             } else {
                 if (decision.toLowerCase() !== "need_full_sync") decision = "error";
@@ -1643,6 +1730,8 @@ export function createRustModeTransform(
                 knownSessionDirectory(deps, sessionId);
             states.delete(sessionId);
             wireCaches.delete(sessionId);
+            // Route close asks the host to settle active work within its close budget before deletion acquires the lane; cleanup closes the replacement route.
+            options.moduleClient.closeSession?.(sessionId);
             if (options.moduleClient.deleteSession) {
                 void options.moduleClient
                     .deleteSession(sessionId, projectRoot)
@@ -1650,8 +1739,6 @@ export function createRustModeTransform(
                         sessionLog(sessionId, "rust module session deletion failed:", error);
                     })
                     .finally(() => options.moduleClient.closeSession?.(sessionId));
-            } else {
-                options.moduleClient.closeSession?.(sessionId);
             }
         },
         invalidateWireState,

@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseRecompArgs } from "@eidnara/opencode/hooks/context/command-handler";
+import { setEidnaraRecompActive } from "../status-line";
 import {
     COMPACTION_OFF_COMMAND_UNAVAILABLE,
     callDaemonSession,
@@ -43,6 +44,7 @@ export function registerCtxRecompCommand(pi: ExtensionAPI, deps: RegisterCtxReco
             } else if (parsedArgs.kind === "partial") {
                 result = `## Eidnara Recomp — Unsupported\n\nRequested range: \`${parsedArgs.range.start}-${parsedArgs.range.end}\`. ${RECOMP_RANGE_UNSUPPORTED}\n\n${RECOMP_USAGE}`;
             } else {
+                setEidnaraRecompActive(ctx, sessionId, true);
                 try {
                     const value = await callDaemonSession(deps, ctx, "session.recomp", {
                         method: "session.recomp",
@@ -53,6 +55,8 @@ export function registerCtxRecompCommand(pi: ExtensionAPI, deps: RegisterCtxReco
                     result = formatRustOperationMessage("recomp", value);
                 } catch (error) {
                     result = `## Eidnara Recomp — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
+                } finally {
+                    setEidnaraRecompActive(ctx, sessionId, false);
                 }
             }
             sendCtxStatusMessage(pi, {

@@ -62,7 +62,11 @@ const KNOWN_SLOTS: Record<string, KnownSlot> = {
     },
     "packages/opencode-plugin/src/shared/models-dev-cache.ts:authRewarmDone": {
         classification: "VERDICT",
-        reason: "Saved: refreshModelLimitsAfterAuthOnce resets the latch when its warm fails.",
+        reason: "Bounded: ordinary failures reset the latch; provider timeouts allow one retry before preserving the last-known-good cache until restart.",
+    },
+    "packages/opencode-plugin/src/shared/models-dev-cache.ts:authRewarmTimeouts": {
+        classification: "VERDICT",
+        reason: "Bounded timeout verdict: two aborted post-auth provider reads stop later event hooks from repeatedly paying the read deadline.",
     },
     "packages/opencode-plugin/src/features/context/fail-closed-block.ts:lastHookInitFailure": {
         classification: "DIAGNOSTIC",

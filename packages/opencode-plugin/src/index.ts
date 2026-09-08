@@ -14,11 +14,11 @@ import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./features/context/smart-note
 import { createLiveSessionState } from "./hooks/context/live-session-state";
 import {
     configureManagedDemandStart,
+    createHostModuleClient,
     createLazyManagedDemandStart,
-    HostModuleTransport,
+    type HostModuleClient,
 } from "./hooks/context/module-transport";
 import { preloadTokenizer } from "./hooks/context/read-session-formatting";
-import type { RustModeModuleClient } from "./hooks/context/rust-mode-transform";
 import {
     type ConfigWarningDelivery,
     createConfigWarningDelivery,
@@ -114,16 +114,16 @@ const server: Plugin = async (ctx) => {
     }
 
     const liveSessionState = createLiveSessionState();
-    const rustModeModuleClient: RustModeModuleClient | undefined =
-        pluginConfig.transform_mode === "rust"
-            ? new HostModuleTransport(pluginConfig.subc?.connection_file)
-            : undefined;
+    // Both transform modes route `ctx_note`, `ctx_reduce`, and the session commands through the daemon client; the instance owns the one client every consumer shares so disposal can tear down the connection it dialed.
+    const moduleClient: HostModuleClient = createHostModuleClient(
+        pluginConfig.subc?.connection_file,
+    );
 
     const hooks = await createSessionHooksAsync({
         ctx,
         pluginConfig,
         liveSessionState,
-        rustModeModuleClient,
+        rustModeModuleClient: moduleClient,
         promptSurfaceRuntime,
     });
     const eidnara = hooks.eidnara;
@@ -131,6 +131,7 @@ const server: Plugin = async (ctx) => {
     const tools = createToolRegistry({
         pluginConfig,
         rustToolBackends: hooks.rustToolBackends ?? {},
+        resolveSessionDirectory: hooks.resolveSessionDirectory,
         promptSurfaceRuntime,
         registrationPromptSurface: loadedPluginConfig.registrationPromptSurface,
     });
@@ -138,7 +139,8 @@ const server: Plugin = async (ctx) => {
     // The function-scope handle lets the `server.instance.disposed` cleanup handler stop the server.
     let rpcServer: EidnaraRpcServer | null = null;
 
-    if (pluginConfig.enabled) {
+    // A null hook means the directory has no project identity (a home directory without `allow_home_project`); the RPC handlers read kernel memory for their directory, so they honor the same refusal.
+    if (pluginConfig.enabled && eidnara) {
         // RPC communication between the TUI and server bypasses the SQLite plugin_messages bus.
         rpcServer = new EidnaraRpcServer(getEidnaraStorageDir(), ctx.directory);
         registerRpcHandlers(rpcServer, {
@@ -146,7 +148,8 @@ const server: Plugin = async (ctx) => {
             config: pluginConfig,
             client: ctx.client,
             liveSessionState,
-            rustModeModuleClient,
+            rustModeModuleClient: moduleClient,
+            nativeCompaction: conflictResult?.nativeCompaction,
         });
         rpcServer.start().catch((err) => {
             log(`[eidnara] RPC server failed to start: ${err}`);
@@ -196,7 +199,7 @@ const server: Plugin = async (ctx) => {
                     await eidnara?.event?.(input);
                 },
             },
-            // `onInstanceDisposed` cleans up only this instance's process-resident resources.
+            // `onInstanceDisposed` cleans up only this instance's process-resident resources: its RPC server and its daemon transport.
             onInstanceDisposed: (disposedDirectory: string) => {
                 if (path.resolve(disposedDirectory) !== path.resolve(ownInstanceDirectory)) return;
                 try {
@@ -204,7 +207,11 @@ const server: Plugin = async (ctx) => {
                 } catch {
                     // best-effort
                 }
-                log("[eidnara] instance disposed — stopped RPC server");
+                // Every reload builds a new client, so the old one is torn down here; otherwise its socket, channel poller, route handles, and ring mappings stay cached for the process lifetime.
+                moduleClient.disconnect();
+                log(
+                    "[eidnara] instance disposed — stopped RPC server and disconnected the daemon transport",
+                );
             },
         }),
         "experimental.chat.messages.transform": createMessagesTransformHandler({

@@ -8,12 +8,9 @@ import {
     __wakePlaneTest,
     WAKE_PLANE_CAPABILITY,
 } from "@eidnara/opencode/features/context/smart-notes/wake-plane";
-import type {
-    RustNoteToolRequest,
-    RustToolBackends,
-} from "@eidnara/opencode/plugin/rust-tool-backends";
 
 import { fakeContext } from "../__tests__/test-utils";
+import type { PiRustNoteToolRequest, PiRustToolBackends } from "../rust-tool-backends";
 import { createCtxNoteTool } from "./ctx-note";
 
 const CWD = "/workspace/project-a";
@@ -27,8 +24,8 @@ const resolveProjectPath = (directory: string) =>
     directory.includes("project-b") ? "git:project-b" : "git:project-a";
 
 function recordingNote(response: unknown = "module note result") {
-    const requests: RustNoteToolRequest[] = [];
-    const note: NonNullable<RustToolBackends["note"]> = async (request) => {
+    const requests: PiRustNoteToolRequest[] = [];
+    const note: NonNullable<PiRustToolBackends["note"]> = async (request) => {
         requests.push(request);
         return response;
     };
@@ -36,7 +33,7 @@ function recordingNote(response: unknown = "module note result") {
 }
 
 async function callNote(args: {
-    rustToolBackends: RustToolBackends;
+    rustToolBackends: PiRustToolBackends;
     resolveProjectPath?: (directory: string) => string | undefined;
     callId?: string;
     sessionId?: string;
@@ -91,7 +88,6 @@ describe("Pi ctx_note", () => {
             commandId: "call-1",
             sessionId: SESSION,
             projectRoot: CWD,
-            projectPath: "git:project-a",
             memoryProject: "git:project-a",
             action: "write",
             content: "module owned note",

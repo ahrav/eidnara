@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { writeFileAtomicSync } from "./atomic-file";
 import { getHarness, type HarnessId } from "./harness";
-import { RELEASE_LAYOUT } from "./release-layout";
+import { MANAGED_SUBTREE, STORAGE_SUBDIRECTORY } from "./host-release-layout";
 
 /**
  * The absolute `XDG_DATA_HOME` override, or `null` when the variable is
@@ -175,14 +175,11 @@ export function getEidnaraStorageDir(): string {
 }
 
 /**
- * Eidnara's storage subtree under an explicit data root
- * (`${dataRoot}/eidnara/context`), with the segment names taken from
- * the release contract the Rust daemon conforms to. Root-parameterized so
- * harnesses and scripts that manage their own data root name the same tree
- * the daemon writes.
+ * Eidnara's storage subtree under an explicit data root (`${dataRoot}/eidnara/context`).
+ * Harnesses and scripts can use their own data roots while addressing the daemon's storage subtree.
  */
 export function storageSubtreePath(dataRoot: string): string {
-    return path.join(dataRoot, RELEASE_LAYOUT.managed_subtree, RELEASE_LAYOUT.storage_subdirectory);
+    return path.join(dataRoot, MANAGED_SUBTREE, STORAGE_SUBDIRECTORY);
 }
 
 let testBackstopDataRoot: string | null = null;

@@ -14,6 +14,7 @@ import { formatConflictShort } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
 import { normalizeSDKResponse } from "../shared/normalize-sdk-response";
 import type { Database } from "../shared/sqlite";
+import { jsonField } from "../shared/sqlite-helpers";
 
 const CONFLICT_WARNING_MARKER = "⚠️ Eidnara is disabled due to conflicting configuration:";
 const ENABLED_MARKER = "✨ Eidnara is now enabled";
@@ -190,15 +191,15 @@ const MARKER_MESSAGE_IDS_SQL = `
 SELECT m.id AS id
 FROM message m
 WHERE m.session_id = ?
-  AND json_extract(m.data, '$.role') = 'user'
+  AND ${jsonField("m.data", "$.role")} = 'user'
   AND EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
   AND NOT EXISTS (
     SELECT 1 FROM part p
     WHERE p.message_id = m.id
       AND NOT (
-        COALESCE(json_extract(p.data, '$.ignored'), 0) IN (1, 'true')
-        AND json_extract(p.data, '$.type') = 'text'
-        AND substr(COALESCE(json_extract(p.data, '$.text'), ''), 1, length(?)) = ?
+        COALESCE(${jsonField("p.data", "$.ignored")}, 0) IN (1, 'true')
+        AND ${jsonField("p.data", "$.type")} = 'text'
+        AND substr(COALESCE(${jsonField("p.data", "$.text")}, ''), 1, length(?)) = ?
       )
   )
 ORDER BY m.time_created, m.id`;

@@ -599,6 +599,11 @@ const SidebarContent = (props: {
                         if (event.properties.sessionID !== sessionID) return;
                         scheduleRefresh();
                     }),
+                    // Compaction drops the server's live usage and sticky snapshot; without a re-poll the pre-compaction counts stay on screen.
+                    props.api.event.on("session.compacted", (event) => {
+                        if (event.properties.sessionID !== sessionID) return;
+                        scheduleRefresh();
+                    }),
                 ];
 
                 onCleanup(() => {

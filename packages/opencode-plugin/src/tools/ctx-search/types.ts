@@ -1,3 +1,4 @@
+import type { SessionDirectoryResolver } from "../../hooks/context/session-directory";
 import type { KernelClientResolver } from "../ctx-memory/types";
 import type { ImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 
@@ -18,4 +19,6 @@ export interface CtxSearchToolDeps {
      * OpenCode's top-level `ctx.directory` reflects the launch directory, not the session's working directory.
      */
     resolveProjectPath: (directory: string) => string | undefined;
+    /** Pins the same route root used by every daemon call for one session. */
+    resolveSessionDirectory?: SessionDirectoryResolver;
 }

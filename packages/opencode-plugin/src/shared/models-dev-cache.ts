@@ -29,12 +29,17 @@ import {
     resolveWindowOverlayFacts,
     type WindowGeometryResult,
 } from "./window-geometry";
+import { HOST_SDK_READ_TIMEOUT_MS, TimeoutError, withTimeout } from "./with-timeout";
 
 interface OpencodeClientLike {
     config: {
-        providers: () => Promise<{ data?: { providers?: unknown } }>;
+        providers: (options?: { signal?: AbortSignal }) => Promise<{
+            data?: { providers?: unknown };
+        }>;
     };
 }
+
+type RefreshOutcome = "ok" | "failed" | "timed_out";
 
 // Pi and OpenCode reject the same out-of-range values through this one bound.
 export { isSaneLimit, MAX_SANE_LIMIT, MIN_SANE_LIMIT } from "./window-geometry";
@@ -309,8 +314,8 @@ export async function refreshModelLimitsFromApi(
     const delayMs = options?.retryDelayMs ?? 1000;
     for (let attempt = 1; attempt <= attempts; attempt++) {
         const ownGeneration = refreshGeneration + 1;
-        const ok = await refreshModelLimitsOnce(client);
-        if (ok) return;
+        const outcome = await refreshModelLimitsOnce(client);
+        if (outcome === "ok") return;
         if (attempt < attempts) {
             await new Promise((resolve) => setTimeout(resolve, delayMs));
             if (refreshGeneration !== ownGeneration) return;
@@ -319,6 +324,9 @@ export async function refreshModelLimitsFromApi(
 }
 
 let authRewarmDone = false;
+let authRewarmTimeouts = 0;
+let providerReadTimeoutMs = HOST_SDK_READ_TIMEOUT_MS;
+const MAX_AUTH_REWARM_TIMEOUTS = 2;
 
 /**
  * After a successful warm, `authRewarmDone` prevents further `config.providers()` calls until reset.
@@ -328,26 +336,39 @@ let authRewarmDone = false;
  *
  * `authRewarmDone` is set before the await to suppress concurrent refreshes.
  * A failed refresh clears `authRewarmDone` so a later call can retry.
+ * Timed-out reads are aborted and permit one retry before the latch stays closed.
  * A startup refresh still in flight when this runs cannot overwrite the
  * authenticated result: `refreshModelLimitsOnce` applies results in request order.
  */
 export async function refreshModelLimitsAfterAuthOnce(client: OpencodeClientLike): Promise<void> {
     if (authRewarmDone) return;
     authRewarmDone = true;
-    const ok = await refreshModelLimitsOnce(client);
-    if (!ok) authRewarmDone = false;
-}
-
-/* */
-export function resetAuthRewarmLatchForTest(): void {
+    const outcome = await refreshModelLimitsOnce(client);
+    if (outcome === "ok") return;
+    if (outcome === "timed_out") {
+        authRewarmTimeouts += 1;
+        if (authRewarmTimeouts >= MAX_AUTH_REWARM_TIMEOUTS) return;
+    }
     authRewarmDone = false;
 }
 
 /* */
-async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boolean> {
+export function resetAuthRewarmLatchForTest(readTimeoutMs = HOST_SDK_READ_TIMEOUT_MS): void {
+    authRewarmDone = false;
+    authRewarmTimeouts = 0;
+    providerReadTimeoutMs = readTimeoutMs;
+}
+
+/* */
+async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<RefreshOutcome> {
     const generation = ++refreshGeneration;
+    const controller = new AbortController();
     try {
-        const result = await client.config.providers();
+        const result = await withTimeout(
+            client.config.providers({ signal: controller.signal }),
+            providerReadTimeoutMs,
+            "provider metadata read timed out",
+        );
         const data = (result as { data?: { providers?: Array<unknown> } }).data;
         const providers = data?.providers;
         if (!Array.isArray(providers) || providers.length === 0) {
@@ -355,7 +376,7 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boole
                 "global",
                 "models-dev-cache: API refresh returned no providers payload (will retry if attempts remain)",
             );
-            return false;
+            return "failed";
         }
 
         const map = new Map<string, CachedModelMetadata>();
@@ -380,14 +401,14 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boole
                 "global",
                 "models-dev-cache: API refresh returned providers without a usable model limit; keeping the last-known-good cache (will retry if attempts remain)",
             );
-            return false;
+            return "failed";
         }
         if (generation < appliedGeneration) {
             sessionLog(
                 "global",
                 `models-dev-cache: discarded a stale API refresh of ${map.size} entries because a later refresh already applied`,
             );
-            return true;
+            return "ok";
         }
         appliedGeneration = generation;
 
@@ -408,14 +429,15 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boole
                 `models-dev-cache: API layer loaded ${map.size} model metadata entries (was ${previousSize})`,
             );
         }
-        return true;
+        return "ok";
     } catch (error) {
+        if (error instanceof TimeoutError) controller.abort(error);
         sessionLog(
             "global",
             "models-dev-cache: API refresh failed:",
             error instanceof Error ? error.message : String(error),
         );
-        return false;
+        return error instanceof TimeoutError ? "timed_out" : "failed";
     }
 }
 

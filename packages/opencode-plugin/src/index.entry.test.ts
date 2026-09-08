@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { getEidnaraStorageDir } from "./shared/data-path";
+import { rpcPortDir } from "./shared/rpc-utils";
 
 const SRC = resolve(import.meta.dir);
 const PACKAGE_ROOT = resolve(SRC, "..");
@@ -151,6 +153,8 @@ describe("plugin entry bundle", () => {
             expect(Object.keys(hooks.tool as Record<string, unknown>).sort()).toEqual(
                 EXPECTED_TOOLS,
             );
+            // A bound project gets an RPC server, which publishes its port under the project's hash.
+            expect(existsSync(rpcPortDir(getEidnaraStorageDir(), projectDirectory))).toBe(true);
         } finally {
             const event = hooks.event as (input: { event: unknown }) => Promise<void>;
             await event({

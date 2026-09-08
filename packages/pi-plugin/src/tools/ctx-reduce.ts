@@ -1,10 +1,10 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
-import type { RustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { getErrorMessage } from "@eidnara/opencode/shared/error-message";
 import { CTX_REDUCE_DESCRIPTION } from "@eidnara/opencode/tools/ctx-reduce/constants";
 import { unwrapImitatedReducedArgs } from "@eidnara/opencode/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
+import type { PiRustToolBackends } from "../rust-tool-backends";
 import { boundedCommandId } from "./command-id";
 
 const ParamsSchema = Type.Object(
@@ -44,7 +44,7 @@ function formatRawDropForAck(rawDrop: string): string {
 }
 
 export interface CtxReduceToolDeps {
-    rustToolBackends: RustToolBackends;
+    rustToolBackends: PiRustToolBackends;
 }
 
 export function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition<typeof ParamsSchema> {
