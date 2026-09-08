@@ -4,7 +4,9 @@ export {
     type HostClientOptions,
     type HostDiagnosticsEvent,
     type HostDiagnosticsObserver,
+    isConnectTransient,
     isConsumerReconnectTransient,
+    isRetryableRouteOpenCode,
 } from "./client";
 export {
     BROCA_CREDENTIAL_NAMES,

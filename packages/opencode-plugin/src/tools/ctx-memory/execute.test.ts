@@ -280,7 +280,7 @@ describe("executeCtxMemory", () => {
         expect(kernel.liveRows()[0]?.decision?.payload.rationale).toBe("keep me");
     });
 
-    test("a redelivered revise carrying null fields reaches the visibility error, not a TypeError", async () => {
+    test("a redelivered revise carrying null fields replays as already applied, not a TypeError", async () => {
         const { kernel, client } = harness();
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
         const first = JSON.parse(
@@ -292,33 +292,25 @@ describe("executeCtxMemory", () => {
             ),
         ) as CommitReply;
         expect(first.outcome).toBe("applied");
-        // A null reason counts as omitted, and an omitted field makes the reconstructed spec unverifiable, so the probe declines the replay and the ordinary path reports the retired target. commentlint: allow(JUDGE)
-        await expect(
-            run(
-                client,
-                "revise",
-                rawArgs({
-                    objectId: "mem_a",
-                    category: "ARCHITECTURE",
-                    content: "A2.",
-                    reason: null,
-                }),
-                "call-revise-null-probe",
-            ),
-        ).rejects.toBeInstanceOf(ClaimOperationInputError);
-        await expect(
-            run(
-                client,
-                "revise",
-                rawArgs({
-                    objectId: "mem_a",
-                    category: "ARCHITECTURE",
-                    content: null,
-                    reason: "r",
-                }),
-                "call-revise-null-probe",
-            ),
-        ).rejects.toBeInstanceOf(ClaimOperationInputError);
+        // A null field counts as omitted: the probe skips its comparison instead of calling `.trim()` on it, and the stated fields match the successor. commentlint: allow(JUDGE)
+        for (const nulled of [{ reason: null }, { content: null }]) {
+            const replay = JSON.parse(
+                await run(
+                    client,
+                    "revise",
+                    rawArgs({
+                        objectId: "mem_a",
+                        category: "ARCHITECTURE",
+                        content: "A2.",
+                        reason: "r",
+                        ...nulled,
+                    }),
+                    "call-revise-null-probe",
+                ),
+            ) as CommitReply;
+            expect(replay).toMatchObject({ outcome: "already applied", objectId: first.objectId });
+        }
+        expect(kernel.liveRows()).toHaveLength(1);
     });
 
     test("a create under an identity already spent on a revise surfaces the daemon's rejection", async () => {

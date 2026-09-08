@@ -20,7 +20,7 @@ import { pruneNestedConfigLeaf } from "./prune-config-leaf";
 import { type EidnaraConfig, EidnaraConfigSchema, REMOVED_CONFIG_KEYS } from "./schema/eidnara";
 import { redactConfigIssuePath } from "./schema/issue-path";
 import { resolveTransformMode } from "./transform-mode";
-import { substituteConfigVariables } from "./variable";
+import { type SubstituteFailure, substituteConfigVariables } from "./variable";
 
 export type { LoadOutcome } from "./load-outcome";
 
@@ -36,14 +36,6 @@ export interface EidnaraPluginConfig extends EidnaraConfig {
             subtask?: boolean;
         }
     >;
-}
-
-function getUserConfigBasePath(): string {
-    return eidnaraUserConfigBasePath();
-}
-
-function getProjectConfigBasePath(directory: string): string {
-    return eidnaraProjectConfigBasePath(directory);
 }
 
 interface LoadedConfigFile {
@@ -69,10 +61,12 @@ interface LoadedConfigFileDetailed extends LoadedConfigFile {
     outcome: LoadOutcome;
     source: "user" | "project";
     /**
-     * The `{env:}`/`{file:}` subset of `warnings`. A rejected prototype-pollution key in the same
-     * file sets `outcome` to `schema-recovery`, so `outcome` alone cannot identify these failures.
+     * The `{env:}`/`{file:}` failures within `warnings`: tokens replaced with an empty string or left
+     * unresolved. A rejected prototype-pollution key in the same file sets `outcome` to
+     * `schema-recovery`, so `outcome` alone cannot identify these failures. Sensitive-path advisories
+     * are warnings but not failures.
      */
-    substitutionWarnings: string[];
+    substitutionFailures: SubstituteFailure[];
 }
 
 /**
@@ -103,7 +97,7 @@ function loadConfigFileDetailed(
             ],
             outcome: "project-file-io-error",
             source,
-            substitutionWarnings: [],
+            substitutionFailures: [],
         };
     }
 
@@ -126,6 +120,10 @@ function loadConfigFileDetailed(
         const config: Record<string, unknown> = parsed;
         const prefix = (warning: string) => `${configPath}: ${warning}`;
         const substitutionWarnings = substituted.warnings.map(prefix);
+        const substitutionFailures = substituted.failures.map((failure) => ({
+            ...failure,
+            message: prefix(failure.message),
+        }));
         const unsafeKeyWarnings = rejectedKeyPaths.map((path) =>
             prefix(
                 `Ignored unsafe config key ${describeRejectedKeyPath(path)} (security: prototype-pollution keys are not allowed).`,
@@ -137,11 +135,11 @@ function loadConfigFileDetailed(
             outcome:
                 rejectedKeyPaths.length > 0
                     ? "schema-recovery"
-                    : substitutionWarnings.length > 0
+                    : substitutionFailures.length > 0
                       ? "substitution-failure"
                       : "ok",
             source,
-            substitutionWarnings,
+            substitutionFailures,
         };
     } catch (error) {
         return {
@@ -151,7 +149,7 @@ function loadConfigFileDetailed(
             ],
             outcome: "project-file-parse-error",
             source,
-            substitutionWarnings: [],
+            substitutionFailures: [],
         };
     }
 }
@@ -219,13 +217,17 @@ function deepMergeRawConfig(
  * Warning rendering never exposes values resolved by `{env:...}` or `{file:...}` substitution.
  *
  * Object keys are withheld because substitution runs on the raw text, so a key can hold a resolved secret as readily as a value.
+ * Numbers report only their length: an unquoted token resolves to a JSON number, so a numeric secret reaches the parsed value.
  */
 function redactConfigValue(value: unknown): string {
     if (value === undefined) return "<missing>";
     if (value === null) return "null";
     if (typeof value === "string")
         return `string, ${value.length} char${value.length === 1 ? "" : "s"}`;
-    if (typeof value === "number") return `number ${value}`;
+    if (typeof value === "number") {
+        const rendered = String(value);
+        return `number, ${rendered.length} char${rendered.length === 1 ? "" : "s"}`;
+    }
     if (typeof value === "boolean") return `boolean ${value}`;
     if (Array.isArray(value)) return `array, ${value.length} item${value.length === 1 ? "" : "s"}`;
     if (typeof value === "object") {
@@ -388,37 +390,16 @@ function hasUserTierExplicitDaemonConfig(config: Record<string, unknown> | undef
     return typeof connectionFile === "string" && connectionFile.trim().length > 0;
 }
 
-function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {
-    if (typeof value === "string") {
-        return value === "" && prefix ? [prefix] : [];
-    }
-    if (Array.isArray(value) || value === null || typeof value !== "object") {
-        return [];
-    }
-
-    const paths: string[] = [];
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-        const nextPrefix = prefix ? `${prefix}.${key}` : key;
-        paths.push(...collectEmptyStringPaths(child, nextPrefix));
-    }
-    return paths;
-}
-
 function bindSubstitutionFailures(
     loaded: LoadedConfigFileDetailed | null,
 ): Array<{ keyPath: string; source: "user" | "project"; message: string }> {
-    if (!loaded || loaded.substitutionWarnings.length === 0) {
-        return [];
-    }
-
-    const emptyPaths = collectEmptyStringPaths(loaded.config);
-    return loaded.substitutionWarnings.map((message) => {
-        const matchedPath = emptyPaths.find((path) => {
-            const tail = path.split(".").at(-1) ?? path;
-            return message.includes(path) || message.toLowerCase().includes(tail.toLowerCase());
-        });
-        return { keyPath: matchedPath ?? "<unknown>", source: loaded.source, message };
-    });
+    if (!loaded) return [];
+    // `redactConfigIssuePath` withholds a substituted object key, which can carry a secret.
+    return loaded.substitutionFailures.map(({ message, path }) => ({
+        keyPath: path === undefined ? "<unknown>" : redactConfigIssuePath(path).join("."),
+        source: loaded.source,
+        message,
+    }));
 }
 
 /** Zod strips removed keys silently; this names them so users learn the key no longer does anything. */
@@ -471,11 +452,15 @@ function combinedOutcome(args: {
 }
 
 export function loadPluginConfigDetailed(directory: string): LoadResultDetailed {
-    const userDetected = detectConfigFile(getUserConfigBasePath());
-    const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
+    // Without an absolute home from the environment there is no user tier to read.
+    const userBasePath = eidnaraUserConfigBasePath();
+    const userDetected = userBasePath === undefined ? undefined : detectConfigFile(userBasePath);
+    const projectDetected = detectConfigFile(eidnaraProjectConfigBasePath(directory));
 
     const userLoaded =
-        userDetected.format !== "none" ? loadConfigFileDetailed(userDetected.path, "user") : null;
+        userDetected && userDetected.format !== "none"
+            ? loadConfigFileDetailed(userDetected.path, "user")
+            : null;
     const projectLoaded =
         projectDetected.format !== "none"
             ? loadConfigFileDetailed(projectDetected.path, "project")
@@ -493,21 +478,23 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     }
 
     let projectRaw: Record<string, unknown> = {};
+    let projectSanitized = false;
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
         allWarnings.push(
             ...removedKeyWarnings(projectLoaded.config).map((w) => `[project config] ${w}`),
         );
         projectRaw = { ...projectLoaded.config };
-        for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
-            allWarnings.push(`[project config] ${warning}`);
-        }
+        // Every sanitizer warning marks a project value the loader did not accept as written.
+        const stripWarnings = stripUnsafeProjectConfigFields(projectRaw);
         mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
-        for (const warning of constrainProjectThresholdOverrides({
+        const thresholdWarnings = constrainProjectThresholdOverrides({
             mergedRaw,
             projectRaw,
             trustedBaseConfig,
-        })) {
+        });
+        projectSanitized = stripWarnings.length > 0 || thresholdWarnings.length > 0;
+        for (const warning of [...stripWarnings, ...thresholdWarnings]) {
             allWarnings.push(`[project config] ${warning}`);
         }
     }
@@ -560,7 +547,7 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         projectConfig: projectLoaded
             ? withSchemaRecovery(
                   projectLoaded.outcome,
-                  projectCausedRecovery(mergedRecoveries, projectRaw),
+                  projectSanitized || projectCausedRecovery(mergedRecoveries, projectRaw),
               )
             : "ok",
     };

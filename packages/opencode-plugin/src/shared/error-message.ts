@@ -1,24 +1,42 @@
+import { readField } from "./guarded-read";
+
+/** If the brand check or a field read throws, fall back to the value's string form. */
 export function getErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+    try {
+        if (!(error instanceof Error)) return safeString(error);
+        const message = readField(error, "message");
+        return typeof message === "string" ? message : safeString(message ?? error);
+    } catch {
+        return safeString(error);
+    }
 }
 
-/**
- *
- * `getErrorMessage` omits `Error.name` when `Error.message` is empty.
- *
- * Captures:
- *
- */
 export interface ErrorDescription {
+    /** `error.name`, else `error.constructor.name`, else `"Error"`. */
     name: string;
+    /** `error.message` when it is a string, else `""`. */
     message: string;
+    /** `error.status`, else `error.statusCode`, as a string. */
     status?: string;
     code?: string;
+    /** `error.cause.name`, else `error.cause.constructor.name`. */
     causeName?: string;
+    /** Contains the first four non-empty lines of `error.stack`, joined by `" | "`. */
     stackHead?: string;
+    /** `String(error)` clipped to 400 characters, or `"<unstringifiable>"`. */
     stringForm: string;
-    /* */
+    /**
+     * One-line summary: `name`, then the non-empty `message`, `status`, `code`, and `cause` fields.
+     * An empty `message` is replaced by `str="…"` holding `stringForm` unless it equals `name`.
+     * Text components are clipped to 200 characters.
+     */
     brief: string;
+}
+
+function readConstructorName(target: object): string | undefined {
+    const ctor = readField(target, "constructor");
+    if (typeof ctor !== "function" && (typeof ctor !== "object" || ctor === null)) return undefined;
+    return readString(readField(ctor, "name"));
 }
 
 function readString(value: unknown): string | undefined {
@@ -32,9 +50,17 @@ function clip(value: string, max: number): string {
     return `${value.slice(0, max)}…`;
 }
 
+/** If error classification throws, return a description from `stringForm` alone. */
 export function describeError(error: unknown): ErrorDescription {
     const stringForm = clip(safeString(error), 400);
+    try {
+        return describeErrorValue(error, stringForm);
+    } catch {
+        return { name: "Error", message: "", stringForm, brief: stringForm || "<empty>" };
+    }
+}
 
+function describeErrorValue(error: unknown, stringForm: string): ErrorDescription {
     if (!(error instanceof Error) && !(error && typeof error === "object")) {
         return {
             name: typeof error,
@@ -44,25 +70,20 @@ export function describeError(error: unknown): ErrorDescription {
         };
     }
 
-    const obj = error as Record<string, unknown>;
-    const nameFromField = readString(obj.name);
-    const nameFromCtor = error?.constructor?.name;
-    const name = nameFromField ?? nameFromCtor ?? "Error";
+    const obj = error as object;
+    const name = readString(readField(obj, "name")) ?? readConstructorName(obj) ?? "Error";
 
-    const message = readString(obj.message) ?? "";
-    const status = readString(obj.status) ?? readString(obj.statusCode);
-    const code = readString(obj.code);
+    const message = readString(readField(obj, "message")) ?? "";
+    const status = readString(readField(obj, "status")) ?? readString(readField(obj, "statusCode"));
+    const code = readString(readField(obj, "code"));
 
     let causeName: string | undefined;
-    const cause = obj.cause;
+    const cause = readField(obj, "cause");
     if (cause && typeof cause === "object") {
-        const causeRecord = cause as Record<string, unknown>;
-        causeName =
-            readString(causeRecord.name) ??
-            (cause as { constructor?: { name?: string } }).constructor?.name;
+        causeName = readString(readField(cause, "name")) ?? readConstructorName(cause);
     }
 
-    const stack = readString(obj.stack);
+    const stack = readString(readField(obj, "stack"));
     const stackHead = stack
         ? stack
               .split("\n")

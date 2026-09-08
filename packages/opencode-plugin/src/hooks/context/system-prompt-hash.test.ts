@@ -117,6 +117,23 @@ describe("system-prompt-hash drain semantics", () => {
         await handler({ sessionID: sessionId }, { system: ["New prompt content"] });
         expect(systemPromptRefreshSessions.has(sessionId)).toBe(false);
     });
+
+    it("keeps a refresh raised by a hash change on a pass that was already cache-busting", async () => {
+        useTempDataHome("sph-drain-busting-hash-change-");
+        const sessionId = "ses-busting-hash-change";
+        const systemPromptRefreshSessions = new Set<string>();
+        const { handler } = buildHandler({ systemPromptRefreshSessions });
+        await seedHash(handler, sessionId);
+
+        // A /ctx-flush flag and a prompt change land on the same pass.
+        systemPromptRefreshSessions.add(sessionId);
+        await handler({ sessionID: sessionId }, { system: ["Changed while flushing"] });
+        expect(systemPromptRefreshSessions.has(sessionId)).toBe(true);
+
+        // The next pass consumes the raised refresh like any other.
+        await handler({ sessionID: sessionId }, { system: ["Changed while flushing"] });
+        expect(systemPromptRefreshSessions.has(sessionId)).toBe(false);
+    });
 });
 
 describe("system-prompt-hash token estimation", () => {

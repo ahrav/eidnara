@@ -1,6 +1,12 @@
-import { describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
+import type { SessionMetadataReadState } from "./live-session-state";
+import {
+    __sessionDirectoryTest,
+    knownSessionDirectory,
+    resolveSessionDirectory,
+} from "./session-directory";
 
-import { knownSessionDirectory, resolveSessionDirectory } from "./session-directory";
+afterEach(() => __sessionDirectoryTest.reset());
 
 describe("resolveSessionDirectory", () => {
     it("returns the cached host directory without an SDK read", async () => {
@@ -67,6 +73,112 @@ describe("resolveSessionDirectory", () => {
         expect(await resolveSessionDirectory(deps, "ses-pinned")).toBe("/launch");
         expect(get).toHaveBeenCalledTimes(1);
         expect(deps.sessionDirectoryBySession.get("ses-pinned")).toBe("/launch");
+    });
+
+    it("retries child classification after a failed read without moving the fallback route", async () => {
+        __sessionDirectoryTest.setRetryDelayMs(0);
+        let fail = true;
+        const get = mock(async () => {
+            if (fail) throw new Error("boom");
+            return {
+                data: { directory: "/from/sdk", parentID: "ses-parent", title: "eidnara-sidekick" },
+            };
+        });
+        const subagentSessions = new Set<string>();
+        const internalChildSessions = new Set<string>();
+        const sessionMetadataReadStateBySession = new Map<string, SessionMetadataReadState>();
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+            sessionMetadataReadStateBySession,
+            subagentSessions,
+            internalChildSessions,
+        };
+
+        expect(await resolveSessionDirectory(deps, "ses-restored-child")).toBe("/launch");
+        fail = false;
+        expect(await resolveSessionDirectory(deps, "ses-restored-child")).toBe("/launch");
+        expect(await resolveSessionDirectory(deps, "ses-restored-child")).toBe("/launch");
+
+        expect(get).toHaveBeenCalledTimes(2);
+        expect(sessionMetadataReadStateBySession.get("ses-restored-child")?.attempts).toBe(2);
+        expect(subagentSessions.has("ses-restored-child")).toBe(true);
+        expect(internalChildSessions.has("ses-restored-child")).toBe(true);
+    });
+
+    it("stops retrying metadata after the bounded second failure", async () => {
+        __sessionDirectoryTest.setRetryDelayMs(0);
+        const get = mock(async () => Promise.reject(new Error("still unavailable")));
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+            sessionMetadataReadStateBySession: new Map(),
+        };
+
+        expect(await resolveSessionDirectory(deps, "ses-unavailable")).toBe("/launch");
+        expect(await resolveSessionDirectory(deps, "ses-unavailable")).toBe("/launch");
+        expect(await resolveSessionDirectory(deps, "ses-unavailable")).toBe("/launch");
+
+        expect(get).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not spend the retry on a duplicate read in the same failure window", async () => {
+        __sessionDirectoryTest.setRetryDelayMs(20);
+        let fail = true;
+        const get = mock(async () => {
+            if (fail) throw new Error("temporarily unavailable");
+            return { data: { directory: "/from/sdk", parentID: "ses-parent" } };
+        });
+        const subagentSessions = new Set<string>();
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+            sessionMetadataReadStateBySession: new Map(),
+            subagentSessions,
+        };
+
+        expect(await resolveSessionDirectory(deps, "ses-retry-next-turn")).toBe("/launch");
+        expect(await resolveSessionDirectory(deps, "ses-retry-next-turn")).toBe("/launch");
+        fail = false;
+        await Bun.sleep(25);
+        expect(await resolveSessionDirectory(deps, "ses-retry-next-turn")).toBe("/launch");
+
+        expect(get).toHaveBeenCalledTimes(2);
+        expect(subagentSessions.has("ses-retry-next-turn")).toBe(true);
+    });
+
+    it("shares a concurrent first metadata read and preserves the later retry", async () => {
+        __sessionDirectoryTest.setRetryDelayMs(20);
+        let fail = true;
+        const get = mock(async () => {
+            if (fail) throw new Error("temporarily unavailable");
+            return { data: { directory: "/from/sdk", parentID: "ses-parent" } };
+        });
+        const subagentSessions = new Set<string>();
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+            sessionMetadataReadStateBySession: new Map<string, SessionMetadataReadState>(),
+            subagentSessions,
+        };
+
+        expect(
+            await Promise.all([
+                resolveSessionDirectory(deps, "ses-concurrent-retry"),
+                resolveSessionDirectory(deps, "ses-concurrent-retry"),
+            ]),
+        ).toEqual(["/launch", "/launch"]);
+        expect(get).toHaveBeenCalledTimes(1);
+
+        fail = false;
+        await Bun.sleep(25);
+        expect(await resolveSessionDirectory(deps, "ses-concurrent-retry")).toBe("/launch");
+        expect(get).toHaveBeenCalledTimes(2);
+        expect(subagentSessions.has("ses-concurrent-retry")).toBe(true);
     });
 
     it("records a session with a parentID as a subagent from the same read", async () => {

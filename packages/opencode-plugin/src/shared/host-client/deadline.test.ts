@@ -3,6 +3,7 @@ import {
     armExpiryTimer,
     Deadline,
     type ExpiryTimerScheduler,
+    MAX_TIMER_DELAY_MS,
     type MonotonicClock,
 } from "./deadline";
 
@@ -129,16 +130,19 @@ function fakeScheduler(): {
     fireNext: () => void;
     scheduledCount: () => number;
     cancelledCount: () => number;
+    scheduledDelays: () => readonly number[];
 } {
     let nextHandle = 0;
     const armed = new Map<number, () => void>();
     let scheduled = 0;
     let cancelled = 0;
+    const delays: number[] = [];
     return {
         scheduler: {
-            schedule: (fn: () => void) => {
+            schedule: (fn: () => void, ms: number) => {
                 scheduled += 1;
                 nextHandle += 1;
+                delays.push(ms);
                 armed.set(nextHandle, fn);
                 return nextHandle;
             },
@@ -154,6 +158,7 @@ function fakeScheduler(): {
         },
         scheduledCount: () => scheduled,
         cancelledCount: () => cancelled,
+        scheduledDelays: () => delays,
     };
 }
 
@@ -221,5 +226,34 @@ describe("armExpiryTimer", () => {
         armExpiryTimer(deadline, () => (expired += 1), scheduler);
         fireNext();
         expect(expired).toBe(1);
+    });
+
+    test("never asks the scheduler for a delay above the 32-bit timer limit", () => {
+        // Node and Bun clamp a setTimeout delay above 2^31 - 1 ms to 1 ms. Without a cap the
+        // re-arm loop would spin at ~1 kHz for the whole deadline, so the delay handed to the
+        // scheduler must stay within the limit on both the initial arm and every re-arm.
+        const { clock, advance } = fakeClock();
+        const { scheduler, fireNext, scheduledDelays } = fakeScheduler();
+        const deadline = Deadline.start(MAX_TIMER_DELAY_MS * 2 + 5, clock);
+        let expired = 0;
+        armExpiryTimer(deadline, () => (expired += 1), scheduler);
+        expect(scheduledDelays()).toEqual([MAX_TIMER_DELAY_MS]);
+
+        advance(MAX_TIMER_DELAY_MS);
+        fireNext();
+        expect(expired).toBe(0);
+        expect(scheduledDelays()).toEqual([MAX_TIMER_DELAY_MS, MAX_TIMER_DELAY_MS]);
+
+        advance(MAX_TIMER_DELAY_MS);
+        fireNext();
+        expect(expired).toBe(0);
+        expect(scheduledDelays()).toEqual([MAX_TIMER_DELAY_MS, MAX_TIMER_DELAY_MS, 5]);
+
+        advance(5);
+        fireNext();
+        expect(expired).toBe(1);
+        for (const delay of scheduledDelays()) {
+            expect(delay).toBeLessThanOrEqual(MAX_TIMER_DELAY_MS);
+        }
     });
 });

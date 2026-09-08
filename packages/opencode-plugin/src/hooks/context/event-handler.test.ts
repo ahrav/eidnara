@@ -222,7 +222,8 @@ describe("createEventHandler — message.updated", () => {
         const message = (text: string): RawMessage => ({
             id: "msg-user-1",
             role: "user",
-            parts: [{ type: "text", text }],
+            // A versioned part fingerprints by type, version, and byte length, so an edit that keeps all three reuses the cached estimate.
+            parts: [{ type: "text", text, version: 1 }],
             ordinal: 1,
         });
 
@@ -230,7 +231,6 @@ describe("createEventHandler — message.updated", () => {
             1,
         );
         const recounted = buildTrueRawTokenIndex(SESSION, [message(after)], options);
-        // The cache key fingerprints part type and byte length only, so the edit is invisible to it.
         expect(recounted.tokenForOrdinal(1)).toBe(first);
 
         await handle("message.updated", {

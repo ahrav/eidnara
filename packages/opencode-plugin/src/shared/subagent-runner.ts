@@ -16,6 +16,8 @@
  *
  */
 
+import type { HarnessId } from "./harness";
+
 /**
  *
  * The configuration contains fields shared by OpenCode session calls and Pi print flags.
@@ -86,7 +88,6 @@ export interface SubagentRunOptions {
  * Categories:
  * `first_event` is the first event received from the child and can measure auth and network warmup time.
  * `terminal` identifies the final assistant turn: Pi requires an assistant `message_end` with a terminal `stopReason` and no tool call; OpenCode uses the SDK `agent_end` equivalent.
- *   `agent_end` equivalent).
  * `raw_event` contains every parsed Pi NDJSON or OpenCode SDK event.
  * `raw_event` is emitted unconditionally so debug logs capture the full timeline.
  * `raw_event.event` is harness-shaped; callers must treat it as `unknown` and log it raw.
@@ -154,7 +155,7 @@ export type SubagentRunResult =
               | "parse_failed";
           error: string;
           durationMs: number;
-          /** `retryable` is true when callers should retry the task instead of advancing its schedule. */
+          /** `transient` is true when callers should retry the task instead of advancing its schedule. */
           transient?: boolean;
           meta?: Record<string, unknown>;
       };
@@ -163,8 +164,8 @@ export type SubagentRunResult =
  *
  */
 export interface SubagentRunner {
-    /** `harness` identifies the harness in logs (`"opencode"` or `"pi"`). */
-    readonly harness: string;
+    /** `harness` identifies the harness in logs. */
+    readonly harness: HarnessId;
 
     /**
      *

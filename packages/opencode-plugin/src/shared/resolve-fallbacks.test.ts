@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseProviderModel, resolveFallbackChain } from "./resolve-fallbacks";
+import { modelBodyField, parseProviderModel, resolveFallbackChain } from "./resolve-fallbacks";
 
 describe("resolveFallbackChain", () => {
     // resolveFallbackChain has no built-in provider-agnostic fallback chain.
@@ -56,6 +56,18 @@ describe("resolveFallbackChain", () => {
             resolveFallbackChain(["  anthropic/claude-sonnet-4-6  ", "\tgoogle/gemini-3-flash\n"]),
         ).toEqual(["anthropic/claude-sonnet-4-6", "google/gemini-3-flash"]);
     });
+
+    test("dedupes entries that differ only by whitespace around the slash", () => {
+        expect(
+            resolveFallbackChain([
+                "anthropic/claude-sonnet-4-6",
+                "anthropic / claude-sonnet-4-6",
+                "anthropic/ claude-sonnet-4-6",
+                "lemonade/GLM-4.7-Flash-GGUF/main",
+                "lemonade /GLM-4.7-Flash-GGUF/main",
+            ]),
+        ).toEqual(["anthropic/claude-sonnet-4-6", "lemonade/GLM-4.7-Flash-GGUF/main"]);
+    });
 });
 
 describe("parseProviderModel", () => {
@@ -94,5 +106,24 @@ describe("parseProviderModel", () => {
 
     test("returns null for empty string", () => {
         expect(parseProviderModel("")).toBeNull();
+    });
+
+    test("returns null when whitespace is the only text beside the slash", () => {
+        expect(parseProviderModel(" /claude-sonnet-4-6")).toBeNull();
+        expect(parseProviderModel("anthropic/ ")).toBeNull();
+        expect(parseProviderModel(" / ")).toBeNull();
+    });
+});
+
+describe("modelBodyField", () => {
+    test("omits the model field when a part is whitespace-only", () => {
+        expect(modelBodyField("anthropic/ ")).toEqual({});
+        expect(modelBodyField(" /claude-sonnet-4-6")).toEqual({});
+    });
+
+    test("carries a trimmed provider/model pair", () => {
+        expect(modelBodyField(" anthropic/claude-sonnet-4-6 ")).toEqual({
+            model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+        });
     });
 });

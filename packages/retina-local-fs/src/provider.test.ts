@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
     type ProviderConfig,
@@ -91,26 +92,68 @@ describe("filesystem predicates", () => {
         expect(absent.events[0]?.observed).toEqual({ contains: false });
     });
 
-    test("file_contains finds a needle that straddles the streaming chunk boundary", async () => {
+    test("file_contains refuses a FIFO or device node instead of blocking on open", async () => {
+        const directory = await temporaryDirectory();
+        const fifo = join(directory, "pipe");
+        await execFileAsync("mkfifo", [fifo]);
+        await expect(
+            poll({ kind: "file_contains", path: fifo, needle: "ready" }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+        await expect(
+            poll({ kind: "file_contains", path: "/dev/zero", needle: "ready" }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+    }, 3_000);
+
+    test("file_contains scans a file larger than one read chunk, including a needle across the seam", async () => {
         const directory = await temporaryDirectory();
         const path = join(directory, "large.log");
-        // Place the needle across the 64 KiB read boundary and pad past a second chunk.
         const chunk = 64 * 1024;
-        const needle = "BUILD SUCCESSFUL";
-        const before = "x".repeat(chunk - 4);
-        await writeFile(path, `${before}${needle}${"y".repeat(chunk + 100)}\n`);
+        const filler = "x".repeat(chunk * 3 - 3);
+        await writeFile(path, `${filler}needle${"y".repeat(chunk)}`);
+        const result = await poll({ kind: "file_contains", path, needle: "needle" });
+        expect(result.events).toHaveLength(1);
+        expect(result.events[0]?.observed).toEqual({ contains: true });
+    });
 
-        const found = await poll({ kind: "file_contains", path, needle });
-        expect(found.events[0]?.observed).toEqual({ contains: true });
+    test("file_contains validates the target before matching an empty needle", async () => {
+        const directory = await temporaryDirectory();
+        const file = join(directory, "present.txt");
+        await writeFile(file, "anything");
+        const matched = await poll({ kind: "file_contains", path: file, needle: "" });
+        expect(matched.events[0]?.observed).toEqual({ contains: true });
 
-        await writeFile(path, `${before}${"y".repeat(chunk + 100)}\n`);
-        const missing = await poll({ kind: "file_contains", path, needle });
-        expect(missing.events).toHaveLength(0);
+        await expect(
+            poll({ kind: "file_contains", path: directory, needle: "" }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+        await expect(
+            poll({ kind: "file_contains", path: "/dev/zero", needle: "" }),
+        ).rejects.toMatchObject({ code: "unreadable_path" });
+    });
 
-        // A multibyte character split by the byte boundary must still match as one code point.
-        await writeFile(path, `${"x".repeat(chunk - 1)}é${"y".repeat(chunk)}\n`);
-        const multibyte = await poll({ kind: "file_contains", path, needle: "xéy" });
-        expect(multibyte.events[0]?.observed).toEqual({ contains: true });
+    test("file_contains rejects a needle larger than one scan chunk before allocating for it", () => {
+        const limit = 64 * 1024;
+        expect(
+            validateProviderConfig({
+                kind: "file_contains",
+                path: "/tmp/x",
+                needle: "a".repeat(limit),
+            }),
+        ).toMatchObject({ success: true });
+        expect(
+            validateProviderConfig({
+                kind: "file_contains",
+                path: "/tmp/x",
+                needle: "a".repeat(limit + 1),
+            }),
+        ).toMatchObject({ success: false, reason: expect.stringContaining("needle") });
+        // The bound is on UTF-8 bytes, not UTF-16 code units.
+        expect(
+            validateProviderConfig({
+                kind: "file_contains",
+                path: "/tmp/x",
+                needle: "\u00e9".repeat(limit / 2 + 1),
+            }),
+        ).toMatchObject({ success: false });
     });
 
     test("path_exists treats missing as an observation and supports gone", async () => {
@@ -151,6 +194,16 @@ describe("filesystem predicates", () => {
         const second = await poll(config, first.scalar);
         expect(second.events).toHaveLength(1);
         expect(second.events[0]?.id).not.toBe(first.events[0]?.id);
+
+        // An mtime that falls below the threshold and later returns to a value already reported re-fires with a new identity.
+        const belowThreshold = new Date(firstTime.getTime() - 10_000);
+        await utimes(path, belowThreshold, belowThreshold);
+        const quietAgain = await poll(config, second.scalar);
+        expect(quietAgain.events).toHaveLength(0);
+        await utimes(path, secondTime, secondTime);
+        const repeated = await poll(config, quietAgain.scalar);
+        expect(repeated.events).toHaveLength(1);
+        expect(repeated.events[0]?.id).not.toBe(second.events[0]?.id);
     });
 
     test("boolean occurrences have stable replay ids and distinct transition ids", async () => {
@@ -168,6 +221,26 @@ describe("filesystem predicates", () => {
         await writeFile(path, "again");
         const repeated = await poll(config, absent.scalar);
         expect(repeated.events[0]?.id).not.toBe(replayA.events[0]?.id);
+    });
+
+    test("occurrence counters saturate at the largest safe integer the scalar accepts", async () => {
+        const directory = await temporaryDirectory();
+        const path = join(directory, "flag");
+        const config = { kind: "path_exists", path } as const;
+        const absent = await poll(config);
+        const [key, entry] = Object.entries(absent.scalar.predicates)[0] ?? [];
+        if (!key || !entry) throw new Error("scalar has no predicate entry");
+        const saturated: ProviderScalar = {
+            version: 1,
+            predicates: { [key]: { ...entry, occurrence: Number.MAX_SAFE_INTEGER } },
+        };
+
+        await writeFile(path, "now present");
+        const fired = await poll(config, saturated);
+        expect(fired.events).toHaveLength(1);
+        expect(fired.scalar.predicates[key]?.occurrence).toBe(Number.MAX_SAFE_INTEGER);
+        // The returned scalar must round-trip through parseScalar's safe-integer check.
+        expect((await poll(config, fired.scalar)).events).toHaveLength(0);
     });
 });
 
@@ -192,6 +265,16 @@ describe("git predicates", () => {
         const third = await poll(config, second.scalar);
         expect(third.events[0]?.observed.sha).toBe(thirdSha);
         expect(third.events[0]?.id).not.toBe(second.events[0]?.id);
+
+        // Leaving the descendant and returning to it re-enters the matching state with a new event identity.
+        await git(repo, "checkout", "--quiet", "--detach", firstSha);
+        const left = await poll(config, third.scalar);
+        expect(left.events).toHaveLength(0);
+        await git(repo, "checkout", "--quiet", "main");
+        const returned = await poll(config, left.scalar);
+        expect(returned.events).toHaveLength(1);
+        expect(returned.events[0]?.observed.sha).toBe(thirdSha);
+        expect(returned.events[0]?.id).not.toBe(third.events[0]?.id);
     });
 
     test("git_tag_matching tracks new matching tags and semver thresholds", async () => {
@@ -218,56 +301,151 @@ describe("git predicates", () => {
         await git(repo, "tag", "v2.0.0");
         const next = await poll(config, matching.scalar);
         expect(next.events[0]?.id).not.toBe(matching.events[0]?.id);
+
+        // A tag deleted and re-created is observed anew and must not reuse the earlier event's identity.
+        await git(repo, "tag", "--delete", "v2.0.0");
+        const deleted = await poll(config, next.scalar);
+        expect(deleted.events).toHaveLength(0);
+        await git(repo, "tag", "v2.0.0");
+        const recreated = await poll(config, deleted.scalar);
+        expect(recreated.events.map((event) => event.observed)).toEqual([{ tag: "v2.0.0" }]);
+        expect(recreated.events[0]?.id).not.toBe(next.events[0]?.id);
     });
 
-    test("git_tag_matching orders prerelease identifiers by ASCII and exact integers", async () => {
+    test("git_tag_matching rejects an option-like pattern instead of passing it to git", async () => {
         const { repo } = await createRepository();
-        // `Z` (0x5A) sorts before `a` (0x61) in SemVer, so `v1.0.0-Z` is below the threshold.
-        await git(repo, "tag", "v1.0.0-Z");
-        await git(repo, "tag", "v1.0.0-b");
-        const alpha = await poll({
-            kind: "git_tag_matching",
-            repo_path: repo,
-            pattern: "v1.0.0-*",
-            above: "1.0.0-a",
-        });
-        expect(alpha.events.map((event) => event.observed)).toEqual([{ tag: "v1.0.0-b" }]);
+        await git(repo, "tag", "other-1.0.0");
+        for (const pattern of ["--format=INJECTED-%(refname)", "--", "-n"]) {
+            await expect(
+                poll({ kind: "git_tag_matching", repo_path: repo, pattern }),
+            ).rejects.toMatchObject({ code: "invalid_config" });
+        }
+    });
 
-        // Both identifiers round to the same `Number`, so only exact comparison separates them.
-        await git(repo, "tag", "v2.0.0-9007199254740992");
-        await git(repo, "tag", "v2.0.0-9007199254740994");
-        const numeric = await poll({
+    test("git_tag_matching orders prerelease identifiers by ASCII, not locale collation", async () => {
+        // SemVer 11.4.2: alphanumeric identifiers compare in ASCII order, so
+        // uppercase sorts before lowercase and 1.0.0-RC1 < 1.0.0-beta.
+        const { repo } = await createRepository();
+        await git(repo, "tag", "v1.0.0-RC1");
+        await git(repo, "tag", "v1.0.0-beta");
+
+        const aboveBeta = await poll({
             kind: "git_tag_matching",
             repo_path: repo,
-            pattern: "v2.0.0-*",
-            above: "2.0.0-9007199254740993",
+            pattern: "v*",
+            above: "1.0.0-beta",
         });
-        expect(numeric.events.map((event) => event.observed)).toEqual([
-            { tag: "v2.0.0-9007199254740994" },
+        expect(aboveBeta.events).toHaveLength(0);
+
+        const aboveRc = await poll({
+            kind: "git_tag_matching",
+            repo_path: repo,
+            pattern: "v*",
+            above: "1.0.0-RC1",
+        });
+        expect(aboveRc.events.map((event) => event.observed)).toEqual([{ tag: "v1.0.0-beta" }]);
+    });
+
+    test("git_tag_matching compares numeric identifiers exactly beyond the double-precision range", async () => {
+        const { repo } = await createRepository();
+        // 2^53 and 2^53 + 1 are the same IEEE-754 double.
+        await git(repo, "tag", "v9007199254740993.0.0");
+        await git(repo, "tag", "v1.0.0-9007199254740993");
+        const config = { kind: "git_tag_matching", repo_path: repo, pattern: "v*" } as const;
+
+        const aboveCore = await poll({ ...config, above: "9007199254740992.0.0" });
+        expect(aboveCore.events.map((event) => event.observed)).toEqual([
+            { tag: "v9007199254740993.0.0" },
         ]);
-
-        // `01` is not a SemVer numeric identifier, so the tag is not a version and cannot fire.
-        await git(repo, "tag", "v3.0.0-01");
-        await git(repo, "tag", "v3.0.0-1");
-        const malformed = await poll({
-            kind: "git_tag_matching",
-            repo_path: repo,
-            pattern: "v3.0.0-*",
-            above: "3.0.0-0",
-        });
-        expect(malformed.events.map((event) => event.observed)).toEqual([{ tag: "v3.0.0-1" }]);
+        const abovePrerelease = await poll({ ...config, above: "1.0.0-9007199254740992" });
+        expect(abovePrerelease.events.map((event) => event.observed)).toEqual([
+            { tag: "v1.0.0-9007199254740993" },
+            { tag: "v9007199254740993.0.0" },
+        ]);
     });
 
-    test("git_tag_matching treats an option-shaped pattern as a glob, not a git flag", async () => {
+    test("git_tag_matching rejects identifiers outside the SemVer grammar", async () => {
+        for (const above of [
+            "1.0.0-01",
+            "1.0.0-alpha..1",
+            "1.0.0-",
+            "1.0.0-.a",
+            "1.0.0+",
+            "1.0.0+a..b",
+        ]) {
+            expect(
+                validateProviderConfig({
+                    kind: "git_tag_matching",
+                    repo_path: "/tmp/repo",
+                    pattern: "v*",
+                    above,
+                }),
+            ).toMatchObject({ success: false, reason: expect.stringContaining(above) });
+        }
+        for (const above of [
+            "1.0.0-0",
+            "1.0.0-0a",
+            "1.0.0-x.7.z.92",
+            "1.0.0-alpha+001",
+            "v1.0.0+build.1",
+        ]) {
+            expect(
+                validateProviderConfig({
+                    kind: "git_tag_matching",
+                    repo_path: "/tmp/repo",
+                    pattern: "v*",
+                    above,
+                }),
+            ).toMatchObject({ success: true });
+        }
+
+        // An invalid tag is not a version and is never "newer" than the threshold.
         const { repo } = await createRepository();
-        await git(repo, "tag", "v1.0.0");
+        await git(repo, "tag", "v2.0.0-01");
+        await git(repo, "tag", "v2.0.0-");
+        await git(repo, "tag", "v2.0.0-1");
         const result = await poll({
             kind: "git_tag_matching",
             repo_path: repo,
-            pattern: "--format=%(objectname)",
+            pattern: "v*",
+            above: "1.0.0",
         });
-        expect(result.events).toHaveLength(0);
+        expect(result.events.map((event) => event.observed)).toEqual([{ tag: "v2.0.0-1" }]);
     });
+
+    test("git_tag_matching lists one tag per line regardless of the repository's column setting", async () => {
+        const { repo } = await createRepository();
+        await git(repo, "config", "column.tag", "always");
+        await git(repo, "tag", "v1.0.0");
+        await git(repo, "tag", "v1.1.0");
+        await git(repo, "tag", "v1.2.0");
+        const result = await poll({ kind: "git_tag_matching", repo_path: repo, pattern: "v*" });
+        expect(result.events.map((event) => event.observed)).toEqual([
+            { tag: "v1.0.0" },
+            { tag: "v1.1.0" },
+            { tag: "v1.2.0" },
+        ]);
+    });
+
+    test("git_tag_matching reads a tag listing larger than the runtime's default buffer", async () => {
+        const { repo, firstSha } = await createRepository();
+        const count = 18_000;
+        const suffix = "x".repeat(40);
+        const updates = Array.from(
+            { length: count },
+            (_, index) =>
+                `create refs/tags/v1.0.${index}-${suffix}-${String(index).padStart(8, "0")} ${firstSha}\n`,
+        ).join("");
+        execFileSync("git", ["-C", repo, "update-ref", "--stdin"], { input: updates });
+        const listing = execFileSync("git", ["-C", repo, "tag", "--list", "--no-column", "v*"], {
+            encoding: "utf8",
+            maxBuffer: 64 * 1024 * 1024,
+        });
+        expect(Buffer.byteLength(listing, "utf8")).toBeGreaterThan(1024 * 1024);
+
+        const result = await poll({ kind: "git_tag_matching", repo_path: repo, pattern: "v*" });
+        expect(result.events).toHaveLength(count);
+    }, 20_000);
 });
 
 describe("compound scalar behavior", () => {
@@ -311,43 +489,26 @@ describe("compound scalar behavior", () => {
         ).toMatchObject({ success: false, reason: expect.stringContaining("unknown field") });
     });
 
-    test.each([
-        "1.0.0-01",
-        "1.0.0-a..b",
-        "1.0.0-",
-        "1.0.0-a.",
-        "01.0.0",
-        "1.0.0+",
-        "1.0.0+a..b",
-    ])("rejects the malformed SemVer threshold %s", (above) => {
-        expect(
-            validateProviderConfig({
-                kind: "git_tag_matching",
-                repo_path: "/tmp/repo",
-                pattern: "v*",
-                above,
-            }),
-        ).toMatchObject({
-            success: false,
-            reason: expect.stringContaining("Invalid semantic version"),
-        });
-    });
+    test("the authoring audit marker does not change predicate identity", async () => {
+        const directory = await temporaryDirectory();
+        const path = join(directory, "result.json");
+        await writeFile(path, "{}");
+        const first = await poll({ kind: "path_exists", path, resolved_path_exists: false });
+        expect(first.events).toHaveLength(1);
 
-    test.each([
-        "1.0.0-0",
-        "1.0.0-0a",
-        "1.0.0-a-b.1",
-        "v1.0.0-rc.1+build.5",
-        "1.0.0+001",
-    ])("accepts the well-formed SemVer threshold %s", (above) => {
-        expect(
-            validateProviderConfig({
-                kind: "git_tag_matching",
-                repo_path: "/tmp/repo",
-                pattern: "v*",
-                above,
-            }),
-        ).toMatchObject({ success: true });
+        // Authoring regenerates the predicate after the path appears; the
+        // stored scalar must still suppress the already-reported observation.
+        const regenerated = await poll(
+            { kind: "path_exists", path, resolved_path_exists: true },
+            first.scalar,
+        );
+        expect(regenerated.events).toHaveLength(0);
+        expect(Object.keys(regenerated.scalar.predicates)).toEqual(
+            Object.keys(first.scalar.predicates),
+        );
+        const unmarked = await poll({ kind: "path_exists", path }, first.scalar);
+        expect(unmarked.events).toHaveLength(0);
+        expect(unmarked.events).toEqual(regenerated.events);
     });
 
     test("rejects compounds larger than four", async () => {
@@ -497,11 +658,44 @@ describe("path fence", () => {
         ).rejects.toMatchObject({ code: "fenced_path" });
     });
 
+    test.skipIf(process.platform !== "linux")(
+        "refuses an ancestor directory swapped for a symlink after the fence check",
+        async () => {
+            // O_NOFOLLOW applies only to the final component, so this swap opens
+            // the fenced file; the descriptor's /proc/self/fd target exposes it.
+            const home = await temporaryDirectory("retina-local-fs-home-");
+            const watchedDirectory = join(home, "project");
+            const path = join(watchedDirectory, "status.txt");
+            const fencedDirectory = join(home, ".local", "share", "eidnara", "run");
+            await mkdir(watchedDirectory);
+            await writeFile(path, "safe");
+            await mkdir(fencedDirectory, { recursive: true });
+            await writeFile(join(fencedDirectory, "status.txt"), "secret");
+            await expect(
+                runProvider(
+                    {
+                        scalar: null,
+                        config: { kind: "file_contains", path, needle: "secret" },
+                    },
+                    {
+                        homeDirectory: home,
+                        dataDirectory: join(home, ".local", "share"),
+                        beforePathUseForTests: async () => {
+                            await rename(watchedDirectory, `${watchedDirectory}-moved`);
+                            await symlink(fencedDirectory, watchedDirectory);
+                        },
+                    },
+                ),
+            ).rejects.toMatchObject({ code: "fenced_path" });
+        },
+    );
+
     test("refuses sensitive basenames outside fenced roots", async () => {
         const home = await temporaryDirectory("retina-local-fs-home-");
         const paths = [
             join(home, "safe", "prod-binding-key-v2"),
             join(home, "safe", "operator.handle"),
+            join(home, "safe", "writer.lease"),
             join(home, "project", "catalog", "dev-binding-key"),
             join(home, "project", "bin", "lease.handle"),
         ];
@@ -538,7 +732,7 @@ describe("path fence", () => {
 
 describe("CLI exit discipline", () => {
     async function invoke(input: unknown, home: string) {
-        const cli = new URL("./cli.ts", import.meta.url).pathname;
+        const cli = fileURLToPath(new URL("./cli.ts", import.meta.url));
         const child = Bun.spawn({
             cmd: ["bun", cli],
             cwd: import.meta.dir,

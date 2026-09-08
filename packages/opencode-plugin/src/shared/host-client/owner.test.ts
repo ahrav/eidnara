@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { HostClient } from "./client";
-import { processHostClient, resetProcessHostClientsForTest } from "./owner";
+import { evictProcessHostClient, processHostClient, resetProcessHostClientsForTest } from "./owner";
 
 afterEach(() => {
     resetProcessHostClientsForTest();
@@ -117,6 +117,29 @@ describe("processHostClient", () => {
         Object.defineProperty(firstClient, "isClosed", { value: true });
 
         expect(await processHostClient({ connectionFile })).toBe(secondClient);
+        expect(connect).toHaveBeenCalledTimes(2);
+        connect.mockRestore();
+    });
+
+    test("a caller arriving while a resolved owner is being evicted does not receive it", async () => {
+        const firstClient = { isClosed: false, closeAsync: async () => {} } as HostClient;
+        const secondClient = { isClosed: false, closeAsync: async () => {} } as HostClient;
+        const connect = spyOn(HostClient, "connect")
+            .mockResolvedValueOnce(firstClient)
+            .mockResolvedValueOnce(secondClient);
+        const options = { connectionFile: `/tmp/eidnara-host-${crypto.randomUUID()}.json` };
+
+        expect(await processHostClient(options)).toBe(firstClient);
+        // The resolution observer that records the client runs one microtask after the promise settles.
+        await Promise.resolve();
+
+        // A request started before eviction completes must create a replacement client.
+        const evicting = evictProcessHostClient(options, firstClient);
+        const concurrent = processHostClient(options);
+        await evicting;
+        Object.defineProperty(firstClient, "isClosed", { value: true });
+
+        expect(await concurrent).toBe(secondClient);
         expect(connect).toHaveBeenCalledTimes(2);
         connect.mockRestore();
     });
