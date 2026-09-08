@@ -37,6 +37,22 @@ describe("PiAdapter settings safety", () => {
         expect(JSON.parse(readFileSync(settingsPath, "utf-8")).packages).toHaveLength(2);
     });
 
+    it("refuses to replace a non-array packages value", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-adapter-scalar-"));
+        tempDirs.push(root);
+        process.env.PI_CODING_AGENT_DIR = root;
+        const settingsPath = join(root, "settings.json");
+        const before = JSON.stringify({ packages: "npm:other" });
+        writeFileSync(settingsPath, before);
+
+        const result = await new PiAdapter().ensurePluginEntry();
+
+        expect(result.ok).toBe(false);
+        expect(result.action).toBe("error");
+        expect(result.message).toContain("not an array");
+        expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+    });
+
     it("treats a version-pinned package source as present and leaves the pin alone", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-pi-adapter-pin-"));
         tempDirs.push(root);

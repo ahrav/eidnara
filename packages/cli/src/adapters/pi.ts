@@ -45,7 +45,10 @@ export class PiAdapter implements HarnessAdapter {
         try {
             const file = resolveLinkTarget(settingsPath);
             const settings = readJsoncConfigForUpdate(file) as PiSettingsLike;
-            const packages = Array.isArray(settings.packages) ? settings.packages : [];
+            if (settings.packages !== undefined && !Array.isArray(settings.packages)) {
+                throw new Error("`packages` is not an array; refusing to replace it");
+            }
+            const packages = settings.packages ?? [];
 
             // A pinned entry is left as the user wrote it rather than replaced with the unversioned source.
             if (!packages.some(matchesPiPackageSource)) {

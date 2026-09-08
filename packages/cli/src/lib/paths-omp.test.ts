@@ -33,7 +33,8 @@ afterEach(() => {
     rmSync(root, { recursive: true, force: true });
 });
 
-describe("OMP path compatibility", () => {
+// `envFirstHomeDir` ignores `HOME` on Windows, so the suite's `HOME` redirection only holds elsewhere.
+describe.if(process.platform !== "win32")("OMP path compatibility", () => {
     it("resolves the default layout", () => {
         expect(resolveOmpPaths()).toEqual({
             configRoot: join(root, ".omp"),
