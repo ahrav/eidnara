@@ -23,6 +23,14 @@ const LANGUAGE_CODE_MESSAGE = 'language must be a 2-letter ISO 639-1 code (e.g. 
 // accept whitespace-only values the loader rejects.
 const NON_BLANK_PATTERN = /\S/;
 
+/** The schema generator matches `LanguageCodeSchema` by identity and publishes the codes `isValidLanguageCode` accepts as a `pattern`. */
+export const LanguageCodeSchema = z
+    .string()
+    .regex(/^\s*[A-Za-z]{2}\s*$/, { message: LANGUAGE_CODE_MESSAGE, abort: true })
+    .trim()
+    .toLowerCase()
+    .refine((s) => isValidLanguageCode(s), LANGUAGE_CODE_MESSAGE);
+
 /** Top-level keys the schema no longer defines; the loader warns when a configuration still carries one. */
 export const REMOVED_CONFIG_KEYS = ["auto_update", "dreamer", "embedding"] as const;
 
@@ -342,26 +350,17 @@ export const EidnaraConfigSchema = z
             .describe(
                 'Experimental: routes the project through the direct Rust daemon (requires the user-level subc.connection_file path); "ts" is the current TypeScript pipeline.',
             ),
-        language: z
-            .string()
-            // The regex emits a JSON Schema `pattern`; `isValidLanguageCode` remains runtime-only
-            // validation because JSON Schema cannot express whether a code names a language.
-            .regex(/^\s*[A-Za-z]{2}\s*$/, { message: LANGUAGE_CODE_MESSAGE, abort: true })
-            .trim()
-            .toLowerCase()
-            .refine((s) => isValidLanguageCode(s), LANGUAGE_CODE_MESSAGE)
-            .optional()
-            .describe(
-                "Output language for Eidnara's generated content and guidance, as a " +
-                    '2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the ' +
-                    "historian, dreamer, sidekick, and the agent-guidance block instruct the model to " +
-                    "write its PROSE in this language while keeping all structural tokens (XML tags, " +
-                    "the five memory category names, code identifiers, file paths) in English. " +
-                    "USER-LEVEL ONLY (ignored in project config for security). Unset = today's " +
-                    "behavior (model mirrors the conversation; English scaffolding). Changing it " +
-                    "triggers one cache re-materialization; existing compartments/memories keep their " +
-                    "original language until naturally rewritten.",
-            ),
+        language: LanguageCodeSchema.optional().describe(
+            "Output language for Eidnara's generated content and guidance, as a " +
+                '2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the ' +
+                "historian, dreamer, sidekick, and the agent-guidance block instruct the model to " +
+                "write its PROSE in this language while keeping all structural tokens (XML tags, " +
+                "the five memory category names, code identifiers, file paths) in English. " +
+                "USER-LEVEL ONLY (ignored in project config for security). Unset = today's " +
+                "behavior (model mirrors the conversation; English scaffolding). Changing it " +
+                "triggers one cache re-materialization; existing compartments/memories keep their " +
+                "original language until naturally rewritten.",
+        ),
         historian: HistorianConfigSchema.describe(
             "Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.)",
         ),

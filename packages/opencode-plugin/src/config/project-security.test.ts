@@ -196,6 +196,24 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("sidekick.system_prompt"))).toBe(true);
     });
 
+    it("strips hidden-agent disable in both directions so a project cannot reactivate an agent", () => {
+        for (const disable of [false, true]) {
+            const raw: Record<string, unknown> = {
+                historian: { disable, temperature: 0.2 },
+                sidekick: { disable, model: "x" },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw.historian).toEqual({ temperature: 0.2 });
+            expect(raw.sidekick).toEqual({ model: "x" });
+            expect(warnings).toEqual([
+                expect.stringContaining("historian.disable"),
+                expect.stringContaining("sidekick.disable"),
+            ]);
+        }
+    });
+
     it("strips compaction.enabled from project config (only-key case)", () => {
         const raw: Record<string, unknown> = {
             compaction: { enabled: false },

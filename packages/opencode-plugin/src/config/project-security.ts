@@ -264,6 +264,7 @@ function resolveTrustedThreshold<T extends number | undefined>(
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
  * A repository may select a reviewed `prompt_surface` preset but may not inject arbitrary guidance or tool-description text.
  * Project config must not set hidden-agent `prompt`, `permission`, or `tools`.
+ * Only user config may set hidden-agent `disable`: the project tier replaces the trusted leaf, so a project `disable: false` would reactivate an agent the user turned off, and disabling the historian would bypass the user-only `compaction.enabled` rule.
  * A project may not replace a block that carries user-only leaves with a non-object value: the merge would substitute the whole block for the trusted one, schema recovery would drop the invalid value, and the user's settings would fall back to defaults without any leaf ever being stripped.
  */
 export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknown>): string[] {
@@ -425,6 +426,12 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
             warnings.push(
                 `Ignoring ${agentKey}.${removed.join("/")} from project config ` +
                     "(security: a repository cannot reprogram or re-permission hidden agents).",
+            );
+        }
+        if ("disable" in block) {
+            delete block.disable;
+            warnings.push(
+                `Ignoring ${agentKey}.disable from project config (security: only user-level config may enable or disable hidden agents; a repository cannot reactivate an agent the user turned off).`,
             );
         }
     }

@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isValidLanguageCode } from "../src/agents/language-directive";
 import { PROMPT_SURFACE_MODEL_KEY_PATTERN } from "../src/shared/prompt-surface";
-import { buildSchema } from "./build-schema";
+import { buildSchema, languageCodePattern } from "./build-schema";
 
 /**
  *
@@ -44,6 +45,23 @@ describe("eidnara JSON schema", () => {
             properties: Record<string, unknown>;
         };
         expect(schema.properties.experimental).toBeUndefined();
+    });
+
+    test("the published language pattern accepts exactly the codes the runtime accepts", () => {
+        const pattern = new RegExp(languageCodePattern());
+        let mismatches = 0;
+        for (let first = 97; first <= 122; first++) {
+            for (let second = 97; second <= 122; second++) {
+                const code = String.fromCharCode(first) + String.fromCharCode(second);
+                for (const variant of [code, code.toUpperCase(), ` ${code} `]) {
+                    if (pattern.test(variant) !== isValidLanguageCode(variant)) mismatches++;
+                }
+            }
+        }
+        expect(mismatches).toBe(0);
+        expect(pattern.test("zz")).toBe(false);
+        expect(pattern.test("english")).toBe(false);
+        expect(pattern.test(" TR ")).toBe(true);
     });
 
     test("loader-only top-level keys are published so the closed root accepts them", () => {
@@ -112,7 +130,7 @@ describe("eidnara JSON schema", () => {
         };
         const promptSurface = schema.properties.prompt_surface.properties;
 
-        expect(schema.properties.language.pattern).toBe("^\\s*[A-Za-z]{2}\\s*$");
+        expect(schema.properties.language.pattern).toBe(languageCodePattern());
         expect(promptSurface.models.propertyNames.pattern).toBe(
             PROMPT_SURFACE_MODEL_KEY_PATTERN.source,
         );

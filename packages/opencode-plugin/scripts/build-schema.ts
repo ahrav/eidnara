@@ -10,9 +10,28 @@
 
 import * as path from "node:path";
 import { z } from "zod";
-import { EidnaraConfigSchema } from "../src/config/schema/eidnara";
+import { isValidLanguageCode } from "../src/agents/language-directive";
+import { EidnaraConfigSchema, LanguageCodeSchema } from "../src/config/schema/eidnara";
 
 const SCHEMA_ID = "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json";
+
+/**
+ * The runtime check consults ICU, which JSON Schema cannot call, so the accepted set is expanded
+ * from the same predicate into a case-insensitive alternation that keeps the runtime's
+ * whitespace handling.
+ */
+export function languageCodePattern(): string {
+    const alternatives: string[] = [];
+    for (let first = 97; first <= 122; first++) {
+        for (let second = 97; second <= 122; second++) {
+            const code = String.fromCharCode(first) + String.fromCharCode(second);
+            if (!isValidLanguageCode(code)) continue;
+            const [a, b] = code;
+            alternatives.push(`[${a}${a.toUpperCase()}][${b}${b.toUpperCase()}]`);
+        }
+    }
+    return `^\\s*(?:${alternatives.join("|")})\\s*$`;
+}
 
 /**
  * The loader reads these top-level keys from raw configuration, not `EidnaraConfigSchema`.
@@ -57,6 +76,11 @@ export function buildSchema(): Record<string, unknown> {
     const generated = z.toJSONSchema(EidnaraConfigSchema, {
         target: "draft-7",
         io: "input",
+        override: (ctx) => {
+            if (ctx.zodSchema === LanguageCodeSchema) {
+                ctx.jsonSchema.pattern = languageCodePattern();
+            }
+        },
     }) as Record<string, unknown>;
 
     delete generated.$schema;
