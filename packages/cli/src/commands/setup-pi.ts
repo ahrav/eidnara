@@ -155,13 +155,22 @@ export function writePiSettingsPackage(
         );
     }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
-    if (packages.some((entry) => entry === packageSource)) return false;
+    // A version-pinned source (`npm:@eidnara/pi@0.1.0`) is the same package; a second entry
+    // would load the extension twice.
+    if (packages.some((entry) => matchesPackageSource(entry, packageSource))) return false;
 
     packages.push(packageSource);
     settings.packages = packages;
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return true;
 }
+function matchesPackageSource(entry: unknown, packageSource: string): boolean {
+    return (
+        typeof entry === "string" &&
+        (entry === packageSource || entry.startsWith(`${packageSource}@`))
+    );
+}
+
 export function removePiSettingsPackage(
     settingsPath: string,
     packageSource = PI_PACKAGE_SOURCE,

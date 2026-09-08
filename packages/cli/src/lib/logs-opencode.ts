@@ -214,7 +214,9 @@ function writeBundleExclusively(basePath: string, contents: string): string {
     for (let attempt = 0; ; attempt += 1) {
         const path = attempt === 0 ? `${basePath}.md` : `${basePath}-${attempt + 1}.md`;
         try {
-            writeFileSync(path, contents, { flag: "wx" });
+            // Owner-only: the bundle holds the user's prose and log excerpts, which sanitization
+            // cannot fully vouch for.
+            writeFileSync(path, contents, { flag: "wx", mode: 0o600 });
             return path;
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

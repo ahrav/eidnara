@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
@@ -195,6 +195,19 @@ describe("bundleIssueReport configuration section", () => {
 });
 
 describe("bundleIssueReport output path", () => {
+    it.if(process.platform !== "win32")("creates the bundle owner-only", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-mode-"));
+        tempDirs.push(root);
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const { path } = await bundleIssueReport(makeReport(root), "description", "title");
+            expect(statSync(path).mode & 0o777).toBe(0o600);
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
+
     it("does not overwrite a bundle written in the same second", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-collide-"));
         tempDirs.push(root);

@@ -10,6 +10,7 @@ import {
     hasOmoPlugin,
     omoConfigCandidatePaths,
     openCodeConfigLayerPaths,
+    pluginEntriesOutside,
     projectOpenCodeConfigPaths,
     projectPluginEntries,
     resolveCompactionForBoot,
@@ -1252,5 +1253,46 @@ describe("detectConflicts", () => {
             const result = await resolveCompactionForBoot(client, 20);
             expect(result).toBeNull();
         });
+    });
+});
+
+describe("pluginEntriesOutside", () => {
+    it("collects entries from every loaded layer except the target file", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-plugin-layers-"));
+        const savedConfig = process.env.OPENCODE_CONFIG;
+        const savedContent = process.env.OPENCODE_CONFIG_CONTENT;
+        const savedXdg = process.env.XDG_CONFIG_HOME;
+        try {
+            process.env.XDG_CONFIG_HOME = join(root, "xdg");
+            const user = getOpenCodeConfigPaths({ binary: "opencode" });
+            mkdirSync(user.configDir, { recursive: true });
+            writeFileSync(user.configJson, `{ "plugin": ["from-sibling"] }`);
+            writeFileSync(user.configJsonc, `{ "plugin": ["from-target"] }`);
+            const custom = join(root, "custom.json");
+            writeFileSync(custom, `{ "plugin": ["from-custom"] }`);
+            process.env.OPENCODE_CONFIG = custom;
+            process.env.OPENCODE_CONFIG_CONTENT = `{ "plugin": ["from-inline"] }`;
+            const project = join(root, "project");
+            mkdirSync(join(project, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(project, ".opencode", "opencode.json"),
+                `{ "plugin": ["from-project"] }`,
+            );
+
+            const entries = pluginEntriesOutside(project, user.configJsonc);
+            expect(entries).toContain("from-sibling");
+            expect(entries).toContain("from-custom");
+            expect(entries).toContain("from-project");
+            expect(entries).toContain("from-inline");
+            expect(entries).not.toContain("from-target");
+        } finally {
+            if (savedConfig === undefined) delete process.env.OPENCODE_CONFIG;
+            else process.env.OPENCODE_CONFIG = savedConfig;
+            if (savedContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+            else process.env.OPENCODE_CONFIG_CONTENT = savedContent;
+            if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = savedXdg;
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });

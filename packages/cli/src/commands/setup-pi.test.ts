@@ -976,3 +976,18 @@ describe("runSetup", () => {
         );
     });
 });
+
+describe("writePiSettingsPackage", () => {
+    it("treats a version-pinned source as already registered", () => {
+        const root = makeTempRoot();
+        const settingsPath = join(root, "settings.json");
+        writeFileSync(settingsPath, `{ "packages": ["npm:@eidnara/pi@0.1.0"] }\n`);
+
+        expect(writePiSettingsPackage(settingsPath, "npm:@eidnara/pi")).toBe(false);
+        expect(parseJsonc(readFileSync(settingsPath, "utf-8"))).toEqual({
+            packages: ["npm:@eidnara/pi@0.1.0"],
+        });
+        // A different scoped package is not the plugin.
+        expect(writePiSettingsPackage(settingsPath, "npm:@eidnara/pi-extras")).toBe(true);
+    });
+});

@@ -7,8 +7,8 @@ import {
     detectConflicts,
     hasOmoPlugin,
     openCodeConfigLayerPaths,
+    pluginEntriesOutside,
     projectOpenCodeConfigPaths,
-    projectPluginEntries,
 } from "@eidnara/opencode/shared/conflict-detector";
 import { collectOmoConfigPaths, fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import {
@@ -596,7 +596,7 @@ export async function runSetup(dryRun = false): Promise<number> {
                 paths.opencodeConfigFormat,
                 removeDcp,
                 disableNativeCompaction,
-                projectPluginEntries(process.cwd()),
+                pluginEntriesOutside(process.cwd(), paths.opencodeConfig),
             );
             log.success(`Plugin added to ${paths.opencodeConfig}`);
             if (removeDcp) log.success("Removed opencode-dcp from plugin list");
