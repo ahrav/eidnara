@@ -206,6 +206,14 @@ describe("sanitizeString home handling", () => {
             "{'\\u0070assword': '<REDACTED>'}",
         );
         expect(sanitizeString("{'\\x70assword': 123456}")).toBe("{'\\x70assword': '<REDACTED>'}");
+        expect(sanitizeString("{'pa\\ssword': 123456}")).toBe("{'pa\\ssword': '<REDACTED>'}");
+        expect(sanitizeString("{'\\u{70}assword': 123456}")).toBe(
+            "{'\\u{70}assword': '<REDACTED>'}",
+        );
+        // A structured value is left whole so the shared redactor replaces it as one unit.
+        const structured = sanitizeString('{"credentials": { "value": "opaque-live-value" }}');
+        expect(structured).not.toContain("opaque-live-value");
+        expect(structured).toMatch(/^\{"credentials": "<REDACTED[^"]*>"\}$/);
         // A bare `key=` is an assignment, so its value goes even when numeric; `key:` stays prose.
         expect(sanitizeString("key=123456 and press any key: continue")).toBe(
             "key=<REDACTED> and press any key: continue",
