@@ -177,6 +177,15 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             try {
+                // An edit or retry of an older response updates that older row; its tokens must not replace the newest response's usage. OpenCode message ids are time-ordered. commentlint: allow(JUDGE)
+                const current = deps.contextUsageMap.get(info.sessionID);
+                if (current?.messageID && info.messageID && info.messageID < current.messageID) {
+                    sessionLog(
+                        info.sessionID,
+                        `event message.updated: skipping — ${info.messageID} is older than the recorded response ${current.messageID}`,
+                    );
+                    return;
+                }
                 const totalInputTokens =
                     (info.tokens?.input ?? 0) +
                     (info.tokens?.cache?.read ?? 0) +

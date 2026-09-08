@@ -336,13 +336,13 @@ describe("registerRpcHandlers", () => {
         await handlers.get("sidebar-snapshot")?.({ sessionId });
         expect(calls).toBe(2);
 
-        // A clear while a request is in flight keeps its late answer out of the cache.
+        // A clear while a request is in flight discards its late answer: the waiting poll fails instead of rendering the invalidated session, and nothing is cached.
         clearRustSessionStatus(sessionId);
         const pending = handlers.get("sidebar-snapshot")?.({ sessionId });
         expect(calls).toBe(3);
         clearRustSessionStatus(sessionId);
         release?.();
-        await pending;
+        expect(await pending).toEqual({ error: "sidebar snapshot unavailable" });
         await handlers.get("sidebar-snapshot")?.({ sessionId });
         expect(calls).toBe(4);
     });
@@ -1015,6 +1015,37 @@ describe("clearWorkMetricsCarry", () => {
         // The recovered entry is cached, so the dialog's countdown starts from the persisted response time.
         const detail = buildStatusDetail(sessionId, process.cwd(), undefined, undefined, live);
         expect(detail.lastResponseTime).toBe(7);
+    });
+
+    test("recovery ignores responses at or before the newest compaction summary", () => {
+        const sessionId = "ses-usage-compacted";
+        const db = openTempOpenCodeDb();
+        insertAssistantRow(db, sessionId, "a", 1, 90_000);
+        // The compaction summary is an assistant row flagged `summary`; its own tokens describe the compaction call.
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run(
+            "s",
+            sessionId,
+            2,
+            JSON.stringify({
+                id: "s",
+                role: "assistant",
+                summary: true,
+                finish: "stop",
+                providerID: "test-provider",
+                modelID: "test-model",
+                tokens: { input: 95_000, output: 500, cache: { read: 0, write: 0 } },
+            }),
+        );
+
+        const live = createLiveSessionState();
+        expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(0);
+        expect(live.contextUsageBySession.has(sessionId)).toBe(false);
+
+        insertAssistantRow(db, sessionId, "b", 3, 12_000);
+        closeQuietly(db);
+        expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(12_000);
     });
 
     test("a retained carry survives row deletion until the session is cleared", () => {

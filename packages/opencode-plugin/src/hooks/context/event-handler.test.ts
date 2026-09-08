@@ -213,6 +213,24 @@ describe("createEventHandler — message.updated", () => {
         expect(deps.contextUsageMap.has(SESSION)).toBe(false);
     });
 
+    it("keeps the newest response's usage when an older response is updated", async () => {
+        const { deps, handle } = buildHarness();
+        const updated = assistantUpdated({ input: 40_000 });
+        updated.info.id = "msg-9";
+        await handle("message.updated", updated);
+
+        const older = assistantUpdated({ input: 5_000 });
+        older.info.id = "msg-3";
+        await handle("message.updated", older);
+        expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(40_000);
+        expect(deps.contextUsageMap.get(SESSION)?.messageID).toBe("msg-9");
+
+        const newer = assistantUpdated({ input: 41_000 });
+        newer.info.id = "msg-9";
+        await handle("message.updated", newer);
+        expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(41_000);
+    });
+
     it("evicts usage entries older than the TTL on the next event", async () => {
         const { deps, handle } = buildHarness();
         const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
