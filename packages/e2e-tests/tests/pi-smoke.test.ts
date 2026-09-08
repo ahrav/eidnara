@@ -1,22 +1,28 @@
-/// <reference types="bun-types" />
-
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { readdirSync } from "node:fs";
 import { PiTestHarness } from "../src/pi-harness";
+import { detectPiPrereqs } from "../src/pi-runner/spawn";
 
-// TODO: Add e2e coverage for Pi historian-success, dreamer-schedule, and sidekick/ctx-aug.
+const piPrereqs = detectPiPrereqs();
 
-let h: PiTestHarness;
+const STORAGE_FILE = /\.(db|sqlite|sqlite3)$/;
 
-beforeAll(async () => {
-    h = await PiTestHarness.create();
-});
+function listRecursive(dir: string): string[] {
+    return readdirSync(dir, { recursive: true, encoding: "utf8" }).sort();
+}
 
-afterAll(async () => {
-    await h.dispose();
-});
+describe.skipIf(!piPrereqs.ok)("pi smoke", () => {
+    let h: PiTestHarness;
 
-describe("pi smoke", () => {
-    it("plugin loads, no crash, and tools are registered", async () => {
+    beforeAll(async () => {
+        h = await PiTestHarness.create();
+    });
+
+    afterAll(async () => {
+        await h?.dispose();
+    });
+
+    it("loads the built extension, completes one mock turn, and leaves no storage file", async () => {
         h.mock.reset();
         h.mock.setDefault({
             text: "pi smoke ok",
@@ -35,6 +41,19 @@ describe("pi smoke", () => {
         expect(body).toContain("ctx_search");
         expect(body).toContain("ctx_memory");
         expect(body).toContain("ctx_note");
-        expect(h.countTags(turn.sessionId!)).toBeGreaterThan(0);
+
+        const listing = listRecursive(h.env.dataDir);
+        const storageFiles = listing.filter((entry) => STORAGE_FILE.test(entry));
+        expect(
+            storageFiles,
+            `storage file under ${h.env.dataDir}; listing:\n${listing.join("\n")}`,
+        ).toEqual([]);
     }, 60_000);
+});
+
+describe.skipIf(piPrereqs.ok)("pi smoke skip visibility", () => {
+    it("prints a skip reason when prerequisites are unmet", () => {
+        console.log(`[pi-e2e] SKIPPED: ${piPrereqs.skipReason ?? "unknown reason"}`);
+        expect(piPrereqs.skipReason && piPrereqs.skipReason.length > 0).toBe(true);
+    });
 });

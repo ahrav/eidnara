@@ -25,8 +25,9 @@ The package is private and never published.
 
 ## Retained suite
 
-`mode-manifest.json` lists every test file under `tests/`; each entry is
-`tier: "rust-only"` with `contract_refs: ["U5-PORT"]`, and
+`mode-manifest.json` lists every test file under `tests/`; each Rust-mode
+entry is `tier: "rust-only"` and the Pi entry is `tier: "pi-smoke"`, all with
+`contract_refs: ["U5-PORT"]`, and
 `validate-mode-manifest` fails when a test file lacks an entry or an entry
 lacks a file. The retained set is:
 
@@ -53,8 +54,11 @@ the test runner uses, so the probe predicts the plugin. Bun 1.3.14 lacks
 needs; on that runtime the suite skips and prints
 `shared-memory channel unavailable on this runtime: runtime_mechanism_unavailable`.
 
-`pi-smoke` requires `@earendil-works/pi-coding-agent` (installed as a dev
-dependency of `packages/pi-plugin`) and the built Pi extension.
+`pi-smoke` is wrapped in `describe.skipIf(!piPrereqs.ok)`. `detectPiPrereqs()`
+(`src/pi-runner/spawn.ts`) requires `@earendil-works/pi-coding-agent`
+(installed as a dev dependency of `packages/pi-plugin`, resolved from that
+package's `node_modules` or the root `node_modules/.bun`), `node` on `PATH`
+(Pi's CLI runs under Node), and the built Pi extension.
 
 ## Commands
 
@@ -68,7 +72,10 @@ bun run mutation:rust-fm          # apply each FM-OC mutation, run its test, rev
 ```
 
 `test` and `test:rust` build `packages/opencode-plugin/dist/index.js` when
-it is absent. `pi-smoke` needs `bun run --cwd packages/pi-plugin build`.
+it is absent. `test:rust` also builds `packages/shm-native/index.js` (the
+Node entry the extension imports) and `packages/pi-plugin/dist/index.js`
+when they are absent; run `bun test tests/pi-smoke.test.ts` directly only
+after `bun run ensure:pi-dist`.
 
 Environment:
 
