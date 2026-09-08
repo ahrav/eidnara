@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -270,6 +271,17 @@ describe("isEidnaraPiPackageEntry", () => {
         expect(isEidnaraPiPackageEntry("git:github.com/ahrav/eidnara", "/base")).toBe(false);
         expect(isEidnaraPiPackageEntry(42, "/base")).toBe(false);
         expect(isEidnaraPiPackageEntry({ name: "@eidnara/pi" }, "/base")).toBe(false);
+    });
+
+    it.if(process.platform !== "win32")("rejects a FIFO manifest instead of blocking on it", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-entry-"));
+        tempDirs.push(root);
+        const dir = join(root, "checkout");
+        mkdirSync(dir, { recursive: true });
+        execFileSync("mkfifo", [join(dir, "package.json")]);
+        const started = performance.now();
+        expect(isEidnaraPiPackageEntry("./checkout", root)).toBe(false);
+        expect(performance.now() - started).toBeLessThan(2_000);
     });
 });
 

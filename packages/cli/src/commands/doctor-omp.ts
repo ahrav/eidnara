@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
 import { EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { loadPiConfig } from "@eidnara/pi/config";
 import { stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
@@ -127,7 +128,7 @@ function selfVersion(): string {
 function pluginDeclaresOmp(path: string | undefined): boolean | null {
     if (!path) return null;
     try {
-        const pkg = JSON.parse(readFileSync(join(path, "package.json"), "utf-8")) as {
+        const pkg = JSON.parse(readRegularFileSync(join(path, "package.json"))) as {
             omp?: { extensions?: unknown };
             pi?: { extensions?: unknown };
         };

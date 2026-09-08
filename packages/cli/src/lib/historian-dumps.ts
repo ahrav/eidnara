@@ -4,10 +4,11 @@
  * cannot drift on what a dump summary contains.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { parseCompartmentOutput } from "@eidnara/opencode/hooks/context/compartment-parser";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 
 export interface HistorianDumpSummary {
     name: string;
@@ -52,7 +53,7 @@ const OUTPUT_TAG_REGEX = /<\/?output(?:\s[^>]*)?>/i;
 
 export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: string } {
     try {
-        const xml = readFileSync(path, "utf-8");
+        const xml = readRegularFileSync(path);
         const root = OUTPUT_DOCUMENT_REGEX.exec(xml);
         if (!root) {
             return { error: "not one complete <output> document" };

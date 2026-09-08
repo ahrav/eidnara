@@ -123,6 +123,8 @@ function describeVersionOutput(output: string): string {
 const LOG_TAIL_BYTES = 64 * 1024;
 /** Upper bound for one picker row: a project path plus a session id. */
 const SESSION_LABEL_MAX_LENGTH = 120;
+/** Upper bound for the last log line echoed into the doctor output. */
+const LOG_LINE_MAX_LENGTH = 300;
 
 function readLastNonEmptyLine(path: string): string | undefined {
     return readLogTailLines(path, LOG_TAIL_BYTES)
@@ -351,7 +353,7 @@ async function runHealthChecks(options: {
             add(
                 results,
                 "info",
-                `Last plugin log line: ${lastLine ? sanitizeDiagnosticText(lastLine) : "<empty log>"}`,
+                `Last plugin log line: ${lastLine ? printableLine(sanitizeDiagnosticText(lastLine), LOG_LINE_MAX_LENGTH) : "<empty log>"}`,
             );
         } catch (error) {
             add(

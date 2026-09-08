@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import {
@@ -16,6 +16,7 @@ import {
     setJsoncValue,
 } from "@eidnara/opencode/shared/jsonc-edit";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { stringify as stringifyJsonc } from "comment-json";
 import {
     isDevPathPluginEntry,
@@ -102,7 +103,7 @@ export function addPluginToOpenCodeConfig(
         return;
     }
 
-    let text = readFileSync(configPath, "utf-8");
+    let text = readRegularFileSync(configPath);
     let changed = false;
     const rawPlugins: unknown[] = Array.isArray(existing.plugin) ? existing.plugin : [];
     const retainedPlugins = removeDcp
@@ -200,8 +201,8 @@ export function addPluginToTuiConfig(configPath: string, _format: "json" | "json
     if (hasNpmEntry || hasDevEntry) return;
 
     const text = Array.isArray(existing.plugin)
-        ? appendJsoncArrayValues(readFileSync(configPath, "utf-8"), ["plugin"], [PLUGIN_NAME])
-        : setJsoncValue(readFileSync(configPath, "utf-8"), ["plugin"], [PLUGIN_NAME]);
+        ? appendJsoncArrayValues(readRegularFileSync(configPath), ["plugin"], [PLUGIN_NAME])
+        : setJsoncValue(readRegularFileSync(configPath), ["plugin"], [PLUGIN_NAME]);
     writeFileAtomic(configPath, text);
 }
 

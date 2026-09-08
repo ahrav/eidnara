@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import {
     detectOmpBinary,
     listOmpPlugins,
@@ -156,7 +156,7 @@ export class OmpAdapter implements HarnessAdapter {
 
     private readRuntimeEnabled(configPath: string): boolean | undefined {
         try {
-            const lock = JSON.parse(readFileSync(configPath, "utf-8")) as {
+            const lock = JSON.parse(readRegularFileSync(configPath)) as {
                 plugins?: Record<string, { enabled?: unknown }>;
             };
             const enabled = lock.plugins?.[OMP_PLUGIN_PACKAGE]?.enabled;

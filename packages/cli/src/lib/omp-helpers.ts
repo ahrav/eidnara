@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { extname, join } from "node:path";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import {
     type CommandInvocation,
     getCommandInvocation,
@@ -47,7 +48,7 @@ function detectOmpPackageCli(): string | null {
     if (!packageDir) return null;
     if (!findBunRuntime()) return null;
     try {
-        const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")) as {
+        const manifest = JSON.parse(readRegularFileSync(join(packageDir, "package.json"))) as {
             name?: unknown;
         };
         if (manifest.name !== "@oh-my-pi/pi-coding-agent") return null;

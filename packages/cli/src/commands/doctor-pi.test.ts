@@ -997,6 +997,26 @@ describe("Pi doctor", () => {
         expect(output).toContain("Last plugin log line: final line marker");
     });
 
+    it("flattens terminal controls out of the echoed last log line", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(logPath, `first\n[error] provider said\u202e desrever\u001b[2K ok\n`);
+        process.env.EIDNARA_LOG_PATH = logPath;
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor(baseOptions(root, cwd, prompts));
+
+        expect(code).toBe(0);
+        const line = prompts.messages.find((message) => message.includes("Last plugin log line"));
+        expect(line).toBeDefined();
+        expect(line).toContain("provider said");
+        expect(line).toContain("ok");
+        for (const forbidden of ["\u202e", "\u001b", "[2K"]) expect(line).not.toContain(forbidden);
+    });
+
     it("treats a local checkout of @eidnara/pi as registered and does not add the npm entry", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");

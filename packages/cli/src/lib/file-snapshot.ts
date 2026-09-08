@@ -1,5 +1,6 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { resolveLinkTarget, writeFileAtomic } from "./atomic-write";
 
 interface FileSnapshot {
@@ -29,7 +30,7 @@ export function snapshotFiles(paths: Iterable<string>): FileSnapshot[] {
         let content: string | null = null;
         if (existsSync(target)) {
             try {
-                content = readFileSync(target, "utf-8");
+                content = readRegularFileSync(target);
             } catch (error) {
                 throw new Error(`Cannot read ${target} to record it for rollback`, {
                     cause: error,

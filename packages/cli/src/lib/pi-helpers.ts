@@ -1,7 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import {
     type CommandInvocation,
     getCommandInvocation,
@@ -57,8 +58,9 @@ export function isEidnaraPiPackageEntry(entry: unknown, baseDir: string): boolea
     }
     if (NON_LOCAL_SOURCE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return false;
     try {
+        // A FIFO or directory at the manifest path is rejected instead of blocking the read.
         const manifest = JSON.parse(
-            readFileSync(join(resolveLocalPackagePath(trimmed, baseDir), "package.json"), "utf-8"),
+            readRegularFileSync(join(resolveLocalPackagePath(trimmed, baseDir), "package.json")),
         ) as { name?: unknown };
         return manifest.name === PI_PACKAGE_NAME;
     } catch {
