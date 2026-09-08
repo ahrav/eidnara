@@ -305,11 +305,15 @@ const TOOL_CALL_ID_FIELDS = [
     "id",
 ] as const;
 
+/** Pi `toolCall` blocks name the call in `id`. */
+const PI_TOOL_CALL_ID_FIELDS = ["id", "callId", "toolCallId"] as const;
+
 function callIdFromPart(part: Record<string, unknown>): string {
-    const direct = firstStringField(part, TOOL_CALL_ID_FIELDS);
+    const fields = partType(part) === "toolCall" ? PI_TOOL_CALL_ID_FIELDS : TOOL_CALL_ID_FIELDS;
+    const direct = firstStringField(part, fields);
     if (direct) return direct;
     const state = isRecord(part.state) ? part.state : null;
-    return state ? (firstStringField(state, TOOL_CALL_ID_FIELDS) ?? "") : "";
+    return state ? (firstStringField(state, fields) ?? "") : "";
 }
 
 function toolNameFromPart(part: Record<string, unknown>): string {
@@ -447,7 +451,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             toolName,
             hasInput: false,
-            hasOutput: contentKey !== null,
+            hasOutput: true,
             providerExecuted: false,
             inputText: "",
             outputText: output.text,
@@ -537,15 +541,7 @@ type NonToolPartContent =
  * commentlint: allow(JUDGE)
  */
 /** OpenCode bookkeeping parts the daemon decoder discards; they occupy no context. */
-const SKIPPED_PART_TYPES = new Set([
-    "step-start",
-    "step-finish",
-    "snapshot",
-    "patch",
-    "agent",
-    "retry",
-    "compaction",
-]);
+const SKIPPED_PART_TYPES = new Set(["snapshot", "patch", "agent", "retry", "compaction"]);
 
 /**
  * The opaque payload of a redacted reasoning block.

@@ -383,6 +383,44 @@ describe("tool arcs", () => {
         expect(breakdown.image).toBe(300);
         expect(breakdown.other).toBe(0);
     });
+
+    it("closes an arc with a payload-less folded Pi toolResult", () => {
+        const call: RawMessage = {
+            id: "c",
+            role: "assistant",
+            parts: [{ type: "toolCall", id: "tc1", name: "noop", arguments: {} }],
+            ordinal: 1,
+        };
+        const result: RawMessage = {
+            id: "r",
+            role: "user",
+            parts: [{ role: "toolResult", toolCallId: "tc1", toolName: "noop" }],
+            ordinal: 2,
+        };
+        expect(buildToolArcs([call, result])).toEqual([
+            { callId: "tc1", invOrdinal: 1, resOrdinal: 2 },
+        ]);
+    });
+
+    it("prefers a Pi toolCall's native id over a retained callId", () => {
+        const call: RawMessage = {
+            id: "c",
+            role: "assistant",
+            parts: [
+                { type: "toolCall", id: "native-1", callId: "stale-9", name: "x", arguments: {} },
+            ],
+            ordinal: 1,
+        };
+        const result: RawMessage = {
+            id: "r",
+            role: "user",
+            parts: [{ role: "toolResult", toolCallId: "native-1", content: "ok" }],
+            ordinal: 2,
+        };
+        expect(buildToolArcs([call, result])).toEqual([
+            { callId: "native-1", invOrdinal: 1, resOrdinal: 2 },
+        ]);
+    });
 });
 
 describe("tool token accounting", () => {
@@ -564,6 +602,26 @@ describe("tool token accounting", () => {
         expect(
             estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
         ).toBe(0);
+    });
+
+    it("counts step boundary parts like the daemon's boundary index", () => {
+        const message: RawMessage = {
+            id: "steps",
+            role: "assistant",
+            parts: [
+                { type: "step-start", snapshot: "abc123" },
+                {
+                    type: "step-finish",
+                    reason: "stop",
+                    cost: 0.01,
+                    tokens: { input: 100, output: 50 },
+                },
+            ],
+            ordinal: 1,
+        };
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).other,
+        ).toBeGreaterThan(0);
     });
 
     it("counts an empty text block in a tool result as empty output", () => {
