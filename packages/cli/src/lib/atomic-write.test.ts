@@ -62,16 +62,32 @@ describe("writeFileAtomic", () => {
         expect(existsSync(`${link}.tmp`)).toBe(false);
     });
 
-    it("replaces a dangling symlink with a regular file", () => {
+    it("creates the target of a dangling symlink and keeps the link", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-dangling-"));
         roots.push(root);
+        const target = join(root, "dotfiles", "opencode.jsonc");
         const link = join(root, "opencode.jsonc");
-        symlinkSync(join(root, "missing-target.jsonc"), link);
+        symlinkSync(target, link);
+        expect(existsSync(target)).toBe(false);
 
         writeFileAtomic(link, "v1\n");
 
-        expect(lstatSync(link).isSymbolicLink()).toBe(false);
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readFileSync(target, "utf-8")).toBe("v1\n");
         expect(readFileSync(link, "utf-8")).toBe("v1\n");
+    });
+
+    it("resolves a relative dangling link text against the link's directory", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-relative-"));
+        roots.push(root);
+        mkdirSync(join(root, "cfg"));
+        const link = join(root, "cfg", "opencode.jsonc");
+        symlinkSync(join("..", "dotfiles", "opencode.jsonc"), link);
+
+        writeFileAtomic(link, "v1\n");
+
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readFileSync(join(root, "dotfiles", "opencode.jsonc"), "utf-8")).toBe("v1\n");
     });
 
     it("creates missing parent directories (fresh Eidnara config location)", () => {

@@ -19,6 +19,7 @@ import {
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
 import type { PromptIO } from "../lib/prompts";
+import { compareVersionStrings } from "../lib/version";
 
 export interface SetupEnvironment {
     detectPiBinary: () => { path: string } | null;
@@ -141,27 +142,6 @@ function compactObject<T extends Record<string, unknown>>(obj: T): T {
         if (obj[key] === undefined) delete obj[key];
     }
     return obj;
-}
-
-/**
- * The comparison parses X.Y.Z versions and ignores pre-release and build suffixes.
- * Returns -1 if `a < b`, 0 if equal, and 1 if `a > b`.
- * either string can't be parsed (we conservatively assume "good enough" so
- * a parse failure doesn't block the user with a phantom upgrade prompt).
- */
-function comparePiVersion(a: string, b: string): number {
-    const parse = (v: string): [number, number, number] | null => {
-        const match = v.match(/(\d+)\.(\d+)\.(\d+)/);
-        return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
-    };
-    const left = parse(a);
-    const right = parse(b);
-    if (!left || !right) return 0;
-    for (let i = 0; i < 3; i += 1) {
-        if (left[i] < right[i]) return -1;
-        if (left[i] > right[i]) return 1;
-    }
-    return 0;
 }
 
 export function writePiSettingsPackage(
@@ -321,7 +301,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             : `${host.displayName} detected at ${binary.path}`,
     );
 
-    if (version && host.minimumVersion && comparePiVersion(version, host.minimumVersion) < 0) {
+    if (version && host.minimumVersion && compareVersionStrings(version, host.minimumVersion) < 0) {
         prompts.log.warn(
             host.versionWarning?.(version, host.minimumVersion) ??
                 `${host.displayName} ${version} is older than required ${host.minimumVersion}.`,

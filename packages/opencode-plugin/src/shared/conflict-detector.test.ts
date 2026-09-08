@@ -297,6 +297,30 @@ describe("detectConflicts", () => {
             expect(result.hasConflict).toBe(false);
         });
 
+        it("ignores disabled_hooks in a shadowed omo.json when omo.jsonc exists", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            const omoDir = join(homeDir, ".omo");
+            mkdirSync(omoDir, { recursive: true });
+            writeFileSync(join(omoDir, "omo.jsonc"), JSON.stringify({ "[opencode]": {} }));
+            writeFileSync(
+                join(omoDir, "omo.json"),
+                JSON.stringify({
+                    "[opencode]": {
+                        disabled_hooks: [
+                            "preemptive-compaction",
+                            "context-window-monitor",
+                            "anthropic-context-window-limit-recovery",
+                        ],
+                    },
+                }),
+            );
+            const result = detectConflicts(projectDir);
+            // The effective omo.jsonc leaves every hook active; the stale omo.json is not consulted.
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
+            expect(result.conflicts.omoContextWindowMonitor).toBe(true);
+            expect(result.conflicts.omoAnthropicRecovery).toBe(true);
+        });
+
         it("ignores new omo.jsonc when OMO is not installed", () => {
             writeProjectConfig([]);
             const omoDir = join(homeDir, ".omo");

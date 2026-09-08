@@ -33,9 +33,12 @@ import { detectOpenCode } from "../lib/opencode-detect";
 import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
 import { type ConfigPaths, detectConfigPaths } from "../lib/paths";
 import { confirm, intro, log, note, outro, promptIO, spinner } from "../lib/prompts";
+import { compareVersionStrings } from "../lib/version";
 
 const PLUGIN_NAME = "@eidnara/opencode";
 const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
+/** Mirrors the `@opencode-ai/plugin` peer dependency in `packages/opencode-plugin/package.json`. */
+export const OPENCODE_MINIMUM_VERSION = "1.15.0";
 
 /** With `enabled: false` the plugin skips every hook at startup, so native compaction must stay on. commentlint: allow(JUDGE) */
 function resolveWriterModes(sharedConfigPath: string, directory: string): EidnaraModes {
@@ -408,6 +411,16 @@ export async function runSetup(dryRun = false): Promise<number> {
     } else {
         const version = getOpenCodeVersion(detection.binary);
         s.stop(`OpenCode ${version ?? ""} detected`);
+        if (version && compareVersionStrings(version, OPENCODE_MINIMUM_VERSION) < 0) {
+            log.warn(
+                `OpenCode ${version} is older than the required ${OPENCODE_MINIMUM_VERSION}; the plugin may fail to load.`,
+            );
+            const proceed = await confirm("Continue with setup anyway?", false);
+            if (!proceed) {
+                outro("Setup cancelled — upgrade OpenCode and try again.");
+                return 1;
+            }
+        }
     }
 
     s.start("Fetching available models");
@@ -531,13 +544,9 @@ export async function runSetup(dryRun = false): Promise<number> {
                 "  • anthropic-context-window-limit-recovery",
         );
 
-        const shouldDisable = dryRun
-            ? false
-            : await confirm("Disable these hooks in oh-my-opencode?", true);
         if (dryRun) {
             log.message("[dry-run] would offer to disable conflicting oh-my-opencode hooks");
-        }
-        if (shouldDisable) {
+        } else if (await confirm("Disable these hooks in oh-my-opencode?", true)) {
             disableOmoHooks = true;
         } else {
             log.warn("Skipped — you may experience context management conflicts");
