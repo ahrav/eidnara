@@ -56,15 +56,23 @@ function showConflictDialog(api, directory, reasons, conflicts) {
       return `${reasons.join("\n")}\n\nFix these conflicts automatically?`;
     },
     onConfirm: () => {
-      const actions = fixConflicts(directory, conflicts);
+      // `fixConflicts` edits only existing files and lets `writeFileSync` errors escape, so both
+      // an empty action list and a thrown error mean the conflict stands.
+      let actions = [];
+      let failure = null;
+      try {
+        actions = fixConflicts(directory, conflicts);
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
       // DialogConfirm calls dialog.clear() after onConfirm, so defer the next dialog
       setTimeout(() => {
-        // `fixConflicts` edits only existing files, so an empty action list means the conflict stands.
-        if (actions.length === 0) {
+        if (failure !== null || actions.length === 0) {
+          const outcome = failure !== null ? `Editing the configuration failed: ${failure}\nEdits made before the failure were kept.` : "No configuration file could be edited, so nothing changed.";
           api.ui.dialog.replace(() => _$createComponent(api.ui.DialogAlert, {
             title: "\u26A0\uFE0F Eidnara Still Disabled",
             get message() {
-              return `No configuration file could be edited, so nothing changed.\n\n${reasons.join("\n")}\n\nResolve these by hand (for native compaction, set compaction.auto and compaction.prune to false in opencode.json), then restart OpenCode.`;
+              return `${outcome}\n\n${reasons.join("\n")}\n\nResolve these by hand (for native compaction, set compaction.auto and compaction.prune to false in opencode.json), then restart OpenCode.`;
             },
             onConfirm: () => {
               showToast(api, {
@@ -1255,7 +1263,8 @@ const tui = async (api, _options, meta) => {
     return;
   }
   initRpcClient(directory);
-  await refreshToastDurationMs();
+  // `EidnaraRpcClient.call` retries discovery for 13.5 s when no server is up; registration does not wait on it.
+  void refreshToastDurationMs();
   const sidebarSlot = createSidebarContentSlot(api);
   api.slots.register(sidebarSlot);
 
