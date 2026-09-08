@@ -214,6 +214,18 @@ describe("EidnaraConfigSchema", () => {
             ).toEqual({ subagent_extensions: ["provider-package", "./local.ts"] });
         });
 
+        it("fills the default for a per-model percentage map that omits it", () => {
+            expect(
+                EidnaraConfigSchema.parse({ execute_threshold_percentage: { "openai/gpt-4": 80 } })
+                    .execute_threshold_percentage,
+            ).toEqual({ default: 65, "openai/gpt-4": 80 });
+            expect(
+                EidnaraConfigSchema.parse({
+                    execute_threshold_percentage: { default: 70, "openai/gpt-4": 80 },
+                }).execute_threshold_percentage,
+            ).toEqual({ default: 70, "openai/gpt-4": 80 });
+        });
+
         it("accepts and normalizes 2-letter ISO 639-1 language codes", () => {
             expect(EidnaraConfigSchema.parse({ language: "tr" }).language).toBe("tr");
             expect(EidnaraConfigSchema.parse({ language: "  ES " }).language).toBe("es");

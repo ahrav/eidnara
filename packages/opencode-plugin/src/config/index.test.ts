@@ -508,7 +508,7 @@ describe("loadPluginConfigDetailed — combined outcome", () => {
     it("does not repeat a user-tier recovery warning the merged parse also reports", () => {
         const result = loadDetailedWithUserAndProjectConfig(
             JSON.stringify({ smart_drops: "invalid" }),
-            JSON.stringify({ enabled: true }),
+            JSON.stringify({ temporal_awareness: true }),
         );
 
         expect(result.sources.userConfig).toBe("schema-recovery");
@@ -921,7 +921,9 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
 
         expect(result.language).toBe("tr");
         expect(result.sidekick?.model).toBe("anthropic/project-sidekick");
-        expect(result.sidekick?.timeout_ms).toBe(45_000);
+        // `timeout_ms` is a user-only cost bound; the project value is stripped and the default stays.
+        expect(result.sidekick?.timeout_ms).toBe(30_000);
+        expect(result.configWarnings?.join("\n")).toContain("Ignoring sidekick.timeout_ms");
     });
 
     it("project boolean override beats user default", () => {

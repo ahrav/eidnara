@@ -28,6 +28,13 @@ const HISTORIAN_USER_ONLY_FIELDS = [
     "two_pass",
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
+const AGENT_COST_CAP_FIELDS = [
+    "maxSteps",
+    "maxTokens",
+    "timeout_ms",
+    "thinking_level",
+    "variant",
+] as const;
 /**
  * Every block below has at least one leaf that only user config may set. The leaf sanitizers
  * skip non-object blocks, so a project `null`, string, or array here would survive to the merge
@@ -42,6 +49,7 @@ const USER_ONLY_LEAF_PARENTS = [
     "historian",
     "sidekick",
     "mural",
+    "memory",
     "experimental",
 ] as const;
 
@@ -57,8 +65,6 @@ const USER_ONLY_LEAF_PARENTS = [
  * Historian model selection is user-only, and project compaction thresholds can only increase, preventing cloned repositories from forcing earlier compaction or extra Historian spending.
  */
 const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools", "system_prompt"] as const;
-/** Per-run spend bounds and reasoning-mode selectors; `buildHiddenAgentConfig` clamps steps only to the built-in cap. */
-const AGENT_COST_FIELDS = ["maxTokens", "maxSteps", "variant", "thinking_level"] as const;
 const PERCENTAGE_THRESHOLD_REASON =
     "security: a repository may only raise compaction thresholds above the user's effective value; it cannot force earlier historian work or cloned-repo cost escalation.";
 const TOKEN_THRESHOLD_REASON =
@@ -100,24 +106,28 @@ function isValidTokenThreshold(value: unknown): value is number {
     );
 }
 
+// The trusted tier is normalized with the same range predicates as project values. A trusted
+// value outside the schema range would otherwise become the baseline a project only has to beat,
+// while schema recovery would have replaced that trusted value with the default.
 function normalizeTrustedPercentageThresholds(value: unknown): PercentageThresholdConfig {
-    if (typeof value === "number" && Number.isFinite(value)) {
+    if (isValidPercentageThreshold(value)) {
         return { defaultValue: value, overrides: new Map() };
     }
 
-    if (
-        isPlainObject(value) &&
-        typeof value.default === "number" &&
-        Number.isFinite(value.default)
-    ) {
+    if (isPlainObject(value)) {
         const overrides = new Map<string, number>();
         for (const [key, child] of Object.entries(value)) {
             if (key === "default") continue;
-            if (typeof child === "number" && Number.isFinite(child)) {
+            if (isValidPercentageThreshold(child)) {
                 overrides.set(key, child);
             }
         }
-        return { defaultValue: value.default, overrides };
+        return {
+            defaultValue: isValidPercentageThreshold(value.default)
+                ? value.default
+                : DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+            overrides,
+        };
     }
 
     return { defaultValue: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE, overrides: new Map() };
@@ -131,16 +141,13 @@ function normalizeTrustedTokenThresholds(value: unknown): TokenThresholdConfig {
     const overrides = new Map<string, number>();
     for (const [key, child] of Object.entries(value)) {
         if (key === "default") continue;
-        if (typeof child === "number" && Number.isFinite(child)) {
+        if (isValidTokenThreshold(child)) {
             overrides.set(key, child);
         }
     }
 
     return {
-        defaultValue:
-            typeof value.default === "number" && Number.isFinite(value.default)
-                ? value.default
-                : undefined,
+        defaultValue: isValidTokenThreshold(value.default) ? value.default : undefined,
         overrides,
     };
 }
@@ -222,19 +229,11 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
     return `Ignoring ${field} from project config (${reason})`;
 }
 
-/** Model IDs sharing a non-dash prefix (`gpt-4` and `gpt-40`) do not shadow each other. */
-function isDashPrefix(candidate: string, key: string): boolean {
-    return (
-        key.startsWith(candidate) &&
-        (key.length === candidate.length || key[candidate.length] === "-")
-    );
-}
-
 /**
  * Returns the trusted threshold that a project per-model key would shadow at runtime.
  *
  * The qualified reading follows `modelKeyLookupOrder`.
- * The bare reading applies under every provider and competes with each trusted wildcard and bare dash-prefix.
+ * The bare reading applies under every provider and competes with the trusted keys that follow the bare key in that walk.
  * A key with a slash keeps the bare reading because model IDs may contain slashes: `openrouter/foo/bar` resolves bare `foo/bar` before `openrouter/*`.
  * The project override must exceed both trusted baselines.
  * Without a trusted default, only a trusted bare dash-prefix covers the bare reading; an uncovered reading is an introduction.
@@ -273,26 +272,47 @@ function qualifiedBaseline<T extends number | undefined>(
     return base.defaultValue;
 }
 
+/** A bare key at some level applies to every provider, so later levels, provider wildcards, and the default are unreachable once one is found. */
 function bareBaseline<T extends number | undefined>(
     base: { defaultValue: T; overrides: Map<string, number> },
     projectKey: string,
 ): { effective: T | number; covered: boolean } {
-    let effective: T | number = base.defaultValue;
-    let covered = base.defaultValue !== undefined;
-    for (const [key, value] of base.overrides) {
-        const slash = key.indexOf("/");
-        if (slash < 0) {
-            if (!isDashPrefix(key, projectKey)) continue;
-            covered = true;
-        } else {
-            const modelPart = key.slice(slash + 1);
-            // `provider/<bare>` precedes the bare key in the walk, so the bare key cannot shadow it.
-            if (modelPart === projectKey) continue;
-            if (modelPart !== "*" && !isDashPrefix(modelPart, projectKey)) continue;
-        }
+    let effective: number | undefined;
+    let covered = false;
+    const consider = (value: number): void => {
         if (effective === undefined || value > effective) effective = value;
+    };
+
+    let level = projectKey;
+    let reachedBare = false;
+    while (!reachedBare) {
+        const lastDash = level.lastIndexOf("-");
+        if (lastDash <= 0) break;
+        level = level.slice(0, lastDash);
+        for (const [key, value] of base.overrides) {
+            const slash = key.indexOf("/");
+            if (slash >= 0 && key.slice(slash + 1) === level) consider(value);
+        }
+        const bare = base.overrides.get(level);
+        if (bare !== undefined) {
+            consider(bare);
+            covered = true;
+            reachedBare = true;
+        }
     }
-    return { effective, covered };
+
+    if (!reachedBare) {
+        for (const [key, value] of base.overrides) {
+            const slash = key.indexOf("/");
+            if (slash >= 0 && key.slice(slash + 1) === "*") consider(value);
+        }
+        if (base.defaultValue !== undefined) {
+            consider(base.defaultValue);
+            covered = true;
+        }
+    }
+
+    return { effective: effective ?? base.defaultValue, covered };
 }
 
 /**
@@ -317,14 +337,15 @@ function bareBaseline<T extends number | undefined>(
  * Only user config may set `historian.disallowed_tools`: the project tier merges over the user tier, so a project array would replace the user's removals and restore the historian's default tools.
  * Only user config may set `historian.two_pass` because the second editor pass adds a model call to every historian run.
  * Only user config may set `system_prompt_injection`: a project `enabled: true` or a replaced `skip_signatures` array would undo the user's injection opt-outs.
+ * Only user config may set `commit_cluster_trigger`: a project `enabled: true` or a lower `min_clusters` would make the historian fire after fewer commits.
+ * Only user config may set hidden-agent `maxSteps`, `maxTokens`, and `timeout_ms`, and top-level `historian_timeout_ms`: the project tier replaces the leaf, so a project value could raise a cost bound the user set.
+ * Only user config may set top-level `enabled`: a project `true` would reactivate a plugin the user disabled, and a project `false` would switch off the user's context-window management, which the `compaction.enabled` rule already reserves for user config.
  * Only user config may set `mural.model` so repositories cannot select a provider for project memory.
  * Project config must not set `pi.subagent_extensions` because it controls extensions loaded by Pi child processes.
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
  * A repository may select a reviewed `prompt_surface` preset but may not inject arbitrary guidance or tool-description text.
  * Project config must not set hidden-agent `prompt`, `permission`, or `tools`.
- * Only user config may set hidden-agent `maxTokens`, `maxSteps`, `variant`, and `thinking_level`: each raises the spend of a run the user did not ask for, and the step clamp only enforces the built-in cap.
  * Only user config may set hidden-agent `disable` or its legacy spelling `enabled`: the project tier replaces the trusted leaf, so a project `disable: false` or `enabled: true` would reactivate an agent the user turned off, and disabling the historian would bypass the user-only `compaction.enabled` rule.
- * Only user config may set `commit_cluster_trigger`: a project `enabled: true` or a lower `min_clusters` would run the historian after fewer commits than the user allowed.
  * A project may add `disabled_hooks` entries but may not replace the list: a non-array value would discard the user's disabled hooks in the merge.
  * A project may not replace a block that carries user-only leaves with a non-object value: the merge would substitute the whole block for the trusted one, schema recovery would drop the invalid value, and the user's settings would fall back to defaults without any leaf ever being stripped.
  */
@@ -347,10 +368,32 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
-    if ("commit_cluster_trigger" in projectRaw) {
-        delete projectRaw.commit_cluster_trigger;
+    if ("enabled" in projectRaw) {
+        delete projectRaw.enabled;
         warnings.push(
-            "Ignoring commit_cluster_trigger from project config (security: only user-level config may enable the commit-cluster trigger or lower min_clusters; a repository cannot make the historian run after fewer commits).",
+            "Ignoring enabled from project config (security: only user-level config may turn Eidnara on or off; a repository cannot reactivate a plugin the user disabled or switch off the user's context-window management).",
+        );
+    }
+
+    if ("historian_timeout_ms" in projectRaw) {
+        delete projectRaw.historian_timeout_ms;
+        warnings.push(
+            "Ignoring historian_timeout_ms from project config (security: the historian timeout is a user-level cost bound; a repository cannot raise it).",
+        );
+    }
+
+    if ("keep_subagents" in projectRaw) {
+        delete projectRaw.keep_subagents;
+        warnings.push(
+            "Ignoring keep_subagents from project config (security: retaining subagent sessions is a user-level debug setting; a repository cannot grow the host session store).",
+        );
+    }
+
+    const memory = projectRaw.memory;
+    if (isPlainObject(memory) && "injection_budget_tokens" in memory) {
+        delete memory.injection_budget_tokens;
+        warnings.push(
+            "Ignoring memory.injection_budget_tokens from project config (security: the injection budget bounds input tokens per request and is user-level only; a repository cannot raise it).",
         );
     }
 
@@ -410,6 +453,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.system_prompt_injection;
         warnings.push(
             "Ignoring system_prompt_injection from project config (security: only user-level config may enable injection or change the skip signatures; a repository cannot undo the user's opt-outs).",
+        );
+    }
+
+    if ("commit_cluster_trigger" in projectRaw) {
+        delete projectRaw.commit_cluster_trigger;
+        warnings.push(
+            "Ignoring commit_cluster_trigger from project config (security: only user-level config may enable the trigger or lower min_clusters; a repository cannot make the historian fire after fewer commits).",
         );
     }
 
@@ -510,19 +560,6 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
                     "(security: a repository cannot reprogram or re-permission hidden agents).",
             );
         }
-        const removedCostFields: string[] = [];
-        for (const field of AGENT_COST_FIELDS) {
-            if (field in block) {
-                delete block[field];
-                removedCostFields.push(field);
-            }
-        }
-        if (removedCostFields.length > 0) {
-            warnings.push(
-                `Ignoring ${agentKey}.${removedCostFields.join("/")} from project config ` +
-                    "(security: hidden-agent token, step, and reasoning limits are user-level only; a repository cannot raise the cost of a run).",
-            );
-        }
         // A project `enabled: true` would replace the user's legacy `enabled: false` in the raw
         // merge before `migrateLegacyAgentEnabledInMemory` turns it into `disable: true`.
         for (const field of HIDDEN_AGENT_ACTIVATION_FIELDS) {
@@ -530,6 +567,18 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
             delete block[field];
             warnings.push(
                 `Ignoring ${agentKey}.${field} from project config (security: only user-level config may enable or disable hidden agents; a repository cannot reactivate an agent the user turned off).`,
+            );
+        }
+        const removedCaps: string[] = [];
+        for (const field of AGENT_COST_CAP_FIELDS) {
+            if (field in block) {
+                delete block[field];
+                removedCaps.push(field);
+            }
+        }
+        if (removedCaps.length > 0) {
+            warnings.push(
+                `Ignoring ${agentKey}.${removedCaps.join("/")} from project config (security: step, output-token, timeout, and reasoning-depth controls are user-level only; a repository cannot raise a bound the user set on hidden-agent cost).`,
             );
         }
     }

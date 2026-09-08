@@ -64,6 +64,21 @@ describe("eidnara JSON schema", () => {
         expect(pattern.test(" TR ")).toBe(true);
     });
 
+    test("the per-model percentage map does not require default", () => {
+        const schema = buildSchema() as {
+            properties: {
+                execute_threshold_percentage: {
+                    anyOf: Array<{ type: string; required?: string[] }>;
+                };
+            };
+        };
+        const object = schema.properties.execute_threshold_percentage.anyOf.find(
+            (variant) => variant.type === "object",
+        );
+        expect(object).toBeDefined();
+        expect(object?.required).toBeUndefined();
+    });
+
     test("loader-only top-level keys are published so the closed root accepts them", () => {
         const schema = buildSchema() as {
             additionalProperties: boolean;
