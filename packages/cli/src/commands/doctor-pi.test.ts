@@ -176,9 +176,10 @@ describe("Pi doctor", () => {
         expect(output).toContain("Repair attempted; 2 item(s) changed");
     });
 
-    for (const [label, version] of [
-        ["below the floor", "0.79.0"],
-        ["not executable", null],
+    for (const [label, override] of [
+        ["below the floor", { getPiVersion: () => "0.79.0" }],
+        ["not executable", { getPiVersion: () => null }],
+        ["not installed", { detectPiBinary: () => null }],
     ] as const) {
         it(`leaves packages[] untouched in --force mode when Pi is ${label}`, async () => {
             const root = makeTempRoot();
@@ -202,7 +203,7 @@ describe("Pi doctor", () => {
                 code = await runDoctor({
                     ...options,
                     force: true,
-                    deps: { ...options.deps, getPiVersion: () => version },
+                    deps: { ...options.deps, ...override },
                 });
             } finally {
                 console.error = originalConsoleError;
@@ -219,6 +220,33 @@ describe("Pi doctor", () => {
             expect(prompts.messages.join("\n")).not.toContain("Added npm:@eidnara/pi");
         });
     }
+
+    it("reports a log path that exists but cannot be read instead of aborting", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const logDir = join(root, "log-as-directory");
+        mkdirSync(logDir, { recursive: true });
+        process.env.EIDNARA_LOG_PATH = logDir;
+        const prompts = new MockPrompts();
+        const stderr: string[] = [];
+        const originalConsoleError = console.error;
+        console.error = (...args: unknown[]) => {
+            stderr.push(args.map(String).join(" "));
+        };
+
+        let code: number;
+        try {
+            code = await runDoctor(baseOptions(root, cwd, prompts));
+        } finally {
+            console.error = originalConsoleError;
+        }
+
+        expect(code).toBe(1);
+        expect(stderr.join("\n")).toContain(`FAIL Log file ${logDir} exists but could not be read`);
+        expect(prompts.messages.join("\n")).toContain("Doctor found failures");
+    });
 
     it("generates a sanitized markdown report in --issue mode without calling gh create", async () => {
         const root = makeTempRoot();

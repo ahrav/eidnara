@@ -273,6 +273,38 @@ describe("collectDiagnostics Pi path resolution", () => {
         }
     });
 
+    it("drops a session whose header cannot be read and reports partial discovery", async () => {
+        if (typeof process.getuid === "function" && process.getuid() === 0) return;
+        const root = makeTempRoot();
+        const home = join(root, "home");
+        const cwd = join(root, "workspace");
+        const agentDir = join(root, "agent");
+        process.env.HOME = home;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_DATA_HOME = join(root, "data");
+        process.env.XDG_CACHE_HOME = join(root, "cache");
+        process.env.XDG_CONFIG_HOME = join(root, "config");
+        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
+        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+        const slugDir = join(agentDir, "sessions", "--tmp-my-project--");
+        mkdirSync(slugDir, { recursive: true });
+        const readable = join(slugDir, "2026-07-07T12-00-00-000Z_visible.jsonl");
+        const locked = join(slugDir, "2026-07-07T13-00-00-000Z_hidden.jsonl");
+        writeFileSync(readable, `${JSON.stringify({ type: "session", cwd: "/tmp/my-project" })}\n`);
+        writeFileSync(locked, `${JSON.stringify({ type: "session", cwd: "/tmp/my-project" })}\n`);
+        chmodSync(locked, 0o000);
+
+        try {
+            const report = await collectDiagnostics(cwd);
+            expect(report.recentSessions.map((session) => session.sessionId)).toEqual(["visible"]);
+            expect(report.sessionDiscovery).toBe("partial");
+        } finally {
+            chmodSync(locked, 0o644);
+        }
+    });
+
     it("reports discovery as partial when some session directories are unreadable", async () => {
         if (typeof process.getuid === "function" && process.getuid() === 0) return;
         const root = makeTempRoot();

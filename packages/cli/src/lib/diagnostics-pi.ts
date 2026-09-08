@@ -337,17 +337,28 @@ export function collectPiRecentSessions(
 
         candidates.sort((a, b) => b.mtime - a.mtime);
         // Headers are read only for the sessions that are reported.
-        const sessions = candidates.slice(0, 5).map((entry) => {
+        const sessions: PiRecentSessionSummary[] = [];
+        for (const entry of candidates.slice(0, 5)) {
             let directory = entry.slugDirectory;
             try {
+                // An absent or malformed header yields null and the slug form
+                // stands in; only an I/O failure throws.
                 directory = readSessionHeaderCwd(entry.path) ?? directory;
-            } catch {}
-            return {
+            } catch {
+                // The slug form is lossy, so a session whose header cannot be
+                // read is not attributed to a guessed directory.
+                unreadable += 1;
+                continue;
+            }
+            sessions.push({
                 sessionId: entry.sessionId,
                 directory,
                 lastActiveAt: new Date(entry.mtime).toISOString(),
-            };
-        });
+            });
+        }
+        if (sessions.length === 0 && unreadable > 0) {
+            return { status: "unavailable", sessions: [] };
+        }
         // Some sessions were read while others were not, so the list is
         // incomplete rather than empty.
         return { status: unreadable > 0 ? "partial" : "ok", sessions };

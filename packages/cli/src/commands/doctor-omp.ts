@@ -13,6 +13,7 @@ import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import { stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
+import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { collectPiHistorianDumps, collectPiRecentSessions } from "../lib/diagnostics-pi";
 import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
@@ -65,6 +66,7 @@ interface HealthReport {
 interface DoctorDeps {
     prompts: PromptIO;
     detectOmpBinary: () => OmpBinaryInfo | null;
+    ensurePluginEntry: () => Promise<PluginEntryResult>;
     getOmpVersion: typeof getOmpVersion;
     getOmpSetting: typeof getOmpSetting;
     listOmpPlugins: typeof listOmpPlugins;
@@ -85,6 +87,7 @@ export interface RunOmpDoctorOptions {
 const DEFAULT_DEPS: DoctorDeps = {
     prompts: promptIO,
     detectOmpBinary,
+    ensurePluginEntry: () => new OmpAdapter().ensurePluginEntry(),
     getOmpVersion,
     getOmpSetting,
     listOmpPlugins,
@@ -365,45 +368,82 @@ async function repair(
         }
         return fixed;
     }
-    if (plan.installPlugin) {
-        const result = await new OmpAdapter().ensurePluginEntry();
-        if (result.ok) {
-            prompts.log.success(result.message);
-            fixed += 1;
-        } else prompts.log.error(result.message);
+    const wantsManagersOff = plan.disableCompaction || plan.disableMemory;
+    // Global settings are unobservable under project or overlay config, so the
+    // manager repairs would be refused below; enabling the plugin first would
+    // then leave it running beside both native managers.
+    const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
+    if (wantsManagersOff && nonGlobalSources.length > 0) {
+        prompts.log.error(
+            `Leaving OMP as it is: effective settings include ${nonGlobalSources.join(", ")}, so the global compaction and memory settings cannot be changed safely`,
+        );
+        return fixed;
     }
-    if (plan.disableCompaction || plan.disableMemory) {
-        // Turning off OMP's managers only makes sense once the plugin that
-        // replaces them is enabled and carries an extension manifest.
-        const plugin = deps
-            .listOmpPlugins(omp.path)
-            ?.find((entry) => entry.name === OMP_PLUGIN_PACKAGE);
+    let enabledHere = false;
+    if (plan.installPlugin) {
         // `pluginDeclaresOmp` returns `null` for a plugin without a readable
         // manifest; only a verified manifest counts, so a `null` also blocks.
-        if (plugin?.enabled !== true || pluginDeclaresOmp(plugin.path) !== true) {
+        const installed = deps
+            .listOmpPlugins(omp.path)
+            ?.find((entry) => entry.name === OMP_PLUGIN_PACKAGE);
+        if (pluginDeclaresOmp(installed?.path) !== true) {
             prompts.log.error(
-                `Leaving OMP native compaction and memory on: ${OMP_PLUGIN_PACKAGE} is not enabled in OMP with a verified extension manifest, so nothing would replace them`,
+                `Leaving ${OMP_PLUGIN_PACKAGE} disabled: its install${installed ? ` at ${installed.path}` : ""} has no verifiable OMP/Pi extension manifest, so OMP would load a package that is not an extension`,
             );
             return fixed;
         }
+        const result = await deps.ensurePluginEntry();
+        if (result.ok) {
+            prompts.log.success(result.message);
+            fixed += 1;
+            enabledHere = true;
+        } else prompts.log.error(result.message);
     }
-    const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
+    if (!wantsManagersOff) return fixed;
+    // Turning off OMP's managers only makes sense once the plugin that
+    // replaces them is enabled and carries an extension manifest.
+    const plugin = deps
+        .listOmpPlugins(omp.path)
+        ?.find((entry) => entry.name === OMP_PLUGIN_PACKAGE);
+    if (plugin?.enabled !== true || pluginDeclaresOmp(plugin.path) !== true) {
+        prompts.log.error(
+            `Leaving OMP native compaction and memory on: ${OMP_PLUGIN_PACKAGE} is not enabled in OMP with a verified extension manifest, so nothing would replace them`,
+        );
+        return fixed;
+    }
+    let managerFailed = false;
     for (const [enabled, key, value] of [
         [plan.disableCompaction, "compaction.enabled", "false"],
         [plan.disableMemory, "memory.backend", "off"],
     ] as const) {
         if (!enabled) continue;
-        if (nonGlobalSources.length > 0) {
-            prompts.log.error(
-                `Refusing to set global OMP ${key}: effective settings include ${nonGlobalSources.join(", ")}`,
-            );
-            continue;
-        }
         const result = deps.runOmpCommand(omp.path, ["config", "set", key, value], 10_000);
         if (result.ok) {
             prompts.log.success(`Set OMP ${key}=${value}`);
             fixed += 1;
-        } else prompts.log.error(result.stderr || `Could not set OMP ${key}`);
+        } else {
+            managerFailed = true;
+            prompts.log.error(result.stderr || `Could not set OMP ${key}`);
+        }
+    }
+    if (managerFailed && enabledHere) {
+        // A plugin enabled in this run beside a native manager that stayed on
+        // would run both after restart; restore the prior state.
+        const rollback = deps.runOmpCommand(
+            omp.path,
+            ["plugin", "disable", OMP_PLUGIN_PACKAGE],
+            120_000,
+        );
+        if (rollback.ok) {
+            fixed -= 1;
+            prompts.log.warn(
+                `Disabled ${OMP_PLUGIN_PACKAGE} again: a native manager could not be turned off, so leaving it enabled would run both`,
+            );
+        } else {
+            prompts.log.error(
+                `Could not disable ${OMP_PLUGIN_PACKAGE} after a native-manager repair failed (${rollback.stderr || rollback.stdout || "omp exited with an error"}). Run \`omp plugin disable ${OMP_PLUGIN_PACKAGE}\` by hand.`,
+            );
+        }
     }
 
     return fixed;

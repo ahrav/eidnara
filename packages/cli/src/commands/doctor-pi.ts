@@ -41,7 +41,7 @@ interface CheckResult {
 }
 
 interface RepairPlan {
-    /** False when Pi is found but reports no usable version or one below the floor; the package entry then stays untouched. */
+    /** False when Pi is missing, reports no usable version, or is below the floor; the package entry then stays untouched. */
     hostSupported: boolean;
     addPackageEntry: boolean;
     writeUserConfig: boolean;
@@ -173,6 +173,7 @@ async function runHealthChecks(options: {
 
     const pi = options.deps.detectPiBinary();
     if (!pi) {
+        repairPlan.hostSupported = false;
         add(results, "fail", "Pi binary not found on PATH or at ~/.pi/bin/pi");
     } else {
         const output = options.deps.getPiVersion(pi.path);
@@ -316,15 +317,25 @@ async function runHealthChecks(options: {
 
     const logPath = getEidnaraLogPath("pi");
     if (existsSync(logPath)) {
-        const stat = statSync(logPath);
-        const sizeKb = (stat.size / 1024).toFixed(0);
-        add(results, "info", `Log file: ${logPath} (${sizeKb} KB)`);
-        const lastLine = readLastNonEmptyLine(logPath);
-        add(
-            results,
-            "info",
-            `Last plugin log line: ${lastLine ? sanitizeDiagnosticText(lastLine) : "<empty log>"}`,
-        );
+        // A path that exists but cannot be read (permissions, or a directory
+        // named by EIDNARA_LOG_PATH) is a broken logging setup, not a doctor crash.
+        try {
+            const stat = statSync(logPath);
+            const sizeKb = (stat.size / 1024).toFixed(0);
+            const lastLine = readLastNonEmptyLine(logPath);
+            add(results, "info", `Log file: ${logPath} (${sizeKb} KB)`);
+            add(
+                results,
+                "info",
+                `Last plugin log line: ${lastLine ? sanitizeDiagnosticText(lastLine) : "<empty log>"}`,
+            );
+        } catch (error) {
+            add(
+                results,
+                "fail",
+                `Log file ${logPath} exists but could not be read: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
     } else {
         add(results, "info", `No plugin log file yet at ${logPath}`);
     }
@@ -362,7 +373,7 @@ function repair(plan: RepairPlan, prompts: PromptIO): RepairOutcome {
         // package it may not support; setup asks before doing the same.
         outcome.failed += 1;
         console.error(
-            `FAIL Leaving Pi packages[] untouched: this Pi reports no usable version or one older than ${PI_MINIMUM_VERSION}, so ${PI_PACKAGE_SOURCE} may not load. Upgrade Pi first.`,
+            `FAIL Leaving Pi packages[] untouched: Pi is missing, reports no usable version, or is older than ${PI_MINIMUM_VERSION}, so ${PI_PACKAGE_SOURCE} may not load. Install or upgrade Pi first.`,
         );
     } else if (plan.addPackageEntry) {
         const settingsPath = getPiUserExtensionsPath();
