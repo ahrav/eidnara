@@ -1,8 +1,18 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
-import { stripJsonComments } from "../shared/jsonc-parser";
-import { homeDir } from "./config-paths";
+import { stripJsoncComments } from "../shared/jsonc-parser";
+
+/**
+ * The environment's home takes precedence over the account database, so a harness or test can point every home-relative path at a scratch directory; Bun's `os.homedir()` does not re-read `HOME` after startup. commentlint: allow(JUDGE)
+ */
+function homeDir(): string {
+    if (process.platform === "win32") {
+        return process.env.USERPROFILE || process.env.HOME || homedir();
+    }
+    return process.env.HOME || homedir();
+}
 
 export interface SubstituteInput {
     /** Raw config text before JSONC parsing. */
@@ -84,7 +94,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         // Scan comment-stripped text so a documented token in a `//` or `/* */`
         // comment does not raise the security warning; the returned text stays
         // unchanged.
-        const scanText = stripJsonComments(text);
+        const scanText = stripJsoncComments(text);
         const hasEnvTokens = ENV_PATTERN.test(scanText);
         const hasFileTokens = FILE_PATTERN.test(scanText);
         ENV_PATTERN.lastIndex = 0;
@@ -104,7 +114,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
     }
 
     // Strip JSONC comments before substitution to prevent tokens in comments from triggering environment or file reads.
-    text = stripJsonComments(text);
+    text = stripJsoncComments(text);
 
     // Substituted values go in as placeholders and come back out in one final pass, so replacement text is never rescanned: an environment value that spells `{file:...}` stays a value, and file contents that spell `{env:...}` stay contents. The delimiter is a private-use code point. commentlint: allow(JUDGE)
     const substitutions: string[] = [];

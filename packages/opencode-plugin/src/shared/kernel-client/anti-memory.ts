@@ -97,6 +97,7 @@ export function normalizeAntiMemoryPayload(payload: AntiMemoryPayload): StoredAn
     };
 }
 
+/** Renders the payload as given: an absent expiry produces no `Expires at` line rather than a defaulted one, because the output is a deterministic function of its input that round-trips through `parseAntiMemoryContent` byte for byte. A caller that wants the default horizon applies `ANTI_MEMORY_DEFAULT_TTL_MS` before rendering. commentlint: allow(JUDGE) */
 export function renderAntiMemoryContent(payload: AntiMemoryPayload): string {
     const stored = normalizeAntiMemoryPayload(payload);
     const expiresAt = antiMemoryExpiry(payload);
