@@ -19,26 +19,16 @@ function gitRootInAncestorChain(startDirectory: string): string | null {
     }
 }
 
-function gitRootDirectory(canonical: string): string | null {
-    const direct = gitRootInAncestorChain(canonical);
-    if (direct) return direct;
-    try {
-        const realCanonical = realpathSync.native(canonical);
-        return realCanonical === canonical ? null : gitRootInAncestorChain(realCanonical);
-    } catch {
-        return null;
-    }
-}
-
 /** Answers the git worktree root containing `directory`, or the directory's canonical path when no `.git` is found, matching the daemon's canonical project root. commentlint: allow(JUDGE) */
 export function resolveProjectRootDirectory(directory: string): string {
-    const canonical = path.resolve(directory);
-    const root = gitRootDirectory(canonical);
-    if (root) return root;
-    // Matches the daemon's `ProjectBinding`, which compares roots after `canonical_root` symlink resolution; a raw spelling would derive distinct import identities inside one daemon scope. commentlint: allow(JUDGE)
+    const resolved = path.resolve(directory);
+    // Git discovers the repository from the physical path, so a symlinked subtree beneath another checkout belongs to the link target's repository, not the outer one; walking the raw spelling first would find the outer `.git`. The daemon's `ProjectBinding` compares roots after the same `canonical_root` symlink resolution, so a raw spelling would also derive a distinct import identity inside one daemon scope. commentlint: allow(JUDGE)
+    let canonical: string;
     try {
-        return realpathSync.native(canonical);
+        canonical = realpathSync.native(resolved);
     } catch {
-        return canonical;
+        // A path with a missing component has no physical spelling; the raw ancestor chain still finds an existing `.git`.
+        return gitRootInAncestorChain(resolved) ?? resolved;
     }
+    return gitRootInAncestorChain(canonical) ?? canonical;
 }

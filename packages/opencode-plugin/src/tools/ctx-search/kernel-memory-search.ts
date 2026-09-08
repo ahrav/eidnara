@@ -11,6 +11,7 @@ import {
     isAvailable,
     isMemoryDecisionRow,
     type KernelClient,
+    MAX_READ_OBJECT_IDS,
     type MemoryState,
     type ReadRow,
     type Surface,
@@ -81,14 +82,17 @@ export async function readObjectRowsChunked(args: {
     client: KernelClient;
     surface: Surface;
     gated: boolean;
-    /** At most `MAX_READ_OBJECT_IDS` ids; the client rejects longer filters. */
+    /** Any length; the read issues one filtered request per `MAX_READ_OBJECT_IDS` ids, the client's filter bound. */
     objectIds: readonly string[];
     signal?: AbortSignal;
 }): Promise<ChunkedObjectRead> {
     const rows: ReadRow[] = [];
     const unresolvedObjectIds: string[] = [];
     let knownAsOf = 0;
-    const pending: (readonly string[])[] = [args.objectIds];
+    const pending: (readonly string[])[] = [];
+    for (let start = 0; start < args.objectIds.length; start += MAX_READ_OBJECT_IDS) {
+        pending.push(args.objectIds.slice(start, start + MAX_READ_OBJECT_IDS));
+    }
     while (pending.length > 0) {
         const chunk = pending.pop() as readonly string[];
         const read = await args.client.read({

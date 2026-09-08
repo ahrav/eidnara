@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { KernelClient } from "../../shared/kernel-client";
+import { KernelClient, MAX_READ_OBJECT_IDS } from "../../shared/kernel-client";
 import { renderAntiMemoryContent } from "../../shared/kernel-client/anti-memory";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
+import { estimateTokens } from "../../shared/token-estimator";
 import type { KernelClientResolver } from "../ctx-memory/types";
-import { createCtxSearchTools, executeCtxSearch } from "./tools";
+import { MAX_RENDERED_RESULT_TOKENS } from "./bounds";
+import { CTX_SEARCH_LIGHT_DESCRIPTION, createCtxSearchTools, executeCtxSearch } from "./tools";
 import type { CtxSearchToolDeps } from "./types";
 
 const toolContext = (sessionID = "ses-search") =>
@@ -240,6 +242,36 @@ describe("createCtxSearchTools", () => {
         );
     });
 
+    it("keeps a comma-joined id list over the filter bound on filtered reads so an old id beyond the row cap resolves", async () => {
+        const harness = kernelHarness();
+        const count = MAX_READ_OBJECT_IDS + 1;
+        seedMany(harness.kernel, count, (index) => `Row ${index}.`);
+        // The unfiltered snapshot would drop the oldest row; every named id must still resolve.
+        harness.kernel.readRowCap = MAX_READ_OBJECT_IDS;
+        const ids = Array.from(
+            { length: count },
+            (_, index) => `mem_${String(index).padStart(32, "0")}`,
+        );
+        const execution = await executeCtxSearch(
+            harness.deps,
+            { query: ids.join(","), limit: 50 },
+            toolContext(),
+        );
+        expect(execution.status).toBe("complete");
+        if (execution.status !== "complete") return;
+        expect(execution.prePack.map((hit) => hit.publicClaimId)).toEqual(ids.slice(0, 50));
+        expect(execution.text).not.toContain("unresolved");
+        expect(execution.text).not.toContain("truncated");
+        const idReads = harness.transport.calls.map(
+            (call) => (call.body as { object_ids?: string[] }).object_ids ?? [],
+        );
+        expect(idReads.map((read) => read.length).sort((a, b) => a - b)).toEqual([
+            1,
+            MAX_READ_OBJECT_IDS,
+        ]);
+        expect(idReads.flat().sort()).toEqual([...ids].sort());
+    });
+
     it("honors the requested limit for a multi-id query", async () => {
         const harness = kernelHarness();
         seed(harness.kernel, OBJECT_A, "First.");
@@ -291,6 +323,17 @@ describe("createCtxSearchTools", () => {
         expect(result).toBe("Error: Memory is unavailable because the daemon is not running.");
         expect(result.toLowerCase()).not.toContain("retry");
         expect(harness.transport.calls).toHaveLength(0);
+    });
+
+    it("advertises only the memory source in both the full and light descriptions", () => {
+        const tools = createCtxSearchTools(kernelHarness().deps);
+        for (const description of [tools.ctx_search.description, CTX_SEARCH_LIGHT_DESCRIPTION]) {
+            expect(description).toContain("memory daemon");
+            expect(description).toContain("mem_<32hex>");
+            for (const absent of ["ctx_expand", "compacted", "commits", "notes"]) {
+                expect(description).not.toContain(absent);
+            }
+        }
     });
 });
 
@@ -356,5 +399,24 @@ describe("executeCtxSearch", () => {
         expect(execution.prePack).toEqual([]);
         expect(execution.delivered).toEqual([]);
         expect(execution.text).toContain("No results found");
+    });
+
+    it("counts the truncation note in tokenCount and keeps the whole text under the budget", async () => {
+        const harness = kernelHarness();
+        const filler = Array.from({ length: 300 }, (_, index) =>
+            ((index * 2654435761) % 36).toString(36),
+        ).join(" ");
+        seedMany(harness.kernel, 50, (index) => `${filler} tail-${index} big`);
+        harness.kernel.readTruncated = true;
+        const execution = await executeCtxSearch(
+            harness.deps,
+            { query: "big", limit: 50 },
+            toolContext(),
+        );
+        expect(execution.status).toBe("complete");
+        if (execution.status !== "complete") return;
+        expect(execution.text).toStartWith("Memory: the memory read was truncated");
+        expect(execution.tokenCount).toBe(estimateTokens(execution.text));
+        expect(execution.tokenCount).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
     });
 });
