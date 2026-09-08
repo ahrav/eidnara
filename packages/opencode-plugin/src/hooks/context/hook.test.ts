@@ -11,7 +11,11 @@ import {
 import { __resetProjectIdentityForTests } from "../../features/context/project-identity";
 import { createEidnaraHook, type EidnaraDeps } from "./hook";
 import { createLiveSessionState } from "./live-session-state";
+import { setRawMessageProvider } from "./read-session-chunk";
+import { closeReadOnlySessionDb } from "./read-session-db";
+import type { RawMessage } from "./read-session-raw";
 import type { RustModeModuleClient } from "./rust-mode-transform";
+import type { MessageLike } from "./tag-content-primitives";
 
 type RecordedCall = { sessionId: string; projectRoot: string; method: string; body: unknown };
 
@@ -33,6 +37,7 @@ const HOOK_KEYS = [
 ].sort();
 
 const tempDirs: string[] = [];
+const unregisterProviders: Array<() => void> = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 /** An empty data home has no `opencode.db`, so tool verdicts freeze fail-open and prompt hashes persist. */
@@ -43,7 +48,27 @@ function useTempDataHome(prefix: string): string {
     return dir;
 }
 
+/** One raw user message lets the transform resolve ordinals without an OpenCode session DB. */
+function installOneRawMessage(sessionId: string): MessageLike[] {
+    const row = { id: "m-1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true };
+    unregisterProviders.push(
+        setRawMessageProvider(sessionId, {
+            readMessages: () => [row] as unknown as RawMessage[],
+            readMessageOrdinalPage: (after) => (after ? [] : [row]),
+            getStoredMessageCount: () => 1,
+        }),
+    );
+    return [
+        {
+            info: { id: row.id, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "hello" }],
+        },
+    ];
+}
+
 afterEach(() => {
+    closeReadOnlySessionDb();
+    for (const unregister of unregisterProviders.splice(0)) unregister();
     __resetProjectIdentityForTests();
     clearHookInitFailure();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -75,12 +100,14 @@ function createFakeModuleClient(
     return { client, calls, deleteSession, closeSession };
 }
 
-function createClientMock(promptMock = mock(() => undefined)) {
+function createClientMock(promptMock = mock(() => undefined), sessionDirectory?: string) {
     return {
         session: {
             prompt: promptMock,
             promptAsync: mock(async () => undefined),
-            get: mock(async () => ({ data: {} })),
+            get: mock(async () => ({
+                data: sessionDirectory === undefined ? {} : { directory: sessionDirectory },
+            })),
         },
         app: { agents: mock(async () => ({ data: [] })) },
         tui: { showToast: mock(async () => undefined) },
@@ -126,12 +153,8 @@ describe("eidnara hook", () => {
         }
         expect("tool.definition" in hook).toBe(false);
         expect("config" in hook).toBe(false);
-        expect(Object.keys(hook.rustToolBackends ?? {}).sort()).toEqual([
-            "note",
-            "noteEvaluationAvailable",
-            "reduce",
-        ]);
-        expect(hook.rustToolBackends?.noteEvaluationAvailable?.("any-project")).toBe(true);
+        expect(Object.keys(hook.rustToolBackends ?? {}).sort()).toEqual(["note", "reduce"]);
+        expect("noteEvaluationAvailable" in (hook.rustToolBackends ?? {})).toBe(false);
     });
 
     it("leaves rustToolBackends undefined in ts mode", () => {
@@ -308,12 +331,53 @@ describe("eidnara hook", () => {
         );
     });
 
-    it("clears the transform session and prompt state on session.deleted", async () => {
-        useTempDataHome("hook-session-deleted-");
-        const fake = createFakeModuleClient();
+    it("routes the transform by the session's own directory and skips hidden eidnara- children", async () => {
+        useTempDataHome("hook-transform-route-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
         const liveSessionState = createLiveSessionState();
         const hook = requireHook(
-            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client, liveSessionState })),
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        const messages = installOneRawMessage("ses-routed");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
+            ["transform", "/other/repo"],
+        ]);
+        expect(liveSessionState.sessionDirectoryBySession.get("ses-routed")).toBe("/other/repo");
+
+        liveSessionState.internalChildSessions.add("ses-hidden");
+        const hidden = installOneRawMessage("ses-hidden");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...hidden] });
+        expect(fake.calls).toHaveLength(1);
+    });
+
+    it("clears the transform session and prompt state on session.deleted", async () => {
+        useTempDataHome("hook-session-deleted-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
         );
         const sessionId = "ses-deleted";
         const selectModel = () =>
@@ -323,6 +387,8 @@ describe("eidnara hook", () => {
             });
 
         await selectModel();
+        const messages = installOneRawMessage(sessionId);
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
         await hook["experimental.chat.system.transform"](
             { sessionID: sessionId },
             { system: ["first prompt"] },
@@ -338,9 +404,11 @@ describe("eidnara hook", () => {
         });
         await Bun.sleep(0);
 
-        expect(fake.deleteSession).toHaveBeenCalledWith(sessionId, "/tmp");
+        // Session deletion uses the transform's recorded project root, not the plugin launch directory.
+        expect(fake.deleteSession).toHaveBeenCalledWith(sessionId, "/other/repo");
         expect(fake.closeSession).toHaveBeenCalledWith(sessionId);
         expect(liveSessionState.liveModelBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
         expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
 
         // A prompt change after deletion finds no persisted hash, so it initializes instead of flagging a change.
