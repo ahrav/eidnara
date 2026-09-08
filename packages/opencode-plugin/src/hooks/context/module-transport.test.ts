@@ -26,25 +26,26 @@ function internals(transport: HostModuleTransport): TransportInternals {
 }
 
 describe("HostModuleTransport forgetRoute", () => {
-    test("closes the cached route on the host as it evicts the handle", async () => {
+    test("closes the cached route on the host as it evicts the handle, without waiting on the close", () => {
         const transport = new HostModuleTransport("/tmp/unused-eidnara-host.json");
         const state = internals(transport);
         const closed: RouteHandle[] = [];
         state.client = {
-            async closeRoute(handle: RouteHandle): Promise<void> {
+            closeRoute(handle: RouteHandle): Promise<void> {
                 closed.push(handle);
+                return new Promise<void>(() => {});
             },
         };
         const route = new RouteHandle(7, 1);
         state.routes.set("session-a\0/repo/missing-project", { route, generation: 0 });
 
-        await transport.forgetRoute("session-a", "/repo/missing-project");
+        transport.forgetRoute("session-a", "/repo/missing-project");
 
         expect(closed).toEqual([route]);
         expect(state.routes.size).toBe(0);
     });
 
-    test("a route absent from the cache sends no close", async () => {
+    test("a route absent from the cache sends no close", () => {
         const transport = new HostModuleTransport("/tmp/unused-eidnara-host.json");
         const state = internals(transport);
         const closed: RouteHandle[] = [];
@@ -54,7 +55,7 @@ describe("HostModuleTransport forgetRoute", () => {
             },
         };
 
-        await transport.forgetRoute("session-a", "/repo/missing-project");
+        transport.forgetRoute("session-a", "/repo/missing-project");
 
         expect(closed).toEqual([]);
     });

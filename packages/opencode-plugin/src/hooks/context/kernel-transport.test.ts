@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
     isAvailable,
     KernelClient,
@@ -152,12 +155,14 @@ describe("shared transport eviction", () => {
         resetKernelClientsForTest();
     });
 
+    const files = Array.from(
+        { length: MAX_CONNECTION_FILE_STATES + 1 },
+        (_, index) => `/tmp/kernel-transport-test-missing-${index}.json`,
+    );
+    const config = (file: string) => ({ subc: { connection_file: file } });
+    const keyOf = (file: string) => `explicit:${file}`;
+
     test("a client that outlives its shared state's eviction re-resolves through the map instead of redialing outside the cap", async () => {
-        const files = Array.from(
-            { length: MAX_CONNECTION_FILE_STATES + 1 },
-            (_, index) => `/tmp/kernel-transport-test-missing-${index}.json`,
-        );
-        const config = (file: string) => ({ subc: { connection_file: file } });
         const stale = createKernelClient({
             sessionId: SESSION,
             projectRoot: PROJECT,
@@ -166,12 +171,73 @@ describe("shared transport eviction", () => {
         for (const file of files.slice(1)) {
             createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: config(file) });
         }
-        expect(sharedConnectionFilesForTest()).toEqual(files.slice(1));
+        expect(sharedConnectionFilesForTest()).toEqual(files.slice(1).map(keyOf));
 
         const result = await stale.read({ surface: "auto_inject" });
         expect(result.state).toEqual({ kind: "unavailable", reason: "daemon_absent" });
         // The stale client's call recreated its connection file's state through the map, so the cap evicted the next-oldest entry rather than a ninth transport living on outside it.
-        expect(sharedConnectionFilesForTest()).toEqual([...files.slice(2), files[0]]);
+        expect(sharedConnectionFilesForTest()).toEqual(
+            [...files.slice(2), files[0] as string].map(keyOf),
+        );
+    });
+
+    test("eviction drops the tokens a retained client still holds, since they were minted against the evicted transport's daemon", () => {
+        const stale = createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: config(files[0] as string),
+        });
+        stale.tokens.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 1 }], 1);
+        expect(stale.tokens.get(PROJECT, "mem_a")).toBeDefined();
+
+        for (const file of files.slice(1)) {
+            createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: config(file) });
+        }
+
+        expect(stale.tokens.get(PROJECT, "mem_a")).toBeUndefined();
+    });
+
+    test("the managed default and an explicit empty path never share a state", () => {
+        createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: {} });
+        createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: { subc: { connection_file: "" } },
+        });
+        expect(sharedConnectionFilesForTest()).toEqual(["managed-default", "explicit:"]);
+    });
+});
+
+describe("shared-path project root canonicalization", () => {
+    let dir = "";
+
+    beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), "kernel-transport-canonical-"));
+        mkdirSync(join(dir, "real"));
+        symlinkSync(join(dir, "real"), join(dir, "link"));
+    });
+
+    afterEach(() => {
+        resetKernelClientsForTest();
+        rmSync(dir, { recursive: true, force: true });
+    });
+
+    test("a symlinked spelling resolves to the same token bucket as the resolved spelling", () => {
+        const resolved = realpathSync.native(join(dir, "real"));
+        const link = join(dir, "link");
+        const config = { subc: { connection_file: MISSING_CONNECTION_FILE } };
+        const tokens = createKernelClient({
+            sessionId: SESSION,
+            projectRoot: resolved,
+            config,
+        }).tokens;
+        tokens.rememberTokens(resolved, [{ object_id: "mem_a", known_as_of: 1 }], 1);
+        for (let index = 1; index < MAX_TOKEN_CACHE_PROJECTS; index += 1) {
+            createKernelClient({ sessionId: SESSION, projectRoot: `/repo/other-${index}`, config });
+        }
+        // Resolving through the symlink must touch the resolved root's bucket rather than open a new one; a new one would push the cache past the cap and evict the resolved root.
+        createKernelClient({ sessionId: SESSION, projectRoot: link, config });
+        expect(tokens.get(resolved, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 1 });
     });
 });
 

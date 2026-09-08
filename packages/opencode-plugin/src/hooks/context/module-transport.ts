@@ -935,8 +935,8 @@ export class HostModuleTransport {
         return this.connectionOrigin === "managed-default" && this.demandStart !== undefined;
     }
 
-    /** Evicts and closes the cached route for one `(session, root)` after the daemon answers `route_unbound`. The daemon has no session binding for the channel but the host still owns it; dropping only the cached handle would leave that host route allocated until the connection generation changes, and every recovery would consume another one. commentlint: allow(JUDGE) */
-    async forgetRoute(sessionId: string, rawProjectRoot: string): Promise<void> {
+    /** Evicts and closes the cached route for one `(session, root)` after the daemon answers `route_unbound`. The daemon has no session binding for the channel but the host still owns it; dropping only the cached handle would leave that host route allocated until the connection generation changes, and every recovery would consume another one. The close is not awaited: `HostClient.closeRoute` flushes under its own shutdown deadline, and the caller's deadline does not reach here, so waiting could hold a cancelled kernel call open for seconds. commentlint: allow(JUDGE) */
+    forgetRoute(sessionId: string, rawProjectRoot: string): void {
         const routeKey = `${sessionId}\0${this.canonicalRoot(rawProjectRoot)}`;
         const existing = this.routes.get(routeKey);
         this.routes.delete(routeKey);
@@ -949,7 +949,7 @@ export class HostModuleTransport {
         if (!existing || !client) return;
         const closeRoute = (client as Partial<HostClient>).closeRoute;
         if (typeof closeRoute !== "function") return;
-        await closeRoute.call(client, existing.route).catch((error: unknown) => {
+        void closeRoute.call(client, existing.route).catch((error: unknown) => {
             if (this.client === client && isConnectionFailure(error)) {
                 this.invalidateConnection(client);
             }
@@ -963,8 +963,9 @@ export class HostModuleTransport {
     }
 
     /** Per-instance memoization resolves symlinks; missing paths retain their input spelling.
-     * Canonicalization preserves the input spelling when the path is gone, so a missing path does not fail the request. */
-    private canonicalRoot(root: string): string {
+     * Canonicalization preserves the input spelling when the path is gone, so a missing path does not fail the request.
+     * Public so a client built over this transport can key its own state by the same root the route is bound to. commentlint: allow(JUDGE) */
+    canonicalRoot(root: string): string {
         const cached = this.canonicalRootCache.get(root);
         if (cached !== undefined) {
             this.canonicalRootCache.delete(root);

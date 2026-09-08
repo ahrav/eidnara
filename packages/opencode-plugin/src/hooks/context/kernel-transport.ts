@@ -72,7 +72,7 @@ export function createKernelTransport(transport: HostModuleTransport): KernelTra
             }
         },
         async ensureRoute(args): Promise<void> {
-            await transport.forgetRoute(args.sessionId, args.projectRoot);
+            transport.forgetRoute(args.sessionId, args.projectRoot);
         },
     };
 }
@@ -113,8 +113,9 @@ function touchTokenProject(shared: SharedKernelState, projectRoot: string): void
 
 const sharedByConnectionFile = new Map<string, SharedKernelState>();
 
+/** Tags the key so the managed default (`undefined`, may demand-start) never shares a state with an explicit empty path (`""`, never demand-starts); `resolveConnectionOrigin` distinguishes them by presence, not value. commentlint: allow(JUDGE) */
 function connectionFileKey(connectionFile: string | undefined): string {
-    return connectionFile ?? "";
+    return connectionFile === undefined ? "managed-default" : `explicit:${connectionFile}`;
 }
 
 function indirectTransport(
@@ -130,6 +131,13 @@ function indirectTransport(
         call: (args) => live().call(args),
         ensureRoute: (args) => live().ensureRoute(args),
     };
+}
+
+/** A token's `known_as_of` is a position in the evicted transport's daemon sequence, so the cache a retained client still holds must not carry those tokens to the replacement state's daemon; the client's next read refills it from that daemon. commentlint: allow(JUDGE) */
+function evictSharedState(evicted: SharedKernelState): void {
+    evicted.module.disconnect();
+    for (const projectRoot of evicted.tokenProjectOrder) evicted.tokens.dropProject(projectRoot);
+    evicted.tokenProjectOrder.clear();
 }
 
 function sharedState(connectionFile: string | undefined): SharedKernelState {
@@ -156,7 +164,7 @@ function sharedState(connectionFile: string | undefined): SharedKernelState {
         if (oldestKey === undefined) break;
         const evicted = sharedByConnectionFile.get(oldestKey);
         sharedByConnectionFile.delete(oldestKey);
-        evicted?.module.disconnect();
+        if (evicted) evictSharedState(evicted);
     }
     return shared;
 }
@@ -170,22 +178,19 @@ export interface CreateKernelClientArgs {
     tokens?: TokenCache;
 }
 
-/**
- * Applies `memory.enabled` to every client. Clients for the same connection
- * file share a transport (one dial, one route cache) and a token cache
- * (tokens are keyed by project, not session).
- */
+/** Applies `memory.enabled` to every client. Clients for the same connection file share a transport (one dial, one route cache) and a token cache (tokens are keyed by project, not session). Shared-path clients take the root the transport canonicalizes, so a symlinked and a resolved spelling of one project derive the same operation keys and token bucket as the route they are bound to. commentlint: allow(JUDGE) */
 export function createKernelClient(args: CreateKernelClientArgs): KernelClient {
     const shared = args.transport ? null : sharedState(args.config.subc?.connection_file);
+    const projectRoot = shared ? shared.module.canonicalRoot(args.projectRoot) : args.projectRoot;
     if (shared && args.tokens === undefined) {
-        touchTokenProject(shared, args.projectRoot);
+        touchTokenProject(shared, projectRoot);
     }
     return new KernelClient({
         transport: args.transport ?? (shared as SharedKernelState).transport,
         tokens: args.tokens ?? shared?.tokens ?? new TokenCache(),
         enabled: args.config.memory?.enabled !== false,
         sessionId: args.sessionId,
-        projectRoot: args.projectRoot,
+        projectRoot,
     });
 }
 
@@ -196,11 +201,11 @@ export function kernelClientResolver(config: KernelClientConfig): KernelClientRe
 
 /** Disconnects every shared transport and drops the shared token caches between test cases; a test that dialed would otherwise leave its socket and route cache to the next one. commentlint: allow(JUDGE) */
 export function resetKernelClientsForTest(): void {
-    for (const shared of sharedByConnectionFile.values()) shared.module.disconnect();
+    for (const shared of sharedByConnectionFile.values()) evictSharedState(shared);
     sharedByConnectionFile.clear();
 }
 
-/** The connection files with a live shared state, least recently resolved first. */
+/** `sharedByConnectionFile` orders live connection-file states from least to most recently resolved. */
 export function sharedConnectionFilesForTest(): string[] {
     return [...sharedByConnectionFile.keys()];
 }
