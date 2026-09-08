@@ -567,6 +567,73 @@ describe("eidnara hook", () => {
         expect(fake.calls).toHaveLength(1);
     });
 
+    it("skips a transform for a session deleted while its directory read is pending", async () => {
+        useTempDataHome("hook-transform-deleted-race-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        let releaseDirectoryRead: (() => void) | undefined;
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(
+            () =>
+                new Promise<{ data: { directory: string } }>((resolve) => {
+                    releaseDirectoryRead = () => resolve({ data: { directory: "/other/repo" } });
+                }),
+        );
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                }),
+            ),
+        );
+        const sessionId = "ses-transform-deleted-race";
+        const messages = installOneRawMessage(sessionId);
+        const pass = hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        releaseDirectoryRead();
+        await pass;
+
+        expect(fake.deleteSession).toHaveBeenCalled();
+        expect(fake.calls.filter((call) => call.method === "transform")).toHaveLength(0);
+    });
+
+    it("skips a transform for an already deleted session without reading its directory", async () => {
+        useTempDataHome("hook-transform-already-deleted-");
+        const fake = createFakeModuleClient();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                }),
+            ),
+        );
+        const sessionId = "ses-transform-already-deleted";
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+        });
+        client.session.get.mockClear();
+        const messages = installOneRawMessage(sessionId);
+
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+
+        expect(client.session.get).not.toHaveBeenCalled();
+        expect(fake.calls.filter((call) => call.method === "transform")).toHaveLength(0);
+    });
+
     it("clears the transform session and prompt state on session.deleted", async () => {
         useTempDataHome("hook-session-deleted-");
         const fake = createFakeModuleClient(({ method }) =>

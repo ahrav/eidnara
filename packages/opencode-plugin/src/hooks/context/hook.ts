@@ -297,8 +297,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
               const messages = output.messages as MessageLike[];
               const sessionId = resolveSessionId(messages);
               if (!sessionId) return;
+              if (deletedSessions.has(sessionId)) return;
               // Hidden `eidnara-` children run Eidnara's own prompts and receive no project context; the directory read classifies a child restored after a restart.
               await sessionDirectoryFor(sessionId);
+              if (deletedSessions.has(sessionId)) return;
               if (internalChildSessions.has(sessionId)) return;
               await rustTransform.run(sessionId, messages, output);
           }

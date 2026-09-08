@@ -803,6 +803,84 @@ describe("Rust mode transform transport", () => {
         expect(transform.getState(sessionId).forceFullWire).toBe(false);
     });
 
+    it("supersedes an older pass that finishes preflight after a newer pass starts", async () => {
+        const sessionId = `rust-overlapping-preflight-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let releaseDirectoryRead: (() => void) | undefined;
+        const deps = makeDeps();
+        deps.client = {
+            session: {
+                get: () =>
+                    new Promise<{ data: { directory: string } }>((resolve) => {
+                        releaseDirectoryRead = () =>
+                            resolve({ data: { directory: "/tmp/project" } });
+                    }),
+            },
+        } as never;
+        deps.sessionMetadataReadStateBySession = new Map();
+        const { client, bodies } = recordingClient((request) => ({
+            native_messages: request.native_messages,
+        }));
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+        const firstInput = makeMessages(sessionId);
+        const firstOutput = { messages: [...firstInput] as unknown[] };
+        const first = transform.run(sessionId, firstInput, firstOutput);
+        while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+        const secondInput = makeMessages(sessionId);
+        const secondOutput = { messages: [...secondInput] as unknown[] };
+        const second = transform.run(sessionId, secondInput, secondOutput);
+
+        releaseDirectoryRead();
+        await Promise.all([first, second]);
+
+        expect(bodies).toHaveLength(1);
+        expect(firstOutput.messages).toEqual(firstInput);
+        expect(secondOutput.messages).toEqual(secondInput);
+        expect(transform.getState(sessionId).passCount).toBe(2);
+        expect(transform.getState(sessionId).failureCount).toBe(0);
+    });
+
+    it("nacks note deliveries when a pass is superseded while its transform response is pending", async () => {
+        const sessionId = `rust-overlapping-response-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let releaseFirstResponse:
+            | ((value: {
+                  native_messages: unknown[];
+                  note_deliveries: Array<{ transform_pass_id: string }>;
+              }) => void)
+            | undefined;
+        const { client, calls } = recordingClient((_request, index) => {
+            if (index > 0) return { native_messages: [] };
+            return new Promise<{
+                native_messages: unknown[];
+                note_deliveries: Array<{ transform_pass_id: string }>;
+            }>((resolve) => {
+                releaseFirstResponse = resolve;
+            });
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const firstInput = makeMessages(sessionId);
+        const firstOutput = { messages: [...firstInput] as unknown[] };
+        const first = transform.run(sessionId, firstInput, firstOutput);
+        while (releaseFirstResponse === undefined) await Bun.sleep(0);
+        const secondInput = makeMessages(sessionId);
+        await transform.run(sessionId, secondInput, { messages: [...secondInput] });
+
+        releaseFirstResponse({
+            native_messages: [{ info: { id: "superseded" }, parts: [] }],
+            note_deliveries: [{ transform_pass_id: "pass-superseded" }],
+        });
+        await first;
+
+        expect(firstOutput.messages).toEqual(firstInput);
+        expect(calls.map((call) => call.method)).toEqual([
+            "transform",
+            "transform",
+            "transform.nack",
+        ]);
+        expect(transform.getState(sessionId).failureCount).toBe(0);
+    });
+
     it("does not resurrect a wire cache for a session cleared while its pass is in flight", async () => {
         const sessionId = `rust-clear-in-flight-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
@@ -1037,6 +1115,55 @@ describe("native output delta", () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+
+    it("keeps applied note output when a newer pass starts during the ack", async () => {
+        const sessionId = `rust-note-ack-superseded-${Date.now()}`;
+        installRawRows(sessionId, rawRows(3));
+        let releaseAck: (() => void) | undefined;
+        const firstNative = [{ info: { id: "first-applied" }, parts: [] }];
+        const secondNative = [
+            { info: { id: "second-applied-1" }, parts: [] },
+            { info: { id: "second-applied-2" }, parts: [] },
+        ];
+        const { client, bodies } = recordingClient(
+            (_request, index) =>
+                index === 0
+                    ? {
+                          native_messages: firstNative,
+                          note_deliveries: [{ transform_pass_id: "pass-first" }],
+                      }
+                    : { native_messages: secondNative },
+            async (method) => {
+                if (method === "transform.ack") {
+                    await new Promise<void>((resolve) => {
+                        releaseAck = resolve;
+                    });
+                }
+                return { ok: true };
+            },
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const firstInput = rowMessages(sessionId, rawRows(1));
+        const firstOutput = { messages: [...firstInput] as unknown[] };
+        const first = transform.run(sessionId, firstInput, firstOutput);
+        while (releaseAck === undefined) await Bun.sleep(0);
+        const secondInput = rowMessages(sessionId, rawRows(2));
+        const secondOutput = { messages: [...secondInput] as unknown[] };
+        const second = transform.run(sessionId, secondInput, secondOutput);
+        await second;
+        releaseAck();
+        await first;
+        const thirdInput = rowMessages(sessionId, rawRows(3));
+        await transform.run(sessionId, thirdInput, { messages: [...thirdInput] });
+
+        expect(firstOutput.messages).toEqual(firstNative);
+        expect(secondOutput.messages).toEqual(secondNative);
+        expect(
+            (bodies[2]?.tail_delta as { native_replace_from?: number } | undefined)
+                ?.native_replace_from,
+        ).toBe(1);
+        expect(transform.getState(sessionId).failureCount).toBe(0);
     });
 
     it("disposes each duplicate delivery pass ID only once", async () => {
