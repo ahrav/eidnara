@@ -557,7 +557,3 @@ export function parseDoctorArgs(args: string[]): RunDoctorOptions {
         help: args.includes("--help") || args.includes("-h"),
     };
 }
-
-export function doctor(args: string[] = []): Promise<number> {
-    return runDoctor(parseDoctorArgs(args));
-}

@@ -16,8 +16,10 @@ eidnara --version
 eidnara --help
 ```
 
-`setup` and `doctor` target every installed harness by default. Add
-`--harness opencode`, `--harness pi`, or `--harness omp` to target one.
+`doctor` targets every installed harness by default. `setup` configures one
+harness per run: it uses the only installed harness, or asks which one when
+several are installed. Add `--harness opencode`, `--harness pi`, or
+`--harness omp` to either command to name the harness yourself.
 
 ## Setup
 

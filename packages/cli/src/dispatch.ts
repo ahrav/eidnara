@@ -99,6 +99,7 @@ export async function dispatchCli(
             return await runDoctor({
                 force: rest.includes("--force"),
                 issue: rest.includes("--issue"),
+                help: rest.includes("--help") || rest.includes("-h"),
                 argv: rest,
             });
         }

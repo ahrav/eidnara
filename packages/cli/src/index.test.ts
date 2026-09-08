@@ -109,6 +109,26 @@ describe("import-safe CLI dispatch", () => {
         expect(h.stderr).toEqual([]);
     });
 
+    test("doctor --harness pi --help prints the Pi doctor help instead of running checks", async () => {
+        const h = dependencies();
+        const logged: string[] = [];
+        const originalLog = console.log;
+        console.log = (...args: unknown[]) => {
+            logged.push(args.map(String).join(" "));
+        };
+        try {
+            const exit = await dispatchCli(["doctor", "--harness", "pi", "--help"], h.deps);
+
+            expect(exit).toBe(0);
+        } finally {
+            console.log = originalLog;
+        }
+        const output = logged.join("\n");
+        expect(output).toContain("Eidnara for Pi doctor");
+        expect(output).toContain("eidnara doctor --harness pi --help");
+        expect(output).not.toContain("Summary: PASS");
+    });
+
     test("importing the executable module does not run or exit", async () => {
         const cliRoot = join(import.meta.dir, "..");
         const child = Bun.spawn({

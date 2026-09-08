@@ -6,11 +6,13 @@ import { resolveAdaptersForCommand } from "../lib/harness-select";
 import { log } from "../lib/prompts";
 import { runDoctor as runOmpDoctor } from "./doctor-omp";
 import { runDoctor as runOpenCodeDoctor } from "./doctor-opencode";
-import { doctor as runPiDoctor } from "./doctor-pi";
+import { runDoctor as runPiDoctor } from "./doctor-pi";
 
 export interface RunDoctorOptions {
     force?: boolean;
     issue?: boolean;
+    /** Only the Pi doctor prints its own help; the other doctors ignore this. */
+    help?: boolean;
     argv?: string[];
 }
 
@@ -43,12 +45,12 @@ async function dispatchDoctor(adapter: HarnessAdapter, options: RunDoctorOptions
                 issue: options.issue,
             });
         }
-        case "pi": {
-            const piArgs: string[] = [];
-            if (options.force) piArgs.push("--force");
-            if (options.issue) piArgs.push("--issue");
-            return runPiDoctor(piArgs);
-        }
+        case "pi":
+            return runPiDoctor({
+                force: options.force,
+                issue: options.issue,
+                help: options.help,
+            });
         case "omp":
             return runOmpDoctor({
                 force: options.force,
