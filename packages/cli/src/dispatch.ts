@@ -1,10 +1,8 @@
 import { createRequire } from "node:module";
 import { isPromptCancelledError } from "./lib/prompts";
-import { runSqlitePreflight } from "./lib/sqlite-preflight";
 
 export interface CliDispatchDependencies {
     runDaemon: (args: string[]) => Promise<number>;
-    runSqlitePreflight: () => Promise<boolean>;
     stdout: (line: string) => void;
     stderr: (line: string) => void;
 }
@@ -14,7 +12,6 @@ const defaultDependencies: CliDispatchDependencies = {
         const { runDaemonCommand } = await import("./commands/daemon");
         return runDaemonCommand(args);
     },
-    runSqlitePreflight,
     stdout: (line) => console.log(line),
     stderr: (line) => console.error(line),
 };
@@ -51,15 +48,8 @@ export function usageText(): string {
         "    --json            Emit one eidnara.daemon/v1 JSON object",
         "",
         "  Doctor options:",
-        "    doctor --force   Force-clear plugin cache",
+        "    doctor --force   Repair configuration conflicts",
         "    doctor --issue   Collect diagnostics and open a GitHub issue",
-        "    doctor --clear   Interactive cache cleanup picker",
-        "    doctor drain-authority <project>  Drain module memory/note authority to TypeScript",
-        "    doctor migrate   Migrate OpenCode session to Pi or OMP JSONL",
-        "    doctor migrate-session   Re-home an OpenCode session to another directory",
-        "    doctor merge-identity   Merge project rows (--from ID --to ID [--dry-run] [--yes])",
-        "    doctor repair-db   Back up and salvage a corrupted shared database",
-        "    doctor reset-db    Abandon an unsupported database family (--dry-run/--yes)",
         "",
         "  Harness selection:",
         "    --harness opencode    Target OpenCode only",
@@ -68,13 +58,11 @@ export function usageText(): string {
         "    (default: auto-detect, prompt if multiple installed)",
         "",
         "  Usage:",
-        "    npx @eidnara/cli@latest setup",
+        "    eidnara setup",
         "        # add --dry-run to preview the wizard without writing any files",
         "    eidnara doctor",
         "    eidnara doctor --issue",
-        "    eidnara doctor migrate \\",
-        "        --from opencode --to <pi|omp> --session ses_xxx --dry-run",
-        "    npx @eidnara/cli@latest daemon status --json",
+        "    eidnara daemon status --json",
         "",
     ].join("\n");
 }
@@ -107,50 +95,10 @@ export async function dispatchCli(
         }
 
         if (command === "doctor") {
-            if (!(await dependencies.runSqlitePreflight())) return 1;
-
-            if (rest[0] === "drain-authority") {
-                const projectRoot = rest[1];
-                if (!projectRoot || projectRoot.startsWith("-")) {
-                    dependencies.stderr("Usage: eidnara doctor drain-authority <project>");
-                    return 1;
-                }
-                const [{ runDoctorDrainAuthority }, { getEidnaraStorageDir }, { join }] =
-                    await Promise.all([
-                        import("./commands/doctor-authority"),
-                        import("@eidnara/opencode/shared/data-path"),
-                        import("node:path"),
-                    ]);
-                return await runDoctorDrainAuthority(
-                    projectRoot,
-                    join(getEidnaraStorageDir(), "context.db"),
-                );
-            }
-            if (rest[0] === "merge-identity") {
-                const { runMergeIdentityCli } = await import("./commands/doctor-merge-identity");
-                return await runMergeIdentityCli(rest.slice(1));
-            }
-            if (rest[0] === "repair-db") {
-                const { runRepairDbCli } = await import("./commands/doctor-repair-db");
-                return await runRepairDbCli(rest.slice(1));
-            }
-            if (rest[0] === "reset-db") {
-                const { runResetDbCli } = await import("./commands/doctor-reset-db");
-                return await runResetDbCli(rest.slice(1));
-            }
-            if (rest[0] === "migrate") {
-                const { runMigrateCli } = await import("./commands/migrate");
-                return await runMigrateCli(rest.slice(1));
-            }
-            if (rest[0] === "migrate-session") {
-                const { runMigrateSessionCli } = await import("./commands/migrate-session");
-                return await runMigrateSessionCli(rest.slice(1));
-            }
             const { runDoctor } = await import("./commands/doctor");
             return await runDoctor({
                 force: rest.includes("--force"),
                 issue: rest.includes("--issue"),
-                clear: rest.includes("--clear"),
                 argv: rest,
             });
         }

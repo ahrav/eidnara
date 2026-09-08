@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type CliDispatchDependencies, dispatchCli, usageText } from "./dispatch";
@@ -19,17 +19,12 @@ afterAll(() => {
 
 function dependencies() {
     const daemonArgs: string[][] = [];
-    let sqliteCalls = 0;
     const stdout: string[] = [];
     const stderr: string[] = [];
     const deps: CliDispatchDependencies = {
         runDaemon: async (args) => {
             daemonArgs.push(args);
             return 0;
-        },
-        runSqlitePreflight: async () => {
-            sqliteCalls += 1;
-            return false;
         },
         stdout: (line) => stdout.push(line),
         stderr: (line) => stderr.push(line),
@@ -39,7 +34,6 @@ function dependencies() {
         daemonArgs,
         stdout,
         stderr,
-        sqliteCalls: () => sqliteCalls,
     };
 }
 
@@ -63,24 +57,43 @@ describe("import-safe CLI dispatch", () => {
         "restart",
         "status",
         "doctor",
-    ])("daemon %s bypasses SQLite preflight", async (action) => {
+    ])("daemon %s dispatches to the daemon command", async (action) => {
         const h = dependencies();
 
         const exit = await dispatchCli(["daemon", action, "--json"], h.deps);
 
         expect(exit).toBe(0);
         expect(h.daemonArgs).toEqual([[action, "--json"]]);
-        expect(h.sqliteCalls()).toBe(0);
     });
 
-    test("legacy doctor still uses SQLite preflight", async () => {
+    test("--version prints the package version", async () => {
         const h = dependencies();
+        const pkg = JSON.parse(
+            readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"),
+        ) as {
+            version: string;
+        };
 
-        const exit = await dispatchCli(["doctor"], h.deps);
+        const exit = await dispatchCli(["--version"], h.deps);
 
-        expect(exit).toBe(1);
-        expect(h.sqliteCalls()).toBe(1);
-        expect(h.daemonArgs).toEqual([]);
+        expect(exit).toBe(0);
+        expect(pkg.version).toBe("0.1.0");
+        expect(h.stdout).toEqual([pkg.version]);
+    });
+
+    test("help lists no storage or migration subcommands", () => {
+        const text = usageText();
+        for (const gone of [
+            "--clear",
+            "repair-db",
+            "reset-db",
+            "merge-identity",
+            "drain-authority",
+            "migrate",
+            "npx",
+        ]) {
+            expect(text).not.toContain(gone);
+        }
     });
 
     test("a cancelled prompt exits 0 rather than escaping as an error", async () => {
@@ -149,14 +162,30 @@ describe("import-safe CLI dispatch", () => {
 
     test("Node dispatches a built CLI invoked through an npm-style bin symlink", async () => {
         const cliRoot = join(import.meta.dir, "..");
+        // Node resolves the bundle's `@eidnara/shm-native` import through the workspace package's `import` export, which its `build:js` produces.
+        const nativeJs = spawnSync("bun", ["run", "--cwd", "../shm-native", "build:js"], {
+            cwd: cliRoot,
+            encoding: "utf8",
+        });
+        expect(nativeJs.status).toBe(0);
         const built = spawnSync("bun", ["run", "build"], {
             cwd: cliRoot,
             encoding: "utf8",
         });
         expect(built.status).toBe(0);
         const entry = join(cliRoot, "dist", "index.js");
-        const bin = join(builtCliRoot, "context");
+        expect(readFileSync(entry, "utf8").startsWith("#!/usr/bin/env node")).toBe(true);
+        const bin = join(builtCliRoot, "eidnara");
         symlinkSync(entry, bin);
+
+        const version = Bun.spawnSync({
+            cmd: ["node", bin, "--version"],
+            stdout: "pipe",
+            stderr: "pipe",
+        });
+        expect(version.exitCode).toBe(0);
+        expect(version.stdout.toString().trim()).toBe("0.1.0");
+        expect(version.stderr.toString()).toBe("");
 
         const child = Bun.spawn({
             cmd: ["node", bin, "--help"],

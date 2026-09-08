@@ -1,22 +1,65 @@
 # Eidnara CLI
 
-The `@eidnara/cli` CLI configures Eidnara, checks installed
-harnesses, and controls the shared `mc-host` process.
+`@eidnara/cli` installs as the `eidnara` command. It configures the Eidnara
+plugin for OpenCode, Pi, and Oh My Pi (OMP), checks those configurations, and
+controls the shared `eidnara-host` daemon.
+
+## Commands
+
+```bash
+eidnara setup                # interactive setup; add --dry-run to preview
+eidnara doctor               # check configuration
+eidnara doctor --force       # repair configuration conflicts
+eidnara doctor --issue       # write a redacted diagnostics bundle
+eidnara daemon <action>      # start | stop | restart | status | doctor
+eidnara --version
+eidnara --help
+```
+
+`setup` and `doctor` target every installed harness by default. Add
+`--harness opencode`, `--harness pi`, or `--harness omp` to target one.
+
+## Setup
+
+`setup` detects the harness, asks for the historian and Sidekick models, and
+writes:
+
+- OpenCode: the `@eidnara/opencode` plugin entry in `opencode.jsonc` and
+  `tui.jsonc`, with OpenCode's native compaction disabled.
+- Pi: the `npm:@eidnara/pi` package entry in `settings.json`.
+- OMP: the plugin enabled through `omp`, with `compaction.enabled` and
+  `memory.backend` turned off so two context managers do not run at once.
+- All three: the user configuration at
+  `$XDG_CONFIG_HOME/eidnara/eidnara.jsonc` with its `$schema` URL.
+
+Setup reads only local files and the harness binaries. It makes no network
+requests.
+
+## Doctor
+
+`doctor` reports the harness installation, the plugin entry, the user and
+project configuration, configuration conflicts, the log file, and historian
+dumps. It writes nothing. `doctor --force` repairs configuration only: it adds
+a missing plugin entry, writes a missing default configuration, and applies the
+conflict fixes it reports. `doctor --issue` writes `eidnara-issue-*.md`,
+`eidnara-pi-issue-*.md`, or `eidnara-omp-issue-*.md` in the current directory
+with secrets and personal paths redacted, and offers to open a GitHub issue
+through `gh` when it is installed and authenticated.
 
 ## Daemon lifecycle
 
 ```bash
-npx @eidnara/cli@latest daemon start
-npx @eidnara/cli@latest daemon status
-npx @eidnara/cli@latest daemon doctor
-npx @eidnara/cli@latest daemon restart
-npx @eidnara/cli@latest daemon stop
+eidnara daemon start
+eidnara daemon status
+eidnara daemon doctor
+eidnara daemon restart
+eidnara daemon stop
 ```
 
 Add `--json` after an action to emit one `eidnara.daemon/v1` object:
 
 ```bash
-npx @eidnara/cli@latest daemon status --json
+eidnara daemon status --json
 ```
 
 `status` and `doctor` are read-only. They do not start, stage, repair, or stop
@@ -27,6 +70,3 @@ not signal a publication PID.
 Exit code `0` means the v1 result has `ok: true`. Exit code `1` means an
 operational lifecycle failure. Exit code `2` means invalid CLI arguments and
 does not invoke lifecycle policy.
-
-Run `npx @eidnara/cli@latest --help` for setup, doctor, migration,
-and daemon command help.
