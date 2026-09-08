@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+    type ConflictResult,
+    DCP_CONFLICT_REASON,
+} from "@eidnara/opencode/shared/conflict-detector";
 import { parse as parseJsonc } from "comment-json";
 import {
     addPluginToOpenCodeConfig,
@@ -9,6 +13,7 @@ import {
     findDcpPluginIndexes,
     hasAnthropicModel,
     withClaudeMaxCacheTtl,
+    withoutDcpConflict,
     writeEidnaraConfig,
 } from "./setup-opencode";
 
@@ -185,6 +190,42 @@ describe("setup-opencode DCP preflight", () => {
 
         expect(() => findDcpPluginIndexes(plugins)).not.toThrow();
         expect(findDcpPluginIndexes(plugins)).toEqual([2]);
+    });
+
+    it("keeps a retained DCP plugin out of the broader automatic-fix pass", () => {
+        const detected: ConflictResult = {
+            hasConflict: true,
+            reasons: [
+                "OpenCode auto-compaction is enabled (compaction.auto=true)",
+                DCP_CONFLICT_REASON,
+            ],
+            conflicts: {
+                compactionAuto: true,
+                compactionPrune: false,
+                dcpPlugin: true,
+                omoPreemptiveCompaction: false,
+                omoContextWindowMonitor: false,
+                omoAnthropicRecovery: false,
+            },
+            nativeCompaction: { auto: true, prune: false },
+        };
+
+        const masked = withoutDcpConflict(detected);
+        expect(masked.conflicts.dcpPlugin).toBe(false);
+        expect(masked.conflicts.compactionAuto).toBe(true);
+        expect(masked.reasons).toEqual([
+            "OpenCode auto-compaction is enabled (compaction.auto=true)",
+        ]);
+        expect(masked.hasConflict).toBe(true);
+        expect(detected.conflicts.dcpPlugin).toBe(true);
+
+        const dcpOnly = withoutDcpConflict({
+            ...detected,
+            reasons: [DCP_CONFLICT_REASON],
+            conflicts: { ...detected.conflicts, compactionAuto: false },
+        });
+        expect(dcpOnly.hasConflict).toBe(false);
+        expect(dcpOnly.reasons).toEqual([]);
     });
 });
 

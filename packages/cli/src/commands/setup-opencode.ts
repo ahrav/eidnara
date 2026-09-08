@@ -3,6 +3,8 @@ import { basename, dirname } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import {
+    type ConflictResult,
+    DCP_CONFLICT_REASON,
     detectConflicts,
     projectOpenCodeConfigPaths,
 } from "@eidnara/opencode/shared/conflict-detector";
@@ -187,15 +189,18 @@ function pluginEntryName(entry: unknown): string {
     return String(entry);
 }
 
+/** `keep` records an explicit refusal, which the broader conflict-fix pass must honor. */
+type DcpDecision = "absent" | "remove" | "keep";
+
 async function resolveDcpConflictBeforeSetup(
     configPath: string,
     format: "json" | "jsonc" | "none",
-): Promise<boolean> {
-    if (format === "none") return false;
+): Promise<DcpDecision> {
+    if (format === "none") return "absent";
     const ocConfig = readJsoncConfigForUpdate(configPath);
     const plugins = Array.isArray(ocConfig.plugin) ? ocConfig.plugin : [];
     const dcpIndexes = findDcpPluginIndexes(plugins);
-    if (dcpIndexes.length === 0) return false;
+    if (dcpIndexes.length === 0) return "absent";
 
     log.warn(`Found conflicting plugin: ${pluginEntryName(plugins[dcpIndexes[0]])}`);
     log.message(
@@ -206,7 +211,21 @@ async function resolveDcpConflictBeforeSetup(
     if (!shouldRemove) {
         log.warn("Skipped — you may experience context management conflicts");
     }
-    return shouldRemove;
+    return shouldRemove ? "remove" : "keep";
+}
+
+/**
+ * Drop the DCP conflict from a detection result so a later "apply automatic
+ * fixes" answer cannot remove a plugin the user chose to keep.
+ */
+export function withoutDcpConflict(result: ConflictResult): ConflictResult {
+    const reasons = result.reasons.filter((reason) => reason !== DCP_CONFLICT_REASON);
+    return {
+        ...result,
+        hasConflict: reasons.length > 0,
+        reasons,
+        conflicts: { ...result.conflicts, dcpPlugin: false },
+    };
 }
 
 export function writeEidnaraConfig(
@@ -319,18 +338,21 @@ export async function runSetup(dryRun = false): Promise<number> {
     // A project-level OpenCode config counts: `detectConflicts` and
     // `fixConflicts` read and repair those files, so a first-time user running
     // setup inside such a project must not skip the conflict pass.
+    const projectConfigPaths = projectOpenCodeConfigPaths(process.cwd());
     const hadExistingSetup =
         paths.opencodeConfigFormat !== "none" ||
         existsSync(paths.eidnaraConfig) ||
         paths.tuiConfigFormat !== "none" ||
-        projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
+        projectConfigPaths.some((path) => existsSync(path));
 
     if (!dryRun) {
+        // Unparseable configs are skipped by conflict repair, so they must stop setup here.
         try {
             assertJsoncConfigsParseable([
                 paths.opencodeConfig,
                 paths.eidnaraConfig,
                 paths.tuiConfig,
+                ...projectConfigPaths,
             ]);
         } catch (error) {
             log.error(error instanceof Error ? error.message : String(error));
@@ -339,9 +361,10 @@ export async function runSetup(dryRun = false): Promise<number> {
         }
     }
 
-    const removeDcp = dryRun
-        ? false
+    const dcpDecision: DcpDecision = dryRun
+        ? "absent"
         : await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
+    const removeDcp = dcpDecision === "remove";
 
     const compactionEnabled = resolveCompactionEnabledForWriter();
 
@@ -355,9 +378,10 @@ export async function runSetup(dryRun = false): Promise<number> {
 
     let conflictFix: Parameters<typeof fixConflicts>[1] | null = null;
     if (hadExistingSetup) {
-        const conflicts = detectConflicts(process.cwd(), {
+        const detected = detectConflicts(process.cwd(), {
             compactionEnabled,
         });
+        const conflicts = dcpDecision === "keep" ? withoutDcpConflict(detected) : detected;
         if (conflicts.hasConflict) {
             log.warn("Found conflicting configuration that can disable Eidnara:");
             for (const reason of conflicts.reasons) {

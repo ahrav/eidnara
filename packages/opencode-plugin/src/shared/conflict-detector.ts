@@ -82,6 +82,10 @@ export interface DetectConflictsOptions {
     resolvedCompaction?: ResolvedCompaction;
 }
 
+/** The `reasons` entry `detectConflicts` emits for `conflicts.dcpPlugin`. */
+export const DCP_CONFLICT_REASON =
+    "opencode-dcp plugin is installed — it conflicts with Eidnara's context management";
+
 /**
  *
  *
@@ -126,9 +130,7 @@ export function detectConflicts(
     const dcpFound = checkDcpPlugin(directory);
     if (dcpFound) {
         conflicts.dcpPlugin = true;
-        reasons.push(
-            "opencode-dcp plugin is installed — it conflicts with Eidnara's context management",
-        );
+        reasons.push(DCP_CONFLICT_REASON);
     }
 
     const omoResult = checkOmoHooks(directory);
