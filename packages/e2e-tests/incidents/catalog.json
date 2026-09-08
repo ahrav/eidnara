@@ -20,14 +20,15 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a1-5",
-                        "fingerprint": "63cd229a7b2afb945cd40bb71c92827f3a18b09a009ecebf2da4d795f769102c"
+                        "id": "rev-parity-a1-6",
+                        "fingerprint": "caa136d080a500e76c431cd9a8ab2362c88176d4c52c90c97cbcae47796d7e08"
                     },
                     "normative_checks": [
                         "check-a1-defer-request-floor",
                         "check-a1-zero-prefix-busts",
                         "check-a1-cached-transitions",
-                        "check-a1-transform-served"
+                        "check-a1-transform-served",
+                        "check-a1-pure-defer"
                     ],
                     "verifier_binding": {
                         "driver": "src/incident-pool/scenarios/source-linked-regressions.ts#driveFirstRenderPureDeferStability",
@@ -37,10 +38,12 @@
                             "crafted bust observation is rejected (source-linked-regressions.test.ts)",
                             "crafted below-floor request count is rejected (source-linked-regressions.test.ts)",
                             "crafted uncached-transition count is rejected (source-linked-regressions.test.ts)",
-                            "crafted raw-served or missing rust pass is rejected (source-linked-regressions.test.ts)"
+                            "crafted raw-served or missing rust pass is rejected (source-linked-regressions.test.ts)",
+                            "crafted executed pass under a pure-defer drill is rejected (source-linked-regressions.test.ts)"
                         ],
                         "oracle_dependencies": [
                             "src/cache-analysis.ts",
+                            "src/rust-harness.ts",
                             "src/scripted-tool-call.ts"
                         ]
                     },
@@ -58,8 +61,8 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a3-8",
-                        "fingerprint": "59259a3afa6e7784d082e5f7d0f835e7f59455da56858d46f4b1889ae54b3465"
+                        "id": "rev-parity-a3-9",
+                        "fingerprint": "e496498df741d824c5960ee0f416bd377c9d7fe858c3f84753a71480b924df61"
                     },
                     "normative_checks": [
                         "check-a3-defer-request-floor",
@@ -67,7 +70,8 @@
                         "check-a3-zero-prefix-busts",
                         "check-a3-reduce-retained-final-wire",
                         "check-a3-cached-transitions",
-                        "check-a3-transform-served"
+                        "check-a3-transform-served",
+                        "check-a3-pure-defer"
                     ],
                     "verifier_binding": {
                         "driver": "src/incident-pool/scenarios/source-linked-regressions.ts#driveAgedCtxReduceSurvival",
@@ -78,10 +82,12 @@
                             "crafted bust observation is rejected (source-linked-regressions.test.ts)",
                             "crafted uncached-transition count is rejected (source-linked-regressions.test.ts)",
                             "crafted raw-served or missing rust pass is rejected (source-linked-regressions.test.ts)",
-                            "crafted below-floor request count is rejected (source-linked-regressions.test.ts)"
+                            "crafted below-floor request count is rejected (source-linked-regressions.test.ts)",
+                            "crafted executed pass under a pure-defer drill is rejected (source-linked-regressions.test.ts)"
                         ],
                         "oracle_dependencies": [
                             "src/cache-analysis.ts",
+                            "src/rust-harness.ts",
                             "src/scripted-tool-call.ts"
                         ]
                     },

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { wireCarriesTagOverlay } from "../src/incident-pool/scenarios/source-linked-regressions";
 import { RustTestHarness } from "../src/rust-harness";
 import {
     assertLoudModuleFailure,
@@ -36,6 +37,10 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-5: transport han
         expect(
             recovered.slice(beforeCount + 1).some((pass) => pass.servedFrom === "transform"),
         ).toBe(true);
+        // The pass log is per session, so recovery is confirmed on the resumed main request itself: a transform-served wire carries the tag overlay and the raw fallback does not.
+        const resumedRequest = h.mainRequests().at(-1);
+        expect(resumedRequest).toBeDefined();
+        expect(wireCarriesTagOverlay(resumedRequest!.body)).toBe(true);
 
         // Outage passes serve the input unchanged, which the failure path labels `raw`.
         const lines = assertLoudModuleFailure(h, sessionId);

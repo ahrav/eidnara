@@ -39,6 +39,7 @@ function a1Observation(
         transformRenderedRequestCount: 6,
         rustPassCount: 6,
         transformServedPassCount: 6,
+        deferredPassCount: 6,
         ...overrides,
     };
 }
@@ -56,6 +57,7 @@ function a3Observation(
         transformRenderedRequestCount: 9,
         rustPassCount: 9,
         transformServedPassCount: 9,
+        deferredPassCount: 9,
         ...overrides,
     };
 }
@@ -66,6 +68,7 @@ function nudgeObservation(
     return {
         mainRequestCount: 3,
         assistantCandidates: 2,
+        requestsWithoutAssistant: 0,
         nudgeMarkerFound: false,
         thinkingBlockCount: 0,
         ...overrides,
@@ -132,10 +135,23 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         expect(
             failedCheckIds(
                 verifyFirstRenderPureDeferStability(
-                    a1Observation({ rustPassCount: 0, transformServedPassCount: 0 }),
+                    a1Observation({
+                        rustPassCount: 0,
+                        transformServedPassCount: 0,
+                        deferredPassCount: 0,
+                    }),
                 ),
             ),
-        ).toEqual(["check-a1-transform-served"]);
+        ).toEqual(["check-a1-transform-served", "check-a1-pure-defer"]);
+        // A low-pressure drill that executed a pass has left the pure-defer path it measures.
+        expect(
+            failedCheckIds(
+                verifyFirstRenderPureDeferStability(a1Observation({ deferredPassCount: 5 })),
+            ),
+        ).toEqual(["check-a1-pure-defer"]);
+        expect(
+            failedCheckIds(verifyAgedCtxReduceSurvival(a3Observation({ deferredPassCount: 8 }))),
+        ).toEqual(["check-a3-pure-defer"]);
         // Internal-agent passes can pad the pass counts; a main request without the tag overlay still fails.
         expect(
             failedCheckIds(
@@ -144,6 +160,7 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
                         transformRenderedRequestCount: 5,
                         rustPassCount: 7,
                         transformServedPassCount: 7,
+                        deferredPassCount: 7,
                     }),
                 ),
             ),
@@ -171,7 +188,11 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         expect(
             failedCheckIds(
                 verifyAgedCtxReduceSurvival(
-                    a3Observation({ rustPassCount: 8, transformServedPassCount: 8 }),
+                    a3Observation({
+                        rustPassCount: 8,
+                        transformServedPassCount: 8,
+                        deferredPassCount: 8,
+                    }),
                 ),
             ),
         ).toEqual(["check-a3-transform-served"]);
@@ -260,6 +281,12 @@ describe("thinking-block successor verifiers", () => {
     it("rejects vacuous inspection and a thinking block that reached the wire", () => {
         expect(
             failedCheckIds(verifyThinkingNudgeAnchor(nudgeObservation({ assistantCandidates: 0 }))),
+        ).toEqual(["check-thinking-a-nonvacuous-inspection"]);
+        // Turn 3 alone contributing an assistant does not cover a turn 2 whose assistant was dropped.
+        expect(
+            failedCheckIds(
+                verifyThinkingNudgeAnchor(nudgeObservation({ requestsWithoutAssistant: 1 })),
+            ),
         ).toEqual(["check-thinking-a-nonvacuous-inspection"]);
         expect(
             failedCheckIds(verifyThinkingNudgeAnchor(nudgeObservation({ mainRequestCount: 2 }))),
@@ -387,6 +414,7 @@ describe("registry binding surface", () => {
                 { id: "check-a1-zero-prefix-busts", passed: false },
                 { id: "check-a1-cached-transitions", passed: true },
                 { id: "check-a1-transform-served", passed: true },
+                { id: "check-a1-pure-defer", passed: true },
             ],
         });
     });

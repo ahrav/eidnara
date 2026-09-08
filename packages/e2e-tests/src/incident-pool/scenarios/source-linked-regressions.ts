@@ -64,6 +64,7 @@ export const FIRST_RENDER_A1_CHECKS = [
     "check-a1-zero-prefix-busts",
     "check-a1-cached-transitions",
     "check-a1-transform-served",
+    "check-a1-pure-defer",
 ] as const;
 
 export const FIRST_RENDER_A3_CHECKS = [
@@ -73,6 +74,7 @@ export const FIRST_RENDER_A3_CHECKS = [
     "check-a3-reduce-retained-final-wire",
     "check-a3-cached-transitions",
     "check-a3-transform-served",
+    "check-a3-pure-defer",
 ] as const;
 
 /** Fields shared by the A1 and A3 observations that prove the zero-bust result is not vacuous. */
@@ -88,6 +90,8 @@ export interface CacheStabilityEvidence extends Record<string, JsonValue> {
     rustPassCount: number;
     /** Passes whose `served_from` is `transform`; the plugin labels the fail-open fallback `raw`. */
     transformServedPassCount: number;
+    /** Passes whose decision is `SOFT+`, the transform's defer label; a low-pressure drill that executes instead has left the pure-defer path it claims to measure. */
+    deferredPassCount: number;
 }
 
 export interface FirstRenderDeferObservation extends CacheStabilityEvidence {}
@@ -131,6 +135,7 @@ async function collectCacheStabilityEvidence(
         ).length,
         rustPassCount: passes.length,
         transformServedPassCount: passes.filter((pass) => pass.servedFrom === "transform").length,
+        deferredPassCount: passes.filter((pass) => pass.decision === "SOFT+").length,
     };
 }
 
@@ -138,7 +143,12 @@ function cacheStabilityChecks(
     prefix: "a1" | "a3",
     observation: CacheStabilityEvidence,
     requestFloor: number,
-): { busts: RegressionCheck; cached: RegressionCheck; served: RegressionCheck } {
+): {
+    busts: RegressionCheck;
+    cached: RegressionCheck;
+    served: RegressionCheck;
+    deferred: RegressionCheck;
+} {
     return {
         busts: {
             id: `check-${prefix}-zero-prefix-busts`,
@@ -154,6 +164,12 @@ function cacheStabilityChecks(
                 observation.transformRenderedRequestCount === observation.mainRequestCount &&
                 observation.rustPassCount >= requestFloor &&
                 observation.transformServedPassCount === observation.rustPassCount,
+        },
+        deferred: {
+            id: `check-${prefix}-pure-defer`,
+            passed:
+                observation.rustPassCount > 0 &&
+                observation.deferredPassCount === observation.rustPassCount,
         },
     };
 }
@@ -182,6 +198,7 @@ export function verifyFirstRenderPureDeferStability(
         stability.busts,
         stability.cached,
         stability.served,
+        stability.deferred,
     ]);
 }
 
@@ -338,6 +355,7 @@ export function verifyAgedCtxReduceSurvival(
         },
         stability.cached,
         stability.served,
+        stability.deferred,
     ]);
 }
 
@@ -551,6 +569,8 @@ const NUDGE_MARKERS = [
 export interface ThinkingNudgeAnchorObservation extends Record<string, JsonValue> {
     mainRequestCount: number;
     assistantCandidates: number;
+    /** Inspected requests (every request after the establishing turn) whose wire carries no assistant; the nudge cannot be tested on such a request. */
+    requestsWithoutAssistant: number;
     nudgeMarkerFound: boolean;
     thinkingBlockCount: number;
 }
@@ -586,9 +606,10 @@ export async function driveThinkingNudgeAnchor(
     const reqs = mainRequests(h);
     // The mock accepts what Anthropic would reject, so a mutation on turn 2 that is cleared before turn 3 is visible only on turn 2's request.
     const inspected = reqs.slice(1).map((request) => request.body);
-    const assistants = inspected.flatMap((body) =>
+    const assistantsByRequest = inspected.map((body) =>
         messagesOf(body).filter((m) => m.role === "assistant"),
     );
+    const assistants = assistantsByRequest.flat();
 
     const nudgeMarkerFound = assistants.some((asst) => {
         const serialized = JSON.stringify(asst.content);
@@ -598,6 +619,7 @@ export async function driveThinkingNudgeAnchor(
     return {
         mainRequestCount: reqs.length,
         assistantCandidates: assistants.length,
+        requestsWithoutAssistant: assistantsByRequest.filter((list) => list.length === 0).length,
         nudgeMarkerFound,
         thinkingBlockCount: inspected.reduce(
             (count, body) => count + findThinkingBlocks(body).length,
@@ -620,9 +642,12 @@ export function verifyThinkingNudgeAnchor(
             passed: observation.thinkingBlockCount === 0,
         },
         {
-            // `assistantCandidates > 0` keeps the checks above from passing vacuously when every assistant is dropped.
+            // A request with no assistant cannot show the nudge, so every inspected request must carry one.
             id: "check-thinking-a-nonvacuous-inspection",
-            passed: observation.mainRequestCount >= 3 && observation.assistantCandidates > 0,
+            passed:
+                observation.mainRequestCount >= 3 &&
+                observation.assistantCandidates > 0 &&
+                observation.requestsWithoutAssistant === 0,
         },
     ]);
 }
@@ -974,6 +999,7 @@ const CACHE_STABILITY_FIELDS = {
     transformRenderedRequestCount: "number",
     rustPassCount: "number",
     transformServedPassCount: "number",
+    deferredPassCount: "number",
 } as const;
 
 function cacheStabilityFields(value: Record<string, JsonValue>): CacheStabilityEvidence {
@@ -985,6 +1011,7 @@ function cacheStabilityFields(value: Record<string, JsonValue>): CacheStabilityE
         transformRenderedRequestCount: numberField(value, "transformRenderedRequestCount"),
         rustPassCount: numberField(value, "rustPassCount"),
         transformServedPassCount: numberField(value, "transformServedPassCount"),
+        deferredPassCount: numberField(value, "deferredPassCount"),
     };
 }
 
