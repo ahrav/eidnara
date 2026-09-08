@@ -332,39 +332,46 @@ export interface PersistedAssistantUsage {
     respondedAt: number;
 }
 
-/** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary are skipped, so a compacted session reports no usage until a post-compaction response lands. commentlint: allow(JUDGE) */
+/** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary in `(time_created, id)` order are skipped, so a compacted session reports no usage until a post-compaction response lands. commentlint: allow(JUDGE) */
 export function findLastAssistantUsageFromOpenCodeDb(
     sessionId: string,
 ): PersistedAssistantUsage | null {
     if (!openCodeDbExists()) return null;
+    const promptTokens = `COALESCE(${jsonField("m.data", "$.tokens.input")}, 0)
+                              + COALESCE(${jsonField("m.data", "$.tokens.cache.read")}, 0)
+                              + COALESCE(${jsonField("m.data", "$.tokens.cache.write")}, 0)`;
     try {
         return withReadOnlySessionDb((db) => {
             const row = db
                 .prepare(
-                    `SELECT id,
-                            json_extract(data, '$.providerID') as providerID,
-                            json_extract(data, '$.modelID') as modelID,
-                            COALESCE(json_extract(data, '$.tokens.input'), 0)
-                              + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
-                              + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) as inputTokens,
-                            json_extract(data, '$.time.completed') as completedAt,
-                            time_created as timeCreated
-                     FROM message
-                     WHERE session_id = ?1
-                       AND json_extract(data, '$.role') = 'assistant'
-                       AND COALESCE(json_extract(data, '$.summary'), 0) <> 1
-                       AND time_created > (
-                         SELECT COALESCE(MAX(time_created), -1)
-                         FROM message
-                         WHERE session_id = ?1
-                           AND COALESCE(json_extract(data, '$.summary'), 0) = 1
+                    `WITH boundary AS (
+                       SELECT time_created, id
+                       FROM message
+                       WHERE session_id = ?1
+                         AND COALESCE(${jsonField("data", "$.summary")}, 0) = 1
+                       ORDER BY time_created DESC, id DESC
+                       LIMIT 1
+                     )
+                     SELECT m.id,
+                            ${jsonField("m.data", "$.providerID")} as providerID,
+                            ${jsonField("m.data", "$.modelID")} as modelID,
+                            ${promptTokens} as inputTokens,
+                            ${jsonField("m.data", "$.time.completed")} as completedAt,
+                            m.time_created as timeCreated
+                     FROM message m
+                     LEFT JOIN boundary b
+                     WHERE m.session_id = ?1
+                       AND ${jsonField("m.data", "$.role")} = 'assistant'
+                       AND COALESCE(${jsonField("m.data", "$.summary")}, 0) <> 1
+                       AND (
+                         b.id IS NULL
+                         OR m.time_created > b.time_created
+                         OR (m.time_created = b.time_created AND m.id > b.id)
                        )
-                       AND json_extract(data, '$.providerID') IS NOT NULL
-                       AND json_extract(data, '$.modelID') IS NOT NULL
-                       AND COALESCE(json_extract(data, '$.tokens.input'), 0)
-                         + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
-                         + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) > 0
-                     ORDER BY time_created DESC, id DESC
+                       AND ${jsonField("m.data", "$.providerID")} IS NOT NULL
+                       AND ${jsonField("m.data", "$.modelID")} IS NOT NULL
+                       AND ${promptTokens} > 0
+                     ORDER BY m.time_created DESC, m.id DESC
                      LIMIT 1`,
                 )
                 .get(sessionId) as {

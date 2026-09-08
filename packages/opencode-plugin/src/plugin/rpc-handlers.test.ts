@@ -1048,6 +1048,35 @@ describe("clearWorkMetricsCarry", () => {
         expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(12_000);
     });
 
+    test("recovery orders the compaction boundary by (time_created, id) and tolerates malformed rows", () => {
+        const sessionId = "ses-usage-boundary-tuple";
+        const db = openTempOpenCodeDb();
+        const insert = db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        );
+        insert.run("bad", sessionId, 1, "{not json");
+        insert.run(
+            "s",
+            sessionId,
+            5,
+            JSON.stringify({
+                role: "assistant",
+                summary: true,
+                providerID: "test-provider",
+                modelID: "test-model",
+                tokens: { input: 95_000, output: 500, cache: { read: 0, write: 0 } },
+            }),
+        );
+        // Same millisecond as the summary, id sorts after it: this response is post-compaction.
+        insertAssistantRow(db, sessionId, "t", 5, 7_000);
+        closeQuietly(db);
+
+        const live = createLiveSessionState();
+        const snapshot = buildSidebarSnapshot(sessionId, process.cwd(), live);
+        expect(snapshot.inputTokens).toBe(7_000);
+        expect(live.contextUsageBySession.get(sessionId)?.messageID).toBe("t");
+    });
+
     test("a retained carry survives row deletion until the session is cleared", () => {
         const sessionId = "ses-carry-clear";
         const db = openTempOpenCodeDb();
