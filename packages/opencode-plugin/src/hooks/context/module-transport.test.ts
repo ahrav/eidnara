@@ -51,6 +51,7 @@ type TransportInternals = {
         projectRoot: string,
         deadline: Deadline,
         signal?: AbortSignal,
+        sessionClosed?: () => boolean,
     ): Promise<unknown>;
     call: HostModuleTransport["call"];
     closeSession: HostModuleTransport["closeSession"];
@@ -357,6 +358,41 @@ describe("a local close wins over recovery", () => {
 
         await expect(call).rejects.toMatchObject({ code: "session_closed" });
         expect(opens).toBe(1);
+    });
+
+    test("a close during connection setup opens no replacement route", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let opens = 0;
+        const client = {
+            routeOpen: async () => {
+                opens += 1;
+                return { channel: 9, epoch: 1 } as unknown as RouteHandle;
+            },
+            closeRoute: async () => {},
+            request: async () => ({ ok: true }),
+        } as unknown as HostClient;
+        transport.client = client;
+        let finishConnect: (() => void) | undefined;
+        transport.ensureConnected = async () => {
+            await new Promise<void>((resolve) => {
+                finishConnect = resolve;
+            });
+            return { client };
+        };
+
+        const call = transport.call({
+            sessionId: "s",
+            projectRoot: "/tmp",
+            method: "session.status",
+            body: { method: "session.status" },
+        });
+        await Bun.sleep(0);
+        transport.closeSession("s");
+        finishConnect?.();
+
+        await expect(call).rejects.toMatchObject({ code: "session_closed" });
+        expect(opens).toBe(0);
+        expect(transport.routes.size).toBe(0);
     });
 
     test("a close during connection setup stops the body before it is written", async () => {

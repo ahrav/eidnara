@@ -782,6 +782,7 @@ export class HostModuleTransport {
                         args.projectRoot,
                         deadline,
                         args.signal,
+                        sessionClosedSinceStart,
                     );
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
@@ -953,6 +954,7 @@ export class HostModuleTransport {
         rawProjectRoot: string,
         deadline: Deadline = Deadline.start(this.requestTimeoutMs),
         signal?: AbortSignal,
+        sessionClosed: () => boolean = () => false,
     ): Promise<EnsuredRoute> {
         // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
         const projectRoot = this.canonicalRoot(rawProjectRoot);
@@ -962,6 +964,10 @@ export class HostModuleTransport {
         const credentialSourceVersion = managedCredentialSourceVersion(process.env);
         // The cache reads a route only after connection settlement, and its generation must match the current connection.
         const { client, expectedDaemonId } = await this.ensureConnected(deadline, signal);
+        // `closeSession` fences a registered opening through `state.closed`; a close that landed before registration is observed here, so no replacement route is opened for a closed session.
+        if (sessionClosed()) {
+            throw this.sessionClosedError(sessionId);
+        }
         // Capturing expectedDaemonId prevents concurrent invalidation from changing the connection fence to no expectation during later awaits.
         const fence = expectedDaemonId === undefined ? {} : { expectedDaemonId };
         const generation = this.connectionGeneration;
