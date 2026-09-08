@@ -1,4 +1,4 @@
-import { clearRustSessionStatus, clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
+import { clearSessionPollCaches, clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import type { BoundedSessionMap } from "../../shared/bounded-session-map";
@@ -164,7 +164,7 @@ export function createEventHook(args: {
         if (input.event.type === "message.updated") {
             const assistantInfo = getMessageUpdatedAssistantInfo(input.event.properties);
             // The turn's transform and tool calls changed daemon state after the last poll; the sidebar refresh this event triggers must read the daemon, not a status cached before them.
-            if (assistantInfo) clearRustSessionStatus(assistantInfo.sessionID);
+            if (assistantInfo) clearSessionPollCaches(assistantInfo.sessionID);
             // An edit of an older response must not move the live model off the newest response.
             if (
                 assistantInfo?.providerID &&
@@ -201,7 +201,7 @@ export function createEventHook(args: {
             clearIgnoredMessages(sessionId);
             clearSidebarSnapshotCache(sessionId);
             clearWorkMetricsCarry(sessionId);
-            clearRustSessionStatus(sessionId);
+            clearSessionPollCaches(sessionId);
         }
 
         if (input.event.type !== "session.deleted") {

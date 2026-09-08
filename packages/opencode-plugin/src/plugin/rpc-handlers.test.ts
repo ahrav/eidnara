@@ -25,7 +25,7 @@ import {
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
     CoalescedTtlCache,
-    clearRustSessionStatus,
+    clearSessionPollCaches,
     clearWorkMetricsCarry,
     clearWorkMetricsCarryIfFolded,
     type RustSessionStatus,
@@ -405,7 +405,7 @@ describe("registerRpcHandlers", () => {
         expect(calls).toEqual(["session.status", "session.status"]);
     });
 
-    test("clearRustSessionStatus forgets the cached status and fences a request in flight", async () => {
+    test("clearSessionPollCaches forgets the cached status and fences a request in flight", async () => {
         const sessionId = "ses-handler-status-cleared";
         let calls = 0;
         let release: (() => void) | undefined;
@@ -442,12 +442,12 @@ describe("registerRpcHandlers", () => {
         await handlers.get("sidebar-snapshot")?.({ sessionId });
         expect(calls).toBe(1);
         // Within the TTL a poll would reuse the cache; the clear forces a fresh daemon read.
-        clearRustSessionStatus(sessionId);
+        clearSessionPollCaches(sessionId);
         await handlers.get("sidebar-snapshot")?.({ sessionId });
         expect(calls).toBe(2);
 
         // A clear while a request is in flight discards its late answer: the waiting poll fails instead of rendering the invalidated session, and nothing is cached.
-        clearRustSessionStatus(sessionId);
+        clearSessionPollCaches(sessionId);
         let reached: (() => void) | undefined;
         const daemonReached = new Promise<void>((resolve) => {
             reached = resolve;
@@ -456,7 +456,7 @@ describe("registerRpcHandlers", () => {
         const pending = handlers.get("sidebar-snapshot")?.({ sessionId });
         await daemonReached;
         expect(calls).toBe(3);
-        clearRustSessionStatus(sessionId);
+        clearSessionPollCaches(sessionId);
         release?.();
         expect(await pending).toEqual({ error: "sidebar snapshot unavailable" });
         await handlers.get("sidebar-snapshot")?.({ sessionId });
@@ -551,7 +551,7 @@ describe("registerRpcHandlers", () => {
             hasUsageTokens: true,
             model: { providerID: "test-provider", modelID: "test-model" },
         });
-        clearRustSessionStatus(sessionId);
+        clearSessionPollCaches(sessionId);
         const liveFirst = (await handlers.get("sidebar-snapshot")?.({
             sessionId,
         })) as unknown as SidebarSnapshot;
@@ -559,7 +559,7 @@ describe("registerRpcHandlers", () => {
 
         // A sample measured against another model does not pair with the active model; the daemon's copy fills in.
         live.liveModelBySession.set(sessionId, { providerID: "other", modelID: "model" });
-        clearRustSessionStatus(sessionId);
+        clearSessionPollCaches(sessionId);
         const otherModel = (await handlers.get("sidebar-snapshot")?.({
             sessionId,
         })) as unknown as SidebarSnapshot;

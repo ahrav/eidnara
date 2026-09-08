@@ -190,10 +190,21 @@ const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
 );
+// The memory snapshot shares the status cache's TTL so one sidebar poll costs at most one daemon read per surface. commentlint: allow(JUDGE)
+const memorySnapshotCache = new CoalescedTtlCache<KernelMemorySnapshot>(
+    RUST_STATUS_CACHE_TTL_MS,
+    POLL_CACHE_MAX_ENTRIES,
+);
 
-/** Forgets a deleted session's cached and in-flight daemon status under every root, so a late answer cannot resurrect the session. commentlint: allow(JUDGE) */
-export function clearRustSessionStatus(sessionId: string): void {
-    rustStatusCache.invalidate(pollCacheKey(sessionId, ""));
+/**
+ * Forgets a session's cached and in-flight daemon status and memory snapshot under every root. After
+ * a deletion a late answer cannot resurrect the session; after a turn the next poll reads state the
+ * turn's transform and tool calls changed. commentlint: allow(JUDGE)
+ */
+export function clearSessionPollCaches(sessionId: string): void {
+    const prefix = pollCacheKey(sessionId, "");
+    rustStatusCache.invalidate(prefix);
+    memorySnapshotCache.invalidate(prefix);
 }
 
 /**
@@ -775,11 +786,6 @@ export function registerRpcHandlers(
     // The status surface reports what an explicit search would see, lag included,
     // so the sidebar shows `stale` when the projector is behind.
     const kernelClient = kernelClientResolver(config);
-    // The cache reuses snapshots for `RUST_STATUS_CACHE_TTL_MS` to avoid a daemon read on each sidebar poll. commentlint: allow(JUDGE)
-    const memorySnapshotCache = new CoalescedTtlCache<KernelMemorySnapshot>(
-        RUST_STATUS_CACHE_TTL_MS,
-        POLL_CACHE_MAX_ENTRIES,
-    );
     const readMemory = async (sessionId: string, dir: string): Promise<KernelMemorySnapshot> => {
         if (config.memory?.enabled === false) {
             return { state: disabled(), rows: [], knownAsOf: null };
