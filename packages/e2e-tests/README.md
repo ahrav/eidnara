@@ -76,11 +76,13 @@ bun run validate:incident-history # catalog, adjudications, and source inventory
 bun run mutation:rust-fm          # apply each FM-OC mutation, run its test, revert
 ```
 
-`test` and `test:rust` build `packages/opencode-plugin/dist/index.js` when
-it is absent. `test:rust` also builds `packages/shm-native/index.js` (the
-Node entry the extension imports) and `packages/pi-plugin/dist/index.js`
-when they are absent; run `bun test tests/pi-smoke.test.ts` directly only
-after `bun run ensure:pi-dist`.
+`test` builds `packages/opencode-plugin/dist/index.js` when it is absent.
+`test:rust` rebuilds `packages/opencode-plugin/dist/index.js` and
+`packages/pi-plugin/dist/index.js` on every run, so edited plugin sources
+are never exercised through a stale bundle, and builds
+`packages/shm-native/index.js` (the Node entry the extension imports) when
+it is absent; run `bun test tests/pi-smoke.test.ts` directly only after
+`bun run ensure:pi-dist`.
 
 Environment:
 

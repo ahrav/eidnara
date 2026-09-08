@@ -352,6 +352,28 @@ export class PiRpcClient {
         };
     }
 
+    /**
+     * A response and the child's `exit` are separate notifications; the response arrives first.
+     * Racing `exit` against a grace period makes a death right after the response observable.
+     */
+    async settledProcessStatus(graceMs = 50): Promise<ReturnType<PiRpcClient["processStatus"]>> {
+        const child = this.process;
+        if (child && child.exitCode === null && child.signalCode === null) {
+            await new Promise<void>((resolve) => {
+                const onExit = () => {
+                    clearTimeout(timer);
+                    resolve();
+                };
+                const timer = setTimeout(() => {
+                    child.off("exit", onExit);
+                    resolve();
+                }, graceMs);
+                child.once("exit", onExit);
+            });
+        }
+        return this.processStatus();
+    }
+
     private processExitError(code: number | null, signal: NodeJS.Signals | null): Error {
         return new Error(
             `Pi RPC process exited with code ${code ?? "null"} signal ${signal ?? "null"}\n${this.stderr}`,

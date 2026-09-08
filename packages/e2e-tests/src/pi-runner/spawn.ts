@@ -40,28 +40,41 @@ function compareSemver(a: string, b: string): number {
     return 0;
 }
 
+/** The exact version `packages/pi-plugin` pins as a devDependency; `null` when the pin is a range. */
+function pinnedPiVersion(): string | null {
+    try {
+        const pkg = JSON.parse(readFileSync(join(PI_PLUGIN_ROOT, "package.json"), "utf8")) as {
+            devDependencies?: Record<string, unknown>;
+        };
+        const pin = pkg.devDependencies?.["@earendil-works/pi-coding-agent"];
+        return typeof pin === "string" && /^\d+\.\d+\.\d+$/.test(pin) ? pin : null;
+    } catch {
+        return null;
+    }
+}
+
 function resolvePiPackageJson(): string | null {
     try {
         return piPluginRequire.resolve("@earendil-works/pi-coding-agent/package.json");
     } catch {
         const bunModules = join(REPO_ROOT, "node_modules/.bun");
         if (!existsSync(bunModules)) return null;
-        const prefix = "@earendil-works+pi-coding-agent@";
-        const candidates = readdirSync(bunModules, { withFileTypes: true })
-            .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
-            .map((entry) => {
-                const version = entry.name.slice(prefix.length).split("+")[0] ?? "0.0.0";
-                return { name: entry.name, version };
-            })
-            .sort((a, b) => compareSemver(b.version, a.version));
-        const best = candidates[0];
-        if (best === undefined) return null;
-        const candidate = join(
+        const pinned = pinnedPiVersion();
+        if (pinned === null) return null;
+        // Bun's isolated store may hold several Pi versions; only the pinned one is a valid fallback.
+        const prefix = `@earendil-works+pi-coding-agent@${pinned}+`;
+        const candidate = readdirSync(bunModules, { withFileTypes: true }).find(
+            (entry) =>
+                entry.isDirectory() &&
+                (entry.name === prefix.slice(0, -1) || entry.name.startsWith(prefix)),
+        );
+        if (candidate === undefined) return null;
+        const packageJson = join(
             bunModules,
-            best.name,
+            candidate.name,
             "node_modules/@earendil-works/pi-coding-agent/package.json",
         );
-        return existsSync(candidate) ? candidate : null;
+        return existsSync(packageJson) ? packageJson : null;
     }
 }
 

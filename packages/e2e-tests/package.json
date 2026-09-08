@@ -23,7 +23,7 @@
         "mutation:rust-fm": "bun scripts/run-rust-fm-mutation.ts",
         "mutation:goldens": "bun scripts/run-goldens-mutation.ts",
         "ensure:plugin-dist": "test -f ../opencode-plugin/dist/index.js || bun run --cwd ../opencode-plugin build",
-        "ensure:pi-dist": "(test -f ../shm-native/index.js || bun run --cwd ../shm-native build:js) && (test -f ../pi-plugin/dist/index.js || bun run --cwd ../pi-plugin build)"
+        "ensure:pi-dist": "(test -f ../shm-native/index.js || bun run --cwd ../shm-native build:js) && bun run --cwd ../pi-plugin build"
     },
     "dependencies": {
         "@eidnara/shm-native": "0.1.0",

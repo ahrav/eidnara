@@ -95,7 +95,7 @@ export class PiTestHarness {
             requireSuccessfulResponse(promptResponse);
             const agentEndEvent = await agentEnd;
             const state = await this.getState();
-            const status = this.rpc.processStatus();
+            const status = await this.rpc.settledProcessStatus();
             return {
                 sessionId: typeof state.sessionId === "string" ? state.sessionId : null,
                 assistantText: finalAssistantText(agentEndEvent),
