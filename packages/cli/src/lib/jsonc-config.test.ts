@@ -86,6 +86,8 @@ describe("readJsoncConfigForUpdate", () => {
                 "0.123456789012345678901",
                 "1e-400",
                 "1e-100000000",
+                "-0",
+                "-0.0e5",
             ]) {
                 writeFileSync(path, `{"n": ${literal}, "plugin": []}`);
                 expect(() => readJsoncConfigForUpdate(path)).toThrow("parser rounded");

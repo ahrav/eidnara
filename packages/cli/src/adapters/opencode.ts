@@ -119,6 +119,11 @@ export class OpenCodeAdapter implements HarnessAdapter {
     }
 }
 
+/** URL schemes are case-insensitive; Node accepts `FILE:///…` in `fileURLToPath`. */
+function isFileUrl(candidate: string): boolean {
+    return /^file:\/\//i.test(candidate);
+}
+
 export function isLocalPathPluginEntry(entry: unknown): boolean {
     const candidate =
         typeof entry === "string"
@@ -129,7 +134,7 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
     if (!candidate) return false;
     // Windows configs spell relative entries with backslashes, which `isAbsolute` does not cover.
     return (
-        candidate.startsWith("file://") ||
+        isFileUrl(candidate) ||
         isAbsolute(candidate) ||
         /^\.\.?[\\/]/.test(candidate) ||
         /^~[\\/]/.test(candidate)
@@ -157,7 +162,7 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
 
     let localPath: string;
     try {
-        if (candidate.startsWith("file://")) {
+        if (isFileUrl(candidate)) {
             localPath = fileURLToPath(candidate);
         } else {
             localPath = resolve(expandHomePrefix(candidate));
@@ -188,7 +193,7 @@ export function matchesPluginEntry(entry: unknown, pkgName: string): boolean {
     if (typeof entry === "string") candidate = entry;
     else if (Array.isArray(entry) && typeof entry[0] === "string") candidate = entry[0];
     if (!candidate) return false;
-    if (candidate.startsWith("file://")) return false;
+    if (isFileUrl(candidate)) return false;
     // The matcher uses the final `@` so scoped package names retain their scope.
     const at = candidate.lastIndexOf("@");
     const head = at > 0 ? candidate.slice(0, at) : candidate;

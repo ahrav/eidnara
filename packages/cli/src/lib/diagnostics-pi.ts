@@ -163,34 +163,55 @@ function decodeQuotedKey(raw: string): string {
     );
 }
 
+/** Index just past the bracket closing the structure opened at `start`, or the text length when unbalanced. */
+function structuredValueEnd(text: string, start: number): number {
+    let depth = 0;
+    for (let at = start; at < text.length; at++) {
+        const ch = text[at];
+        if (ch === '"' || ch === "'") {
+            for (at++; at < text.length && text[at] !== ch; at++) if (text[at] === "\\") at++;
+        } else if (ch === "{" || ch === "[") {
+            depth++;
+        } else if (ch === "}" || ch === "]") {
+            depth--;
+            if (depth === 0) return at + 1;
+        }
+    }
+    return text.length;
+}
+
+// The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
+// A quoted key may hold spaces, slashes, or escapes (`"api key"`, `"\u0070assword"`);
+// a bare key is an identifier. A `{`/`[` value matches only its opening bracket.
+const KEYED_VALUE_PATTERN =
+    /(?:"((?:[^"\\\r\n]|\\.)+)"|'((?:[^'\\\r\n]|\\.)+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[{[]|[^\s&;,}\]]+)/g;
+
 function redactKeyedText(value: string): string {
-    // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
-    // A quoted key may hold spaces, slashes, or escapes (`"api key"`, `"\u0070assword"`);
-    // a bare key is an identifier. A `{`/`[` value is left whole for the shared
-    // redactor, which replaces balanced structures.
-    return value.replace(
-        /(?:"((?:[^"\\\r\n]|\\.)+)"|'((?:[^'\\\r\n]|\\.)+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?![{[])[^\s&;,}\]]+)/g,
-        (
-            full,
-            doubleQuoted: string | undefined,
-            singleQuoted: string | undefined,
-            bare: string | undefined,
-            separator: string,
-            secret: string,
-        ) => {
-            const quote = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : "";
-            const rawKey = doubleQuoted ?? singleQuoted ?? bare ?? "";
-            const key = quote ? decodeQuotedKey(rawKey) : rawKey;
-            const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
-            if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
-                return full;
-            }
-            // A quoted key marks a JSON literal, where a quoted placeholder keeps the document
-            // well-formed and stops the shared redactor from reading past the value.
-            const placeholder = quote ? `${quote}<REDACTED>${quote}` : "<REDACTED>";
-            return `${quote}${rawKey}${quote}${separator}${placeholder}`;
-        },
-    );
+    let out = "";
+    let last = 0;
+    KEYED_VALUE_PATTERN.lastIndex = 0;
+    for (let m = KEYED_VALUE_PATTERN.exec(value); m !== null; m = KEYED_VALUE_PATTERN.exec(value)) {
+        const [full, doubleQuoted, singleQuoted, bare, separator, secret] = m;
+        const quote = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : "";
+        const rawKey = doubleQuoted ?? singleQuoted ?? bare ?? "";
+        const key = quote ? decodeQuotedKey(rawKey) : rawKey;
+        const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
+        if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
+            continue;
+        }
+        // A structured value under a secret key is redacted whole, numeric-only contents
+        // included, so a nested `pin` never reaches the bundle.
+        const valueEnd = m.index + full.length;
+        const end =
+            secret === "{" || secret === "[" ? structuredValueEnd(value, valueEnd - 1) : valueEnd;
+        // A quoted key marks a JSON literal, where a quoted placeholder keeps the document
+        // well-formed and stops the shared redactor from reading past the value.
+        const placeholder = quote ? `${quote}<REDACTED>${quote}` : "<REDACTED>";
+        out += `${value.slice(last, m.index)}${quote}${rawKey}${quote}${separator}${placeholder}`;
+        last = end;
+        KEYED_VALUE_PATTERN.lastIndex = end;
+    }
+    return out + value.slice(last);
 }
 
 function redactSecretString(value: string): string {
