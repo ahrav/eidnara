@@ -22,16 +22,29 @@ interface MeasureResult {
 const ANTHROPIC_BETA = "oauth-2025-04-20";
 const COUNT_URL = "https://api.anthropic.com/v1/messages/count_tokens";
 
+/**
+ * OAuth tokens authenticate with a bearer header plus the OAuth beta flag;
+ * API keys authenticate with `x-api-key` and no beta flag.
+ */
+export function anthropicAuthHeaders(auth: AuthEntry): Record<string, string> {
+    if (auth.type === "oauth" && auth.access) {
+        return { authorization: `Bearer ${auth.access}`, "anthropic-beta": ANTHROPIC_BETA };
+    }
+    if (auth.type === "api" && auth.key) {
+        return { "x-api-key": auth.key };
+    }
+    throw new Error("Anthropic auth must be OAuth with an access token or an API key");
+}
+
 async function callCountTokens(
     body: Record<string, unknown>,
-    accessToken: string,
+    authHeaders: Record<string, string>,
 ): Promise<number> {
     const res = await fetch(COUNT_URL, {
         method: "POST",
         headers: {
-            authorization: `Bearer ${accessToken}`,
+            ...authHeaders,
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": ANTHROPIC_BETA,
             "content-type": "application/json",
             "user-agent": "eidnara-calibration/1.0",
         },
@@ -54,17 +67,14 @@ export async function measureAnthropic(
     systemText: string,
     toolsArray: unknown[],
 ): Promise<MeasureResult> {
-    if (auth.type !== "oauth" || !auth.access) {
-        throw new Error("Anthropic auth must be OAuth with access token");
-    }
-    const access = auth.access;
+    const authHeaders = anthropicAuthHeaders(auth);
 
     const systemBody = {
         model: test.modelId,
         system: systemText,
         messages: [{ role: "user", content: "x" }],
     };
-    const systemApi = await callCountTokens(systemBody, access);
+    const systemApi = await callCountTokens(systemBody, authHeaders);
 
     // Tools-only request
     const toolsBody = {
@@ -72,13 +82,13 @@ export async function measureAnthropic(
         tools: toolsArray,
         messages: [{ role: "user", content: "x" }],
     };
-    const toolsApi = await callCountTokens(toolsBody, access);
+    const toolsApi = await callCountTokens(toolsBody, authHeaders);
 
     const baselineBody = {
         model: test.modelId,
         messages: [{ role: "user", content: "x" }],
     };
-    const baseline = await callCountTokens(baselineBody, access);
+    const baseline = await callCountTokens(baselineBody, authHeaders);
     return {
         systemApi: Math.max(0, systemApi - baseline),
         toolsApi: Math.max(0, toolsApi - baseline),

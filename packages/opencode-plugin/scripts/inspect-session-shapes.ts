@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getDataDir } from "../src/shared/data-path";
@@ -7,6 +7,37 @@ import { Database } from "../src/shared/sqlite";
 
 const opencodeDbPath = join(getDataDir(), "opencode", "opencode.db");
 const piSessionsDir = join(homedir(), ".pi", "agent", "sessions");
+
+const SHAPE_MAX_DEPTH = 6;
+
+/** Session entries hold user prompts and tool output, so samples print as type skeletons rather than values. */
+function shapeOf(value: unknown, depth = 0): unknown {
+    if (value === null) return "null";
+    if (Array.isArray(value)) {
+        if (depth >= SHAPE_MAX_DEPTH) return "[...]";
+        return value.length === 0 ? [] : [shapeOf(value[0], depth + 1)];
+    }
+    switch (typeof value) {
+        case "string":
+            return `string(${value.length})`;
+        case "object": {
+            if (depth >= SHAPE_MAX_DEPTH) return "{...}";
+            const out: Record<string, unknown> = {};
+            for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+                out[key] = shapeOf(inner, depth + 1);
+            }
+            return out;
+        }
+        default:
+            return typeof value;
+    }
+}
+
+function printSamples(samples: Map<string, unknown>): void {
+    for (const [type, sample] of samples) {
+        console.log(`\n[${type}] ${JSON.stringify(shapeOf(sample)).slice(0, 1000)}`);
+    }
+}
 
 function inspectOpenCode(): void {
     if (!existsSync(opencodeDbPath)) {
@@ -66,11 +97,9 @@ function inspectOpenCode(): void {
     }
     const unsampled = counts.map((c) => c.type).filter((t) => t !== "<invalid>" && !samples.has(t));
     console.log(
-        `Part samples (from the first ${rows.length} parts${unsampled.length > 0 ? `; no sample for: ${unsampled.join(", ")}` : ""}):`,
+        `Part shapes (from the first ${rows.length} parts${unsampled.length > 0 ? `; no sample for: ${unsampled.join(", ")}` : ""}):`,
     );
-    for (const [type, sample] of samples) {
-        console.log(`\n[${type}] ${JSON.stringify(sample).slice(0, 1000)}`);
-    }
+    printSamples(samples);
 }
 
 function walkJsonlFiles(dir: string, out: string[] = []): string[] {
@@ -83,13 +112,21 @@ function walkJsonlFiles(dir: string, out: string[] = []): string[] {
     return out;
 }
 
+const PI_FILE_LIMIT = 20;
+
 function inspectPi(): void {
-    const files = walkJsonlFiles(piSessionsDir).slice(0, 20);
-    console.log("Pi JSONL files:");
+    const all = walkJsonlFiles(piSessionsDir)
+        .map((path) => ({ path, mtimeMs: statSync(path).mtimeMs }))
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const files = all.slice(0, PI_FILE_LIMIT).map((f) => f.path);
+    console.log(
+        `Pi JSONL files (${files.length} most recent of ${all.length}${all.length > files.length ? "; older files not inspected" : ""}):`,
+    );
     console.table(files.map((path) => ({ path })));
     for (const file of files) {
         const lines = readFileSync(file, "utf-8").trim().split("\n").filter(Boolean);
-        const types = new Set<string>();
+        const counts = new Map<string, number>();
+        const samples = new Map<string, unknown>();
         let malformed = 0;
         for (const line of lines) {
             // A live session may still be appending its last line, and one damaged
@@ -101,12 +138,16 @@ function inspectPi(): void {
                 malformed++;
                 continue;
             }
-            types.add(parsed.type ?? "<missing>");
+            const type = parsed.type ?? "<missing>";
+            counts.set(type, (counts.get(type) ?? 0) + 1);
+            if (!samples.has(type)) samples.set(type, parsed);
         }
         console.log(`\n${file}`);
-        console.log(`Entry types: ${[...types].join(", ")}`);
+        console.log(
+            `Entry types: ${[...counts.entries()].map(([type, count]) => `${type} (${count})`).join(", ")}`,
+        );
         if (malformed > 0) console.log(`Skipped ${malformed} malformed line(s)`);
-        for (const line of lines.slice(0, 5)) console.log(line.slice(0, 1000));
+        printSamples(samples);
     }
 }
 
