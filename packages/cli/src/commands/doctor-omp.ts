@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -340,7 +340,8 @@ async function runHealthChecks(options: {
         // The shared logger drops records it cannot append, so a directory or FIFO named by
         // EIDNARA_LOG_PATH is broken logging, not an informational path.
         try {
-            const stat = statSync(logPath);
+            // `lstat` sees a symlink as a link, which the runtime logger refuses, so it fails here too.
+            const stat = lstatSync(logPath);
             if (!stat.isFile()) throw new Error("not a regular file");
             add(
                 results,

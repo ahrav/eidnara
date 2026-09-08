@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
@@ -96,6 +104,16 @@ describe("readLogTailLines", () => {
         const fifo = join(root, "eidnara.log");
         execFileSync("mkfifo", [fifo]);
         expect(() => readLogTailLines(fifo)).toThrow("not a regular file");
+    });
+
+    it.if(process.platform !== "win32")("refuses a symlink instead of reading its target", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        const target = join(root, "private.txt");
+        writeFileSync(target, "secret line\n");
+        const link = join(root, "eidnara.log");
+        symlinkSync(target, link);
+        expect(() => readLogTailLines(link, 1024)).toThrow();
     });
 
     it("rejects a directory as not a regular file", () => {

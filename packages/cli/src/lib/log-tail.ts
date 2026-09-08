@@ -4,10 +4,15 @@ export const DEFAULT_LOG_TAIL_BYTES = 4 * 1024 * 1024;
 
 export const TRUNCATED_RECORD_MARKER = "[truncated record] ";
 
-/** Limits the read to the final `maxBytes` to bound memory use on an unrotated log. */
+/**
+ * Limits the read to the final `maxBytes` to bound memory use on an unrotated log.
+ * The open mirrors the runtime logger's: O_NOFOLLOW fails on a symlink instead of reading its
+ * target, so a redirected log path cannot pull another file into a report, and O_NONBLOCK lets
+ * fstat reject a FIFO with no writer instead of blocking.
+ */
 export function readLogTailLines(path: string, maxBytes = DEFAULT_LOG_TAIL_BYTES): string[] {
-    // A FIFO with no writer would block a plain open; O_NONBLOCK lets fstat reject it instead.
-    const fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = constants;
+    const fd = openSync(path, O_RDONLY | (O_NOFOLLOW ?? 0) | (O_NONBLOCK ?? 0));
     try {
         const entry = fstatSync(fd);
         if (!entry.isFile()) throw new Error(`not a regular file: ${path}`);

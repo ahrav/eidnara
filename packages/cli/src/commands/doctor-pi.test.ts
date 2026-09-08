@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -251,6 +259,40 @@ describe("Pi doctor", () => {
             expect(code).toBe(1);
             expect(stderr.join("\n")).toContain("not a regular file");
             expect(prompts.messages.join("\n")).toContain("not a regular file");
+        },
+    );
+
+    it.if(process.platform !== "win32")(
+        "fails a symlinked log path instead of reading the link target",
+        async () => {
+            const root = makeTempRoot();
+            const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+            const agentDir = setEnv(root, cwd);
+            writeHealthyFiles(agentDir, cwd);
+            const target = join(root, "private.txt");
+            writeFileSync(target, "not an eidnara log\n");
+            const link = join(root, "eidnara.log");
+            symlinkSync(target, link);
+            process.env.EIDNARA_LOG_PATH = link;
+            const prompts = new MockPrompts();
+            const stderr: string[] = [];
+            const originalConsoleError = console.error;
+            console.error = (...args: unknown[]) => {
+                stderr.push(args.map(String).join(" "));
+            };
+
+            let code: number;
+            try {
+                code = await runDoctor(baseOptions(root, cwd, prompts));
+            } finally {
+                console.error = originalConsoleError;
+            }
+
+            expect(code).toBe(1);
+            expect(stderr.join("\n")).toContain(
+                `FAIL Log file ${link} exists but could not be read: not a regular file`,
+            );
+            expect(prompts.messages.join("\n")).not.toContain("not an eidnara log");
         },
     );
 

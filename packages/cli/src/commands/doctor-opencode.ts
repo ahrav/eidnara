@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
@@ -585,7 +585,8 @@ export async function runDoctor(
         // A path that exists but is not a readable regular file (a directory or FIFO named by
         // EIDNARA_LOG_PATH) means the plugin cannot append to it, so the check fails.
         try {
-            const logStat = statSync(logPath);
+            // `lstat` sees a symlink as a link, which the runtime logger refuses, so it fails here too.
+            const logStat = lstatSync(logPath);
             if (!logStat.isFile()) throw new Error("not a regular file");
             const sizeKb = (logStat.size / 1024).toFixed(0);
             log.info(`Log file: ${logPath} (${sizeKb} KB)`);
