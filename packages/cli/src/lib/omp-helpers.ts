@@ -2,9 +2,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join } from "node:path";
+import {
+    type CommandInvocation,
+    getCommandInvocation,
+    invocationSpawnOptions,
+} from "./command-invocation";
 import { findOnPath, isExecutableFile } from "./find-on-path";
 import { getOmpPackageDir } from "./paths";
-import { getPiCommandInvocation } from "./pi-helpers";
 export interface OmpBinaryInfo {
     path: string;
     source: "path" | "home" | "package";
@@ -24,6 +28,8 @@ export interface OmpPluginInfo {
 }
 
 export const OMP_PLUGIN_PACKAGE = "@eidnara/pi";
+
+const OMP_BINARY_ENV = "EIDNARA_OMP_BINARY";
 
 /**
  * OMP publishes its CLI as a Bun script (`#!/usr/bin/env bun`), not a native executable.
@@ -45,15 +51,12 @@ function detectOmpPackageCli(): string | null {
         return null;
     }
 }
-export function getOmpCommandInvocation(
-    ompPath: string,
-    args: string[],
-): { command: string; args: string[] } {
+export function getOmpCommandInvocation(ompPath: string, args: string[]): CommandInvocation {
     if (extname(ompPath).toLowerCase() === ".js") {
         const bun = findOnPath("bun");
         if (bun) return { command: bun, args: [ompPath, ...args] };
     }
-    return getPiCommandInvocation(ompPath, args);
+    return getCommandInvocation(ompPath, args, OMP_BINARY_ENV);
 }
 
 export function getOmpFallbackCandidates(
@@ -93,6 +96,7 @@ export function runOmpCommand(ompPath: string, args: string[], timeout = 30_000)
             timeout,
             maxBuffer: 10 * 1024 * 1024,
             stdio: ["ignore", "pipe", "pipe"],
+            ...invocationSpawnOptions(invocation),
         });
         return {
             ok: result.status === 0 && !result.error,

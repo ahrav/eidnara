@@ -155,6 +155,13 @@ describe.if(isPosix)("opencode helpers with a resolved binary path", () => {
         expect(performance.now() - started).toBeLessThan(OPENCODE_VERSION_PROBE_TIMEOUT_MS + 1_500);
     });
 
+    it("bounds a hanging models probe", () => {
+        const bin = fakeOpencode("sleep 5");
+        const started = performance.now();
+        expect(getAvailableModels(bin, 200)).toEqual([]);
+        expect(performance.now() - started).toBeLessThan(3_000);
+    });
+
     it("returns empty / null when the binary path does not exist", () => {
         const missing = join(tmpdir(), "definitely-not-a-real-opencode-binary-xyz");
         expect(getAvailableModels(missing)).toEqual([]);

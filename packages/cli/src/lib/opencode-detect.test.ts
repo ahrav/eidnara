@@ -138,4 +138,33 @@ describe("detectOpenCode", () => {
         );
         expect(detectOpenCode(deps(new Set([marker]), "win32")).kind).toBe("desktop");
     });
+
+    it("finds a never-run system-wide Linux Desktop install under the default XDG_DATA_DIRS", () => {
+        const launcher = "/usr/share/applications/ai.opencode.desktop.desktop";
+        const result = detectOpenCode(deps(new Set([launcher]), "linux"));
+        expect(result).toEqual({ kind: "desktop", marker: launcher });
+    });
+
+    it("honors an explicit XDG_DATA_DIRS list ahead of the defaults", () => {
+        const launcher = "/opt/data/applications/ai.opencode.desktop.desktop";
+        const d = deps(new Set([launcher]), "linux");
+        d.env = { ...d.env, XDG_DATA_DIRS: "/opt/data:/opt/other" };
+        expect(detectOpenCode(d)).toEqual({ kind: "desktop", marker: launcher });
+
+        const defaultOnly = deps(
+            new Set(["/usr/share/applications/ai.opencode.desktop.desktop"]),
+            "linux",
+        );
+        defaultOnly.env = { ...defaultOnly.env, XDG_DATA_DIRS: "/opt/data" };
+        expect(detectOpenCode(defaultOnly).kind).toBe("none");
+    });
+
+    it("probes the user data home before the system data dirs", () => {
+        const user = join(HOME, ".local", "share", "applications", "ai.opencode.desktop.desktop");
+        const system = "/usr/share/applications/ai.opencode.desktop.desktop";
+        expect(detectOpenCodeInstallations(deps(new Set([user, system]), "linux"))).toEqual([
+            { path: user, source: "app", kind: "desktop" },
+            { path: system, source: "app", kind: "desktop" },
+        ]);
+    });
 });

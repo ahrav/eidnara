@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,8 @@ import {
     parseModelListOutput,
 } from "./pi-helpers";
 
+// Executable shell stubs require POSIX.
+const isPosix = process.platform !== "win32";
 const originalComSpec = process.env.ComSpec;
 const tempDirs: string[] = [];
 
@@ -17,6 +19,15 @@ afterEach(() => {
     else process.env.ComSpec = originalComSpec;
     for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+function fakePi(body: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "eidnara-pi-bin-"));
+    tempDirs.push(dir);
+    const bin = join(dir, "pi");
+    writeFileSync(bin, `#!/bin/sh\n${body}\n`);
+    chmodSync(bin, 0o755);
+    return bin;
+}
 
 const HEADER = "provider      model                context  max-out  thinking  images";
 
@@ -72,13 +83,13 @@ describe("parseModelListOutput", () => {
 });
 
 describe("Pi command execution", () => {
-    it("routes cmd shims through ComSpec and parses their output", () => {
-        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-command-"));
+    it("routes cmd shims through ComSpec as one quoted command and parses their output", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara pi command "));
         tempDirs.push(root);
         const comSpec = join(root, "fake-cmd");
         writeFileSync(
             comSpec,
-            `#!/bin/sh\nif [ "$5" = "--version" ]; then\n  printf '0.75.1\\n'\nelse\n  printf '${HEADER}\\nanthropic claude-fable-5 1M 128K yes yes\\n'\nfi\n`,
+            `#!/bin/sh\ncase "$5" in\n  *--version*) printf '0.75.1\\n' ;;\n  *) printf '${HEADER}\\nanthropic claude-fable-5 1M 128K yes yes\\n' ;;\nesac\n`,
         );
         chmodSync(comSpec, 0o755);
         process.env.ComSpec = comSpec;
@@ -86,7 +97,9 @@ describe("Pi command execution", () => {
 
         expect(getPiCommandInvocation(shim, ["--version"])).toEqual({
             command: comSpec,
-            args: ["/d", "/s", "/c", shim, "--version"],
+            args: ["/d", "/s", "/v:off", "/c", '""%EIDNARA_PI_BINARY%" "--version""'],
+            env: { EIDNARA_PI_BINARY: shim },
+            windowsVerbatimArguments: true,
         });
         expect(getPiVersion(shim)).toBe("0.75.1");
         expect(getAvailableModels(shim)).toEqual(["anthropic/claude-fable-5"]);
@@ -100,9 +113,55 @@ describe("Pi command execution", () => {
     });
 });
 
+describe.if(isPosix)("getPiVersion", () => {
+    it("returns null when the probe exits nonzero, even with stderr output", () => {
+        const pi = fakePi('echo "pi: unknown option --version" >&2; exit 2');
+        expect(getPiVersion(pi)).toBeNull();
+    });
+
+    it("returns null when the probe times out after writing to stderr", () => {
+        const pi = fakePi('echo "starting" >&2; sleep 5');
+        const started = performance.now();
+        expect(getPiVersion(pi, 200)).toBeNull();
+        expect(performance.now() - started).toBeLessThan(3_000);
+    });
+
+    it("accepts stderr output after a clean exit", () => {
+        const pi = fakePi('echo "0.80.0" >&2');
+        expect(getPiVersion(pi)).toBe("0.80.0");
+    });
+});
+
 describe("getAvailableModels", () => {
     it("returns [] when pi output parses to no models (no static fallback)", () => {
         const piPath = process.platform === "win32" ? "where" : "true";
         expect(getAvailableModels(piPath)).toEqual([]);
+    });
+
+    it.if(isPosix)("does not run the compatibility probe when --list-models succeeds", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-models-"));
+        tempDirs.push(root);
+        const log = join(root, "calls.log");
+        const pi = fakePi(
+            `echo "$*" >> "${log}"\nif [ "$1" = "--list-models" ]; then printf '${HEADER}\\nanthropic claude-fable-5 1M 128K yes yes\\n'; fi`,
+        );
+
+        expect(getAvailableModels(pi)).toEqual(["anthropic/claude-fable-5"]);
+        expect(readFileSync(log, "utf-8").trim().split("\n")).toEqual(["--list-models"]);
+    });
+
+    it.if(isPosix)("falls back to `models list` when --list-models yields nothing", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-models-"));
+        tempDirs.push(root);
+        const log = join(root, "calls.log");
+        const pi = fakePi(
+            `echo "$*" >> "${log}"\nif [ "$1" = "models" ]; then printf '${HEADER}\\nanthropic claude-fable-5 1M 128K yes yes\\n'; fi`,
+        );
+
+        expect(getAvailableModels(pi)).toEqual(["anthropic/claude-fable-5"]);
+        expect(readFileSync(log, "utf-8").trim().split("\n")).toEqual([
+            "--list-models",
+            "models list",
+        ]);
     });
 });

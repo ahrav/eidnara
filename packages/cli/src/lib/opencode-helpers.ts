@@ -1,48 +1,29 @@
 import { execFileSync, execSync } from "node:child_process";
-import { extname } from "node:path";
+import {
+    type CommandInvocation,
+    getCommandInvocation,
+    invocationSpawnOptions,
+} from "./command-invocation";
 import type { OpenCodeInstallation } from "./opencode-detect";
-
-export interface OpenCodeCommandInvocation {
-    command: string;
-    args: string[];
-    env?: Record<string, string>;
-    windowsVerbatimArguments?: true;
-}
 
 const OPENCODE_BINARY_ENV = "EIDNARA_OPENCODE_BINARY";
 
-export function getOpenCodeCommandInvocation(
-    binary: string,
-    args: string[],
-): OpenCodeCommandInvocation {
-    const extension = extname(binary).toLowerCase();
-    if (extension !== ".cmd" && extension !== ".bat") {
-        return { command: binary, args };
-    }
-
-    const command = process.env.ComSpec?.trim() || process.env.COMSPEC?.trim() || "cmd.exe";
-    // cmd.exe requires an outer-quoted command string after /c.
-    // The child environment supplies the binary so percent signs in its path cannot trigger variable expansion.
-    const commandLine = [`%${OPENCODE_BINARY_ENV}%`, ...args].map((part) => `"${part}"`).join(" ");
-    return {
-        command,
-        args: ["/d", "/s", "/v:off", "/c", `"${commandLine}"`],
-        env: { [OPENCODE_BINARY_ENV]: binary },
-        windowsVerbatimArguments: true,
-    };
+export function getOpenCodeCommandInvocation(binary: string, args: string[]): CommandInvocation {
+    return getCommandInvocation(binary, args, OPENCODE_BINARY_ENV);
 }
 
-/**
- */
-function runOpenCode(args: string[], binary?: string | null, timeoutMs?: number): string | null {
+function runOpenCode(
+    args: string[],
+    binary: string | null | undefined,
+    timeoutMs: number,
+): string | null {
     try {
-        const options = { stdio: "pipe" as const, ...(timeoutMs ? { timeout: timeoutMs } : {}) };
+        const options = { stdio: "pipe" as const, timeout: timeoutMs };
         if (binary) {
             const invocation = getOpenCodeCommandInvocation(binary, args);
             return execFileSync(invocation.command, invocation.args, {
                 ...options,
-                ...(invocation.env ? { env: { ...process.env, ...invocation.env } } : {}),
-                ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+                ...invocationSpawnOptions(invocation),
             })
                 .toString()
                 .trim();
@@ -59,6 +40,11 @@ function runOpenCode(args: string[], binary?: string | null, timeoutMs?: number)
  * A 2,000 ms timeout prevents broken shims from blocking version probes indefinitely.
  */
 export const OPENCODE_VERSION_PROBE_TIMEOUT_MS = 2_000;
+
+/**
+ * Model discovery loads provider catalogs, so it gets the same 20,000 ms bound as the Pi probe.
+ */
+export const OPENCODE_MODELS_PROBE_TIMEOUT_MS = 20_000;
 
 export function getOpenCodeVersion(binary?: string | null): string | null {
     return runOpenCode(["--version"], binary, OPENCODE_VERSION_PROBE_TIMEOUT_MS);
@@ -83,8 +69,11 @@ export function describeOpenCodeInstallations(
     }));
 }
 
-export function getAvailableModels(binary?: string | null): string[] {
-    const output = runOpenCode(["models"], binary);
+export function getAvailableModels(
+    binary?: string | null,
+    timeoutMs = OPENCODE_MODELS_PROBE_TIMEOUT_MS,
+): string[] {
+    const output = runOpenCode(["models"], binary, timeoutMs);
     if (output === null) return [];
     return output
         .split("\n")

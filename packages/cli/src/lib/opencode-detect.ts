@@ -131,6 +131,21 @@ function desktopUserDataDir(d: DetectDeps, appId: string): string {
             return join(xdgConfigHome(d), appId);
     }
 }
+/**
+ * A system-wide Linux Desktop install places its launcher under one of the
+ * `XDG_DATA_DIRS` entries rather than the user's data home, so both sets are
+ * searched. The defaults are the XDG Base Directory fallbacks.
+ */
+const XDG_DATA_DIRS_DEFAULT = ["/usr/local/share", "/usr/share"];
+
+function xdgDataDirs(d: DetectDeps): string[] {
+    const dataHome =
+        d.env.XDG_DATA_HOME && d.env.XDG_DATA_HOME.length > 0
+            ? d.env.XDG_DATA_HOME
+            : join(d.home, ".local", "share");
+    const systemDirs = (d.env.XDG_DATA_DIRS ?? "").split(":").filter((dir) => dir.length > 0);
+    return [dataHome, ...(systemDirs.length > 0 ? systemDirs : XDG_DATA_DIRS_DEFAULT)];
+}
 function desktopAppPaths(d: DetectDeps): string[] {
     switch (d.platform) {
         case "darwin":
@@ -139,15 +154,12 @@ function desktopAppPaths(d: DetectDeps): string[] {
             const localappdata = d.env.LOCALAPPDATA ?? join(d.home, "AppData", "Local");
             return [join(localappdata, "Programs", "OpenCode", "OpenCode.exe")];
         }
-        default: {
-            const dataHome =
-                d.env.XDG_DATA_HOME && d.env.XDG_DATA_HOME.length > 0
-                    ? d.env.XDG_DATA_HOME
-                    : join(d.home, ".local", "share");
-            return OPENCODE_DESKTOP_APP_IDS.map((appId) =>
-                join(dataHome, "applications", `${appId}.desktop`),
+        default:
+            return xdgDataDirs(d).flatMap((dataDir) =>
+                OPENCODE_DESKTOP_APP_IDS.map((appId) =>
+                    join(dataDir, "applications", `${appId}.desktop`),
+                ),
             );
-        }
     }
 }
 export function openCodeDesktopSettingsMarkers(deps?: Partial<DetectDeps>): string[] {
