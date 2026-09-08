@@ -243,14 +243,16 @@ export function createLazyManagedDemandStart(
             declaringModuleUrl: options.declaringModuleUrl,
             parentPackageName: options.parentPackageName,
         });
+        // Envelope construction is synchronous preparation, so it is measured before the residual is taken.
+        const startupEnvelope =
+            request.startupEnvelope ?? buildManagedStartupEnvelope(options.parentPackageName);
         const preparationMs = performance.now() - startedAt;
         const deadlineMs =
             request.deadlineMs === undefined ? undefined : request.deadlineMs - preparationMs;
         const outcome = await policy.demandStart({
             ...request,
             ...(deadlineMs === undefined ? {} : { deadlineMs }),
-            startupEnvelope:
-                request.startupEnvelope ?? buildManagedStartupEnvelope(options.parentPackageName),
+            startupEnvelope,
         });
         return {
             ok: outcome.result.ok,
@@ -665,14 +667,15 @@ export class HostModuleTransport {
         timeoutMs?: number;
     }): Promise<unknown> {
         const wrapupInFlight = (this.wrapupSessions.get(args.sessionId) ?? 0) > 0;
+        // The transform cap is a hard ceiling: a caller-supplied `timeoutMs` shortens it but never lifts it, because the transform runs on the prompt path and its send must settle within one bounded budget.
         const operationTimeoutMs =
-            args.timeoutMs ??
-            (args.method === "session.wrapup" ||
-            (args.method === "session.status" && wrapupInFlight)
-                ? MAX_WRAPUP_REQUEST_BUDGET_MS
-                : args.method === "transform"
-                  ? Math.min(this.requestTimeoutMs, TRANSFORM_SEND_TIMEOUT_MS)
-                  : this.requestTimeoutMs);
+            args.method === "transform"
+                ? Math.min(args.timeoutMs ?? this.requestTimeoutMs, TRANSFORM_SEND_TIMEOUT_MS)
+                : (args.timeoutMs ??
+                  (args.method === "session.wrapup" ||
+                  (args.method === "session.status" && wrapupInFlight)
+                      ? MAX_WRAPUP_REQUEST_BUDGET_MS
+                      : this.requestTimeoutMs));
         // `operationDeadline` is an immutable absolute deadline created before session-lane admission.
         // `operationDeadline` is shared by connect, route open, and request.
         // The deadline covers admission, connect, route opening, request, and permitted replay; cleanup uses the facade's separate bounded ticket.
@@ -1097,7 +1100,7 @@ export class HostModuleTransport {
             return await this.waitForSharedConnection(joinable, deadline, signal);
         }
         // The transport must not re-probe an unreachable daemon at full request rate.
-        if (Date.now() < this.nextProbeMs) {
+        if (performance.now() < this.nextProbeMs) {
             throw this.connectionBackoffError();
         }
         let expectedDaemonId: Uint8Array | undefined;
@@ -1109,7 +1112,7 @@ export class HostModuleTransport {
             // Arming backoff for WaiterDetachedError would apply one caller's cancellation to later transport demands.
             // is healthy.
             if (!(error instanceof WaiterDetachedError)) {
-                this.nextProbeMs = Date.now() + this.backoffMs;
+                this.nextProbeMs = performance.now() + this.backoffMs;
                 this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
             }
             throw error;
@@ -1123,10 +1126,16 @@ export class HostModuleTransport {
         if (signal?.aborted) {
             throw signal.reason ?? new Error("module transport call aborted");
         }
-        // Another caller can have opened a dial while this demand was awaiting.
+        // Another caller can have opened a dial, or completed one, while this demand was awaiting.
+        // A completed dial has already cleared `connectionPromise`, so the live client is checked as well; starting a second flight here would replace it unowned and reject the first caller's in-flight response as a connection change.
         const raced = this.connectionPromise;
-        if (raced) {
-            const joined = await this.waitForSharedConnection(raced, deadline, signal);
+        const live = this.client;
+        const joined: CertifiedConnection | null = raced
+            ? await this.waitForSharedConnection(raced, deadline, signal)
+            : live
+              ? { client: live, ...certification }
+              : null;
+        if (joined) {
             if (
                 expectedDaemonId !== undefined &&
                 !sameDaemonId(joined.client.authenticated?.daemonId, expectedDaemonId)
@@ -1169,7 +1178,7 @@ export class HostModuleTransport {
                 return { client: candidate, ...certification };
             } catch (error) {
                 if (generation === this.connectionGeneration) this.invalidateConnection();
-                this.nextProbeMs = Date.now() + this.backoffMs;
+                this.nextProbeMs = performance.now() + this.backoffMs;
                 this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
                 throw error;
             }
@@ -1184,8 +1193,9 @@ export class HostModuleTransport {
     }
 
     private connectionBackoffError(): Error & { code?: string } {
+        const remainingMs = Math.max(0, Math.ceil(this.nextProbeMs - performance.now()));
         const error = new Error(
-            `daemon connection backoff active until ${this.nextProbeMs}`,
+            `daemon connection backoff active for another ${remainingMs} ms`,
         ) as Error & { code?: string };
         error.code = "EIDNARA_HOST_CONNECTION_BACKOFF";
         return error;
