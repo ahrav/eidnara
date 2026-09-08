@@ -181,25 +181,20 @@ async function loadRustSessionStatus(
     }
 }
 
-function resolveConfigValue<T>(
-    cfg: Record<string, unknown> | undefined,
-    key: string,
+function resolveConfiguredCacheTtl(
+    config: Record<string, unknown> | undefined,
     modelKey: string | undefined,
-    defaultValue: T,
-): T {
-    if (!cfg) return defaultValue;
-    const val = cfg[key];
-    if (typeof val === typeof defaultValue) return val as T;
-    if (val && typeof val === "object") {
-        const obj = val as Record<string, T>;
-        if (modelKey && obj[modelKey] !== undefined) return obj[modelKey];
-        if (modelKey) {
-            const bare = modelKey.split("/").slice(1).join("/");
-            if (bare && obj[bare] !== undefined) return obj[bare];
-        }
-        if (obj.default !== undefined) return obj.default;
-    }
-    return defaultValue;
+): string {
+    const cacheTtlConfig = config?.cache_ttl;
+    return typeof cacheTtlConfig === "string" ||
+        (cacheTtlConfig !== null && typeof cacheTtlConfig === "object")
+        ? resolveCacheTtl(cacheTtlConfig as EidnaraConfig["cache_ttl"], modelKey)
+        : "5m";
+}
+
+function resolveToastDurationMs(config: Record<string, unknown>): number {
+    const value = config.toast_duration_ms;
+    return typeof value === "number" && Number.isFinite(value) ? value : 5000;
 }
 
 export function buildSidebarSnapshot(
@@ -312,19 +307,13 @@ export function buildSidebarSnapshot(
             executeThresholdClamped = thresholdDetail.clamped === true;
         }
 
-        const cacheTtlConfig = config?.cache_ttl;
-        const cacheTtl =
-            typeof cacheTtlConfig === "string" ||
-            (cacheTtlConfig !== null && typeof cacheTtlConfig === "object")
-                ? resolveCacheTtl(cacheTtlConfig as EidnaraConfig["cache_ttl"], modelKey)
-                : "5m";
+        const cacheTtl = resolveConfiguredCacheTtl(config, modelKey);
 
-        // Native compaction uses the model's full context window rather than Eidnara's reserved limit.
-        // nativeContextUsagePercentage uses the unreserved context limit because native compaction watches the model's full window.
+        // Native compaction uses the model's unreserved context window. The daemon reports the reserved limit, so native usage remains unset without a resolved model.
         const nativeContextLimit =
             activeProviderID && activeModelID
                 ? resolveContextLimit(activeProviderID, activeModelID, { reservation: "none" })
-                : contextLimit;
+                : 0;
         const nativeContextUsagePercentage =
             nativeContextLimit > 0 ? (effectiveInputTokens / nativeContextLimit) * 100 : undefined;
 
@@ -518,8 +507,7 @@ export function buildStatusDetail(
                 detail.executeThresholdTokens = thresholdDetail.absoluteTokens;
             }
 
-            const ct = resolveConfigValue<string>(config, "cache_ttl", effectiveModelKey, "5m");
-            detail.cacheTtl = ct;
+            detail.cacheTtl = resolveConfiguredCacheTtl(config, effectiveModelKey);
 
             if (typeof config.protected_tags === "number") {
                 detail.protectedTagCount = config.protected_tags;
@@ -527,12 +515,7 @@ export function buildStatusDetail(
             if (typeof config.history_budget_percentage === "number") {
                 detail.historyBudgetPercentage = config.history_budget_percentage;
             }
-            detail.toastDurationMs = resolveConfigValue<number>(
-                config,
-                "toast_duration_ms",
-                effectiveModelKey,
-                5000,
-            );
+            detail.toastDurationMs = resolveToastDurationMs(config);
         }
 
         // Derived values
@@ -649,12 +632,7 @@ export function registerRpcHandlers(
         ) as unknown as Record<string, unknown>;
     });
 
-    rpcServer.handle("toast-duration", async () => {
-        const resolved =
-            typeof config.toast_duration_ms === "number" &&
-            Number.isFinite(config.toast_duration_ms)
-                ? config.toast_duration_ms
-                : 5000;
-        return { toastDurationMs: resolved };
-    });
+    rpcServer.handle("toast-duration", async () => ({
+        toastDurationMs: resolveToastDurationMs(rawConfig),
+    }));
 }

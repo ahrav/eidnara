@@ -241,7 +241,7 @@ describe("buildSidebarSnapshot — daemon status", () => {
         expect(response).toMatchObject({ sessionId: "ses-empty", inputTokens: 0 });
     });
 
-    test("reports the resolved compaction mode and raw native usage", () => {
+    test("reports the resolved compaction mode and leaves native usage unset without a model", () => {
         const snapshot = buildSidebarSnapshot(
             "ses-native-sidebar",
             process.cwd(),
@@ -252,8 +252,30 @@ describe("buildSidebarSnapshot — daemon status", () => {
             false,
         );
         expect(snapshot.compaction_enabled).toBe(false);
-        expect(snapshot.native_context_usage_percentage).toBe(41);
+        expect(snapshot.native_context_usage_percentage).toBeUndefined();
+        expect(snapshot.usagePercentage).toBe(41);
         expect(snapshot.cacheTtl).toBe("5m");
+    });
+
+    test("native usage divides by the live model's unreserved window", () => {
+        const sessionId = "ses-native-live";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        const snapshot = buildSidebarSnapshot(
+            sessionId,
+            process.cwd(),
+            live,
+            undefined,
+            undefined,
+            {
+                usage: { current_total_input_tokens: 64_000, context_limit_tokens: 100_000 },
+            },
+        );
+        expect(snapshot.usagePercentage).toBe(64);
+        expect(snapshot.native_context_usage_percentage).toBe(50);
     });
 
     test("falls back to the live model's context limit and per-model config when the daemon gives none", () => {
@@ -388,7 +410,7 @@ describe("buildStatusDetail", () => {
         const config = {
             execute_threshold_percentage: { default: 65, "test-provider/test-model": 50 },
             cache_ttl: { default: "5m", "test-provider/test-model": "10m" },
-            toast_duration_ms: { default: 5000, "test-provider/test-model": 1500 },
+            toast_duration_ms: 1500,
         };
 
         const fromLive = buildStatusDetail(sessionId, process.cwd(), undefined, config, live);
@@ -406,7 +428,21 @@ describe("buildStatusDetail", () => {
         );
         expect(requested.executeThreshold).toBe(65);
         expect(requested.cacheTtl).toBe("5m");
-        expect(requested.toastDurationMs).toBe(5000);
+    });
+
+    test("the dialog's cache TTL matches the sidebar's base-model lookup", () => {
+        const sessionId = "ses-status-derived-model";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model-fast",
+        });
+        const config = { cache_ttl: { default: "5m", "test-provider/test-model": "10m" } };
+
+        const snapshot = buildSidebarSnapshot(sessionId, process.cwd(), live, undefined, config);
+        const detail = buildStatusDetail(sessionId, process.cwd(), undefined, config, live);
+        expect(snapshot.cacheTtl).toBe("10m");
+        expect(detail.cacheTtl).toBe("10m");
     });
 });
 
