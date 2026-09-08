@@ -145,11 +145,12 @@ function isOpenCodeSchemaCompatible(db: Database, dbPath: string): boolean {
         cachedSchemaCompatible = { path: dbPath, compatible: true };
         return true;
     } catch (error) {
+        // A probe exception is not a schema verdict: a transient SQLITE_BUSY or I/O error must not
+        // disable marker management for the rest of the process, so only column results are cached.
         log(
             `[eidnara] compaction-marker: schema probe failed: ${error instanceof Error ? error.message : String(error)}. ` +
-                `Marker injection disabled until next process restart.`,
+                `Marker injection skipped for this call; the probe retries on the next one.`,
         );
-        cachedSchemaCompatible = { path: dbPath, compatible: false };
         return false;
     }
 }
@@ -213,8 +214,8 @@ function getNonSummaryMessageSortKey(
              FROM message
              WHERE session_id = ?
                AND id = ?
-               AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
-                        AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')
+               AND NOT (COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.summary'), 0) = 1
+                        AND COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.finish'), '') = 'stop')
              LIMIT 1`,
         )
         .get(sessionId, messageId) as { time_created?: unknown; id?: unknown } | undefined;
@@ -247,9 +248,9 @@ export function findBoundaryUserMessage(
             `SELECT id, time_created, data
              FROM message
              WHERE session_id = ?
-               AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
-                        AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')
-               AND COALESCE(json_extract(data, '$.role'), '') = 'user'
+               AND NOT (COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.summary'), 0) = 1
+                        AND COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.finish'), '') = 'stop')
+               AND COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.role'), '') = 'user'
                AND (time_created < ? OR (time_created = ? AND id <= ?))
              ORDER BY time_created DESC, id DESC
              LIMIT 1`,
@@ -333,16 +334,16 @@ function removeLegacyMarkerLineageRows(
              FROM message m
              WHERE m.session_id = ?
                AND m.id <> ?
-               AND COALESCE(json_extract(m.data, '$.summary'), 0) = 1
-               AND COALESCE(json_extract(m.data, '$.finish'), '') = 'stop'
-               AND COALESCE(json_extract(m.data, '$.parentID'), '') = ?
+               AND COALESCE(json_extract(CASE WHEN json_valid(m.data) THEN m.data END, '$.summary'), 0) = 1
+               AND COALESCE(json_extract(CASE WHEN json_valid(m.data) THEN m.data END, '$.finish'), '') = 'stop'
+               AND COALESCE(json_extract(CASE WHEN json_valid(m.data) THEN m.data END, '$.parentID'), '') = ?
                AND EXISTS (
                    SELECT 1
                    FROM part p
                    WHERE p.session_id = m.session_id
                      AND p.message_id = m.id
-                     AND COALESCE(json_extract(p.data, '$.type'), '') = 'text'
-                     AND COALESCE(json_extract(p.data, '$.text'), '') = ?
+                     AND COALESCE(json_extract(CASE WHEN json_valid(p.data) THEN p.data END, '$.type'), '') = 'text'
+                     AND COALESCE(json_extract(CASE WHEN json_valid(p.data) THEN p.data END, '$.text'), '') = ?
                )`,
         )
         .all(
@@ -366,15 +367,21 @@ function removeLegacyMarkerLineageRows(
     }
 
     // A stale marker lineage can contain its own compaction part.
-    // Delete other automatic compaction parts from the stale lineage boundary.
-    db.prepare(
-        `DELETE FROM part
-         WHERE session_id = ?
-           AND message_id = ?
-           AND id <> ?
-           AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'
-           AND COALESCE(json_extract(data, '$.auto'), 0) = 1`,
-    ).run(args.sessionId, args.boundaryMessageId, args.compactionPartId);
+    // Only parts with the exact plugin shape are deleted: a native automatic compaction on the same
+    // boundary also has `type:"compaction"` and `auto:true` but carries extra fields such as
+    // `tail_start_id`, and deleting a native automatic compaction would remove OpenCode's own boundary.
+    const staleCompactionPartIds = selectSessionCompactionParts(db, args.sessionId)
+        .filter(
+            (part) =>
+                part.messageId === args.boundaryMessageId &&
+                part.id !== args.compactionPartId &&
+                isMcCanonicalCompactionPartData(part.data),
+        )
+        .map((part) => part.id);
+    const deletePart = db.prepare("DELETE FROM part WHERE session_id = ? AND id = ?");
+    for (const partId of staleCompactionPartIds) {
+        deletePart.run(args.sessionId, partId);
+    }
 }
 
 /** Upsert one `part` row by deterministic id; retries rewrite the exact canonical row. */
@@ -420,7 +427,9 @@ export function injectCompactionMarker(
         );
         return null;
     }
-    // OpenCode's time/id ordering places the marker immediately after the boundary when marker timestamps are relative to the boundary.
+    // Marker rows use `boundaryTime + 1` in canonical `time_created, id` order.
+    // The summary follows the boundary only when the first retained message is created at least 2 ms later.
+    // Ids are a pure function of the boundary so retries upsert the same rows.
     const boundaryTime = boundary.timeCreated;
     const markerIdentity = `${args.sessionId}\0${args.endMessageId}`;
     const summaryMsgId = generateMessageId(
@@ -541,12 +550,12 @@ interface EidnaraSummaryRow {
 function selectEidnaraSummaryRows(db: Database, sessionId: string): EidnaraSummaryRow[] {
     const rows = db
         .prepare(
-            `SELECT id, COALESCE(json_extract(data, '$.parentID'), '') AS parent_id
+            `SELECT id, COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.parentID'), '') AS parent_id
              FROM message
              WHERE session_id = ?
-               AND COALESCE(json_extract(data, '$.summary'), 0) = 1
-               AND COALESCE(json_extract(data, '$.finish'), '') = 'stop'
-               AND COALESCE(json_extract(data, '$.providerID'), '') = ?`,
+               AND COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.summary'), 0) = 1
+               AND COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.finish'), '') = 'stop'
+               AND COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.providerID'), '') = ?`,
         )
         .all(sessionId, EIDNARA_PROVIDER_ID) as Array<{ id?: unknown; parent_id?: unknown }>;
     return rows.flatMap((row) =>
@@ -570,7 +579,7 @@ function selectSessionCompactionParts(db: Database, sessionId: string): SessionC
             `SELECT id, message_id, data
              FROM part
              WHERE session_id = ?
-               AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'`,
+               AND COALESCE(json_extract(CASE WHEN json_valid(data) THEN data END, '$.type'), '') = 'compaction'`,
         )
         .all(sessionId) as Array<{ id?: unknown; message_id?: unknown; data?: unknown }>;
     const parts: SessionCompactionPart[] = [];
@@ -590,6 +599,58 @@ function selectSessionCompactionParts(db: Database, sessionId: string): SessionC
         });
     }
     return parts;
+}
+
+interface TailReferenceIndex {
+    parts: SessionCompactionPart[];
+    messageTailStartIds: Set<string>;
+}
+
+function loadTailReferenceIndex(db: Database, sessionId: string): TailReferenceIndex {
+    const parts = selectSessionCompactionParts(db, sessionId);
+    const messageTailRefs = db
+        .prepare(
+            `SELECT id, data
+             FROM message
+             WHERE session_id = ?
+               AND json_extract(CASE WHEN json_valid(data) THEN data END, '$.compaction.tail_start_id') IS NOT NULL`,
+        )
+        .all(sessionId) as Array<{ id?: unknown; data?: unknown }>;
+    const messageTailStartIds = new Set<string>();
+    for (const row of messageTailRefs) {
+        if (typeof row.id !== "string") continue;
+        let data: unknown;
+        try {
+            data = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
+        } catch {
+            data = null;
+        }
+        const ref = dataReferencesTailStart(data);
+        if (ref) messageTailStartIds.add(ref);
+    }
+    return { parts, messageTailStartIds };
+}
+
+/** Parts in `excludedPartIds` are the ones the deletion itself removes; their references vanish with them. */
+function survivingTailReferences(
+    index: TailReferenceIndex,
+    rowsToDelete: ReadonlySet<string>,
+    excludedPartIds: ReadonlySet<string>,
+): boolean {
+    if (
+        index.parts.some(
+            (part) =>
+                !excludedPartIds.has(part.id) &&
+                part.tailStartId !== null &&
+                rowsToDelete.has(part.tailStartId),
+        )
+    ) {
+        return true;
+    }
+    for (const id of rowsToDelete) {
+        if (index.messageTailStartIds.has(id)) return true;
+    }
+    return false;
 }
 
 /**
@@ -632,23 +693,39 @@ export function listSessionCompactionMarkers(sessionId: string): SessionCompacti
  *
  * `protectedSummaryMessageId` identifies the caller-owned summary message that cleanup must retain.
  *
- * Returns false instead of throwing when opening or executing the transaction fails.
- * SQLITE_BUSY causes this function to return false.
+ * The tail-reference preflight and the deletes run under one `BEGIN IMMEDIATE` transaction.
+ * `"retained"` means a surviving `tail_start_id` references a row the removal would delete; the
+ * marker is left in place and a retry will not change the outcome until that reference is gone.
+ * `"failed"` means opening or executing the transaction threw (including SQLITE_BUSY) and the
+ * removal can be retried.
  */
+export type ForeignMarkerRemovalOutcome = "removed" | "retained" | "failed";
+
 export function removeForeignCompactionMarker(
     sessionId: string,
     marker: SessionCompactionMarkerRows,
     protectedSummaryMessageId: string | null,
-): boolean {
+): ForeignMarkerRemovalOutcome {
     try {
         const db = getWritableOpenCodeDb();
-        db.transaction(() => {
+        return runImmediate(db, (): ForeignMarkerRemovalOutcome => {
+            const summaryIds = marker.summaryMessageIds.filter(
+                (id) => id !== protectedSummaryMessageId,
+            );
+            const rowsToDelete = new Set<string>([...summaryIds, marker.compactionPartId]);
+            const index = loadTailReferenceIndex(db, sessionId);
+            if (survivingTailReferences(index, rowsToDelete, new Set([marker.compactionPartId]))) {
+                log(
+                    `[eidnara] compaction-marker: foreign-marker removal RETAINED (${sessionId}, part ${marker.compactionPartId}) — a surviving tail_start_id references a row the removal would delete`,
+                );
+                return "retained";
+            }
+
             const deletePartsOfMessage = db.prepare(
                 "DELETE FROM part WHERE session_id = ? AND message_id = ?",
             );
             const deleteMessage = db.prepare("DELETE FROM message WHERE session_id = ? AND id = ?");
-            for (const summaryMessageId of marker.summaryMessageIds) {
-                if (summaryMessageId === protectedSummaryMessageId) continue;
+            for (const summaryMessageId of summaryIds) {
                 deletePartsOfMessage.run(sessionId, summaryMessageId);
                 deleteMessage.run(sessionId, summaryMessageId);
             }
@@ -656,13 +733,13 @@ export function removeForeignCompactionMarker(
                 sessionId,
                 marker.compactionPartId,
             );
-        })();
-        return true;
+            return "removed";
+        });
     } catch (error) {
         log(
             `[eidnara] compaction-marker: foreign-marker removal failed (${sessionId}, part ${marker.compactionPartId}): ${error instanceof Error ? error.message : String(error)}`,
         );
-        return false;
+        return "failed";
     }
 }
 
@@ -772,19 +849,19 @@ function removeEidnaraOwnedCompactionMarkersLocked(
     const canonicalSummaries = selectEidnaraSummaryRows(db, sessionId);
     const legacySummaries = db
         .prepare(
-            `SELECT m.id, COALESCE(json_extract(m.data, '$.parentID'), '') AS parent_id
+            `SELECT m.id, COALESCE(json_extract(CASE WHEN json_valid(m.data) THEN m.data END, '$.parentID'), '') AS parent_id
              FROM message m
              WHERE m.session_id = ?
-               AND COALESCE(json_extract(m.data, '$.summary'), 0) = 1
-               AND COALESCE(json_extract(m.data, '$.finish'), '') = 'stop'
-               AND COALESCE(json_extract(m.data, '$.providerID'), '') <> ?
+               AND COALESCE(json_extract(CASE WHEN json_valid(m.data) THEN m.data END, '$.summary'), 0) = 1
+               AND COALESCE(json_extract(CASE WHEN json_valid(m.data) THEN m.data END, '$.finish'), '') = 'stop'
+               AND COALESCE(json_extract(CASE WHEN json_valid(m.data) THEN m.data END, '$.providerID'), '') <> ?
                AND EXISTS (
                    SELECT 1
                    FROM part p
                    WHERE p.session_id = m.session_id
                      AND p.message_id = m.id
-                     AND COALESCE(json_extract(p.data, '$.type'), '') = 'text'
-                     AND COALESCE(json_extract(p.data, '$.text'), '') = ?
+                     AND COALESCE(json_extract(CASE WHEN json_valid(p.data) THEN p.data END, '$.type'), '') = 'text'
+                     AND COALESCE(json_extract(CASE WHEN json_valid(p.data) THEN p.data END, '$.text'), '') = ?
                )`,
         )
         .all(sessionId, EIDNARA_PROVIDER_ID, summaryText) as Array<{
@@ -815,29 +892,8 @@ function removeEidnaraOwnedCompactionMarkersLocked(
     }
 
     // Preflight parses every session compaction part once so it sees surviving native parts and evaluates each boundary against all of its parts.
-    const parsedParts = selectSessionCompactionParts(db, sessionId);
-
     // Preflight includes message-level V2 compaction `tail_start_id` references; any reference to a deletion target retains the lineage.
-    const messageTailRefs = db
-        .prepare(
-            `SELECT id, data
-             FROM message
-             WHERE session_id = ?
-               AND json_extract(data, '$.compaction.tail_start_id') IS NOT NULL`,
-        )
-        .all(sessionId) as Array<{ id?: unknown; data?: unknown }>;
-    const messageTailStartIds = new Set<string>();
-    for (const row of messageTailRefs) {
-        if (typeof row.id !== "string") continue;
-        let data: unknown;
-        try {
-            data = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
-        } catch {
-            data = null;
-        }
-        const ref = dataReferencesTailStart(data);
-        if (ref) messageTailStartIds.add(ref);
-    }
+    const tailIndex = loadTailReferenceIndex(db, sessionId);
 
     let removedLineages = 0;
     let removedRows = 0;
@@ -860,25 +916,19 @@ function removeEidnaraOwnedCompactionMarkersLocked(
 
     for (const [boundaryMessageId, summaryIds] of summariesByBoundary) {
         // A compaction part with `tail_start_id` does not match the plugin-owned signature and is retained.
-        const boundaryParts = parsedParts.filter((part) => part.messageId === boundaryMessageId);
-        const mcPartIds = boundaryParts
-            .filter((part) => isMcCanonicalCompactionPartData(part.data))
-            .map((part) => part.id);
+        const mcPartIds = new Set(
+            tailIndex.parts
+                .filter(
+                    (part) =>
+                        part.messageId === boundaryMessageId &&
+                        isMcCanonicalCompactionPartData(part.data),
+                )
+                .map((part) => part.id),
+        );
 
         // The preflight includes every row this lineage would delete.
-        // Preflight detects surviving markers that reference deleted compaction-part IDs.
         const rowsToDelete = new Set<string>([...summaryIds, ...mcPartIds]);
-        const survivingPartsReferenceDeletion = parsedParts.some(
-            (part) =>
-                !mcPartIds.includes(part.id) &&
-                part.tailStartId !== null &&
-                rowsToDelete.has(part.tailStartId),
-        );
-        const messageFieldReferencesDeletion = [...rowsToDelete].some((id) =>
-            messageTailStartIds.has(id),
-        );
-        if (survivingPartsReferenceDeletion || messageFieldReferencesDeletion) {
-            // Retain a lineage when deletion would leave a surviving part pointing at a deleted tail target.
+        if (survivingTailReferences(tailIndex, rowsToDelete, mcPartIds)) {
             retainedLineages += 1;
             log(
                 `[eidnara] compaction-marker: flip-off cleanup RETAINED lineage at boundary ${boundaryMessageId} — a surviving tail_start_id references a row the deletion would remove`,
@@ -890,7 +940,7 @@ function removeEidnaraOwnedCompactionMarkersLocked(
         for (const partId of mcPartIds) {
             rows += deletePart.run(sessionId, partId).changes;
         }
-        if (rows > 0 || summaryIds.size > 0 || mcPartIds.length > 0) {
+        if (rows > 0 || summaryIds.size > 0 || mcPartIds.size > 0) {
             removedLineages += 1;
             removedRows += rows;
         }
@@ -898,14 +948,7 @@ function removeEidnaraOwnedCompactionMarkersLocked(
 
     if (orphanSummaryIds.size > 0) {
         // Orphan summaries have no boundary to preflight.
-        const rowsToDelete = new Set<string>(orphanSummaryIds);
-        const survivingPartsReferenceDeletion = parsedParts.some(
-            (part) => part.tailStartId !== null && rowsToDelete.has(part.tailStartId),
-        );
-        const messageFieldReferencesDeletion = [...rowsToDelete].some((id) =>
-            messageTailStartIds.has(id),
-        );
-        if (survivingPartsReferenceDeletion || messageFieldReferencesDeletion) {
+        if (survivingTailReferences(tailIndex, orphanSummaryIds, new Set())) {
             retainedLineages += 1;
         } else {
             const rows = deleteSummaries(orphanSummaryIds);

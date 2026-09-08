@@ -323,6 +323,88 @@ describe("injectCompactionMarker", () => {
         expect(countRows(dataHome, "message")).toBe(1);
         expect(countRows(dataHome, "part")).toBe(0);
     });
+
+    it("keeps a native automatic compaction part on the boundary when replacing a stale lineage", () => {
+        const dataHome = useTempDataHome("marker-inject-stale-lineage-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_assistant", "assistant", 200);
+        insertMessage(db, "msg_003_target", "assistant", 300);
+        // A stale plugin lineage on the boundary: a different endMessageId produced a different summary id.
+        insertPart(db, "prt_stale_compaction", "msg_001_user", 100, {
+            type: "compaction",
+            auto: true,
+        });
+        insertMessage(db, "msg_stale_summary", "assistant", 101, {
+            parentID: "msg_001_user",
+            summary: true,
+            finish: "stop",
+            providerID: EIDNARA_PROVIDER_ID,
+        });
+        insertPart(db, "prt_stale_text", "msg_stale_summary", 101, {
+            type: "text",
+            text: "summary placeholder",
+        });
+        // A native automatic compaction on the same boundary carries a tail reference.
+        insertPart(db, "prt_native_compaction", "msg_001_user", 100, {
+            type: "compaction",
+            auto: true,
+            tail_start_id: "msg_002_assistant",
+        });
+        closeQuietly(db);
+
+        const result = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 3,
+            endMessageId: "msg_003_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!result) throw new Error("injection returned null");
+
+        const inspection = new Database(join(dataHome, "opencode", "opencode.db"), {
+            readonly: true,
+        });
+        const partIds = (
+            inspection
+                .prepare("SELECT id FROM part WHERE message_id = 'msg_001_user' ORDER BY id")
+                .all() as Array<{ id: string }>
+        ).map((row) => row.id);
+        const staleSummary = inspection
+            .prepare("SELECT 1 AS one FROM message WHERE id = 'msg_stale_summary'")
+            .get();
+        closeQuietly(inspection);
+
+        expect(partIds).toEqual([result.compactionPartId, "prt_native_compaction"].sort());
+        expect(staleSummary).toBeNull();
+    });
+
+    it("treats a message with malformed JSON as a non-match instead of failing", () => {
+        const dataHome = useTempDataHome("marker-inject-malformed-json-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('msg_002_broken', 'ses-1', 200, 200, '{not json')",
+        ).run();
+        insertMessage(db, "msg_003_target", "assistant", 300);
+        closeQuietly(db);
+
+        expect(findBoundaryUserMessage("ses-1", "msg_003_target")?.id).toBe("msg_001_user");
+        const result = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 3,
+            endMessageId: "msg_003_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        expect(result?.boundaryMessageId).toBe("msg_001_user");
+        expect(removeEidnaraOwnedCompactionMarkers("ses-1", "summary placeholder")).toEqual({
+            verified: true,
+            removedLineages: 1,
+            removedRows: 3,
+            retainedLineages: 0,
+        });
+    });
 });
 
 describe("listSessionCompactionMarkers", () => {
@@ -387,12 +469,45 @@ describe("listSessionCompactionMarkers", () => {
         expect(markers.map((marker) => marker.compactionPartId)).toEqual([
             injected.compactionPartId,
         ]);
-        expect(removeForeignCompactionMarker("ses-1", markers[0], null)).toBe(true);
+        expect(removeForeignCompactionMarker("ses-1", markers[0], null)).toBe("removed");
 
         expect(listSessionCompactionMarkers("ses-1")).toEqual([]);
         // Native rows plus the two plain messages survive; every injected row is gone.
         expect(countRows(dataHome, "message")).toBe(4);
         expect(countRows(dataHome, "part")).toBe(2);
+    });
+
+    it("retains a foreign marker whose summary a surviving tail_start_id references", () => {
+        const dataHome = useTempDataHome("marker-list-retained-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_target", "assistant", 200);
+        closeQuietly(db);
+
+        const injected = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!injected) throw new Error("injection returned null");
+
+        const native = new Database(join(dataHome, "opencode", "opencode.db"));
+        insertMessage(native, "msg_005_user", "user", 500);
+        insertPart(native, "prt_005_native", "msg_005_user", 500, {
+            type: "compaction",
+            auto: true,
+            tail_start_id: injected.summaryMessageId,
+        });
+        closeQuietly(native);
+        closeCompactionMarkerDb();
+
+        const [marker] = listSessionCompactionMarkers("ses-1");
+        if (!marker) throw new Error("expected the injected marker to be listed");
+        expect(removeForeignCompactionMarker("ses-1", marker, null)).toBe("retained");
+        expect(countRows(dataHome, "message")).toBe(4);
+        expect(countRows(dataHome, "part")).toBe(3);
     });
 });
 
