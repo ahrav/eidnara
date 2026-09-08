@@ -28,6 +28,9 @@ const NOT_PORTED =
  * tree without a consumer fails this test; a consumer landing shrinks it.
  */
 const AWAITING_CONSUMER = new Map<string, string>([
+    ["config/agent-disable.ts", "config loader (U3)"],
+    ["config/load-outcome.ts", "type-only"],
+    ["features/context/defaults.ts", "config schema (U3)"],
     ["plugin/types.ts", "type-only"],
     ["shared/context-limit-provenance.ts", "type-only"],
     ["shared/opencode-config-dir-types.ts", "type-only"],
