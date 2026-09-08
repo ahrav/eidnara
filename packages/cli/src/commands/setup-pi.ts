@@ -1,17 +1,13 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
 import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
-import {
-    assertJsoncConfigsParseable,
-    readJsoncConfigForUpdate,
-    readJsoncLenient,
-} from "../lib/jsonc-config";
+import { type EidnaraModes, projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentDir, getPiUserExtensionsPath, getSharedUserConfigPath } from "../lib/paths";
 import {
@@ -36,15 +32,6 @@ export interface SetupEnvironment {
 
 /** Throw when a restoration did not take effect so the caller reports a partial rollback. */
 export type SetupRollback = () => Promise<void>;
-
-/** Shared-config modes a host hook reads before disabling a native manager. */
-export interface EidnaraModes {
-    enabled: boolean;
-    /** False when Eidnara compaction is off or Eidnara is disabled. */
-    compactionEnabled: boolean;
-    /** False when Eidnara memory is off or Eidnara is disabled. */
-    memoryEnabled: boolean;
-}
 
 export interface PiCompatibleSetupHost {
     displayName: string;
@@ -295,36 +282,6 @@ async function pickCopilotThinkingLevel(
     ]);
 }
 
-/**
- * The read is lenient because dry runs skip config validation; an unreadable
- * config resolves to the schema defaults (both enabled).
- */
-function readEidnaraModes(configPath: string): EidnaraModes {
-    return eidnaraModesFrom(readJsoncLenient(configPath).value);
-}
-
-/**
- * Accepts both a leniently read raw config and a parsed `EidnaraConfig`.
- * `enabled: false` turns every mode off: a disabled plugin skips its hooks,
- * so a native manager must stay on.
- */
-export function eidnaraModesFrom(config: {
-    enabled?: unknown;
-    compaction?: unknown;
-    memory?: unknown;
-}): EidnaraModes {
-    const enabled = config.enabled !== false;
-    return {
-        enabled,
-        compactionEnabled:
-            enabled &&
-            isCompactionEnabled({
-                compaction: isRecord(config.compaction) ? config.compaction : null,
-            }),
-        memoryEnabled: enabled && (!isRecord(config.memory) || config.memory.enabled !== false),
-    };
-}
-
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const prompts = options.prompts ?? (await getDefaultPrompts());
     const env = options.env ?? DEFAULT_ENV;
@@ -422,12 +379,11 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             `Eidnara is disabled (\`enabled: false\`) in ${configPath}; setup keeps that setting and leaves ${host.displayName}'s native context managers on.`,
         );
     }
-    // Project config is a per-project opt-out layered over the shared config.
-    // Native host settings are global, so `eidnara` follows the shared config.
     const projectConfigPath = resolveEidnaraProjectConfigPath(process.cwd());
-    if (readJsoncLenient(projectConfigPath).value.enabled === false) {
+    const overrides = projectModeOverrides(projectConfigPath, eidnara);
+    if (overrides.length > 0) {
         prompts.log.warn(
-            `Eidnara is disabled (\`enabled: false\`) by the project config ${projectConfigPath}; it will not run in this project after setup.`,
+            `Project config ${projectConfigPath} overrides ${overrides.join(", ")}; ${host.displayName}'s native settings follow the shared config, so this project may run both Eidnara and the native manager, or neither. Adjust one of the configs if that is not intended.`,
         );
     }
     const rollbackHost =

@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { loadPluginConfig } from "@eidnara/opencode/config";
-import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import {
     type ConflictResult,
     DCP_CONFLICT_REASON,
@@ -22,6 +21,7 @@ import {
     matchesPluginEntry,
 } from "../adapters/opencode";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
 import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { detectOpenCode } from "../lib/opencode-detect";
@@ -33,25 +33,21 @@ const PLUGIN_NAME = "@eidnara/opencode";
 const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 
 /** With `enabled: false` the plugin skips every hook at startup, so native compaction must stay on. commentlint: allow(JUDGE) */
-function resolveCompactionEnabledForWriter(): boolean {
-    try {
-        const config = loadPluginConfig(process.cwd());
-        if (config.enabled === false) {
-            log.warn(
-                "Eidnara is disabled in its config (enabled: false); leaving native compaction untouched. " +
-                    "Set enabled to true to let Eidnara manage the context window.",
-            );
-            return false;
-        }
-        return isCompactionEnabled(config);
-    } catch (error) {
+function resolveCompactionEnabledForWriter(sharedConfigPath: string, directory: string): boolean {
+    const modes = readEidnaraModes(sharedConfigPath);
+    if (!modes.enabled) {
         log.warn(
-            `Could not load Eidnara config to resolve compaction mode; ` +
-                `preserving existing native compaction fields. ` +
-                `(${error instanceof Error ? error.message : String(error)})`,
+            `Eidnara is disabled (\`enabled: false\`) in ${sharedConfigPath}; setup keeps that setting and leaves OpenCode's native compaction on.`,
         );
-        return false;
     }
+    const projectConfigPath = resolveEidnaraProjectConfigPath(directory);
+    const overrides = projectModeOverrides(projectConfigPath, modes);
+    if (overrides.length > 0) {
+        log.warn(
+            `Project config ${projectConfigPath} overrides ${overrides.join(", ")}; OpenCode's native settings follow the shared config, so this project may run both Eidnara and native compaction, or neither. Adjust one of the configs if that is not intended.`,
+        );
+    }
+    return modes.compactionEnabled;
 }
 
 function ensureDir(dir: string): void {
@@ -414,7 +410,7 @@ export async function runSetup(dryRun = false): Promise<number> {
         : await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
     const removeDcp = dcpDecision === "remove";
 
-    const compactionEnabled = resolveCompactionEnabledForWriter();
+    const compactionEnabled = resolveCompactionEnabledForWriter(paths.eidnaraConfig, process.cwd());
 
     if (dryRun) {
         log.message(

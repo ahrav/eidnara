@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
+    resolveEidnaraProjectConfigPath,
 } from "@eidnara/opencode/config/config-paths";
 import { EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
@@ -13,6 +14,7 @@ import { loadPiConfig } from "@eidnara/pi/config";
 import { stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
 import { capBodyToGithubLimit } from "../lib/issue-body";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import {
@@ -32,9 +34,9 @@ import {
     getOmpPackageDir,
     getOmpPluginsLockPath,
     getOmpSessionsRoot,
+    getSharedUserConfigPath,
 } from "../lib/paths";
 import { type PromptIO, promptIO } from "../lib/prompts";
-import { eidnaraModesFrom } from "./setup-pi";
 
 const MIN_OMP_VERSION = "17.1.7";
 type Status = "pass" | "warn" | "fail" | "info";
@@ -155,10 +157,22 @@ async function runHealthChecks(options: {
         disableMemory: false,
         writeUserConfig: false,
     };
-    // The effective (user + project) Eidnara config decides which native OMP
-    // managers count as conflicts; a manager Eidnara has switched off stays on.
+    // OMP's native settings are global, so the shared user config decides which
+    // native managers count as conflicts; a manager Eidnara has switched off
+    // stays on, and a project-tier disagreement is only reported.
+    const eidnara = readEidnaraModes(getSharedUserConfigPath());
+    const modeOverrides = projectModeOverrides(
+        resolveEidnaraProjectConfigPath(options.cwd),
+        eidnara,
+    );
+    if (modeOverrides.length > 0) {
+        add(
+            results,
+            "warn",
+            `Project config overrides ${modeOverrides.join(", ")}; OMP's native settings follow the shared config, so this project may run both Eidnara and the native manager, or neither.`,
+        );
+    }
     const loaded = loadPiConfig({ cwd: options.cwd });
-    const eidnara = eidnaraModesFrom(loaded.config);
     const omp = options.deps.detectOmpBinary();
     if (!omp) {
         add(results, "fail", "OMP binary not found on PATH or in standard user bin directories");
@@ -201,7 +215,7 @@ async function runHealthChecks(options: {
             add(
                 results,
                 "pass",
-                "OMP native compaction stays enabled because Eidnara compaction is off in the effective config",
+                "OMP native compaction stays enabled because Eidnara compaction is off in the shared config",
             );
         } else if (compaction === true) {
             add(results, "fail", "OMP native compaction is enabled and conflicts with Eidnara");
@@ -214,7 +228,7 @@ async function runHealthChecks(options: {
             add(
                 results,
                 "pass",
-                `OMP memory.backend=${memory} stays enabled because Eidnara memory is off in the effective config`,
+                `OMP memory.backend=${memory} stays enabled because Eidnara memory is off in the shared config`,
             );
         } else if (typeof memory === "string") {
             add(
