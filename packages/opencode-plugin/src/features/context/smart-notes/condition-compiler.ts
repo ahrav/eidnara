@@ -169,8 +169,8 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         ),
     );
     if (fileContains) {
-        const path = unquotePath(fileContains[1]);
-        const needle = unquote(fileContains[3].trim());
+        const path = unquoteNonEmpty(fileContains[1]);
+        const needle = unquoteNonEmpty(fileContains[3].trim());
         if (path === null || needle === null) return null;
         return {
             kind: "file_contains",
@@ -187,7 +187,7 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         ),
     );
     if (commit) {
-        const repoPath = unquotePath(commit[1]);
+        const repoPath = unquoteNonEmpty(commit[1]);
         if (repoPath === null) return null;
         return {
             kind: "git_commit_after",
@@ -203,9 +203,10 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         ),
     );
     if (tag) {
-        const pattern = tag[1] ? unquote(tag[1]) : "*";
-        const above = unquote(tag[2] ?? tag[3] ?? "");
-        const repoPath = tag[4] ? unquotePath(tag[4]) : projectPath;
+        const pattern = tag[1] ? unquoteNonEmpty(tag[1]) : "*";
+        const aboveCapture = tag[2] ?? tag[3];
+        const above = aboveCapture === undefined ? "" : unquoteNonEmpty(aboveCapture);
+        const repoPath = tag[4] ? unquoteNonEmpty(tag[4]) : projectPath;
         if (pattern === null || above === null || repoPath === null) return null;
         return {
             kind: "git_tag_matching",
@@ -222,7 +223,7 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         ),
     );
     if (mtime) {
-        const path = unquotePath(mtime[1]);
+        const path = unquoteNonEmpty(mtime[1]);
         if (path === null) return null;
         return {
             kind: "mtime_after",
@@ -234,7 +235,7 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         new RegExp(`^(?:when\\s+)?(?:path\\s+)?(${VALUE})\\s+(exists|is gone)$`, "i"),
     );
     if (pathExists) {
-        const path = unquotePath(pathExists[1]);
+        const path = unquoteNonEmpty(pathExists[1]);
         if (path === null) return null;
         return {
             kind: "path_exists",
@@ -350,10 +351,10 @@ function unquote(value: string): string | null {
     return value.slice(1, -1).replace(/\\'/g, "'").replace(/\\\\/g, "\\");
 }
 
-/** `resolveAndFenceProviderPath("")` returns `cwd`, so an empty quoted path is rejected before resolution. */
-function unquotePath(value: string): string | null {
-    const path = unquote(value);
-    return path === null || path.length === 0 ? null : path;
+/** `unquote` for operands where the empty string is malformed rather than a value. */
+function unquoteNonEmpty(value: string): string | null {
+    const unquoted = unquote(value);
+    return unquoted === null || unquoted.length === 0 ? null : unquoted;
 }
 
 function singleLine(value: string): string {
