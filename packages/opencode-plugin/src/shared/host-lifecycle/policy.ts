@@ -440,6 +440,11 @@ export class HostLifecyclePolicy {
         const rootKey = rootResolution.ok ? rootResolution.root : "\u0000no-root";
         const startupEnvelope = request.startupEnvelope ?? this.defaultStartupEnvelope;
         const key = `${rootKey}\u0000${envelopeIdentity(startupEnvelope)}`;
+        // Serializing the envelope ran caller-supplied code and may have spent
+        // the caller's deadline; a caller with no time left must not spawn.
+        if (callerDeadlineAt !== undefined && monotonicNow() >= callerDeadlineAt) {
+            throw new WaiterDetachedError("deadline");
+        }
         let shared = this.inflightStarts.get(key);
         if (!shared) {
             shared = this.start(startupEnvelope);

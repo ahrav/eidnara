@@ -2085,6 +2085,40 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("an envelope whose serialization spends the deadline never spawns a start", async () => {
+        const root = tempDir("eidnara-policy-slow-envelope-key-");
+        const { binary, invocationLog } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+            });
+            // The coalescing key serializes the envelope before any start exists.
+            const slowEnvelope = {
+                toJSON() {
+                    const until = performance.now() + 300;
+                    while (performance.now() < until) {
+                        // spin
+                    }
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            await expect(
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    deadlineMs: 150,
+                    startupEnvelope: slowEnvelope,
+                }),
+            ).rejects.toMatchObject({ name: "WaiterDetachedError", cause_kind: "deadline" });
+            // A caller that had already expired must not have launched a child.
+            expect(invocations(invocationLog)).toEqual([]);
+            expect(policy.inflightStartCount).toBe(0);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("an already-expired deadline detaches instead of taking a settled result", async () => {
         // This root resolution fails synchronously, so the shared start is
         // already settled when the waiter attaches and only the guard can stop
