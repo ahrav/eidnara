@@ -353,12 +353,24 @@ function metadataDescriptionFromState(state: Record<string, unknown> | null): st
     return metadata ? (firstStringField(metadata, ["description"]) ?? "") : "";
 }
 
+/**
+ * A folded Pi tool result is a part with `role: "toolResult"` and no `type`.
+ * Harnesses that synthesize a call identity for idless parts: OpenCode `tool` and Pi `toolCall`.
+ */
+function toolPartType(part: Record<string, unknown>): string {
+    const type = partType(part);
+    if (type.length === 0 && part.role === "toolResult") return "tool_result";
+    return type;
+}
+
+const SYNTHESIZED_ID_TOOL_TYPES = new Set(["tool", "toolCall"]);
+
 function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (!isRecord(part)) return null;
-    const type = partType(part);
+    const type = toolPartType(part);
     const state = isRecord(part.state) ? part.state : null;
     const callId = callIdFromPart(part);
-    if (!callId && type !== "tool") return null;
+    if (!callId && !SYNTHESIZED_ID_TOOL_TYPES.has(type)) return null;
     const toolName = toolNameFromPart(part);
 
     if (type === "tool") {
@@ -529,21 +541,39 @@ const SKIPPED_PART_TYPES = new Set([
     "retry",
 ]);
 
+/**
+ * The opaque payload of a redacted reasoning block.
+ * Anthropic stores it in `data`; Pi in `thinkingSignature` with `redacted: true`.
+ * OpenCode stores it in a string `redacted` field at the top level or under `metadata`.
+ */
+function redactedReasoningData(part: Record<string, unknown>): string | null {
+    const direct = firstStringField(part, ["data"]);
+    if (direct) return direct;
+    if (typeof part.redacted === "string" && part.redacted.length > 0) return part.redacted;
+    const metadata = isRecord(part.metadata) ? part.metadata : null;
+    const fromMetadata = metadata ? firstStringField(metadata, ["redacted"]) : null;
+    if (fromMetadata) return fromMetadata;
+    if (part.redacted === true || partType(part) === "redacted_thinking") {
+        return firstStringField(part, ["thinkingSignature"]);
+    }
+    return null;
+}
+
 function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent {
     const type = partType(part);
     if (SKIPPED_PART_TYPES.has(type) || (type === "meta" && Object.keys(part).length <= 1)) {
         return { kind: "skip" };
     }
     if (type === "text") {
+        if (part.ignored === true) return { kind: "skip" };
         const text = firstStringField(part, ["text", "content"]);
         return text ? { kind: "text", text } : { kind: "skip" };
     }
     if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
-        const redacted = type === "redacted_thinking" || part.redacted === true;
-        const fields = redacted
-            ? ["thinkingSignature", "data", "thinking", "text"]
-            : ["thinking", "text", "content", "reasoning"];
-        const text = firstStringFieldAllowEmpty(part, fields);
+        const text = firstStringFieldAllowEmpty(part, ["thinking", "text", "content", "reasoning"]);
+        if (text !== null && text.length > 0) return { kind: "reasoning", text };
+        const redacted = redactedReasoningData(part);
+        if (redacted !== null) return { kind: "reasoning", text: redacted };
         return text !== null ? { kind: "reasoning", text } : { kind: "structured" };
     }
     if (type.length === 0) {
@@ -553,7 +583,13 @@ function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent 
     if (looksImageLike(part)) {
         return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
     }
-    if (type.includes("file") || type === "source") {
+    if (type.includes("file")) {
+        const content = firstStringField(part, ["content", "text", "source"]);
+        if (content) return { kind: "text", text: content };
+        // A file without inline text is a media block, however large its URL or base64 payload.
+        return { kind: "image", altText: firstStringField(part, ["alt", "description"]) };
+    }
+    if (type === "source") {
         const content = firstStringField(part, ["content", "text", "source"]);
         return content ? { kind: "text", text: content } : { kind: "structured" };
     }

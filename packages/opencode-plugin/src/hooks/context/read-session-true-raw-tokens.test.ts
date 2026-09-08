@@ -298,6 +298,58 @@ describe("tool arcs", () => {
         expect(breakdown.toolInput).toBeGreaterThan(0);
         expect(breakdown.other).toBe(0);
     });
+
+    it("synthesizes an identity for an idless Pi toolCall", () => {
+        const message: RawMessage = {
+            id: "pi-idless",
+            role: "assistant",
+            parts: [{ type: "toolCall", name: "bash", arguments: { cmd: "ls" } }],
+            ordinal: 1,
+        };
+        const arcs = buildToolArcs([message]);
+        expect(arcs).toHaveLength(1);
+        expect(arcs[0].resOrdinal).toBeNull();
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolInput).toBeGreaterThan(0);
+        expect(breakdown.other).toBe(0);
+    });
+
+    it("closes a Pi toolCall through a folded toolResult part and counts its media", () => {
+        const call: RawMessage = {
+            id: "call",
+            role: "assistant",
+            parts: [{ type: "toolCall", id: "tc1", name: "read", arguments: {} }],
+            ordinal: 1,
+        };
+        const folded: RawMessage = {
+            id: "folded",
+            role: "user",
+            parts: [
+                {
+                    role: "toolResult",
+                    toolCallId: "tc1",
+                    toolName: "read",
+                    content: [
+                        { type: "text", text: "ok" },
+                        { type: "image", mimeType: "image/png", data: "A".repeat(20_000) },
+                    ],
+                },
+            ],
+            ordinal: 2,
+        };
+        expect(buildToolArcs([call, folded])).toEqual([
+            { callId: "tc1", invOrdinal: 1, resOrdinal: 2 },
+        ]);
+        const breakdown = estimateTrueRawMessageTokens(folded, {
+            providerShapeVersion: "pi-folded-v1",
+            imageTokenHeuristic: () => 300,
+        });
+        expect(breakdown.toolOutput).toBeLessThan(10);
+        expect(breakdown.image).toBe(300);
+        expect(breakdown.other).toBe(0);
+    });
 });
 
 describe("tool token accounting", () => {
@@ -369,6 +421,59 @@ describe("tool token accounting", () => {
         expect(
             estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
         ).toBe(0);
+    });
+
+    it("skips ignored OpenCode text and fingerprints the flag", () => {
+        const text = "routing notice ".repeat(50);
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        const visible = singlePartMessage({ type: "text", text });
+        const ignored = singlePartMessage({ type: "text", text, ignored: true });
+        expect(estimateTrueRawMessageTokens(visible, options).total).toBeGreaterThan(0);
+        expect(estimateTrueRawMessageTokens(ignored, options).total).toBe(0);
+        expect(fingerprintOf({ type: "text", text: "x" })).not.toBe(
+            fingerprintOf({ type: "text", text: "x", ignored: true }),
+        );
+    });
+
+    it("counts OpenCode redacted reasoning stored in metadata or a string redacted field", () => {
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        const viaMetadata = singlePartMessage({
+            type: "reasoning",
+            text: "",
+            metadata: { redacted: "R".repeat(2000) },
+        });
+        const viaField = singlePartMessage({
+            type: "reasoning",
+            text: "",
+            redacted: "S".repeat(2000),
+        });
+        expect(estimateTrueRawMessageTokens(viaMetadata, options).reasoning).toBeGreaterThan(100);
+        expect(estimateTrueRawMessageTokens(viaField, options).reasoning).toBeGreaterThan(100);
+        expect(
+            fingerprintOf({ type: "reasoning", text: "", metadata: { redacted: "A".repeat(100) } }),
+        ).not.toBe(
+            fingerprintOf({
+                type: "reasoning",
+                text: "",
+                metadata: { redacted: "B".repeat(3000) },
+            }),
+        );
+    });
+
+    it("counts a standalone file part through the media heuristic", () => {
+        const pdf = singlePartMessage({
+            type: "file",
+            mime: "application/pdf",
+            filename: "spec.pdf",
+            url: `data:application/pdf;base64,${"Q".repeat(30_000)}`,
+        });
+        const breakdown = estimateTrueRawMessageTokens(pdf, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 400,
+        });
+        expect(breakdown.image).toBe(400);
+        expect(breakdown.other).toBe(0);
+        expect(breakdown.text).toBe(0);
     });
 
     it("counts an empty text block in a tool result as empty output", () => {
