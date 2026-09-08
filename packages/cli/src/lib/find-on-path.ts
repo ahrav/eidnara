@@ -53,7 +53,10 @@ export function isExecutableFile(path: string, isWindows = process.platform === 
     }
 }
 
-/** Global-install launcher locations for `bun`, `npm`, and Homebrew. */
+/**
+ * Global-install launcher locations for `bun`, `npm`, and Homebrew. Without a home (`null`) only
+ * the system directories are candidates; a cwd-relative `.bun/bin` must never be probed.
+ */
 export function packageManagerBinCandidates(
     binary: string,
     platform: NodeJS.Platform,

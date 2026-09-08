@@ -80,6 +80,18 @@ function isNonSecretScalarValue(value: string): boolean {
     return /^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(v);
 }
 
+// A number under `password`, `secret`, `credential`, or `cookie` is a PIN or numeric token; one under
+// `token` or `key` is a count (`max_tokens: 4096`). `isSecretKey` alone cannot tell them apart.
+const PIN_BEARING_SEGMENT_PATTERN = /^(?:password|passwd|pwd|secret|credential|cookie)s?$/;
+
+/** Whether a scalar under a secret-shaped key stays visible: booleans and null always, numbers unless the key names a password-like secret. */
+export function keepsScalarValue(key: string, value: string): boolean {
+    if (!isNonSecretScalarValue(value)) return false;
+    const v = value.trim();
+    if (v === "true" || v === "false" || v === "null" || v === "undefined") return true;
+    return !keySegments(key).some((segment) => PIN_BEARING_SEGMENT_PATTERN.test(segment));
+}
+
 export const SECRET_QUALIFIERS = new Set([
     "api",
     "access",
@@ -728,8 +740,14 @@ export function redactSecretText(value: string): string {
     return redactKeyedAssignments(redactQuotedKeys(redacted));
 }
 
+/** URL queries and fragments can contain tokens under arbitrary parameter names, so diagnostic output replaces them with `<REDACTED:query>`. */
+const URL_QUERY_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/[^\s?#"'`]+)[?#][^\s"'`]*/gi;
+
 export function sanitizeDiagnosticText(value: string): string {
-    return sanitizePathString(redactSecretText(value));
+    return sanitizePathString(redactSecretText(value)).replace(
+        URL_QUERY_PATTERN,
+        (_full, base: string) => `${base}?<REDACTED:query>`,
+    );
 }
 
 // `sanitizeDiagnosticText` excludes shareability-only patterns.

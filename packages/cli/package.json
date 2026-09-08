@@ -16,7 +16,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external @eidnara/shm-native --external jsonc-parser",
+    "build": "bun run clean && bun build src/index.ts --outfile dist/index.js --target node --format esm --external @eidnara/shm-native --external jsonc-parser",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint": "biome check .",
@@ -38,6 +38,6 @@
     "typescript": "5.9.3"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24.15.0"
   }
 }

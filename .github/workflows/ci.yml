@@ -82,7 +82,10 @@ jobs:
               - *workflow
               - *cargo
               - 'crates/shm-transport/**'
-              - 'packages/shm-native/**'
+              - 'crates/daemon/**'
+              - 'packages/**'
+              - 'scripts/**'
+              - 'release/**'
               - 'package.json'
               - 'bun.lock'
               - 'tsconfig.json'
@@ -277,6 +280,16 @@ jobs:
       - name: TypeScript
         if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
         run: bun run check:repo
+
+      - name: Incident history and verifier gates
+        # Both validators use the pull request base SHA or protected push `before` SHA.
+        # An unprotected push, a scheduled run, and a manual dispatch have no trusted base, so the step is skipped there.
+        # The validators import `typescript`, so the install above must have run: a path-filtered pull request without TypeScript changes installs here instead.
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_protected)
+        run: |
+          if [ ! -d node_modules ]; then bun install --frozen-lockfile; fi
+          bun run --cwd packages/e2e-tests validate:incident-history:ci
+          bun run --cwd packages/e2e-tests validate:incident-verifiers:ci
 
       # `bun test` resolves QuickJS and the TUI from source and node_modules, so only these smokes exercise the shipped bundles.
       - name: Plugin bundle smokes
@@ -545,7 +558,7 @@ jobs:
   native-addon:
     name: native addon package (Bun)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.native == 'true') }}
     env:
@@ -574,6 +587,12 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # actions/setup-node v4.4.0; the E2E harness runs OpenCode, whose npm
+      # package installs through Node.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.18.0
+
       - name: Build and test the addon
         # The addon loads a release build of the cdylib; the package tests
         # then drive the setup handshake, ring geometry, buffer bounds, and
@@ -584,6 +603,31 @@ jobs:
           bun run --cwd packages/shm-native test
           bun run --cwd packages/shm-native test:capability:bun
           bun run --cwd packages/opencode-plugin test src/shared/host-client
+
+      - name: Payload and tarball smoke
+        run: |
+          cargo +1.98 build -p daemon --bin eidnara-host --locked
+          bun run payload:dev
+          bun run smoke:tarballs
+
+      - name: Rust-mode E2E
+        # OpenCode is pinned to the version the harness closure under
+        # `release/harness-closures/` names. The suite skips itself, with the
+        # reason printed, when the shared-memory channel cannot start on the
+        # runner's Bun; OpenCode embeds Bun, so the probe predicts the plugin.
+        # The fixture contract probe requires the built native addon;
+        # `check:repo` does not build it.
+        # The Pi smoke fails if Node, the Pi package, or the built extension is
+        # missing.
+        env:
+          EIDNARA_E2E_REQUIRE_PI: "1"
+        run: |
+          npm install -g opencode-ai@1.18.22
+          cargo +1.98 build -p daemon --example direct_host_fixture \
+            --features direct-host-fixture --locked
+          bun run --cwd packages/e2e-tests test:fixture-contract
+          bun run --cwd packages/e2e-tests validate-mode-manifest
+          bun run --cwd packages/e2e-tests test:rust
 
   unlocked-deps:
     name: pinned toolchain with unlocked latest dependencies

@@ -419,6 +419,98 @@ describe("collectDiagnostics recent sessions", () => {
     });
 });
 
+describe("collectDiagnostics conflicts and the Eidnara enabled flag", () => {
+    it("reports no conflicts when Eidnara is disabled, even with DCP and native compaction on", async () => {
+        const { configHome, cwd } = isolatedRoot();
+        writeFileSync(
+            join(configHome, "opencode", "opencode.jsonc"),
+            JSON.stringify({
+                plugin: ["@eidnara/opencode", "@tarquinen/opencode-dcp"],
+                compaction: { auto: true },
+            }),
+        );
+        writeFileSync(
+            join(configHome, "eidnara", "eidnara.jsonc"),
+            JSON.stringify({ enabled: false }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.conflicts.eidnaraEnabled).toBe(false);
+        expect(report.conflicts.compactionEnabled).toBe(false);
+        expect(report.conflicts.hasConflict).toBe(false);
+        expect(report.conflicts.reasons).toEqual([]);
+    });
+
+    it("still reports the DCP conflict when Eidnara is enabled", async () => {
+        const { configHome, cwd } = isolatedRoot();
+        writeFileSync(
+            join(configHome, "opencode", "opencode.jsonc"),
+            JSON.stringify({
+                plugin: ["@eidnara/opencode", "@tarquinen/opencode-dcp"],
+                compaction: { auto: false, prune: false },
+            }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.conflicts.eidnaraEnabled).toBe(true);
+        expect(report.conflicts.hasConflict).toBe(true);
+        expect(report.conflicts.reasons.some((reason) => /dcp/i.test(reason))).toBe(true);
+    });
+});
+
+describe("collectDiagnostics session discovery status", () => {
+    it("reports session discovery as unavailable when the database cannot be read", async () => {
+        const { cwd } = isolatedRoot();
+        const dataHome = process.env.XDG_DATA_HOME as string;
+        mkdirSync(join(dataHome, "opencode"), { recursive: true });
+        writeFileSync(join(dataHome, "opencode", "opencode.db"), "not a sqlite database");
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.recentSessions).toEqual([]);
+        expect(report.sessionDiscovery).toBe("unavailable");
+    });
+
+    it("reports session discovery as unavailable when no database exists", async () => {
+        const { cwd } = isolatedRoot();
+
+        const report = await collectDiagnostics(cwd);
+
+        // The append-only log can outlive the database, so its records stay
+        // unattributable and the issue flow must ask before bundling them.
+        expect(report.recentSessions).toEqual([]);
+        expect(report.sessionDiscovery).toBe("unavailable");
+    });
+
+    it("reports session discovery as ok once the database is readable", async () => {
+        const { root, cwd } = isolatedRoot();
+        const dataHome = process.env.XDG_DATA_HOME as string;
+        const path = join(dataHome, "opencode", "opencode.db");
+        mkdirSync(join(path, ".."), { recursive: true });
+        const db = new Database(path);
+        try {
+            db.run(
+                "CREATE TABLE session (id TEXT, directory TEXT, title TEXT, time_updated INTEGER, time_archived INTEGER, parent_id TEXT)",
+            );
+            db.run(
+                "INSERT INTO session VALUES ('ses_default001', ?, 'default session', 1700000000000, NULL, NULL)",
+                [join(root, "project")],
+            );
+        } finally {
+            db.close();
+        }
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.sessionDiscovery).toBe("ok");
+        expect(report.recentSessions.map((session) => session.sessionId)).toEqual([
+            "ses_default001",
+        ]);
+    });
+});
+
 describe("collectDiagnostics log file", () => {
     it("reports a missing log as absent instead of throwing", async () => {
         const { cwd } = isolatedRoot();

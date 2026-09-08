@@ -5,6 +5,7 @@ import {
     invocationSpawnOptions,
 } from "./command-invocation";
 import type { OpenCodeInstallation } from "./opencode-detect";
+import { standaloneVersion } from "./semver";
 
 const OPENCODE_BINARY_ENV = "EIDNARA_OPENCODE_BINARY";
 
@@ -62,9 +63,10 @@ export function describeOpenCodeInstallations(
 ): OpenCodeInstallationReport[] {
     return installations.map((installation, index) => ({
         ...installation,
+        // Only the parsed semver enters the report; a wrapper's stdout can carry warnings naming paths or credentials.
         version:
             installation.kind === "cli"
-                ? (getOpenCodeVersion(installation.path) ?? "unknown")
+                ? (standaloneVersion(getOpenCodeVersion(installation.path)) ?? "unknown")
                 : "unknown",
         active: index === 0,
     }));

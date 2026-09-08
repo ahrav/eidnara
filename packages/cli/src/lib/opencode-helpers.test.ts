@@ -164,6 +164,24 @@ describe.if(isPosix)("opencode helpers with a resolved binary path", () => {
         ]);
     });
 
+    it("keeps only the parsed version when a wrapper prints warnings around it", () => {
+        const pathBin = fakeOpencode(
+            'echo "warning: config at /Users/alice/.config token=abc123"; echo "1.18.0"',
+        );
+        const installations = detectOpenCodeInstallations({
+            exists: () => false,
+            isExecutable: (path) => path === pathBin,
+            home: "/nonexistent-home",
+            platform: "darwin",
+            env: {},
+            onPath: () => pathBin,
+            realpath: (path) => path,
+        });
+        expect(describeOpenCodeInstallations(installations).map((entry) => entry.version)).toEqual([
+            "1.18.0",
+        ]);
+    });
+
     it("bounds a hanging version probe", () => {
         const bin = fakeOpencode("sleep 5");
         const started = performance.now();

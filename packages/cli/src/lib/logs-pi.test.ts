@@ -47,6 +47,7 @@ function reportWithLog(logPath: string): PiDiagnosticReport {
         conflicts: { knownConflicts: [], otherPiExtensions: [] },
         logFile: { path: logPath, exists: true, sizeKb: 0 },
         recentSessions: [],
+        sessionDiscovery: "ok",
         historianDumps: { byProject: [], legacyDumps: { dir: "/x/legacy", count: 0, recent: [] } },
     };
 }
@@ -207,7 +208,7 @@ describe("bundleIssueReport session filtering", () => {
         });
 
         expect(bundled.bodyMarkdown).toContain("<log unreadable: ");
-        expect(bundled.bodyMarkdown).toContain("EISDIR");
+        expect(bundled.bodyMarkdown).toContain("not a regular file");
         expect(bundled.bodyMarkdown).toContain("## Diagnostics");
     });
 
@@ -246,5 +247,160 @@ describe("bundleIssueReport file naming", () => {
         expect(second.path).toBe(join(root, "eidnara-pi-issue-20260707-120000-2.md"));
         expect(readFileSync(first.path, "utf-8")).toContain("first");
         expect(readFileSync(second.path, "utf-8")).toContain("second");
+    });
+});
+
+const SELECTED = "019fdade-87e3-7657-9ce7-65bee79b08e3";
+const OTHER_UUID = "019fdade-0000-7657-9ce7-65bee79b08e3";
+const OTHER_CUSTOM = "my_session";
+
+async function bundleWithLog(log: string, sessionFilter: string | null): Promise<string> {
+    const root = makeTempRoot();
+    const logPath = join(root, "eidnara.log");
+    writeFileSync(logPath, log);
+    const report: PiDiagnosticReport = {
+        ...reportWithLog(logPath),
+        recentSessions: [
+            { sessionId: SELECTED, directory: "/work/a", lastActiveAt: "2026-05-11T12:00:00.000Z" },
+        ],
+    };
+    const bundled = await bundleIssueReport(report, "desc", "title", { cwd: root, sessionFilter });
+    return readFileSync(bundled.path, "utf-8");
+}
+
+describe("bundleIssueReport session filtering by tag class", () => {
+    const logLines = [
+        `[2026-05-11T12:00:00.000Z] [eidnara][${SELECTED}] selected session line`,
+        `[2026-05-11T12:00:01.000Z] [eidnara][${OTHER_UUID}] other uuid session line`,
+        `[2026-05-11T12:00:02.000Z] [eidnara][${OTHER_CUSTOM}] other custom session line`,
+        "[2026-05-11T12:00:03.000Z] [eidnara][pi-status] status label line",
+        "[2026-05-11T12:00:04.000Z] [eidnara][global] global label line",
+        "[2026-05-11T12:00:05.000Z] [eidnara][pi] plugin label line",
+        "[2026-05-11T12:00:06.000Z] plugin startup line without a session tag",
+    ];
+
+    it("keeps only the selected session and the global label; drops every other tag and untagged records", async () => {
+        const body = await bundleWithLog(`${logLines.join("\n")}\n`, SELECTED);
+
+        expect(body).toContain("selected session line");
+        expect(body).toContain("global label line");
+        // Untagged records cannot be attributed, and `pi` / `pi-status` carry
+        // per-session command output, so all of them fail closed.
+        expect(body).not.toContain("plugin startup line without a session tag");
+        expect(body).not.toContain("status label line");
+        expect(body).not.toContain("plugin label line");
+        expect(body).not.toContain("other uuid session line");
+        expect(body).not.toContain("other custom session line");
+    });
+
+    it("drops the untagged continuation lines of another session's multi-line record", async () => {
+        const log = [
+            `[2026-05-11T12:00:00.000Z] [eidnara][${OTHER_UUID}] rust session.status failed: boom`,
+            "Error: boom",
+            "    at other-session-frame (/work/b/file.ts:1:1)",
+            `[2026-05-11T12:00:01.000Z] [eidnara][${SELECTED}] selected failed: mine`,
+            "Error: mine",
+            "    at selected-session-frame (/work/a/file.ts:1:1)",
+            "[2026-05-11T12:00:02.000Z] untagged record",
+            "    continuation of the untagged record",
+        ].join("\n");
+        const body = await bundleWithLog(`${log}\n`, SELECTED);
+
+        expect(body).not.toContain("boom");
+        expect(body).not.toContain("other-session-frame");
+        expect(body).toContain("Error: mine");
+        expect(body).toContain("selected-session-frame");
+        expect(body).not.toContain("continuation of the untagged record");
+    });
+
+    it("drops untagged lines that precede the first record when a session is selected", async () => {
+        const log = [
+            "    at leading-fragment-frame (/work/b/file.ts:1:1)",
+            "    at another-leading-frame (/work/b/file.ts:2:2)",
+            `[2026-05-11T12:00:01.000Z] [eidnara][${SELECTED}] selected line`,
+        ].join("\n");
+        const body = await bundleWithLog(`${log}\n`, SELECTED);
+
+        expect(body).not.toContain("leading-fragment-frame");
+        expect(body).not.toContain("another-leading-frame");
+        expect(body).toContain("selected line");
+    });
+
+    it("keeps every line when no session is selected", async () => {
+        const body = await bundleWithLog(`${logLines.join("\n")}\n`, null);
+
+        expect(body).toContain("other uuid session line");
+        expect(body).toContain("other custom session line");
+    });
+});
+
+describe("bundleIssueReport log reading", () => {
+    it("reads only the tail of a large log and drops the leading partial line", async () => {
+        // 5,000 lines of 2 KiB each is ~10 MiB, larger than the 4 MiB tail window.
+        const filler = Array.from(
+            { length: 5000 },
+            (_, i) => `[2026-05-11T12:00:00.000Z] filler ${i} ${"x".repeat(2000)}`,
+        );
+        const body = await bundleWithLog(
+            `early only line\n${filler.join("\n")}\nfinal tail line\n`,
+            null,
+        );
+
+        expect(body).toContain("final tail line");
+        expect(body).not.toContain("early only line");
+        expect(body.length).toBeLessThan(70_000);
+    });
+});
+
+describe("bundleIssueReport session scoping of diagnostics", () => {
+    it("keeps only the selected session's dump bucket and session entry", async () => {
+        const root = makeTempRoot();
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(logPath, "");
+        const report: PiDiagnosticReport = {
+            ...reportWithLog(logPath),
+            recentSessions: [
+                {
+                    sessionId: "sel",
+                    directory: "/work/selected",
+                    lastActiveAt: "2026-05-11T12:00:00.000Z",
+                },
+                {
+                    sessionId: "oth",
+                    directory: "/work/other-private",
+                    lastActiveAt: "2026-05-11T11:00:00.000Z",
+                },
+            ],
+            historianDumps: {
+                byProject: [
+                    {
+                        directory: "/work/selected",
+                        primarySessionId: "sel",
+                        sessionIds: ["sel", "oth"],
+                        count: 1,
+                        recent: [{ name: "keep.xml", ageMinutes: 1, sizeKb: 1 }],
+                    },
+                    {
+                        directory: "/work/other-private",
+                        primarySessionId: "oth",
+                        sessionIds: ["oth"],
+                        count: 1,
+                        recent: [{ name: "drop.xml", ageMinutes: 2, sizeKb: 1 }],
+                    },
+                ],
+                legacyDumps: { dir: "/x/legacy", count: 0, recent: [] },
+            },
+        };
+
+        const bundled = await bundleIssueReport(report, "desc", "title", {
+            cwd: root,
+            sessionFilter: "sel",
+        });
+        const body = readFileSync(bundled.path, "utf-8");
+
+        expect(body).toContain("keep.xml");
+        expect(body).not.toContain("drop.xml");
+        expect(body).not.toContain("other-private");
+        expect(body).not.toContain('"oth"');
     });
 });

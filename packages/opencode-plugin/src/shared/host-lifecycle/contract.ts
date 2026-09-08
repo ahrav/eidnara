@@ -337,6 +337,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         "checks",
         "versions",
     ];
+    // `crates/daemon/src/bin/eidnara-host.rs` serializes no `readiness` field: component readiness is a `host.status` observation, not a CLI verdict. A result that carries the key is still validated in full.
     if ("readiness" in record) resultKeys.push("readiness");
     if ("shared_memory" in record) resultKeys.push("shared_memory");
     requireExactKeys(record, resultKeys, "result");

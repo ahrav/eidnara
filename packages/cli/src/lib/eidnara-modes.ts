@@ -10,10 +10,10 @@ export interface EidnaraModes {
 
 /**
  * Reads the shared user config only: setup edits global host settings, so a project-tier opt-out must not switch a native manager back on for every other project. commentlint: allow(JUDGE)
- * A missing or unreadable config resolves to the schema defaults (everything enabled).
+ * A missing or unreadable config, or no user tier at all (`undefined`), resolves to the schema defaults (everything enabled).
  */
-export function readEidnaraModes(configPath: string): EidnaraModes {
-    const config = readJsoncLenient(configPath).value;
+export function readEidnaraModes(configPath: string | undefined): EidnaraModes {
+    const config = configPath === undefined ? {} : readJsoncLenient(configPath).value;
     const enabled = config.enabled !== false;
     return {
         enabled,
@@ -38,4 +38,12 @@ export function projectModeOverrides(projectConfigPath: string, shared: EidnaraM
         overrides.push(`memory.enabled: ${memory}`);
     }
     return overrides;
+}
+
+/** With `enabled: false` the plugin skips every hook, so a native manager must stay on whatever the compaction setting says. */
+export function compactionEnabledFor(config: { enabled?: unknown; compaction?: unknown }): boolean {
+    if (config.enabled === false) return false;
+    return isCompactionEnabled({
+        compaction: isRecord(config.compaction) ? config.compaction : null,
+    });
 }

@@ -147,34 +147,53 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
         return { kind: "parse-error", error: new ConfigParseError(path, "", error) };
     }
     try {
-        // The shared parser strips a leading BOM before it assigns node offsets, so the same
-        // stripped text feeds both parsers and the offset-based literal slices.
-        const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
-        // `comment-json` runs first because its syntax errors carry a line and column; the shared
-        // parser then rejects what `comment-json` accepts but the daemon's reader does not, such
-        // as an unpaired surrogate escape inside a string.
-        const tree = parseCommentJson(text);
-        const root = parseJsoncTree(text);
-        const rejectedKeyPaths: string[] = [];
-        const plain = sanitizeParsedJson(tree, {
-            onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
-        });
-        if (rejectedKeyPaths.length > 0) {
-            throw new Error(`unsafe prototype-pollution key at ${rejectedKeyPaths.join(", ")}`);
-        }
-        // A scalar root parses to a boxed primitive, which is an object but not a plain one.
-        if (!isCommentJsonObjectRoot(tree)) {
-            throw new Error("expected a JSON object at the document root");
-        }
+        const document = parseJsoncObject(content);
         return {
             kind: "parsed",
-            tree,
-            plain: plain as Record<string, unknown>,
-            rewriteHazard: rewriteHazard(text, root),
+            tree: document.tree,
+            plain: document.plain,
+            rewriteHazard: rewriteHazard(document.text, document.root),
         };
     } catch (error) {
         return { kind: "parse-error", error: new ConfigParseError(path, content, error) };
     }
+}
+
+/**
+ * Parses JSONC that must be a config object: a prototype-pollution key or a
+ * non-object root (an array, a scalar, `null`) throws, since the loader would
+ * silently fall back to defaults for such a document. `tree` keeps the
+ * comment-json metadata that `stringify` needs to emit comments; `plain` is
+ * the sanitized copy without it.
+ */
+export function parseJsoncObject(content: string): {
+    tree: Record<string, unknown>;
+    plain: Record<string, unknown>;
+    /** The syntax tree whose node offsets index into `text`. */
+    root: Node;
+    /** `content` with a leading BOM removed, the text `root`'s offsets refer to. */
+    text: string;
+} {
+    // The shared parser strips a leading BOM before it assigns node offsets, so the same
+    // stripped text feeds both parsers and the offset-based literal slices.
+    const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+    // `comment-json` runs first because its syntax errors carry a line and column; the shared
+    // parser then rejects what `comment-json` accepts but the daemon's reader does not, such
+    // as an unpaired surrogate escape inside a string.
+    const tree = parseCommentJson(text);
+    const root = parseJsoncTree(text);
+    const rejectedKeyPaths: string[] = [];
+    const plain = sanitizeParsedJson(tree, {
+        onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
+    });
+    if (rejectedKeyPaths.length > 0) {
+        throw new Error(`unsafe prototype-pollution key at ${rejectedKeyPaths.join(", ")}`);
+    }
+    // A scalar root parses to a boxed primitive, which is an object but not a plain one.
+    if (!isCommentJsonObjectRoot(tree)) {
+        throw new Error("expected a JSON object at the document root");
+    }
+    return { tree, plain: plain as Record<string, unknown>, root, text };
 }
 
 /**

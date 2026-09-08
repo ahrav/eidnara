@@ -1,0 +1,72 @@
+{
+    "schema": "incident-source-inventory/v1",
+    "items": [
+        {
+            "id": "src-parity-findings-s2",
+            "source_path": "parity-findings:s2",
+            "content_digest": "448a0f3de3ea5b71adafa342ed41d22a4dcd1290f1c500971b86e6f40654a85c",
+            "claims": [
+                {
+                    "id": "claim-parity-a1",
+                    "content_digest": "b1eac3217d65bf15ea35bf748d61e13d75efb378e5bc62f0c4137a49d565a0b2",
+                    "disposition": "executable_fixed_regression",
+                    "rationale": "real parity defect, fixed by first-render tag activation; preserved as an executable regression via the shared source-linked driver",
+                    "family_links": [
+                        "fam-first-render-tag-stability"
+                    ]
+                },
+                {
+                    "id": "claim-parity-a3",
+                    "content_digest": "45037eb2d3ad517eca6cf1e7615bccf9dc746b4cf1e51b6bc5ad4bdb6f0cd1db",
+                    "disposition": "executable_fixed_regression",
+                    "rationale": "real parity defect (aged ctx_reduce prefix survival), fixed by the same first-render tag activation; same root cause as parity A1",
+                    "family_links": [
+                        "fam-first-render-tag-stability"
+                    ]
+                }
+            ]
+        },
+        {
+            "id": "src-mutation-goldens-dg-1",
+            "source_path": "packages/e2e-tests/mutations/goldens-dg-1.json",
+            "content_digest": "b6a28a281cdd91120f4c8662098b6645a04981e00284c98b689d59c313571c0e",
+            "claims": [
+                {
+                    "id": "claim-mutation-dg-1-one-byte-input",
+                    "content_digest": "0a917bcfb6beafd531c8b565bf8bcfccb7d83021c140cd6432ed29ae60f2de6f",
+                    "disposition": "verifier_evidence",
+                    "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
+                    "family_links": []
+                }
+            ]
+        },
+        {
+            "id": "src-mutation-goldens-dg-2",
+            "source_path": "packages/e2e-tests/mutations/goldens-dg-2.json",
+            "content_digest": "0f92dbd115086d44845170ddf8a243d3b8dbf95988847efb6c543bfa357f1d40",
+            "claims": [
+                {
+                    "id": "claim-mutation-dg-2-one-byte-input",
+                    "content_digest": "da3c1be3e9cc93746f35b24bca01f201bcaa1c925bb55fef61c73746673c9ef9",
+                    "disposition": "verifier_evidence",
+                    "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
+                    "family_links": []
+                }
+            ]
+        },
+        {
+            "id": "src-mutation-goldens-dg-3",
+            "source_path": "packages/e2e-tests/mutations/goldens-dg-3.json",
+            "content_digest": "7fd1bb97a50c9fc71ee44a8ea477c09df4d4a5b1217838ebc0acfdcd70adb3ba",
+            "claims": [
+                {
+                    "id": "claim-mutation-dg-3-one-byte-input",
+                    "content_digest": "c879c4bd37cb56651bd4a4dc586eae3eff631979e8d383cae96ffe26279d0f18",
+                    "disposition": "verifier_evidence",
+                    "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
+                    "family_links": []
+                }
+            ]
+        }
+    ]
+}

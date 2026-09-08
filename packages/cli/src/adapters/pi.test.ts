@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { matchesPiPackageSource, PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
+import { isEidnaraPiPackageEntry, PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
 import { PiAdapter } from "./pi";
 
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
@@ -75,10 +75,11 @@ describe("PiAdapter settings safety", () => {
     });
 
     it("does not mistake a sibling scoped package for the plugin", () => {
-        expect(matchesPiPackageSource("npm:@eidnara/pi-extras")).toBe(false);
-        expect(matchesPiPackageSource("npm:@eidnara/pi")).toBe(true);
-        expect(matchesPiPackageSource("npm:@eidnara/pi@0.1.0")).toBe(true);
-        expect(matchesPiPackageSource(["npm:@eidnara/pi"])).toBe(false);
+        const baseDir = tmpdir();
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi-extras", baseDir)).toBe(false);
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi", baseDir)).toBe(true);
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi@0.1.0", baseDir)).toBe(true);
+        expect(isEidnaraPiPackageEntry(["npm:@eidnara/pi"], baseDir)).toBe(false);
     });
 
     it("aborts plugin updates when existing settings are malformed", async () => {

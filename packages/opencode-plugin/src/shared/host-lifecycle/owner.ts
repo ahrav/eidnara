@@ -48,7 +48,13 @@ export interface PreparedManagedLaunchTarget {
     kind: "retained-fd";
     fd: number;
     retained: RetainedBootstrap;
-    payloadManifestDigest: string;
+    /**
+     * The digest the daemon's `--payload-manifest-digest` argument carries.
+     * A development-mode payload carries none: the daemon's trusted path
+     * accepts only `mode: "production"`, and its unqualified path (debug
+     * builds only) walks the payload directory without a manifest.
+     */
+    payloadManifestDigest: string | undefined;
     payloadDir?: string;
 }
 
@@ -71,7 +77,7 @@ export type ResolveManagedPayloadDirOptions = Omit<
 interface VerifiedPayload {
     payloadDir: string;
     launcherPath: string;
-    payloadManifestDigest: string;
+    payloadManifestDigest: string | undefined;
     launcherDigest: string;
 }
 
@@ -279,7 +285,7 @@ function bootstrapDir(dataRoot: string): string {
 
 function retainedTarget(
     retained: RetainedBootstrap,
-    payloadManifestDigest: string,
+    payloadManifestDigest: string | undefined,
     payloadDir?: string,
 ): PreparedManagedLaunchTarget {
     return {
@@ -330,7 +336,6 @@ function verifyPackage(packageDir: string, target: PayloadTarget): VerifiedPaylo
     if (
         release.id !== hostRelease.release.id ||
         release.version !== hostRelease.release.version ||
-        manifest.mode !== "production" ||
         typeof manifest.release_contract_sha256 !== "string" ||
         !SHA256_RE.test(manifest.release_contract_sha256) ||
         typeof manifest.production_inputs_lock_sha256 !== "string" ||
@@ -362,13 +367,17 @@ function verifyPackage(packageDir: string, target: PayloadTarget): VerifiedPaylo
     if (typeof launcher?.sha256 !== "string" || launcher.mode !== "755") {
         fail("payload manifest names no executable launcher file");
     }
+    if (manifest.mode !== "production" && manifest.mode !== "development") {
+        fail("payload manifest mode is neither production nor development");
+    }
     const trailingNewline = manifestBytes.at(-1) === 0x0a ? 1 : 0;
     return {
         payloadDir: packageDir,
         launcherPath: join(packageDir, LAUNCHER_REL_PATH),
-        payloadManifestDigest: sha256(
-            manifestBytes.subarray(0, manifestBytes.length - trailingNewline),
-        ),
+        payloadManifestDigest:
+            manifest.mode === "production"
+                ? sha256(manifestBytes.subarray(0, manifestBytes.length - trailingNewline))
+                : undefined,
         launcherDigest: launcher.sha256,
     };
 }

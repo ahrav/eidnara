@@ -28,6 +28,7 @@ export async function runSetup(argv: string[]): Promise<number> {
             verb: "setup",
         });
     } catch (error) {
+        if (isPromptCancelledError(error)) throw error;
         log.error(error instanceof Error ? error.message : String(error));
         outro("Setup stopped — correct the command arguments and try again.");
         return 1;
@@ -46,9 +47,10 @@ export async function runSetup(argv: string[]): Promise<number> {
         try {
             code = await dispatchSetup(adapter, dryRun);
         } catch (error) {
+            // The dispatcher maps a cancellation to exit 0; the outro still tells the user what happened.
             if (isPromptCancelledError(error)) {
                 outro("Setup cancelled — nothing further was changed.");
-                return 1;
+                throw error;
             }
             log.error(error instanceof Error ? error.message : String(error));
             anyFailure = true;

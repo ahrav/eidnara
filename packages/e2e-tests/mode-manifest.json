@@ -1,0 +1,150 @@
+{
+    "schema": 1,
+    "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-smoke` runs the Pi RPC process under Node and skips itself when Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure.",
+    "entries": [
+        {
+            "path": "tests/cache-invariants.test.ts",
+            "tier": "rust-only",
+            "rationale": "replay-class prefix stability: pure-defer growth (A1), defer passes after an execute pass (A2), and aged ctx_reduce survival (A3) through the incident-pool verifiers",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/cache-stability.test.ts",
+            "tier": "rust-only",
+            "rationale": "defer-pass byte-stability of the system block and the retained message prefix",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/incident-pool-green.test.ts",
+            "tier": "rust-only",
+            "rationale": "baseline-green incident variants executed in isolation through the incident-pool runner",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/pi-smoke.test.ts",
+            "tier": "pi-smoke",
+            "rationale": "the Pi RPC process loads the built extension, completes one mock turn with ctx_search, ctx_memory, and ctx_note registered, and leaves no storage file in the isolated data directory",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-ctx-reduce-roundtrip.test.ts",
+            "tier": "rust-only",
+            "rationale": "an agent ctx_reduce drop enters the daemon queued-drop ledger and is consumed on the next producer-backed bust",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-duplicate-tool-use-id.test.ts",
+            "tier": "rust-only",
+            "rationale": "served messages arrays keep tool_use ids unique when a queued drop is consumed",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-2.test.ts",
+            "tier": "rust-only",
+            "rationale": "failure-mode drill 2: host crash mid-session keeps serving raw passes with a loud module failure and no placeholders",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-3.test.ts",
+            "tier": "rust-only",
+            "rationale": "failure-mode drill 3: passes are served from the transform again after the host restarts, without restarting the session",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-fm-oc-5.test.ts",
+            "tier": "rust-only",
+            "rationale": "failure-mode drill 5: a paused host produces a transport timeout served raw, and passes recover after SIGCONT",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-fold-under-pressure.test.ts",
+            "tier": "rust-only",
+            "rationale": "content pressure past the execute threshold lands a fold whose m0 shrinks the provider wire",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-historian-producer.test.ts",
+            "tier": "rust-only",
+            "rationale": "historian producer reaches the controlled backend and records a typed backend failure without killing a provider process",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-multi-frame-delta-perf.test.ts",
+            "tier": "rust-only",
+            "rationale": "large provider-visible tail stays intact across one-page reuse and bounded multi-page retransmission",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-park-self-heal.test.ts",
+            "tier": "rust-only",
+            "rationale": "passes are served from transform again after a host restart or crash",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-removal-self-heal.test.ts",
+            "tier": "rust-only",
+            "rationale": "passes are served from transform again after a mid-session message is reverted",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-smoke.test.ts",
+            "tier": "rust-only",
+            "rationale": "rust mode boots and transforms a real session through the host transport",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-steady-state-byte-identity.test.ts",
+            "tier": "rust-only",
+            "rationale": "retained wire messages are byte-identical across defer passes",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/rust-tail-mutation-readopt.test.ts",
+            "tier": "rust-only",
+            "rationale": "passes are served from transform again after the newest user message is mutated in place",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/thinking-block-safety.test.ts",
+            "tier": "rust-only",
+            "rationale": "thinking-block wire safety: no nudge text in a signed assistant, dropped text shells, and image parts under whole-arc history",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        }
+    ]
+}

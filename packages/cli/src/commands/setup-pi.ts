@@ -15,6 +15,8 @@ import {
     detectPiBinary,
     getAvailableModels,
     getPiVersion,
+    isEidnaraPiPackageEntry,
+    PI_MINIMUM_VERSION,
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
 import type { PromptIO } from "../lib/prompts";
@@ -85,12 +87,11 @@ const DEFAULT_HOST: PiCompatibleSetupHost = {
     displayName: "Pi",
     cliName: "pi",
     packageSource: PI_PACKAGE_SOURCE,
-    minimumVersion: "0.74.0",
+    minimumVersion: PI_MINIMUM_VERSION,
     versionWarning: (version, minimum) =>
         `Pi ${version} is older than the required ${minimum}.\n` +
-        `Pi 0.74.0 renamed the npm package from \`@mariozechner/pi-coding-agent\` ` +
-        `to \`@earendil-works/pi-coding-agent\`. Eidnara's peer dependency ` +
-        `targets the new scope, so older Pi installs cannot load this extension.\n` +
+        `${PI_PACKAGE_SOURCE} declares \`@earendil-works/pi-coding-agent\` ^${minimum} as its peer range, ` +
+        `so older Pi installs may not load this extension.\n` +
         `Run \`pi update --self\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`) before continuing.`,
     ensurePluginEntry: async (settingsPath) => {
         const settings = readJsoncConfigForUpdate(settingsPath);
@@ -155,9 +156,15 @@ export function writePiSettingsPackage(
         );
     }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
-    // A version-pinned source (`npm:@eidnara/pi@0.1.0`) is the same package; a second entry
-    // would load the extension twice.
-    if (packages.some((entry) => matchesPackageSource(entry, packageSource))) return false;
+    // A version-pinned source (`npm:@eidnara/pi@0.1.0`), a local checkout, or the object form of
+    // the same package counts as present; a second entry would load the extension twice.
+    const present = packages.some(
+        (entry) =>
+            matchesPackageSource(entry, packageSource) ||
+            (packageSource === PI_PACKAGE_SOURCE &&
+                isEidnaraPiPackageEntry(entry, dirname(settingsPath))),
+    );
+    if (present) return false;
 
     packages.push(packageSource);
     settings.packages = packages;
@@ -301,10 +308,17 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             : `${host.displayName} detected at ${binary.path}`,
     );
 
-    if (version && host.minimumVersion && compareVersionStrings(version, host.minimumVersion) < 0) {
+    const minimum = host.minimumVersion;
+    const versionTooOld =
+        minimum !== undefined && version !== null && compareVersionStrings(version, minimum) < 0;
+    // An unreadable version leaves the minimum unverified, so it takes the same confirmation as an old one.
+    const versionUnknown = minimum !== undefined && version === null;
+    if (minimum !== undefined && (versionTooOld || versionUnknown)) {
         prompts.log.warn(
-            host.versionWarning?.(version, host.minimumVersion) ??
-                `${host.displayName} ${version} is older than required ${host.minimumVersion}.`,
+            version !== null
+                ? (host.versionWarning?.(version, minimum) ??
+                      `${host.displayName} ${version} is older than required ${minimum}.`)
+                : `${host.displayName} did not report a version, so the required ${minimum} cannot be verified.`,
         );
         const proceed = await prompts.confirm(
             "Continue with setup anyway? (subagents may fail at runtime)",
@@ -312,7 +326,11 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         );
         if (!proceed) {
             // A non-zero code keeps the dispatcher from printing next steps after nothing was written.
-            prompts.outro(`Setup cancelled — upgrade ${host.displayName} and try again.`);
+            prompts.outro(
+                version !== null
+                    ? `Setup cancelled — upgrade ${host.displayName} and try again.`
+                    : `Setup cancelled — check the ${host.displayName} installation and try again.`,
+            );
             return 1;
         }
     }

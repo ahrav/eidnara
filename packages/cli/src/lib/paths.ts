@@ -163,6 +163,16 @@ export function getPiAgentDir(): string {
     return join(envFirstHomeDir(), ".pi", "agent");
 }
 
+/** Doctors probe this before building user-level paths so a missing home degrades to a reported failure instead of aborting the run. */
+export function hasHomeDir(): boolean {
+    return absoluteHomeDir() !== undefined;
+}
+
+/** Without a home directory or `PI_CODING_AGENT_DIR`, `getPiAgentDir()` has no base a doctor may inspect or write. */
+export function hasPiAgentDir(): boolean {
+    return Boolean(process.env.PI_CODING_AGENT_DIR?.trim()) || hasHomeDir();
+}
+
 /** Pi session JSONL root (`<agentDir>/sessions`). */
 export function getPiSessionsRoot(): string {
     return join(getPiAgentDir(), "sessions");

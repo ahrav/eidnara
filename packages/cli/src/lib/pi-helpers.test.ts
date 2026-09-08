@@ -1,13 +1,17 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { childPathWithLauncherDir } from "./command-invocation";
 import {
     getAvailableModels,
     getPiCommandInvocation,
     getPiFallbackCandidates,
     getPiVersion,
+    isEidnaraPiPackageEntry,
+    PI_MINIMUM_VERSION,
     parseModelListOutput,
 } from "./pi-helpers";
 
@@ -120,6 +124,18 @@ describe("Pi fallback discovery", () => {
             join(home, ".bun", "bin", "pi.cmd"),
         ]);
     });
+
+    it("probes only the system launchers when no home directory resolves", () => {
+        expect(getPiFallbackCandidates("linux", undefined)).toEqual([
+            "/usr/local/bin/pi",
+            "/opt/homebrew/bin/pi",
+        ]);
+        const appData = "C:\\Users\\fox\\AppData\\Roaming";
+        expect(getPiFallbackCandidates("win32", undefined, appData)).toEqual([
+            join(appData, "npm", "pi.cmd"),
+            join(appData, "npm", "pi.exe"),
+        ]);
+    });
 });
 
 describe("Pi command execution", () => {
@@ -214,5 +230,76 @@ describe("getAvailableModels", () => {
             "--list-models",
             "models list",
         ]);
+    });
+});
+
+describe("isEidnaraPiPackageEntry", () => {
+    function checkoutOf(name: string): { root: string; dir: string } {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-entry-"));
+        tempDirs.push(root);
+        const dir = join(root, "checkout");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "package.json"), JSON.stringify({ name }));
+        return { root, dir };
+    }
+
+    it("matches the bare and pinned npm specs and the object form", () => {
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi", "/base")).toBe(true);
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi@0.36.0", "/base")).toBe(true);
+        expect(isEidnaraPiPackageEntry({ source: "npm:@eidnara/pi" }, "/base")).toBe(true);
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi-theme", "/base")).toBe(false);
+        expect(isEidnaraPiPackageEntry("npm:other-pi-extension", "/base")).toBe(false);
+    });
+
+    it("matches a local checkout by its package name, resolving relative paths against the base", () => {
+        const { root, dir } = checkoutOf("@eidnara/pi");
+        expect(isEidnaraPiPackageEntry(dir, "/elsewhere")).toBe(true);
+        expect(isEidnaraPiPackageEntry("./checkout", root)).toBe(true);
+        expect(isEidnaraPiPackageEntry(pathToFileURL(dir).href, "/elsewhere")).toBe(true);
+        expect(isEidnaraPiPackageEntry({ source: dir }, "/elsewhere")).toBe(true);
+    });
+
+    it("expands a home-relative entry written with either separator", () => {
+        const { root } = checkoutOf("@eidnara/pi");
+        const previousHome = process.env.HOME;
+        process.env.HOME = root;
+        try {
+            expect(isEidnaraPiPackageEntry("~/checkout", "/elsewhere")).toBe(true);
+            expect(isEidnaraPiPackageEntry("~\\checkout", "/elsewhere")).toBe(true);
+        } finally {
+            if (previousHome === undefined) delete process.env.HOME;
+            else process.env.HOME = previousHome;
+        }
+    });
+
+    it("rejects local checkouts of other packages, git sources, and unknown shapes", () => {
+        const { dir } = checkoutOf("eidnara-theme");
+        expect(isEidnaraPiPackageEntry(dir, "/elsewhere")).toBe(false);
+        expect(isEidnaraPiPackageEntry(join(dir, "missing"), "/elsewhere")).toBe(false);
+        expect(isEidnaraPiPackageEntry("git:github.com/ahrav/eidnara", "/base")).toBe(false);
+        expect(isEidnaraPiPackageEntry(42, "/base")).toBe(false);
+        expect(isEidnaraPiPackageEntry({ name: "@eidnara/pi" }, "/base")).toBe(false);
+    });
+
+    it.if(process.platform !== "win32")("rejects a FIFO manifest instead of blocking on it", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-entry-"));
+        tempDirs.push(root);
+        const dir = join(root, "checkout");
+        mkdirSync(dir, { recursive: true });
+        execFileSync("mkfifo", [join(dir, "package.json")]);
+        const started = performance.now();
+        expect(isEidnaraPiPackageEntry("./checkout", root)).toBe(false);
+        expect(performance.now() - started).toBeLessThan(2_000);
+    });
+});
+
+describe("PI_MINIMUM_VERSION", () => {
+    it("equals the floor of the pi-coding-agent peer range @eidnara/pi declares", () => {
+        const manifest = JSON.parse(
+            readFileSync(new URL("../../../pi-plugin/package.json", import.meta.url), "utf-8"),
+        ) as { peerDependencies?: Record<string, string> };
+        const range = manifest.peerDependencies?.["@earendil-works/pi-coding-agent"];
+
+        expect(range).toBe(`^${PI_MINIMUM_VERSION}`);
     });
 });

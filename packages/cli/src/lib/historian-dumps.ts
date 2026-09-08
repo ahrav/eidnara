@@ -4,10 +4,11 @@
  * cannot drift on what a dump summary contains.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { parseCompartmentOutput } from "@eidnara/opencode/hooks/context/compartment-parser";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 
 export interface HistorianDumpSummary {
     name: string;
@@ -52,7 +53,7 @@ const OUTPUT_TAG_REGEX = /<\/?output(?:\s[^>]*)?>/i;
 
 export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: string } {
     try {
-        const xml = readFileSync(path, "utf-8");
+        const xml = readRegularFileSync(path);
         const root = OUTPUT_DOCUMENT_REGEX.exec(xml);
         if (!root) {
             return { error: "not one complete <output> document" };
@@ -143,4 +144,58 @@ export function listDumpsInDir(
     } catch {
         return { count: 0, recent: [] };
     }
+}
+
+export interface HistorianDumpBucketLike {
+    directory: string;
+    count: number;
+    recent: HistorianDumpSummary[];
+}
+
+export interface HistorianDumpsReportLike {
+    byProject: HistorianDumpBucketLike[];
+    legacyDumps: { dir: string; count: number };
+}
+
+export function scopeDumpBucketsToSession<
+    T extends { primarySessionId: string; sessionIds: string[] },
+>(buckets: readonly T[], sessionId: string): T[] {
+    return buckets
+        .filter((bucket) => bucket.sessionIds.includes(sessionId))
+        .map((bucket) => ({ ...bucket, primarySessionId: sessionId, sessionIds: [sessionId] }));
+}
+
+/** Check lines a doctor prints for the dumps it found: a warning for the total, info lines for the three newest per project. */
+export function describeHistorianDumps(
+    report: HistorianDumpsReportLike,
+): Array<{ status: "warn" | "info"; message: string }> {
+    const lines: Array<{ status: "warn" | "info"; message: string }> = [];
+    if (report.byProject.length > 0) {
+        const totalCount = report.byProject.reduce((sum, bucket) => sum + bucket.count, 0);
+        lines.push({
+            status: "warn",
+            message: `Historian debug dumps: ${totalCount} file(s) across ${report.byProject.length} project(s)`,
+        });
+        for (const bucket of report.byProject) {
+            lines.push({
+                status: "info",
+                message: `  [${bucket.directory}] ${bucket.count} file(s)`,
+            });
+            for (const dump of bucket.recent.slice(0, 3)) {
+                const age = dump.ageMinutes;
+                const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+                lines.push({ status: "info", message: `    ${dump.name} (${ageStr})` });
+            }
+            if (bucket.count > 3) {
+                lines.push({ status: "info", message: `    ... and ${bucket.count - 3} more` });
+            }
+        }
+    }
+    if (report.legacyDumps.count > 0) {
+        lines.push({
+            status: "info",
+            message: `Legacy historian dumps (pre-v0.18.x): ${report.legacyDumps.count} file(s) in ${report.legacyDumps.dir}`,
+        });
+    }
+    return lines;
 }

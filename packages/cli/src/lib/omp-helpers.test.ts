@@ -127,8 +127,10 @@ describe.if(process.platform !== "win32")("OMP fallback launchers", () => {
         roots.push(root);
         const bunBin = join(root, ".bun", "bin");
         mkdirSync(bunBin, { recursive: true });
-        // The stand-in "bun" runtime echoes the script's arguments so the test sees it ran.
-        writeFileSync(join(bunBin, "bun"), '#!/bin/sh\nshift\necho "omp/1.2.3 $*"\n');
+        // The stand-in "bun" runtime prints OMP's version line, which only it can
+        // produce here, so the test sees that the launcher ran through it. The
+        // line carries nothing else because the probe accepts only a bare version.
+        writeFileSync(join(bunBin, "bun"), '#!/bin/sh\necho "omp/1.2.3"\n');
         chmodSync(join(bunBin, "bun"), 0o755);
         writeFileSync(join(bunBin, "omp"), "#!/usr/bin/env bun\n");
         chmodSync(join(bunBin, "omp"), 0o755);
@@ -144,7 +146,7 @@ describe.if(process.platform !== "win32")("OMP fallback launchers", () => {
         const launcherBin = join(root, "usr-local-bin");
         mkdirSync(bunBin, { recursive: true });
         mkdirSync(launcherBin, { recursive: true });
-        writeFileSync(join(bunBin, "bun"), '#!/bin/sh\nshift\necho "omp/1.2.3 $*"\n');
+        writeFileSync(join(bunBin, "bun"), '#!/bin/sh\necho "omp/1.2.3"\n');
         chmodSync(join(bunBin, "bun"), 0o755);
         writeFileSync(join(launcherBin, "omp"), "#!/usr/bin/env bun\n");
         chmodSync(join(launcherBin, "omp"), 0o755);
@@ -248,6 +250,28 @@ describe("OMP plugin listing", () => {
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
+    });
+});
+
+describe("OMP version probe", () => {
+    it("reads only a line that is OMP's own version", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-version-"));
+        roots.push(root);
+        const prefixed = join(root, "omp-prefixed");
+        writeFileSync(
+            prefixed,
+            "#!/bin/sh\necho 'Node 24.15.0 is deprecated'\necho 'omp/17.0.0'\n",
+        );
+        chmodSync(prefixed, 0o755);
+        expect(getOmpVersion(prefixed)).toBe("17.0.0");
+        const bare = join(root, "omp-bare");
+        writeFileSync(bare, "#!/bin/sh\necho '17.1.7'\n");
+        chmodSync(bare, 0o755);
+        expect(getOmpVersion(bare)).toBe("17.1.7");
+        const noisy = join(root, "omp-noisy");
+        writeFileSync(noisy, "#!/bin/sh\necho 'Node 24.15.0 is deprecated'\n");
+        chmodSync(noisy, 0o755);
+        expect(getOmpVersion(noisy)).toBeNull();
     });
 });
 

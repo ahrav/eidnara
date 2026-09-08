@@ -156,6 +156,24 @@ describe("managed lifecycle owner", () => {
         expect(prepare(f, true)?.payloadManifestDigest).toBe(f.manifestDigest);
     });
 
+    test("a development-mode payload stages but carries no manifest digest", () => {
+        const f = fixture();
+        writeManifest(f, { ...f.manifest, mode: "development" });
+
+        const target = prepare(f, true);
+
+        expect(target?.kind).toBe("retained-fd");
+        expect(target?.retained.path).toContain(f.launcherDigest);
+        // `crates/daemon/src/bin/eidnara-host.rs` accepts `--payload-manifest-digest` only for `mode: "production"`; a development payload takes the unqualified path, which reads no manifest.
+        expect(target?.payloadManifestDigest).toBeUndefined();
+    });
+
+    test("a payload whose mode is neither production nor development is invalid", () => {
+        const f = fixture();
+        writeManifest(f, { ...f.manifest, mode: "staging" });
+        expect(() => prepare(f, true)).toThrow(/mode/);
+    });
+
     test("observation reuses the retained bootstrap and never stages", () => {
         const f = fixture();
         expect(prepare(f, false)).toBeNull();
@@ -232,7 +250,7 @@ describe("managed lifecycle owner", () => {
         expect(existsSync(f.dataRoot)).toBe(false);
     });
 
-    test("a manifest outside the release identity or production mode fails closed", () => {
+    test("a manifest outside the release identity fails closed", () => {
         const f = fixture();
         writeManifest(f, { ...f.manifest, release: { id: "other-release", version: "0.1.0" } });
         expect(() => prepare(f, true)).toThrow(/release identity/);
@@ -241,9 +259,6 @@ describe("managed lifecycle owner", () => {
             ...f.manifest,
             release: { id: "eidnara-host-release", version: "0.2.0" },
         });
-        expect(() => prepare(f, true)).toThrow(/release identity/);
-
-        writeManifest(f, { ...f.manifest, mode: "development" });
         expect(() => prepare(f, true)).toThrow(/release identity/);
 
         writeManifest(f, { ...f.manifest, release_contract_sha256: "not-a-digest" });

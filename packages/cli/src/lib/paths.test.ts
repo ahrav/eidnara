@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os, { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { envFirstHomeDir, resolveOmpPaths } from "./paths";
+import { envFirstHomeDir, hasHomeDir, hasPiAgentDir, resolveOmpPaths } from "./paths";
 
 const ENV_KEYS = [
     "HOME",
@@ -55,8 +55,9 @@ describe("envFirstHomeDir", () => {
         "rejects a relative HOME instead of resolving under the working directory",
         () => {
             // A relative HOME is ignored in favor of the passwd entry; a relative passwd entry
-            // (Bun echoes HOME) is refused outright.
+            // (Bun echoes HOME) is refused outright, and the doctors' predicates report no home.
             setEnv("HOME", "rel/home");
+            setEnv("PI_CODING_AGENT_DIR", undefined);
             const resolved = envFirstHomeDir();
             expect(isAbsolute(resolved)).toBe(true);
             expect(resolved).not.toBe("rel/home");
@@ -66,6 +67,8 @@ describe("envFirstHomeDir", () => {
             const homedirSpy = spyOn(os, "homedir").mockImplementation(() => "rel/home");
             try {
                 expect(() => envFirstHomeDir()).toThrow("Relative home directory");
+                expect(hasHomeDir()).toBe(false);
+                expect(hasPiAgentDir()).toBe(false);
             } finally {
                 homedirSpy.mockRestore();
                 userInfoSpy.mockRestore();

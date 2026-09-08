@@ -213,7 +213,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -246,7 +246,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -293,7 +293,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -383,7 +383,7 @@ describe("runSetup", () => {
 
             const env: SetupEnvironment = {
                 detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-                getPiVersion: () => "0.74.0",
+                getPiVersion: () => "0.80.2",
                 getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
                 paths: {
                     getPiAgentConfigDir: () => agentDir,
@@ -441,7 +441,7 @@ describe("runSetup", () => {
 
             const env: SetupEnvironment = {
                 detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-                getPiVersion: () => "0.74.0",
+                getPiVersion: () => "0.80.2",
                 getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
                 paths: {
                     getPiAgentConfigDir: () => agentDir,
@@ -490,7 +490,7 @@ describe("runSetup", () => {
 
             const env: SetupEnvironment = {
                 detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-                getPiVersion: () => "0.74.0",
+                getPiVersion: () => "0.80.2",
                 getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
                 paths: {
                     getPiAgentConfigDir: () => agentDir,
@@ -543,7 +543,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -594,7 +594,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -651,7 +651,7 @@ describe("runSetup", () => {
         try {
             const env: SetupEnvironment = {
                 detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-                getPiVersion: () => "0.74.0",
+                getPiVersion: () => "0.80.2",
                 getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
                 paths: {
                     getPiAgentConfigDir: () => agentDir,
@@ -709,7 +709,7 @@ describe("runSetup", () => {
         try {
             const env: SetupEnvironment = {
                 detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-                getPiVersion: () => "0.74.0",
+                getPiVersion: () => "0.80.2",
                 getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
                 paths: {
                     getPiAgentConfigDir: () => agentDir,
@@ -760,7 +760,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => ["github-copilot/gpt-5.4"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -797,7 +797,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -851,7 +851,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => [
                 "anthropic/claude-haiku-4-5",
                 "anthropic/claude-sonnet-4-6",
@@ -900,7 +900,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             // The single available model makes the picker deterministic.
             getAvailableModels: () => ["github-copilot/gpt-5.4"],
             paths: {
@@ -934,7 +934,7 @@ describe("runSetup", () => {
         writeFileSync(join(agentDir, "settings.json"), "{ malformed");
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -975,7 +975,7 @@ describe("runSetup", () => {
         expect(prompts.messages.join("\n")).toContain("Pi not found");
     });
 
-    it("warns and exits when Pi version is below 0.74.0 and user declines", async () => {
+    it("warns and exits when Pi version is below 0.80.2 and user declines", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
         setConfigEnv(root, agentDir);
@@ -996,13 +996,13 @@ describe("runSetup", () => {
 
         expect(code).toBe(1);
         const log = prompts.messages.join("\n");
-        expect(log).toContain("Pi 0.69.0 is older than the required 0.74.0");
+        expect(log).toContain("Pi 0.69.0 is older than the required 0.80.2");
         expect(log).toContain("outro:Setup cancelled");
         expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(false);
         expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
     });
 
-    it("continues setup when Pi version is below 0.74.0 and user opts in", async () => {
+    it("continues setup when Pi version is below 0.80.2 and user opts in", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
         setConfigEnv(root, agentDir);
@@ -1024,8 +1024,36 @@ describe("runSetup", () => {
         expect(code).toBe(0);
         expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(true);
         expect(prompts.messages.join("\n")).toContain(
-            "Pi 0.69.0 is older than the required 0.74.0",
+            "Pi 0.69.0 is older than the required 0.80.2",
         );
+    });
+
+    it("asks for the same confirmation when Pi reports no version, and stops when declined", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
+            getPiVersion: () => null,
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [false] });
+
+        const code = await runSetup({ prompts, env });
+
+        expect(code).toBe(1);
+        const log = prompts.messages.join("\n");
+        expect(log).toContain(
+            "Pi did not report a version, so the required 0.80.2 cannot be verified",
+        );
+        expect(log).toContain("outro:Setup cancelled");
+        expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(false);
+        expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
     });
 });
 

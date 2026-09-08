@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
@@ -59,11 +67,13 @@ function makeReport(root: string, overrides: Partial<DiagnosticReport> = {}): Di
         conflicts: {
             hasConflict: false,
             reasons: [],
+            eidnaraEnabled: true,
             compactionEnabled: true,
             nativeCompaction: { auto: false, prune: false },
         },
         logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
         recentSessions: [],
+        sessionDiscovery: "ok",
         historianDumps: {
             byProject: [],
             legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
@@ -94,6 +104,22 @@ describe("readLogTailLines", () => {
         const fifo = join(root, "eidnara.log");
         execFileSync("mkfifo", [fifo]);
         expect(() => readLogTailLines(fifo)).toThrow("not a regular file");
+    });
+
+    it.if(process.platform !== "win32")("refuses a symlink instead of reading its target", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        const target = join(root, "private.txt");
+        writeFileSync(target, "secret line\n");
+        const link = join(root, "eidnara.log");
+        symlinkSync(target, link);
+        expect(() => readLogTailLines(link, 1024)).toThrow();
+    });
+
+    it("rejects a directory as not a regular file", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        expect(() => readLogTailLines(root, 1024)).toThrow("not a regular file");
     });
 
     it("returns every line of a file smaller than the byte cap", () => {
@@ -448,6 +474,65 @@ describe("bundleIssueReport session filter", () => {
     });
 });
 
+describe("bundleIssueReport session filter fail-closed records", () => {
+    it("drops an untagged record and a leading fragment when a session is selected", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-session-records-"));
+        tempDirs.push(root);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "    at leading-fragment-frame (/work/x.ts:1:1)",
+                "[2026-05-11T12:00:00.000Z] [eidnara][ses_other000] other failed: boom",
+                "Error: boom",
+                "    at other-session-frame (/work/b.ts:1:1)",
+                "[2026-05-11T12:00:01.000Z] [eidnara][ses_selected0] selected failed: mine",
+                "Error: mine",
+                "    at selected-session-frame (/work/a.ts:1:1)",
+                "[2026-05-11T12:00:02.000Z] untagged record",
+            ].join("\n"),
+        );
+        const report = makeReport(root, { logFile: { path: logPath, exists: true, sizeKb: 1 } });
+
+        const body = await bundleInTempCwd(root, report, "ses_selected0");
+
+        expect(body).not.toContain("leading-fragment-frame");
+        expect(body).not.toContain("boom");
+        expect(body).not.toContain("other-session-frame");
+        expect(body).toContain("Error: mine");
+        expect(body).toContain("selected-session-frame");
+        // An untagged record cannot be attributed, so it fails closed.
+        expect(body).not.toContain("untagged record");
+    });
+});
+
+describe("bundleIssueReport URL redaction in config values", () => {
+    it("redacts URL userinfo and query strings in config values", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-url-"));
+        tempDirs.push(root);
+        const report = makeReport(root, {
+            eidnaraConfig: {
+                path: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {
+                    embedding: {
+                        endpoint: "https://svc-user:s3cr3t-pass@embed.example.com/v1?access=abc123",
+                    },
+                },
+            },
+        });
+
+        const body = await bundleInTempCwd(root, report);
+
+        // The account name stays to identify the endpoint; the password and the query go.
+        expect(body).toContain(
+            "https://svc-user:<REDACTED:password>@embed.example.com/v1?<REDACTED:query>",
+        );
+        expect(body).not.toContain("s3cr3t-pass");
+        expect(body).not.toContain("abc123");
+    });
+});
+
 describe("renderDiagnosticsMarkdown conflict detection failure", () => {
     it("reports a detection error alongside the default no-conflict verdict", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-render-conflicts-"));
@@ -457,6 +542,7 @@ describe("renderDiagnosticsMarkdown conflict detection failure", () => {
                 conflicts: {
                     hasConflict: false,
                     reasons: [],
+                    eidnaraEnabled: true,
                     compactionEnabled: true,
                     nativeCompaction: { auto: false, prune: false },
                     detectionError: "uv_os_homedir returned ENOENT at /home/alice/.omo",
@@ -911,11 +997,13 @@ describe("bundleIssueReport secret redaction", () => {
                 conflicts: {
                     hasConflict: false,
                     reasons: [],
+                    eidnaraEnabled: true,
                     compactionEnabled: true,
                     nativeCompaction: { auto: false, prune: false },
                 },
                 logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
                 recentSessions: [],
+                sessionDiscovery: "ok",
                 historianDumps: {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
@@ -999,6 +1087,7 @@ describe("bundleIssueReport secret redaction", () => {
                 conflicts: {
                     hasConflict: false,
                     reasons: [],
+                    eidnaraEnabled: true,
                     compactionEnabled: true,
                     nativeCompaction: { auto: false, prune: false },
                 },

@@ -5,7 +5,6 @@ import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
-import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
@@ -28,6 +27,7 @@ import {
 import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse as parseJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
+import { compactionEnabledFor } from "./eidnara-modes";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
 import { codeFenceFor } from "./issue-body";
 import { detectOpenCodeInstallations } from "./opencode-detect";
@@ -97,6 +97,8 @@ export interface DiagnosticReport {
     conflicts: {
         hasConflict: boolean;
         reasons: string[];
+        /** With `enabled: false` no integration is a conflict, since the plugin skips every hook. */
+        eidnaraEnabled: boolean;
         /** `compactionEnabled` stores the resolved Eidnara compaction mode used by the writer and fixer. */
         compactionEnabled: boolean;
         /** `nativeCompaction` stores the resolved native OpenCode `auto` and `prune` states. */
@@ -120,6 +122,12 @@ export interface DiagnosticReport {
      * On Node-only runs, `recentSessions` is empty and diagnostics use the tmp-directory historian listing.
      */
     recentSessions: RecentSessionSummary[];
+    /**
+     * `unavailable` when the OpenCode database is missing or could not be
+     * opened or queried, so an empty `recentSessions` is a failure, not an
+     * absence, and the issue flow must ask before bundling log records.
+     */
+    sessionDiscovery: "ok" | "unavailable";
     /**
      * `historianDumps` groups historian dumps by project directory.
      * `legacyDumps` contains dumps from the harness-scoped tmp directory.
@@ -207,7 +215,11 @@ export function describeProbeText(text: string): string {
 }
 
 /** Without a resolvable user config directory (no home), only the layers that can be located count. */
-function pluginRegisteredInLoadedLayers(cwd: string): boolean {
+/**
+ * Whether any config layer the host loads — both user siblings, `OPENCODE_CONFIG`,
+ * `OPENCODE_CONFIG_CONTENT`, and the project files — registers the plugin.
+ */
+export function pluginRegisteredInLoadedLayers(cwd: string): boolean {
     let entries: unknown[];
     try {
         entries = pluginEntriesOutside(cwd);
@@ -276,7 +288,7 @@ function configHasPluginEntry(config: Record<string, unknown> | null, baseDir: s
  * The host merges every project file that exists, `.json` and `.jsonc` alike, so each one is
  * inspected; under `OPENCODE_DISABLE_PROJECT_CONFIG` it loads none of them.
  */
-function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
+export function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
     const report: ProjectOpenCodeConfigReport = { paths: [], hasPlugin: false, parseErrors: [] };
     if (projectConfigDisabled()) return report;
     for (const path of projectOpenCodeConfigPaths(cwd)) {
@@ -339,7 +351,12 @@ export function collectHistorianDumps(
  * The session list groups project directories and powers the `--issue` flow's session picker.
  *
  */
-async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
+type SessionDiscovery =
+    | { status: "ok"; sessions: RecentSessionSummary[] }
+    | { status: "unavailable"; sessions: [] };
+
+async function collectRecentSessions(): Promise<SessionDiscovery> {
+    const unavailable: SessionDiscovery = { status: "unavailable", sessions: [] };
     // `getDataDir` applies the daemon's rules: a relative `XDG_DATA_HOME` is ignored and an
     // absolute `HOME` is required, so a checkout cannot redirect the lookup. Without a data
     // directory or a database there are no sessions to report.
@@ -347,38 +364,28 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     try {
         candidates = resolveOpenCodeDatabaseCandidates(getDataDir());
     } catch {
-        return [];
+        return unavailable;
     }
-
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
-        return [];
-    }
-
-    type DatabaseCtor = new (
-        path: string,
-        opts?: { readonly?: boolean },
-    ) => {
-        prepare: (sql: string) => { all: () => unknown[] };
-        close: () => void;
-    };
-
-    let DatabaseClass: DatabaseCtor;
+    // The shared module picks `bun:sqlite` or `node:sqlite` for the running
+    // runtime and loads it at import time, so the import stays lazy: a Node
+    // without `node:sqlite` degrades to an unavailable list instead of failing
+    // the whole doctor.
+    let DatabaseClass: typeof import("@eidnara/opencode/shared/sqlite").Database;
     try {
-        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
-            Database: DatabaseCtor;
-        };
-        DatabaseClass = mod.Database;
+        DatabaseClass = (await import("@eidnara/opencode/shared/sqlite")).Database;
     } catch {
-        return [];
+        return unavailable;
     }
 
     // A candidate that is not an OpenCode session database (a stray `opencode-backup.db`, a
-    // corrupt file) fails the query; the next-ranked candidate is tried instead.
+    // corrupt file) fails the query; the next-ranked candidate is tried instead. The append-only
+    // log outlives the database, so with no readable candidate no record can be attributed to a
+    // session and the issue flow must ask before bundling.
     for (const candidate of candidates) {
-        const rows = querySessions(DatabaseClass, candidate);
-        if (rows !== null) return rows;
+        const sessions = querySessions(DatabaseClass, candidate);
+        if (sessions !== null) return { status: "ok", sessions };
     }
-    return [];
+    return unavailable;
 }
 
 function querySessions(
@@ -405,7 +412,7 @@ function querySessions(
             title: unknown;
             time_updated: unknown;
         }>;
-        return rows.flatMap((row) => {
+        const sessions = rows.flatMap((row) => {
             const sessionId = typeof row.id === "string" ? row.id : null;
             const directory = typeof row.directory === "string" ? row.directory : null;
             if (!sessionId || !directory) return [];
@@ -416,6 +423,7 @@ function querySessions(
                     : "";
             return [{ sessionId, title, directory, lastActiveAt }];
         });
+        return sessions;
     } catch {
         return null;
     } finally {
@@ -429,7 +437,7 @@ function querySessions(
  * With `HOME` and `XDG_CONFIG_HOME` unset for a UID without a passwd entry, every user-level path
  * resolution throws; the report then carries empty user-level paths and the error text.
  */
-function resolveUserLevelPaths(): { configPaths: ConfigPaths; error?: string } {
+export function resolveUserLevelPaths(): { configPaths: ConfigPaths; error?: string } {
     try {
         return { configPaths: detectConfigPaths() };
     } catch (error) {
@@ -479,8 +487,11 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
     }
 
     let compactionEnabled = false;
+    let eidnaraEnabled = true;
     try {
-        compactionEnabled = isCompactionEnabled(loadPluginConfig(cwd));
+        const config = loadPluginConfig(cwd);
+        eidnaraEnabled = config.enabled !== false;
+        compactionEnabled = compactionEnabledFor(config);
     } catch (error) {
         console.warn(
             `[eidnara] Could not load Eidnara config to resolve compaction mode; ` +
@@ -502,7 +513,11 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
             nativeCompaction: { auto: false, prune: false },
         };
     }
-    const recentSessions = await collectRecentSessions();
+    // With `enabled: false` the plugin skips every hook, so DCP and the OMO
+    // hooks are not conflicts; the doctor skips this detector in that mode too.
+    const reasons = eidnaraEnabled ? conflictResult.reasons : [];
+    const discovery = await collectRecentSessions();
+    const recentSessions = discovery.sessions;
     const opencodeInstallations = describeOpenCodeInstallations(detectOpenCodeInstallations());
     const activeInstallation = opencodeInstallations[0];
     let openCodeInstallKind: "cli" | "desktop" | "none" = "none";
@@ -535,8 +550,9 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         eidnaraConfig,
         projectConfig,
         conflicts: {
-            hasConflict: conflictResult.hasConflict,
-            reasons: conflictResult.reasons,
+            hasConflict: reasons.length > 0,
+            reasons,
+            eidnaraEnabled,
             compactionEnabled,
             nativeCompaction: conflictResult.nativeCompaction,
             ...(conflictsError ? { detectionError: conflictsError } : {}),
@@ -547,6 +563,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
             sizeKb: Math.round((logFileSize ?? 0) / 1024),
         },
         recentSessions,
+        sessionDiscovery: discovery.status,
         historianDumps: collectHistorianDumps(recentSessions),
     };
 }
@@ -668,6 +685,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
                 ? ` (detection failed: ${sanitizeDiagnosticText(report.conflicts.detectionError)})`
                 : ""
         }`,
+        `- Eidnara enabled: ${report.conflicts.eidnaraEnabled}`,
         `- Eidnara compaction mode: ${report.conflicts.compactionEnabled ? "on" : "off"}`,
         `- Native compaction: auto=${report.conflicts.nativeCompaction?.auto ?? "unknown"}, prune=${report.conflicts.nativeCompaction?.prune ?? "unknown"}`,
         ...openCodeInstallationTable,

@@ -71,10 +71,36 @@ function isInsidePackage(file: string): boolean {
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+/**
+ * npm's `files` mixes literal include paths with `!`-prefixed exclusion globs. The exclusions
+ * here use only `**` and `*`, which map onto a regular expression directly.
+ */
+function exclusionPattern(entry: string): RegExp {
+    const source = entry
+        .slice(1)
+        .split("**/")
+        .map((segment) => segment.split("*").map(escapeRegExp).join("[^/]*"))
+        .join("(?:.*/)?");
+    return new RegExp(`^${source}(?:/|$)`);
+}
+
+function escapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function includeEntries(files: readonly string[]): string[] {
+    return files.filter((entry) => !entry.startsWith("!"));
+}
+
+function excludePatterns(files: readonly string[]): RegExp[] {
+    return files.filter((entry) => entry.startsWith("!")).map(exclusionPattern);
+}
+
 /** npm ships `package.json` regardless of `files`. */
 function isShipped(rel: string, files: readonly string[]): boolean {
     if (rel === "package.json") return true;
-    return files.some((entry) => rel === entry || rel.startsWith(`${entry}/`));
+    if (excludePatterns(files).some((pattern) => pattern.test(rel))) return false;
+    return includeEntries(files).some((entry) => rel === entry || rel.startsWith(`${entry}/`));
 }
 
 type ImportGraph = {
@@ -129,10 +155,20 @@ describe("packed TUI import graph", () => {
         expect(graph.reached).toContain("src/tui-compiled/data/session-rpc.ts");
     });
 
-    test("`files` entries are literal paths", () => {
-        // `isShipped` matches `files` entries as literal paths; npm glob entries are unsupported.
-        const globEntries = packageJson.files.filter((entry) => /[*?[\]{}!]/.test(entry));
-        expect(globEntries).toEqual([]);
+    test("`files` include entries are literal paths and exclusions use only `*` globs", () => {
+        // `isShipped` matches include entries as literal paths and exclusions through
+        // `exclusionPattern`, which understands `**` and `*` but no other glob syntax.
+        const globIncludes = includeEntries(packageJson.files).filter((entry) =>
+            /[*?[\]{}!]/.test(entry),
+        );
+        expect(globIncludes).toEqual([]);
+        const unsupportedExclusions = packageJson.files.filter(
+            (entry) => entry.startsWith("!") && /[?[\]{}]/.test(entry),
+        );
+        expect(unsupportedExclusions).toEqual([]);
+        expect(isShipped("src/shared/data-path.test.ts", packageJson.files)).toBe(false);
+        expect(isShipped("src/shared/__tests__/fixture.ts", packageJson.files)).toBe(false);
+        expect(isShipped("src/shared/data-path.ts", packageJson.files)).toBe(true);
     });
 
     test("every reachable module is inside the package and covered by `files`", () => {

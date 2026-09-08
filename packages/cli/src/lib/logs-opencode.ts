@@ -1,4 +1,3 @@
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import {
@@ -6,7 +5,10 @@ import {
     describeProbeText,
     renderDiagnosticsMarkdown,
 } from "./diagnostics-opencode";
+import { writeNewFile } from "./fs-utils";
+import { scopeDumpBucketsToSession } from "./historian-dumps";
 import { capBodyToGithubLimit, codeFenceFor, extractRecentErrors } from "./issue-body";
+import { filterLogRecords } from "./log-records";
 import { readLogTailLines } from "./log-tail";
 
 /**
@@ -75,29 +77,20 @@ function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
 }
 
 /**
- * Each record starts with a bracketed ISO timestamp. Stack frames following an
- * `Error` record have no session tag, so they inherit that record's filter decision.
- */
-const RECORD_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T/;
-
-/**
- * A scoped bundle keeps a record only when it carries at least one session tag and every tag
- * is the selected session, matching the Pi filter. Untagged records (global plugin lifecycle,
- * other projects) are excluded rather than assumed to belong to the session.
+ * With a session selected, only records whose first line names that session
+ * survive. An untagged record cannot be attributed, and the plugin writes some
+ * per-session failures without a tag, so it fails closed rather than into the
+ * bundle. Stack frames following an `Error` record have no session tag and
+ * inherit that record's decision.
  */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
     // Word boundaries prevent matching `ses_` embedded in longer identifiers.
-    const sessionTagPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
-    // Lines before the first record start are continuations of a record the tail read cut off,
-    // so their session is unknown and they are dropped.
-    let keepRecord = false;
-    return lines.filter((line) => {
-        if (RECORD_START_PATTERN.test(line)) {
-            const tags = line.match(sessionTagPattern);
-            keepRecord = tags?.every((id) => id === sessionId) ?? false;
-        }
-        return keepRecord;
+    const sessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    return filterLogRecords(lines, (firstLine) => {
+        const matches = firstLine.match(sessionPattern);
+        if (!matches) return false;
+        return matches.every((id) => id === sessionId);
     });
 }
 
@@ -111,13 +104,7 @@ function scopeReportToSession(
         recentSessions: report.recentSessions.filter((session) => session.sessionId === sessionId),
         historianDumps: {
             ...report.historianDumps,
-            byProject: report.historianDumps.byProject
-                .filter((bucket) => bucket.sessionIds.includes(sessionId))
-                .map((bucket) => ({
-                    ...bucket,
-                    primarySessionId: sessionId,
-                    sessionIds: [sessionId],
-                })),
+            byProject: scopeDumpBucketsToSession(report.historianDumps.byProject, sessionId),
         },
     };
 }
@@ -199,27 +186,9 @@ export async function bundleIssueReport(
 
     const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
-    const path = writeBundleExclusively(
+    const path = writeNewFile(
         join(process.cwd(), `eidnara-issue-${formatTimestamp(new Date())}`),
         `${bodyMarkdown}\n`,
     );
     return { path, bodyMarkdown };
-}
-
-/**
- * Two bundles created in the same second share a timestamp; exclusive creation plus a
- * numeric suffix keeps the earlier one intact.
- */
-function writeBundleExclusively(basePath: string, contents: string): string {
-    for (let attempt = 0; ; attempt += 1) {
-        const path = attempt === 0 ? `${basePath}.md` : `${basePath}-${attempt + 1}.md`;
-        try {
-            // Owner-only: the bundle holds the user's prose and log excerpts, which sanitization
-            // cannot fully vouch for.
-            writeFileSync(path, contents, { flag: "wx", mode: 0o600 });
-            return path;
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        }
-    }
 }

@@ -8,6 +8,7 @@ import {
     describeProseLength,
     hasShareabilitySensitiveText,
     isSecretKey,
+    keepsScalarValue,
     redactSecretText,
     SECRET_QUALIFIERS,
     SECRET_WORDS,
@@ -877,6 +878,22 @@ describe("sanitizeConfigValue record keys", () => {
                 },
             },
         });
+    });
+});
+
+describe("keepsScalarValue", () => {
+    test("keeps counts under token/key names and booleans anywhere, but not a number under a password-like key", () => {
+        expect(keepsScalarValue("max_tokens", "4096")).toBe(true);
+        expect(keepsScalarValue("maxTokens", "4096")).toBe(true);
+        expect(keepsScalarValue("api_key", "42")).toBe(true);
+        expect(keepsScalarValue("execute_threshold_tokens", "200000")).toBe(true);
+        expect(keepsScalarValue("password", "true")).toBe(true);
+        expect(keepsScalarValue("secret", "null")).toBe(true);
+        expect(keepsScalarValue("password", "123456")).toBe(false);
+        expect(keepsScalarValue("db_passwd", "987654")).toBe(false);
+        expect(keepsScalarValue("pin_secret", "4242")).toBe(false);
+        expect(keepsScalarValue("ldap_credential", "7")).toBe(false);
+        expect(keepsScalarValue("api_key", "sk-live")).toBe(false);
     });
 });
 

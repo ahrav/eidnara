@@ -1,0 +1,13 @@
+{
+    "extends": "./tsconfig.json",
+    "exclude": [
+        "node_modules",
+        "dist",
+        "scripts",
+        "src/**/*.test.ts",
+        "src/**/__tests__/**",
+        "src/tui/**",
+        "src/tui-compiled/**",
+        "src/testing/**"
+    ]
+}

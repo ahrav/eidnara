@@ -1,24 +1,71 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { join } from "node:path";
+
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import {
     type CommandInvocation,
     getCommandInvocation,
     invocationSpawnOptions,
 } from "./command-invocation";
 import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
-import { absoluteHomeDir } from "./paths";
+import { absoluteHomeDir, envFirstHomeDir } from "./paths";
 
 export interface PiBinaryInfo {
     path: string;
     source: "path" | "home";
 }
 
-export const PI_PACKAGE_SOURCE = "npm:@eidnara/pi";
+export const PI_PACKAGE_NAME = "@eidnara/pi";
+export const PI_PACKAGE_SOURCE = `npm:${PI_PACKAGE_NAME}`;
 
-/** A pinned source such as `npm:@eidnara/pi@0.1.0` still names the plugin package. */
-export function matchesPiPackageSource(entry: unknown): boolean {
-    if (typeof entry !== "string") return false;
-    return entry === PI_PACKAGE_SOURCE || entry.startsWith(`${PI_PACKAGE_SOURCE}@`);
+/** The `source` string of a Pi `packages[]` entry, or `null` for an unrecognized shape. */
+export function piPackageEntrySource(entry: unknown): string | null {
+    if (typeof entry === "string") return entry;
+    if (
+        entry &&
+        typeof entry === "object" &&
+        typeof (entry as { source?: unknown }).source === "string"
+    ) {
+        return (entry as { source: string }).source;
+    }
+    return null;
+}
+
+/** Pi treats sources without these prefixes as filesystem paths. */
+const NON_LOCAL_SOURCE_PREFIXES = ["npm:", "git:", "github:", "http:", "https:", "ssh:"];
+
+/** Pi expands `~`, accepts `file://` URLs, and resolves relative paths against the scope directory. */
+function resolveLocalPackagePath(source: string, baseDir: string): string {
+    const trimmed = source.trim();
+    if (trimmed === "~") return envFirstHomeDir();
+    if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+        return join(envFirstHomeDir(), trimmed.slice(2));
+    }
+    if (/^file:\/\//.test(trimmed)) return fileURLToPath(trimmed);
+    return resolve(baseDir, trimmed);
+}
+
+/** Treats versioned npm specs and local checkouts of `@eidnara/pi` as the same package to prevent duplicate plugin loads. */
+export function isEidnaraPiPackageEntry(entry: unknown, baseDir: string): boolean {
+    const source = piPackageEntrySource(entry);
+    if (source === null) return false;
+    const trimmed = source.trim();
+    if (trimmed.startsWith("npm:")) {
+        const spec = trimmed.slice("npm:".length).trim();
+        const name = /^(@?[^@]+(?:\/[^@]+)?)(?:@.+)?$/.exec(spec)?.[1];
+        return name === PI_PACKAGE_NAME;
+    }
+    if (NON_LOCAL_SOURCE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return false;
+    try {
+        // A FIFO or directory at the manifest path is rejected instead of blocking the read.
+        const manifest = JSON.parse(
+            readRegularFileSync(join(resolveLocalPackagePath(trimmed, baseDir), "package.json")),
+        ) as { name?: unknown };
+        return manifest.name === PI_PACKAGE_NAME;
+    } catch {
+        return false;
+    }
 }
 
 const PI_BINARY_ENV = "EIDNARA_PI_BINARY";
@@ -27,7 +74,7 @@ export function getPiCommandInvocation(piPath: string, args: string[]): CommandI
     return getCommandInvocation(piPath, args, PI_BINARY_ENV);
 }
 
-/** The installer's `~/.pi/bin` comes first; the package-manager launchers follow. */
+/** The installer's `~/.pi/bin` comes first; the package-manager launchers follow. Without a home only the system launchers remain. */
 export function getPiFallbackCandidates(
     platform: NodeJS.Platform,
     home: string | undefined,
@@ -60,6 +107,8 @@ export function getPiVersion(piPath: string, timeout = 10_000): string | null {
             timeout,
             ...invocationSpawnOptions(invocation),
         });
+        // A failing executable can print a dependency's version to stderr;
+        // only a clean exit's output is a Pi version.
         if (result.error || result.status !== 0) return null;
         const stdout = result.stdout?.trim();
         if (stdout) return stdout;
@@ -144,3 +193,10 @@ export function getAvailableModels(piPath: string): string[] {
     }
     return [];
 }
+
+/**
+ * The lowest Pi release the CLI certifies. It is the floor of the
+ * `@earendil-works/pi-coding-agent` peer range that `@eidnara/pi` declares;
+ * `pi-helpers.test.ts` fails when the two drift apart.
+ */
+export const PI_MINIMUM_VERSION = "0.80.2";

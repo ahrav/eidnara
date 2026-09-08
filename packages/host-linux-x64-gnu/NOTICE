@@ -1,0 +1,14 @@
+Third-party notices for @eidnara/host-linux-x64-gnu
+====================================================
+
+- eidnara-host and the shm-native addon (this repository) — MIT. See LICENSE.
+- ONNX Runtime (CPU shared library, payload/ort/) — MIT.
+  Copyright (c) Microsoft Corporation.
+  https://github.com/microsoft/onnxruntime/blob/main/LICENSE
+- gte-modernbert-base-f16 model, tokenizer, and configuration files
+  (payload/model/gte-modernbert-base-f16/) — Apache-2.0.
+  https://huggingface.co/Alibaba-NLP/gte-modernbert-base
+
+The ONNX Runtime and model slots are populated only from inputs recorded in
+release/production-inputs.lock.json. No third-party bytes are committed to
+this repository.
