@@ -45,7 +45,9 @@ export function newConnectionToken(): object {
 
 /** True when `handle` was created for the connection identified by `token`. */
 export function belongsToConnection(handle: RouteHandle, token: object): boolean {
-    return connectionToken.get(handle) === token;
+    const owner = connectionToken.get(handle);
+    // An unregistered handle has no owner; it must not match a nullish token.
+    return owner !== undefined && owner === token;
 }
 
 /* */

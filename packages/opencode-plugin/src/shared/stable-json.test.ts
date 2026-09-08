@@ -62,6 +62,16 @@ describe("stableStringify", () => {
         expect(stableStringify([])).toBe("[]");
     });
 
+    test("sparse arrays keep their length instead of collapsing to []", () => {
+        expect(stableStringify(new Array(1))).toBe("[undefined]");
+        expect(stableStringify(new Array(2))).toBe("[undefined,undefined]");
+        // A hole between values serializes like an explicit `undefined` element.
+        const holed: unknown[] = [1];
+        holed[2] = 3;
+        expect(stableStringify(holed)).toBe(stableStringify([1, undefined, 3]));
+        expect(stableStringify(new Array(1))).not.toBe(stableStringify([]));
+    });
+
     test("special string characters JSON-escaped in keys", () => {
         const input = { 'with "quotes"': 1 };
         expect(stableStringify(input)).toBe('{"with \\"quotes\\"":1}');

@@ -18,6 +18,7 @@ import {
     type HostClientOptions,
     isConsumerReconnectTransient,
     isHostCallError,
+    isRetryableRouteOpenCode,
     Priority,
     processHostClient,
     type RouteHandle,
@@ -51,6 +52,8 @@ const SERIAL_LANE_MAX_WAITERS = 16;
 const SERIAL_LANE_MAX_WAITERS_PER_SESSION = 8;
 const SERIAL_LANE_MIN_REMAINING_MS = 25;
 const CANONICAL_ROOT_CACHE_MAX_ENTRIES = 256;
+const ROUTE_OPEN_RETRY_BASE_MS = 100;
+const ROUTE_OPEN_RETRY_CAP_MS = 2_000;
 
 function getDefaultConnectionFile(): string {
     // Dial the lifecycle resolver's path exactly; otherwise a ready demand can target a different daemon. Use application storage only when no lifecycle root resolves.
@@ -76,7 +79,6 @@ export interface HostModuleTransportOptions {
     connectionFile?: string;
     moduleId?: string;
     requestTimeoutMs?: number;
-    routeSessionPrefix?: string;
     demandStart?: ManagedDemandStart;
 }
 
@@ -86,6 +88,14 @@ export interface LazyManagedDemandStartOptions {
 }
 
 let configuredManagedDemandStart: ManagedDemandStart | undefined;
+
+function snapshotCredentialSource(
+    env: Record<string, string | undefined>,
+): Readonly<Record<string, string | undefined>> {
+    const snapshot: Record<string, string | undefined> = {};
+    for (const name of BROCA_CREDENTIAL_NAMES) snapshot[name] = env[name];
+    return Object.freeze(snapshot);
+}
 
 function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
     const hash = createHash("sha256").update("eidnara-host-route-credentials-v1");
@@ -243,14 +253,16 @@ export function createLazyManagedDemandStart(
             declaringModuleUrl: options.declaringModuleUrl,
             parentPackageName: options.parentPackageName,
         });
+        // Envelope construction is synchronous preparation, so it is measured before the residual is taken.
+        const startupEnvelope =
+            request.startupEnvelope ?? buildManagedStartupEnvelope(options.parentPackageName);
         const preparationMs = performance.now() - startedAt;
         const deadlineMs =
             request.deadlineMs === undefined ? undefined : request.deadlineMs - preparationMs;
         const outcome = await policy.demandStart({
             ...request,
             ...(deadlineMs === undefined ? {} : { deadlineMs }),
-            startupEnvelope:
-                request.startupEnvelope ?? buildManagedStartupEnvelope(options.parentPackageName),
+            startupEnvelope,
         });
         return {
             ok: outcome.result.ok,
@@ -303,6 +315,16 @@ function isStaleOrDeadRouteFailure(error: unknown): boolean {
     });
 }
 
+/** Request-local `not_sent` codes; they do not invalidate the connection or route. */
+const LOCAL_NOT_SENT_CODES = new Set([
+    "memory_cap",
+    "ring_full",
+    "deadline_expired",
+    "aborted",
+    "control_body_too_large",
+    "invalid_max_stream_items",
+]);
+
 function isConnectionFailure(error: unknown): boolean {
     // One caller's own deadline or abort is not a connection failure. It carries ETIMEDOUT so
     // callers classifying retryability on `code` see a timeout, but treating it as a
@@ -310,6 +332,13 @@ function isConnectionFailure(error: unknown): boolean {
     // which evicts the still-connecting owner's candidate — one waiter's deadline would
     // abort the connect for every waiter. The backoff path already excludes this class.
     if (error instanceof WaiterDetachedError) {
+        return false;
+    }
+    if (
+        isHostCallError(error) &&
+        error.kind === "not_sent" &&
+        LOCAL_NOT_SENT_CODES.has(error.code ?? "")
+    ) {
         return false;
     }
     if (
@@ -335,7 +364,6 @@ function isConnectionFailure(error: unknown): boolean {
                 "deadline_exceeded_no_drop_observed",
                 "connection_dropped",
                 DAEMON_GENERATION_CHANGED_CODE,
-                "EIDNARA_HOST_CONNECTION_BACKOFF",
             ].includes(code) ||
             /\bclient closed\b|\bconnection closed\b|\bclosed the connection\b/i.test(message)
         );
@@ -368,6 +396,20 @@ function isStaleRouteHandleFailure(error: unknown): boolean {
 }
 
 /** Attach a bounded cleanup ticket when caller abort can race a possible send. */
+/** Rejects with the signal's reason as soon as it aborts; `operation` itself keeps running. */
+function untilAborted<T>(operation: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+    if (!signal) return operation;
+    const abortError = (): unknown => signal.reason ?? new Error("module transport call aborted");
+    if (signal.aborted) return Promise.reject(abortError());
+    return new Promise<T>((resolve, reject) => {
+        const onAbort = (): void => reject(abortError());
+        signal.addEventListener("abort", onAbort, { once: true });
+        operation.then(resolve, reject).finally(() => {
+            signal.removeEventListener("abort", onAbort);
+        });
+    });
+}
+
 function cleanupTicketOf(error: unknown): Promise<void> | null {
     if (!isRecord(error) || error.name !== "HostCallError") return null;
     const cleanup = (error as { cleanup?: unknown }).cleanup;
@@ -433,11 +475,14 @@ interface SerialLaneWaiter {
 interface SerialLane {
     active: boolean;
     waiters: SerialLaneWaiter[];
+    /** Incremented by `closeSession`; a call that observes a change must not replay its body. */
+    closeEpoch: number;
 }
 
 interface OpeningRoute {
     client: HostClient;
     generation: number;
+    credentialSourceVersion?: string;
     state: {
         /** `closeSession` sets `closed` during an in-flight open; the open then skips caching its route. */
         closed: boolean;
@@ -451,7 +496,6 @@ export class HostModuleTransport {
     private readonly demandStart: ManagedDemandStart | undefined;
     private readonly moduleId: string;
     private readonly requestTimeoutMs: number;
-    private readonly routeSessionPrefix: string;
     private client: HostClient | null = null;
     private clientCacheOptions: HostClientOptions | null = null;
     private routes = new Map<string, CachedRoute>();
@@ -479,7 +523,6 @@ export class HostModuleTransport {
         connectionFileOrOptions?: string | HostModuleTransportOptions,
         moduleId = DEFAULT_MODULE_ID,
         requestTimeoutMs = MODULE_SEND_TIMEOUT_MS,
-        routeSessionPrefix = "",
     ) {
         const options =
             typeof connectionFileOrOptions === "object"
@@ -488,13 +531,11 @@ export class HostModuleTransport {
                       connectionFile: connectionFileOrOptions,
                       moduleId,
                       requestTimeoutMs,
-                      routeSessionPrefix,
                   };
         this.connectionOrigin = resolveConnectionOrigin({ connectionFile: options.connectionFile });
         this.connectionFile = options.connectionFile ?? getDefaultConnectionFile();
         this.moduleId = options.moduleId ?? DEFAULT_MODULE_ID;
         this.requestTimeoutMs = options.requestTimeoutMs ?? MODULE_SEND_TIMEOUT_MS;
-        this.routeSessionPrefix = options.routeSessionPrefix ?? "";
         this.demandStart = options.demandStart ?? configuredManagedDemandStart;
     }
 
@@ -513,6 +554,14 @@ export class HostModuleTransport {
     private connectionChangedError(detail: string): Error & { code?: string } {
         const error = new Error(detail) as Error & { code?: string };
         error.code = "ECONNRESET";
+        return error;
+    }
+
+    private sessionClosedError(sessionId: string): Error & { code?: string } {
+        const error = new Error(
+            `module transport session ${sessionId} was closed while the call was in flight`,
+        ) as Error & { code?: string };
+        error.code = "session_closed";
         return error;
     }
 
@@ -609,7 +658,11 @@ export class HostModuleTransport {
         if (deadline.remainingMs() < SERIAL_LANE_MIN_REMAINING_MS) {
             return Promise.reject(this.laneTimeoutError());
         }
-        const lane = this.sessionLanes.get(sessionId) ?? { active: false, waiters: [] };
+        const lane: SerialLane = this.sessionLanes.get(sessionId) ?? {
+            active: false,
+            waiters: [],
+            closeEpoch: 0,
+        };
         this.sessionLanes.set(sessionId, lane);
         if (!lane.active && lane.waiters.length === 0) {
             lane.active = true;
@@ -661,18 +714,27 @@ export class HostModuleTransport {
         signal?: AbortSignal;
         /** `call()` does not retry after reconnecting; callers rebuild for the new connection. */
         generationSensitive?: boolean;
+        /** The connection generation the body was built under. Checked after lane admission and route settlement, right before the send, so a turnover that lands while this call waits in the session lane returns `connection_generation_changed` instead of delivering the body to the new connection. commentlint: allow(JUDGE) */
+        expectedGeneration?: number;
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
     }): Promise<unknown> {
+        // Deadline and wrapup policy key off `args.method`, so the body the daemon reads must name the same method.
+        if (!isRecord(args.body) || args.body.method !== args.method) {
+            throw new TypeError(
+                `module transport body must carry method ${JSON.stringify(args.method)}`,
+            );
+        }
         const wrapupInFlight = (this.wrapupSessions.get(args.sessionId) ?? 0) > 0;
+        // The transform cap is a hard ceiling: a caller-supplied `timeoutMs` shortens it but never lifts it, because the transform runs on the prompt path and its send must settle within one bounded budget.
         const operationTimeoutMs =
-            args.timeoutMs ??
-            (args.method === "session.wrapup" ||
-            (args.method === "session.status" && wrapupInFlight)
-                ? MAX_WRAPUP_REQUEST_BUDGET_MS
-                : args.method === "transform"
-                  ? Math.min(this.requestTimeoutMs, TRANSFORM_SEND_TIMEOUT_MS)
-                  : this.requestTimeoutMs);
+            args.method === "transform"
+                ? Math.min(args.timeoutMs ?? this.requestTimeoutMs, TRANSFORM_SEND_TIMEOUT_MS)
+                : (args.timeoutMs ??
+                  (args.method === "session.wrapup" ||
+                  (args.method === "session.status" && wrapupInFlight)
+                      ? MAX_WRAPUP_REQUEST_BUDGET_MS
+                      : this.requestTimeoutMs));
         // `operationDeadline` is an immutable absolute deadline created before session-lane admission.
         // `operationDeadline` is shared by connect, route open, and request.
         // The deadline covers admission, connect, route opening, request, and permitted replay; cleanup uses the facade's separate bounded ticket.
@@ -690,6 +752,10 @@ export class HostModuleTransport {
             if (remaining > 0) this.wrapupSessions.set(args.sessionId, remaining);
             else this.wrapupSessions.delete(args.sessionId);
         };
+        // The epoch is read before lane admission so a close that lands while this call is queued is observed.
+        const closeEpoch = this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0;
+        const sessionClosedSinceStart = (): boolean =>
+            (this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0) !== closeEpoch;
         let releaseLane: (() => void) | undefined;
         try {
             releaseLane = await this.acquireCorrectnessLane(args.sessionId, args.signal, deadline);
@@ -716,9 +782,32 @@ export class HostModuleTransport {
                         args.projectRoot,
                         deadline,
                         args.signal,
+                        sessionClosedSinceStart,
                     );
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
+                    }
+                    // A close that landed during connection setup or route opening must stop the body before it is written.
+                    if (sessionClosedSinceStart()) {
+                        throw this.sessionClosedError(args.sessionId);
+                    }
+                    // The facade admits synchronously, so an already-expired budget is refused here rather than after the body is on the wire.
+                    if (deadline.isExpired()) {
+                        throw new HostCallError(
+                            "not_sent",
+                            "module transport deadline expired before the request was written",
+                            "deadline_expired",
+                        );
+                    }
+                    if (
+                        args.expectedGeneration !== undefined &&
+                        ensuredRoute.generation !== args.expectedGeneration
+                    ) {
+                        return {
+                            transport_status: "connection_generation_changed",
+                            previous_generation: args.expectedGeneration,
+                            current_generation: ensuredRoute.generation,
+                        } satisfies ModuleTransportGenerationChangedResult;
                     }
                     requestInvoked = true;
                     const response = await this.beforeDeadline(
@@ -765,29 +854,43 @@ export class HostModuleTransport {
                     const replayEligible = unknownChannel || provenNotSent;
                     const previousGeneration =
                         ensuredRoute?.generation ?? this.connectionGeneration;
+                    let turnedOver = false;
                     if (unknownChannel || isStaleRouteHandleFailure(error)) {
                         // Route-level proof evicts the dead route while retaining the connection; the facade reconnects internally when its generation retires.
                         if (ensuredRoute) {
                             this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
+                            turnedOver = true;
                         }
                     } else if (cleanupTicket === null && isConnectionFailure(error)) {
                         // A possible send invalidates the route without resending the body.
                         // A post-write abort relies on the bounded cleanup ticket instead of resending a possibly sent body.
                         // After a possible send, a post-write abort uses Cancel and the cleanup ticket rather than resending the body.
+                        let teardown: Promise<void>;
                         if (ensuredRoute) {
                             this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
-                            this.invalidateConnection(ensuredRoute.client);
+                            teardown = this.invalidateConnection(ensuredRoute.client);
                         } else {
-                            this.invalidateConnection();
+                            teardown = this.invalidateConnection();
                         }
+                        turnedOver = true;
+                        // A body that may have reached the daemon has no cleanup ticket of its own, so the superseded connection's teardown fences the lane until the daemon has seen the connection go.
+                        if (!provenNotSent) cleanupTicket = teardown;
+                    }
+                    // A local close wins over recovery: neither a rebuild hint nor a replay may dispatch this body after `closeSession`.
+                    if (sessionClosedSinceStart()) {
+                        throw this.sessionClosedError(args.sessionId);
                     }
                     if (replayEligible && args.generationSensitive && !callerAborted) {
                         // Recovery does not cross a route or connection generation.
-                        return {
-                            transport_status: "connection_generation_changed",
-                            previous_generation: previousGeneration,
-                            current_generation: this.connectionGeneration,
-                        } satisfies ModuleTransportGenerationChangedResult;
+                        if (turnedOver || previousGeneration !== this.connectionGeneration) {
+                            return {
+                                transport_status: "connection_generation_changed",
+                                previous_generation: previousGeneration,
+                                current_generation: this.connectionGeneration,
+                            } satisfies ModuleTransportGenerationChangedResult;
+                        }
+                        // A pre-send refusal with no route or connection turnover is the caller's real failure.
+                        throw error;
                     }
                     if (replayEligible && !replaySpent && !callerAborted && !deadline.isExpired()) {
                         replaySpent = true;
@@ -820,6 +923,8 @@ export class HostModuleTransport {
     closeSession(sessionId: string): void {
         const client = this.client;
         const prefix = `${sessionId}\0`;
+        const lane = this.sessionLanes.get(sessionId);
+        if (lane) lane.closeEpoch += 1;
         // Closing the session fences in-flight opens so a late `route.open` success cannot repopulate the cache.
         let closedOpenings = false;
         for (const [key, opening] of [...this.routeOpenings.entries()]) {
@@ -834,13 +939,13 @@ export class HostModuleTransport {
             if (client) {
                 void client.closeRoute(cachedRoute.route).catch((error: unknown) => {
                     if (this.client === client && isConnectionFailure(error)) {
-                        this.invalidateConnection(client);
+                        void this.invalidateConnection(client);
                     }
                 });
             }
         }
-        if (routes.length === 0 && !closedOpenings && this.sessionLanes.get(sessionId)?.active) {
-            this.invalidateConnection(client);
+        if (routes.length === 0 && !closedOpenings && lane?.active) {
+            void this.invalidateConnection(client);
         }
     }
 
@@ -849,6 +954,7 @@ export class HostModuleTransport {
         rawProjectRoot: string,
         deadline: Deadline = Deadline.start(this.requestTimeoutMs),
         signal?: AbortSignal,
+        sessionClosed: () => boolean = () => false,
     ): Promise<EnsuredRoute> {
         // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
         const projectRoot = this.canonicalRoot(rawProjectRoot);
@@ -858,6 +964,10 @@ export class HostModuleTransport {
         const credentialSourceVersion = managedCredentialSourceVersion(process.env);
         // The cache reads a route only after connection settlement, and its generation must match the current connection.
         const { client, expectedDaemonId } = await this.ensureConnected(deadline, signal);
+        // `closeSession` fences a registered opening through `state.closed`; a close that landed before registration is observed here, so no replacement route is opened for a closed session.
+        if (sessionClosed()) {
+            throw this.sessionClosedError(sessionId);
+        }
         // Capturing expectedDaemonId prevents concurrent invalidation from changing the connection fence to no expectation during later awaits.
         const fence = expectedDaemonId === undefined ? {} : { expectedDaemonId };
         const generation = this.connectionGeneration;
@@ -872,53 +982,101 @@ export class HostModuleTransport {
             this.routes.delete(routeKey);
             const closeRoute = (client as Partial<HostClient>).closeRoute;
             if (typeof closeRoute === "function") {
-                await closeRoute.call(client, existing.route).catch(() => undefined);
+                // `closeRoute` flushes under the facade's own shutdown deadline; awaiting it would add up to that budget to the caller's operation deadline.
+                void closeRoute.call(client, existing.route).catch(() => undefined);
             }
         }
         const opening = this.routeOpenings.get(routeKey);
         if (opening?.client === client && opening.generation === generation) {
-            return await opening.promise;
+            if ((opening.credentialSourceVersion ?? "") === (credentialSourceVersion ?? "")) {
+                // A joiner keeps its own deadline and signal; the shared open runs on. Its expiry is a waiter detach, not a connection failure.
+                return await this.beforeDeadline(
+                    untilAborted(opening.promise, signal),
+                    deadline,
+                    "opening the module route",
+                    () => new WaiterDetachedError("deadline"),
+                );
+            }
+            // An open bound under older credentials must not be reused; its late success closes the route instead of caching it.
+            opening.state.closed = true;
+            this.routeOpenings.delete(routeKey);
         }
 
         const state = { closed: false };
-        const promise = (async (): Promise<EnsuredRoute> => {
+        const routeOpening = { client, generation, credentialSourceVersion, state } as OpeningRoute;
+        routeOpening.promise = (async (): Promise<EnsuredRoute> => {
             const target: RouteTarget = { kind: "tool_provider", module_id: this.moduleId };
             const identity: BindIdentity = {
                 project_root: projectRoot,
                 harness: getHarness(),
-                session: `${this.routeSessionPrefix}${sessionId}`,
+                session: sessionId,
             };
-            const route = await this.beforeDeadline(
-                client.routeOpen(target, identity, fence),
-                deadline,
-                "opening the module route",
-            );
+            // Momentary target unavailability retries with the facade's managed-route backoff, all inside the caller's deadline.
+            let delayMs = ROUTE_OPEN_RETRY_BASE_MS;
+            let route: RouteHandle;
+            let bindVersion: string;
+            for (;;) {
+                // One credential-source snapshot, so `bindVersion` identifies the credentials sent to `routeOpen`.
+                const credentialSource = snapshotCredentialSource(process.env);
+                bindVersion = managedCredentialSourceVersion(credentialSource);
+                routeOpening.credentialSourceVersion = bindVersion;
+                const open = client.routeOpen(target, identity, { ...fence, credentialSource });
+                try {
+                    route = await this.beforeDeadline(open, deadline, "opening the module route");
+                    break;
+                } catch (error) {
+                    // The facade's own route-open deadline outlives this wait; a bind that succeeds after it would install a handle nobody owns.
+                    void open.then(
+                        (late) => void client.closeRoute(late).catch(() => undefined),
+                        () => undefined,
+                    );
+                    const retryable =
+                        isHostCallError(error) &&
+                        error.kind === "terminal" &&
+                        isRetryableRouteOpenCode(error.code);
+                    if (!retryable || state.closed || this.client !== client) throw error;
+                    await new Promise<void>((resolve) =>
+                        setTimeout(resolve, deadline.stageBudgetMs(delayMs)),
+                    );
+                    delayMs = Math.min(delayMs * 2, ROUTE_OPEN_RETRY_CAP_MS);
+                    if (deadline.isExpired()) throw error;
+                    // The fence and the connection can both move during the sleep; a local close or turnover must not start another bind.
+                    if (
+                        state.closed ||
+                        this.client !== client ||
+                        generation !== this.connectionGeneration
+                    ) {
+                        throw this.connectionChangedError(
+                            "daemon connection changed while opening module route",
+                        );
+                    }
+                }
+            }
             if (
                 state.closed ||
                 this.client !== client ||
                 generation !== this.connectionGeneration
             ) {
-                await client.closeRoute(route).catch(() => undefined);
+                // `closeRoute` flushes under the facade's shutdown deadline; the error is returned without waiting on it.
+                void client.closeRoute(route).catch(() => undefined);
                 throw this.connectionChangedError(
                     "daemon connection changed while opening module route",
                 );
             }
-            this.routes.set(routeKey, {
-                route,
-                generation,
-                ...(credentialSourceVersion === undefined ? {} : { credentialSourceVersion }),
-            });
+            this.routes.set(routeKey, { route, generation, credentialSourceVersion: bindVersion });
             return { client, route, routeKey, generation, ...fence };
         })();
-        const routeOpening: OpeningRoute = { client, generation, state, promise };
         this.routeOpenings.set(routeKey, routeOpening);
-        try {
-            return await routeOpening.promise;
-        } finally {
-            if (this.routeOpenings.get(routeKey) === routeOpening) {
-                this.routeOpenings.delete(routeKey);
-            }
-        }
+        const promise = routeOpening.promise;
+        // The opening outlives an aborted waiter: its settlement, not the waiter's, retires the map entry, so a late success is cached rather than duplicated by the next caller.
+        void promise
+            .catch(() => undefined)
+            .finally(() => {
+                if (this.routeOpenings.get(routeKey) === routeOpening) {
+                    this.routeOpenings.delete(routeKey);
+                }
+            });
+        return await untilAborted(routeOpening.promise, signal);
     }
 
     /** The connection file the transport dials; its absence means no daemon can be reached. */
@@ -926,9 +1084,14 @@ export class HostModuleTransport {
         return this.connectionFile;
     }
 
+    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. commentlint: allow(JUDGE) */
+    get generation(): number {
+        return this.connectionGeneration;
+    }
+
     /** Tears down the live connection, its routes, and cached capabilities so an owner evicting this transport does not strand a socket, channel poller, or ring mappings for the process lifetime. A later call on this instance redials. commentlint: allow(JUDGE) */
     disconnect(): void {
-        this.invalidateConnection();
+        void this.invalidateConnection();
     }
 
     canDemandStart(): boolean {
@@ -962,22 +1125,15 @@ export class HostModuleTransport {
         this.routes.delete(routeKey);
     }
 
-    /** Per-instance memoization resolves symlinks; missing paths retain their input spelling.
-     * Canonicalization preserves the input spelling when the path is gone, so a missing path does not fail the request.
-     * Public so a client built over this transport can key its own state by the same root the route is bound to. commentlint: allow(JUDGE) */
+    /** `canonicalRoot` resolves symlinks on every call so a retargeted link keys its new target. Missing roots retain their last resolution, or the input spelling, to avoid request failure or route-key rebinding. The method is public so clients built over this transport can key state by the same root bound to the route. commentlint: allow(JUDGE) */
     canonicalRoot(root: string): string {
-        const cached = this.canonicalRootCache.get(root);
-        if (cached !== undefined) {
-            this.canonicalRootCache.delete(root);
-            this.canonicalRootCache.set(root, cached);
-            return cached;
-        }
-        let resolved = root;
+        let resolved: string;
         try {
             resolved = realpathSync.native(root);
         } catch {
-            // Gone or unreadable roots keep their observed spelling.
+            resolved = this.canonicalRootCache.get(root) ?? root;
         }
+        this.canonicalRootCache.delete(root);
         this.canonicalRootCache.set(root, resolved);
         while (this.canonicalRootCache.size > CANONICAL_ROOT_CACHE_MAX_ENTRIES) {
             const oldestRoot = this.canonicalRootCache.keys().next().value as string | undefined;
@@ -1097,14 +1253,14 @@ export class HostModuleTransport {
                     return { client: cached, expectedDaemonId: expected };
                 }
             }
-            this.invalidateConnection(cached);
+            void this.invalidateConnection(cached);
         }
         const joinable = this.connectionPromise;
         if (joinable) {
             return await this.waitForSharedConnection(joinable, deadline, signal);
         }
         // The transport must not re-probe an unreachable daemon at full request rate.
-        if (Date.now() < this.nextProbeMs) {
+        if (performance.now() < this.nextProbeMs) {
             throw this.connectionBackoffError();
         }
         let expectedDaemonId: Uint8Array | undefined;
@@ -1116,7 +1272,7 @@ export class HostModuleTransport {
             // Arming backoff for WaiterDetachedError would apply one caller's cancellation to later transport demands.
             // is healthy.
             if (!(error instanceof WaiterDetachedError)) {
-                this.nextProbeMs = Date.now() + this.backoffMs;
+                this.nextProbeMs = performance.now() + this.backoffMs;
                 this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
             }
             throw error;
@@ -1130,15 +1286,21 @@ export class HostModuleTransport {
         if (signal?.aborted) {
             throw signal.reason ?? new Error("module transport call aborted");
         }
-        // Another caller can have opened a dial while this demand was awaiting.
+        // Another caller can have opened a dial, or completed one, while this demand was awaiting.
+        // A completed dial has already cleared `connectionPromise`, so the live client is checked as well; starting a second flight here would replace it unowned and reject the first caller's in-flight response as a connection change.
         const raced = this.connectionPromise;
-        if (raced) {
-            const joined = await this.waitForSharedConnection(raced, deadline, signal);
+        const live = this.client;
+        const joined: CertifiedConnection | null = raced
+            ? await this.waitForSharedConnection(raced, deadline, signal)
+            : live
+              ? { client: live, ...certification }
+              : null;
+        if (joined) {
             if (
                 expectedDaemonId !== undefined &&
                 !sameDaemonId(joined.client.authenticated?.daemonId, expectedDaemonId)
             ) {
-                this.invalidateConnection(joined.client);
+                void this.invalidateConnection(joined.client);
                 throw this.connectionChangedError(
                     "daemon changed after lifecycle compatibility validation",
                 );
@@ -1175,8 +1337,8 @@ export class HostModuleTransport {
                 this.nextProbeMs = 0;
                 return { client: candidate, ...certification };
             } catch (error) {
-                if (generation === this.connectionGeneration) this.invalidateConnection();
-                this.nextProbeMs = Date.now() + this.backoffMs;
+                if (generation === this.connectionGeneration) void this.invalidateConnection();
+                this.nextProbeMs = performance.now() + this.backoffMs;
                 this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
                 throw error;
             }
@@ -1191,15 +1353,17 @@ export class HostModuleTransport {
     }
 
     private connectionBackoffError(): Error & { code?: string } {
+        const remainingMs = Math.max(0, Math.ceil(this.nextProbeMs - performance.now()));
         const error = new Error(
-            `daemon connection backoff active until ${this.nextProbeMs}`,
+            `daemon connection backoff active for another ${remainingMs} ms`,
         ) as Error & { code?: string };
         error.code = "EIDNARA_HOST_CONNECTION_BACKOFF";
         return error;
     }
 
-    private invalidateConnection(client: HostClient | null = this.client): void {
-        if (client && this.client !== client) return;
+    /** Returns the superseded connection's bounded teardown: cache eviction, then `closeAsync`. */
+    private invalidateConnection(client: HostClient | null = this.client): Promise<void> {
+        if (client && this.client !== client) return Promise.resolve();
         this.connectionGeneration += 1;
         this.connectionCertification = null;
         const superseded = this.client;
@@ -1210,11 +1374,12 @@ export class HostModuleTransport {
         this.routeOpenings.clear();
         // A retained entry holds a resolved client whose channel owns a polling interval and two ring mappings, and `handshakeTimeoutMs` is deadline-derived, so reconnects do not reuse one entry.
         if (superseded && supersededOptions) {
-            void evictProcessHostClient(supersededOptions, superseded).then(
+            return evictProcessHostClient(supersededOptions, superseded).then(
                 () => superseded.closeAsync().catch(() => undefined),
                 () => undefined,
             );
         }
+        return Promise.resolve();
     }
 }
 

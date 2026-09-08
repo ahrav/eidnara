@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -834,5 +834,37 @@ describe("fork hygiene", () => {
         expect(listSessionCompactionMarkers("ses-2")).toEqual([]);
         // The parent session's lineage is untouched.
         expect(listSessionCompactionMarkers("ses-1")).toHaveLength(1);
+    });
+});
+
+describe("write connection lifecycle", () => {
+    it("closes a handle whose initialization pragma throws instead of leaking it", () => {
+        const dataHome = useTempDataHome("marker-open-failure-");
+        closeQuietly(createOpenCodeTestDb(dataHome));
+        const closes: number[] = [];
+        const originalExec = Database.prototype.exec;
+        const originalClose = Database.prototype.close;
+        const execSpy = spyOn(Database.prototype, "exec").mockImplementation(function (
+            this: Database,
+            sql: string,
+        ) {
+            if (sql.includes("journal_mode")) throw new Error("simulated pragma failure");
+            return originalExec.call(this, sql);
+        });
+        const closeSpy = spyOn(Database.prototype, "close").mockImplementation(function (
+            this: Database,
+        ) {
+            closes.push(1);
+            return originalClose.call(this);
+        });
+        try {
+            expect(() => listSessionCompactionMarkers("ses-1")).toThrow("simulated pragma failure");
+            expect(closes).toHaveLength(1);
+        } finally {
+            execSpy.mockRestore();
+            closeSpy.mockRestore();
+        }
+        // The failed handle was never cached, so the next call opens a fresh connection and succeeds.
+        expect(listSessionCompactionMarkers("ses-1")).toEqual([]);
     });
 });

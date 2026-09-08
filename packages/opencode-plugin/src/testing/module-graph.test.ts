@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { type ModuleGraph, reachableModules } from "./module-graph";
 
 const SRC = resolve(import.meta.dir, "..");
 
@@ -17,9 +18,9 @@ const ALL = sourceFiles(SRC);
 const TESTS = ALL.filter((file) => /\.test\.tsx?$/.test(file));
 const MODULES = ALL.filter((file) => !/\.test\.tsx?$/.test(file));
 
-/** Not-ported subsystems; a path under any of them reachable from a test is residue. The bundler names inputs relative to `SRC`, so a subsystem directly under `src` has no leading slash and the prefix must also accept the start of the path. commentlint: allow(JUDGE) */
+/** Not-ported subsystems; a path under any of them reachable from a test is residue. The bundler names inputs relative to `SRC`, so a subsystem directly under `src` has no leading slash and the prefix must also accept the start of the path; the file alternative accepts both extensions `sourceFiles` scans. commentlint: allow(JUDGE) */
 const NOT_PORTED =
-    /(^|\/)(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.ts$)/;
+    /(^|\/)(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.tsx?$)/;
 
 /**
  * Modules no landed test reaches through a runtime import. Type-only modules
@@ -36,7 +37,6 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ["shared/opencode-config-dir-types.ts", "type-only"],
     ["shared/rpc-types.ts", "type-only"],
     ["shared/format-bytes.ts", "TUI (U4)"],
-    ["shared/format-threshold.ts", "TUI (U4)"],
     ["shared/kernel-client-testing/state-table.ts", "tool tests (U3)"],
     ["shared/subagent-runner.ts", "sidekick (U3)"],
     ["shared/transcript.ts", "hooks (U4)"],
@@ -45,13 +45,13 @@ const AWAITING_CONSUMER = new Map<string, string>([
         "testing/module-graph-report.ts",
         "test infrastructure: run as a child process, never imported",
     ],
-    ["testing/module-graph.ts", "test infrastructure: imported only by the child process"],
 ]);
 
 describe("module graph over the landed tree", () => {
     test("the residue pattern matches a not-ported subsystem at the source root and nested under it", () => {
         expect(NOT_PORTED.test("memory/foo.ts")).toBe(true);
         expect(NOT_PORTED.test("dreamer.ts")).toBe(true);
+        expect(NOT_PORTED.test("memory.tsx")).toBe(true);
         expect(NOT_PORTED.test("features/memory/foo.ts")).toBe(true);
         expect(NOT_PORTED.test("shared/user-memory.ts")).toBe(true);
         expect(NOT_PORTED.test("shared/memory-guard.ts")).toBe(false);
@@ -86,4 +86,33 @@ describe("module graph over the landed tree", () => {
             .sort();
         expect(orphans).toEqual([...AWAITING_CONSUMER.keys()].sort());
     }, 120_000);
+});
+const graph: ModuleGraph = {
+    inputs: ["src/a/forbidden.ts", "src/b/forbidden.ts", "src/c/allowed.ts"],
+    externals: ["@scope/forbidden-external", "@scope/allowed-external"],
+    text: "",
+};
+
+describe("reachableModules", () => {
+    test("returns every input and external matching the pattern", () => {
+        expect(reachableModules(graph, /forbidden/)).toEqual([
+            "src/a/forbidden.ts",
+            "src/b/forbidden.ts",
+            "@scope/forbidden-external",
+        ]);
+    });
+
+    test("returns an empty list when nothing matches", () => {
+        expect(reachableModules(graph, /never-present/)).toEqual([]);
+    });
+
+    // `RegExp.prototype.test` advances `lastIndex` on `g` and `y` patterns, so a
+    // silent under-count would make a reachable module look unreachable.
+    test("rejects a global pattern instead of under-counting", () => {
+        expect(() => reachableModules(graph, /forbidden/g)).toThrow(TypeError);
+    });
+
+    test("rejects a sticky pattern instead of under-counting", () => {
+        expect(() => reachableModules(graph, /forbidden/y)).toThrow(TypeError);
+    });
 });

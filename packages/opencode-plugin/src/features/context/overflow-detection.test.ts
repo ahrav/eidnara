@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { ContextLimitProvenance } from "../../shared/context-limit-provenance";
-import { detectOverflow, extractErrorMessage, parseReportedLimit } from "./overflow-detection";
+import {
+    detectOverflow,
+    extractErrorMessage,
+    MAX_SCAN_CHARS,
+    parseReportedLimit,
+} from "./overflow-detection";
 
 describe("overflow-detection / extractErrorMessage", () => {
     test("returns message from Error instance", () => {
@@ -31,6 +36,47 @@ describe("overflow-detection / extractErrorMessage", () => {
     test("returns empty string for null / undefined", () => {
         expect(extractErrorMessage(null)).toBe("");
         expect(extractErrorMessage(undefined)).toBe("");
+    });
+
+    test("serializes an object without recognized text fields within the scan cap", () => {
+        // A decoded body far larger than the cap must not be serialized in full.
+        const huge = {
+            status: 400,
+            data: { rows: Array.from({ length: 200_000 }, (_, i) => ({ i })) },
+        };
+        const started = performance.now();
+        const text = extractErrorMessage(huge);
+        const elapsed = performance.now() - started;
+
+        expect(text.startsWith('{"status":400,"data":{"rows":[{"i":0},')).toBe(true);
+        expect(text.length).toBeLessThanOrEqual(MAX_SCAN_CHARS + 1);
+        expect(text.endsWith("…")).toBe(true);
+        expect(elapsed).toBeLessThan(50);
+    });
+
+    test("serializes small objects, cycles, and bigint without throwing", () => {
+        const cyclic: Record<string, unknown> = { code: 7 };
+        cyclic.self = cyclic;
+        expect(extractErrorMessage({ code: 7, ok: true })).toBe('{"code":7,"ok":true}');
+        expect(extractErrorMessage(cyclic)).toBe('{"code":7,"self":"[cycle]"}');
+        expect(extractErrorMessage({ n: 1n, f: () => 1 })).toBe('{"n":1}');
+    });
+
+    test("stops reading a wide object's properties once the cap is reached", () => {
+        let reads = 0;
+        const wide: Record<string, unknown> = {};
+        for (let i = 0; i < 50_000; i += 1) {
+            Object.defineProperty(wide, `k${i}`, {
+                enumerable: true,
+                get: () => {
+                    reads += 1;
+                    return i;
+                },
+            });
+        }
+        const text = extractErrorMessage(wide);
+        expect(text.length).toBeLessThanOrEqual(MAX_SCAN_CHARS + 1);
+        expect(reads).toBeLessThan(1_000);
     });
 });
 
@@ -104,6 +150,43 @@ describe("overflow-detection / detectOverflow", () => {
         expect(detection.isOverflow).toBe(true);
         expect(detection.matchedPattern).toBeDefined();
     });
+
+    // HTTP and SDK wrappers can carry the provider text below a generic top-level message.
+    test("finds overflow text in responseBody under a generic wrapper message", () => {
+        const detection = detectOverflow({
+            message: "Request failed with status code 400",
+            responseBody:
+                '{"error":{"message":"prompt is too long: 250000 tokens > 200000 maximum"}}',
+        });
+        expect(detection.isOverflow).toBe(true);
+        expect(detection.reportedLimit).toBe(200000);
+        expect(detection.reportedLimitProvenance).toBe("prompt_only");
+    });
+
+    test("finds overflow text in a standard Error.cause chain", () => {
+        const wrapped = new Error("fetch failed", {
+            cause: new Error("This model's maximum context length is 128000 tokens."),
+        });
+        const detection = detectOverflow(wrapped);
+        expect(detection.isOverflow).toBe(true);
+        expect(detection.reportedLimit).toBe(128000);
+    });
+
+    test("finds overflow text in data.error.message under a generic wrapper message", () => {
+        const detection = detectOverflow({
+            name: "APICallError",
+            message: "Bad Request",
+            data: { error: { message: "input is too long for requested model" } },
+        });
+        expect(detection.isOverflow).toBe(true);
+    });
+
+    test("a cyclic error graph with no overflow text returns not-overflow", () => {
+        const cyclic: Record<string, unknown> = { message: "Network error" };
+        cyclic.cause = cyclic;
+        cyclic.error = { data: cyclic };
+        expect(detectOverflow(cyclic).isOverflow).toBe(false);
+    });
 });
 
 describe("overflow-detection / parseReportedLimit", () => {
@@ -166,6 +249,52 @@ describe("overflow-detection / parseReportedLimit", () => {
     test("returns first plausible match when multiple numbers present", () => {
         const msg = "maximum context length is 128000 tokens (limit 999)";
         expect(parseReportedLimit(msg)).toEqual({ value: 128000, provenance: "combined" });
+    });
+
+    test("a limit stated before 'context' wins over a later request size", () => {
+        expect(
+            parseReportedLimit("maximum 128000 context length; request has 200000 tokens"),
+        ).toEqual({ value: 128000, provenance: "unknown" });
+    });
+});
+
+describe("overflow-detection / adversarial input cost", () => {
+    // Provider error bodies are attacker-controlled; patterns must avoid superlinear backtracking.
+    const MAX_MS = 100;
+
+    function measure(message: string): number {
+        const started = performance.now();
+        detectOverflow(message);
+        return performance.now() - started;
+    }
+
+    test("dense max/context repeats without digits stay linear (generic limit fallback)", () => {
+        const message = `context_length_exceeded ${"max context ".repeat(600)}`;
+        expect(measure(message)).toBeLessThan(MAX_MS);
+    });
+
+    test("dense 'input length ... exceeds' repeats stay linear (vLLM pattern)", () => {
+        const message = "input length exceeds ".repeat(500);
+        expect(measure(message)).toBeLessThan(MAX_MS);
+    });
+
+    test("dense 'input token count' repeats stay linear (Gemini pattern)", () => {
+        const message = "input token count ".repeat(1500);
+        expect(measure(message)).toBeLessThan(MAX_MS);
+    });
+
+    test("scan is capped so oversized bodies cost the same as capped ones", () => {
+        const phrase = "prompt is too long: 210000 tokens > 200000 maximum";
+        const within = detectOverflow(`${"x".repeat(MAX_SCAN_CHARS - phrase.length)}${phrase}`);
+        expect(within.isOverflow).toBe(true);
+        expect(within.reportedLimit).toBe(200000);
+
+        const beyond = detectOverflow(`${"x".repeat(MAX_SCAN_CHARS)}${phrase}`);
+        expect(beyond.isOverflow).toBe(false);
+
+        expect(measure(`context_length_exceeded ${"max context ".repeat(50_000)}`)).toBeLessThan(
+            MAX_MS,
+        );
     });
 });
 

@@ -63,6 +63,45 @@ describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", (
         );
         expect(stripTagPrefix(`${SECTION}12.3 of the plan`)).toBe(`${SECTION}12.3 of the plan`);
     });
+
+    it("does not backtrack a multi-digit decimal reference into a shorter dangling tag", () => {
+        // `§42.1` must not match as `§4` and leave `2.1`.
+        expect(stripDanglingTagNotationGlobally(`see ${SECTION}42.1 for details`)).toBe(
+            `see ${SECTION}42.1 for details`,
+        );
+        expect(stripPersistedAssistantText(`see ${SECTION}42.1 for details`)).toBe(
+            "see 42.1 for details",
+        );
+        expect(stripTagPrefix(`${SECTION}42.1 hello`)).toBe(`${SECTION}42.1 hello`);
+    });
+
+    it.each([
+        ["CJK", "修复完成"],
+        ["Latin with diacritic", "éclair"],
+        ["Greek", "αβγ"],
+        ["Cyrillic word", "готово"],
+        ["non-ASCII digit", "٣ items"],
+        ["emoji", "😀 fixed"],
+        ["heading marker", "# Heading"],
+        ["bullet marker", "* item"],
+        ["code fence", "```ts"],
+        ["parenthesis", "(note)"],
+    ])("does not consume the first %s character after a dangling tag", (_label, content) => {
+        expect(stripPersistedAssistantText(`${SECTION}42${content}`)).toBe(content);
+        expect(stripTagPrefix(`${SECTION}42${content}`)).toBe(content);
+        expect(stripDanglingTagNotationGlobally(`${SECTION}42${content}`)).toBe(content);
+    });
+
+    it.each([
+        ["dollar sign", "$"],
+        ["double quote", '"'],
+        ["single quote", "'"],
+        ["xml hybrid tail", '">'],
+        ["Cyrillic ha", CYRILLIC_HA],
+    ])("consumes the %s improvised closer", (_label, closer) => {
+        expect(stripPersistedAssistantText(`${SECTION}42${closer} done`)).toBe("done");
+        expect(stripTagPrefix(`${SECTION}42${closer} done`)).toBe("done");
+    });
 });
 
 describe("stripTagPrefix (transform §N§ notation only)", () => {
@@ -70,8 +109,73 @@ describe("stripTagPrefix (transform §N§ notation only)", () => {
         expect(stripTagPrefix(`${SECTION}42${SECTION} Hello`)).toBe("Hello");
     });
 
+    it("#given tags separated by U+0085 #when stripTagPrefix runs #then removes them all", () => {
+        expect(
+            stripTagPrefix(`${SECTION}42${SECTION}\u0085${SECTION}43${SECTION}\u0085Hello`),
+        ).toBe("Hello");
+        expect(stripTagPrefix(`${SECTION}42">${SECTION}\u0085${SECTION}7$\u0085Hello`)).toBe(
+            "Hello",
+        );
+    });
+
     it("#given malformed xml hybrid prefix #when stripTagPrefix runs #then removes it", () => {
         expect(stripTagPrefix(`${SECTION}15298">${SECTION}15298${SECTION} hello`)).toBe("hello");
+    });
+
+    it("#given well-formed prefix hiding a malformed one #when stripTagPrefix runs #then removes both whole", () => {
+        // Removing `§1§ ` exposes `§2">§2§ `; the dangling pass must not take only `§2"` and leave `>§2§`.
+        expect(
+            stripTagPrefix(`${SECTION}1${SECTION} ${SECTION}2">${SECTION}2${SECTION} hello`),
+        ).toBe("hello");
+        expect(
+            stripTagPrefix(
+                `${SECTION}1${SECTION} ${SECTION}2">${SECTION}2${SECTION} ${SECTION}3${SECTION} ${SECTION}4">${SECTION}4${SECTION} hello`,
+            ),
+        ).toBe("hello");
+        expect(
+            prependTag(7, `${SECTION}1${SECTION} ${SECTION}2">${SECTION}2${SECTION} hello`),
+        ).toBe(`${SECTION}7${SECTION} hello`);
+    });
+
+    it("#given a long alternating run of well-formed and malformed prefixes #when stripTagPrefix runs #then consumes every one", () => {
+        let value = "";
+        for (let i = 0; i < 40; i++) {
+            value +=
+                i % 2 === 0
+                    ? `${SECTION}${i}${SECTION} `
+                    : `${SECTION}${i}">${SECTION}${i}${SECTION} `;
+        }
+        value += "hello";
+
+        expect(stripTagPrefix(value)).toBe("hello");
+        expect(prependTag(99, value)).toBe(`${SECTION}99${SECTION} hello`);
+    });
+
+    it("#given a dangling prefix before a well-formed tag #when stripTagPrefix runs #then removes both whole", () => {
+        // The dangling rule must stop before `§2§` so the pair rule can take it as a unit.
+        expect(stripTagPrefix(`${SECTION}1 ${SECTION}2${SECTION} hello`)).toBe("hello");
+        expect(prependTag(9, `${SECTION}1 ${SECTION}2${SECTION} hello`)).toBe(
+            `${SECTION}9${SECTION} hello`,
+        );
+        expect(stripPersistedAssistantText(`${SECTION}1 ${SECTION}2${SECTION} hello`)).toBe(
+            "hello",
+        );
+    });
+
+    it("#given a very long adversarial prefix chain #when stripTagPrefix runs #then finishes in linear time", () => {
+        let value = "";
+        for (let i = 0; i < 40_000; i++) {
+            value +=
+                i % 2 === 0
+                    ? `${SECTION}${i}${SECTION} `
+                    : `${SECTION}${i}">${SECTION}${i}${SECTION} `;
+        }
+        value += "hello";
+
+        const started = performance.now();
+        expect(stripTagPrefix(value)).toBe("hello");
+        // The 40,000-prefix input distinguishes linear scans from quadratic scans.
+        expect(performance.now() - started).toBeLessThan(200);
     });
 
     it("#given accumulated bare digit residue #when stripTagPrefix runs #then preserves digits", () => {
