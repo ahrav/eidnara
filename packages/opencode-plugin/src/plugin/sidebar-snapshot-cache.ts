@@ -14,17 +14,20 @@ interface CachedSnapshot {
 }
 
 const MAX_CACHED_SESSIONS = 100;
+/** Roots retained per session. A session lives under one root; the slack covers alternate spellings of that root without letting a long-lived session accumulate a snapshot per directory it was ever polled from. commentlint: allow(JUDGE) */
+export const MAX_CACHED_ROOTS_PER_SESSION = 4;
 const STALE_SNAPSHOT_AGE_MS = 5 * 60 * 1000; // 5 minutes
 
-// The daemon scopes session state by project root, so a session polled under two roots needs one sticky snapshot per root. The outer map bounds session entries.
-const cache = new BoundedSessionMap<Map<string, CachedSnapshot>>(MAX_CACHED_SESSIONS);
+// The daemon scopes session state by project root, so a session polled under two roots needs one sticky snapshot per root. Both levels are LRU-bounded.
+const cache = new BoundedSessionMap<BoundedSessionMap<CachedSnapshot>>(MAX_CACHED_SESSIONS);
 
 function peekCached(sessionId: string, directory: string): CachedSnapshot | undefined {
-    return cache.peek(sessionId)?.get(directory);
+    return cache.peek(sessionId)?.peek(directory);
 }
 
 function storeCached(sessionId: string, directory: string, entry: CachedSnapshot): void {
-    const byRoot = cache.get(sessionId) ?? new Map<string, CachedSnapshot>();
+    const byRoot =
+        cache.get(sessionId) ?? new BoundedSessionMap<CachedSnapshot>(MAX_CACHED_ROOTS_PER_SESSION);
     byRoot.set(directory, entry);
     cache.set(sessionId, byRoot);
 }

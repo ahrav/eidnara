@@ -3,6 +3,7 @@ import type { SidebarSnapshot } from "../shared/rpc-types";
 import {
     applyStickySnapshotCache,
     clearSidebarSnapshotCache,
+    MAX_CACHED_ROOTS_PER_SESSION,
     resetSidebarSnapshotCache,
 } from "./sidebar-snapshot-cache";
 
@@ -238,6 +239,32 @@ describe("applyStickySnapshotCache", () => {
             makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
         );
         expect(sameRoot.inputTokens).toBe(100_000);
+    });
+
+    test("one session retains at most MAX_CACHED_ROOTS_PER_SESSION roots, evicting the oldest", () => {
+        const roots = Array.from(
+            { length: MAX_CACHED_ROOTS_PER_SESSION + 1 },
+            (_, index) => `/repo-${index}`,
+        );
+        for (const [index, root] of roots.entries()) {
+            applyStickySnapshotCache(
+                "ses_test",
+                root,
+                makeSnapshot({ inputTokens: 1_000 * (index + 1) }),
+            );
+        }
+        const evicted = applyStickySnapshotCache(
+            "ses_test",
+            roots[0],
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        expect(evicted.inputTokens).toBe(0);
+        const retained = applyStickySnapshotCache(
+            "ses_test",
+            roots[1],
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        expect(retained.inputTokens).toBe(2_000);
     });
 
     test("clearSidebarSnapshotCache drops every root cached for the session", () => {
