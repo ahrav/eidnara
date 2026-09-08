@@ -76,17 +76,24 @@ describe("readJsoncConfigForUpdate", () => {
         }
     });
 
-    it("refuses to rewrite a file whose integer literal parsing rounded", () => {
+    it("refuses to rewrite a file whose numeric literal parsing rounded", () => {
         const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-update-"));
         const path = join(directory, "big.json");
-        writeFileSync(path, `{"id": 9007199254740993, "plugin": []}`);
 
         try {
-            expect(() => readJsoncConfigForUpdate(path)).toThrow("outside the safe range");
-            // Reading for diagnostics still works; only the rewrite is refused.
-            expect(readJsoncConfig(path).kind).toBe("parsed");
-            writeFileSync(path, `{"id": 9007199254740991, "plugin": []}`);
-            expect(readJsoncConfigForUpdate(path)).toMatchObject({ id: 9007199254740991 });
+            for (const literal of ["9007199254740993", "0.123456789012345678901", "1e-400"]) {
+                writeFileSync(path, `{"n": ${literal}, "plugin": []}`);
+                expect(() => readJsoncConfigForUpdate(path)).toThrow("parser rounded");
+                // Reading for diagnostics still works; only the rewrite is refused.
+                expect(readJsoncConfig(path).kind).toBe("parsed");
+            }
+            // An overflowing literal is already invalid JSON to the shared parser.
+            writeFileSync(path, `{"n": 1e400, "plugin": []}`);
+            expect(() => readJsoncConfigForUpdate(path)).toThrow();
+            for (const literal of ["9007199254740991", "1.0", "1e3", "-0.5", "2.5E-3", "0"]) {
+                writeFileSync(path, `{"n": ${literal}, "plugin": []}`);
+                expect(readJsoncConfigForUpdate(path)).toMatchObject({ n: Number(literal) });
+            }
         } finally {
             rmSync(directory, { recursive: true, force: true });
         }

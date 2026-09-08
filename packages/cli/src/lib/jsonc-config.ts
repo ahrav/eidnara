@@ -5,6 +5,7 @@ import {
     sanitizeParsedJson,
 } from "@eidnara/opencode/shared/jsonc-parser";
 import { parse as parseCommentJson } from "comment-json";
+import type { Node } from "jsonc-parser";
 
 export type JsoncReadResult =
     | { kind: "missing" }
@@ -59,13 +60,41 @@ type JsoncDocumentResult =
       }
     | { kind: "parse-error"; error: ConfigParseError };
 
-/** An integer at or beyond 2^53 cannot be told apart from its neighbors after parsing. */
-function containsLossyNumber(value: unknown): boolean {
-    if (typeof value === "number")
-        return Number.isFinite(value) && !Number.isSafeInteger(value) && Number.isInteger(value);
-    if (Array.isArray(value)) return value.some(containsLossyNumber);
-    if (value && typeof value === "object") return Object.values(value).some(containsLossyNumber);
-    return false;
+/**
+ * Splits a JSON number literal into an integer significand and a power of ten,
+ * so two literals compare exactly without going through a double.
+ */
+function decimalParts(literal: string): { digits: bigint; exponent: number } | null {
+    const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(literal);
+    if (!match) return null;
+    const [, sign, whole, fraction = "", exponent = "0"] = match;
+    const digits = BigInt(`${sign}${whole}${fraction}`);
+    return { digits, exponent: Number(exponent) - fraction.length };
+}
+
+/**
+ * A literal is lossy when the parsed double does not denote the same rational
+ * value: an integer past 2^53, a fraction with more digits than a double holds,
+ * or an exponent that underflows to zero. Serializing the parsed value would
+ * then write a different number over the user's literal.
+ */
+function isLossyNumberLiteral(literal: string, value: number): boolean {
+    if (!Number.isFinite(value)) return true;
+    const source = decimalParts(literal);
+    const parsed = decimalParts(String(value)) ?? decimalParts(value.toFixed(0));
+    if (source === null || parsed === null) return true;
+    const shift = source.exponent - parsed.exponent;
+    return shift >= 0
+        ? source.digits * 10n ** BigInt(shift) !== parsed.digits
+        : source.digits !== parsed.digits * 10n ** BigInt(-shift);
+}
+
+function containsLossyNumber(content: string, node: Node): boolean {
+    if (node.type === "number") {
+        const literal = content.slice(node.offset, node.offset + node.length);
+        return typeof node.value === "number" && isLossyNumberLiteral(literal, node.value);
+    }
+    return (node.children ?? []).some((child) => containsLossyNumber(content, child));
 }
 
 /**
@@ -90,7 +119,7 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
     try {
         // The shared parser rejects what `comment-json` accepts but the daemon's reader does not,
         // such as an unpaired surrogate escape inside a string.
-        parseJsoncTree(content);
+        const root = parseJsoncTree(content);
         const tree = parseCommentJson(content);
         const rejectedKeyPaths: string[] = [];
         const plain = sanitizeParsedJson(tree, {
@@ -107,7 +136,7 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
             kind: "parsed",
             tree,
             plain: plain as Record<string, unknown>,
-            lossyNumber: containsLossyNumber(plain),
+            lossyNumber: containsLossyNumber(content, root),
         };
     } catch (error) {
         return { kind: "parse-error", error: new ConfigParseError(path, content, error) };
@@ -137,7 +166,7 @@ export function readJsoncConfigForUpdate(path: string): Record<string, unknown> 
         throw new ConfigParseError(
             path,
             "",
-            new Error("an integer literal outside the safe range would not survive a rewrite"),
+            new Error("a numeric literal the parser rounded would not survive a rewrite"),
         );
     }
     return result.tree;

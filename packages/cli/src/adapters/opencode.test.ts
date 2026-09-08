@@ -134,6 +134,20 @@ describe("OpenCodeAdapter config safety", () => {
         },
     );
 
+    it("refuses to replace a non-array plugin value", async () => {
+        const root = configRoot();
+        const configPath = join(root, "opencode.json");
+        const before = JSON.stringify({ plugin: "custom-loader" });
+        writeFileSync(configPath, before);
+
+        const result = await new OpenCodeAdapter().ensurePluginEntry();
+
+        expect(result.ok).toBe(false);
+        expect(result.action).toBe("error");
+        expect(result.message).toContain("not an array");
+        expect(readFileSync(configPath, "utf-8")).toBe(before);
+    });
+
     it("leaves a version-pinned plugin entry as written", async () => {
         const root = configRoot();
         const configPath = join(root, "opencode.json");

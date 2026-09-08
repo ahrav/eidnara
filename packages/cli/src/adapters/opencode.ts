@@ -68,7 +68,10 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
             const cfg = readJsoncConfigForUpdate(file);
 
-            const plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
+            if (cfg.plugin !== undefined && !Array.isArray(cfg.plugin)) {
+                throw new Error("`plugin` is not an array; refusing to replace it");
+            }
+            const plugin = cfg.plugin ?? [];
             const existingIdx = plugin.findIndex((e) => matchesPluginEntry(e, PLUGIN_NAME));
             const existingDevIdx = plugin.findIndex((e) => isDevPathPluginEntry(e));
 
