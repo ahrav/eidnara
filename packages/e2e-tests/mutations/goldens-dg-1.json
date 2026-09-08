@@ -1,0 +1,18 @@
+{
+  "golden_family": "postprocess-gates",
+  "command": "cargo test -p daemon --lib dg_goldens_match_ts_wire_surface_and_gate_labels",
+  "mutations": [
+    {
+      "name": "DG_1_ONE_BYTE_INPUT",
+      "applied_diff": {
+        "path": "crates/daemon/testdata/differential-golden.json",
+        "before": "cases[0].input.messages[0].content[0].kind.text='stable input'",
+        "after": "cases[0].input.messages[0].content[0].kind.text='stable inputx'",
+        "changed": true
+      },
+      "observed_failure": null,
+      "reverted_rerun": null,
+      "adequacy_finding": "Golden mutation evidence must be regenerated against crates/daemon."
+    }
+  ]
+}
