@@ -133,16 +133,19 @@ function getSelfVersion(): string {
  * null stay, a number may be a PIN. A bare `key=` names a secret the way the shared text
  * redactor reads it, while `key:` keeps the prose carve-out (`press any key: continue`).
  */
-/** A JSON string escape such as `\u0070` spells a character the key vocabulary must see decoded. */
+/**
+ * A string escape such as `\u0070` or `\x70` spells a character the key vocabulary
+ * must see decoded. A single-quoted body is rewritten into a JSON string body so
+ * one decoder serves both quote styles.
+ */
 function decodeQuotedKey(raw: string, quote: string): string {
-    if (quote === '"') {
-        try {
-            return JSON.parse(`"${raw}"`) as string;
-        } catch {
-            return raw;
-        }
+    let body = raw.replace(/\\x([0-9A-Fa-f]{2})/g, "\\u00$1");
+    if (quote === "'") body = body.replace(/\\'/g, "'").replace(/"/g, '\\"');
+    try {
+        return JSON.parse(`"${body}"`) as string;
+    } catch {
+        return raw;
     }
-    return raw.replace(/\\(.)/g, "$1");
 }
 
 function redactKeyedText(value: string): string {
