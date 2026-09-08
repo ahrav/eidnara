@@ -17,7 +17,7 @@ import { formatWindowDerivationLine } from "../shared/window-geometry"
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "./compaction-off"
 import { isCompactionEnabled } from "../config/agent-disable"
 import { loadPluginConfig } from "../config"
-import { detectConflicts } from "../shared/conflict-detector"
+import { detectConflicts, resolveCompactionForBoot } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
 
 const DEFAULT_TOAST_DURATION_MS = 5000
@@ -733,8 +733,12 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         pluginConfig = loadPluginConfig(directory)
     } catch {
     }
+    if (pluginConfig?.enabled === false) return
+    // `resolveCompactionForBoot` uses host-resolved config because the scanner treats missing config as enabled.
+    const resolvedCompaction = await resolveCompactionForBoot(api.client)
     const conflictResult = detectConflicts(directory, {
         compactionEnabled: isCompactionEnabled(pluginConfig ?? {}),
+        resolvedCompaction: resolvedCompaction ?? undefined,
     })
     if (conflictResult.hasConflict) {
         showConflictDialog(api, directory, conflictResult.reasons, conflictResult.conflicts)
