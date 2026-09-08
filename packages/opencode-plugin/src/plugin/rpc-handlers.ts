@@ -196,8 +196,13 @@ async function loadRustSessionStatus(
         sessionId,
         directory,
     ).then((status) => {
-        // `clearRustSessionStatus` removes the slot when the session is deleted mid-request; the answer is then stale and must not be cached.
-        if (rustStatusInFlight.get(cacheKey) === request) rustStatusCache.set(cacheKey, status);
+        // `clearRustSessionStatus` removes the slot when the session is deleted mid-request; the answer is then stale for the cache and for the poll that is still waiting on it.
+        if (rustStatusInFlight.get(cacheKey) !== request) {
+            throw new Error(
+                `session.status answer for ${sessionId} discarded: session invalidated`,
+            );
+        }
+        rustStatusCache.set(cacheKey, status);
         return status;
     });
     rustStatusInFlight.set(cacheKey, request);
