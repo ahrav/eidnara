@@ -182,14 +182,15 @@ function readNoFollowBytes(path: string, label: string): Buffer {
 }
 
 /**
- * `JSON.parse` keeps the last of two equal keys; serde's derived deserializer
- * reports `duplicate field`. Runs on text `JSON.parse` has already accepted,
- * so the scan handles well-formed input only.
+ * Input `JSON.parse` accepts that `serde_json::from_slice::<TrustedPayloadManifest>` rejects. `text` has already passed `JSON.parse`, so the scan assumes well-formed input. commentlint: allow(JUDGE)
+ *
+ * A repeated key: `JSON.parse` keeps the last, serde fails on the duplicate. A number outside f64: `JSON.parse` yields `Infinity`, serde fails. A `size` with a fraction or exponent: `JSON.parse` yields the plain integer, serde's `u64` rejects a float. commentlint: allow(JUDGE)
  */
-function hasDuplicateKey(text: string): boolean {
+function serdeRejection(text: string): string | null {
     // One frame per open container: a key set for an object, `null` for an array.
     const frames: (Set<string> | null)[] = [];
     let expectKey = false;
+    let lastKey = "";
     for (let i = 0; i < text.length; i++) {
         const ch = text[i];
         if (ch === '"') {
@@ -198,9 +199,21 @@ function hasDuplicateKey(text: string): boolean {
             const frame = frames.at(-1);
             if (expectKey && frame) {
                 const key = JSON.parse(text.slice(start, i + 1)) as string;
-                if (frame.has(key)) return true;
+                if (frame.has(key)) return "repeats a key";
                 frame.add(key);
+                lastKey = key;
                 expectKey = false;
+            }
+        } else if (ch === "-" || (ch >= "0" && ch <= "9")) {
+            const start = i;
+            while (i + 1 < text.length && /[-+.0-9eE]/.test(text[i + 1] as string)) i++;
+            const token = text.slice(start, i + 1);
+            if (!Number.isFinite(Number(token))) return "holds a number out of range";
+            // `frames` identifies file entries; `platform_floor` remains a free-form serde `Value` and may contain floats.
+            const inFileEntry =
+                frames.length === 3 && frames[1] === null && frames[2] instanceof Set;
+            if (inFileEntry && lastKey === "size" && !/^(0|[1-9][0-9]*)$/.test(token)) {
+                return "holds a size that is not an integer literal";
             }
         } else if (ch === "{") {
             frames.push(new Set());
@@ -215,7 +228,7 @@ function hasDuplicateKey(text: string): boolean {
             expectKey = frames.at(-1) instanceof Set;
         }
     }
-    return false;
+    return null;
 }
 
 function parseJson(bytes: Buffer, label: string): unknown {
@@ -227,7 +240,8 @@ function parseJson(bytes: Buffer, label: string): unknown {
     } catch {
         fail(`${label} is malformed`);
     }
-    if (hasDuplicateKey(text)) fail(`${label} repeats a key`);
+    const rejection = serdeRejection(text);
+    if (rejection !== null) fail(`${label} ${rejection}`);
     return value;
 }
 

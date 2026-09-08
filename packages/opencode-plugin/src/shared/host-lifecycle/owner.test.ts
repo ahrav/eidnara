@@ -286,6 +286,27 @@ describe("managed lifecycle owner", () => {
         expect(() => prepare(f, true)).toThrow(/repeats a key/);
     });
 
+    test("numbers serde rejects are rejected before staging", () => {
+        const f = fixture();
+        // `JSON.parse("1e400")` is `Infinity`; serde_json reports `number out of range`.
+        writeFileSync(
+            f.manifestPath,
+            f.manifestText.replace('"glibc": "2.34"', '"glibc": "2.34", "epoch": 1e400'),
+        );
+        expect(() => prepare(f, true)).toThrow(/number out of range/);
+
+        // `JSON.parse("2.4e1")` equals `24`; serde's `u64` rejects a float spelling.
+        const files = f.manifest.files as Record<string, unknown>[];
+        const size = files[1]?.size as number;
+        const text = writeManifest(f, {
+            ...f.manifest,
+            files: [files[0], { ...files[1], size: 0 }],
+        });
+        writeFileSync(f.manifestPath, text.replace('"size": 0', `"size": ${size / 10}e1`));
+        expect(() => prepare(f, true)).toThrow(/integer literal/);
+        expect(existsSync(f.dataRoot)).toBe(false);
+    });
+
     test("umask-stripped source modes are accepted; extra permission bits are not", () => {
         const f = fixture();
         const launcherPath = join(f.packageDir, "payload", "bin", "eidnara-host");
