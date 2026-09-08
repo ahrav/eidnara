@@ -1,8 +1,9 @@
-import { stripPersistedAssistantText } from "@eidnara/opencode/hooks/context/tag-content-primitives";
+import {
+    stripTagNotationGlobally,
+    stripWellFormedLeadingTagPrefix,
+} from "@eidnara/opencode/hooks/context/tag-content-primitives";
 
 const TAG_SECTION_CHAR = "\u00a7";
-const LEADING_WHITESPACE_REGEX = /^\s*/;
-const TRAILING_WHITESPACE_REGEX = /\s*$/;
 
 interface TextPart {
     type: "text";
@@ -19,11 +20,10 @@ function isTextPart(part: unknown): part is TextPart {
 }
 
 /**
- * Whitespace at interior part boundaries separates words after parts are joined.
- * Only the first text part loses leading whitespace and only the last loses trailing whitespace.
+ * Interior boundary whitespace separates joined words.
+ * Every part keeps the whitespace around removed tag notation; only the first text part loses a
+ * leading tag prefix with its following whitespace and only the last loses trailing whitespace.
  * Parts without a `§` carry no tag notation and stay untouched.
- * A first or last part reduced to nothing but tag notation becomes empty; an interior one keeps
- * its boundary whitespace so the words on either side stay separated.
  *
  * Mutates in place; returns `true` after modifying at least one part.
  */
@@ -43,11 +43,10 @@ export function stripTagPrefixFromAssistantMessage(message: {
         const text = textPart.text;
         if (!text.includes(TAG_SECTION_CHAR)) continue;
 
-        const core = stripPersistedAssistantText(text);
-        const leading = index === 0 ? "" : (LEADING_WHITESPACE_REGEX.exec(text)?.[0] ?? "");
-        const trailing = index === last ? "" : (TRAILING_WHITESPACE_REGEX.exec(text)?.[0] ?? "");
-        const atEdge = index === 0 || index === last;
-        const stripped = core.length === 0 && atEdge ? "" : leading + core + trailing;
+        let stripped = index === 0 ? stripWellFormedLeadingTagPrefix(text) : text;
+        stripped = stripTagNotationGlobally(stripped);
+        if (index === 0) stripped = stripped.trimStart();
+        if (index === last) stripped = stripped.trimEnd();
 
         if (stripped !== text) {
             textPart.text = stripped;
