@@ -152,19 +152,29 @@ function xdgDataDirs(d: DetectDeps): string[] {
     const systemDirs = (d.env.XDG_DATA_DIRS ?? "").split(":").filter((dir) => dir.length > 0);
     return [dataHome, ...(systemDirs.length > 0 ? systemDirs : XDG_DATA_DIRS_DEFAULT)];
 }
-function desktopAppPaths(d: DetectDeps): string[] {
+interface DesktopAppPath {
+    path: string;
+    /** Linux launchers are named by channel; macOS and Windows app bundles carry no channel. */
+    appId?: (typeof OPENCODE_DESKTOP_APP_IDS)[number];
+}
+
+function desktopAppPaths(d: DetectDeps): DesktopAppPath[] {
     switch (d.platform) {
         case "darwin":
-            return ["/Applications/OpenCode.app", join(d.home, "Applications", "OpenCode.app")];
+            return [
+                { path: "/Applications/OpenCode.app" },
+                { path: join(d.home, "Applications", "OpenCode.app") },
+            ];
         case "win32": {
             const localappdata = d.env.LOCALAPPDATA ?? join(d.home, "AppData", "Local");
-            return [join(localappdata, "Programs", "OpenCode", "OpenCode.exe")];
+            return [{ path: join(localappdata, "Programs", "OpenCode", "OpenCode.exe") }];
         }
         default:
             return xdgDataDirs(d).flatMap((dataDir) =>
-                OPENCODE_DESKTOP_APP_IDS.map((appId) =>
-                    join(dataDir, "applications", `${appId}.desktop`),
-                ),
+                OPENCODE_DESKTOP_APP_IDS.map((appId) => ({
+                    path: join(dataDir, "applications", `${appId}.desktop`),
+                    appId,
+                })),
             );
     }
 }
@@ -198,17 +208,23 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
     }
 
     // One channel's state files describe one installation, so only the first existing file is reported.
+    const channelsWithState = new Set<string>();
     for (const appId of OPENCODE_DESKTOP_APP_IDS) {
         const marker = OPENCODE_DESKTOP_STATE_FILES.map((file) =>
             join(desktopUserDataDir(d, appId), file),
         ).find((candidate) => d.exists(candidate));
         if (marker) {
+            channelsWithState.add(appId);
             addCandidate(installations, seenRealpaths, d, marker, "desktop", "desktop");
         }
     }
-    for (const appPath of desktopAppPaths(d)) {
-        if (d.exists(appPath)) {
-            addCandidate(installations, seenRealpaths, d, appPath, "app", "desktop");
+    // An app path is the same installation as a state marker, so it is reported only when no marker accounts for it.
+    for (const app of desktopAppPaths(d)) {
+        const accountedFor = app.appId
+            ? channelsWithState.has(app.appId)
+            : channelsWithState.size > 0;
+        if (!accountedFor && d.exists(app.path)) {
+            addCandidate(installations, seenRealpaths, d, app.path, "app", "desktop");
         }
     }
 

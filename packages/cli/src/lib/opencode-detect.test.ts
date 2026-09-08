@@ -156,13 +156,45 @@ describe("detectOpenCode", () => {
         ]);
     });
 
-    it("enumerates Desktop settings and GUI app probes after CLI probes", () => {
+    it("reports a Desktop that has run once, not again for its app bundle", () => {
         const d = deps(new Set());
         const marker = openCodeDesktopSettingsMarkers(d)[0];
         const appPath = "/Applications/OpenCode.app";
         expect(detectOpenCodeInstallations(deps(new Set([marker, appPath]), "darwin"))).toEqual([
             { path: marker, source: "desktop", kind: "desktop" },
-            { path: appPath, source: "app", kind: "desktop" },
+        ]);
+        const cliBin = join(HOME, ".opencode", "bin", "opencode");
+        expect(
+            detectOpenCodeInstallations(deps(new Set([cliBin, marker, appPath]), "darwin")),
+        ).toEqual([
+            { path: cliBin, source: "home-bin", kind: "cli" },
+            { path: marker, source: "desktop", kind: "desktop" },
+        ]);
+    });
+
+    it("reports a Linux launcher for a channel that has no state marker", () => {
+        const prodMarker = join(HOME, ".config", "ai.opencode.desktop", "opencode.settings");
+        const prodLauncher = join(
+            HOME,
+            ".local",
+            "share",
+            "applications",
+            "ai.opencode.desktop.desktop",
+        );
+        const betaLauncher = join(
+            HOME,
+            ".local",
+            "share",
+            "applications",
+            "ai.opencode.desktop.beta.desktop",
+        );
+        expect(
+            detectOpenCodeInstallations(
+                deps(new Set([prodMarker, prodLauncher, betaLauncher]), "linux"),
+            ),
+        ).toEqual([
+            { path: prodMarker, source: "desktop", kind: "desktop" },
+            { path: betaLauncher, source: "app", kind: "desktop" },
         ]);
     });
 
