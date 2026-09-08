@@ -397,17 +397,81 @@ describe("createEventHandler — message.removed", () => {
         deps.onNewestResponseRemoved = (sessionId, model) => removed.push([sessionId, model]);
 
         await handle("message.updated", assistantUpdated({ input: 40_000 }));
-        // A three-hour-old entry survives unrelated events; removing another message preserves newest-response tracking.
+        // A three-hour-old entry survives unrelated events; removing an older message preserves newest-response tracking.
         const entry = deps.contextUsageMap.get(SESSION);
         if (entry) entry.updatedAt = Date.now() - 3 * 60 * 60 * 1000;
         await handle("session.error", { sessionID: "other", error: { message: "nope" } });
-        await handle("message.removed", { sessionID: SESSION, messageID: "msg-other" });
+        await handle("message.removed", { sessionID: SESSION, messageID: "msg-00" });
         expect(removed).toEqual([]);
 
         await handle("message.removed", { sessionID: SESSION, messageID: "msg-1" });
         expect(removed).toEqual([
             [SESSION, { providerID: "earlier-provider", modelID: "earlier-model" }],
         ]);
+    });
+
+    it("reverts the live model when a newer zero-usage response is removed, keeping the usage entry", async () => {
+        const db = openCodeDb();
+        try {
+            const insert = db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            );
+            insert.run(
+                "msg-1",
+                SESSION,
+                500,
+                500,
+                JSON.stringify({
+                    role: "assistant",
+                    providerID: "no-such-provider",
+                    modelID: "no-such-model",
+                    tokens: { input: 40_000, output: 10, cache: { read: 0, write: 0 } },
+                }),
+            );
+            insert.run(
+                "msg-2",
+                SESSION,
+                600,
+                600,
+                JSON.stringify({
+                    role: "assistant",
+                    providerID: "next-provider",
+                    modelID: "next-model",
+                    tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+                }),
+            );
+        } finally {
+            closeQuietly(db);
+        }
+        const removed: Array<[string, { providerID: string; modelID: string } | undefined]> = [];
+        const { deps, handle } = buildHarness();
+        deps.onNewestResponseRemoved = (sessionId, model) => removed.push([sessionId, model]);
+
+        await handle("message.updated", assistantUpdated({ input: 40_000 }));
+        await handle("message.updated", {
+            info: {
+                role: "assistant",
+                id: "msg-2",
+                sessionID: SESSION,
+                providerID: "next-provider",
+                modelID: "next-model",
+                tokens: { input: 0 },
+            },
+        });
+        expect(deps.contextUsageMap.get(SESSION)?.messageID).toBe("msg-1");
+
+        const dbAgain = openCodeDb();
+        try {
+            dbAgain.prepare("DELETE FROM message WHERE id = ?").run("msg-2");
+        } finally {
+            closeQuietly(dbAgain);
+        }
+        await handle("message.removed", { sessionID: SESSION, messageID: "msg-2" });
+
+        expect(removed).toEqual([
+            [SESSION, { providerID: "no-such-provider", modelID: "no-such-model" }],
+        ]);
+        expect(deps.contextUsageMap.get(SESSION)?.messageID).toBe("msg-1");
     });
 });
 

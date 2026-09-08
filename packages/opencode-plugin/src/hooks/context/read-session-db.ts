@@ -280,6 +280,7 @@ export function getMessageTimesFromOpenCodeDb(
 export function findLastAssistantModelFromOpenCodeDb(
     sessionId: string,
 ): { providerID: string; modelID: string; agent?: string } | null {
+    if (!openCodeDbExists()) return null;
     try {
         return withReadOnlySessionDb((db) => {
             const row = db

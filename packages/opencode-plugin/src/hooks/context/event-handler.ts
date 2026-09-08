@@ -16,7 +16,10 @@ import {
 } from "./event-payloads";
 import { resolveContextLimit, resolveSessionId } from "./event-resolvers";
 import { recordChildSession } from "./live-session-state";
-import { findLastAssistantUsageFromOpenCodeDb } from "./read-session-db";
+import {
+    findLastAssistantModelFromOpenCodeDb,
+    findLastAssistantUsageFromOpenCodeDb,
+} from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 
 export interface ContextUsageEntry {
@@ -47,7 +50,7 @@ export interface EventHandlerDeps {
     contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     onSessionCacheInvalidated?: (sessionId: string) => void;
     onRustWireInvalidated?: (sessionId: string) => void;
-    /** Fires when the response that supplied the live usage is removed; `model` is the preceding persisted response's model, or `undefined` when none remains. */
+    /** Fires when a message at or after the newest usage response is removed; `model` is the newest remaining persisted response's model, or `undefined` when none remains. */
     onNewestResponseRemoved?: (
         sessionId: string,
         model: { providerID: string; modelID: string } | undefined,
@@ -264,12 +267,16 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 if (deps.contextUsageMap.get(info.sessionID)?.messageID === info.messageID) {
                     deps.contextUsageMap.delete(info.sessionID);
                     clearSidebarSnapshotCache(info.sessionID);
-                    // The live model followed the removed response; the preceding persisted response, if any, becomes the reference for both. commentlint: allow(JUDGE)
-                    const preceding = findLastAssistantUsageFromOpenCodeDb(info.sessionID);
+                }
+                // The live model follows every assistant response, including one with no usage tokens, so a removal at or after the newest usage response re-derives it from the newest remaining persisted response. commentlint: allow(JUDGE)
+                if (
+                    !isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
+                ) {
+                    const remaining = findLastAssistantModelFromOpenCodeDb(info.sessionID);
                     deps.onNewestResponseRemoved?.(
                         info.sessionID,
-                        preceding
-                            ? { providerID: preceding.providerID, modelID: preceding.modelID }
+                        remaining
+                            ? { providerID: remaining.providerID, modelID: remaining.modelID }
                             : undefined,
                     );
                 }
