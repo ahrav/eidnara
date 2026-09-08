@@ -24,7 +24,7 @@ import {
     getPiSessionsRoot,
     getPiUserExtensionsPath,
 } from "./paths";
-import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
+import { detectPiBinary, getPiVersion, matchesPiPackageSource } from "./pi-helpers";
 
 /** Pi-named aliases of the shared historian-dump shapes. */
 export type PiHistorianDumpMeta = HistorianDumpMeta;
@@ -77,7 +77,7 @@ export interface PiDiagnosticReport {
      * `--issue` uses these sessions in its session picker.
      * Pi stores session JSONL files under `~/.pi/agent/sessions/<slug>/*.jsonl`.
      * Each session's `directory` comes from the `cwd` in its JSONL header line.
-     * The session-slug folder is the fallback when a header carries no `cwd`.
+     * The raw session-slug folder name is the fallback when a header carries no `cwd`.
      */
     recentSessions: PiRecentSessionSummary[];
     /** The report keeps legacy tmp-dir dumps separate from project-grouped dumps. */
@@ -86,7 +86,7 @@ export interface PiDiagnosticReport {
 
 export interface PiRecentSessionSummary {
     sessionId: string;
-    /** The session header's `cwd`, or the reversed session slug when the header has none. */
+    /** The session header's `cwd`, or the raw session slug such as `--tmp-my-project--` when the header has none. */
     directory: string;
     /** The JSONL file's mtime determines `lastActiveAt` in ISO format. */
     lastActiveAt: string;
@@ -160,7 +160,9 @@ function redactSecretString(value: string): string {
     // pair's value in place. Redacting one-token pairs first removes that value.
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
     const redacted = redactSecretText(redactKeyedText(value))
-        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1<REDACTED>@")
+        // Userinfo runs through the last `@` before the path so a raw `@` in a password is covered,
+        // and a scheme-relative `//user@host` counts too.
+        .replace(/((?:\b[a-z][a-z0-9+.-]*:)?\/\/)[^\s/?#]*@/gi, "$1<REDACTED>@")
         .replace(
             /(\b(?:Proxy-)?Authorization\s*[:=]\s*|\b(?:Set-)?Cookie\s*[:=]\s*|\bX-API-Key\s*[:=]\s*)[^\r\n]+/gi,
             "$1<REDACTED>",
@@ -180,14 +182,22 @@ export function sanitizeString(value: string): string {
     // Windows paths compare case-insensitively, so home and account matches do too there.
     const flags = process.platform === "win32" ? "gi" : "g";
     let sanitized = redactSecretString(value);
+    // Both replacements stop at an identifier boundary so a short account name such as `a`
+    // or a home that prefixes another directory does not rewrite unrelated text.
     if (home && parse(home).root !== home) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(home), flags), "<HOME>");
+        sanitized = sanitized.replace(
+            new RegExp(`${escapeRegex(home)}(?![A-Za-z0-9_.-])`, flags),
+            "<HOME>",
+        );
     }
     sanitized = sanitized.replace(/(\/Users\/)[^/\s"'`]+/gi, "$1<USER>");
     sanitized = sanitized.replace(/(\/home\/)[^/\s"'`]+/gi, "$1<USER>");
     sanitized = sanitized.replace(/[A-Za-z]:[\\/]Users[\\/][^\\/\s"'`]+/gi, "C:\\Users\\<USER>");
     if (username) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(username), flags), "<USER>");
+        sanitized = sanitized.replace(
+            new RegExp(`(?<![A-Za-z0-9_])${escapeRegex(username)}(?![A-Za-z0-9_])`, flags),
+            "<USER>",
+        );
     }
     return sanitized;
 }
@@ -272,17 +282,14 @@ function describePackageEntry(entry: unknown): string {
 }
 
 /**
- * A session-slug directory encodes its source project path.
- *
- * Pi strips the leading `/`, replaces `/` with `-`, and wraps the result in `--`.
- *
- * Literal `-` characters in path components make session-slug reversal lossy,
- * so the slug is the fallback when the header does not provide an absolute `cwd`.
+ * Pi names a session directory after its project path: the leading `/` is
+ * dropped, every `/` becomes `-`, and the result is wrapped in `--`. Literal
+ * `-` characters in path components make that encoding lossy, so the slug is
+ * never turned back into a path; it stands in as a label when the header
+ * carries no `cwd`.
  */
-function reverseSlugToDirectory(slug: string): string | null {
-    if (!slug.startsWith("--") || !slug.endsWith("--")) return null;
-    const inner = slug.slice(2, -2);
-    return `/${inner.replace(/-/g, "/")}`;
+function isSessionSlug(name: string): boolean {
+    return name.startsWith("--") && name.endsWith("--");
 }
 
 const SESSION_HEADER_MAX_BYTES = 8 * 1024;
@@ -331,13 +338,12 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
         const candidates: Array<{
             sessionId: string;
             file: string;
-            slugDirectory: string;
+            slug: string;
             mtime: number;
         }> = [];
 
         for (const slug of slugs) {
-            const slugDirectory = reverseSlugToDirectory(slug);
-            if (!slugDirectory) continue;
+            if (!isSessionSlug(slug)) continue;
             const slugDir = join(sessionsRoot, slug);
             let files: string[];
             try {
@@ -353,7 +359,7 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
                     if (!stat.isFile()) continue;
                     const sessionId = name.replace(/\.jsonl$/, "");
                     if (!sessionId) continue;
-                    candidates.push({ sessionId, file, slugDirectory, mtime: stat.mtimeMs });
+                    candidates.push({ sessionId, file, slug, mtime: stat.mtimeMs });
                 } catch {}
             }
         }
@@ -361,7 +367,7 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
         candidates.sort((a, b) => b.mtime - a.mtime);
         return candidates.slice(0, 5).map((entry) => ({
             sessionId: entry.sessionId,
-            directory: readSessionHeaderCwd(entry.file) ?? entry.slugDirectory,
+            directory: readSessionHeaderCwd(entry.file) ?? entry.slug,
             lastActiveAt: new Date(entry.mtime).toISOString(),
         }));
     } catch {
@@ -373,7 +379,8 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
     const buckets = new Map<string, PiProjectHistorianBucket>();
     for (const session of recentSessions) {
         const dir = session.directory;
-        if (!dir) continue;
+        // A slug label is not a path, so no project directory is scanned for it.
+        if (!isAbsolute(dir)) continue;
         const existing = buckets.get(dir);
         if (existing) {
             if (!existing.sessionIds.includes(session.sessionId)) {
@@ -434,7 +441,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const loaded = loadPiConfig({ cwd });
     const logFile = statLogFile(getEidnaraLogPath("pi"));
     const otherPiExtensions = packages
-        .filter((entry) => entry !== PI_PACKAGE_SOURCE)
+        .filter((entry) => !matchesPiPackageSource(entry))
         .map(describePackageEntry);
     const recentSessions = collectPiRecentSessions();
     const historianDumps = collectPiHistorianDumps(recentSessions);
@@ -454,7 +461,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             ...(settingsParsed.parseError
                 ? { parseError: sanitizeString(settingsParsed.parseError) }
                 : {}),
-            hasEidnaraPackage: packages.some((entry) => entry === PI_PACKAGE_SOURCE),
+            hasEidnaraPackage: packages.some(matchesPiPackageSource),
             packages: sanitizeValue(packages) as unknown[],
         },
         configPaths: {
