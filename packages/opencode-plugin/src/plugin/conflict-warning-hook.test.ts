@@ -108,6 +108,34 @@ describe.if(platform() === "linux")(
             expect(input.body.variant).toBe("max");
         });
 
+        it("does not persist a second warning while one is already in the session", async () => {
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const prompt = mock(async () => ({}));
+            const client = {
+                session: {
+                    prompt,
+                    get: mock(async () => ({ title: REAL_TITLE })),
+                    messages: mock(async () => [
+                        {
+                            info: { id: "msg_warning", role: "user" },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: formatConflictShort(CONFLICT),
+                                    ignored: true,
+                                },
+                            ],
+                        },
+                    ]),
+                },
+            };
+
+            await sendConflictWarning(client, directory, CONFLICT);
+
+            expect(prompt).not.toHaveBeenCalled();
+        });
+
         it("persists the conflict warning even when a TUI is connected", async () => {
             // cleanupConflictWarnings deletes the persisted warning row when
             // the conflict is resolved; a toast would leave nothing to clean

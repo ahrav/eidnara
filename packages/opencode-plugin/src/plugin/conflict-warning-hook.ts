@@ -283,6 +283,15 @@ export async function sendConflictWarning(
         return;
     }
 
+    // Conflict detection re-fires on every startup; a warning already in the session is not repeated.
+    const existing = await findMarkerMessageIds(client, sessionId, CONFLICT_WARNING_MARKER);
+    if (existing.length > 0) {
+        log(
+            `[eidnara] conflict-warning: session ${sessionId} already carries ${existing.length} warning(s); not sending another`,
+        );
+        return;
+    }
+
     const warningText = formatConflictShort(conflictResult);
 
     log(
