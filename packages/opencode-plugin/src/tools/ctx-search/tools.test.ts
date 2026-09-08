@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { resolveSessionDirectory } from "../../hooks/context/session-directory";
 import { KernelClient, MAX_READ_OBJECT_IDS } from "../../shared/kernel-client";
 import { renderAntiMemoryContent } from "../../shared/kernel-client/anti-memory";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
@@ -51,6 +52,54 @@ function seedMany(kernel: FakeKernel, count: number, text: (index: number) => st
 }
 
 describe("createCtxSearchTools", () => {
+    it("routes a pinned session independently of the tool context directory", async () => {
+        const harness = kernelHarness();
+        seed(harness.kernel, OBJECT_A, "Pinned search route.");
+        const routedRoots: string[] = [];
+        const identityDirectories: string[] = [];
+        const pinnedRoot = "/tmp/ctx-search-pinned";
+        const sessionDirectories = new Map([["ses-search", pinnedRoot]]);
+        let metadataReads = 0;
+        const tools = createCtxSearchTools({
+            kernelClient: (route) => {
+                routedRoots.push(route.projectRoot);
+                return harness.kernelClient(route);
+            },
+            resolveProjectPath: (directory) => {
+                identityDirectories.push(directory);
+                return "git:repo-project";
+            },
+            resolveSessionDirectory: (sessionId, fallbackDirectory) =>
+                resolveSessionDirectory(
+                    {
+                        client: {
+                            session: {
+                                get: async () => {
+                                    metadataReads += 1;
+                                    throw new Error("session metadata unavailable");
+                                },
+                            },
+                        } as never,
+                        directory: pinnedRoot,
+                        sessionDirectoryBySession: sessionDirectories,
+                    },
+                    sessionId,
+                    fallbackDirectory,
+                ),
+        });
+
+        const result = await tools.ctx_search.execute({ query: "pinned search" }, {
+            sessionID: "ses-search",
+            directory: "/tmp/divergent-tool-context",
+        } as never);
+
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(metadataReads).toBe(0);
+        expect(sessionDirectories.get("ses-search")).toBe(pinnedRoot);
+        expect(identityDirectories).toEqual([pinnedRoot]);
+        expect(routedRoots).toEqual([pinnedRoot]);
+    });
+
     it("validates required query", async () => {
         const tools = createCtxSearchTools(kernelHarness().deps);
 

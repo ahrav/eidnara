@@ -39,6 +39,7 @@ import {
 import { defaultConnectionFilePath } from "../../shared/host-lifecycle/paths";
 import { isRecord } from "../../shared/record-type-guard";
 import type { ModuleMethod } from "./module-wire";
+import type { RustModeModuleClient } from "./rust-mode-transform";
 
 const DEFAULT_MODULE_ID = "context";
 const CONNECT_BACKOFF_INITIAL_MS = 1_000;
@@ -490,6 +491,15 @@ interface OpeningRoute {
     promise: Promise<EnsuredRoute>;
 }
 
+export function isModuleCallBodyValid(method: ModuleMethod, body: unknown): boolean {
+    if (!isRecord(body)) return false;
+    if (method === "ctx_note") {
+        const keys = Object.keys(body);
+        return keys.length === 2 && body.name === "ctx_note" && isRecord(body.arguments);
+    }
+    return body.method === method;
+}
+
 export class HostModuleTransport {
     private readonly connectionFile: string;
     private readonly connectionOrigin: ConnectionOrigin;
@@ -719,10 +729,12 @@ export class HostModuleTransport {
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
     }): Promise<unknown> {
-        // Deadline and wrapup policy key off `args.method`, so the body the daemon reads must name the same method.
-        if (!isRecord(args.body) || args.body.method !== args.method) {
+        // Deadline and wrapup policy key off `args.method`; ctx_note is the one facade whose body uses name/arguments instead of a method discriminator.
+        if (!isModuleCallBodyValid(args.method, args.body)) {
             throw new TypeError(
-                `module transport body must carry method ${JSON.stringify(args.method)}`,
+                args.method === "ctx_note"
+                    ? 'module transport ctx_note body must be exactly { name: "ctx_note", arguments: {...} }'
+                    : `module transport body must carry method ${JSON.stringify(args.method)}`,
             );
         }
         const wrapupInFlight = (this.wrapupSessions.get(args.sessionId) ?? 0) > 0;
@@ -918,6 +930,14 @@ export class HostModuleTransport {
             method: "session.delete",
             body: { method: "session.delete", v: 1, session_id: sessionId },
         });
+    }
+
+    hasSessionRoute(sessionId: string): boolean {
+        const prefix = `${sessionId}\0`;
+        return (
+            [...this.routes.keys()].some((key) => key.startsWith(prefix)) ||
+            [...this.routeOpenings.keys()].some((key) => key.startsWith(prefix))
+        );
     }
 
     closeSession(sessionId: string): void {
@@ -1392,3 +1412,23 @@ export const __moduleTransportTest = {
     lockedHarnessClosure,
     managedCredentialSourceVersion,
 };
+
+/**
+ * The daemon client every harness hands to the transform, tool backends, and session commands.
+ * `connectionFile` undefined selects the default connection file for the current harness.
+ */
+export function createHostModuleClient(connectionFile: string | undefined): HostModuleClient {
+    const transport = new HostModuleTransport(connectionFile);
+    return {
+        call: (args) => transport.call(args),
+        deleteSession: (sessionId, projectRoot) => transport.deleteSession(sessionId, projectRoot),
+        closeSession: (sessionId) => transport.closeSession(sessionId),
+        hasSessionRoute: (sessionId) => transport.hasSessionRoute(sessionId),
+        disconnect: () => transport.disconnect(),
+    };
+}
+
+/** The daemon client plus the teardown its owner calls when the runtime that created it is disposed. A disposed runtime that only closed its sessions would leave the transport's socket, channel poller, and ring mappings cached for the process lifetime, and a reload with a different connection file would then hold one live transport per reload. commentlint: allow(JUDGE) */
+export interface HostModuleClient extends RustModeModuleClient {
+    disconnect(): void;
+}

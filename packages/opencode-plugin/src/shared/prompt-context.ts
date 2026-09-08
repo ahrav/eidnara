@@ -1,3 +1,4 @@
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "./with-timeout";
 /**
  * The resolver reads recent OpenCode HTTP API messages to determine the agent, model, and variant.
  *
@@ -112,16 +113,15 @@ export async function resolvePromptContext(
     };
     if (typeof c.session?.messages !== "function") return null;
 
-    let messages: unknown[] = [];
-    try {
-        const response = await c.session.messages({
+    const response = await withTimeout(
+        c.session.messages({
             path: { id: sessionId },
             query: { limit: PROMPT_CONTEXT_MESSAGE_LIMIT },
-        });
-        messages = extractMessages(response);
-    } catch {
-        return null;
-    }
+        }),
+        HOST_SDK_READ_TIMEOUT_MS,
+        "prompt context read timed out",
+    );
+    const messages = extractMessages(response);
     if (messages.length === 0) return null;
 
     let result: ResolvedPromptContext = {};

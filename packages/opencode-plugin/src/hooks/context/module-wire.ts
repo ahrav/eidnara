@@ -393,6 +393,8 @@ export interface ModuleOrdinalMemo {
     anchor?: RawMessageOrdinalAnchor | null;
     storedCount?: number | null;
     canonicalCount?: number;
+    /** Highest ordinal from the prior lineage; priming assigns persisted rows ordinals starting at `continuationBase + 1`. */
+    continuationBase?: number;
 }
 
 /** Reads every ordinal row after `anchor`, then the stored count that must account for them. */
@@ -453,14 +455,17 @@ export async function resolveOrdinalsForModule(args: {
     const generationChanged = args.memo.memoGeneration !== args.memo.generation;
     if (generationChanged) memo.clear();
 
+    const continuationBase = Math.max(0, args.memo.continuationBase ?? 0);
     let anchor = generationChanged ? null : (args.memo.anchor ?? null);
     let storedCount = generationChanged ? null : (args.memo.storedCount ?? null);
-    let canonicalCount = generationChanged ? 0 : (args.memo.canonicalCount ?? 0);
+    let canonicalCount = generationChanged
+        ? continuationBase
+        : (args.memo.canonicalCount ?? continuationBase);
     let priming = storedCount === null;
     if (priming) {
         memo.clear();
         anchor = null;
-        canonicalCount = 0;
+        canonicalCount = continuationBase;
     }
 
     let scan = await scanOrdinalRows(args.sessionId, anchor);
@@ -472,7 +477,7 @@ export async function resolveOrdinalsForModule(args: {
             return { ok: false, reason: "mismatch" };
         }
         priming = true;
-        canonicalCount = 0;
+        canonicalCount = continuationBase;
     }
 
     const assigned = new Map<string, number>();
@@ -853,6 +858,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
     ordinal: number;
     ck: Record<string, unknown>;
 }> {
+    const emittedToolCallIds = new Set<string>();
     return messages.map((message, index) => {
         const raw =
             message !== null && typeof message === "object"
@@ -970,21 +976,27 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                 // The daemon's `#[serde(default)]` reads an absent field as false.
                 const providerExecuted =
                     metadata.providerExecuted === true ? { provider_executed: true } : {};
-                content.push({
-                    kind: {
-                        type: "tool_call",
-                        id: callId,
-                        name: toolName,
-                        input,
-                        ...providerExecuted,
-                    },
-                });
                 const status =
                     typeof state.status === "string"
                         ? state.status
                         : typeof part.status === "string"
                           ? part.status
                           : undefined;
+                // Pi folds a tool result into the following message as a second part under the
+                // same call id; the daemon requires tool_use ids to be unique and drops a repeat,
+                // so a repeated id contributes only its result.
+                if (!emittedToolCallIds.has(callId)) {
+                    emittedToolCallIds.add(callId);
+                    content.push({
+                        kind: {
+                            type: "tool_call",
+                            id: callId,
+                            name: toolName,
+                            input,
+                            ...providerExecuted,
+                        },
+                    });
+                }
                 if (status === "completed" || status === "error") {
                     const isError = status === "error";
                     const outputValue =

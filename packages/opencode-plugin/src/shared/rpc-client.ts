@@ -107,6 +107,8 @@ export class EidnaraRpcClient {
         port: number;
         token: string | null;
         instanceId: string | null;
+        /** The server's port-file `started_at`; 0 when the record carried none. */
+        startedAt: number;
     } | null> {
         try {
             // The socket owns reconnect backoff, so endpoint discovery performs one
@@ -117,6 +119,7 @@ export class EidnaraRpcClient {
                 port: server.port,
                 token: server.token ?? null,
                 instanceId: server.instance_id ?? null,
+                startedAt: server.started_at,
             };
         } catch {
             return null;

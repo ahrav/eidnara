@@ -775,6 +775,7 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
             },
         ]);
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            messageID: "msg_new",
             providerID: "anthropic",
             modelID: "claude-opus-4-7",
         });
@@ -799,6 +800,7 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
             },
         ]);
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            messageID: "msg_asst",
             providerID: "github-copilot",
             modelID: "claude-sonnet-4.5",
         });
@@ -826,6 +828,7 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
         ]);
         // `findLastAssistantModelFromOpenCodeDb` returns the fully populated earlier assistant rather than the newer partial row.
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            messageID: "msg_full",
             providerID: "anthropic",
             modelID: "claude-opus-4-7",
         });
@@ -852,10 +855,12 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
             },
         ]);
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            messageID: "msg_A1",
             providerID: "anthropic",
             modelID: "claude-opus-4-7",
         });
         expect(findLastAssistantModelFromOpenCodeDb("ses_B")).toEqual({
+            messageID: "msg_B1",
             providerID: "github-copilot",
             modelID: "gpt-5.4",
         });
@@ -881,6 +886,7 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
             },
         ]);
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            messageID: "msg_agentic",
             providerID: "anthropic",
             modelID: "claude-opus-4-7",
             agent: "Alfonso - CTO",
@@ -902,12 +908,11 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
         ]);
         const result = findLastAssistantModelFromOpenCodeDb("ses_A");
         expect(result).toEqual({
+            messageID: "msg_default",
             providerID: "anthropic",
             modelID: "claude-opus-4-7",
         });
         // `agent` must be absent; an empty string triggers the `agentBySession` lookup.
-        // `recovered.agent` must be absent; an empty string triggers the `agentBySession` lookup.
-        // `recovered.agent` must be absent; an empty string triggers the `agentBySession` lookup.
         expect((result as { agent?: string }).agent).toBeUndefined();
     });
 });
@@ -987,6 +992,7 @@ describe("OPENCODE_DB override", () => {
         process.env.OPENCODE_DB = overridePath;
         expect(openCodeDbExists()).toBe(true);
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            messageID: "msg_override",
             providerID: "override-provider",
             modelID: "override-model",
         });
@@ -1007,6 +1013,7 @@ describe("OPENCODE_DB override", () => {
         process.env.OPENCODE_DB = "";
 
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            messageID: "msg_xdg",
             providerID: "xdg-provider",
             modelID: "xdg-model",
         });

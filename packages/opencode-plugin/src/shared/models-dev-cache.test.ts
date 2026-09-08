@@ -157,6 +157,7 @@ describe("models-dev-cache (SDK-only)", () => {
             /* Cache cleanup ignores `EBUSY` errors on Windows. */
         }
         clearModelsDevCache();
+        resetAuthRewarmLatchForTest();
     });
 
     test("honors the reporter's default output_reserve on the SDK geometry path", async () => {
@@ -513,6 +514,61 @@ describe("models-dev-cache (SDK-only)", () => {
             // A failure resets the latch, so the next event retries and succeeds.
             await refreshModelLimitsAfterAuthOnce(flaky);
             expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);
+            expect(calls).toBe(2);
+        });
+
+        test("a timed-out re-warm resets the latch so a later usage event retries", async () => {
+            resetAuthRewarmLatchForTest(20);
+            let calls = 0;
+            let firstSignal: AbortSignal | undefined;
+            const client = {
+                config: {
+                    providers: (options?: { signal?: AbortSignal }) => {
+                        calls++;
+                        if (calls === 1) {
+                            firstSignal = options?.signal;
+                            return new Promise<never>(() => {});
+                        }
+                        return Promise.resolve({
+                            data: {
+                                providers: [
+                                    {
+                                        id: "openai",
+                                        models: { "gpt-5.5": { limit: { input: 272000 } } },
+                                    },
+                                ],
+                            },
+                        });
+                    },
+                },
+            };
+
+            const startedAt = performance.now();
+            await refreshModelLimitsAfterAuthOnce(client);
+            expect(performance.now() - startedAt).toBeGreaterThanOrEqual(10);
+            expect(firstSignal?.aborted).toBe(true);
+
+            await refreshModelLimitsAfterAuthOnce(client);
+            expect(calls).toBe(2);
+            expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);
+        });
+
+        test("stops post-auth retries after two provider timeouts", async () => {
+            resetAuthRewarmLatchForTest(10);
+            let calls = 0;
+            const client = {
+                config: {
+                    providers: (_options?: { signal?: AbortSignal }) => {
+                        calls++;
+                        return new Promise<never>(() => {});
+                    },
+                },
+            };
+
+            await refreshModelLimitsAfterAuthOnce(client);
+            await refreshModelLimitsAfterAuthOnce(client);
+            await refreshModelLimitsAfterAuthOnce(client);
+
             expect(calls).toBe(2);
         });
     });

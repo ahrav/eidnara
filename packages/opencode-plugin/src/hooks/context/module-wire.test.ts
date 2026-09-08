@@ -41,6 +41,45 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
     });
 
+    it("emits only a tool_result for a later part that repeats an already-emitted call id", () => {
+        const kinds = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "asst", role: "assistant" },
+                parts: [{ type: "tool", tool: "read", callID: "tc-1", state: { input: {} } }],
+            },
+            {
+                info: { id: "user", role: "user" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "tc-1",
+                        state: { status: "completed", output: "done" },
+                    },
+                ],
+            },
+        ]).map((message) =>
+            (message.ck.content as Array<{ kind: { type: string } }>).map((c) => c.kind.type),
+        );
+
+        expect(kinds).toEqual([["tool_call"], ["tool_result"]]);
+    });
+
+    it("keeps the tool_call for a first-seen unfinished tool part without input", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "asst", role: "assistant" },
+                parts: [
+                    { type: "tool", tool: "read", callID: "tc-1", state: { status: "pending" } },
+                ],
+            },
+        ]);
+
+        expect(
+            (encoded.ck.content as Array<{ kind: { type: string } }>).map((c) => c.kind.type),
+        ).toEqual(["tool_call"]);
+    });
+
     it("keeps non-object parts as unknown opaque blocks", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {

@@ -64,17 +64,23 @@ export function stripTagSectionCharacters(value: string): string {
 }
 
 /**
+ * The function removes tag notation wherever it appears and leaves the surrounding whitespace in
+ * place, so a caller that owns the text's boundaries decides what to trim.
+ */
+export function stripTagNotationGlobally(value: string): string {
+    let text = stripCompleteTagPairsGlobally(value);
+    text = stripMalformedTagNotationGlobally(text);
+    // stripDanglingTagNotationGlobally runs before stripTagSectionCharacters so `§N$` and `§Nҩ` are removed as units.
+    text = stripDanglingTagNotationGlobally(text);
+    return stripTagSectionCharacters(text);
+}
+
+/**
  * The function removes whole `§N§` pairs.
  * It never removes bare digits; it then removes malformed tag notation and stray `§`.
  */
 export function stripPersistedAssistantText(value: string): string {
-    let text = stripWellFormedLeadingTagPrefix(value);
-    text = stripCompleteTagPairsGlobally(text);
-    text = stripMalformedTagNotationGlobally(text);
-    // stripDanglingTagNotationGlobally runs before stripTagSectionCharacters so `§N$` and `§Nҩ` are removed as units.
-    text = stripDanglingTagNotationGlobally(text);
-    text = stripTagSectionCharacters(text);
-    return text.trim();
+    return stripTagNotationGlobally(stripWellFormedLeadingTagPrefix(value)).trim();
 }
 
 export function byteSize(value: string): number {

@@ -5,7 +5,7 @@
  * same way. commentlint: allow(JUDGE)
  */
 
-import { resolveProjectRootDirectory } from "../../features/context/project-root";
+import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import {
     isAvailable,
     type MemoryState,
@@ -118,11 +118,14 @@ export async function executeCtxSearch(
         return { status: "invalid", text: sourcesError };
     }
 
-    const projectPath = deps.resolveProjectPath(toolContext.directory);
+    const directory = deps.resolveSessionDirectory
+        ? await deps.resolveSessionDirectory(toolContext.sessionID, toolContext.directory)
+        : toolContext.directory;
+    const projectPath = deps.resolveProjectPath(directory);
     if (!projectPath) {
         return { status: "invalid", text: "Error: Could not resolve project identity for search." };
     }
-    const projectRoot = resolveProjectRootDirectory(toolContext.directory);
+    const projectRoot = resolveProjectRootDirectory(directory);
 
     const completeFrom = (
         results: KernelMemorySearchResult[],

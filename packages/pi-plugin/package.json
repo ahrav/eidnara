@@ -1,0 +1,74 @@
+{
+  "name": "@eidnara/pi",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pi and OMP coding agent extension for Eidnara: cross-session memory and context management",
+  "main": "dist/index.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ahrav/eidnara",
+    "directory": "packages/pi-plugin"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p ../retina-local-fs/tsconfig.build.json && rm -f dist/index.js dist/subagent-entry.js dist/*-*.js && bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external node:sqlite",
+    "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit",
+    "test": "bun test",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@eidnara/shm-native": "0.1.0",
+    "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
+    "ai-tokenizer": "^1.0.6",
+    "comment-json": "^5.0.0",
+    "quickjs-emscripten": "^0.32.0",
+    "typebox": "^1.3.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.80.2",
+    "@earendil-works/pi-coding-agent": "0.80.2",
+    "@earendil-works/pi-tui": "0.80.2",
+    "@types/bun": "1.3.14",
+    "@types/node": "^22.20.0",
+    "typescript": "5.9.3"
+  },
+  "optionalDependencies": {
+    "@eidnara/host-linux-x64-gnu": "0.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@earendil-works/pi-tui": "^0.80.2"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "engines": {
+    "node": ">=24.15.0"
+  }
+}

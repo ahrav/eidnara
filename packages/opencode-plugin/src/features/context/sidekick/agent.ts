@@ -4,6 +4,7 @@ import type { SidekickConfig } from "../../../config/schema/eidnara";
 import {
     childSessionMessagesFetcher,
     createChildSession,
+    deleteChildSession,
 } from "../../../hooks/context/child-session-spawn";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
@@ -103,13 +104,9 @@ export async function runSidekick(deps: {
         return null;
     } finally {
         if (agentSessionId && !shouldKeepSubagents()) {
-            await deps.client.session
-                .delete({
-                    path: { id: agentSessionId },
-                })
-                .catch((error: unknown) => {
-                    log("[eidnara] failed to delete sidekick child session:", error);
-                });
+            await deleteChildSession(deps.client, agentSessionId).catch((error: unknown) => {
+                log("[eidnara] failed to delete sidekick child session:", error);
+            });
         }
     }
 }

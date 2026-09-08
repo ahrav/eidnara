@@ -9,3 +9,4 @@ docs/selective-indexing.md
 plans/
 /packages/*/dist/
 /packages/*/dist-scripts/
+/packages/opencode-plugin/.entry-smoke-dist-*/

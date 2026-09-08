@@ -4,6 +4,7 @@ import { SMART_NOTE_COMPILER_AGENT } from "../../../agents/smart-note-compiler";
 import {
     childSessionMessagesFetcher,
     createChildSession,
+    deleteChildSession,
 } from "../../../hooks/context/child-session-spawn";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
@@ -199,12 +200,11 @@ Remember: output only the JSON object described by the system prompt.`;
         return { ok: false, cancelled, error: message };
     } finally {
         if (childSessionId && !shouldKeepSubagents()) {
-            await args.client.session
-                .delete({
-                    path: { id: childSessionId },
-                    signal: AbortSignal.timeout(SESSION_CLEANUP_TIMEOUT_MS),
-                })
-                .catch(() => {});
+            await deleteChildSession(
+                args.client,
+                childSessionId,
+                AbortSignal.timeout(SESSION_CLEANUP_TIMEOUT_MS),
+            ).catch(() => {});
         }
     }
 }

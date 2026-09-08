@@ -1,3 +1,4 @@
+import type { SessionDirectoryResolver } from "../../hooks/context/session-directory";
 import type { KernelClientResolver } from "../../shared/kernel-client";
 import type { AntiMemoryPayload } from "../../shared/kernel-client/anti-memory";
 import type { ImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
@@ -30,5 +31,7 @@ export type { KernelClientResolver };
 export interface CtxMemoryToolDeps {
     kernelClient: KernelClientResolver;
     resolveProjectPath: (directory: string) => string | undefined;
+    /** Pins the same route root used by every daemon call for one session. */
+    resolveSessionDirectory?: SessionDirectoryResolver;
     allowedActions?: CtxMemoryAction[];
 }

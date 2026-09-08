@@ -349,10 +349,11 @@ describe("EidnaraRpcClient", () => {
             path === "/health" ? json({ pid: process.pid, instance_id: "bbbb" }) : json({ ok: 2 }),
         );
         cleanups.push(second.stop);
+        const secondStartedAt = Date.now();
         writePortFile(storageDir, {
             port: second.port,
             pid: process.pid,
-            started_at: Date.now(),
+            started_at: secondStartedAt,
             instance_id: "bbbb",
         });
 
@@ -363,6 +364,7 @@ describe("EidnaraRpcClient", () => {
             port: second.port,
             token: null,
             instanceId: "bbbb",
+            startedAt: secondStartedAt,
         });
     });
 });

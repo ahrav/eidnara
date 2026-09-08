@@ -396,6 +396,37 @@ mod tests {
     }
 
     #[test]
+    fn shared_guidance_keeps_host_specific_memory_contracts_conditional() {
+        let memory_schema = ctx_memory_schema();
+        let memory_properties = memory_schema["properties"]
+            .as_object()
+            .expect("ctx_memory schema has properties");
+        assert!(memory_properties.contains_key("publicClaimId"));
+        assert!(memory_properties.contains_key("publicClaimIds"));
+
+        for guidance in [
+            GUIDANCE_FULL_PRIMARY,
+            GUIDANCE_FULL_NO_REDUCE,
+            GUIDANCE_LIGHT_PRIMARY_TEXT,
+            GUIDANCE_LIGHT_NO_REDUCE_TEXT,
+        ] {
+            assert!(guidance.contains("`objectId`/`objectIds`"));
+            assert!(guidance.contains("`publicClaimId`/`publicClaimIds`"));
+            assert!(guidance.contains("`mem_<32hex>`"));
+            assert!(guidance.contains("`mcm_<32hex>`"));
+            assert!(guidance.contains("`sources` permits only `memory`"));
+            assert!(
+                guidance.contains("when its current contract includes project memories")
+                    || guidance.contains("when its contract includes project memories")
+            );
+            assert!(guidance.contains("notes or"));
+            assert!(guidance.contains("When `ctx_expand` is registered"));
+            assert!(guidance.contains("`## start-end · date · title`"));
+            assert!(guidance.contains("`<session-history>`"));
+        }
+    }
+
+    #[test]
     fn default_full_manifest_is_legacy_inert_and_overrides_only_descriptions() {
         let full = PromptSurfaceSelection::default();
         assert!(manifest_content_epoch(&full).is_empty());

@@ -1,4 +1,5 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
+import { resolveSessionDirectory } from "../../hooks/context/session-directory";
 import { KernelClient, TokenCache } from "../../shared/kernel-client";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import { createCtxMemoryTools } from "./tools";
@@ -66,6 +67,61 @@ function reduced(inner: Record<string, unknown>) {
 }
 
 describe("ctx_memory without a daemon", () => {
+    test("routes a pinned session independently of the tool context directory", async () => {
+        const transport = new FakeKernelTransport(new FakeKernel());
+        const routedRoots: string[] = [];
+        const identityDirectories: string[] = [];
+        const pinnedRoot = "/tmp/kernel-opencode-pinned";
+        const sessionDirectories = new Map([[SESSION, pinnedRoot]]);
+        let metadataReads = 0;
+        const definition = createCtxMemoryTools({
+            kernelClient: ({ sessionId, projectRoot }) => {
+                routedRoots.push(projectRoot);
+                return new KernelClient({
+                    transport,
+                    enabled: true,
+                    sessionId,
+                    projectRoot,
+                    tokens: new TokenCache(),
+                });
+            },
+            resolveProjectPath: (directory) => {
+                identityDirectories.push(directory);
+                return PROJECT;
+            },
+            resolveSessionDirectory: (sessionId, fallbackDirectory) =>
+                resolveSessionDirectory(
+                    {
+                        client: {
+                            session: {
+                                get: async () => {
+                                    metadataReads += 1;
+                                    throw new Error("session metadata unavailable");
+                                },
+                            },
+                        } as never,
+                        directory: pinnedRoot,
+                        sessionDirectoryBySession: sessionDirectories,
+                    },
+                    sessionId,
+                    fallbackDirectory,
+                ),
+        }).ctx_memory;
+
+        const text = (await definition.execute(createArgs("Pinned route."), {
+            sessionID: SESSION,
+            directory: "/tmp/divergent-tool-context",
+            callID: "call-pinned-route",
+            agent: "primary",
+        } as never)) as string;
+
+        expect(text).not.toStartWith("Error:");
+        expect(metadataReads).toBe(0);
+        expect(sessionDirectories.get(SESSION)).toBe(pinnedRoot);
+        expect(identityDirectories).toEqual([pinnedRoot]);
+        expect(routedRoots).toEqual([pinnedRoot]);
+    });
+
     test("get answers with the unavailable text, no retry wording, and no kernel call", async () => {
         const tool = harness();
         tool.transport.fileExists = false;
