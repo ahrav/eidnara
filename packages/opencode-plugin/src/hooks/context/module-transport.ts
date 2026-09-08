@@ -737,6 +737,10 @@ export class HostModuleTransport {
             if (remaining > 0) this.wrapupSessions.set(args.sessionId, remaining);
             else this.wrapupSessions.delete(args.sessionId);
         };
+        // The epoch is read before lane admission so a close that lands while this call is queued is observed.
+        const closeEpoch = this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0;
+        const sessionClosedSinceStart = (): boolean =>
+            (this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0) !== closeEpoch;
         let releaseLane: (() => void) | undefined;
         try {
             releaseLane = await this.acquireCorrectnessLane(args.sessionId, args.signal, deadline);
@@ -747,9 +751,6 @@ export class HostModuleTransport {
         // A post-write abort creates a bounded cleanup ticket.
         // A post-write abort settles the caller promptly while the session lane remains fenced until the cleanup ticket resolves; the facade retires the generation on expiry.
         let cleanupTicket: Promise<void> | null = null;
-        const closeEpoch = this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0;
-        const sessionClosedSinceStart = (): boolean =>
-            (this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0) !== closeEpoch;
         try {
             // This layer uses the facade's replay-free routeOpen/request primitives and solely decides whether to resend a body.
             // This layer uses only the facade's replay-free `routeOpen`/`request` primitives, so it alone decides whether to resend a body.

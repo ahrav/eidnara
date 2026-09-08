@@ -345,6 +345,45 @@ describe("a local close wins over recovery", () => {
         await expect(call).rejects.toMatchObject({ code: "session_closed" });
         expect(requests).toBe(0);
     });
+
+    test("a call queued behind the lane when the session closes does not send", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let requests = 0;
+        let finishFirst: ((value: unknown) => void) | undefined;
+        const route = { channel: 9, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            request: () => {
+                requests += 1;
+                return new Promise<unknown>((resolve) => {
+                    finishFirst = resolve;
+                });
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureRoute = async (sessionId) => ({
+            client,
+            route,
+            routeKey: `${sessionId}\0/tmp`,
+            generation: 0,
+        });
+
+        const first = transport
+            .call({ sessionId: "s", projectRoot: "/tmp", method: "session.status", body: {} })
+            .catch((error: unknown) => error);
+        await Bun.sleep(0);
+        expect(requests).toBe(1);
+        const queued = transport
+            .call({ sessionId: "s", projectRoot: "/tmp", method: "session.delete", body: {} })
+            .catch((error: unknown) => error);
+        await Bun.sleep(0);
+        transport.closeSession("s");
+        finishFirst?.({ ok: true });
+
+        // `closeSession` invalidates the connection under the in-flight call, so its late response is discarded too.
+        expect(await first).toMatchObject({ code: "session_closed" });
+        expect(await queued).toMatchObject({ code: "session_closed" });
+        expect(requests).toBe(1);
+    });
 });
 
 describe("credential rotation during a route bind", () => {
