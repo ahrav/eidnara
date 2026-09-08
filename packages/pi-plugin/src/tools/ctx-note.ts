@@ -15,6 +15,7 @@ import { CTX_NOTE_DESCRIPTION } from "@eidnara/opencode/tools/ctx-note/constants
 import type { CtxNoteArgs } from "@eidnara/opencode/tools/ctx-note/types";
 import { unwrapImitatedReducedArgs } from "@eidnara/opencode/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
+import { boundedCommandId } from "./command-id";
 
 const ACTION_VALUES = ["write", "read", "dismiss", "update"] as const;
 const FILTER_VALUES = ["all", "active", "pending", "ready", "dismissed"] as const;
@@ -199,7 +200,8 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
                     "Error: Rust notes authority is active, but this module transport does not support ctx_note.",
                 );
             }
-            const commandId = toolCallId?.trim() || undefined;
+            const callId = toolCallId?.trim();
+            const commandId = callId ? boundedCommandId(callId) : undefined;
             let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
             if ((action === "write" || action === "update") && surfaceCondition) {
                 if (deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true) {
