@@ -156,6 +156,16 @@ describe("registerRpcHandlers", () => {
         expect(detail.compartmentCount).toBe(4);
     });
 
+    test("an empty requested directory falls back to the server's directory instead of pinning an empty root", async () => {
+        const { handlers, roots } = register({}, DAEMON_STATUS);
+        const sessionId = "ses-handler-empty-dir";
+
+        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: "" });
+        await handlers.get("status-detail")?.({ sessionId, directory: 7 });
+
+        expect(roots).toEqual([process.cwd()]);
+    });
+
     test("a session keeps its first route root when a later poll supplies another directory", async () => {
         const { handlers, calls, roots } = register({}, DAEMON_STATUS);
         const sessionId = "ses-handler-two-roots";

@@ -776,7 +776,12 @@ export function registerRpcHandlers(
     // Daemon state is keyed by (session, project_root), so a poll reads the root the hooks write under; the caller's directory is the fallback when the host reports none. commentlint: allow(JUDGE)
     const routeRootFor = (sessionId: string, requested: unknown): Promise<string> =>
         resolveSessionDirectory(
-            { ...sessionDirectoryDeps, directory: String(requested ?? directory) },
+            {
+                ...sessionDirectoryDeps,
+                // The TUI sends "" when it has no directory; an empty fallback would pin an empty root for the session.
+                directory:
+                    typeof requested === "string" && requested.length > 0 ? requested : directory,
+            },
             sessionId,
         );
 
