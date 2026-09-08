@@ -770,6 +770,10 @@ export class HostModuleTransport {
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
                     }
+                    // A close that landed during connection setup or route opening must stop the body before it is written.
+                    if (sessionClosedSinceStart()) {
+                        throw this.sessionClosedError(args.sessionId);
+                    }
                     requestInvoked = true;
                     const response = await this.beforeDeadline(
                         ensuredRoute.client.request(ensuredRoute.route, args.body, {
@@ -958,7 +962,8 @@ export class HostModuleTransport {
         }
 
         const state = { closed: false };
-        const promise = (async (): Promise<EnsuredRoute> => {
+        const routeOpening = { client, generation, credentialSourceVersion, state } as OpeningRoute;
+        routeOpening.promise = (async (): Promise<EnsuredRoute> => {
             const target: RouteTarget = { kind: "tool_provider", module_id: this.moduleId };
             const identity: BindIdentity = {
                 project_root: projectRoot,
@@ -968,14 +973,17 @@ export class HostModuleTransport {
             // Momentary target unavailability retries with the facade's managed-route backoff, all inside the caller's deadline.
             let delayMs = ROUTE_OPEN_RETRY_BASE_MS;
             let route: RouteHandle;
+            let bindVersion: string;
             for (;;) {
+                // Accept a route only if the credential source version is unchanged across binding; otherwise close it and retry.
+                bindVersion = managedCredentialSourceVersion(process.env);
+                routeOpening.credentialSourceVersion = bindVersion;
                 try {
                     route = await this.beforeDeadline(
                         client.routeOpen(target, identity, fence),
                         deadline,
                         "opening the module route",
                     );
-                    break;
                 } catch (error) {
                     const retryable =
                         isHostCallError(error) &&
@@ -987,6 +995,14 @@ export class HostModuleTransport {
                     );
                     delayMs = Math.min(delayMs * 2, ROUTE_OPEN_RETRY_CAP_MS);
                     if (deadline.isExpired()) throw error;
+                    continue;
+                }
+                if (managedCredentialSourceVersion(process.env) === bindVersion) break;
+                void client.closeRoute(route).catch(() => undefined);
+                if (state.closed || this.client !== client || deadline.isExpired()) {
+                    throw this.connectionChangedError(
+                        "credentials changed while opening module route",
+                    );
                 }
             }
             if (
@@ -1000,21 +1016,11 @@ export class HostModuleTransport {
                     "daemon connection changed while opening module route",
                 );
             }
-            this.routes.set(routeKey, {
-                route,
-                generation,
-                ...(credentialSourceVersion === undefined ? {} : { credentialSourceVersion }),
-            });
+            this.routes.set(routeKey, { route, generation, credentialSourceVersion: bindVersion });
             return { client, route, routeKey, generation, ...fence };
         })();
-        const routeOpening: OpeningRoute = {
-            client,
-            generation,
-            ...(credentialSourceVersion === undefined ? {} : { credentialSourceVersion }),
-            state,
-            promise,
-        };
         this.routeOpenings.set(routeKey, routeOpening);
+        const promise = routeOpening.promise;
         // The opening outlives an aborted waiter: its settlement, not the waiter's, retires the map entry, so a late success is cached rather than duplicated by the next caller.
         void promise
             .catch(() => undefined)

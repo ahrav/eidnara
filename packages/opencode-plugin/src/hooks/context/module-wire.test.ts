@@ -41,6 +41,24 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
     });
 
+    it("preserves an explicitly empty tool-call id as the daemon does", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_empty_call", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "",
+                        id: "part_1",
+                        state: { status: "pending" },
+                    },
+                ],
+            },
+        ]);
+        expect((encoded.ck.content as Array<{ kind: { id: string } }>)[0]?.kind.id).toBe("");
+    });
+
     it("preserves an explicit zero absolute ordinal", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
@@ -52,6 +70,18 @@ describe("encodeOpenCodeMessagesToCk", () => {
 
         expect(encoded.ordinal).toBe(0);
         expect(encoded.ck.meta).toMatchObject({ ordinal: 0, synthetic: true });
+    });
+
+    it("ignores explicit ordinals the daemon cannot read as u64", () => {
+        const ordinals = encodeOpenCodeMessagesToCk([
+            { info: { id: "o1", role: "user" }, parts: [], absolute_ordinal: 1e21 },
+            { info: { id: "o2", role: "user" }, parts: [], absolute_ordinal: 2 ** 64 },
+            { info: { id: "o3", role: "user" }, parts: [], absolute_ordinal: -1 },
+            { info: { id: "o4", role: "user" }, parts: [], absolute_ordinal: 1.5 },
+            { info: { id: "o5", role: "user" }, parts: [], absolute_ordinal: 2 ** 63 },
+        ]).map((message) => message.ordinal);
+        // The first four fall back to `index + 1`; 2^63 survives because its wire text fits u64.
+        expect(ordinals).toEqual([1, 2, 3, 4, 2 ** 63]);
     });
 
     it("propagates provider-executed metadata to the call and result blocks", () => {

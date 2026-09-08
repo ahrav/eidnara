@@ -161,7 +161,12 @@ function getMessageId(message: MessageLike): string | null {
 
 /** An explicit absolute ordinal the daemon reads with `Value::as_u64`; zero is a valid value. */
 function wireOrdinal(value: unknown): number | undefined {
-    return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+    return typeof value === "number" &&
+        Number.isInteger(value) &&
+        value >= 0 &&
+        wireIntegerText(value) !== undefined
+        ? value
+        : undefined;
 }
 
 /** The daemon's `media_kind` classification of a MIME type. */
@@ -921,10 +926,13 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                             ? part.args
                             : {};
                 const callId =
-                    (typeof part.callID === "string" && part.callID) ||
-                    (typeof part.callId === "string" && part.callId) ||
-                    (typeof part.id === "string" && part.id) ||
-                    `synth-tool-${ordinal}-${partIndex}-${toolName}-${stableHashPrefix(input, 12)}`;
+                    typeof part.callID === "string"
+                        ? part.callID
+                        : typeof part.callId === "string"
+                          ? part.callId
+                          : typeof part.id === "string"
+                            ? part.id
+                            : `synth-tool-${ordinal}-${partIndex}-${toolName}-${stableHashPrefix(input, 12)}`;
                 const metadata =
                     part.metadata !== null && typeof part.metadata === "object"
                         ? (part.metadata as Record<string, unknown>)

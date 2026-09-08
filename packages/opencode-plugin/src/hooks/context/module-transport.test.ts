@@ -312,6 +312,75 @@ describe("a local close wins over recovery", () => {
         await expect(call).rejects.toMatchObject({ code: "session_closed" });
         expect(opens).toBe(1);
     });
+
+    test("a close during connection setup stops the body before it is written", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let requests = 0;
+        const route = { channel: 9, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            request: async () => {
+                requests += 1;
+                return { ok: true };
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        let finishSetup: (() => void) | undefined;
+        transport.ensureRoute = async (sessionId) => {
+            await new Promise<void>((resolve) => {
+                finishSetup = resolve;
+            });
+            return { client, route, routeKey: `${sessionId}\0/tmp`, generation: 0 };
+        };
+
+        const call = transport.call({
+            sessionId: "s",
+            projectRoot: "/tmp",
+            method: "session.delete",
+            body: {},
+        });
+        await Bun.sleep(0);
+        transport.closeSession("s");
+        finishSetup?.();
+
+        await expect(call).rejects.toMatchObject({ code: "session_closed" });
+        expect(requests).toBe(0);
+    });
+});
+
+describe("credential rotation during a route bind", () => {
+    test("a route bound while credentials changed is closed and bound again", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const credentialName = BROCA_CREDENTIAL_NAMES[0] as string;
+        const previous = process.env[credentialName];
+        const opened: RouteHandle[] = [];
+        const closed: RouteHandle[] = [];
+        const client = {
+            routeOpen: async () => {
+                const route = { channel: opened.length + 1, epoch: 1 } as unknown as RouteHandle;
+                opened.push(route);
+                if (opened.length === 1) process.env[credentialName] = `${previous ?? ""}rotated`;
+                return route;
+            },
+            closeRoute: async (route: RouteHandle) => {
+                closed.push(route);
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+        try {
+            const ensured = await transport.ensureRoute("s", "/tmp", Deadline.start(5_000));
+            expect(opened).toHaveLength(2);
+            expect(ensured).toMatchObject({ route: opened[1] });
+            await Bun.sleep(0);
+            expect(closed).toEqual([opened[0]]);
+            const again = await transport.ensureRoute("s", "/tmp", Deadline.start(5_000));
+            expect(again).toMatchObject({ route: opened[1] });
+            expect(opened).toHaveLength(2);
+        } finally {
+            if (previous === undefined) delete process.env[credentialName];
+            else process.env[credentialName] = previous;
+        }
+    });
 });
 
 describe("route opening observes the caller's abort", () => {
