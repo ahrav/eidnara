@@ -39,7 +39,12 @@ export const AgentOverrideConfigSchema = z.object({
         .regex(/^#[0-9A-Fa-f]{6}$/)
         .optional()
         .describe("Hex color for the agent (e.g. '#a1b2c3')"),
-    maxSteps: z.number().optional().describe("Maximum tool-call steps per invocation"),
+    maxSteps: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Maximum tool-call steps per invocation (positive integer)"),
     permission: PermissionSchema.describe("Per-tool permission overrides"),
     maxTokens: z.number().optional().describe("Maximum output tokens"),
     variant: z

@@ -64,8 +64,10 @@ function getProjectConfigPaths(cwd: string): string[] {
     return [`${basePath}.jsonc`, `${basePath}.json`];
 }
 
+/** Empty when the environment provides no absolute home: there is no user tier to read. */
 function getUserConfigPaths(): string[] {
     const basePath = eidnaraUserConfigBasePath();
+    if (basePath === undefined) return [];
     return [`${basePath}.jsonc`, `${basePath}.json`];
 }
 

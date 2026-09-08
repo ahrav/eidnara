@@ -1,4 +1,3 @@
-import { log } from "./logger";
 import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "./with-timeout";
 
 /**
@@ -11,7 +10,6 @@ import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "./with-timeout";
  * Do not mark notifications `synthetic: true`: Desktop renders only non-synthetic text parts.
  *
  * Posting to a session with a non-default title cannot affect title generation.
- * Do not mark skipped notifications as delivered; retry them at the next startup.
  */
 
 /**
@@ -56,8 +54,7 @@ export interface SafeTargetOptions {
  *
  *   unreadable (fail-open).
  * On `"skip"`, posting can permanently suppress the session's title generation.
- * The caller must leave the delivered/seen marker unset so the next startup retries the notification.
- *   startup retries.
+ * The caller either drops an ordinary notice or retains a command result for a later retry.
  *
  */
 export async function waitForSafeNotificationTarget(
@@ -75,8 +72,5 @@ export async function waitForSafeNotificationTarget(
             await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
     }
-    log(
-        `[eidnara] notification skipped: session ${sessionId} still has its default title (would suppress title generation); will retry on a later startup`,
-    );
     return "skip";
 }

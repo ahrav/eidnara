@@ -151,10 +151,32 @@ describe("createEidnaraCommandHandler", () => {
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-compaction-off",
                 `Eidnara compaction is disabled (compaction.enabled: false) — /${command} manages compacted history and has no effect in this mode.`,
-                {},
+                { forcePersist: true },
             );
             expect(calls).toHaveLength(0);
             expect(onFlush).not.toHaveBeenCalled();
+        });
+    }
+
+    for (const command of ["ctx-status", "ctx-flush", "ctx-recomp", "ctx-wrapup"] as const) {
+        it(`does not send /${command} to the daemon when route resolution loses to deletion`, async () => {
+            let deleted = false;
+            const resolveProjectRoot = mock(async () => {
+                deleted = true;
+                return "/deleted/session";
+            });
+            const onFlush = mock(() => {});
+            const { run, calls, sendNotification } = setup(undefined, {
+                resolveProjectRoot,
+                isSessionDeleted: () => deleted,
+                onFlush,
+            });
+
+            await expectSentinel(run(command, "ses-deleted-during-command"), command);
+
+            expect(calls).toHaveLength(0);
+            expect(onFlush).not.toHaveBeenCalled();
+            expect(sendNotification).not.toHaveBeenCalled();
         });
     }
 
@@ -180,7 +202,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-flush",
                 "Flushed: Changes take effect on next message.",
-                {},
+                { forcePersist: true },
             );
         });
 
@@ -358,7 +380,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(received.map((n) => n.payload)).toEqual([{ action: "show-status-dialog" }]);
         });
 
-        it("strips agent and model params from context command notifications", async () => {
+        it("strips agent and model params while retaining the command result", async () => {
             const { run, sendNotification } = setup(() => STATUS_RESPONSE);
 
             await expectSentinel(
@@ -374,7 +396,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-stable-model",
                 expect.stringContaining("## Eidnara Status"),
-                {},
+                { forcePersist: true },
             );
         });
     });
@@ -546,6 +568,19 @@ describe("createEidnaraCommandHandler", () => {
 
             expect(calls).toHaveLength(0);
         });
+
+        it("keeps TUI delivery enabled for a connected session", async () => {
+            connectTui("ses-wrapup-tui");
+            const { run, sendNotification } = setup(() => ({
+                disposition: "completed",
+                rounds: 1,
+                summary: "Wrapped up.",
+            }));
+
+            await expectSentinel(run("ctx-wrapup", "ses-wrapup-tui"), "ctx-wrapup");
+
+            expect(sendNotification.mock.calls.at(-1)?.[2]).toEqual({ forcePersist: false });
+        });
     });
 
     describe("ctx-aug", () => {
@@ -635,7 +670,7 @@ describe("createEidnaraCommandHandler", () => {
                     delete: mock(async () => ({ data: undefined })),
                 },
             };
-            const { run, texts } = setup(undefined, {
+            const { run, texts, sendNotification } = setup(undefined, {
                 sidekick: {
                     config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
@@ -651,6 +686,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(failure).toBeDefined();
             expect(failure).toContain("session is busy");
             expect(failure).toContain("Ship the migration");
+            expect(sendNotification.mock.calls.at(-1)?.[2]).toEqual({ forcePersist: true });
         });
 
         it("reports an unconfirmed delivery instead of a lost prompt when the send times out", async () => {
@@ -670,7 +706,7 @@ describe("createEidnaraCommandHandler", () => {
                     delete: mock(async () => ({ data: undefined })),
                 },
             };
-            const { run, texts } = setup(undefined, {
+            const { run, texts, sendNotification } = setup(undefined, {
                 sidekick: {
                     config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
@@ -695,6 +731,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(notice).toContain("may still arrive");
             expect(notice).toContain("Ship the migration");
             expect(texts().some((text) => text.startsWith("## /ctx-aug — Failed"))).toBe(false);
+            expect(sendNotification.mock.calls.at(-1)?.[2]).toEqual({ forcePersist: true });
         });
     });
 
@@ -717,7 +754,7 @@ describe("createEidnaraCommandHandler", () => {
         expect(sendNotification).toHaveBeenCalledWith(
             "ses-notify",
             "No pending operations to flush.",
-            {},
+            { forcePersist: true },
         );
     });
 

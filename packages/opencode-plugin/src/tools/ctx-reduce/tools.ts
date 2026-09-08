@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { boundedCommandId, toolCallIdFromContext } from "../../plugin/rust-tool-backends";
@@ -59,20 +58,6 @@ const ctxReduceArgsShape = {
 const ctxReduceArgsSchema = tool.schema.object(ctxReduceArgsShape).passthrough();
 
 function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
-    // The daemon's reduce_command_ledger keeps command ids for the session's
-    // lifetime, so a fallback id must not repeat after the tool is rebuilt:
-    // the incarnation nonce keeps `oc-<session>-<nonce>-1` from colliding with
-    // the same counter value issued by an earlier tool instance.
-    const incarnation = randomBytes(6).toString("hex");
-    let fallbackCommandSequence = 0;
-
-    const commandIdForInvocation = (sessionId: string, toolContext: unknown): string => {
-        const callId = toolCallIdFromContext(toolContext);
-        if (callId) return boundedCommandId(`oc-${sessionId}-${callId}`);
-        fallbackCommandSequence += 1;
-        return boundedCommandId(`oc-${sessionId}-${incarnation}-${fallbackCommandSequence}`);
-    };
-
     return tool({
         description: CTX_REDUCE_DESCRIPTION,
         args: ctxReduceArgsShape,
@@ -85,6 +70,12 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             if (!args.drop) {
                 return "Error: 'drop' must be provided.";
             }
+            // The command id keys the daemon's reduce ledger, so a redelivered call replays instead
+            // of queueing the same tags twice; only the host's tool-call id is stable across deliveries.
+            const callId = toolCallIdFromContext(toolContext);
+            if (!callId) {
+                return "Error: ctx_reduce requires a stable tool-call identity from the host; nothing was queued.";
+            }
 
             const rustReduce = deps.rustToolBackends.reduce;
             if (!rustReduce) {
@@ -95,7 +86,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     sessionId,
                     projectRoot: toolContext.directory,
                     drop: args.drop,
-                    commandId: commandIdForInvocation(sessionId, toolContext),
+                    commandId: boundedCommandId(`oc-${sessionId}-${callId}`),
                 });
                 const value =
                     response !== null && typeof response === "object" && "result" in response

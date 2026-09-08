@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { getDataDir, getOpenCodeStorageDir } from "../../src/shared/data-path";
+import { getDataDir } from "../../src/shared/data-path";
 
 /**
  * Committed writes land in the `-wal` sidecar until a checkpoint, so the main
@@ -40,6 +40,7 @@ export function resolveOpenCodeDatabasePath(): string {
 
     const dataDir = getDataDir();
     const opencodeRoot = join(dataDir, "opencode");
+    const storageRoot = join(opencodeRoot, "storage");
 
     // `opencode.db` competes with the channel databases (`opencode-beta.db`, ...) on
     // last activity, so a stale stable database does not shadow the active channel.
@@ -48,12 +49,12 @@ export function resolveOpenCodeDatabasePath(): string {
         return channelDbCandidates[0];
     }
 
-    const storageDbCandidates = listDatabaseFiles(getOpenCodeStorageDir(), "");
+    const storageDbCandidates = listDatabaseFiles(storageRoot, "");
     if (storageDbCandidates.length > 0) {
         return storageDbCandidates[0];
     }
 
     throw new Error(
-        `Unable to locate OpenCode DB. Checked opencode*.db in ${opencodeRoot} and storage DBs in ${getOpenCodeStorageDir()}`,
+        `Unable to locate OpenCode DB. Checked opencode*.db in ${opencodeRoot} and storage DBs in ${storageRoot}`,
     );
 }

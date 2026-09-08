@@ -102,6 +102,38 @@ describe("work metrics", () => {
         ).toEqual({ newWorkTokens: 244, totalInputTokens: 320 });
     });
 
+    test("Pi metrics do not count the resumed prompt after an aborted zero-usage entry twice", () => {
+        const usage = (input: number, output: number) => ({
+            role: "assistant",
+            usage: { input, output, cacheRead: 0, cacheWrite: 0 },
+        });
+        // The OpenCode fold on the same shape: 1000 qualifies in phase 0; the abort row closes it
+        // and the resumed 1000 (prev 0, phase 1) does not qualify, so total input stays 1000.
+        const db = new Database(":memory:");
+        db.exec("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+        const insert = db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        );
+        for (const [i, [input, output]] of [
+            [1000, 5],
+            [0, 0],
+            [1000, 7],
+        ].entries()) {
+            insert.run(
+                `m${i}`,
+                "s",
+                i,
+                JSON.stringify({ role: "assistant", agent: "a", tokens: { input, output } }),
+            );
+        }
+        const openCode = computeOpenCodeWorkMetrics(db, "s");
+
+        const pi = computePiWorkMetrics([usage(1000, 5), usage(0, 0), usage(1000, 7)]);
+
+        expect(pi).toEqual(openCode);
+        expect(pi.totalInputTokens).toBe(1000);
+    });
+
     // The incremental fold must match the window-function oracle while processing only rows after its watermark.
 
     function createIncrementalFixture(): Database {

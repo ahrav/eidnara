@@ -12,7 +12,8 @@ export interface ConfigPaths {
     /* */
     opencodeConfig: string;
     opencodeConfigFormat: "json" | "jsonc" | "none";
-    eidnaraConfig: string;
+    /** Absent when the environment provides no absolute home, so no user tier exists to read or write. */
+    eidnaraConfig: string | undefined;
     /* */
     omoConfig: string | null;
     tuiConfig: string;
@@ -121,8 +122,8 @@ export function getPiCacheRoot(): string {
     return join(dirname(getPiAgentDir()), "cache");
 }
 
-/** Shared Eidnara user config, independent of any harness agent settings dir. */
-export function getSharedUserConfigPath(): string {
+/** Shared Eidnara user config, independent of any harness agent settings dir; `undefined` when the environment provides no absolute home. */
+export function getSharedUserConfigPath(): string | undefined {
     return resolveEidnaraUserConfigPath();
 }
 

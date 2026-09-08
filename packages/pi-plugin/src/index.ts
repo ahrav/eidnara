@@ -633,12 +633,15 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     }
 
     // Clears one session's prompt state and closes its routes on both daemon transports; a closed route reopens on the session's next call, so no durable state is lost. commentlint: allow(JUDGE)
+    // The kernel transport is shared per connection file, and a session that `/cd`s across projects with distinct connection files holds routes on each, so every project config this process has resolved is released.
     function releaseSessionResources(sessionId: string): void {
         clearPiSystemPromptSession(sessionId);
         promptSurfaceGuidanceEpochs.clear(sessionId);
         systemPromptRefreshSessions.delete(sessionId);
         moduleClient.closeSession?.(sessionId);
-        closeKernelSession(sessionId);
+        for (const deps of projectDepsByDir.values()) {
+            closeKernelSession(deps.config, sessionId);
+        }
     }
 
     // `/reload` tears down extensions and re-runs the default export.

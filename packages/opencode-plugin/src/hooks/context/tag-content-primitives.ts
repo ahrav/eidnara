@@ -20,24 +20,18 @@ export type MessageLike = { info: MessageInfo; parts: unknown[] };
 
 const encoder = new TextEncoder();
 
-const TAG_PREFIX_REGEX = /^(?:§\d+§\s*)+/;
+// The lookahead preserves numeric references such as `§42.1` and adjacent tags such as `§1 §2§`.
+// The closed closer set prevents a broad symbol class from consuming an authored emoji or a `#` heading marker.
+const DANGLING_TAG_CORE = String.raw`\u00a7\d+(?!\d|\.\d|\u00a7)(?:">|[$"'\u04a9])?`;
+const DANGLING_TAG_GLOBAL_REGEX = new RegExp(DANGLING_TAG_CORE, "gu");
 
-//
-//
-// `§15298">§15298§ hello...` matches the malformed-prefix regex.
-// `MALFORMED_TAG_PREFIX_REGEX` matches `§15298">§ hello...` without closing digits.
-//
-//
-const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
-
-//
-//
-// The negative lookahead rejects `§5.1`; the optional closer does not consume whitespace, `§`, word characters, or `.`.
-// `(?!\d)` pins `\d+` to the whole digit run, so `§12.3` cannot backtrack to `§1` and pass the decimal lookahead on `2.3`.
-// The closer does not consume an ASCII word character or `.`.
-// The closer preserves word characters, periods, and whitespace (`§42important` → `important`).
-const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\d)(?!\.\d)[^\s\u00a7\w.]?/g;
-const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\d)(?!\.\d)[^\s\u00a7\w.]?\s*)+/;
+// Sticky (`y`) makes each rule match only at the current offset. The malformed rule precedes the
+// dangling rule because both can match `§N">`, and only the malformed rule consumes the whole hybrid.
+const LEADING_TAG_RULES: readonly RegExp[] = [
+    /\u00a7\d+">\u00a7(?:\d+\u00a7)?[\s\u0085]*/y,
+    /\u00a7\d+\u00a7[\s\u0085]*/y,
+    new RegExp(String.raw`${DANGLING_TAG_CORE}[\s\u0085]*`, "uy"),
+];
 
 /* */
 const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;
@@ -98,17 +92,20 @@ export function byteSize(value: string): number {
  * Does not remove bare leading digits: preserve `99 files`, `2024 roadmap`, and numbered lists.
  */
 export function stripTagPrefix(value: string): string {
-    let stripped = value;
-    for (let pass = 0; pass < 8; pass++) {
-        const prev = stripped;
-        stripped = stripped.replace(MALFORMED_TAG_PREFIX_REGEX, "");
-        stripped = stripped.replace(TAG_PREFIX_REGEX, "");
-        // Run `DANGLING_TAG_PREFIX_REGEX` after `TAG_PREFIX_REGEX` so a well-formed `§N§` is not reduced to `§`.
-        // `DANGLING_TAG_PREFIX_REGEX` would otherwise strip `§N` and leave the closing `§`.
-        stripped = stripped.replace(DANGLING_TAG_PREFIX_REGEX, "");
-        if (stripped === prev) break;
+    // Each accepted match advances `offset`, preventing zero-length matches from looping indefinitely.
+    let offset = 0;
+    scan: while (offset < value.length) {
+        for (const rule of LEADING_TAG_RULES) {
+            rule.lastIndex = offset;
+            const match = rule.exec(value);
+            if (match !== null && match[0].length > 0) {
+                offset += match[0].length;
+                continue scan;
+            }
+        }
+        break;
     }
-    return stripped;
+    return offset === 0 ? value : value.slice(offset);
 }
 
 /**

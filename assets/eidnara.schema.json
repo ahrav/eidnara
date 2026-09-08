@@ -104,8 +104,10 @@
           "pattern": "^#[0-9A-Fa-f]{6}$"
         },
         "maxSteps": {
-          "description": "Maximum tool-call steps per invocation",
-          "type": "number"
+          "description": "Maximum tool-call steps per invocation (positive integer)",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         },
         "permission": {
           "description": "Per-tool permission overrides",
@@ -852,8 +854,10 @@
           "pattern": "^#[0-9A-Fa-f]{6}$"
         },
         "maxSteps": {
-          "description": "Maximum tool-call steps per invocation",
-          "type": "number"
+          "description": "Maximum tool-call steps per invocation (positive integer)",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
         },
         "permission": {
           "description": "Per-tool permission overrides",

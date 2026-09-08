@@ -74,14 +74,21 @@ function extractFromMessage(message: unknown): ResolvedPromptContext | null {
     return out;
 }
 
+/** Variants are defined per model, so `patch.variant` is inherited only when `patch.model` matches the resolved model. */
 function mergeContexts(
     base: ResolvedPromptContext,
     patch: ResolvedPromptContext,
 ): ResolvedPromptContext {
+    const model = base.model ?? patch.model;
+    const sameModel =
+        patch.model !== undefined &&
+        model !== undefined &&
+        patch.model.providerID === model.providerID &&
+        patch.model.modelID === model.modelID;
     return {
         agent: base.agent ?? patch.agent,
-        model: base.model ?? patch.model,
-        variant: base.variant ?? patch.variant,
+        model,
+        variant: base.variant ?? (sameModel ? patch.variant : undefined),
     };
 }
 
