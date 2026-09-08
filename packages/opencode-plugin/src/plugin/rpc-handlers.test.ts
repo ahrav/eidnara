@@ -22,6 +22,7 @@ import {
     buildSidebarSnapshot,
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
+    CoalescedTtlCache,
     clearRustSessionStatus,
     clearWorkMetricsCarry,
     clearWorkMetricsCarryIfFolded,
@@ -1173,5 +1174,64 @@ describe("BoundedTtlCache", () => {
         expect(cache.get("a", 3_000)).toBeUndefined();
         expect(cache.get("b", 3_000)).toBe("beta-2");
         expect(cache.get("c", 3_000)).toBe("gamma");
+    });
+});
+
+describe("CoalescedTtlCache", () => {
+    test("concurrent misses share one load, a settled value is cached, and a failure is not", async () => {
+        const cache = new CoalescedTtlCache<number>(60_000, 8);
+        let loads = 0;
+        let release: ((value: number) => void) | undefined;
+        const load = () =>
+            new Promise<number>((resolve) => {
+                loads += 1;
+                release = resolve;
+            });
+
+        const first = cache.getOrLoad("k", load);
+        const second = cache.getOrLoad("k", load);
+        expect(loads).toBe(1);
+        release?.(7);
+        expect(await Promise.all([first, second])).toEqual([7, 7]);
+        expect(await cache.getOrLoad("k", load)).toBe(7);
+        expect(loads).toBe(1);
+
+        await expect(
+            cache.getOrLoad("bad", () => Promise.reject(new Error("boom"))),
+        ).rejects.toThrow("boom");
+        let recovered = 0;
+        await cache.getOrLoad("bad", async () => {
+            recovered += 1;
+            return 1;
+        });
+        expect(recovered).toBe(1);
+    });
+
+    test("invalidate drops cached and in-flight entries under a prefix and rejects the late load", async () => {
+        const cache = new CoalescedTtlCache<number>(60_000, 8);
+        await cache.getOrLoad("ses\u001f/a", async () => 1);
+        await cache.getOrLoad("other\u001f/a", async () => 2);
+        let release: ((value: number) => void) | undefined;
+        const pending = cache.getOrLoad(
+            "ses\u001f/b",
+            () =>
+                new Promise<number>((resolve) => {
+                    release = resolve;
+                }),
+        );
+
+        cache.invalidate("ses\u001f");
+        release?.(3);
+        await expect(pending).rejects.toThrow("invalidated");
+
+        let reloaded = 0;
+        expect(
+            await cache.getOrLoad("ses\u001f/a", async () => {
+                reloaded += 1;
+                return 4;
+            }),
+        ).toBe(4);
+        expect(reloaded).toBe(1);
+        expect(await cache.getOrLoad("other\u001f/a", async () => 99)).toBe(2);
     });
 });

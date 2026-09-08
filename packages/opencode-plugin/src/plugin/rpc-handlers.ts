@@ -124,6 +124,47 @@ export class BoundedTtlCache<V> {
     }
 }
 
+/**
+ * A `BoundedTtlCache` whose concurrent misses for one key share one in-flight load. `invalidate`
+ * drops cached values and in-flight slots for a key prefix; a load whose slot is gone when it
+ * settles rejects, so neither the cache nor the waiting caller sees an answer for an invalidated key.
+ */
+export class CoalescedTtlCache<V> {
+    private readonly values: BoundedTtlCache<V>;
+    private readonly inFlight = new Map<string, Promise<V>>();
+
+    constructor(ttlMs: number, maxEntries: number) {
+        this.values = new BoundedTtlCache<V>(ttlMs, maxEntries);
+    }
+
+    async getOrLoad(key: string, load: () => Promise<V>): Promise<V> {
+        const cached = this.values.get(key);
+        if (cached !== undefined) return cached;
+        const inFlight = this.inFlight.get(key);
+        if (inFlight) return inFlight;
+        const request: Promise<V> = load().then((value) => {
+            if (this.inFlight.get(key) !== request) {
+                throw new Error(`load for ${key} discarded: key invalidated`);
+            }
+            this.values.set(key, value);
+            return value;
+        });
+        this.inFlight.set(key, request);
+        const releaseSlot = () => {
+            if (this.inFlight.get(key) === request) this.inFlight.delete(key);
+        };
+        request.then(releaseSlot, releaseSlot);
+        return request;
+    }
+
+    invalidate(keyPrefix: string): void {
+        this.values.deleteWhere((key) => key.startsWith(keyPrefix));
+        for (const key of this.inFlight.keys()) {
+            if (key.startsWith(keyPrefix)) this.inFlight.delete(key);
+        }
+    }
+}
+
 export interface RustSessionStatus {
     usage?: { current_total_input_tokens?: number; context_limit_tokens?: number };
     tail_hygiene?: WireTailHygieneBaseline | null;
@@ -139,19 +180,14 @@ export interface RustSessionStatus {
     wrapup_rounds?: number | null;
     pass_trace?: { last_reject_error?: string | null } | null;
 }
-const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
+const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
 );
-const rustStatusInFlight = new Map<string, Promise<RustSessionStatus>>();
 
-/** Forgets a deleted session's cached daemon status under every root. An in-flight request is dropped from the map, and `fetchRustSessionStatus` caches only while it still holds the map slot, so a late answer cannot resurrect the session. commentlint: allow(JUDGE) */
+/** Forgets a deleted session's cached and in-flight daemon status under every root, so a late answer cannot resurrect the session. commentlint: allow(JUDGE) */
 export function clearRustSessionStatus(sessionId: string): void {
-    const prefix = pollCacheKey(sessionId, "");
-    rustStatusCache.deleteWhere((key) => key.startsWith(prefix));
-    for (const key of rustStatusInFlight.keys()) {
-        if (key.startsWith(prefix)) rustStatusInFlight.delete(key);
-    }
+    rustStatusCache.invalidate(pollCacheKey(sessionId, ""));
 }
 
 /**
@@ -183,34 +219,9 @@ async function loadRustSessionStatus(
     directory: string,
 ): Promise<RustSessionStatus | undefined> {
     if (!client) return undefined;
-    const cacheKey = pollCacheKey(sessionId, directory);
-    const cached = rustStatusCache.get(cacheKey);
-    if (cached !== undefined) {
-        return cached;
-    }
-    // Polls that miss the cache while a request is in flight share it. The module transport serializes calls per session, so one status request queued behind a long wrapup must not become one queued request per poll. commentlint: allow(JUDGE)
-    const inFlight = rustStatusInFlight.get(cacheKey);
-    if (inFlight) return inFlight;
-    const request: Promise<RustSessionStatus> = fetchRustSessionStatus(
-        client,
-        sessionId,
-        directory,
-    ).then((status) => {
-        // `clearRustSessionStatus` removes the slot when the session is deleted mid-request; the answer is then stale for the cache and for the poll that is still waiting on it.
-        if (rustStatusInFlight.get(cacheKey) !== request) {
-            throw new Error(
-                `session.status answer for ${sessionId} discarded: session invalidated`,
-            );
-        }
-        rustStatusCache.set(cacheKey, status);
-        return status;
-    });
-    rustStatusInFlight.set(cacheKey, request);
-    const releaseSlot = () => {
-        if (rustStatusInFlight.get(cacheKey) === request) rustStatusInFlight.delete(cacheKey);
-    };
-    request.then(releaseSlot, releaseSlot);
-    return request;
+    return rustStatusCache.getOrLoad(pollCacheKey(sessionId, directory), () =>
+        fetchRustSessionStatus(client, sessionId, directory),
+    );
 }
 
 async function fetchRustSessionStatus(
@@ -699,7 +710,7 @@ export function registerRpcHandlers(
     // so the sidebar shows `stale` when the projector is behind.
     const kernelClient = kernelClientResolver(config);
     // The cache reuses snapshots for `RUST_STATUS_CACHE_TTL_MS` to avoid a daemon read on each sidebar poll. commentlint: allow(JUDGE)
-    const memorySnapshotCache = new BoundedTtlCache<KernelMemorySnapshot>(
+    const memorySnapshotCache = new CoalescedTtlCache<KernelMemorySnapshot>(
         RUST_STATUS_CACHE_TTL_MS,
         POLL_CACHE_MAX_ENTRIES,
     );
@@ -707,17 +718,15 @@ export function registerRpcHandlers(
         if (config.memory?.enabled === false) {
             return { state: disabled(), rows: [], knownAsOf: null };
         }
-        const cacheKey = pollCacheKey(sessionId, dir);
-        const cached = memorySnapshotCache.get(cacheKey);
-        if (cached !== undefined) {
-            return cached;
-        }
-        const client = kernelClient({ sessionId, projectRoot: resolveProjectRootDirectory(dir) });
-        const snapshot = kernelMemorySnapshotFrom(
-            await client.read({ surface: "explicit_search", gated: true }),
-        );
-        memorySnapshotCache.set(cacheKey, snapshot);
-        return snapshot;
+        return memorySnapshotCache.getOrLoad(pollCacheKey(sessionId, dir), async () => {
+            const client = kernelClient({
+                sessionId,
+                projectRoot: resolveProjectRootDirectory(dir),
+            });
+            return kernelMemorySnapshotFrom(
+                await client.read({ surface: "explicit_search", gated: true }),
+            );
+        });
     };
 
     // An unreachable daemon fails the poll rather than yielding zero counts, because `applyStickySnapshotCache` treats zero counts as lost state and blanks the sidebar. commentlint: allow(JUDGE)
