@@ -25,11 +25,9 @@ export function resolveOpenCodeDatabasePath(): string {
 
     const dataDir = getDataDir();
     const opencodeRoot = join(dataDir, "opencode");
-    const defaultDb = join(opencodeRoot, "opencode.db");
-    if (existsSync(defaultDb)) {
-        return defaultDb;
-    }
 
+    // `opencode.db` competes with the channel databases (`opencode-beta.db`, ...) on
+    // modification time, so a stale stable database does not shadow the active channel.
     const channelDbCandidates = listDatabaseFiles(opencodeRoot, "opencode");
     if (channelDbCandidates.length > 0) {
         return channelDbCandidates[0];
@@ -41,6 +39,6 @@ export function resolveOpenCodeDatabasePath(): string {
     }
 
     throw new Error(
-        `Unable to locate OpenCode DB. Checked ${defaultDb}, channel DBs in ${opencodeRoot}, and storage DBs in ${getOpenCodeStorageDir()}`,
+        `Unable to locate OpenCode DB. Checked opencode*.db in ${opencodeRoot} and storage DBs in ${getOpenCodeStorageDir()}`,
     );
 }

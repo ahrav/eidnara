@@ -138,7 +138,9 @@ function localCounts(
     let toolsSdk: number | null = null;
     let sdkError: string | null = null;
 
-    if (tokenizerKey && ALL_MODELS[tokenizerKey]) {
+    if (tokenizerKey && !ALL_MODELS[tokenizerKey]) {
+        sdkError = `tokenizer key ${tokenizerKey} is not in ai-tokenizer's model catalog`;
+    } else if (tokenizerKey) {
         const m = ALL_MODELS[tokenizerKey];
         // biome-ignore lint/suspicious/noExplicitAny: ai-tokenizer's SDK `Tokenizer` type does not accept the encoding-constructed instance
         const sdkTokenizer = new Tokenizer(pickEncoding(tokenizerKey) as any) as any;
