@@ -2351,6 +2351,45 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("an envelope with no JSON form never shares a start", async () => {
+        const root = tempDir("eidnara-policy-cyclic-envelope-");
+        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: async () => "ready",
+            });
+            // A cyclic object's fallback identity can equal a valid envelope's literal `self` value.
+            const cyclic: Record<string, unknown> = { schema: 1 };
+            cyclic.credentials = { KEY: "x" };
+            cyclic.self = cyclic;
+            const valid = {
+                schema: 1,
+                credentials: { KEY: "x" },
+                self: "[Circular]",
+            } as unknown as NativeStartupEnvelope;
+            const [a, b] = await Promise.all([
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: valid,
+                }),
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: cyclic as unknown as NativeStartupEnvelope,
+                }),
+            ]);
+            expect(a.result.reason).toBe("started");
+            // The launcher rejects the unserializable envelope before any spawn.
+            expect(b.result.reason).toBe("internal_error");
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("an already-expired deadline detaches instead of taking a settled result", async () => {
         // This root resolution fails synchronously, so the shared start is
         // already settled when the waiter attaches and only the guard can stop

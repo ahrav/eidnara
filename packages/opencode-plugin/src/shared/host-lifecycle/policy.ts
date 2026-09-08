@@ -301,19 +301,21 @@ function unprovenCompatibility(result: DaemonResultV1): DaemonResultV1 {
 
 /**
  * JSON round-trip evaluates `toJSON` and getters once before deriving both the coalescing key and launch payload. commentlint: allow(JUDGE)
- * An envelope with no JSON form is passed through unchanged so the launcher reports its typed usage error. commentlint: allow(JUDGE)
+ * An envelope with no JSON form is passed through unchanged so the launcher reports its typed usage error, and is marked so it never shares a start. commentlint: allow(JUDGE)
  */
-function normalizedEnvelope(
-    envelope: NativeStartupEnvelope | undefined,
-): NativeStartupEnvelope | undefined {
-    if (envelope === undefined) return undefined;
+function normalizedEnvelope(envelope: NativeStartupEnvelope | undefined): {
+    envelope: NativeStartupEnvelope | undefined;
+    serializable: boolean;
+} {
+    if (envelope === undefined) return { envelope: undefined, serializable: true };
     let wire: string | undefined;
     try {
         wire = JSON.stringify(envelope);
     } catch {
-        return envelope;
+        return { envelope, serializable: false };
     }
-    return wire === undefined ? envelope : (JSON.parse(wire) as NativeStartupEnvelope);
+    if (wire === undefined) return { envelope, serializable: false };
+    return { envelope: JSON.parse(wire) as NativeStartupEnvelope, serializable: true };
 }
 
 /**
@@ -466,7 +468,7 @@ export class HostLifecyclePolicy {
         // first on the transaction lock.
         const rootKey = rootResolution.ok ? rootResolution.root : "\u0000no-root";
         // One serialized snapshot is both the coalescing key and the native start's input, so a stateful `toJSON` cannot make coalesced demands launch with different envelopes. commentlint: allow(JUDGE)
-        const startupEnvelope = normalizedEnvelope(
+        const { envelope: startupEnvelope, serializable } = normalizedEnvelope(
             request.startupEnvelope ?? this.defaultStartupEnvelope,
         );
         const key = `${rootKey}\u0000${envelopeIdentity(startupEnvelope)}`;
@@ -480,15 +482,20 @@ export class HostLifecyclePolicy {
         if (rootResolution.ok && monotonicNow() >= aggregateDeadlineAt) {
             return { result: timeoutResult("start", rootResolution.root, true), storage: null };
         }
-        let shared = this.inflightStarts.get(key);
+        // An envelope with no JSON form has no trustworthy identity, so its start is never shared. commentlint: allow(JUDGE)
+        let shared = serializable ? this.inflightStarts.get(key) : undefined;
         if (!shared) {
             shared = this.start(startupEnvelope);
-            this.inflightStarts.set(key, shared);
-            void shared
-                .catch(() => {})
-                .finally(() => {
-                    if (this.inflightStarts.get(key) === shared) this.inflightStarts.delete(key);
-                });
+            if (serializable) {
+                this.inflightStarts.set(key, shared);
+                void shared
+                    .catch(() => {})
+                    .finally(() => {
+                        if (this.inflightStarts.get(key) === shared) {
+                            this.inflightStarts.delete(key);
+                        }
+                    });
+            }
         }
         let result: DaemonResultV1;
         if (rootResolution.ok) {
