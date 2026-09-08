@@ -2,10 +2,6 @@
  */
 export const COMPACTION_ENABLED_PATH = `compaction${"."}enabled`;
 
-export function isDreamerRunnable(config: { dreamer?: { disable?: boolean } | null }): boolean {
-    return !!config.dreamer && config.dreamer.disable !== true;
-}
-
 export function isSidekickRunnable(config: { sidekick?: { disable?: boolean } | null }): boolean {
     return !!config.sidekick && config.sidekick.disable !== true;
 }
@@ -31,7 +27,7 @@ function clonePlainObject(value: unknown): Record<string, unknown> | undefined {
 
 function migrateLegacyEnabledForAgent(args: {
     patched: Record<string, unknown>;
-    agentName: "dreamer" | "sidekick" | "historian";
+    agentName: "sidekick" | "historian";
     warnings: string[];
 }): void {
     const agent = clonePlainObject(args.patched[args.agentName]);
@@ -49,18 +45,6 @@ function migrateLegacyEnabledForAgent(args: {
         return;
     }
 
-    if (args.agentName === "dreamer") {
-        if (disable !== true && enabled === false) {
-            agent.disable = true;
-            args.warnings.push(
-                'Migrated "dreamer.enabled=false" → "dreamer.disable=true" in-memory (run doctor to persist). This now also disables manual /ctx-dream; for manual-only remove disable and set schedule="".',
-            );
-        }
-        // `enabled=true` has no effect because only `disable=true` disables Dreamer; remove it without warning.
-        args.patched.dreamer = agent;
-        return;
-    }
-
     if (disable !== true && enabled === false) {
         agent.disable = true;
         args.warnings.push(
@@ -75,7 +59,7 @@ export function migrateLegacyAgentEnabledInMemory(
     rawConfig: Record<string, unknown>,
     warnings: string[],
 ): Record<string, unknown> {
-    const shouldPatch = ["dreamer", "sidekick", "historian"].some((key) => {
+    const shouldPatch = ["sidekick", "historian"].some((key) => {
         const agent = rawConfig[key];
         return (
             typeof agent === "object" &&
@@ -87,7 +71,6 @@ export function migrateLegacyAgentEnabledInMemory(
     if (!shouldPatch) return rawConfig;
 
     const patched: Record<string, unknown> = { ...rawConfig };
-    migrateLegacyEnabledForAgent({ patched, agentName: "dreamer", warnings });
     migrateLegacyEnabledForAgent({ patched, agentName: "sidekick", warnings });
     migrateLegacyEnabledForAgent({ patched, agentName: "historian", warnings });
     return patched;
