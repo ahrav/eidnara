@@ -226,6 +226,66 @@ describe("eidnara hook", () => {
         ]);
     });
 
+    it("routes todo snapshots by the session's own directory", async () => {
+        useTempDataHome("hook-todo-route-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-todo-routed",
+            args: { todos: [{ status: "pending", priority: "high", content: "Route me" }] },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
+            ["todo_state.set", "/other/repo"],
+        ]);
+    });
+
+    it("treats a restored child session as a subagent from the host's parentID", async () => {
+        useTempDataHome("hook-subagent-rehydrate-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        const liveSessionState = createLiveSessionState();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(async () => ({
+            data: { directory: "/other/repo", parentID: "ses-parent" },
+        }));
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        const messages = installOneRawMessage("ses-restored-child");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+
+        expect(liveSessionState.subagentSessions.has("ses-restored-child")).toBe(true);
+        const transformBody = fake.calls.find((call) => call.method === "transform")?.body as
+            | { is_subagent?: boolean }
+            | undefined;
+        expect(transformBody?.is_subagent).toBe(true);
+    });
+
     it("sends agent_drops.append through rustToolBackends.reduce", async () => {
         useTempDataHome("hook-reduce-");
         const fake = createFakeModuleClient();

@@ -12,6 +12,7 @@ import {
     getSessionProperties,
 } from "./event-payloads";
 import { resolveContextLimit, resolveSessionId } from "./event-resolvers";
+import { addBoundedSession } from "./live-session-state";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
@@ -40,18 +41,6 @@ export interface EventHandlerDeps {
 
 /** Hidden Eidnara child sessions carry this title prefix at creation. */
 const INTERNAL_CHILD_TITLE_PREFIX = "eidnara-";
-
-/** Bounds retained child session IDs when deletion events are absent; matches the plugin's other per-session caps. */
-const CHILD_SESSION_CAPACITY = 1000;
-
-/** Adds `sessionId` and drops the oldest entry once the set is full; `Set` iterates in insertion order. */
-function addBoundedSession(sessions: Set<string>, sessionId: string): void {
-    if (!sessions.has(sessionId) && sessions.size >= CHILD_SESSION_CAPACITY) {
-        const oldest = sessions.values().next().value;
-        if (oldest !== undefined) sessions.delete(oldest);
-    }
-    sessions.add(sessionId);
-}
 
 function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry>): void {
     const now = Date.now();

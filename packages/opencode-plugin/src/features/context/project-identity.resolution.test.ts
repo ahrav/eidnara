@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import {
@@ -48,10 +48,14 @@ function returningRootCommit(rootCommit: string): typeof execFileSync {
 }
 
 function expectedDirIdentity(directory: string): string {
-    return `dir:${createHash("md5")
-        .update(path.resolve(directory), "utf8")
-        .digest("hex")
-        .slice(0, 12)}`;
+    const resolved = path.resolve(directory);
+    let canonical: string;
+    try {
+        canonical = realpathSync.native(resolved);
+    } catch {
+        canonical = resolved;
+    }
+    return `dir:${createHash("md5").update(canonical, "utf8").digest("hex").slice(0, 12)}`;
 }
 
 function expectProjectIdentityError(fn: () => void): ProjectIdentityError {
@@ -174,6 +178,21 @@ describe("project identity", () => {
 
         expect(resolveProjectIdentity(link)).toBe(`git:${FIRST_ROOT_COMMIT}`);
         expect(execMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("gives a non-git directory one dir: identity through its symlink and its real path", () => {
+        const target = makeTempDir("project-identity-dir-symlink-target-");
+        const linkParent = makeTempDir("project-identity-dir-symlink-parent-");
+        const link = join(linkParent, "alias");
+        try {
+            symlinkSync(target, link, "dir");
+        } catch (error) {
+            if ((error as { code?: unknown }).code === "EPERM") return;
+            throw error;
+        }
+
+        expect(resolveProjectIdentity(link)).toBe(resolveProjectIdentity(target));
+        expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(target));
     });
 
     it("reuses the last successful git identity during transient failures and cooldown", () => {

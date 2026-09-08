@@ -217,6 +217,18 @@ describe("sendUserPrompt", () => {
         expect(prompt).toHaveBeenCalledTimes(1);
     });
 
+    it("rejects when promptAsync never settles so the caller can report the lost prompt", async () => {
+        const promptAsync = mock(() => new Promise<never>(() => {}));
+        __ignoredNotificationTest.setSendTimeoutMs(20);
+        try {
+            await expect(
+                sendUserPrompt({ session: { promptAsync } }, "ses-user-hung", "hello"),
+            ).rejects.toThrow("user prompt delivery timed out");
+        } finally {
+            __ignoredNotificationTest.reset();
+        }
+    });
+
     it("rejects when the session prompt API is unavailable", async () => {
         await expect(sendUserPrompt(undefined, "ses-no-client", "hello")).rejects.toThrow(
             "session prompt API unavailable",

@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
-import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
@@ -45,11 +44,12 @@ import {
     HOST_SDK_READ_TIMEOUT_MS,
     knownSessionDirectory,
     resolveSessionDirectory,
+    type SessionDirectoryDeps,
 } from "./session-directory";
 import type { MessageLike } from "./tag-content-primitives";
 import { logTransformTiming } from "./transform-stage-logger";
 
-export interface RustModeTransformDeps {
+export interface RustModeTransformDeps extends SessionDirectoryDeps {
     contextUsageMap: Map<string, ContextUsageEntry>;
     protectedTags?: number;
     clearReasoningAge: number;
@@ -62,9 +62,6 @@ export interface RustModeTransformDeps {
     autoSearch?: { enabled: boolean; scoreThreshold: number; minPromptChars: number };
     cacheTtl: string | Record<string, string>;
     compactionOff?: boolean;
-    client?: PluginContext["client"];
-    directory?: string;
-    sessionDirectoryBySession?: Map<string, string>;
     isSubagentSession: (sessionId: string) => boolean;
     systemPromptHashFor: (sessionId: string) => string;
 }
@@ -916,6 +913,8 @@ export function createRustModeTransform(
         let rowVersion = 0;
         let appliedAt: number | undefined;
         const passUsageSnapshot = loadContextUsage(deps, sessionId);
+        // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
+        const directory = await resolveSessionDirectory(deps, sessionId);
         const isSubagent = deps.isSubagentSession(sessionId);
         const systemPromptHash = deps.systemPromptHashFor(sessionId);
         let preflightError: unknown;
@@ -1049,7 +1048,6 @@ export function createRustModeTransform(
         );
         try {
             if (preflightError) throw preflightError;
-            const directory = await resolveSessionDirectory(deps, sessionId);
             const usage = passUsageSnapshot;
             const contextLimit =
                 resolvedContextLimit && resolvedContextLimit > 0

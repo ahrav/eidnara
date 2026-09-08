@@ -122,11 +122,12 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         deps.liveSessionState?.sessionDirectoryBySession ?? new Map<string, string>();
     const internalChildSessions = deps.liveSessionState?.internalChildSessions ?? new Set<string>();
     const subagentSessions = deps.liveSessionState?.subagentSessions ?? new Set<string>();
-    // One resolver serves the transform, the commands, and the Sidekick child, so every daemon call for a session shares one route root.
+    // One resolver serves the transform, the commands, the todo snapshots, and the Sidekick child, so every daemon call for a session shares one route root.
     const sessionDirectoryDeps = {
         client: deps.client,
         directory: deps.directory,
         sessionDirectoryBySession,
+        subagentSessions,
     };
     const sessionDirectoryFor = (sessionId: string): Promise<string> =>
         resolveSessionDirectory(sessionDirectoryDeps, sessionId);
@@ -270,9 +271,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             },
             cacheTtl: deps.config.cache_ttl,
             compactionOff,
-            client: deps.client,
-            directory: deps.directory,
-            sessionDirectoryBySession,
+            ...sessionDirectoryDeps,
             isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
             systemPromptHashFor: (sessionId) =>
                 systemPromptHash.promptStateFor(sessionId)?.systemPromptHash ?? "",
@@ -390,10 +389,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             client: deps.client,
             transformMode: deps.config.transform_mode,
             todoStateSet: rustMode
-                ? ({ sessionId, stateJson, ownerMessageId }) =>
+                ? async ({ sessionId, stateJson, ownerMessageId }) =>
                       moduleClient.call({
                           sessionId,
-                          projectRoot: deps.directory,
+                          projectRoot: await sessionDirectoryFor(sessionId),
                           method: "todo_state.set",
                           body: {
                               method: "todo_state.set",

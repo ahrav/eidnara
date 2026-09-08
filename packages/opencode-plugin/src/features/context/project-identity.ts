@@ -122,8 +122,14 @@ function getErrorStderr(error: unknown): string {
 }
 
 function directoryFallback(directory: string): string {
-    // The fallback hashes the full canonical path to distinguish directories with identical basenames.
-    const canonical = path.resolve(directory);
+    // The hash covers the physical path so a project opened through a symlink and through its real path shares one `dir:` identity; a path with a missing component keeps its lexical spelling.
+    const resolved = path.resolve(directory);
+    let canonical: string;
+    try {
+        canonical = realpathSync.native(resolved);
+    } catch {
+        canonical = resolved;
+    }
     const hash = createHash("md5").update(canonical, "utf8").digest("hex").slice(0, 12);
     return `dir:${hash}`;
 }
