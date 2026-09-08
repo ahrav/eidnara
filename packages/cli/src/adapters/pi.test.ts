@@ -51,4 +51,32 @@ describe("PiAdapter settings safety", () => {
         expect(result.message).toContain("Refusing to overwrite unparseable config");
         expect(readFileSync(settingsPath, "utf-8")).toBe(malformed);
     });
+
+    it("keeps existing comments when adding the package entry", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-adapter-"));
+        tempDirs.push(root);
+        process.env.PI_CODING_AGENT_DIR = root;
+        const settingsPath = join(root, "settings.json");
+        writeFileSync(
+            settingsPath,
+            `{\n  // keep me\n  "packages": ["npm:other"] /* trailing */\n}\n`,
+        );
+
+        const result = await new PiAdapter().ensurePluginEntry();
+
+        expect(result.action).toBe("added");
+        const written = readFileSync(settingsPath, "utf-8");
+        expect(written).toContain("// keep me");
+        expect(written).toContain("/* trailing */");
+        expect(written).toContain(PI_PACKAGE_SOURCE);
+    });
+
+    it("reports the plugin absent instead of throwing when packages is not an array", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-adapter-"));
+        tempDirs.push(root);
+        process.env.PI_CODING_AGENT_DIR = root;
+        writeFileSync(join(root, "settings.json"), JSON.stringify({ packages: "npm:other" }));
+
+        expect(new PiAdapter().hasPluginEntry()).toBe(false);
+    });
 });

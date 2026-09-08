@@ -26,7 +26,7 @@ export class PiAdapter implements HarnessAdapter {
     hasPluginEntry(): boolean {
         const settings = readPiSettings();
         if (!settings) return false;
-        const packages = (settings.packages ?? []) as unknown[];
+        const packages = Array.isArray(settings.packages) ? settings.packages : [];
         return packages.some((entry) => entry === PI_PACKAGE_SOURCE);
     }
 
@@ -44,11 +44,9 @@ export class PiAdapter implements HarnessAdapter {
         const settingsPath = getPiUserExtensionsPath();
         try {
             const settings = readPiSettingsForUpdate();
-            const packages = Array.isArray(settings.packages)
-                ? (settings.packages as unknown[])
-                : [];
+            const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
-            const idx = packages.findIndex((entry) => entry === PI_PACKAGE_SOURCE);
+            const idx = packages.indexOf(PI_PACKAGE_SOURCE);
             if (idx === -1) {
                 packages.push(PI_PACKAGE_SOURCE);
                 settings.packages = packages;

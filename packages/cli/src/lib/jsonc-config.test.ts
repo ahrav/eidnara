@@ -2,8 +2,46 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stringify } from "comment-json";
 
-import { readJsoncConfig, readJsoncLenient } from "./jsonc-config";
+import { readJsoncConfig, readJsoncConfigForUpdate, readJsoncLenient } from "./jsonc-config";
+
+describe("readJsoncConfigForUpdate", () => {
+    it("returns a tree whose mutations serialize with the original comments", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-update-"));
+        const path = join(directory, "config.jsonc");
+        writeFileSync(path, `{\n  // keep me\n  "items": ["a"] /* trailing */\n}\n`);
+
+        try {
+            const tree = readJsoncConfigForUpdate(path);
+            (tree.items as unknown[]).push("b");
+            const written = stringify(tree, null, 2);
+            expect(written).toContain("// keep me");
+            expect(written).toContain("/* trailing */");
+            expect(written).toContain('"b"');
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("throws on an array document root and on prototype-pollution keys", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-update-"));
+        const arrayRoot = join(directory, "array.json");
+        const polluted = join(directory, "polluted.json");
+        writeFileSync(arrayRoot, `[1, 2]`);
+        writeFileSync(polluted, `{"constructor": {"prototype": {"x": 1}}}`);
+
+        try {
+            expect(() => readJsoncConfigForUpdate(arrayRoot)).toThrow(
+                "expected a JSON object at the document root",
+            );
+            expect(() => readJsoncConfigForUpdate(polluted)).toThrow("prototype-pollution");
+            expect(readJsoncConfigForUpdate(join(directory, "missing.json"))).toEqual({});
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+});
 
 describe("readJsoncConfig prototype-pollution hardening", () => {
     it("refuses dangerous keys recursively before config mutation", () => {

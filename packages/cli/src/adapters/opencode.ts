@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { ensureParentDir } from "../lib/fs-utils";
+import { readJsoncConfig, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { detectConfigPaths, getEidnaraLogPath } from "../lib/paths";
 import type { HarnessAdapter, HarnessConfigPaths, PluginEntryResult } from "./types";
@@ -25,15 +26,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
     hasPluginEntry(): boolean {
         const paths = detectConfigPaths();
         if (paths.opencodeConfigFormat === "none") return false;
-        try {
-            const raw = readFileSync(paths.opencodeConfig, "utf-8");
-            const cfg = parseJsonc(raw) as Record<string, unknown> | null;
-            const plugin = cfg?.plugin;
-            if (!Array.isArray(plugin)) return false;
-            return plugin.some((entry) => matchesPluginEntry(entry, PLUGIN_NAME));
-        } catch {
-            return false;
-        }
+        const result = readJsoncConfig(paths.opencodeConfig);
+        if (result.kind !== "parsed") return false;
+        const plugin = result.value.plugin;
+        if (!Array.isArray(plugin)) return false;
+        return plugin.some(
+            (entry) => matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
+        );
     }
 
     getConfigPaths(): HarnessConfigPaths {
@@ -66,16 +65,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                 };
             }
 
-            const raw = readFileSync(target, "utf-8");
-            const cfg = parseJsonc(raw) as Record<string, unknown> | null;
-            if (cfg === null || typeof cfg !== "object") {
-                return {
-                    ok: false,
-                    action: "error",
-                    message: `Could not parse ${target}.`,
-                    configPath: target,
-                };
-            }
+            const cfg = readJsoncConfigForUpdate(target);
 
             const plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
             const existingIdx = plugin.findIndex((e) => matchesPluginEntry(e, PLUGIN_NAME));
