@@ -143,10 +143,10 @@ export function createSystemPromptHashHandler(deps: {
         const previousState = tracked.prompt;
         const previousHash = previousState?.systemPromptHash ?? "";
         const hasPersistedHash = previousHash !== "" && previousHash !== "0";
-        // A failed lookup keeps the last recorded classification instead of demoting a known subagent to primary.
+        // Parentage is immutable, so a recorded subagent stays one even when the lookup later fails or no longer knows the session.
         let isSubagent = previousState?.isSubagent ?? false;
         try {
-            isSubagent = isSubagentSession(sessionId);
+            isSubagent = isSubagent || isSubagentSession(sessionId);
         } catch (error) {
             sessionLog(sessionId, "system-prompt-hash subagent lookup failed:", error);
         }

@@ -205,6 +205,24 @@ describe("system-prompt-hash fail-open (per-turn handler must never throw)", () 
         expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
     });
 
+    it("does not demote a recorded subagent when the lookup later returns false", async () => {
+        useTempDataHome("sph-subagent-no-demote-");
+        const sessionId = "ses-subagent-no-demote";
+        const children = new Set<string>([sessionId]);
+        const { handler, promptStateFor } = buildHandler({
+            isSubagentSession: (id) => children.has(id),
+        });
+
+        const system = ["You are a coding subagent."];
+        await handler({ sessionID: sessionId }, { system: [...system] });
+        expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
+
+        children.delete(sessionId);
+        await handler({ sessionID: sessionId }, { system: [...system] });
+
+        expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
+    });
+
     it("clearSession drops the recorded state", async () => {
         useTempDataHome("sph-clear-session-");
         const sessionId = "ses-clear";
