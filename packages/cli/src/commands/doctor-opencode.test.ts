@@ -300,4 +300,34 @@ describe("doctor OpenCode read-only checks", () => {
             restore();
         }
     });
+
+    it("prints loader warnings for a project config that names a removed key", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, REGISTERED_PLUGIN);
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+        writeJsonc(join(cwd, ".eidnara", "eidnara.jsonc"), { dreamer: { enabled: true } });
+        const warnings: string[] = [];
+        const warnSpy = spyOn(log, "warn").mockImplementation((message: string) => {
+            warnings.push(message);
+        });
+        const { errors, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ cwd });
+
+            expect(code).toBe(0);
+            expect(errors).toEqual([]);
+            expect(
+                warnings.some(
+                    (message) =>
+                        message.startsWith("[project config]") && message.includes('"dreamer"'),
+                ),
+            ).toBe(true);
+        } finally {
+            warnSpy.mockRestore();
+            restore();
+        }
+    });
 });

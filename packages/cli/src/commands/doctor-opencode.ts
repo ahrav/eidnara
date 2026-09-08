@@ -348,9 +348,11 @@ export async function runDoctor(
             const result = loadPluginConfig(cwd);
             const warnings = result.configWarnings ?? [];
             if (warnings.length > 0) {
-                warn(
-                    `Eidnara config has ${warnings.length} warning(s) — see 'eidnara doctor --issue' for details`,
-                );
+                // The issue report carries no loader warnings, so the doctor is where they surface.
+                for (const warning of warnings.slice(0, 4)) warn(warning);
+                if (warnings.length > 4) {
+                    warn(`... and ${warnings.length - 4} more config warning(s)`);
+                }
             } else {
                 pass("Eidnara config loads successfully");
             }
