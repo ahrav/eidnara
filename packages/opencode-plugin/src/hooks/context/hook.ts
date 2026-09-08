@@ -314,6 +314,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         moduleClient,
         compactionOff,
         projectRoot: deps.directory,
+        isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
         // The DB fallback gives /ctx-status the model-specific threshold before the first hook after a restart.
         getLiveModelKey: (sessionId) => {
             const model = resolveLiveModel(sessionId);
