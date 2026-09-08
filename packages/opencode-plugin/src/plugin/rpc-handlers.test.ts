@@ -669,6 +669,31 @@ describe("buildStatusDetail", () => {
         expect(expired.cacheExpired).toBe(true);
     });
 
+    test("an unparseable cache TTL falls back to the daemon's five-minute default", () => {
+        const sessionId = "ses-status-bad-ttl";
+        const live = createLiveSessionState();
+        const now = Date.now();
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 10, inputTokens: 10_000 },
+            updatedAt: now,
+            lastResponseTime: now - 60_000,
+            hasUsageTokens: true,
+        });
+        for (const cacheTtl of ["5d", ""]) {
+            const detail = buildStatusDetail(
+                sessionId,
+                process.cwd(),
+                undefined,
+                { cache_ttl: cacheTtl },
+                live,
+            );
+            expect(detail.cacheTtl).toBe(cacheTtl);
+            expect(detail.cacheTtlMs).toBe(300_000);
+            expect(detail.cacheRemainingMs).toBeGreaterThan(230_000);
+            expect(detail.cacheNeverExpires).toBe(false);
+        }
+    });
+
     test("a request without modelKey resolves per-model config from the live model", () => {
         const sessionId = "ses-status-live-model";
         const live = createLiveSessionState();

@@ -10,6 +10,7 @@ import {
     type WorkMetricsCarry,
 } from "../features/context/work-metrics";
 import {
+    DEFAULT_CACHE_TTL_MS,
     parseCacheTtlMs,
     resolveCacheTtl,
     resolveContextLimit,
@@ -551,12 +552,12 @@ export function buildStatusDetail(
         }
 
         // `cacheRemainingMs` is set only after a response has been seen.
-        const cacheTtlMs = parseCacheTtlMs(detail.cacheTtl);
+        const cacheTtlMs = parseCacheTtlMs(detail.cacheTtl) ?? DEFAULT_CACHE_TTL_MS;
         if (cacheTtlMs === Number.POSITIVE_INFINITY) {
             detail.cacheTtlMs = -1;
             detail.cacheRemainingMs = -1;
             detail.cacheNeverExpires = true;
-        } else if (cacheTtlMs !== undefined) {
+        } else {
             detail.cacheTtlMs = cacheTtlMs;
             if (lastResponseTime > 0) {
                 detail.cacheRemainingMs = Math.max(0, lastResponseTime + cacheTtlMs - Date.now());
