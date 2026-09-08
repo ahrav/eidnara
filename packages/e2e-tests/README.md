@@ -58,7 +58,10 @@ needs; on that runtime the suite skips and prints
 (`src/pi-runner/spawn.ts`) requires `@earendil-works/pi-coding-agent`
 (installed as a dev dependency of `packages/pi-plugin`, resolved from that
 package's `node_modules` or the root `node_modules/.bun`), `node` on `PATH`
-(Pi's CLI runs under Node), and the built Pi extension.
+(Pi's CLI runs under Node), and the built Pi extension. With
+`EIDNARA_E2E_REQUIRE_PI=1` an unmet prerequisite fails the file instead of
+skipping it; the `gates` job sets it because it provides all three, so a skip
+there would mean a resolution or layout regression.
 
 ## Commands
 
@@ -81,6 +84,8 @@ Environment:
 
 - `EIDNARA_E2E_MODE=rust` is the only accepted mode; `run-test-selection.ts`
   exits 2 for any other value.
+- `EIDNARA_E2E_REQUIRE_PI=1` makes `pi-smoke` fail rather than skip when a Pi
+  prerequisite is missing.
 - `EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN` overrides the fixture binary path
   (default `target/debug/examples/direct_host_fixture`).
 - `EIDNARA_RUST_E2E_FOLD=1` and `EIDNARA_RUST_E2E_DUPLICATE_IDS=1` enable the
@@ -110,4 +115,5 @@ until the runtime can start the shared-memory channel.
 ## CI
 
 The `gates` job installs OpenCode 1.18.22 and Pi 0.80.2 on Node 24.18.0,
-builds the fixture, and runs `validate-mode-manifest` and `test:rust`.
+builds the fixture, and runs `validate-mode-manifest` and `test:rust` with
+`EIDNARA_E2E_REQUIRE_PI=1`.

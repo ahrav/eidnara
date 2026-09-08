@@ -67,4 +67,27 @@ describe("Pi RPC protocol", () => {
 
         await expect(wait).resolves.toMatchObject({ type: "agent_end" });
     });
+
+    it("fails outstanding event waits and commands together when the process is gone", async () => {
+        const protocol = new PiRpcProtocol();
+        const exit = new Error("Pi RPC process exited with code 1 signal null\nboom");
+
+        const wait = protocol.waitForEvent((event) => event.type === "agent_end", {
+            timeoutMs: 60_000,
+        });
+        const command = protocol.sendCommand(
+            () => undefined,
+            "get_state",
+            {},
+            { timeoutMs: 60_000 },
+        );
+        protocol.rejectPending(exit);
+
+        await expect(wait).rejects.toBe(exit);
+        await expect(command).rejects.toBe(exit);
+
+        // A settled wait no longer observes events: dispatch must not throw or resurrect it.
+        protocol.dispatchLine(JSON.stringify({ type: "agent_end" }));
+        protocol.rejectPending(new Error("second"));
+    });
 });

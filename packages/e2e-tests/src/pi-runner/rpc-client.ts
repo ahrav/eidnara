@@ -43,6 +43,10 @@ interface PendingRequest {
     timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingWait {
+    fail: (error: Error) => void;
+}
+
 export function serializeRpcMessage(value: Record<string, unknown>): string {
     return `${JSON.stringify(value)}\n`;
 }
@@ -83,6 +87,7 @@ export function attachStrictJsonlReader(
 export class PiRpcProtocol {
     private nextId = 0;
     private readonly pendingRequests = new Map<string, PendingRequest>();
+    private readonly pendingWaits = new Set<PendingWait>();
     private readonly eventListeners = new Set<(event: PiRpcEvent) => void>();
 
     onEvent(listener: (event: PiRpcEvent) => void): () => void {
@@ -131,24 +136,32 @@ export class PiRpcProtocol {
         const timeoutMs = opts.timeoutMs ?? 60_000;
         const label = opts.label ? ` (${opts.label})` : "";
         return new Promise((resolve, reject) => {
+            const wait: PendingWait = {
+                fail: (error) => {
+                    settle();
+                    reject(error);
+                },
+            };
+            const settle = () => {
+                clearTimeout(timer);
+                unsubscribe();
+                this.pendingWaits.delete(wait);
+            };
             const unsubscribe = this.onEvent((event) => {
                 try {
                     if (!predicate(event)) return;
-                    clearTimeout(timer);
-                    unsubscribe();
+                    settle();
                     resolve(event);
                 } catch (error) {
-                    clearTimeout(timer);
-                    unsubscribe();
-                    reject(error instanceof Error ? error : new Error(String(error)));
+                    wait.fail(error instanceof Error ? error : new Error(String(error)));
                 }
             });
             const timer = setTimeout(() => {
-                unsubscribe();
-                reject(
+                wait.fail(
                     new Error(`Timed out after ${timeoutMs}ms waiting for Pi RPC event${label}`),
                 );
             }, timeoutMs);
+            this.pendingWaits.add(wait);
         });
     }
 
@@ -179,11 +192,15 @@ export class PiRpcProtocol {
         this.dispatchEvent(message as PiRpcEvent);
     }
 
+    /** Fails every outstanding command and event wait; a dead process can answer neither. */
     rejectPending(error: Error): void {
         for (const [id, pending] of this.pendingRequests) {
             clearTimeout(pending.timer);
             pending.reject(error);
             this.pendingRequests.delete(id);
+        }
+        for (const wait of [...this.pendingWaits]) {
+            wait.fail(error);
         }
     }
 
@@ -259,7 +276,9 @@ export class PiRpcClient {
         this.stopReadingStdout = attachStrictJsonlReader(child.stdout, (line) => {
             this.protocol.dispatchLine(line);
         });
-        child.once("exit", (code, signal) => {
+        // `close` follows `exit` once the stdio pipes have drained, so an `agent_end` written just
+        // before the process died reaches its waiter before the waiter is failed.
+        child.once("close", (code, signal) => {
             this.protocol.rejectPending(
                 new Error(
                     `Pi RPC process exited with code ${code ?? "null"} signal ${signal ?? "null"}\n${this.stderr}`,

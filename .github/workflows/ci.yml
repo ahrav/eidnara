@@ -482,6 +482,10 @@ jobs:
         # runner's Bun; OpenCode embeds Bun, so the probe predicts the plugin.
         # The fixture contract probe requires the built native addon;
         # `check:repo` does not build it.
+        # The Pi smoke fails if Node, the Pi package, or the built extension is
+        # missing.
+        env:
+          EIDNARA_E2E_REQUIRE_PI: "1"
         run: |
           npm install -g opencode-ai@1.18.22
           cargo +1.98 build -p daemon --example direct_host_fixture \

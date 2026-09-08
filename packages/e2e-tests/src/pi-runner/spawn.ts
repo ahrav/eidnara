@@ -229,6 +229,9 @@ export function childEnv(env: PiIsolatedEnv): Record<string, string> {
     result.XDG_CONFIG_HOME = env.configDir;
     result.XDG_DATA_HOME = env.dataDir;
     result.XDG_CACHE_HOME = env.cacheDir;
+    // The plugin logger's default path is shared by Pi processes and survives `dispose()`;
+    // a path under `baseDir` ties the log's lifetime to the isolated environment.
+    result.EIDNARA_LOG_PATH = join(env.baseDir, "eidnara.log");
     result.ANTHROPIC_API_KEY = "test-key-not-real";
     result.PI_OFFLINE = "1";
     result.PI_SKIP_VERSION_CHECK = "1";
