@@ -23,6 +23,9 @@
   "scripts": {
     "build": "tsc -p ../retina-local-fs/tsconfig.build.json && bun run build:tui && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite && tsc --emitDeclarationOnly",
     "build:tui": "bun scripts/build-tui.ts",
+    "smoke:smartnote-wasm": "bun scripts/smoke-smartnote-wasm.ts",
+    "smoke:tui-import": "bun scripts/smoke-tui-import.ts",
+    "context:concat": "bun scripts/context-dump/run-context-concat.ts",
     "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "bun test",
     "lint": "biome check .",
