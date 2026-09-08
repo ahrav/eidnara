@@ -182,3 +182,10 @@ export function getAvailableModels(piPath: string): string[] {
     }
     return [];
 }
+
+/**
+ * The lowest Pi release the CLI certifies. It is the floor of the
+ * `@earendil-works/pi-coding-agent` peer range that `@eidnara/pi` declares;
+ * `pi-helpers.test.ts` fails when the two drift apart.
+ */
+export const PI_MINIMUM_VERSION = "0.80.2";

@@ -460,6 +460,32 @@ describe("doctor OpenCode read-only checks", () => {
         }
     });
 
+    it("leaves conflicts in place under --force when the OpenCode version cannot be read", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeFileSync(join(configDir, "..", "..", "bin", "opencode"), "#!/bin/sh\nexit 1\n");
+        writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ force: true });
+
+            expect(code).toBe(1);
+            expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
+            expect(
+                errors.some((message) =>
+                    message.startsWith("Leaving conflicts in place: this OpenCode is older than"),
+                ),
+            ).toBe(true);
+            const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
+                compaction?: { auto?: boolean };
+            };
+            expect(untouched.compaction?.auto).toBe(true);
+        } finally {
+            restore();
+        }
+    });
+
     it("leaves conflicts in place under --force when OpenCode is below the minimum", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeFileSync(join(configDir, "..", "..", "bin", "opencode"), "#!/bin/sh\necho 1.14.9\n");

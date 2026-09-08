@@ -691,6 +691,52 @@ describe("OMP doctor", () => {
         );
     });
 
+    it("does not enable @eidnara/pi under --force when OMP is below the minimum", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-old-host-enable-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.0.0",
+                listOmpPlugins: () => [
+                    { name: "@eidnara/pi", version: "0.33.0", enabled: false, path: pluginDir },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(1);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain(
+            "Leaving @eidnara/pi and OMP native compaction and memory as they are: this OMP is missing a version or older than 17.1.7",
+        );
+        // The adapter reports a missing binary when it runs; its absence shows it never ran.
+        expect(output).not.toContain("OMP binary not found");
+        expect(output).not.toContain("Enabled @eidnara/pi");
+    });
+
     it("does not turn off OMP managers under --force when OMP is below the minimum", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-old-host-"));
         roots.push(root);
@@ -734,7 +780,7 @@ describe("OMP doctor", () => {
         expect(code).toBe(1);
         expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
         expect(prompts.messages.join("\n")).toContain(
-            "Leaving OMP native compaction and memory on: this OMP is missing a version or older than 17.1.7",
+            "Leaving @eidnara/pi and OMP native compaction and memory as they are: this OMP is missing a version or older than 17.1.7",
         );
     });
 

@@ -291,13 +291,14 @@ async function collectRecentSessions(): Promise<SessionDiscovery> {
     }
 }
 
-export async function collectDiagnostics(): Promise<DiagnosticReport> {
+/** `cwd` selects the project whose config tier, effective modes, and conflicts the report describes. */
+export async function collectDiagnostics(cwd: string = process.cwd()): Promise<DiagnosticReport> {
     const pluginVersion = getSelfVersion();
     const configPaths = detectConfigPaths();
     const opencodeConfig = readConfig(configPaths.opencodeConfig);
     const tuiConfig = readConfig(configPaths.tuiConfig);
     const eidnaraConfig = readConfig(configPaths.eidnaraConfig);
-    const projectConfigPath = detectConfigFile(eidnaraProjectConfigBasePath(process.cwd())).path;
+    const projectConfigPath = detectConfigFile(eidnaraProjectConfigBasePath(cwd)).path;
     const projectConfig = readConfig(projectConfigPath);
 
     const logPath = getEidnaraLogPath("opencode");
@@ -306,7 +307,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     let compactionEnabled = false;
     let eidnaraEnabled = true;
     try {
-        const config = loadPluginConfig(process.cwd());
+        const config = loadPluginConfig(cwd);
         eidnaraEnabled = config.enabled !== false;
         compactionEnabled = compactionEnabledFor(config);
     } catch (error) {
@@ -318,7 +319,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     }
     // With `enabled: false` the plugin skips every hook, so DCP and the OMO
     // hooks are not conflicts; the doctor skips this detector in that mode too.
-    const conflictResult = detectConflicts(process.cwd(), { compactionEnabled });
+    const conflictResult = detectConflicts(cwd, { compactionEnabled });
     const reasons = eidnaraEnabled ? conflictResult.reasons : [];
     const discovery = await collectRecentSessions();
     const recentSessions = discovery.sessions;

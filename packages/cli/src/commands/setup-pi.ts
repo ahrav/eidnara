@@ -16,6 +16,7 @@ import {
     getAvailableModels,
     getPiVersion,
     isEidnaraPiPackageEntry,
+    PI_MINIMUM_VERSION,
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
 import type { PromptIO } from "../lib/prompts";
@@ -86,12 +87,11 @@ const DEFAULT_HOST: PiCompatibleSetupHost = {
     displayName: "Pi",
     cliName: "pi",
     packageSource: PI_PACKAGE_SOURCE,
-    minimumVersion: "0.74.0",
+    minimumVersion: PI_MINIMUM_VERSION,
     versionWarning: (version, minimum) =>
         `Pi ${version} is older than the required ${minimum}.\n` +
-        `Pi 0.74.0 renamed the npm package from \`@mariozechner/pi-coding-agent\` ` +
-        `to \`@earendil-works/pi-coding-agent\`. Eidnara's peer dependency ` +
-        `targets the new scope, so older Pi installs cannot load this extension.\n` +
+        `${PI_PACKAGE_SOURCE} declares \`@earendil-works/pi-coding-agent\` ^${minimum} as its peer range, ` +
+        `so older Pi installs may not load this extension.\n` +
         `Run \`pi update --self\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`) before continuing.`,
     ensurePluginEntry: async (settingsPath) => {
         const settings = readJsoncConfigForUpdate(settingsPath);

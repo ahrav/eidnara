@@ -61,6 +61,30 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
         ]);
     });
 
+    it("redacts generic credential keys and keeps benign neighbors of secret words", () => {
+        expect(
+            sanitizeValue({
+                auth: "basic dXNlcjpwYXNz",
+                credential: "plain-text",
+                bearer: "abc",
+                private_key: "-----BEGIN-----",
+                cookie: "sid=1",
+                session_cookie: "sid=2",
+                pin_key_files: ["notes.md"],
+                token_budget: "5k",
+            }),
+        ).toEqual({
+            auth: "<REDACTED>",
+            credential: "<REDACTED>",
+            bearer: "<REDACTED>",
+            private_key: "<REDACTED>",
+            cookie: "<REDACTED>",
+            session_cookie: "<REDACTED>",
+            pin_key_files: ["notes.md"],
+            token_budget: "5k",
+        });
+    });
+
     it("preserves numeric thresholds while redacting string secrets", () => {
         expect(
             sanitizeValue({
@@ -207,7 +231,7 @@ describe("collectDiagnostics Pi path resolution", () => {
         const pi = join(binDir, "pi");
         writeFileSync(
             pi,
-            `#!/bin/sh\necho "warning: config at ${home}/.pi/agent token=abc123"\necho 0.74.0\n`,
+            `#!/bin/sh\necho "warning: config at ${home}/.pi/agent token=abc123"\necho 0.80.2\n`,
         );
         chmodSync(pi, 0o755);
         process.env.PATH = binDir;
@@ -216,7 +240,7 @@ describe("collectDiagnostics Pi path resolution", () => {
 
         expect(report.settings.hasEidnaraPackage).toBe(true);
         expect(report.conflicts.otherPiExtensions).toEqual(["npm:other-pi-extension"]);
-        expect(report.piVersion).toBe("0.74.0");
+        expect(report.piVersion).toBe("0.80.2");
         expect(renderDiagnosticsMarkdown(report)).not.toContain("abc123");
     });
 

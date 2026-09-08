@@ -56,6 +56,25 @@ describe("collectDiagnostics", () => {
         expect(report.tuiConfigHasPlugin).toBe(true);
     });
 
+    it("collects the project-tier config from an explicit directory instead of the current one", async () => {
+        const { root, project } = isolate();
+        writeFileSync(
+            join(project, ".eidnara", "eidnara.json"),
+            JSON.stringify({ historian: { model: "anthropic/current" } }),
+        );
+        const other = join(root, "other-project");
+        mkdirSync(join(other, ".eidnara"), { recursive: true });
+        writeFileSync(
+            join(other, ".eidnara", "eidnara.json"),
+            JSON.stringify({ historian: { model: "anthropic/other" } }),
+        );
+
+        const report = await collectDiagnostics(other);
+
+        expect(report.projectConfig.path).toBe(join(other, ".eidnara", "eidnara.json"));
+        expect(report.projectConfig.flags).toEqual({ historian: { model: "anthropic/other" } });
+    });
+
     it("collects the project-tier config from the current directory", async () => {
         const { project } = isolate();
         writeFileSync(

@@ -24,6 +24,7 @@ import {
     detectPiBinary,
     getPiVersion,
     isEidnaraPiPackageEntry,
+    PI_MINIMUM_VERSION,
     PI_PACKAGE_SOURCE,
     type PiBinaryInfo,
 } from "../lib/pi-helpers";
@@ -31,9 +32,6 @@ import { isPromptCancelledError, type PromptIO, promptIO } from "../lib/prompts"
 import { standaloneVersion } from "../lib/semver";
 import { compareVersionStrings } from "../lib/version";
 import { writePiSettingsPackage } from "./setup-pi";
-
-// Pi 0.74.0 changed the package scope from `@mariozechner/pi-coding-agent` to `@earendil-works/pi-coding-agent`; older Pi versions cannot load this extension because its peerDependency uses the new scope.
-const MIN_PI_VERSION = "0.74.0";
 
 type CheckStatus = "pass" | "warn" | "fail" | "info";
 
@@ -43,6 +41,8 @@ interface CheckResult {
 }
 
 interface RepairPlan {
+    /** False when Pi is found but reports no usable version or one below the floor; the package entry then stays untouched. */
+    hostSupported: boolean;
     addPackageEntry: boolean;
     writeUserConfig: boolean;
 }
@@ -165,6 +165,7 @@ async function runHealthChecks(options: {
 }): Promise<HealthReport> {
     const results: CheckResult[] = [];
     const repairPlan: RepairPlan = {
+        hostSupported: true,
         addPackageEntry: false,
         writeUserConfig: false,
     };
@@ -180,23 +181,26 @@ async function runHealthChecks(options: {
         // other tool's version cannot pass as Pi's.
         const version = standaloneVersion(output);
         if (output === null) {
+            repairPlan.hostSupported = false;
             add(results, "fail", `Pi CLI was found at ${pi.path} but could not be executed`);
         } else if (version === null) {
+            repairPlan.hostSupported = false;
             add(
                 results,
                 "fail",
                 `Pi CLI at ${pi.path} printed unrecognized version output: ${describeVersionOutput(output)}`,
             );
-        } else if (compareVersionStrings(version, MIN_PI_VERSION) < 0) {
+        } else if (compareVersionStrings(version, PI_MINIMUM_VERSION) < 0) {
+            repairPlan.hostSupported = false;
             add(results, "pass", `Pi ${version} detected at ${pi.path}`);
             add(
                 results,
                 "fail",
-                `Pi ${version} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer/sidekick) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`).`,
+                `Pi ${version} is older than required ${PI_MINIMUM_VERSION}, the floor of the \`@earendil-works/pi-coding-agent\` range ${PI_PACKAGE_SOURCE} declares; older hosts may not load the extension. Run \`pi update\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`).`,
             );
         } else {
             add(results, "pass", `Pi ${version} detected at ${pi.path}`);
-            add(results, "pass", `Pi version meets minimum ${MIN_PI_VERSION} requirement`);
+            add(results, "pass", `Pi version meets minimum ${PI_MINIMUM_VERSION} requirement`);
         }
     }
 
@@ -353,7 +357,14 @@ interface RepairOutcome {
 
 function repair(plan: RepairPlan, prompts: PromptIO): RepairOutcome {
     const outcome: RepairOutcome = { fixed: 0, failed: 0 };
-    if (plan.addPackageEntry) {
+    if (plan.addPackageEntry && !plan.hostSupported) {
+        // Registering the extension on an unverified host would make Pi load a
+        // package it may not support; setup asks before doing the same.
+        outcome.failed += 1;
+        console.error(
+            `FAIL Leaving Pi packages[] untouched: this Pi reports no usable version or one older than ${PI_MINIMUM_VERSION}, so ${PI_PACKAGE_SOURCE} may not load. Upgrade Pi first.`,
+        );
+    } else if (plan.addPackageEntry) {
         const settingsPath = getPiUserExtensionsPath();
         try {
             const added = writePiSettingsPackage(settingsPath);

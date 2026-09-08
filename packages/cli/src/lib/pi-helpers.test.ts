@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,6 +8,7 @@ import {
     getPiCommandInvocation,
     getPiVersion,
     isEidnaraPiPackageEntry,
+    PI_MINIMUM_VERSION,
     parseModelListOutput,
 } from "./pi-helpers";
 
@@ -167,5 +168,16 @@ describe("isEidnaraPiPackageEntry", () => {
         expect(isEidnaraPiPackageEntry("git:github.com/ahrav/eidnara", "/base")).toBe(false);
         expect(isEidnaraPiPackageEntry(42, "/base")).toBe(false);
         expect(isEidnaraPiPackageEntry({ name: "@eidnara/pi" }, "/base")).toBe(false);
+    });
+});
+
+describe("PI_MINIMUM_VERSION", () => {
+    it("equals the floor of the pi-coding-agent peer range @eidnara/pi declares", () => {
+        const manifest = JSON.parse(
+            readFileSync(new URL("../../../pi-plugin/package.json", import.meta.url), "utf-8"),
+        ) as { peerDependencies?: Record<string, string> };
+        const range = manifest.peerDependencies?.["@earendil-works/pi-coding-agent"];
+
+        expect(range).toBe(`^${PI_MINIMUM_VERSION}`);
     });
 });

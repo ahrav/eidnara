@@ -109,7 +109,7 @@ function openBrowser(url: string): void {
     }
 }
 
-async function runIssueFlow(): Promise<number> {
+async function runIssueFlow(cwd: string): Promise<number> {
     intro("Eidnara Issue Report");
 
     const title = await text("Issue title", {
@@ -125,7 +125,7 @@ async function runIssueFlow(): Promise<number> {
     s.start("Collecting diagnostics");
 
     try {
-        const report = await collectDiagnostics();
+        let report = await collectDiagnostics(cwd);
         s.stop("Diagnostics collected");
 
         // A lone discovered session still filters: the append-only log can hold older sessions' records.
@@ -161,6 +161,17 @@ async function runIssueFlow(): Promise<number> {
                 ],
             );
             sessionFilter = choice === "__all__" ? null : choice;
+        }
+
+        // A selected session from another project gets that project's config,
+        // effective modes, and conflicts, not the current directory's.
+        const selected = report.recentSessions.find(
+            (session) => session.sessionId === sessionFilter,
+        );
+        if (selected !== undefined && selected.directory !== cwd) {
+            s.start(`Collecting diagnostics for ${selected.directory}`);
+            report = await collectDiagnostics(selected.directory);
+            s.stop("Diagnostics collected for the selected session");
         }
 
         s.start("Bundling issue report");
@@ -244,13 +255,13 @@ function isUnverifiableLocalPluginEntry(entry: unknown): boolean {
 export async function runDoctor(
     options: { force?: boolean; issue?: boolean; cwd?: string } = {},
 ): Promise<number> {
+    const cwd = options.cwd ?? process.cwd();
     if (options.issue) {
-        return runIssueFlow();
+        return runIssueFlow(cwd);
     }
 
     intro("Eidnara Doctor");
 
-    const cwd = options.cwd ?? process.cwd();
     let fixed = 0;
     let passCount = 0;
     let warnCount = 0;
@@ -304,12 +315,10 @@ export async function runDoctor(
         return true;
     };
 
-    // A host below the plugin minimum may not load the plugin, so nothing may
-
-    // replace the native managers a repair would turn off.
-
+    // A host below the plugin minimum, or one whose version cannot be read, may
+    // not load the plugin, so nothing may replace the native managers a repair
+    // would turn off.
     let openCodeSupported = true;
-
     const installationReports = describeOpenCodeInstallations(detectOpenCodeInstallations());
     const activeInstallation = installationReports[0];
     if (!activeInstallation) {
@@ -331,6 +340,7 @@ export async function runDoctor(
                 : "OpenCode Desktop detected (CLI not installed)",
         );
     } else if (activeInstallation.version === "unknown") {
+        openCodeSupported = false;
         fail(`OpenCode CLI was found at ${activeInstallation.path} but could not be executed`);
     } else {
         pass(
@@ -447,7 +457,7 @@ export async function runDoctor(
             );
         } else if (options.force && !openCodeSupported) {
             fail(
-                `Leaving conflicts in place: this OpenCode is older than ${OPENCODE_MINIMUM_VERSION}, so the plugin may not load to replace native compaction. Upgrade OpenCode first.`,
+                `Leaving conflicts in place: this OpenCode is older than ${OPENCODE_MINIMUM_VERSION} or its version could not be read, so the plugin may not load to replace native compaction. Upgrade OpenCode first.`,
             );
         } else if (options.force) {
             try {
@@ -510,7 +520,7 @@ export async function runDoctor(
     }
 
     // Dumps are grouped by project so users can identify each project's dumps.
-    const diagnostics = await collectDiagnostics();
+    const diagnostics = await collectDiagnostics(cwd);
     const dumpBuckets = diagnostics.historianDumps.byProject;
     if (dumpBuckets.length > 0) {
         const totalCount = dumpBuckets.reduce((sum, b) => sum + b.count, 0);

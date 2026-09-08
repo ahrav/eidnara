@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
-import { escapeRegex, redactSecretText } from "@eidnara/opencode/shared/redaction";
+import { escapeRegex, isSecretKey, redactSecretText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import {
     type HistorianDumpMeta,
@@ -170,8 +170,10 @@ export function sanitizeString(value: string): string {
     return sanitized;
 }
 
+// The shared vocabulary covers `auth`, `bearer`, `credential`, `private_key`,
+// and the qualified forms; `cookie` is a Pi-side addition it does not list.
 function shouldRedactKey(key: string): boolean {
-    return /api[_-]?key|token|secret|password|authorization|cookie/i.test(key);
+    return isSecretKey(key) || /cookie/i.test(key);
 }
 
 export function sanitizeValue(value: unknown, key = ""): unknown {

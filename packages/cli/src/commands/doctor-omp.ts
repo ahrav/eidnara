@@ -52,7 +52,7 @@ interface RepairPlan {
     disableCompaction: boolean;
     disableMemory: boolean;
     writeUserConfig: boolean;
-    /** False when OMP is missing or below the tested minimum; native managers then stay on. */
+    /** False when OMP reports no version or one below the tested minimum; every OMP-side repair then stays off. */
     hostSupported: boolean;
 }
 interface HealthReport {
@@ -355,18 +355,22 @@ async function repair(
     }
     const omp = deps.detectOmpBinary();
     if (!omp) return fixed;
+    // Enabling the plugin on an unverified host would run it beside both
+    // native managers, which stay on below.
+    if (!plan.hostSupported) {
+        if (plan.installPlugin || plan.disableCompaction || plan.disableMemory) {
+            prompts.log.error(
+                `Leaving ${OMP_PLUGIN_PACKAGE} and OMP native compaction and memory as they are: this OMP is missing a version or older than ${MIN_OMP_VERSION}, so the plugin may not run. Upgrade with \`omp update\` first.`,
+            );
+        }
+        return fixed;
+    }
     if (plan.installPlugin) {
         const result = await new OmpAdapter().ensurePluginEntry();
         if (result.ok) {
             prompts.log.success(result.message);
             fixed += 1;
         } else prompts.log.error(result.message);
-    }
-    if ((plan.disableCompaction || plan.disableMemory) && !plan.hostSupported) {
-        prompts.log.error(
-            `Leaving OMP native compaction and memory on: this OMP is missing a version or older than ${MIN_OMP_VERSION}, so the plugin may not run to replace them`,
-        );
-        return fixed;
     }
     if (plan.disableCompaction || plan.disableMemory) {
         // Turning off OMP's managers only makes sense once the plugin that

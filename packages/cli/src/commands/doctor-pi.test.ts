@@ -104,7 +104,7 @@ function baseOptions(root: string, cwd: string, prompts: MockPrompts): RunDoctor
                 path: join(root, ".pi", "bin", "pi"),
                 source: "home",
             }),
-            getPiVersion: () => "0.74.0",
+            getPiVersion: () => "0.80.2",
             now: () => new Date("2026-04-28T12:34:56Z"),
             execFileSync: () => {
                 throw new Error("gh unavailable");
@@ -143,7 +143,7 @@ describe("Pi doctor", () => {
 
         expect(code).toBe(0);
         const output = prompts.messages.join("\n");
-        expect(output).toContain("PASS Pi 0.74.0 detected");
+        expect(output).toContain("PASS Pi 0.80.2 detected");
         expect(output).toContain("PASS npm:@eidnara/pi is registered");
         expect(output).toContain("PASS No conflicting Eidnara entries in Pi packages[]");
         expect(output).toContain("INFO Other Pi extensions registered: npm:other-pi-extension");
@@ -176,6 +176,50 @@ describe("Pi doctor", () => {
         expect(output).toContain("Repair attempted; 2 item(s) changed");
     });
 
+    for (const [label, version] of [
+        ["below the floor", "0.79.0"],
+        ["not executable", null],
+    ] as const) {
+        it(`leaves packages[] untouched in --force mode when Pi is ${label}`, async () => {
+            const root = makeTempRoot();
+            const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+            const agentDir = setEnv(root, cwd);
+            writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+            writeFileSync(
+                join(cwd, ".eidnara", "eidnara.jsonc"),
+                JSON.stringify({ enabled: true }),
+            );
+            const prompts = new MockPrompts();
+            const options = baseOptions(root, cwd, prompts);
+            const stderr: string[] = [];
+            const originalConsoleError = console.error;
+            console.error = (...args: unknown[]) => {
+                stderr.push(args.map(String).join(" "));
+            };
+
+            let code: number;
+            try {
+                code = await runDoctor({
+                    ...options,
+                    force: true,
+                    deps: { ...options.deps, getPiVersion: () => version },
+                });
+            } finally {
+                console.error = originalConsoleError;
+            }
+
+            expect(code).toBe(1);
+            const settings = parseJsonc(readFileSync(join(agentDir, "settings.json"), "utf-8")) as {
+                packages?: string[];
+            };
+            expect(settings.packages).toEqual([]);
+            // The config repair does not depend on the host and still runs.
+            expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(true);
+            expect(stderr.join("\n")).toContain("FAIL Leaving Pi packages[] untouched");
+            expect(prompts.messages.join("\n")).not.toContain("Added npm:@eidnara/pi");
+        });
+    }
+
     it("generates a sanitized markdown report in --issue mode without calling gh create", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
@@ -202,7 +246,7 @@ describe("Pi doctor", () => {
             pluginVersion: "0.1.0",
             piInstalled: true,
             piPath: join(root, ".pi", "bin", "pi"),
-            piVersion: "0.74.0",
+            piVersion: "0.80.2",
             settings: {
                 path: join(agentDir, "settings.json"),
                 exists: true,
@@ -303,7 +347,7 @@ describe("Pi doctor", () => {
             pluginVersion: "0.1.0",
             piInstalled: true,
             piPath: join(root, ".pi", "bin", "pi"),
-            piVersion: "0.74.0",
+            piVersion: "0.80.2",
             settings: {
                 path: join(agentDir, "settings.json"),
                 exists: true,
@@ -385,7 +429,7 @@ describe("Pi doctor", () => {
             pluginVersion: "0.1.0",
             piInstalled: true,
             piPath: join(root, ".pi", "bin", "pi"),
-            piVersion: "0.74.0",
+            piVersion: "0.80.2",
             settings: {
                 path: join(agentDir, "settings.json"),
                 exists: true,
@@ -460,7 +504,7 @@ describe("Pi doctor", () => {
             pluginVersion: "0.1.0",
             piInstalled: true,
             piPath: join(root, ".pi", "bin", "pi"),
-            piVersion: "0.74.0",
+            piVersion: "0.80.2",
             settings: {
                 path: join(agentDir, "settings.json"),
                 exists: true,
@@ -549,7 +593,7 @@ describe("Pi doctor", () => {
             pluginVersion: "0.1.0",
             piInstalled: true,
             piPath: join(root, ".pi", "bin", "pi"),
-            piVersion: "0.74.0",
+            piVersion: "0.80.2",
             settings: {
                 path: join(agentDir, "settings.json"),
                 exists: true,
@@ -693,7 +737,7 @@ describe("Pi doctor", () => {
 
         expect(code).toBe(1);
         expect(prompts.messages.join("\n")).toContain("PASS Pi 0.70.0 detected");
-        expect(stderr.join("\n")).toContain("Pi 0.70.0 is older than required 0.74.0");
+        expect(stderr.join("\n")).toContain("Pi 0.70.0 is older than required 0.80.2");
     });
 
     it("treats a prerelease of the minimum as older than the minimum", async () => {
@@ -713,14 +757,14 @@ describe("Pi doctor", () => {
         try {
             code = await runDoctor({
                 ...options,
-                deps: { ...options.deps, getPiVersion: () => "0.74.0-beta.1" },
+                deps: { ...options.deps, getPiVersion: () => "0.80.2-beta.1" },
             });
         } finally {
             console.error = originalConsoleError;
         }
 
         expect(code).toBe(1);
-        expect(stderr.join("\n")).toContain("Pi 0.74.0-beta.1 is older than required 0.74.0");
+        expect(stderr.join("\n")).toContain("Pi 0.80.2-beta.1 is older than required 0.80.2");
     });
 
     it("does not write a default eidnara.jsonc over an existing eidnara.json in --force mode", async () => {
