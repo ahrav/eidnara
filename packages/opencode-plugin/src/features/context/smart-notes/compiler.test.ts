@@ -10,6 +10,7 @@ import { createSmartNoteCapabilities, type SmartNoteCapabilityApi } from "./capa
 import {
     bindDeclaredRequests,
     compileSmartNoteCheck,
+    isValidSmartNoteCron,
     manifestAdvisoryWarnings,
     normalizeCompiledCheck,
     normalizeCron,
@@ -633,6 +634,40 @@ describe("smart-note compiler output bounds", () => {
         expect(normalizeCron("  ")).toBe("0 * * * *");
     });
 
+    test("accepts the daemon's five-field numeric cron grammar and rejects the rest", () => {
+        for (const cron of [
+            "0 * * * *",
+            "*/15 * * * *",
+            "0 9-17 * * 1-5",
+            "0,30 */2 1,15 * 0",
+            "5/10 * * * 7",
+            "0 0 * * *",
+        ]) {
+            expect(isValidSmartNoteCron(cron)).toBe(true);
+            expect(normalizeCron(cron)).toBe(cron);
+        }
+        for (const cron of [
+            "not-a-cron",
+            "* * * *",
+            "* * * * * *",
+            "60 * * * *",
+            "* 24 * * *",
+            "* * 0 * *",
+            "* * * 13 *",
+            "* * * * 8",
+            "*/0 * * * *",
+            "5-1 * * * *",
+            "1-2-3 * * * *",
+            "1/2/3 * * * *",
+            ", * * * *",
+            "@hourly",
+            "0 * * jan *",
+        ]) {
+            expect(isValidSmartNoteCron(cron)).toBe(false);
+            expect(() => normalizeCron(cron)).toThrow(/valid 5-field/);
+        }
+    });
+
     test("treats backtick fences inside the JSON as data, not as a response fence", () => {
         const check = `function check(cap) { const r = cap.readFile("README.md") || ""; return { met: r.includes("\`\`\`json") && r.includes("\`\`\`") }; }`;
         const body = JSON.stringify({
@@ -712,6 +747,18 @@ describe("smart-note compiler output bounds", () => {
             [
                 `module.exports.check = (cap) => ({ met: true });`,
                 /must define function check\(cap\)/,
+            ],
+            [
+                `function check(cap) { cap.httpGet("https://a/0"); return { met: true }; } function check(x) { return { met: true }; }`,
+                /define check exactly once/,
+            ],
+            [
+                `function check(cap) { return { met: true }; } check = function (x) { return { met: true }; };`,
+                /must not reassign check/,
+            ],
+            [
+                `function check(cap) { return { met: true }; } var check = (x) => ({ met: true });`,
+                /must not reassign check/,
             ],
             [
                 `function check(cap) {

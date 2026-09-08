@@ -354,6 +354,14 @@ export function normalizeCompiledCheck(source: string): string {
     if (!signature) {
         throw new Error("compiled_check must define function check(cap)");
     }
+    // The runner uses the final `check` binding, so redeclaration or reassignment can replace
+    // the validated function.
+    if ((codeOnly.match(/\bfunction\s+check\s*\(/g) ?? []).length !== 1) {
+        throw new Error("compiled_check must define check exactly once");
+    }
+    if (/\bcheck\s*=(?![=>])/.test(codeOnly)) {
+        throw new Error("compiled_check must not reassign check");
+    }
     if (/\b(?:import|require)\b/.test(codeOnly)) {
         throw new Error("compiled_check must not import modules");
     }
@@ -541,10 +549,57 @@ function literalCalls(code: string, method: LiteralCapabilityMethod): string[] {
 
 export function normalizeCron(cron: string): string {
     const normalized = cron.trim() || "0 * * * *";
-    // The daemon validates the 5-field syntax on receipt; this module enforces only the byte bound.
     if (Buffer.byteLength(normalized, "utf8") > MAX_CRON_BYTES)
         throw new Error("check_cron exceeds 256 bytes");
+    // The daemon rejects cron expressions outside its grammar; reject them before creating the artifact.
+    if (!isValidSmartNoteCron(normalized)) {
+        throw new Error("check_cron must be a valid 5-field numeric cron expression");
+    }
     return normalized;
+}
+
+const CRON_FIELD_BOUNDS: ReadonlyArray<readonly [min: number, max: number]> = [
+    [0, 59],
+    [0, 23],
+    [1, 31],
+    [1, 12],
+    [0, 7],
+];
+
+/**
+ * Accepts the daemon's cron grammar (`parse_cron` in `smart_note_evaluation.rs`): five numeric
+ * fields, each a comma list of `*`, `n`, `lo-hi`, or any of those with `/step`; no names or
+ * macros; day-of-week `7` represents Sunday.
+ */
+export function isValidSmartNoteCron(expression: string): boolean {
+    const tokens = expression.trim().split(/\s+/);
+    if (tokens.length !== 5 || tokens.some((token) => token.length === 0)) return false;
+    return tokens.every((token, field) => {
+        const [min, max] = CRON_FIELD_BOUNDS[field];
+        return token.split(",").every((piece) => {
+            const [rangePart, stepPart, extra] = piece.split("/");
+            if (piece.length === 0 || extra !== undefined) return false;
+            if (stepPart !== undefined && (!/^\d+$/.test(stepPart) || Number(stepPart) < 1)) {
+                return false;
+            }
+            let lo: number;
+            let hi: number;
+            if (rangePart === "*") {
+                [lo, hi] = [min, max];
+            } else if (rangePart.includes("-")) {
+                const bounds = rangePart.split("-");
+                if (bounds.length !== 2 || !bounds.every((bound) => /^\d+$/.test(bound))) {
+                    return false;
+                }
+                [lo, hi] = [Number(bounds[0]), Number(bounds[1])];
+            } else {
+                if (!/^\d+$/.test(rangePart)) return false;
+                lo = Number(rangePart);
+                hi = stepPart !== undefined ? max : lo;
+            }
+            return lo >= min && lo <= max && hi >= min && hi <= max && lo <= hi;
+        });
+    });
 }
 
 function unique<T>(items: T[]): T[] {
