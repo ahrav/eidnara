@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write";
@@ -12,14 +23,18 @@ afterEach(() => {
     }
 });
 
+function stagedSiblings(dir: string): string[] {
+    return readdirSync(dir).filter((name) => name.endsWith(".tmp"));
+}
+
 describe("writeFileAtomic", () => {
-    it("writes content and leaves no .tmp sibling", () => {
+    it("writes content and leaves no staged sibling", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-"));
         roots.push(root);
         const target = join(root, "config.jsonc");
         writeFileAtomic(target, '{"ok":true}\n');
         expect(readFileSync(target, "utf-8")).toBe('{"ok":true}\n');
-        expect(existsSync(`${target}.tmp`)).toBe(false);
+        expect(stagedSiblings(root)).toEqual([]);
     });
 
     it("preserves file mode on replace", () => {
@@ -40,6 +55,37 @@ describe("writeFileAtomic", () => {
         expect(existsSync(join(root, "eidnara"))).toBe(false);
         writeFileAtomic(target, '{"created":true}\n');
         expect(readFileSync(target, "utf-8")).toBe('{"created":true}\n');
-        expect(existsSync(`${target}.tmp`)).toBe(false);
+        expect(stagedSiblings(join(root, "eidnara", "nested"))).toEqual([]);
+    });
+
+    it("replaces the file behind a symlinked config and keeps the link", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-link-"));
+        roots.push(root);
+        const real = join(root, "dotfiles", "opencode.jsonc");
+        mkdirSync(join(root, "dotfiles"));
+        writeFileAtomic(real, "v1\n");
+        const link = join(root, "config", "opencode.jsonc");
+        mkdirSync(join(root, "config"));
+        symlinkSync(real, link);
+
+        writeFileAtomic(link, "v2\n");
+
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readFileSync(real, "utf-8")).toBe("v2\n");
+        expect(readFileSync(link, "utf-8")).toBe("v2\n");
+        expect(stagedSiblings(join(root, "dotfiles"))).toEqual([]);
+        expect(stagedSiblings(join(root, "config"))).toEqual([]);
+    });
+
+    it("removes the staged sibling when the rename fails", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-fail-"));
+        roots.push(root);
+        const target = join(root, "config.jsonc");
+        mkdirSync(target);
+
+        expect(() => writeFileAtomic(target, "v1\n")).toThrow();
+
+        expect(statSync(target).isDirectory()).toBe(true);
+        expect(stagedSiblings(root)).toEqual([]);
     });
 });

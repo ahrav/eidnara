@@ -13,4 +13,18 @@ describe("sanitizeDiagnosticEndpoint", () => {
         const sanitized = sanitizeDiagnosticEndpoint("ftp://user:pass@example.com/v1?token=secret");
         expect(sanitized).toBe("ftp://example.com/v1");
     });
+
+    it("strips userinfo that URL parsing would read as an opaque scheme", () => {
+        expect(sanitizeDiagnosticEndpoint("alice:hunter2@example.com/v1")).toBe("example.com/v1");
+        expect(sanitizeDiagnosticEndpoint("alice:hunter2@example.com/v1?k=secret#frag")).toBe(
+            "example.com/v1",
+        );
+        expect(sanitizeDiagnosticEndpoint("user:pass@example.com")).toBe("example.com");
+    });
+
+    it("keeps an @ that is part of the path", () => {
+        expect(sanitizeDiagnosticEndpoint("https://example.com/v1/@scope/pkg")).toBe(
+            "https://example.com/v1/@scope/pkg",
+        );
+    });
 });

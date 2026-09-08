@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
 // ============================================================================
@@ -167,7 +167,8 @@ export function resolveOmpPaths(): OmpPaths {
     let dataRoot = configRoot;
     if (canUseXdg) {
         const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
-        if (xdgDataHome) {
+        // XDG requires an absolute value; a relative one would resolve against this process's cwd.
+        if (xdgDataHome && isAbsolute(xdgDataHome)) {
             const appRoot = join(xdgDataHome, "omp");
             const candidate = profile ? join(appRoot, "profiles", profile) : appRoot;
             if (existsSync(candidate)) dataRoot = candidate;
