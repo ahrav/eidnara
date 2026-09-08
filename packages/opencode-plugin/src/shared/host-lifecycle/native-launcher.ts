@@ -117,13 +117,16 @@ interface CollectedExit {
     stdout: Buffer;
     timedOut: boolean;
     outputCapExceeded: boolean;
+    /** A read error on stdout; the buffered bytes may be a prefix of what the child wrote. */
+    stdoutReadFailed: boolean;
 }
 
 function retainedFdExecPath(platform: NodeJS.Platform): string | null {
     return platform === "linux" ? `/proc/self/fd/${LAUNCHER_CHILD_FD}` : null;
 }
 
-function collectChild(child: ChildProcess, deadlineMs: number): Promise<CollectedExit> {
+/** `deadlineAt` uses the `performance.now()` timebase. */
+function collectChild(child: ChildProcess, deadlineAt: number): Promise<CollectedExit> {
     return new Promise((resolve, reject) => {
         let stdoutLen = 0;
         const stdoutChunks: Buffer[] = [];
@@ -131,10 +134,14 @@ function collectChild(child: ChildProcess, deadlineMs: number): Promise<Collecte
         let outputCapExceeded = false;
         let settled = false;
         let stdioGrace: ReturnType<typeof setTimeout> | null = null;
-        const timer = setTimeout(() => {
-            timedOut = true;
-            child.kill("SIGKILL");
-        }, deadlineMs);
+        // Computed after `spawn` returned, so the synchronous spawn cost is charged to the budget.
+        const timer = setTimeout(
+            () => {
+                timedOut = true;
+                child.kill("SIGKILL");
+            },
+            Math.max(0, deadlineAt - performance.now()),
+        );
         child.stdout?.on("data", (chunk: Buffer) => {
             stdoutLen += chunk.length;
             if (stdoutLen > MAX_STDOUT_BYTES) {
@@ -184,6 +191,8 @@ function collectChild(child: ChildProcess, deadlineMs: number): Promise<Collecte
                 stdout: Buffer.concat(stdoutChunks),
                 timedOut,
                 outputCapExceeded,
+                // `destroy(error)` records the stream error in `errored`, even when no `error` event is emitted.
+                stdoutReadFailed: (child.stdout?.errored ?? null) !== null,
             });
         });
     });
@@ -290,8 +299,8 @@ export async function runNativeLifecycle(
     }
     // Serializing a large envelope can consume the budget on its own; spawning
     // a mutating command after that would give it a fresh full deadline.
-    const remainingMs = options.deadlineMs - (performance.now() - startedAt);
-    if (remainingMs <= 0) {
+    const deadlineAt = startedAt + options.deadlineMs;
+    if (performance.now() >= deadlineAt) {
         throw new NativeLaunchError(
             "timeout",
             "native lifecycle deadline expired before the child was spawned",
@@ -317,7 +326,7 @@ export async function runNativeLifecycle(
     } else {
         child.stdin?.end(serializedEnvelope);
     }
-    const collected = await collectChild(child, remainingMs);
+    const collected = await collectChild(child, deadlineAt);
     if (collected.timedOut) {
         throw new NativeLaunchError("timeout", "native lifecycle command exceeded its deadline");
     }
@@ -338,6 +347,10 @@ export async function runNativeLifecycle(
             "usage_error",
             "native lifecycle command rejected its invocation",
         );
+    }
+    // A complete-looking JSON prefix buffered before a read error is not the whole result.
+    if (collected.stdoutReadFailed) {
+        throw new NativeLaunchError("malformed_output", "native output was not fully read");
     }
     // Decoded strictly. `Buffer.toString("utf8")` substitutes U+FFFD for an
     // invalid byte, so a corrupt byte inside an otherwise well-formed JSON
