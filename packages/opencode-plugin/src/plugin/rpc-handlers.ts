@@ -708,14 +708,19 @@ export function registerRpcHandlers(
     const { directory, config, liveSessionState, rustModeModuleClient } = args;
     const compactionEnabled = isCompactionEnabled(config);
     // The same maps the hooks share, so a metadata read here pins the route root and records child classification for them too. commentlint: allow(JUDGE)
-    const sessionDirectoryDeps: SessionDirectoryDeps = {
+    const sessionDirectoryDeps: Omit<SessionDirectoryDeps, "directory"> = {
         client: args.client ?? undefined,
-        directory,
         sessionDirectoryBySession: liveSessionState.sessionDirectoryBySession,
         sessionMetadataReadStateBySession: liveSessionState.sessionMetadataReadStateBySession,
         subagentSessions: liveSessionState.subagentSessions,
         internalChildSessions: liveSessionState.internalChildSessions,
     };
+    // Daemon state is keyed by (session, project_root), so a poll reads the root the hooks write under; the caller's directory is the fallback when the host reports none. commentlint: allow(JUDGE)
+    const routeRootFor = (sessionId: string, requested: unknown): Promise<string> =>
+        resolveSessionDirectory(
+            { ...sessionDirectoryDeps, directory: String(requested ?? directory) },
+            sessionId,
+        );
 
     // RPC results serialize to JSON, so handler-map values use the JSON-object envelope.
     const rawConfig = config as unknown as Record<string, unknown>;
@@ -764,8 +769,8 @@ export function registerRpcHandlers(
 
     rpcServer.handle("sidebar-snapshot", async (params) => {
         const sessionId = String(params.sessionId ?? "");
-        const dir = String(params.directory ?? directory);
         if (!sessionId) return { error: "unavailable" };
+        const dir = await routeRootFor(sessionId, params.directory);
         const inputs = await loadPollInputs(sessionId, dir);
         if (!inputs) return { error: "sidebar snapshot unavailable" };
         return buildSidebarSnapshotRpcResponse(
@@ -781,11 +786,10 @@ export function registerRpcHandlers(
 
     rpcServer.handle("status-detail", async (params) => {
         const sessionId = String(params.sessionId ?? "");
-        const dir = String(params.directory ?? directory);
         const modelKey = params.modelKey ? String(params.modelKey) : undefined;
         if (!sessionId) return { error: "unavailable" };
-        // After a restart the child sets are empty; the host read that classifies a restored child runs before `isSubagent` is read.
-        await resolveSessionDirectory(sessionDirectoryDeps, sessionId);
+        // The same host read also classifies a restored child, so it runs before `isSubagent` is read.
+        const dir = await routeRootFor(sessionId, params.directory);
         const inputs = await loadPollInputs(sessionId, dir);
         if (!inputs) return { error: "status detail unavailable" };
         return buildStatusDetail(

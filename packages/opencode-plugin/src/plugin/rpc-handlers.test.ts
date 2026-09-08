@@ -155,7 +155,7 @@ describe("registerRpcHandlers", () => {
         expect(detail.compartmentCount).toBe(4);
     });
 
-    test("the daemon status cache keys by project root, so one session polled under two roots asks each route", async () => {
+    test("a session keeps its first route root when a later poll supplies another directory", async () => {
         const { handlers, calls, roots } = register({}, DAEMON_STATUS);
         const sessionId = "ses-handler-two-roots";
         const rootA = process.cwd();
@@ -163,17 +163,18 @@ describe("registerRpcHandlers", () => {
 
         await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootA });
         await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootB });
-        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootA });
+        await handlers.get("status-detail")?.({ sessionId, directory: rootB });
 
-        expect(calls).toEqual(["session.status", "session.status"]);
-        expect(roots).toEqual([rootA, rootB]);
+        // Every call routes to the pinned root, so the cached status answers the later polls.
+        expect(calls).toEqual(["session.status"]);
+        expect(roots).toEqual([rootA]);
     });
 
-    test("a zero-token answer from a second root does not inherit the first root's sticky totals", async () => {
-        const sessionId = "ses-handler-sticky-roots";
+    test("the host-reported session directory routes the poll, not the caller's directory", async () => {
+        const sessionId = "ses-handler-host-root";
         const rootA = process.cwd();
         const rootB = join(process.cwd(), "src");
-        // Root B keeps root A's compartment count so a session-keyed sticky cache would substitute A's totals.
+        // Root B keeps root A's compartment count so a wrong route would be visible only through the token totals.
         const statusByRoot = new Map<string, RustSessionStatus>([
             [rootA, DAEMON_STATUS],
             [
@@ -190,33 +191,39 @@ describe("registerRpcHandlers", () => {
                 handlers.set(method, handler);
             },
         } as unknown as EidnaraRpcServer;
+        const liveSessionState = createLiveSessionState();
+        const roots: string[] = [];
         registerRpcHandlers(server, {
             directory: rootA,
             config: EidnaraConfigSchema.parse({
                 transform_mode: "rust",
                 subc: { connection_file: MISSING_CONNECTION_FILE },
             }),
-            client: null,
-            liveSessionState: createLiveSessionState(),
+            client: {
+                session: {
+                    async get(args: { path: { id: string } }) {
+                        return { data: { id: args.path.id, directory: rootB } };
+                    },
+                },
+            } as unknown as NonNullable<Parameters<typeof registerRpcHandlers>[1]["client"]>,
+            liveSessionState,
             rustModeModuleClient: {
                 async call(args) {
+                    roots.push(args.projectRoot);
                     return { ok: true, result: statusByRoot.get(args.projectRoot) ?? {} };
                 },
             },
         });
 
-        const first = (await handlers.get("sidebar-snapshot")?.({
+        const snapshot = (await handlers.get("sidebar-snapshot")?.({
             sessionId,
             directory: rootA,
         })) as unknown as SidebarSnapshot;
-        expect(first.inputTokens).toBe(42_000);
-
-        const second = (await handlers.get("sidebar-snapshot")?.({
-            sessionId,
-            directory: rootB,
-        })) as unknown as SidebarSnapshot;
-        expect(second.inputTokens).toBe(0);
-        expect(second.usagePercentage).toBe(0);
+        expect(roots).toEqual([rootB]);
+        expect(snapshot.inputTokens).toBe(0);
+        expect(snapshot.usagePercentage).toBe(0);
+        // The pin is shared with the hooks, so their daemon calls take the same route.
+        expect(liveSessionState.sessionDirectoryBySession.get(sessionId)).toBe(rootB);
     });
 
     test("a daemon that cannot answer fails the poll instead of returning a zero snapshot", async () => {
@@ -355,6 +362,7 @@ describe("registerRpcHandlers", () => {
         const sessionId = "ses-handler-status-cleared";
         let calls = 0;
         let release: (() => void) | undefined;
+        let onThirdCall: (() => void) | undefined;
         const gate = new Promise<void>((resolve) => {
             release = resolve;
         });
@@ -375,7 +383,10 @@ describe("registerRpcHandlers", () => {
             rustModeModuleClient: {
                 async call() {
                     calls += 1;
-                    if (calls === 3) await gate;
+                    if (calls === 3) {
+                        onThirdCall?.();
+                        await gate;
+                    }
                     return { ok: true, result: DAEMON_STATUS };
                 },
             },
@@ -390,7 +401,13 @@ describe("registerRpcHandlers", () => {
 
         // A clear while a request is in flight discards its late answer: the waiting poll fails instead of rendering the invalidated session, and nothing is cached.
         clearRustSessionStatus(sessionId);
+        let reached: (() => void) | undefined;
+        const daemonReached = new Promise<void>((resolve) => {
+            reached = resolve;
+        });
+        onThirdCall = () => reached?.();
         const pending = handlers.get("sidebar-snapshot")?.({ sessionId });
+        await daemonReached;
         expect(calls).toBe(3);
         clearRustSessionStatus(sessionId);
         release?.();
