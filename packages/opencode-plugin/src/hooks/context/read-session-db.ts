@@ -4,7 +4,7 @@ import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { isMeaningfulUserText } from "./read-session-formatting";
+import { isMeaningfulUserText, isTruthyFlag } from "./read-session-formatting";
 
 interface AssistantMidTurnRow {
     id?: string;
@@ -192,11 +192,11 @@ function isRealUserMessage(partRows: PartDataRow[]): boolean {
 
 /**
  * Parts with `synthetic`, `ignored`, or `metadata.marker.kind` do not count. Text parts count only
- * when `isMeaningfulUserText` returns true; other unflagged part types count.
+ * when `isMeaningfulUserText` returns true; other typed, unflagged parts count.
  */
 function isRealUserPart(part: Record<string, unknown>): boolean {
-    if (isTruthyFlag(part.synthetic) || isTruthyFlag(part.ignored)) return false;
-    if (markerKind(part) !== null) return false;
+    if (typeof part.type !== "string") return false;
+    if (isMachineAuthoredPart(part)) return false;
     if (part.type === "text") {
         return typeof part.text === "string" && isMeaningfulUserText(part.text);
     }
@@ -207,7 +207,7 @@ function parsePart(row: PartDataRow): Record<string, unknown> | null {
     if (typeof row.data !== "string" || row.data.length === 0) return null;
     try {
         const parsed: unknown = JSON.parse(row.data);
-        return parsed !== null && typeof parsed === "object"
+        return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
             ? (parsed as Record<string, unknown>)
             : null;
     } catch {
@@ -215,17 +215,13 @@ function parsePart(row: PartDataRow): Record<string, unknown> | null {
     }
 }
 
-/** Persisted flags appear as JSON `true`, SQLite `1`, or the string `"true"`. */
-function isTruthyFlag(value: unknown): boolean {
-    return value === true || value === 1 || value === "true";
-}
-
-function markerKind(part: Record<string, unknown>): unknown {
+function isMachineAuthoredPart(part: Record<string, unknown>): boolean {
+    if (isTruthyFlag(part.synthetic) || isTruthyFlag(part.ignored)) return true;
     const metadata = part.metadata;
-    if (metadata === null || typeof metadata !== "object") return null;
+    if (metadata === null || typeof metadata !== "object") return false;
     const marker = (metadata as Record<string, unknown>).marker;
-    if (marker === null || typeof marker !== "object") return null;
-    return (marker as Record<string, unknown>).kind ?? null;
+    if (marker === null || typeof marker !== "object") return false;
+    return (marker as Record<string, unknown>).kind != null;
 }
 
 interface AssistantModelRow {

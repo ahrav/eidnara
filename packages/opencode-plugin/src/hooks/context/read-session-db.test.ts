@@ -370,6 +370,32 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
+    it.each([
+        ["a JSON array", []],
+        ["an object without a type", { foo: 1 }],
+        ["an object with a non-string type", { type: 7 }],
+        ["a JSON string", "text"],
+    ])("does not release for a part that is %s", (_label, data) => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", data);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("does not release for an Oh My OpenCode directive part", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "[SYSTEM DIRECTIVE: OH-MY-OPENCODE continue]",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
     it("is not mid-turn when there is no assistant message", () => {
         const db = createMidTurnDb();
 

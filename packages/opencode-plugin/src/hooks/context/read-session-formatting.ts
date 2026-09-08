@@ -22,6 +22,10 @@ export interface ChunkBlock {
 
 const MAX_COMMITS_PER_BLOCK = 5;
 
+export function isTruthyFlag(value: unknown): boolean {
+    return value === true || value === 1 || value === "true";
+}
+
 function cleanUserText(text: string): string {
     return removeSystemReminders(text).replaceAll(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
 }
@@ -31,12 +35,16 @@ export function isMeaningfulUserText(text: string): boolean {
     return cleaned.length > 0 && !isSystemDirective(cleaned);
 }
 
+function isMachineAuthoredText(part: Record<string, unknown>): boolean {
+    return isTruthyFlag(part.synthetic) || isTruthyFlag(part.ignored);
+}
+
 export function hasMeaningfulUserText(parts: unknown[]): boolean {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const candidate = part as Record<string, unknown>;
         if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
-        if (candidate.ignored === true) continue;
+        if (isMachineAuthoredText(candidate)) continue;
         if (isMeaningfulUserText(candidate.text)) return true;
     }
 
@@ -49,8 +57,7 @@ export function extractTexts(parts: unknown[], role: string): string[] {
         if (part === null || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
         if (p.type !== "text" || typeof p.text !== "string") continue;
-        // `hasMeaningfulUserText` skips ignored parts (routing and quota notices); the summary must not carry them either.
-        if (p.ignored === true) continue;
+        if (isMachineAuthoredText(p)) continue;
         // `hasMeaningfulUserText` evaluates cleaned text, so summaries clean user text too.
         const text = role === "user" ? cleanUserText(p.text) : p.text.trim();
         if (text.length === 0) continue;

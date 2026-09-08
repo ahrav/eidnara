@@ -1,4 +1,5 @@
-const SYSTEM_DIRECTIVE_PREFIX = "[SYSTEM DIRECTIVE: EIDNARA";
+// Eidnara, Oh My OpenCode, and Oh My Claude directives share this prefix.
+const SYSTEM_DIRECTIVE_PREFIX = "[SYSTEM DIRECTIVE:";
 
 export function isSystemDirective(text: string): boolean {
     return text.trimStart().startsWith(SYSTEM_DIRECTIVE_PREFIX);

@@ -71,6 +71,37 @@ describe("extractTexts", () => {
 
         expect(extractTexts([{ type: "text", text }], "assistant")).toEqual([text]);
     });
+
+    it("drops an Oh My OpenCode directive part", () => {
+        const parts = [
+            { type: "text", text: "[SYSTEM DIRECTIVE: OH-MY-OPENCODE continue]" },
+            { type: "text", text: "real request" },
+        ];
+
+        expect(extractTexts(parts, "user")).toEqual(["real request"]);
+        expect(hasMeaningfulUserText([parts[0]])).toBe(false);
+    });
+
+    it.each([
+        ["true", true],
+        ["numeric 1", 1],
+        ["the string true", "true"],
+    ])("skips a synthetic text part flagged with %s", (_label, synthetic) => {
+        const parts = [
+            { type: "text", text: "<session-history>\nP1\n</session-history>", synthetic },
+            { type: "text", text: "real request" },
+        ];
+
+        expect(extractTexts(parts, "user")).toEqual(["real request"]);
+        expect(hasMeaningfulUserText([parts[0]])).toBe(false);
+        expect(hasMeaningfulUserText(parts)).toBe(true);
+    });
+
+    it("skips a synthetic assistant text part too", () => {
+        expect(
+            extractTexts([{ type: "text", text: "generated", synthetic: true }], "assistant"),
+        ).toEqual([]);
+    });
 });
 
 describe("extractToolCallSummaries", () => {

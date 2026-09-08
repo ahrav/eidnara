@@ -71,10 +71,26 @@ describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", (
         ["Greek", "αβγ"],
         ["Cyrillic word", "готово"],
         ["non-ASCII digit", "٣ items"],
+        ["emoji", "😀 fixed"],
+        ["heading marker", "# Heading"],
+        ["bullet marker", "* item"],
+        ["code fence", "```ts"],
+        ["parenthesis", "(note)"],
     ])("does not consume the first %s character after a dangling tag", (_label, content) => {
         expect(stripPersistedAssistantText(`${SECTION}42${content}`)).toBe(content);
         expect(stripTagPrefix(`${SECTION}42${content}`)).toBe(content);
         expect(stripDanglingTagNotationGlobally(`${SECTION}42${content}`)).toBe(content);
+    });
+
+    it.each([
+        ["dollar sign", "$"],
+        ["double quote", '"'],
+        ["single quote", "'"],
+        ["xml hybrid tail", '">'],
+        ["Cyrillic ha", CYRILLIC_HA],
+    ])("consumes the %s improvised closer", (_label, closer) => {
+        expect(stripPersistedAssistantText(`${SECTION}42${closer} done`)).toBe("done");
+        expect(stripTagPrefix(`${SECTION}42${closer} done`)).toBe("done");
     });
 });
 

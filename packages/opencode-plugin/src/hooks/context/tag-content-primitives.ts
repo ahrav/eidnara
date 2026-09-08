@@ -19,12 +19,16 @@ const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
 
 // `(?!\d|\.\d)` rejects decimal references and prevents `\d+` from backtracking to a shorter prefix.
 // Without the digit alternative, `§42.1` matches as `§4` and leaves `2.1`.
-// The optional closer excludes Unicode letters and numbers except `\u04a9`; JavaScript's `\w` is ASCII-only,
-// so `[^\w]` would consume the first character of `§42修复完成` or `§42éclair`.
-// `\u04a9` (ҩ) is a letter a model has been observed to improvise as a closer, so it is listed explicitly.
-const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\d|\.\d)(?:[^\s\u00a7\p{L}\p{N}.]|\u04a9)?/gu;
-const DANGLING_TAG_PREFIX_REGEX =
-    /^(?:\u00a7\d+(?!\d|\.\d)(?:[^\s\u00a7\p{L}\p{N}.]|\u04a9)?\s*)+/u;
+// The closed closer set prevents a broad symbol class from consuming an authored emoji or a `#` heading marker.
+const DANGLING_TAG_CLOSER = String.raw`(?:">|[$"'\u04a9])`;
+const DANGLING_TAG_GLOBAL_REGEX = new RegExp(
+    String.raw`\u00a7\d+(?!\d|\.\d)${DANGLING_TAG_CLOSER}?`,
+    "gu",
+);
+const DANGLING_TAG_PREFIX_REGEX = new RegExp(
+    String.raw`^(?:\u00a7\d+(?!\d|\.\d)${DANGLING_TAG_CLOSER}?\s*)+`,
+    "u",
+);
 
 /* */
 const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;
