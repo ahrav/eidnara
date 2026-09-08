@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { getDataDir } from "../../../shared/data-path";
-import { processHostClient } from "../../../shared/host-client";
+import { HostClient } from "../../../shared/host-client";
 import { defaultConnectionFilePath } from "../../../shared/host-lifecycle/paths";
 
 /** `wake.create` indicates that scheduled wakes own condition evaluation. */
@@ -46,13 +46,19 @@ function readDaemonPublication(): string | null {
 }
 
 async function probeWakePlaneCatalog(): Promise<readonly CatalogEntry[]> {
-    // `requestTimeoutMs` is part of the process-client cache key. Setting it here buys this probe its own client and its own ring mappings; the per-call timeout reaches the same deadline on the shared client.
-    const client = await processHostClient({
+    // Connect at probe time so the answer comes from the daemon that currently owns the
+    // connection file; a cached client can outlive a replaced publication.
+    const client = await HostClient.connect({
         connectionFile: connectionFile(),
         handshakeTimeoutMs: WAKE_PLANE_HANDSHAKE_TIMEOUT_MS,
         credentialSource: process.env,
     });
-    return client.catalogList({ timeoutMs: WAKE_PLANE_CATALOG_TIMEOUT_MS });
+    try {
+        return await client.catalogList({ timeoutMs: WAKE_PLANE_CATALOG_TIMEOUT_MS });
+    } finally {
+        // Teardown is not part of the answer; `closeAsync` runs under its own shutdown deadline.
+        void client.closeAsync().catch(() => undefined);
+    }
 }
 
 function catalogHasWakePlane(entries: readonly CatalogEntry[]): boolean {

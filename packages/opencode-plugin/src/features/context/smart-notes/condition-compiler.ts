@@ -39,6 +39,13 @@ type RawPredicate =
 const VALUE = String.raw`(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)`;
 
 /**
+ * Mirrors the daemon's `MAX_SHORT_FIELD_BYTES` cap on the stored `compiled_config` string
+ * (`crates/daemon/src/lib.rs`). Resolved absolute paths and JSON framing make a config larger
+ * than its surface condition, so a condition under the surface cap can still overflow here.
+ */
+const COMPILED_CONFIG_MAX_BYTES = 4 * 1024;
+
+/**
  * compileSurfaceCondition compiles only deterministic local filesystem phrases.
  * Prose outside the grammar returns { status: "plain" }.
  */
@@ -87,6 +94,14 @@ export async function compileSurfaceCondition(
         return {
             status: "refused",
             reason: `provider schema: ${singleLine(validation.reason)}`.slice(0, 180),
+        };
+    }
+
+    const configBytes = Buffer.byteLength(JSON.stringify(validation.config), "utf8");
+    if (configBytes > COMPILED_CONFIG_MAX_BYTES) {
+        return {
+            status: "refused",
+            reason: `compiled config is ${configBytes} bytes; the storage limit is ${COMPILED_CONFIG_MAX_BYTES}`,
         };
     }
 

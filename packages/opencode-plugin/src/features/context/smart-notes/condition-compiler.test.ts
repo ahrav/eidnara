@@ -252,4 +252,29 @@ describe("surface-condition compiler", () => {
             expect(result.reason).toContain("between 1 and 4 predicates");
         }
     });
+
+    test("refuses a compiled config over 4096 bytes even when the surface condition fits", async () => {
+        // `{"kind":"file_contains","path":"/tmp/state","needle":""}` is 56 bytes of framing.
+        const framing = 56;
+        const atCap = "x".repeat(4096 - framing);
+        const overCap = `${atCap}y`;
+
+        const fits = await compileSurfaceCondition(
+            `when file /tmp/state contains "${atCap}"`,
+            pureOptions(),
+        );
+        expect(fits.status).toBe("compiled");
+        if (fits.status === "compiled") {
+            expect(Buffer.byteLength(JSON.stringify(fits.config), "utf8")).toBe(4096);
+        }
+
+        const surface = `when file /tmp/state contains "${overCap}"`;
+        expect(Buffer.byteLength(surface, "utf8")).toBeLessThanOrEqual(4096);
+        const overflow = await compileSurfaceCondition(surface, pureOptions());
+        expect(overflow).toEqual({
+            status: "refused",
+            reason: "compiled config is 4097 bytes; the storage limit is 4096",
+        });
+        expect(conditionCompileStorageFields(overflow).compiledConfig).toBeNull();
+    });
 });
