@@ -2,6 +2,8 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
+import { getLocation, type JSONPath } from "jsonc-parser";
+
 import { stripJsoncComments } from "../shared/jsonc-parser";
 
 /**
@@ -30,13 +32,28 @@ export interface SubstituteInput {
     isProjectConfig?: boolean;
 }
 
+export interface SubstituteFailure {
+    /** The same text as the matching entry in `SubstituteResult.warnings`. */
+    message: string;
+    /**
+     * The JSONC path of the value or key that held the token, read from the document before the
+     * token was replaced. `undefined` when the failure is not tied to one token.
+     */
+    path: JSONPath | undefined;
+}
+
 export interface SubstituteResult {
     /* */
     text: string;
     /**
-     * Warnings cover missing environment variables, unreadable files, and tokens replaced with an empty string.
+     * Warnings cover missing environment variables, unreadable files, tokens replaced with an empty string, and sensitive-path advisories.
      */
     warnings: string[];
+    /**
+     * The subset of `warnings` where a token was replaced with an empty string or left unresolved.
+     * A sensitive-path advisory is not a failure: the file was read and inlined.
+     */
+    failures: SubstituteFailure[];
 }
 
 const ENV_PATTERN = /\{env:([^}]+)\}/g;
@@ -88,6 +105,14 @@ function sensitiveFilePathReason(resolvedPath: string): string | null {
  */
 export function substituteConfigVariables(input: SubstituteInput): SubstituteResult {
     const warnings: string[] = [];
+    const failures: SubstituteFailure[] = [];
+    // A token's path is read from the text being scanned; placeholders from an earlier pass are
+    // ordinary string tokens, so the structure is unchanged.
+    let tokenPath: JSONPath | undefined;
+    const fail = (message: string): void => {
+        warnings.push(message);
+        failures.push({ message, path: tokenPath });
+    };
     let text = input.text;
 
     if (input.isProjectConfig) {
@@ -106,11 +131,11 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             ]
                 .filter(Boolean)
                 .join(" and ");
-            warnings.push(
+            fail(
                 `Project-level config no longer supports ${tokenTypes} tokens for security reasons; leaving tokens literal. Move secret expansion to user-level config.`,
             );
         }
-        return { text, warnings };
+        return { text, warnings, failures };
     }
 
     // Strip JSONC comments before substitution to prevent tokens in comments from triggering environment or file reads.
@@ -127,7 +152,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         const varName = rawName.trim();
         const value = varName ? process.env[varName] : undefined;
         if (value === undefined || value === "") {
-            warnings.push(
+            fail(
                 `Environment variable ${varName} is not set (referenced via {env:${varName}}); using empty string`,
             );
             return undefined;
@@ -144,13 +169,16 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             const lineStart = source.lastIndexOf("\n", index - 1) + 1;
             const prefix = source.slice(lineStart, index).trimStart();
             if (prefix.startsWith("//")) return token;
+            tokenPath = getLocation(source, index).path;
 
             // A missing fragment must not leave a shorter path that names some other existing file (`{file:{env:DIR}/secret}` with `DIR` unset would read `/secret`), so the whole token yields the empty string the env warning already announced. commentlint: allow(JUDGE)
             let nestedEnvMissing = false;
+            let nestedEnvExpanded = false;
             let filePath = rawPath
                 .replace(ENV_PATTERN, (_, rawName: string) => {
                     const value = envValue(rawName);
                     if (value === undefined) nestedEnvMissing = true;
+                    else nestedEnvExpanded = true;
                     return value ?? "";
                 })
                 .trim();
@@ -160,6 +188,11 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             } else if (!isAbsolute(filePath)) {
                 filePath = resolve(configDir, filePath);
             }
+            // `token` is the literal text, so it names the `{env:...}` group rather than its value; the
+            // resolved path carries that value and is withheld from every warning about this token.
+            const shownPath = nestedEnvExpanded
+                ? "path withheld: it contains an {env:} expansion"
+                : filePath;
 
             // Inlining a sensitive file exposes its contents in the substituted config. The spelled path is classified before the existence check so the warning fires whether or not the file is there. commentlint: allow(JUDGE)
             const warnSensitive = (reason: string, target: string): void => {
@@ -169,12 +202,10 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
                 );
             };
             const spelledReason = sensitiveFilePathReason(filePath);
-            if (spelledReason) warnSensitive(spelledReason, filePath);
+            if (spelledReason) warnSensitive(spelledReason, shownPath);
 
             if (!existsSync(filePath)) {
-                warnings.push(
-                    `File not found for ${token} (resolved to ${filePath}); using empty string`,
-                );
+                fail(`File not found for ${token} (resolved to ${shownPath}); using empty string`);
                 return "";
             }
 
@@ -182,22 +213,33 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             if (!spelledReason) {
                 const realPath = realPathOrSelf(filePath);
                 const realReason = realPath === filePath ? null : sensitiveFilePathReason(realPath);
-                if (realReason) warnSensitive(realReason, `${filePath} -> ${realPath}`);
+                if (realReason) {
+                    warnSensitive(
+                        realReason,
+                        nestedEnvExpanded ? shownPath : `${filePath} -> ${realPath}`,
+                    );
+                }
             }
 
             let contents: string;
             try {
                 contents = readFileSync(filePath, "utf-8").trim();
             } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                warnings.push(
-                    `Failed to read file for ${token} (${filePath}): ${message}; using empty string`,
+                // Node embeds the path in `error.message`; an expanded token keeps only `error.code`.
+                const code = (error as NodeJS.ErrnoException | undefined)?.code;
+                const message = nestedEnvExpanded
+                    ? (code ?? "read error")
+                    : error instanceof Error
+                      ? error.message
+                      : String(error);
+                fail(
+                    `Failed to read file for ${token} (${shownPath}): ${message}; using empty string`,
                 );
                 return "";
             }
 
             if (contents === "") {
-                warnings.push(`File for ${token} (${filePath}) is empty; using empty string`);
+                fail(`File for ${token} (${shownPath}) is empty; using empty string`);
                 return "";
             }
 
@@ -207,7 +249,8 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         },
     );
 
-    text = text.replace(ENV_PATTERN, (_, rawName: string) => {
+    text = text.replace(ENV_PATTERN, (_, rawName: string, index: number, source: string) => {
+        tokenPath = getLocation(source, index).path;
         const value = envValue(rawName);
         return value === undefined ? "" : placeholder(JSON.stringify(value).slice(1, -1));
     });
@@ -216,5 +259,5 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         PLACEHOLDER_PATTERN,
         (_, index: string) => substitutions[Number(index)] ?? "",
     );
-    return { text, warnings };
+    return { text, warnings, failures };
 }

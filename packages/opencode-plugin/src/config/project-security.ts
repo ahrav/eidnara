@@ -19,6 +19,8 @@ import {
 
 /** These hidden agents run with elevated or autonomous capability. */
 const HIDDEN_AGENT_KEYS = ["historian", "sidekick"] as const;
+/** `disable` and its legacy spelling `enabled`, which `migrateLegacyAgentEnabledInMemory` rewrites after the merge. */
+const HIDDEN_AGENT_ACTIVATION_FIELDS = ["disable", "enabled"] as const;
 const HISTORIAN_USER_ONLY_FIELDS = [
     "model",
     "fallback_models",
@@ -343,7 +345,8 @@ function bareBaseline<T extends number | undefined>(
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
  * A repository may select a reviewed `prompt_surface` preset but may not inject arbitrary guidance or tool-description text.
  * Project config must not set hidden-agent `prompt`, `permission`, or `tools`.
- * Only user config may set hidden-agent `disable`: the project tier replaces the trusted leaf, so a project `disable: false` would reactivate an agent the user turned off, and disabling the historian would bypass the user-only `compaction.enabled` rule.
+ * Only user config may set hidden-agent `disable` or its legacy spelling `enabled`: the project tier replaces the trusted leaf, so a project `disable: false` or `enabled: true` would reactivate an agent the user turned off, and disabling the historian would bypass the user-only `compaction.enabled` rule.
+ * A project may add `disabled_hooks` entries but may not replace the list: a non-array value would discard the user's disabled hooks in the merge.
  * A project may not replace a block that carries user-only leaves with a non-object value: the merge would substitute the whole block for the trusted one, schema recovery would drop the invalid value, and the user's settings would fall back to defaults without any leaf ever being stripped.
  */
 export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknown>): string[] {
@@ -356,6 +359,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
                 `Ignoring ${key} from project config (security: a repository cannot replace a block that carries user-only settings; a non-object value would discard the user's ${key} configuration).`,
             );
         }
+    }
+
+    if ("disabled_hooks" in projectRaw && !Array.isArray(projectRaw.disabled_hooks)) {
+        delete projectRaw.disabled_hooks;
+        warnings.push(
+            "Ignoring disabled_hooks from project config (security: a repository may only add hook IDs; a non-array value would replace the user's disabled hooks and re-enable them).",
+        );
     }
 
     if ("enabled" in projectRaw) {
@@ -550,10 +560,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
                     "(security: a repository cannot reprogram or re-permission hidden agents).",
             );
         }
-        if ("disable" in block) {
-            delete block.disable;
+        // A project `enabled: true` would replace the user's legacy `enabled: false` in the raw
+        // merge before `migrateLegacyAgentEnabledInMemory` turns it into `disable: true`.
+        for (const field of HIDDEN_AGENT_ACTIVATION_FIELDS) {
+            if (!(field in block)) continue;
+            delete block[field];
             warnings.push(
-                `Ignoring ${agentKey}.disable from project config (security: only user-level config may enable or disable hidden agents; a repository cannot reactivate an agent the user turned off).`,
+                `Ignoring ${agentKey}.${field} from project config (security: only user-level config may enable or disable hidden agents; a repository cannot reactivate an agent the user turned off).`,
             );
         }
         const removedCaps: string[] = [];

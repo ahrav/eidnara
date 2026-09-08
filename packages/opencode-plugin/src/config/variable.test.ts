@@ -305,6 +305,34 @@ describe("substituteConfigVariables", () => {
             expect(result.text).toBe(`{ "api_key": "indirect-value" }`);
         });
 
+        it("withholds an env-expanded file path from the missing-file warning", () => {
+            process.env.EIDNARA_SECRET_DIR = join(tmpDir, "hunter2-secret-dir");
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_SECRET_DIR}/missing.txt}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "" }`);
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("not found");
+            expect(result.warnings[0]).toContain("{file:{env:EIDNARA_SECRET_DIR}/missing.txt}");
+            expect(result.warnings[0]).toContain("path withheld");
+            expect(result.warnings[0]).not.toContain("hunter2-secret-dir");
+            delete process.env.EIDNARA_SECRET_DIR;
+        });
+
+        it("still names the resolved path for a literal file token next to an expanded one", () => {
+            process.env.EIDNARA_SECRET_DIR = join(tmpDir, "hunter2-secret-dir");
+            const literalMissing = join(tmpDir, "literal-missing.txt");
+
+            const input = `{ "a": "{file:{env:EIDNARA_SECRET_DIR}/x.txt}", "b": "{file:${literalMissing}}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.warnings).toHaveLength(2);
+            expect(result.warnings[0]).not.toContain("hunter2-secret-dir");
+            expect(result.warnings[1]).toContain(literalMissing);
+            delete process.env.EIDNARA_SECRET_DIR;
+        });
+
         it("env values inside {file:} stay raw paths even when the directory name needs JSON escaping", () => {
             const quotedDir = join(tmpDir, 'a"b\\c');
             mkdirSync(quotedDir);
@@ -499,6 +527,88 @@ describe("substituteConfigVariables", () => {
 
             expect(result.text).toBe(`{ "key": "private-key" }`);
             expect(result.warnings.some((w) => w.includes("SSH keys"))).toBe(true);
+        });
+
+        it("reports the advisory as a warning but not as a failure", () => {
+            process.env.HOME = tmpDir;
+            mkdirSync(join(tmpDir, ".ssh"));
+            writeFileSync(join(tmpDir, ".ssh", "note.txt"), "inline-me");
+
+            const result = substituteConfigVariables({
+                text: `{ "key": "{file:~/.ssh/note.txt}" }`,
+            });
+
+            expect(result.text).toBe(`{ "key": "inline-me" }`);
+            expect(result.warnings).toEqual([expect.stringContaining("sensitive path")]);
+            expect(result.failures).toEqual([]);
+        });
+    });
+
+    describe("failures subset", () => {
+        it("lists every empty-string fallback with its JSONC path and nothing else", () => {
+            delete process.env.EIDNARA_MISSING_FOR_FAILURES;
+            const missing = join(tmpDir, "no-such-file.txt");
+            const input = `{ "a": "{env:EIDNARA_MISSING_FOR_FAILURES}", "b": { "c": "{file:${missing}}" } }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            // The file pass runs before the env pass, so the file failure is recorded first.
+            expect(result.failures).toEqual([
+                { message: expect.stringContaining("not found"), path: ["b", "c"] },
+                { message: expect.stringContaining("is not set"), path: ["a"] },
+            ]);
+            expect(result.failures.map((failure) => failure.message).sort()).toEqual(
+                [...result.warnings].sort(),
+            );
+        });
+
+        it("records the array index for a token inside an array element", () => {
+            delete process.env.EIDNARA_MISSING_IN_ARRAY;
+            const input = `{ "models": ["a/b", "{env:EIDNARA_MISSING_IN_ARRAY}"] }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.failures).toEqual([expect.objectContaining({ path: ["models", 1] })]);
+        });
+
+        it("records the enclosing value's path for a missing env inside a {file:} token", () => {
+            delete process.env.EIDNARA_MISSING_DIR;
+            const input = `{ "nested": { "key": "{file:{env:EIDNARA_MISSING_DIR}/x.txt}" } }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.failures).toEqual([expect.objectContaining({ path: ["nested", "key"] })]);
+        });
+
+        it("records distinct paths for two fields that reference the same missing token", () => {
+            delete process.env.EIDNARA_MISSING_SHARED;
+            const input = `{ "x": { "model": "{env:EIDNARA_MISSING_SHARED}" }, "y": { "model": "{env:EIDNARA_MISSING_SHARED}" } }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.failures.map((failure) => failure.path)).toEqual([
+                ["x", "model"],
+                ["y", "model"],
+            ]);
+        });
+
+        it("keeps a sensitive-path advisory out of failures when the file is then missing", () => {
+            process.env.HOME = tmpDir;
+            const result = substituteConfigVariables({ text: `{ "key": "{file:~/.ssh/id_rsa}" }` });
+
+            expect(result.warnings).toHaveLength(2);
+            expect(result.failures).toEqual([
+                { message: expect.stringContaining("not found"), path: ["key"] },
+            ]);
+        });
+
+        it("treats literal project-level tokens as one failure without a path", () => {
+            const result = substituteConfigVariables({
+                text: `{ "a": "{env:X}" }`,
+                isProjectConfig: true,
+            });
+
+            expect(result.failures).toEqual([{ message: result.warnings[0], path: undefined }]);
         });
     });
 });

@@ -328,6 +328,42 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
+    it("strips the legacy hidden-agent enabled key so a project cannot undo a user's enabled=false", () => {
+        for (const enabled of [false, true]) {
+            const raw: Record<string, unknown> = {
+                historian: { enabled, temperature: 0.2 },
+                sidekick: { enabled, model: "x" },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw.historian).toEqual({ temperature: 0.2 });
+            expect(raw.sidekick).toEqual({ model: "x" });
+            expect(warnings).toEqual([
+                expect.stringContaining("historian.enabled"),
+                expect.stringContaining("sidekick.enabled"),
+            ]);
+        }
+    });
+
+    it("strips a non-array disabled_hooks so a project cannot replace the user's list", () => {
+        for (const value of [null, "hook", 1, { hook: true }]) {
+            const raw: Record<string, unknown> = { disabled_hooks: value, smart_drops: true };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw).toEqual({ smart_drops: true });
+            expect(warnings).toEqual([expect.stringContaining("Ignoring disabled_hooks")]);
+        }
+    });
+
+    it("keeps an array disabled_hooks so a project can add hook IDs", () => {
+        const raw: Record<string, unknown> = { disabled_hooks: ["a", "b"] };
+
+        expect(stripUnsafeProjectConfigFields(raw)).toEqual([]);
+        expect(raw.disabled_hooks).toEqual(["a", "b"]);
+    });
+
     it("strips compaction.enabled from project config (only-key case)", () => {
         const raw: Record<string, unknown> = {
             compaction: { enabled: false },

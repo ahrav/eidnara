@@ -65,6 +65,10 @@ export function sanitizeParsedJson<T>(
         ) as T;
     }
     if (value === null || typeof value !== "object") return value;
+    // `comment-json` boxes a scalar top level as `Number`, `String`, or `Boolean`; the boxed prototype is not a prototype override.
+    if (value instanceof Number || value instanceof String || value instanceof Boolean) {
+        return value.valueOf() as T;
+    }
 
     const source = value as Record<string, unknown>;
     const sourcePrototype = Object.getPrototypeOf(source);
