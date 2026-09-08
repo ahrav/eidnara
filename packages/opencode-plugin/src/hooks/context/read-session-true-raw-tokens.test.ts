@@ -520,6 +520,25 @@ describe("tool arcs", () => {
         expect(breakdown.other).toBeGreaterThan(100);
         expect(breakdown.toolInput).toBe(0);
     });
+
+    it("recognizes a Pi toolCall only inside an assistant message", () => {
+        const part = {
+            type: "toolCall",
+            id: "tc",
+            name: "x",
+            arguments: {},
+            payload: "P".repeat(8000),
+        };
+        const inUser: RawMessage = { id: "u", role: "user", parts: [part], ordinal: 1 };
+        const inAssistant: RawMessage = { id: "a", role: "assistant", parts: [part], ordinal: 2 };
+        expect(buildToolArcs([inUser], "pi-folded-v1")).toEqual([]);
+        expect(buildToolArcs([inAssistant], "pi-folded-v1")).toEqual([
+            { callId: "tc", invOrdinal: 2, resOrdinal: null },
+        ]);
+        expect(
+            estimateTrueRawMessageTokens(inUser, { providerShapeVersion: "pi-folded-v1" }).other,
+        ).toBeGreaterThan(1000);
+    });
 });
 
 describe("tool token accounting", () => {
@@ -720,6 +739,73 @@ describe("tool token accounting", () => {
         });
         expect(breakdown.image).toBe(0);
         expect(breakdown.other).toBeGreaterThan(1000);
+    });
+
+    it("keeps an unknown image-like type opaque", () => {
+        const message = singlePartMessage({ type: "image-cache", payload: "X".repeat(20_000) });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+        });
+        expect(breakdown.image).toBe(0);
+        expect(breakdown.other).toBeGreaterThan(1000);
+    });
+
+    it("reads only the decoder's reasoning fields", () => {
+        expect(
+            estimateTrueRawMessageTokens(
+                singlePartMessage({ type: "thinking", text: "stale compat ".repeat(200) }),
+                { providerShapeVersion: "pi-folded-v1" },
+            ).reasoning,
+        ).toBe(0);
+        expect(
+            estimateTrueRawMessageTokens(
+                singlePartMessage({ type: "reasoning", content: "stale ".repeat(200) }),
+                { providerShapeVersion: "opencode-v1" },
+            ).reasoning,
+        ).toBe(0);
+    });
+
+    it("counts and fingerprints reasoning sidecars", () => {
+        const openCode = (size: number) => ({
+            type: "reasoning",
+            text: "ok",
+            metadata: { sig: "S".repeat(size) },
+        });
+        const pi = (size: number) => ({
+            type: "thinking",
+            thinking: "ok",
+            thinkingSignature: "S".repeat(size),
+        });
+        expect(
+            estimateTrueRawMessageTokens(singlePartMessage(openCode(8000)), {
+                providerShapeVersion: "opencode-v1",
+            }).other,
+        ).toBeGreaterThan(1000);
+        expect(fingerprintOf(openCode(10))).not.toBe(fingerprintOf(openCode(5000)));
+        expect(
+            estimateTrueRawMessageTokens(singlePartMessage(pi(8000)), {
+                providerShapeVersion: "pi-folded-v1",
+            }).other,
+        ).toBeGreaterThan(1000);
+        expect(fingerprintOf(pi(10), "pi-folded-v1")).not.toBe(
+            fingerprintOf(pi(5000), "pi-folded-v1"),
+        );
+    });
+
+    it("counts and fingerprints a Pi text signature", () => {
+        const part = (size: number) => ({
+            type: "text",
+            text: "hi",
+            textSignature: "T".repeat(size),
+        });
+        expect(
+            estimateTrueRawMessageTokens(singlePartMessage(part(8000)), {
+                providerShapeVersion: "pi-folded-v1",
+            }).other,
+        ).toBeGreaterThan(1000);
+        expect(fingerprintOf(part(10), "pi-folded-v1")).not.toBe(
+            fingerprintOf(part(5000), "pi-folded-v1"),
+        );
     });
 
     it("ignores a retained input field on a Pi toolCall", () => {
