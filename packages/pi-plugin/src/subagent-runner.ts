@@ -372,45 +372,69 @@ export class PiSubagentRunner implements SubagentRunner {
     }
 
     async run(options: SubagentRunOptions): Promise<SubagentRunResult> {
+        // `durationMs` is the wall-clock span of the whole call, so it covers every
+        // provider-form, extension-isolation, and fallback spawn, not only the last one.
+        const startTime = Date.now();
+        const result = await this.runAttempts(options);
+        return { ...result, durationMs: Date.now() - startTime };
+    }
+
+    private async runAttempts(options: SubagentRunOptions): Promise<SubagentRunResult> {
         const providerAttempt = resolveProviderModelAttempt(options.model);
-        const firstOptions = providerAttempt
-            ? { ...options, model: providerAttempt.canonicalRef }
-            : options;
-        const firstRun = await this.runWithExtensionRetry(firstOptions, providerAttempt?.modelRef);
-        if (!providerAttempt) return firstRun.result;
-        if (firstRun.result.ok) {
+        if (!providerAttempt) {
+            return (await this.runWithExtensionRetry(options)).result;
+        }
+
+        // Try both provider forms of the primary model before starting its fallback chain.
+        const primaryOptions = {
+            ...options,
+            model: providerAttempt.canonicalRef,
+            fallbackModels: undefined,
+        };
+        let primaryRun = await this.runWithExtensionRetry(primaryOptions, providerAttempt.modelRef);
+        if (primaryRun.result.ok) {
             PI_PROVIDER_FORM_CACHE.set(
                 providerAttempt.canonicalProvider,
                 providerAttempt.attemptedProvider,
             );
-            return firstRun.result;
+            return primaryRun.result;
         }
-        if (!isProviderCredentialFailure(firstRun.result, providerAttempt)) {
-            return firstRun.result;
+        if (isProviderCredentialFailure(primaryRun.result, providerAttempt)) {
+            // If an extension retry already ran, the provider retry retains isolated mode.
+            primaryRun = primaryRun.extensionRetryUsed
+                ? {
+                      result: await this.runModelChain(
+                          primaryOptions,
+                          { disableDiscoveredExtensions: true },
+                          providerAttempt.canonicalRef,
+                      ),
+                      extensionRetryUsed: true,
+                  }
+                : await this.runWithExtensionRetry(primaryOptions, providerAttempt.canonicalRef);
+            if (primaryRun.result.ok) {
+                PI_PROVIDER_FORM_CACHE.set(
+                    providerAttempt.canonicalProvider,
+                    providerAttempt.canonicalProvider,
+                );
+                return primaryRun.result;
+            }
         }
 
-        // If an extension retry already ran, the provider retry retains isolated mode.
+        const fallbackModels = (options.fallbackModels ?? []).filter(isModelRef);
+        if (fallbackModels.length === 0 || !isFallbackEligible(primaryRun.result.reason)) {
+            return primaryRun.result;
+        }
         const fallbackOptions = {
             ...options,
-            model: providerAttempt.canonicalRef,
+            model: fallbackModels[0],
+            fallbackModels: fallbackModels.slice(1),
         };
-        const fallbackRun: ExtensionRetryResult = firstRun.extensionRetryUsed
-            ? {
-                  result: await this.runModelChain(
-                      fallbackOptions,
-                      { disableDiscoveredExtensions: true },
-                      providerAttempt.canonicalRef,
-                  ),
-                  extensionRetryUsed: true,
-              }
-            : await this.runWithExtensionRetry(fallbackOptions, providerAttempt.canonicalRef);
-        if (fallbackRun.result.ok) {
-            PI_PROVIDER_FORM_CACHE.set(
-                providerAttempt.canonicalProvider,
-                providerAttempt.canonicalProvider,
-            );
+        // Fallbacks keep the extension mode the primary settled on, so an isolated
+        // primary retry is not repeated for every fallback.
+        if (primaryRun.extensionRetryUsed) {
+            return this.runModelChain(fallbackOptions, { disableDiscoveredExtensions: true });
         }
-        return fallbackRun.result;
+        return (await this.runWithExtensionRetry(fallbackOptions)).result;
     }
 
     private async runWithExtensionRetry(
@@ -445,9 +469,7 @@ export class PiSubagentRunner implements SubagentRunner {
         runMode: PiRunMode,
         primaryModelRef?: string,
     ): Promise<SubagentRunResult> {
-        const models = [options.model, ...(options.fallbackModels ?? [])].filter(
-            (model): model is string => typeof model === "string" && model.length > 0,
-        );
+        const models = [options.model, ...(options.fallbackModels ?? [])].filter(isModelRef);
         const attempts = models.length > 0 ? models : [undefined];
         let lastResult: SubagentRunResult | null = null;
         for (let index = 0; index < attempts.length; index += 1) {
@@ -756,6 +778,7 @@ export class PiSubagentRunner implements SubagentRunner {
                 });
 
                 // `agent_end` with `messages` takes precedence over accumulated messages.
+                // No early return: the drain block below must also start for this event.
                 if (e.type === "agent_end" && Array.isArray(e.messages)) {
                     sawAgentEnd = true;
                     agentEndMessages = e.messages;
@@ -770,7 +793,6 @@ export class PiSubagentRunner implements SubagentRunner {
                         hasToolCall: false,
                         ms: elapsedMs,
                     });
-                    return;
                 }
 
                 // `stopReason="length"` means the model exhausted its token limit mid-response.
@@ -891,18 +913,35 @@ export class PiSubagentRunner implements SubagentRunner {
                 if (timeoutHandle) clearTimeout(timeoutHandle);
                 if (drainTimerHandle) clearTimeout(drainTimerHandle);
                 options.signal?.removeEventListener("abort", onAbort);
+                if (settled) return;
                 emitProgress({
                     type: "child_exit",
                     code,
                     signal,
                     ms: Date.now() - startTime,
                 });
-                if (settled) return;
 
                 // A drain `SIGTERM` stops Pi print mode after the final turn.
                 // Captured stopReason and text remain authoritative after the final turn.
                 // A signaled close must not convert a valid answer into a subprocess failure.
                 if (sawAgentEnd) {
+                    // Handle terminal failures before empty text so `errorMessage` is preserved.
+                    if (
+                        finalStopReason === "error" ||
+                        finalStopReason === "aborted" ||
+                        finalStopReason === "length"
+                    ) {
+                        settle({
+                            ok: false,
+                            reason: finalStopReason === "length" ? "truncated" : "model_failed",
+                            error:
+                                finalErrorMessage ??
+                                `pi assistant stopped with reason "${finalStopReason}"`,
+                            durationMs: Date.now() - startTime,
+                            meta: { stderr: stderr.length > 0 ? stderr : undefined },
+                        });
+                        return;
+                    }
                     const trimmedAssistantText = finalAssistantText?.trim() ?? null;
                     if (trimmedAssistantText === null || trimmedAssistantText.length === 0) {
                         settle({
@@ -919,22 +958,6 @@ export class PiSubagentRunner implements SubagentRunner {
                                 stderr: stderr.length > 0 ? stderr : undefined,
                                 sawProtocolOutput: true,
                             },
-                        });
-                        return;
-                    }
-                    if (
-                        finalStopReason === "error" ||
-                        finalStopReason === "aborted" ||
-                        finalStopReason === "length"
-                    ) {
-                        settle({
-                            ok: false,
-                            reason: finalStopReason === "length" ? "truncated" : "model_failed",
-                            error:
-                                finalErrorMessage ??
-                                `pi assistant stopped with reason "${finalStopReason}"`,
-                            durationMs: Date.now() - startTime,
-                            meta: { stderr: stderr.length > 0 ? stderr : undefined },
                         });
                         return;
                     }
@@ -1053,6 +1076,10 @@ function annotateIsolatedRetryModelUnavailable(result: FailedRunResult): FailedR
         ...result,
         error: `${ISOLATED_RETRY_MODEL_UNAVAILABLE_MESSAGE}. Original failure: ${result.error}`,
     };
+}
+
+function isModelRef(model: unknown): model is string {
+    return typeof model === "string" && model.length > 0;
 }
 
 function isFallbackEligible(reason: string): boolean {

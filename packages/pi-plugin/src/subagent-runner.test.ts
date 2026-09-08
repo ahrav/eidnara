@@ -647,6 +647,36 @@ describe("PiSubagentRunner spawn lifecycle", () => {
             meta: { stderr: undefined },
         });
     });
+    it("replaces the hard timeout with the drain grace period after agent_end", async () => {
+        const child = createMockChild();
+        const { runner } = runnerWith(child);
+
+        const resultPromise = runner.run({ ...baseOptions, timeoutMs: 30 });
+        child.writeStdoutLine(
+            agentEnd([
+                {
+                    role: "assistant",
+                    content: [{ type: "text", text: "answered" }],
+                    stopReason: "stop",
+                },
+            ]),
+        );
+        // The child outlives `timeoutMs`; the captured answer must not become a timeout.
+        const outcome = await Promise.race([
+            resultPromise.then(() => "settled"),
+            new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 90)),
+        ]);
+        expect(outcome).toBe("pending");
+        child.emitClose(0);
+
+        expect(await resultPromise).toEqual({
+            ok: true,
+            assistantText: "answered",
+            toolCallCount: 0,
+            durationMs: expect.any(Number),
+            meta: { stderr: undefined },
+        });
+    });
     it("counts toolCall content parts from assistant message_end into toolCallCount (grounding gate)", async () => {
         // `toolCallCount` counts `toolCall` content parts on assistant `message_end` turns, not tool event names.
         // Pi emits `tool_execution_end`, not `tool_result_end`, so counting event names would miss calls.
@@ -846,6 +876,31 @@ describe("PiSubagentRunner spawn lifecycle", () => {
             ok: false,
             reason: "model_failed",
             error: 'pi assistant stopped with reason "aborted"',
+            durationMs: expect.any(Number),
+            meta: { stderr: undefined },
+        });
+    });
+
+    it("returns model_failed with the errorMessage when an error turn has no text", async () => {
+        const child = createMockChild();
+        const { runner } = runnerWith(child);
+
+        const resultPromise = runner.run(baseOptions);
+        child.writeStdoutLine({
+            type: "message_end",
+            message: {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage: "No API key found for anthropic",
+            },
+        });
+        child.emitClose(0);
+
+        expect(await resultPromise).toEqual({
+            ok: false,
+            reason: "model_failed",
+            error: "No API key found for anthropic",
             durationMs: expect.any(Number),
             meta: { stderr: undefined },
         });
@@ -1388,6 +1443,62 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+
+    it("retries the canonical primary before advancing to fallback models", async () => {
+        const first = createMockChild();
+        const second = createMockChild();
+        const third = createMockChild();
+        const { runner, spawnImpl } = runnerWith([first, second, third]);
+
+        const resultPromise = runner.run({
+            ...baseOptions,
+            model: "openai/gpt-5.5",
+            fallbackModels: ["anthropic/fallback"],
+        });
+        first.writeStderr("No API key found for openai-codex. Use /login to authenticate.");
+        first.emitClose(1);
+        await nextTick();
+        second.writeStdoutLine(
+            agentEnd([
+                {
+                    role: "assistant",
+                    content: [{ type: "text", text: "partial" }],
+                    stopReason: "error",
+                    errorMessage: "rate limited",
+                },
+            ]),
+        );
+        second.emitClose(0);
+        await nextTick();
+        third.writeStdoutLine(
+            agentEnd([
+                {
+                    role: "assistant",
+                    content: [{ type: "text", text: "fallback success" }],
+                    stopReason: "stop",
+                },
+            ]),
+        );
+        third.emitClose(0);
+
+        expect(await resultPromise).toEqual({
+            ok: true,
+            assistantText: "fallback success",
+            toolCallCount: 0,
+            durationMs: expect.any(Number),
+            meta: { stderr: undefined },
+        });
+        expect(spawnImpl).toHaveBeenCalledTimes(3);
+        expect(spawnImpl.mock.calls[0]?.[1]).toEqual(
+            expect.arrayContaining(["--model", "openai-codex/gpt-5.5"]),
+        );
+        expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
+            expect.arrayContaining(["--model", "openai/gpt-5.5"]),
+        );
+        expect(spawnImpl.mock.calls[2]?.[1]).toEqual(
+            expect.arrayContaining(["--model", "anthropic/fallback"]),
+        );
     });
 
     it("retries once with --no-extensions after an extension turn collision", async () => {
@@ -2026,6 +2137,56 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         }
         expect(child.kill).toHaveBeenCalledWith("SIGTERM");
         expect(child.killSignals).toEqual(["SIGTERM"]);
+    });
+
+    it("does not emit child_exit after a timeout has already settled the run", async () => {
+        const child = createMockChild();
+        const { runner } = runnerWith(child);
+        const eventTypes: string[] = [];
+
+        const result = await runner.run({
+            ...baseOptions,
+            timeoutMs: 20,
+            onProgress: (event) => {
+                eventTypes.push(event.type);
+            },
+        });
+        expect(result.ok).toBe(false);
+        child.emitClose(null, "SIGTERM");
+        await nextTick();
+
+        expect(eventTypes).not.toContain("child_exit");
+    });
+
+    it("measures durationMs across every attempt in the retry chain", async () => {
+        const first = createMockChild();
+        const second = createMockChild();
+        const { runner } = runnerWith([first, second]);
+
+        const resultPromise = runner.run({
+            ...baseOptions,
+            model: "anthropic/primary",
+            fallbackModels: ["anthropic/fallback"],
+        });
+        // The first attempt is the slow one; the fallback settles on the next tick.
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        first.writeStderr("boom");
+        first.emitClose(1);
+        await nextTick();
+        second.writeStdoutLine(
+            agentEnd([
+                {
+                    role: "assistant",
+                    content: [{ type: "text", text: "late success" }],
+                    stopReason: "stop",
+                },
+            ]),
+        );
+        second.emitClose(0);
+
+        const result = await resultPromise;
+        expect(result.ok).toBe(true);
+        expect(result.durationMs).toBeGreaterThanOrEqual(35);
     });
 
     it("returns abort without spawning when caller signal is already aborted", async () => {
