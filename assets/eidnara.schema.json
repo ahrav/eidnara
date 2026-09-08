@@ -169,6 +169,32 @@
                 "deny"
               ]
             }
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ask",
+                  "allow",
+                  "deny"
+                ]
+              },
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                }
+              }
+            ]
           }
         },
         "maxTokens": {
@@ -858,6 +884,32 @@
                 "deny"
               ]
             }
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ask",
+                  "allow",
+                  "deny"
+                ]
+              },
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                }
+              }
+            ]
           }
         },
         "maxTokens": {
