@@ -45,7 +45,6 @@ import {
 } from "./contract";
 import {
     NativeLaunchError,
-    type NativeLaunchFailureCode,
     type NativeLaunchTarget,
     type NativeLifecycleCommand,
     type NativeStartupEnvelope,
@@ -126,18 +125,8 @@ function timerDelay(deadlineMs: number): number {
     return Math.min(deadlineMs, MAX_TIMER_DELAY_MS);
 }
 
-/** Launch failures raised after `spawn` succeeded; every other failure leaves the daemon exactly as found. */
-const CHILD_RAN_FAILURES: ReadonlySet<NativeLaunchFailureCode> = new Set([
-    "timeout",
-    "signal_exit",
-    "output_cap_exceeded",
-    "exit_disagreement",
-    "malformed_output",
-    "command_mismatch",
-]);
-
 function nativeChildRan(error: unknown): boolean {
-    return error instanceof NativeLaunchError && CHILD_RAN_FAILURES.has(error.code);
+    return error instanceof NativeLaunchError && error.childSpawned;
 }
 
 /** `lifecycle_busy` and `harness_unavailable` return before the binary spawns or stops anything. commentlint: allow(JUDGE) */
@@ -193,8 +182,15 @@ export interface LifecyclePolicyOptions {
      * default of `ready` would authorize application bodies against a daemon
      * whose storage state was never examined. Explicit CLI flows are
      * unaffected — they never reach `demandStart`.
+     *
+     * `signal` is the demanding caller's own; it releases this caller's share of
+     * any coalesced observation and never cancels work another caller awaits.
      */
-    storageProbe?: (budgetMs: number, expectedDaemonId?: Uint8Array) => Promise<StorageReadiness>;
+    storageProbe?: (
+        budgetMs: number,
+        expectedDaemonId?: Uint8Array,
+        signal?: AbortSignal,
+    ) => Promise<StorageReadiness>;
     /**
      * Authenticated daemon, catalog, and Eidnara epoch snapshot for demand.
      * Managed demand fails closed with `native_probe_unavailable` when this is
@@ -329,6 +325,7 @@ export class HostLifecyclePolicy {
     private readonly storageProbe: (
         budgetMs: number,
         expectedDaemonId?: Uint8Array,
+        signal?: AbortSignal,
     ) => Promise<StorageReadiness>;
     private readonly compatibilityProbe:
         | ((budgetMs: number, signal?: AbortSignal) => Promise<CompatibilitySnapshot>)
@@ -509,7 +506,7 @@ export class HostLifecyclePolicy {
         let storage: StorageReadiness;
         try {
             storage = await this.raceWithinPolicy(
-                this.storageProbe(storageBudget, authenticatedDaemonId),
+                this.storageProbe(storageBudget, authenticatedDaemonId, request.signal),
                 request.signal,
                 callerDeadlineAt,
                 storageDeadlineAt,
@@ -662,6 +659,11 @@ export class HostLifecyclePolicy {
                 },
                 (error: unknown) => {
                     if (settled) return;
+                    // A late rejection is the deadline's outcome, not the probe's; classifying it as a probe failure would let it stand in for a detachment. commentlint: allow(JUDGE)
+                    if (deadlineAt !== undefined && monotonicNow() >= deadlineAt) {
+                        detach("deadline");
+                        return;
+                    }
                     settled = true;
                     if (timer !== null) clearTimeout(timer);
                     signal?.removeEventListener("abort", onAbort);

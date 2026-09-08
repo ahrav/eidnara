@@ -82,13 +82,11 @@ export type SynapseReadiness =
 
 export function synapseReadiness(metrics: Record<string, unknown>): SynapseReadiness {
     const component = componentRecord(metrics, "synapse");
-    // An absent component is a lane the daemon does not offer, so it reports `unsupported`: the one readiness state `addCheck` maps to a skipped check rather than a failure, which keeps `status` and `doctor` at `ok: true` on a platform without a Synapse lane. commentlint: allow(JUDGE)
-    if (component === null) return { state: "unsupported", reason: "synapse_unsupported" };
-    const state = asRecord(component.metrics)?.synapse_state;
+    const state = asRecord(component?.metrics)?.synapse_state;
     if (state === "ready") return { state: "ready", reason: "healthy" };
     if (state === "starting") return { state: "starting", reason: "synapse_starting" };
     if (state === "unsupported") return { state: "unsupported", reason: "synapse_unsupported" };
-    // A named component with a missing or out-of-set state is what `host_status_response_json` sends when a health callback panicked: the status survives with empty metrics. The lane exists and cannot prove readiness, so it fails instead of reading as absent. commentlint: allow(JUDGE)
+    // The fixed profile always carries a Synapse lane and reports `unsupported` as an explicit literal, so an absent component, like a named one with a missing or out-of-set state, is a lane that cannot prove readiness and fails rather than reading as absent or unsupported. commentlint: allow(JUDGE)
     return { state: "degraded", reason: "synapse_degraded" };
 }
 
@@ -396,7 +394,11 @@ export interface ManagedProbeIo {
 
 export interface ManagedProbes {
     compatibilityProbe(budgetMs: number, signal?: AbortSignal): Promise<CompatibilitySnapshot>;
-    storageProbe(budgetMs: number, expectedDaemonId?: Uint8Array): Promise<StorageReadinessState>;
+    storageProbe(
+        budgetMs: number,
+        expectedDaemonId?: Uint8Array,
+        signal?: AbortSignal,
+    ): Promise<StorageReadinessState>;
 }
 
 function daemonKey(daemonId: Uint8Array): string {
@@ -411,23 +413,36 @@ interface SharedStoragePoll {
 
 /**
  * A waiter that outlives its own budget answers `starting`, the state a private poll of that length would have returned; the shared poll keeps running for the waiters still entitled to wait. `onIdle` fires when the last waiter leaves a poll that has not settled. commentlint: allow(JUDGE)
+ *
+ * A waiter whose caller aborts leaves at once, so a canceled demand stops holding the shared poll (and its connection) open for the rest of its budget. commentlint: allow(JUDGE)
  */
 function joinStoragePoll(
     poll: SharedStoragePoll,
     budgetMs: number,
     onIdle: () => void,
+    signal?: AbortSignal,
 ): Promise<StorageReadinessState> {
     poll.waiters += 1;
     return new Promise((resolve, reject) => {
         let settled = false;
         let timer: ReturnType<typeof setTimeout> | null = null;
+        const onAbort = (): void => {
+            leave();
+            resolve("starting");
+        };
         const leave = (): void => {
             if (settled) return;
             settled = true;
             if (timer !== null) clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
             poll.waiters -= 1;
             if (poll.waiters === 0) onIdle();
         };
+        if (signal?.aborted) {
+            onAbort();
+            return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
         timer = setTimeout(
             () => {
                 leave();
@@ -475,7 +490,7 @@ export function managedProbes(io: ManagedProbeIo): ManagedProbes {
             }
             return probe.snapshot;
         },
-        storageProbe(budgetMs, expectedDaemonId) {
+        storageProbe(budgetMs, expectedDaemonId, signal) {
             if (expectedDaemonId === undefined) return io.storage(budgetMs);
             const record = observed;
             if (
@@ -502,10 +517,15 @@ export function managedProbes(io: ManagedProbeIo): ManagedProbes {
                 void created.result.then(evict, evict);
             }
             const current = poll;
-            return joinStoragePoll(current, budgetMs, () => {
-                current.controller.abort();
-                if (polling.get(key) === current) polling.delete(key);
-            });
+            return joinStoragePoll(
+                current,
+                budgetMs,
+                () => {
+                    current.controller.abort();
+                    if (polling.get(key) === current) polling.delete(key);
+                },
+                signal,
+            );
         },
     };
 }

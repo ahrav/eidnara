@@ -50,14 +50,35 @@ export type NativeLaunchFailureCode =
     | "command_mismatch"
     | "usage_error";
 
+/**
+ * Whether a failure with this code was raised after `spawn` returned a child.
+ * `timeout` is raised on both sides of the spawn, so that site states it explicitly.
+ */
+const CHILD_SPAWNED_BY_CODE: Readonly<Record<NativeLaunchFailureCode, boolean>> = {
+    spawn_failed: false,
+    unsupported_platform: false,
+    usage_error: false,
+    timeout: true,
+    signal_exit: true,
+    output_cap_exceeded: true,
+    malformed_output: true,
+    exit_disagreement: true,
+    command_mismatch: true,
+};
+
 /** Typed launch failure. Never carries stdout/stderr bytes or raw paths. */
 export class NativeLaunchError extends Error {
+    /** A failure raised after the child existed leaves its effects unknown; one raised before it committed nothing. */
+    readonly childSpawned: boolean;
+
     constructor(
         readonly code: NativeLaunchFailureCode,
         message: string,
+        options: { childSpawned?: boolean } = {},
     ) {
         super(message);
         this.name = "NativeLaunchError";
+        this.childSpawned = options.childSpawned ?? CHILD_SPAWNED_BY_CODE[code];
     }
 }
 
@@ -317,6 +338,7 @@ export async function runNativeLifecycle(
         throw new NativeLaunchError(
             "timeout",
             "native lifecycle deadline expired before the child was spawned",
+            { childSpawned: false },
         );
     }
     try {

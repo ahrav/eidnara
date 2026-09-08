@@ -7,6 +7,7 @@ import type { CatalogEntry } from "../host-client";
 import type { PlatformReaders } from "./bootstrap";
 import { parseDaemonResult } from "./contract";
 import { buildManagedCredentialEnvelope } from "./managed-policy";
+import type { NativeStartupEnvelope } from "./native-launcher";
 import {
     aggregateForTarget,
     HostLifecyclePolicy,
@@ -1619,6 +1620,35 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("a deadline spent before spawn reports known effects, not unknown ones", async () => {
+        const root = tempDir("eidnara-policy-pre-spawn-timeout-");
+        const { binary, invocationLog } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 300,
+            });
+            // Serializing this envelope exceeds the aggregate deadline before any child exists.
+            const slowEnvelope = {
+                toJSON() {
+                    const until = performance.now() + 400;
+                    while (performance.now() < until) {
+                        // spin
+                    }
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            const restarted = await policy.restart(slowEnvelope);
+            expect(restarted.reason).toBe("startup_timeout");
+            // No process existed, so both effects are known false rather than null.
+            expect(restarted.effects).toEqual({ stop_committed: false, start_committed: false });
+            expect(invocations(invocationLog)).toEqual([]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("a failed compatibility probe becomes a typed closed result, not a raw rejection", async () => {
         const root = tempDir("eidnara-policy-probe-failure-");
         const { binary, invocationLog } = fakeBinary(root);
@@ -1977,11 +2007,13 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         const root = tempDir("eidnara-policy-storage-abort-");
         const { binary } = fakeBinary(root);
         const controller = new AbortController();
+        let probeSignal: AbortSignal | undefined;
         try {
             const policy = policyFor({
                 env: { XDG_DATA_HOME: root },
                 launchTarget: { kind: "test-binary", path: binary },
-                storageProbe: () => {
+                storageProbe: (_budgetMs, _expectedDaemonId, signal) => {
+                    probeSignal = signal;
                     queueMicrotask(() => controller.abort());
                     return new Promise<never>(() => {});
                 },
@@ -1997,6 +2029,8 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 name: "WaiterDetachedError",
                 cause_kind: "aborted",
             });
+            expect(probeSignal).toBe(controller.signal);
+            expect(probeSignal?.aborted).toBe(true);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

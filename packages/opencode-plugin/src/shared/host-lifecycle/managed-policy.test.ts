@@ -552,6 +552,32 @@ describe("managed probes", () => {
         expect(await next).toBe("starting");
     });
 
+    test("an aborted waiter leaves the shared poll at once", async () => {
+        const signals: AbortSignal[] = [];
+        const probes = managedProbes({
+            compatibility: async () => result(daemon(7), "starting"),
+            storage: (_budget, _expected, signal) => {
+                if (signal !== undefined) signals.push(signal);
+                return new Promise(() => {});
+            },
+        });
+        await probes.compatibilityProbe(1_000);
+        const patient = new AbortController();
+        const canceled = new AbortController();
+        const kept = probes.storageProbe(60_000, daemon(7), patient.signal);
+        const dropped = probes.storageProbe(60_000, daemon(7), canceled.signal);
+
+        canceled.abort();
+        expect(await dropped).toBe("starting");
+        // The other waiter still holds the poll open.
+        expect(signals[0]?.aborted).toBe(false);
+
+        patient.abort();
+        expect(await kept).toBe("starting");
+        // The last waiter left, so the poll is released without waiting out its budget.
+        expect(signals[0]?.aborted).toBe(true);
+    });
+
     test("an observation from another daemon is never reused", async () => {
         const polled: Array<Uint8Array | undefined> = [];
         const probes = managedProbes({
@@ -766,14 +792,16 @@ describe("synapse readiness from host.status metrics", () => {
         },
     });
 
-    test("an absent component is a lane the daemon does not offer", () => {
+    test("an absent component is an unproven lane, not an unsupported one", () => {
+        // The fixed profile reports `unsupported` as an explicit literal, so
+        // omission is never read as proof of that state.
         expect(synapseReadiness(withSynapse(undefined))).toEqual({
-            state: "unsupported",
-            reason: "synapse_unsupported",
+            state: "degraded",
+            reason: "synapse_degraded",
         });
         expect(synapseReadiness({})).toEqual({
-            state: "unsupported",
-            reason: "synapse_unsupported",
+            state: "degraded",
+            reason: "synapse_degraded",
         });
     });
 
