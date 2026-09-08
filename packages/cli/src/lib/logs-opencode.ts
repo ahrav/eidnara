@@ -98,6 +98,29 @@ function narrowReportToSession(report: DiagnosticReport, sessionFilter: string):
     };
 }
 
+/**
+ * A log path that exists but cannot be read (permissions, or a directory named
+ * by `EIDNARA_LOG_PATH`) yields no lines and an `unreadable` marker, so the
+ * rest of the diagnostics still ship.
+ */
+function readLogTail(logFile: { exists: boolean; path: string }): {
+    lines: string[];
+    unreadable: string | null;
+} {
+    if (!logFile.exists) return { lines: [], unreadable: null };
+    try {
+        return {
+            lines: readFileTail(logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/),
+            unreadable: null,
+        };
+    } catch (error) {
+        return {
+            lines: [],
+            unreadable: `<log unreadable: ${sanitizeDiagnosticText(error instanceof Error ? error.message : String(error))}>`,
+        };
+    }
+}
+
 export async function bundleIssueReport(
     fullReport: DiagnosticReport,
     description: string,
@@ -107,11 +130,10 @@ export async function bundleIssueReport(
     const report =
         sessionFilter === null ? fullReport : narrowReportToSession(fullReport, sessionFilter);
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists
-        ? readFileTail(report.logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/)
-        : [];
-    const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
-    const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
+    const tail = readLogTail(report.logFile);
+    const logLines = filterLogLinesBySession(tail.lines, sessionFilter);
+    const recentLog =
+        tail.unreadable ?? sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // The 4,000-line window includes historian failures outside the 400-line log tail.
     const historianScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));

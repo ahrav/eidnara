@@ -240,7 +240,9 @@ async function collectRecentSessions(): Promise<SessionDiscovery> {
     const dataHome =
         process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), ".local", "share");
     const opencodeDbPath = join(dataHome, "opencode", "opencode.db");
-    if (!existsSync(opencodeDbPath)) return { status: "ok", sessions: [] };
+    // The append-only log outlives the database, so without one no record can
+    // be attributed to a session and the issue flow must ask before bundling.
+    if (!existsSync(opencodeDbPath)) return { status: "unavailable", sessions: [] };
 
     // The shared module picks `bun:sqlite` or `node:sqlite` for the running
     // runtime and loads it at import time, so the import stays lazy: a Node

@@ -1,3 +1,4 @@
+import { parse } from "node:path";
 import {
     createManagedLifecyclePolicy,
     type DaemonResultV1,
@@ -15,9 +16,16 @@ export const PARENT_PACKAGE_NAME = "@eidnara/cli";
 /** Bounds redacted version text so a peer cannot flood the terminal or the JSON result. */
 const MAX_VERSION_TEXT_LEN = 128;
 
-/** Replacing C0 and C1 controls prevents peer-supplied version text from moving the cursor, erasing lines, or forging terminal output. */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: the security boundary intentionally matches C0/C1 ranges
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+/**
+ * Replacing C0 and C1 controls prevents peer-supplied version text from moving
+ * the cursor, erasing lines, or forging terminal output; the Unicode ranges
+ * cover zero-width and bidi marks, line and paragraph separators, bidi
+ * overrides and isolates, and the BOM, which can reorder or hide the rest of
+ * the rendered line.
+ */
+const CONTROL_CHARS =
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: the security boundary intentionally matches C0/C1 ranges
+    /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 
 interface DaemonPolicy {
     start(): Promise<DaemonResultV1>;
@@ -89,6 +97,9 @@ function redactResult(
             // Version text may embed a sensitive root mid-string, so redaction replaces every occurrence.
             let redacted = value;
             for (const sensitiveRoot of sensitiveRoots) {
+                // A filesystem root such as `/` names nothing private and would
+                // match every separator, including the one in `eidnara-host/0.1.0`.
+                if (parse(sensitiveRoot).root === sensitiveRoot) continue;
                 redacted = redacted.split(sensitiveRoot).join("<data-root>");
             }
             redacted = sanitizeDiagnosticText(redacted).replace(CONTROL_CHARS, " ");

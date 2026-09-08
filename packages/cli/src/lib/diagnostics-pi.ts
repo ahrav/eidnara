@@ -294,7 +294,10 @@ export type PiSessionDiscovery =
 export function collectPiRecentSessions(
     sessionsRoot: string = getPiSessionsRoot(),
 ): PiSessionDiscovery {
-    if (!existsSync(sessionsRoot)) return { status: "ok", sessions: [] };
+    // The append-only log outlives the sessions directory, so without one no
+    // record can be attributed to a session and the issue flow must ask
+    // before bundling.
+    if (!existsSync(sessionsRoot)) return { status: "unavailable", sessions: [] };
     try {
         const slugs = readdirSync(sessionsRoot, { withFileTypes: true })
             .filter((entry) => entry.isDirectory())

@@ -347,13 +347,20 @@ function writeDefaultConfig(path: string): void {
     writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
+interface RepairOutcome {
+    fixed: number;
+    /** Repairs that were attempted and did not take; the doctor exits non-zero when any did. */
+    failed: number;
+}
+
 async function repair(
     plan: RepairPlan,
     deps: DoctorDeps,
     prompts: PromptIO,
     cwd: string,
-): Promise<number> {
+): Promise<RepairOutcome> {
     let fixed = 0;
+    let failed = 0;
     const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
     if (plan.writeUserConfig && userConfig.format === "none") {
         try {
@@ -361,13 +368,14 @@ async function repair(
             prompts.log.success(`Wrote default Eidnara config to ${userConfig.path}`);
             fixed += 1;
         } catch (error) {
+            failed += 1;
             prompts.log.error(
                 `Could not write default Eidnara config to ${userConfig.path}: ${error instanceof Error ? error.message : String(error)}`,
             );
         }
     }
     const omp = deps.detectOmpBinary();
-    if (!omp) return fixed;
+    if (!omp) return { fixed, failed };
     // Enabling the plugin on an unverified host would run it beside both
     // native managers, which stay on below.
     if (!plan.hostSupported) {
@@ -376,7 +384,7 @@ async function repair(
                 `Leaving ${OMP_PLUGIN_PACKAGE} and OMP native compaction and memory as they are: this OMP is missing a version or older than ${MIN_OMP_VERSION}, so the plugin may not run. Upgrade with \`omp update\` first.`,
             );
         }
-        return fixed;
+        return { fixed, failed };
     }
     const wantsManagersOff = plan.disableCompaction || plan.disableMemory;
     // Global settings are unobservable under project or overlay config, so the
@@ -387,7 +395,7 @@ async function repair(
         prompts.log.error(
             `Leaving OMP as it is: effective settings include ${nonGlobalSources.join(", ")}, so the global compaction and memory settings cannot be changed safely`,
         );
-        return fixed;
+        return { fixed, failed };
     }
     let enabledHere = false;
     if (plan.installPlugin) {
@@ -400,7 +408,7 @@ async function repair(
             prompts.log.error(
                 `Leaving ${OMP_PLUGIN_PACKAGE} disabled: its install${installed ? ` at ${installed.path}` : ""} has no verifiable OMP/Pi extension manifest, so OMP would load a package that is not an extension`,
             );
-            return fixed;
+            return { fixed, failed };
         }
         const result = await deps.ensurePluginEntry();
         if (result.ok) {
@@ -409,7 +417,7 @@ async function repair(
             enabledHere = true;
         } else prompts.log.error(result.message);
     }
-    if (!wantsManagersOff) return fixed;
+    if (!wantsManagersOff) return { fixed, failed };
     // A plugin enabled in this run beside a native manager that stayed on
     // would run both after restart, so any later failure restores the prior
     // disabled state.
@@ -439,7 +447,7 @@ async function repair(
             `Leaving OMP native compaction and memory on: ${OMP_PLUGIN_PACKAGE} is not enabled in OMP with a verified extension manifest, so nothing would replace them`,
         );
         disablePluginAgain("its enabled state could not be verified afterwards");
-        return fixed;
+        return { fixed, failed };
     }
     // Each mutation records the value that undoes it, so a later failure can
     // restore every manager already turned off in this run.
@@ -461,7 +469,7 @@ async function repair(
             break;
         }
     }
-    if (failedKey === null) return fixed;
+    if (failedKey === null) return { fixed, failed };
     for (const { key, prior } of applied.reverse()) {
         const restore = deps.runOmpCommand(omp.path, ["config", "set", key, prior], 10_000);
         if (restore.ok) {
@@ -479,7 +487,7 @@ async function repair(
         `OMP ${failedKey} could not be turned off, so leaving it enabled would run both`,
     );
 
-    return fixed;
+    return { fixed, failed };
 }
 
 function timestamp(date: Date): string {
@@ -567,9 +575,17 @@ export async function runDoctor(options: RunOmpDoctorOptions = {}): Promise<numb
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
     if (!options.force) return first.fail === 0 ? 0 : 1;
     if (first.fail === 0 && !first.repairPlan.writeUserConfig) return 0;
-    const fixed = await repair(first.repairPlan, deps, prompts, cwd);
-    prompts.log.info(`Applied ${fixed} repair(s); re-checking`);
+    const repaired = await repair(first.repairPlan, deps, prompts, cwd);
+    prompts.log.info(
+        repaired.failed > 0
+            ? `Applied ${repaired.fixed} repair(s), ${repaired.failed} failed; re-checking`
+            : `Applied ${repaired.fixed} repair(s); re-checking`,
+    );
     const second = await runHealthChecks({ cwd, prompts, deps });
     prompts.log.message(`Summary: PASS ${second.pass} / WARN ${second.warn} / FAIL ${second.fail}`);
+    if (repaired.failed > 0) {
+        prompts.log.error("Doctor could not complete the requested repair");
+        return 1;
+    }
     return second.fail === 0 ? 0 : 1;
 }

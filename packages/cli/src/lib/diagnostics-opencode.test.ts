@@ -142,12 +142,14 @@ describe("collectDiagnostics", () => {
         expect(report.sessionDiscovery).toBe("unavailable");
     });
 
-    it("reports session discovery as ok when no database exists", async () => {
+    it("reports session discovery as unavailable when no database exists", async () => {
         isolate();
 
         const report = await collectDiagnostics();
 
+        // The append-only log can outlive the database, so its records stay
+        // unattributable and the issue flow must ask before bundling them.
         expect(report.recentSessions).toEqual([]);
-        expect(report.sessionDiscovery).toBe("ok");
+        expect(report.sessionDiscovery).toBe("unavailable");
     });
 });

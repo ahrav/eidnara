@@ -53,6 +53,29 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
 
 const ISSUE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
 
+/**
+ * A log path that exists but cannot be read (permissions, or a directory named
+ * by `EIDNARA_LOG_PATH`) yields no lines and an `unreadable` marker, so the
+ * rest of the diagnostics still ship.
+ */
+function readLogTail(logFile: { exists: boolean; path: string }): {
+    lines: string[];
+    unreadable: string | null;
+} {
+    if (!logFile.exists) return { lines: [], unreadable: null };
+    try {
+        return {
+            lines: readFileTail(logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/),
+            unreadable: null,
+        };
+    } catch (error) {
+        return {
+            lines: [],
+            unreadable: `<log unreadable: ${sanitizeString(error instanceof Error ? error.message : String(error))}>`,
+        };
+    }
+}
+
 export async function bundleIssueReport(
     report: PiDiagnosticReport,
     description: string,
@@ -60,11 +83,10 @@ export async function bundleIssueReport(
     options: { cwd?: string; now?: Date; sessionFilter?: string | null } = {},
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists
-        ? readFileTail(report.logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/)
-        : [];
-    const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
-    const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
+    const tail = readLogTail(report.logFile);
+    const logLines = filterLogLinesBySession(tail.lines, options.sessionFilter ?? null);
+    const recentLog =
+        tail.unreadable ?? sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // The error scan uses 4,000 lines so trailing log output does not exclude earlier errors.
     const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
