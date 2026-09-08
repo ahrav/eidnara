@@ -242,9 +242,68 @@ describe("tool arcs", () => {
             { callId: "c3", invOrdinal: 3, resOrdinal: null },
         ]);
     });
+
+    it("synthesizes distinct identities for adjacent idless OpenCode tools", () => {
+        const message: RawMessage = {
+            id: "idless",
+            role: "assistant",
+            parts: [
+                { type: "tool", tool: "read", state: { status: "running", input: { path: "a" } } },
+                { type: "tool", tool: "read", state: { status: "running", input: { path: "b" } } },
+            ],
+            ordinal: 7,
+        };
+        const arcs = buildToolArcs([message]);
+        expect(arcs).toHaveLength(2);
+        expect(arcs[0].callId).not.toBe(arcs[1].callId);
+        expect(arcs.every((arc) => arc.invOrdinal === 7 && arc.resOrdinal === null)).toBe(true);
+    });
 });
 
 describe("tool token accounting", () => {
+    it("counts an empty text block in a tool result as empty output", () => {
+        const result = (text: string): RawMessage => ({
+            id: "r",
+            role: "user",
+            parts: [{ type: "tool_result", tool_use_id: "c", content: [{ type: "text", text }] }],
+            ordinal: 1,
+        });
+        const empty = estimateTrueRawMessageTokens(result(""), {
+            providerShapeVersion: "opencode-v1",
+        });
+        const short = estimateTrueRawMessageTokens(result("ok"), {
+            providerShapeVersion: "opencode-v1",
+        });
+        expect(empty.toolOutput).toBe(0);
+        expect(short.toolOutput).toBeGreaterThan(0);
+    });
+
+    it("counts OpenCode tool attachments as media", () => {
+        const message: RawMessage = {
+            id: "read",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "c1",
+                    tool: "read",
+                    state: {
+                        status: "completed",
+                        input: { path: "x.png" },
+                        output: "",
+                        attachments: [{ type: "file", mime: "image/png", url: "file:///x.png" }],
+                    },
+                },
+            ],
+            ordinal: 1,
+        };
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 333,
+        });
+        expect(breakdown.image).toBe(333);
+    });
+
     it("counts media blocks in tool results through the image heuristic, not as text", () => {
         const message: RawMessage = {
             id: "result",
@@ -485,6 +544,42 @@ describe("raw range fingerprints", () => {
                 metadata: { providerExecuted: true },
                 state: { input: {} },
             }),
+        );
+    });
+
+    it("changes when a tool's metadata description or attachments change", () => {
+        const base = {
+            type: "tool",
+            callID: "c1",
+            tool: "task",
+            state: { status: "completed", input: { x: 1 }, output: "ok" },
+        };
+        expect(
+            fingerprintOf({
+                ...base,
+                state: { ...base.state, metadata: { description: "Explore repo" } },
+            }),
+        ).not.toBe(
+            fingerprintOf({
+                ...base,
+                state: { ...base.state, metadata: { description: "Fix the bug" } },
+            }),
+        );
+        expect(fingerprintOf(base)).not.toBe(
+            fingerprintOf({
+                ...base,
+                state: {
+                    ...base.state,
+                    attachments: [{ type: "file", mime: "image/png", url: "x" }],
+                },
+            }),
+        );
+    });
+
+    it("hashes every media field a custom image heuristic could read", () => {
+        const image = { type: "image", mime: "image/png", width: 10, height: 10 };
+        expect(fingerprintOf({ ...image, detail: "low", url: "u1" })).not.toBe(
+            fingerprintOf({ ...image, detail: "high", url: "u2-longer" }),
         );
     });
 

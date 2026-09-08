@@ -84,6 +84,8 @@ interface ToolSignal {
     outputText: string;
     /** Image and file blocks inside a tool result, counted through the image heuristic instead of as text. */
     outputMedia: readonly Record<string, unknown>[];
+    /** `state.metadata.description`, which the tool-call summaries display when the input carries no description. */
+    metadataDescription: string;
 }
 
 interface ToolResultContent {
@@ -138,6 +140,18 @@ function firstStringField(
     return null;
 }
 
+/** An empty string is a present value here: an empty text block is empty output, not a serialized record. */
+function firstStringFieldAllowEmpty(
+    record: Record<string, unknown>,
+    fields: readonly string[],
+): string | null {
+    for (const field of fields) {
+        const value = record[field];
+        if (typeof value === "string") return value;
+    }
+    return null;
+}
+
 function stringValue(value: unknown): string {
     if (typeof value === "string") return value;
     if (value === undefined || value === null) return "";
@@ -146,7 +160,20 @@ function stringValue(value: unknown): string {
 
 function isMediaResultBlock(entry: Record<string, unknown>): boolean {
     const type = partType(entry);
-    return type === "image" || type === "file" || looksImageLike(entry);
+    return (
+        type === "image" ||
+        type === "file" ||
+        hasOwn(entry, "mime") ||
+        hasOwn(entry, "mimeType") ||
+        looksImageLike(entry)
+    );
+}
+
+function mergeToolResultContent(a: ToolResultContent, b: ToolResultContent): ToolResultContent {
+    return {
+        text: [a.text, b.text].filter((text) => text.length > 0).join("\n"),
+        media: [...a.media, ...b.media],
+    };
 }
 
 /**
@@ -165,7 +192,7 @@ function toolResultContent(content: unknown): ToolResultContent {
                     media.push(entry);
                     continue;
                 }
-                const text = firstStringField(entry, ["text", "content", "value"]);
+                const text = firstStringFieldAllowEmpty(entry, ["text", "content", "value"]);
                 pieces.push(text ?? stableStringify(entry));
             } else if (entry !== null && entry !== undefined) {
                 pieces.push(String(entry));
@@ -311,6 +338,21 @@ function emptyToolResultContent(): ToolResultContent {
     return { text: "", media: [] };
 }
 
+function toolAttachments(
+    part: Record<string, unknown>,
+    state: Record<string, unknown> | null,
+): ToolResultContent {
+    const attachments =
+        state && Array.isArray(state.attachments) ? state.attachments : part.attachments;
+    if (!Array.isArray(attachments)) return emptyToolResultContent();
+    return toolResultContent(attachments.filter(isRecord));
+}
+
+function metadataDescriptionFromState(state: Record<string, unknown> | null): string {
+    const metadata = state && isRecord(state.metadata) ? state.metadata : null;
+    return metadata ? (firstStringField(metadata, ["description"]) ?? "") : "";
+}
+
 function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (!isRecord(part)) return null;
     const type = partType(part);
@@ -327,9 +369,10 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             state && firstOwnKey(state, ["output", "error", "result"]) !== null ? state : part;
         const outputKey = firstOwnKey(outputOwner, ["output", "error", "result"]);
         const hasOutput = outputKey !== null || toolStatusIsTerminal(part, state);
-        const output = outputKey
-            ? toolResultContent(outputOwner[outputKey])
-            : emptyToolResultContent();
+        const output = mergeToolResultContent(
+            outputKey ? toolResultContent(outputOwner[outputKey]) : emptyToolResultContent(),
+            toolAttachments(part, state),
+        );
         const providerExecuted = providerExecutedFromPart(part);
         const openInvocation = !providerExecuted && !hasOutput;
         return {
@@ -341,6 +384,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             inputText: inputKey ? stringValue(inputOwner[inputKey]) : "",
             outputText: output.text,
             outputMedia: output.media,
+            metadataDescription: metadataDescriptionFromState(state),
         };
     }
 
@@ -357,6 +401,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             inputText: argsKey ? stringValue(part[argsKey]) : "",
             outputText: output.text,
             outputMedia: output.media,
+            metadataDescription: "",
         };
     }
 
@@ -371,6 +416,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             inputText: hasInput ? stringValue(part.input) : "",
             outputText: "",
             outputMedia: [],
+            metadataDescription: "",
         };
     }
 
@@ -386,6 +432,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             inputText: "",
             outputText: output.text,
             outputMedia: output.media,
+            metadataDescription: "",
         };
     }
 
@@ -560,15 +607,30 @@ export function estimateTrueRawMessageTokens(
     return breakdown;
 }
 
+/**
+ * An OpenCode `tool` part with no call id still describes one call, so it needs an identity for its arc.
+ * The ordinal and part index make two adjacent idless parts distinct.
+ */
+function synthesizedToolCallId(ordinal: number, partIndex: number, signal: ToolSignal): string {
+    return `synth-tool-${ordinal}-${partIndex}-${signal.toolName || "tool"}-${contentStringsHash([signal.inputText])}`;
+}
+
 export function buildToolArcs(messages: readonly RawMessage[]): ToolArc[] {
     const openQueues = new Map<string, number[]>();
     const arcs: ToolArc[] = [];
     for (const message of messages) {
-        for (const part of message.parts) {
-            const signal = toolSignalFromPart(part);
-            if (!signal || signal.callId.length === 0) continue;
+        for (const [partIndex, part] of message.parts.entries()) {
+            const rawSignal = toolSignalFromPart(part);
+            if (!rawSignal) continue;
             // Provider-executed calls cannot leave a local invocation for the fence to protect.
-            if (signal.providerExecuted) continue;
+            if (rawSignal.providerExecuted) continue;
+            const signal =
+                rawSignal.callId.length > 0
+                    ? rawSignal
+                    : {
+                          ...rawSignal,
+                          callId: synthesizedToolCallId(message.ordinal, partIndex, rawSignal),
+                      };
             if (signal.hasInput && signal.hasOutput) {
                 arcs.push({
                     callId: signal.callId,
@@ -797,8 +859,12 @@ export function buildTrueRawTokenIndex(
     };
 }
 
+/**
+ * `imageTokenHeuristic` receives the whole part and may read any field, so the media
+ * fingerprint hashes the whole part rather than a guessed field list.
+ */
 function mediaFingerprintFields(media: Record<string, unknown>): string[] {
-    return ["media", stringValue(media.width), stringValue(media.height)];
+    return ["media", stableStringify(media)];
 }
 
 /**
@@ -819,6 +885,7 @@ function partContentFingerprint(part: unknown): string {
             tool.providerExecuted ? "provider" : "",
             tool.inputText,
             tool.outputText,
+            tool.metadataDescription,
             ...tool.outputMedia.flatMap(mediaFingerprintFields),
         ]);
     }
@@ -830,7 +897,7 @@ function partContentFingerprint(part: unknown): string {
         case "reasoning":
             return contentStringsHash([content.kind, content.text]);
         case "image":
-            return contentStringsHash([...mediaFingerprintFields(part), content.altText ?? ""]);
+            return contentStringsHash(mediaFingerprintFields(part));
         case "structured":
             return contentStringsHash(["structured", stableStringify(part)]);
     }
