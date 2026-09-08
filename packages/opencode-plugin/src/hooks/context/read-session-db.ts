@@ -277,15 +277,17 @@ export function getMessageTimesFromOpenCodeDb(
     return result;
 }
 
+/** The newest assistant row with a model, regardless of usage tokens; `messageID` is that row's id. */
 export function findLastAssistantModelFromOpenCodeDb(
     sessionId: string,
-): { providerID: string; modelID: string; agent?: string } | null {
+): { messageID: string; providerID: string; modelID: string; agent?: string } | null {
     if (!openCodeDbExists()) return null;
     try {
         return withReadOnlySessionDb((db) => {
             const row = db
                 .prepare(
-                    `SELECT json_extract(data, '$.providerID') as providerID,
+                    `SELECT id as messageID,
+                            json_extract(data, '$.providerID') as providerID,
                             json_extract(data, '$.modelID') as modelID,
                             json_extract(data, '$.agent') as agent
                      FROM message
@@ -296,13 +298,21 @@ export function findLastAssistantModelFromOpenCodeDb(
                      ORDER BY time_created DESC, id DESC
                      LIMIT 1`,
                 )
-                .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
-            if (!row || typeof row.providerID !== "string" || typeof row.modelID !== "string") {
+                .get(sessionId) as
+                | (AssistantModelRow & { messageID?: unknown; agent?: string | null })
+                | null;
+            if (
+                !row ||
+                typeof row.messageID !== "string" ||
+                typeof row.providerID !== "string" ||
+                typeof row.modelID !== "string"
+            ) {
                 return null;
             }
             const agent =
                 typeof row.agent === "string" && row.agent.length > 0 ? row.agent : undefined;
             return {
+                messageID: row.messageID,
                 providerID: row.providerID,
                 modelID: row.modelID,
                 ...(agent ? { agent } : {}),

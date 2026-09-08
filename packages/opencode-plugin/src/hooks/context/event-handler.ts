@@ -15,11 +15,8 @@ import {
     getSessionProperties,
 } from "./event-payloads";
 import { resolveContextLimit, resolveSessionId } from "./event-resolvers";
-import { recordChildSession } from "./live-session-state";
-import {
-    findLastAssistantModelFromOpenCodeDb,
-    findLastAssistantUsageFromOpenCodeDb,
-} from "./read-session-db";
+import { addBoundedSession, recordChildSession } from "./live-session-state";
+import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 
 export interface ContextUsageEntry {
@@ -31,18 +28,22 @@ export interface ContextUsageEntry {
     model?: { providerID: string; modelID: string };
     /** The assistant message `usage` came from, so removing that message can discard the entry. */
     messageID?: string;
+    /** The newest assistant response seen when it is later than `messageID` and has reported no usage tokens yet. */
+    newestResponseID?: string;
 }
 
-/** Returns whether `messageID` predates the newest response, using the persisted response when in-memory state is unavailable. OpenCode message ids are time-ordered, so id order tracks response order. commentlint: allow(JUDGE) */
+/** Returns whether `messageID` predates the newest assistant response, with or without usage tokens, using the persisted response when in-memory state is unavailable. OpenCode message ids are time-ordered, so id order tracks response order. commentlint: allow(JUDGE) */
 export function isOlderThanNewestResponse(
     contextUsageMap: BoundedSessionMap<ContextUsageEntry>,
     sessionId: string,
     messageID: string | undefined,
 ): boolean {
     if (!messageID) return false;
+    const entry = contextUsageMap.get(sessionId);
     const newestResponseId =
-        contextUsageMap.get(sessionId)?.messageID ??
-        findLastAssistantUsageFromOpenCodeDb(sessionId)?.messageID;
+        entry?.newestResponseID ??
+        entry?.messageID ??
+        findLastAssistantModelFromOpenCodeDb(sessionId)?.messageID;
     return newestResponseId !== undefined && messageID < newestResponseId;
 }
 
@@ -64,6 +65,8 @@ export interface EventHandlerDeps {
     internalChildSessions?: Set<string>;
     /** `subagentSessions` records every session created with a non-empty `parentID`, in memory only. */
     subagentSessions?: Set<string>;
+    /** Sessions whose daemon usage predates a host compaction; the transform removes a session once it forwards new usage. */
+    staleDaemonUsageSessions?: Set<string>;
 }
 
 /** An overflow error means the host will rebuild the window, so the session's injection cache is stale. */
@@ -176,6 +179,15 @@ export function createEventHandler(deps: EventHandlerDeps) {
             );
 
             if (!hasUsageTokens) {
+                // A response without usage is still the newest response; an edit to an older row must not displace the live model or usage while it exists. commentlint: allow(JUDGE)
+                const entry = deps.contextUsageMap.get(info.sessionID);
+                if (
+                    entry &&
+                    info.messageID &&
+                    !isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
+                ) {
+                    entry.newestResponseID = info.messageID;
+                }
                 sessionLog(info.sessionID, "event message.updated: skipping — no usage tokens");
                 return;
             }
@@ -273,6 +285,13 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     !isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
                 ) {
                     const remaining = findLastAssistantModelFromOpenCodeDb(info.sessionID);
+                    const entry = deps.contextUsageMap.get(info.sessionID);
+                    if (entry) {
+                        entry.newestResponseID =
+                            remaining && entry.messageID && remaining.messageID > entry.messageID
+                                ? remaining.messageID
+                                : undefined;
+                    }
                     deps.onNewestResponseRemoved?.(
                         info.sessionID,
                         remaining
@@ -308,6 +327,10 @@ export function createEventHandler(deps: EventHandlerDeps) {
             // Compaction replaces the context the live usage measured, so the pre-compaction count must not carry over.
             deps.contextUsageMap.delete(sessionId);
             clearSidebarSnapshotCache(sessionId);
+            // The daemon still holds the usage the last transform forwarded; it describes the replaced context.
+            if (deps.staleDaemonUsageSessions) {
+                addBoundedSession(deps.staleDaemonUsageSessions, sessionId);
+            }
             deps.onSessionCacheInvalidated?.(sessionId);
             return;
         }
@@ -336,6 +359,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             deps.contextUsageMap.delete(sessionId);
             deps.subagentSessions?.delete(sessionId);
             deps.internalChildSessions?.delete(sessionId);
+            deps.staleDaemonUsageSessions?.delete(sessionId);
             invalidateTrueRawTokenCache({ sessionId, reason: "session.deleted" });
             return;
         }

@@ -19,7 +19,12 @@ import type { SidebarSnapshot } from "../../shared/rpc-types";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeCompactionMarkerConnection, MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
-import { type ContextUsageEntry, createEventHandler, type EventHandlerDeps } from "./event-handler";
+import {
+    type ContextUsageEntry,
+    createEventHandler,
+    type EventHandlerDeps,
+    isOlderThanNewestResponse,
+} from "./event-handler";
 import { DEFAULT_CONTEXT_LIMIT, resolveContextLimit } from "./event-resolvers";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { RawMessage } from "./read-session-raw";
@@ -410,68 +415,98 @@ describe("createEventHandler — message.removed", () => {
         ]);
     });
 
-    it("reverts the live model when a newer zero-usage response is removed, keeping the usage entry", async () => {
+    function insertAssistantRow(
+        id: string,
+        timeCreated: number,
+        model: { providerID: string; modelID: string },
+        inputTokens: number,
+    ): void {
         const db = openCodeDb();
         try {
-            const insert = db.prepare(
+            db.prepare(
                 "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
-            );
-            insert.run(
-                "msg-1",
+            ).run(
+                id,
                 SESSION,
-                500,
-                500,
+                timeCreated,
+                timeCreated,
                 JSON.stringify({
                     role: "assistant",
-                    providerID: "no-such-provider",
-                    modelID: "no-such-model",
-                    tokens: { input: 40_000, output: 10, cache: { read: 0, write: 0 } },
-                }),
-            );
-            insert.run(
-                "msg-2",
-                SESSION,
-                600,
-                600,
-                JSON.stringify({
-                    role: "assistant",
-                    providerID: "next-provider",
-                    modelID: "next-model",
-                    tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+                    ...model,
+                    tokens: { input: inputTokens, output: 0, cache: { read: 0, write: 0 } },
                 }),
             );
         } finally {
             closeQuietly(db);
         }
+    }
+
+    function deleteRow(id: string): void {
+        const db = openCodeDb();
+        try {
+            db.prepare("DELETE FROM message WHERE id = ?").run(id);
+        } finally {
+            closeQuietly(db);
+        }
+    }
+
+    const FIRST_MODEL = { providerID: "no-such-provider", modelID: "no-such-model" };
+    const NEXT_MODEL = { providerID: "next-provider", modelID: "next-model" };
+
+    it("reverts the live model when a newer zero-usage response is removed, keeping the usage entry", async () => {
         const removed: Array<[string, { providerID: string; modelID: string } | undefined]> = [];
         const { deps, handle } = buildHarness();
         deps.onNewestResponseRemoved = (sessionId, model) => removed.push([sessionId, model]);
 
+        insertAssistantRow("msg-1", 500, FIRST_MODEL, 40_000);
         await handle("message.updated", assistantUpdated({ input: 40_000 }));
+        insertAssistantRow("msg-2", 600, NEXT_MODEL, 0);
         await handle("message.updated", {
             info: {
                 role: "assistant",
                 id: "msg-2",
                 sessionID: SESSION,
-                providerID: "next-provider",
-                modelID: "next-model",
+                ...NEXT_MODEL,
                 tokens: { input: 0 },
             },
         });
         expect(deps.contextUsageMap.get(SESSION)?.messageID).toBe("msg-1");
+        expect(deps.contextUsageMap.get(SESSION)?.newestResponseID).toBe("msg-2");
 
-        const dbAgain = openCodeDb();
-        try {
-            dbAgain.prepare("DELETE FROM message WHERE id = ?").run("msg-2");
-        } finally {
-            closeQuietly(dbAgain);
-        }
+        deleteRow("msg-2");
         await handle("message.removed", { sessionID: SESSION, messageID: "msg-2" });
 
-        expect(removed).toEqual([
-            [SESSION, { providerID: "no-such-provider", modelID: "no-such-model" }],
-        ]);
+        expect(removed).toEqual([[SESSION, FIRST_MODEL]]);
         expect(deps.contextUsageMap.get(SESSION)?.messageID).toBe("msg-1");
+        expect(deps.contextUsageMap.get(SESSION)?.newestResponseID).toBeUndefined();
+    });
+
+    it("treats an edit to the usage response as older while a newer zero-usage response exists", async () => {
+        const { deps, handle } = buildHarness();
+
+        insertAssistantRow("msg-1", 500, FIRST_MODEL, 40_000);
+        await handle("message.updated", assistantUpdated({ input: 40_000 }));
+        insertAssistantRow("msg-2", 600, NEXT_MODEL, 0);
+        await handle("message.updated", {
+            info: {
+                role: "assistant",
+                id: "msg-2",
+                sessionID: SESSION,
+                ...NEXT_MODEL,
+                tokens: { input: 0 },
+            },
+        });
+
+        // In memory: the tracked newest response is msg-2, so msg-1 is older.
+        expect(isOlderThanNewestResponse(deps.contextUsageMap, SESSION, "msg-1")).toBe(true);
+        expect(isOlderThanNewestResponse(deps.contextUsageMap, SESSION, "msg-2")).toBe(false);
+        // After a restart the map is empty and the database answers the same way.
+        deps.contextUsageMap.delete(SESSION);
+        expect(isOlderThanNewestResponse(deps.contextUsageMap, SESSION, "msg-1")).toBe(true);
+
+        // A late edit to msg-1 cannot re-establish it as the usage source.
+        await handle("message.updated", assistantUpdated({ input: 41_000 }));
+        expect(deps.contextUsageMap.has(SESSION)).toBe(false);
     });
 });
 
@@ -484,6 +519,17 @@ describe("createEventHandler — session.compacted", () => {
 
         expect(calls.cache).toEqual([SESSION]);
         expect(rowCounts()).toEqual({ messages: 2, parts: 0 });
+    });
+
+    it("marks the daemon's usage stale until a transform forwards a new sample", async () => {
+        const { deps, handle } = buildHarness();
+        deps.staleDaemonUsageSessions = new Set<string>();
+
+        await handle("session.compacted", { sessionID: SESSION });
+        expect(deps.staleDaemonUsageSessions.has(SESSION)).toBe(true);
+
+        await handle("session.deleted", { sessionID: SESSION });
+        expect(deps.staleDaemonUsageSessions.has(SESSION)).toBe(false);
     });
 
     it("drops the pre-compaction live usage and sticky snapshot", async () => {
