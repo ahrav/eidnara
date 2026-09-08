@@ -379,6 +379,51 @@ describe("readSessionChunk", () => {
         expect(readRawSessionMessages("ses-nested")).toEqual([]);
     });
 
+    it("classifies tool arcs by the registered provider's shape", () => {
+        useTempDataHome("read-session-provider-shape-");
+        const piMessages: RawMessage[] = [
+            {
+                id: "pi-call",
+                ordinal: 1,
+                role: "assistant",
+                parts: [{ type: "toolCall", id: "tc1", name: "read", arguments: {} }],
+                createdAt: 1,
+                version: null,
+            },
+            {
+                id: "pi-result",
+                ordinal: 2,
+                role: "user",
+                parts: [
+                    {
+                        role: "toolResult",
+                        toolCallId: "tc1",
+                        toolName: "read",
+                        content: [{ type: "text", text: "ok" }],
+                    },
+                ],
+                createdAt: 2,
+                version: null,
+            },
+        ];
+
+        const piShaped = {
+            readMessages: () => piMessages,
+            providerShapeVersion: "pi-folded-v1" as const,
+        };
+        withRawMessageProvider("ses-pi-shape", piShaped, () => {
+            expect(readSessionChunk("ses-pi-shape", 100_000, 1).completedToolArcs).toEqual([
+                { start: 1, end: 2 },
+            ]);
+        });
+
+        // Without a declared shape the OpenCode rules apply, and they do not recognize Pi parts.
+        const defaultShaped = { readMessages: () => piMessages };
+        withRawMessageProvider("ses-default-shape", defaultShaped, () => {
+            expect(readSessionChunk("ses-default-shape", 100_000, 1).completedToolArcs).toEqual([]);
+        });
+    });
+
     it("releases each provider on its own cleanup when scopes overlap out of order", () => {
         useTempDataHome("read-session-overlap-provider-");
         const first = { readMessages: () => [providerMessage("first-1", 1, 1)] };

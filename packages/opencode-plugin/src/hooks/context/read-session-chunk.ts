@@ -30,7 +30,7 @@ import {
     readRawSessionMessagesFromDb,
     readRawSessionTailFromDb,
 } from "./read-session-raw";
-import { buildToolArcs } from "./read-session-true-raw-tokens";
+import { buildToolArcs, type ProviderShapeVersion } from "./read-session-true-raw-tokens";
 import { isFilePart, isTextPart } from "./tag-part-guards";
 import { extractToolCallObservation } from "./tool-drop-target";
 
@@ -121,6 +121,8 @@ let activeAbsoluteCountCache: Map<string, number> | null = null;
  */
 export interface RawMessageProvider {
     readMessages(): RawMessage[];
+    /** When absent, `readMessages` returns parts in the OpenCode DB shape. */
+    providerShapeVersion?: ProviderShapeVersion;
     readMessagePage?: (afterOrdinal: number, limit: number, finalWatermark: number) => RawMessage[];
     readMessageById?: (messageId: string) => RawMessage | null;
     readMessagePartsById?: (messageId: string) => RawMessageParts | null;
@@ -147,6 +149,10 @@ const sessionProviders = new Map<string, ProviderRegistration[]>();
 
 function activeRawMessageProvider(sessionId: string): RawMessageProvider | undefined {
     return sessionProviders.get(sessionId)?.at(-1)?.provider;
+}
+
+function activeProviderShapeVersion(sessionId: string): ProviderShapeVersion {
+    return activeRawMessageProvider(sessionId)?.providerShapeVersion ?? "opencode-v1";
 }
 
 /** The release function removes only its registration. Releasing twice is a no-op. */
@@ -750,7 +756,10 @@ export function readSessionChunk(
         }
     }
 
-    const completedToolArcs = buildToolArcs(messages).flatMap((arc) =>
+    const completedToolArcs = buildToolArcs(
+        messages,
+        activeProviderShapeVersion(sessionId),
+    ).flatMap((arc) =>
         arc.resOrdinal === null ? [] : [{ start: arc.invOrdinal, end: arc.resOrdinal }],
     );
 
