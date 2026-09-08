@@ -16,13 +16,16 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
 const ALL = sourceFiles(SRC);
 const TESTS = ALL.filter((file) => /\.test\.tsx?$/.test(file));
 const MODULES = ALL.filter((file) => !/\.test\.tsx?$/.test(file));
+/** The plugin entry is a bundle root: it reaches the runtime graph no test imports directly. */
+const ENTRY = join(SRC, "index.ts");
+const ROOTS = [ENTRY, ...TESTS];
 
-/** Not-ported subsystems; a path under any of them reachable from a test is residue. */
+/** Not-ported subsystems; a path under any of them reachable from a bundle root is residue. */
 const NOT_PORTED =
     /\/(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.ts$)/;
 
 /**
- * Modules no landed test reaches through a runtime import. Type-only modules
+ * Modules no bundle root reaches through a runtime import. Type-only modules
  * are erased by the bundler and stay here; the others are waiting for the
  * unit that lands their consumer, named beside each. A module added to the
  * tree without a consumer fails this test; a consumer landing shrinks it.
@@ -30,8 +33,10 @@ const NOT_PORTED =
 const AWAITING_CONSUMER = new Map<string, string>([
     ["config/load-outcome.ts", "type-only"],
     ["features/builtin-commands/types.ts", "type-only"],
-    ["features/context/sidekick/index.ts", "plugin entry (U4)"],
+    ["features/context/sidekick/index.ts", "barrel; the entry imports ./agent directly"],
     ["plugin/types.ts", "type-only"],
+    ["tui/types/opencode-plugin-tui.d.ts", "type-only"],
+    ["tui/slots/sidebar-content.tsx", "TUI entry (U4)"],
     ["shared/context-limit-provenance.ts", "type-only"],
     ["shared/opencode-config-dir-types.ts", "type-only"],
     ["shared/format-bytes.ts", "TUI (U4)"],
@@ -48,9 +53,9 @@ const AWAITING_CONSUMER = new Map<string, string>([
 ]);
 
 describe("module graph over the landed tree", () => {
-    test("no test reaches a not-ported subsystem, and every module without a consumer is named", async () => {
+    test("no bundle root reaches a not-ported subsystem, and every module without a consumer is named", async () => {
         const report = Bun.spawnSync({
-            cmd: ["bun", join(import.meta.dir, "module-graph-report.ts"), ...TESTS],
+            cmd: ["bun", join(import.meta.dir, "module-graph-report.ts"), ...ROOTS],
             cwd: SRC,
             stdout: "pipe",
             stderr: "pipe",

@@ -1,0 +1,156 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { EidnaraRpcServer } from "../../shared/rpc-server";
+import type { SidebarSnapshot } from "../../shared/rpc-types";
+import { closeRpc, initRpcClient, loadSidebarSnapshot } from "./session-rpc";
+
+const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const tempDirs: string[] = [];
+const servers: EidnaraRpcServer[] = [];
+
+afterEach(() => {
+    closeRpc();
+    for (const server of servers.splice(0)) server.stop();
+    for (const dir of tempDirs.splice(0)) {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+    if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = originalXdgDataHome;
+});
+
+function makeDataHome(): string {
+    const dir = mkdtempSync(join(tmpdir(), "eidnara-session-rpc-"));
+    tempDirs.push(dir);
+    process.env.XDG_DATA_HOME = dir;
+    return dir;
+}
+
+function snapshot(sessionId: string, inputTokens: number): SidebarSnapshot {
+    return {
+        sessionId,
+        usagePercentage: inputTokens > 0 ? 25 : 0,
+        inputTokens,
+        contextLimit: 1000,
+        systemPromptTokens: 0,
+        compartmentCount: inputTokens > 0 ? 2 : 0,
+        memoryCount: 0,
+        memoryState: null,
+        memoryBlockCount: 0,
+        pendingOpsCount: 0,
+        historianRunning: false,
+        compartmentInProgress: false,
+        sessionNoteCount: 0,
+        readySmartNoteCount: 0,
+        cacheTtl: "5m",
+        lastTransformError: null,
+        lastDreamerRunAt: null,
+        projectIdentity: null,
+        compartmentTokens: 0,
+        factTokens: 0,
+        memoryTokens: 0,
+        docsTokens: 0,
+        profileTokens: 0,
+        conversationTokens: inputTokens,
+        toolCallTokens: 0,
+        toolDefinitionTokens: 0,
+        executeThreshold: 65,
+        newWorkTokens: null,
+        totalInputTokens: inputTokens,
+    };
+}
+
+async function startServer(
+    dataHome: string,
+    directory: string,
+    sidebar: () => Record<string, unknown>,
+): Promise<EidnaraRpcServer> {
+    const server = new EidnaraRpcServer(join(dataHome, "eidnara", "context"), directory);
+    server.handle("sidebar-snapshot", async () => sidebar());
+    await server.start();
+    servers.push(server);
+    return server;
+}
+
+describe("TUI context RPC data", () => {
+    test("uses an unexpired sticky snapshot only for failed responses", async () => {
+        const dataHome = makeDataHome();
+        const directory = "/repo-sticky";
+        const sessionId = "ses_sticky";
+        let response: Record<string, unknown> = snapshot(sessionId, 250) as unknown as Record<
+            string,
+            unknown
+        >;
+        await startServer(dataHome, directory, () => response);
+        initRpcClient(directory);
+
+        expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(250);
+        response = { error: "database busy" };
+        expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(250);
+
+        response = snapshot(sessionId, 0) as unknown as Record<string, unknown>;
+        expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(0);
+        response = { error: "database busy again" };
+        expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(0);
+    });
+
+    test("a zero-token success replaces the sticky snapshot instead of dropping it", async () => {
+        const dataHome = makeDataHome();
+        const directory = "/repo-zero-token";
+        const sessionId = "ses_zero_token";
+        const zeroTokens: SidebarSnapshot = {
+            ...snapshot(sessionId, 0),
+            memoryCount: 7,
+            memoryState: "available",
+            projectIdentity: "git:proj",
+        };
+        let response: Record<string, unknown> = zeroTokens as unknown as Record<string, unknown>;
+        await startServer(dataHome, directory, () => response);
+        initRpcClient(directory);
+
+        expect((await loadSidebarSnapshot(sessionId, directory)).memoryCount).toBe(7);
+        response = { error: "database busy" };
+        const replayed = await loadSidebarSnapshot(sessionId, directory);
+
+        expect(replayed.inputTokens).toBe(0);
+        expect(replayed.memoryCount).toBe(7);
+        expect(replayed.memoryState).toBe("available");
+        expect(replayed.projectIdentity).toBe("git:proj");
+    });
+
+    test("sticky snapshots are scoped by directory as well as session", async () => {
+        const dataHome = makeDataHome();
+        const sessionId = "ses_two_roots";
+        const rootA = "/repo-root-a";
+        const rootB = "/repo-root-b";
+        let responseA: Record<string, unknown> = {
+            ...snapshot(sessionId, 100),
+            projectIdentity: "git:a",
+        } as unknown as Record<string, unknown>;
+        let responseB: Record<string, unknown> = { error: "database busy" };
+        await startServer(dataHome, rootA, () => responseA);
+        await startServer(dataHome, rootB, () => responseB);
+
+        initRpcClient(rootA);
+        expect((await loadSidebarSnapshot(sessionId, rootA)).projectIdentity).toBe("git:a");
+
+        // An error under the second root must not replay the first root's snapshot.
+        closeRpc();
+        initRpcClient(rootB);
+        const fromB = await loadSidebarSnapshot(sessionId, rootB);
+        expect(fromB.projectIdentity).toBeNull();
+        expect(fromB.inputTokens).toBe(0);
+
+        // A success under the second root must not overwrite the first root's fallback.
+        responseB = { ...snapshot(sessionId, 5), projectIdentity: "git:b" } as unknown as Record<
+            string,
+            unknown
+        >;
+        expect((await loadSidebarSnapshot(sessionId, rootB)).projectIdentity).toBe("git:b");
+        closeRpc();
+        initRpcClient(rootA);
+        responseA = { error: "database busy" };
+        expect((await loadSidebarSnapshot(sessionId, rootA)).projectIdentity).toBe("git:a");
+    });
+});

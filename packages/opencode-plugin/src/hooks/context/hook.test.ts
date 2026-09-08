@@ -153,11 +153,11 @@ describe("eidnara hook", () => {
         }
         expect("tool.definition" in hook).toBe(false);
         expect("config" in hook).toBe(false);
-        expect(Object.keys(hook.rustToolBackends ?? {}).sort()).toEqual(["note", "reduce"]);
-        expect("noteEvaluationAvailable" in (hook.rustToolBackends ?? {})).toBe(false);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+        expect("noteEvaluationAvailable" in hook.rustToolBackends).toBe(false);
     });
 
-    it("leaves rustToolBackends undefined in ts mode", () => {
+    it("attaches the daemon tool backends in ts mode and leaves the messages transform a no-op", async () => {
         useTempDataHome("hook-ts-mode-");
         const fake = createFakeModuleClient();
         const hook = requireHook(
@@ -169,8 +169,22 @@ describe("eidnara hook", () => {
             ),
         );
 
-        expect(hook.rustToolBackends).toBeUndefined();
         expect(Object.keys(hook).sort()).toEqual(HOOK_KEYS);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+
+        await hook.rustToolBackends.reduce?.({
+            sessionId: "ses-ts",
+            projectRoot: "/repo",
+            drop: "1",
+            commandId: "cmd-ts",
+        });
+        expect(fake.calls.map((call) => call.method)).toEqual(["agent_drops.append"]);
+
+        const messages = [{ info: { sessionID: "ses-ts" } }];
+        const output = { messages: [...messages] };
+        await hook["experimental.chat.messages.transform"]({}, output);
+        expect(output.messages).toEqual(messages);
+        expect(fake.calls).toHaveLength(1);
     });
 
     it("returns null and records no_project when no project identity resolves", () => {
@@ -224,6 +238,35 @@ describe("eidnara hook", () => {
                 },
             },
         ]);
+    });
+
+    it("routes todo_state.set by the session's own directory", async () => {
+        useTempDataHome("hook-todo-route-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-todo-routed",
+            args: { todos: [{ status: "pending", priority: "high", content: "Route me" }] },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
+            ["todo_state.set", "/other/repo"],
+        ]);
+        expect(liveSessionState.sessionDirectoryBySession.get("ses-todo-routed")).toBe(
+            "/other/repo",
+        );
     });
 
     it("sends agent_drops.append through rustToolBackends.reduce", async () => {

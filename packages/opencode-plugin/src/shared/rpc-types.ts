@@ -115,6 +115,8 @@ export interface SidebarSnapshot {
         message?: string;
         note?: string;
     } | null;
+    dreamerProgress?: { task: string; processed: number; total: number } | null;
+    dreamerBacklog?: Record<string, { pending: number; total: number }>;
 }
 
 /** A `+` suffix marks a truncated read; the count is a lower bound. */
@@ -122,6 +124,16 @@ export function formatMemoryCount(
     snapshot: Pick<SidebarSnapshot, "memoryCount" | "memoryTruncated">,
 ): string {
     return `${snapshot.memoryCount}${snapshot.memoryTruncated ? "+" : ""}`;
+}
+
+/** A non-`available` state such as `disabled` or `unavailable:daemon_absent` replaces the count, which is 0 only because nothing was read. commentlint: allow(JUDGE) */
+export function formatMemoryStatus(
+    snapshot: Pick<SidebarSnapshot, "memoryCount" | "memoryTruncated" | "memoryState">,
+): string {
+    if (snapshot.memoryState && snapshot.memoryState !== "available") {
+        return snapshot.memoryState;
+    }
+    return formatMemoryCount(snapshot);
 }
 
 export interface StatusDetail extends SidebarSnapshot {
