@@ -37,6 +37,10 @@ function isSaneLimit(value: number | undefined): value is number {
     );
 }
 
+function isFinitePositive(value: number | undefined): value is number {
+    return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
 export function resolvePiWindowGeometry(
     args: ResolvePiWindowGeometryArgs,
 ): WindowGeometryResult | undefined {
@@ -45,25 +49,19 @@ export function resolvePiWindowGeometry(
         : isSaneLimit(args.model?.contextWindow)
           ? args.model.contextWindow
           : undefined;
+    // The sanity bounds apply to the inferred window, not to the sample's token count.
     const persistedUsable =
-        isSaneLimit(args.persistedInputTokens) &&
-        typeof args.persistedPercentage === "number" &&
-        Number.isFinite(args.persistedPercentage) &&
-        args.persistedPercentage > 0
+        isFinitePositive(args.persistedInputTokens) && isFinitePositive(args.persistedPercentage)
             ? args.persistedInputTokens / (args.persistedPercentage / 100)
             : undefined;
-    const persistedWindow =
-        isSaneLimit(args.persistedInputTokens) &&
-        typeof args.persistedPercentage === "number" &&
-        Number.isFinite(args.persistedPercentage) &&
-        args.persistedPercentage > 0
-            ? args.persistedInputTokens / (args.persistedPercentage / 100)
-            : undefined;
-    const context = runtimeWindow ?? persistedWindow;
+    const context = runtimeWindow ?? persistedUsable;
     if (!isSaneLimit(context)) return undefined;
     const providerID = args.model?.provider ?? "unknown";
     const modelID = args.model?.id ?? "unknown";
     const outputReserveOverride = resolveOutputReserve(providerID, modelID, args.reserveConfig);
+    const contextCap = isSaneLimit(args.detectedContextLimit)
+        ? args.detectedContextLimit
+        : undefined;
     const result = deriveWindowGeometry(
         providerID,
         modelID,
@@ -73,9 +71,7 @@ export function resolvePiWindowGeometry(
         },
         {
             overlay: resolveWindowOverlayFacts(providerID, modelID, getWindowOverlay()),
-            contextCap: isSaneLimit(args.detectedContextLimit)
-                ? args.detectedContextLimit
-                : undefined,
+            contextCap,
             outputReserveOverride,
             harness: "pi",
         },
@@ -83,6 +79,9 @@ export function resolvePiWindowGeometry(
     if (!result || outputReserveOverride !== undefined || !isSaneLimit(persistedUsable))
         return result;
     const usableSoft = Math.round(persistedUsable);
+    // A detected overflow is the final downward cap: a persisted estimate above the capped
+    // hard wall contradicts the wire and must not postpone compaction past it.
+    if (contextCap !== undefined && usableSoft > result.usableHard) return result;
     return {
         ...result,
         usableSoft,
