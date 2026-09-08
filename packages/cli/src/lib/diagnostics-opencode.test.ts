@@ -89,6 +89,78 @@ describe("collectDiagnostics plugin registration", () => {
             /- opencode config parse error: (?!none)/,
         );
     });
+
+    it("treats a local checkout of this package as a registered plugin", async () => {
+        const { root, configHome, cwd } = isolatedRoot();
+        const checkout = join(root, "checkout", "packages", "opencode-plugin");
+        mkdirSync(checkout, { recursive: true });
+        writeFileSync(
+            join(checkout, "package.json"),
+            JSON.stringify({ name: "@eidnara/opencode", version: "0.0.0" }),
+        );
+        writeFileSync(
+            join(configHome, "opencode", "opencode.json"),
+            JSON.stringify({ plugin: [`file://${checkout}`] }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.opencodeConfigHasPlugin).toBe(true);
+    });
+
+    it("does not treat an unrelated local path as this plugin", async () => {
+        const { root, configHome, cwd } = isolatedRoot();
+        const other = join(root, "checkout", "eidnara-theme");
+        mkdirSync(other, { recursive: true });
+        writeFileSync(join(other, "package.json"), JSON.stringify({ name: "eidnara-theme" }));
+        writeFileSync(
+            join(configHome, "opencode", "opencode.json"),
+            JSON.stringify({ plugin: [`file://${other}`] }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.opencodeConfigHasPlugin).toBe(false);
+    });
+
+    it("reports registration in the project's own opencode config", async () => {
+        const { cwd } = isolatedRoot();
+        mkdirSync(join(cwd, ".opencode"), { recursive: true });
+        writeFileSync(
+            join(cwd, ".opencode", "opencode.jsonc"),
+            '// project\n{ "plugin": ["@eidnara/opencode"] }',
+        );
+        writeFileSync(join(cwd, "opencode.json"), "{ broken");
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.opencodeConfigHasPlugin).toBe(false);
+        expect(report.projectOpencodeConfig.hasPlugin).toBe(true);
+        expect(report.projectOpencodeConfig.paths).toEqual([
+            join(cwd, ".opencode", "opencode.jsonc"),
+            join(cwd, "opencode.json"),
+        ]);
+        expect(report.projectOpencodeConfig.parseErrors).toHaveLength(1);
+
+        const markdown = renderDiagnosticsMarkdown(report);
+        expect(markdown).toContain("- Plugin registered in project opencode config: true (");
+        expect(markdown).toMatch(/- project opencode config parse errors: (?!none)/);
+    });
+
+    it("says so when the project has no opencode config", async () => {
+        const { cwd } = isolatedRoot();
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.projectOpencodeConfig).toEqual({
+            paths: [],
+            hasPlugin: false,
+            parseErrors: [],
+        });
+        expect(renderDiagnosticsMarkdown(report)).toContain(
+            "- Plugin registered in project opencode config: false (no project opencode config)",
+        );
+    });
 });
 
 describe("collectDiagnostics Eidnara config tiers", () => {

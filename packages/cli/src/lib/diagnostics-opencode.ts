@@ -20,7 +20,7 @@ import {
     sanitizePathString,
 } from "@eidnara/opencode/shared/redaction";
 import { parse as parseJsonc } from "comment-json";
-import { matchesPluginEntry } from "../adapters/opencode";
+import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
@@ -46,6 +46,14 @@ export interface EidnaraConfigTier {
     flags: Record<string, unknown>;
 }
 
+export interface ProjectOpenCodeConfigReport {
+    /** Existing `<cwd>/.opencode/opencode.json(c)` and `<cwd>/opencode.json(c)` files, in OpenCode's load order. */
+    paths: string[];
+    /** True when any listed file registers the plugin. */
+    hasPlugin: boolean;
+    parseErrors: string[];
+}
+
 export interface DiagnosticReport {
     timestamp: string;
     platform: string;
@@ -58,11 +66,13 @@ export interface DiagnosticReport {
     /** `opencodeInstallations` marks the first detection-ladder rung as active. */
     opencodeInstallations: OpenCodeInstallationReport[];
     configPaths: ConfigPaths;
+    /** Registration in the user-level `opencode.json(c)` under the OpenCode config dir. */
     opencodeConfigHasPlugin: boolean;
     /** A malformed or unreadable `opencode.json(c)` reports `false` for `opencodeConfigHasPlugin`; the error explains why. */
     opencodeConfigParseError?: string;
     tuiConfigHasPlugin: boolean;
     tuiConfigParseError?: string;
+    projectOpencodeConfig: ProjectOpenCodeConfigReport;
     /** User tier under `$XDG_CONFIG_HOME/eidnara/`. */
     eidnaraConfig: EidnaraConfigTier;
     /** Project tier under `<cwd>/.eidnara/`; its overrides win over the user tier. */
@@ -190,7 +200,32 @@ function readEidnaraConfigTier(basePath: string): EidnaraConfigTier {
 
 function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
     const plugins = Array.isArray(config?.plugin) ? config.plugin : [];
-    return plugins.some((entry) => matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME));
+    // `ensurePluginEntry` treats a local checkout of this package as registered; diagnostics must agree.
+    return plugins.some(
+        (entry) => matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) || isDevPathPluginEntry(entry),
+    );
+}
+
+/**
+ * OpenCode also loads `<cwd>/.opencode/opencode.json(c)` and `<cwd>/opencode.json(c)`, so a plugin
+ * registered only there is active for the diagnosed project.
+ */
+function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
+    const candidates = [
+        join(cwd, ".opencode", "opencode.jsonc"),
+        join(cwd, ".opencode", "opencode.json"),
+        join(cwd, "opencode.jsonc"),
+        join(cwd, "opencode.json"),
+    ];
+    const report: ProjectOpenCodeConfigReport = { paths: [], hasPlugin: false, parseErrors: [] };
+    for (const path of candidates) {
+        if (!existsSync(path)) continue;
+        report.paths.push(path);
+        const parsed = readConfig(path);
+        if (parsed.error) report.parseErrors.push(parsed.error);
+        if (configHasPluginEntry(parsed.value)) report.hasPlugin = true;
+    }
+    return report;
 }
 
 /**
@@ -356,6 +391,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value),
         ...(tuiConfig.error ? { tuiConfigParseError: tuiConfig.error } : {}),
+        projectOpencodeConfig: readProjectOpenCodeConfigs(cwd),
         eidnaraConfig,
         projectConfig,
         conflicts: {
@@ -447,6 +483,16 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- opencode config parse error: ${describeParseError(report.opencodeConfigParseError)}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
         `- tui config parse error: ${describeParseError(report.tuiConfigParseError)}`,
+        `- Plugin registered in project opencode config: ${report.projectOpencodeConfig.hasPlugin}${
+            report.projectOpencodeConfig.paths.length === 0
+                ? " (no project opencode config)"
+                : ` (${report.projectOpencodeConfig.paths.map((p) => `\`${sanitizeString(p)}\``).join(", ")})`
+        }`,
+        `- project opencode config parse errors: ${
+            report.projectOpencodeConfig.parseErrors.length === 0
+                ? "none"
+                : report.projectOpencodeConfig.parseErrors.map(sanitizeDiagnosticText).join("; ")
+        }`,
         `- User config: ${describeConfigTier(report.eidnaraConfig)}`,
         `- User config parse error: ${describeParseError(report.eidnaraConfig.parseError)}`,
         `- Project config: ${describeConfigTier(report.projectConfig)}`,

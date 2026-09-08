@@ -42,6 +42,7 @@ function makeReport(root: string, overrides: Partial<DiagnosticReport> = {}): Di
         },
         opencodeConfigHasPlugin: true,
         tuiConfigHasPlugin: true,
+        projectOpencodeConfig: { paths: [], hasPlugin: false, parseErrors: [] },
         eidnaraConfig: {
             path: join(root, ".config", "eidnara", "eidnara.jsonc"),
             exists: false,
@@ -117,6 +118,23 @@ describe("readLogTailLines", () => {
         const tail = readLogTailLines(path, 101);
         expect(tail.join("\n")).not.toContain("\uFFFD");
         for (const entry of tail.slice(0, -1)) expect(entry).toBe(line);
+    });
+});
+
+describe("bundleIssueReport log read failures", () => {
+    it("still writes the bundle and records a sanitized read error when the log vanished", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-logread-"));
+        tempDirs.push(root);
+        const missing = join(root, "home", "alice", "eidnara.log");
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, { logFile: { path: missing, exists: true, sizeKb: 12 } }),
+        );
+        expect(body).toContain("## Diagnostics");
+        expect(body).toContain("_Log could not be read: ENOENT");
+        expect(body).toContain("<no log output>");
+        expect(body).toContain("/home/<USER>/eidnara.log");
+        expect(body).not.toContain("alice");
     });
 });
 
@@ -667,6 +685,7 @@ describe("bundleIssueReport secret redaction", () => {
                 },
                 opencodeConfigHasPlugin: true,
                 tuiConfigHasPlugin: true,
+                projectOpencodeConfig: { paths: [], hasPlugin: false, parseErrors: [] },
                 eidnaraConfig: {
                     path: join(root, ".config", "eidnara", "eidnara.jsonc"),
                     exists: true,
@@ -761,6 +780,7 @@ describe("bundleIssueReport secret redaction", () => {
                 },
                 opencodeConfigHasPlugin: true,
                 tuiConfigHasPlugin: true,
+                projectOpencodeConfig: { paths: [], hasPlugin: false, parseErrors: [] },
                 eidnaraConfig: {
                     path: "/Users/alice/.config/eidnara/eidnara.jsonc",
                     exists: true,

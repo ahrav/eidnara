@@ -104,6 +104,23 @@ describe("redactSecretText — unquoted colon assignments and quoted env values"
         expect(redactSecretText(`authorization: token ${token}`)).toBe(
             "authorization: token <REDACTED:token>",
         );
+        const negotiate = ["YIIB", "kwYGKwYBBQUC", "oIIBhzCCAYM"].join("");
+        expect(redactSecretText(`Authorization: Negotiate ${negotiate}`)).toBe(
+            "Authorization: Negotiate <REDACTED:negotiate>",
+        );
+    });
+
+    test("redacts the whole Digest parameter list", () => {
+        const digest = [
+            'username="alice"',
+            'realm="api"',
+            'nonce="dcd98b7102dd2f0e"',
+            'response="6629fae49393a05397450978507c4ef1"',
+        ].join(", ");
+        const redacted = redactSecretText(`Authorization: Digest ${digest} trailing`);
+        expect(redacted).toBe("Authorization: Digest <REDACTED:digest>");
+        expect(redacted).not.toContain("alice");
+        expect(redacted).not.toContain("6629fae4");
     });
 
     test("a bare `key:` at end of line does not consume the next line", () => {

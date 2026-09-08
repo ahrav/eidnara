@@ -117,7 +117,18 @@ export async function bundleIssueReport(
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
     const scopedReport = scopeReportToSession(report, sessionFilter);
-    const allLogLines = report.logFile.exists ? readLogTailLines(report.logFile.path) : [];
+    // A log statted during diagnostics can become unreadable before bundling.
+    let allLogLines: string[] = [];
+    let logReadError: string | null = null;
+    if (report.logFile.exists) {
+        try {
+            allLogLines = readLogTailLines(report.logFile.path);
+        } catch (error) {
+            logReadError = sanitizeDiagnosticText(
+                error instanceof Error ? error.message : String(error),
+            );
+        }
+    }
     const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
@@ -175,6 +186,7 @@ export async function bundleIssueReport(
             : ["```", recentErrorLines.join("\n"), "```"].join("\n"),
         "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
+        ...(logReadError ? [`_Log could not be read: ${logReadError}_`] : []),
         "```",
         recentLog || "<no log output>",
         "```",
