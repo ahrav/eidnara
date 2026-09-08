@@ -460,6 +460,25 @@ describe("tool arcs", () => {
         };
         expect(buildToolArcs([message])).toEqual([{ callId: "c1", invOrdinal: 1, resOrdinal: 1 }]);
     });
+
+    it("keeps a running OpenCode tool open even when partial output is stored", () => {
+        const message: RawMessage = {
+            id: "streaming",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "c",
+                    tool: "bash",
+                    state: { status: "running", input: {}, output: "partial stream..." },
+                },
+            ],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([
+            { callId: "c", invOrdinal: 1, resOrdinal: null },
+        ]);
+    });
 });
 
 describe("tool token accounting", () => {
@@ -742,6 +761,48 @@ describe("tool token accounting", () => {
             estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" })
                 .toolOutput,
         ).toBe(0);
+    });
+
+    it("treats a text-typed OpenCode attachment with a MIME field as media", () => {
+        const message = singlePartMessage({
+            type: "tool",
+            callID: "c",
+            tool: "read",
+            state: {
+                status: "completed",
+                input: {},
+                output: "",
+                attachments: [{ type: "text", mime: "application/pdf", data: "P".repeat(20_000) }],
+            },
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 400,
+        });
+        expect(breakdown.image).toBe(400);
+        expect(breakdown.toolOutput).toBe(0);
+    });
+
+    it("classifies only an exact file type as media", () => {
+        const breakdown = estimateTrueRawMessageTokens(
+            singlePartMessage({ type: "profile", payload: "X".repeat(20_000) }),
+            { providerShapeVersion: "opencode-v1" },
+        );
+        expect(breakdown.image).toBe(0);
+        expect(breakdown.other).toBeGreaterThan(1000);
+    });
+
+    it("keeps source parts opaque", () => {
+        const part = (payload: string) => ({ type: "source", content: "short", payload });
+        const breakdown = estimateTrueRawMessageTokens(
+            singlePartMessage(part("Y".repeat(20_000))),
+            {
+                providerShapeVersion: "opencode-v1",
+            },
+        );
+        expect(breakdown.text).toBe(0);
+        expect(breakdown.other).toBeGreaterThan(1000);
+        expect(fingerprintOf(part("A".repeat(10)))).not.toBe(fingerprintOf(part("B".repeat(5000))));
     });
 
     it("counts an empty text block in a tool result as empty output", () => {

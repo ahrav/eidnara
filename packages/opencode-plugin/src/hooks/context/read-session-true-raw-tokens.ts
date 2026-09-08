@@ -166,10 +166,12 @@ type ResultBlockOrigin = "content" | "attachment";
 
 function isMediaResultBlock(entry: Record<string, unknown>, origin: ResultBlockOrigin): boolean {
     const type = partType(entry);
+    const hasMime = hasOwn(entry, "mime") || hasOwn(entry, "mimeType");
+    if (origin === "attachment") {
+        return type === "image" || type === "file" || hasMime || looksImageLike(entry);
+    }
     if (type === "image" || type === "file") return true;
     if (type === "text") return false;
-    const hasMime = hasOwn(entry, "mime") || hasOwn(entry, "mimeType");
-    if (origin === "attachment") return hasMime || looksImageLike(entry);
     if (type.length > 0) return looksImageLike(entry);
     return hasMime || looksImageLike(entry);
 }
@@ -343,7 +345,7 @@ function providerExecutedFromPart(part: Record<string, unknown>): boolean {
 
 const TERMINAL_TOOL_STATUSES = new Set(["completed", "error"]);
 
-/** A terminal `status` marks a completed call even when no output payload is stored. */
+/** Only a terminal `status` completes an OpenCode tool. A stored `output` on a `running` tool is partial streamed output, not a result. */
 function toolStatusIsTerminal(
     part: Record<string, unknown>,
     state: Record<string, unknown> | null,
@@ -403,7 +405,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
         const outputOwner =
             state && firstOwnKey(state, ["output", "error"]) !== null ? state : part;
         const outputKey = firstOwnKey(outputOwner, ["output", "error"]);
-        const hasOutput = outputKey !== null || toolStatusIsTerminal(part, state);
+        const hasOutput = toolStatusIsTerminal(part, state);
         const output = mergeToolResultContent(
             outputKey ? toolResultContent(outputOwner[outputKey]) : emptyToolResultContent(),
             toolAttachments(part, state),
@@ -608,13 +610,9 @@ function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent 
     if (looksImageLike(part)) {
         return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
     }
-    if (type.includes("file")) {
+    if (type === "file") {
         // Every file part is a media block, whatever inline fields it carries.
         return { kind: "image", altText: firstStringField(part, ["alt", "description"]) };
-    }
-    if (type === "source") {
-        const content = firstStringField(part, ["content", "text", "source"]);
-        return content ? { kind: "text", text: content } : { kind: "structured" };
     }
     return { kind: "structured" };
 }
