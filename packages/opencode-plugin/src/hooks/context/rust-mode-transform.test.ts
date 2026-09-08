@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import * as logger from "../../shared/logger";
 import { promptSurfaceConfigIdentity } from "../../shared/prompt-surface";
 import { Database } from "../../shared/sqlite";
@@ -80,7 +80,7 @@ const makeMessages = (sessionId: string): MessageLike[] =>
 
 function makeDeps(): RustModeTransformDeps {
     return {
-        contextUsageMap: new Map(),
+        contextUsageMap: new BoundedSessionMap(8),
         protectedTags: 4,
         clearReasoningAge: 50,
         cacheTtl: "5m",

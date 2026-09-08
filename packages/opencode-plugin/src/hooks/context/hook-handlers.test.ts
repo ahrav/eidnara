@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import type { ContextUsageEntry } from "./event-handler";
 import {
     createChatMessageHook,
@@ -249,7 +250,7 @@ describe("createEventHook live model tracking", () => {
 
     function makeHook(
         liveModelBySession: Map<string, { providerID: string; modelID: string }>,
-        contextUsageMap = new Map<string, ContextUsageEntry>(),
+        contextUsageMap = new BoundedSessionMap<ContextUsageEntry>(8),
     ) {
         const sessionDirectoryBySession = new Map<string, string>();
         const hook = createEventHook({
@@ -292,18 +293,14 @@ describe("createEventHook live model tracking", () => {
     test("an update to an older response does not move the live model off the newest response", async () => {
         const sessionId = "ses-model-older-edit";
         const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
-        const contextUsageMap = new Map<string, ContextUsageEntry>([
-            [
-                sessionId,
-                {
-                    usage: { percentage: 10, inputTokens: 10_000 },
-                    updatedAt: Date.now(),
-                    hasUsageTokens: true,
-                    messageID: "msg-9",
-                    model: { providerID: "anthropic", modelID: "claude-large" },
-                },
-            ],
-        ]);
+        const contextUsageMap = new BoundedSessionMap<ContextUsageEntry>(8);
+        contextUsageMap.set(sessionId, {
+            usage: { percentage: 10, inputTokens: 10_000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+            messageID: "msg-9",
+            model: { providerID: "anthropic", modelID: "claude-large" },
+        });
         const { hook } = makeHook(liveModelBySession, contextUsageMap);
 
         await hook(makeAssistantEvent(sessionId, "anthropic", "claude-large", "msg-9"));

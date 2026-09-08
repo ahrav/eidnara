@@ -1,6 +1,7 @@
 import { detectOverflow } from "../../features/context/overflow-detection";
 import { clearWorkMetricsCarry, clearWorkMetricsCarryIfFolded } from "../../plugin/rpc-handlers";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
+import type { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsAfterAuthOnce } from "../../shared/models-dev-cache";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
@@ -18,8 +19,6 @@ import { recordChildSession } from "./live-session-state";
 import { findLastAssistantUsageFromOpenCodeDb } from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 
-const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
-
 export interface ContextUsageEntry {
     usage: ContextUsage;
     updatedAt: number;
@@ -33,7 +32,7 @@ export interface ContextUsageEntry {
 
 /** Returns whether `messageID` predates the newest response, using the persisted response when in-memory state is unavailable. OpenCode message ids are time-ordered, so id order tracks response order. commentlint: allow(JUDGE) */
 export function isOlderThanNewestResponse(
-    contextUsageMap: Map<string, ContextUsageEntry>,
+    contextUsageMap: BoundedSessionMap<ContextUsageEntry>,
     sessionId: string,
     messageID: string | undefined,
 ): boolean {
@@ -45,7 +44,7 @@ export function isOlderThanNewestResponse(
 }
 
 export interface EventHandlerDeps {
-    contextUsageMap: Map<string, ContextUsageEntry>;
+    contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     onSessionCacheInvalidated?: (sessionId: string) => void;
     onRustWireInvalidated?: (sessionId: string) => void;
     /** Fires when the response that supplied the live usage is removed; `model` is the preceding persisted response's model, or `undefined` when none remains. */
@@ -62,15 +61,6 @@ export interface EventHandlerDeps {
     internalChildSessions?: Set<string>;
     /** `subagentSessions` records every session created with a non-empty `parentID`, in memory only. */
     subagentSessions?: Set<string>;
-}
-
-function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry>): void {
-    const now = Date.now();
-    for (const [sessionId, entry] of contextUsageMap) {
-        if (now - entry.updatedAt > CONTEXT_USAGE_TTL_MS) {
-            contextUsageMap.delete(sessionId);
-        }
-    }
 }
 
 /** An overflow error means the host will rebuild the window, so the session's injection cache is stale. */
@@ -93,8 +83,6 @@ function invalidateOnOverflow(
 
 export function createEventHandler(deps: EventHandlerDeps) {
     return async (input: { event: { type: string; properties?: unknown } }): Promise<void> => {
-        evictExpiredUsageEntries(deps.contextUsageMap);
-
         const properties = getSessionProperties(input.event.properties);
 
         if (input.event.type === "session.created") {

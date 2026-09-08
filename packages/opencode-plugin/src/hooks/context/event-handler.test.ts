@@ -13,6 +13,7 @@ import {
     applyStickySnapshotCache,
     resetSidebarSnapshotCache,
 } from "../../plugin/sidebar-snapshot-cache";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import type { SidebarSnapshot } from "../../shared/rpc-types";
 import { Database } from "../../shared/sqlite";
@@ -107,7 +108,7 @@ interface Harness {
 function buildHarness(): Harness {
     const calls = { cache: [] as string[], wire: [] as string[], deleted: [] as string[] };
     const deps: EventHandlerDeps = {
-        contextUsageMap: new Map<string, ContextUsageEntry>(),
+        contextUsageMap: new BoundedSessionMap<ContextUsageEntry>(8),
         internalChildSessions: new Set<string>(),
         subagentSessions: new Set<string>(),
         onSessionCacheInvalidated: (id) => calls.cache.push(id),
@@ -317,22 +318,18 @@ describe("createEventHandler — message.updated", () => {
         expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(40_500);
     });
 
-    it("evicts usage entries older than the TTL on the next event", async () => {
+    it("keeps a usage entry across later events; residency is bounded by session count, not age", async () => {
         const { deps, handle } = buildHarness();
         const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
-        deps.contextUsageMap.set("stale", {
+        deps.contextUsageMap.set("old", {
             usage: { percentage: 1, inputTokens: 1 },
             updatedAt: twoHoursAgo,
-        });
-        deps.contextUsageMap.set("fresh", {
-            usage: { percentage: 1, inputTokens: 1 },
-            updatedAt: Date.now(),
+            messageID: "msg-old",
         });
 
         await handle("session.error", { sessionID: "other", error: { message: "nope" } });
 
-        expect(deps.contextUsageMap.has("stale")).toBe(false);
-        expect(deps.contextUsageMap.has("fresh")).toBe(true);
+        expect(deps.contextUsageMap.get("old")?.messageID).toBe("msg-old");
     });
 });
 
@@ -396,6 +393,10 @@ describe("createEventHandler — message.removed", () => {
         deps.onNewestResponseRemoved = (sessionId, model) => removed.push([sessionId, model]);
 
         await handle("message.updated", assistantUpdated({ input: 40_000 }));
+        // A three-hour-old entry survives unrelated events; removing another message preserves newest-response tracking.
+        const entry = deps.contextUsageMap.get(SESSION);
+        if (entry) entry.updatedAt = Date.now() - 3 * 60 * 60 * 1000;
+        await handle("session.error", { sessionID: "other", error: { message: "nope" } });
         await handle("message.removed", { sessionID: SESSION, messageID: "msg-other" });
         expect(removed).toEqual([]);
 

@@ -8,6 +8,7 @@ import {
 import { resolveProjectIdentityForSession } from "../../features/context/project-identity";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { log } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
@@ -21,7 +22,11 @@ import {
     createToolExecuteAfterHook,
     getLiveNotificationParams,
 } from "./hook-handlers";
-import { addBoundedSession, type LiveSessionState } from "./live-session-state";
+import {
+    addBoundedSession,
+    type LiveSessionState,
+    MAX_LIVE_USAGE_SESSIONS,
+} from "./live-session-state";
 import { HostModuleTransport } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
@@ -89,7 +94,8 @@ function resolveSessionId(messages: readonly MessageLike[]): string | undefined 
 
 export function createEidnaraHook(deps: EidnaraDeps) {
     const contextUsageMap =
-        deps.liveSessionState?.contextUsageBySession ?? new Map<string, ContextUsageEntry>();
+        deps.liveSessionState?.contextUsageBySession ??
+        new BoundedSessionMap<ContextUsageEntry>(MAX_LIVE_USAGE_SESSIONS);
 
     clearHookInitFailure();
     const projectPath = resolveProjectIdentityForSession(

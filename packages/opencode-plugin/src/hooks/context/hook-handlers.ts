@@ -1,6 +1,7 @@
 import { clearRustSessionStatus, clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
+import type { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
 import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import {
@@ -137,7 +138,7 @@ export function createChatMessageHook(args: {
 
 export function createEventHook(args: {
     eventHandler: (input: { event: { type: string; properties?: unknown } }) => Promise<void>;
-    contextUsageMap: Map<string, ContextUsageEntry>;
+    contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;

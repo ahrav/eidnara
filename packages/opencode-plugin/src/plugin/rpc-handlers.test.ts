@@ -10,6 +10,7 @@ import { resetKernelClientsForTest } from "../hooks/context/kernel-transport";
 import { createLiveSessionState } from "../hooks/context/live-session-state";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
+import { BoundedSessionMap } from "../shared/bounded-session-map";
 import { unavailable } from "../shared/kernel-client";
 import { ANTI_MEMORY_CATEGORY, renderAntiMemoryContent } from "../shared/kernel-client/anti-memory";
 import { FakeKernel } from "../shared/kernel-client-testing/fake-kernel";
@@ -1109,7 +1110,7 @@ describe("clearWorkMetricsCarry", () => {
         // The carry already folded `a`, so a poll without the event still reports the closed phase.
         expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
 
-        const handle = createEventHandler({ contextUsageMap: new Map() });
+        const handle = createEventHandler({ contextUsageMap: new BoundedSessionMap(8) });
         await handle({
             event: {
                 type: "message.removed",
