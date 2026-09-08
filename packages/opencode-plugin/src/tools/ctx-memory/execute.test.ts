@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import { KernelClient } from "../../shared/kernel-client";
 import { ClaimOperationInputError } from "../../shared/kernel-client/anti-memory";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
@@ -9,6 +9,11 @@ import type { CtxMemoryAction, CtxMemoryArgs } from "./types";
 const SESSION = "ses-exec";
 const PROJECT = "/tmp/exec";
 const CONTENT = "Use the daemon";
+const ANTI_MEMORY = {
+    trigger: "session caching",
+    rejectedStrategy: "Redis",
+    rejectionReason: "it creates split ownership",
+};
 
 interface CommitReply {
     outcome: string;
@@ -30,6 +35,11 @@ function harness(enabled = true) {
 
 function identityFor(toolCallId: string): CtxMemoryWriteIdentity {
     return { sessionId: SESSION, toolCallId };
+}
+
+/** The wrappers pass raw arguments through when schema parsing fails, so the executor can receive `null` where the type says `string | undefined`. commentlint: allow(JUDGE) */
+function rawArgs(value: Record<string, unknown>): CtxMemoryArgs {
+    return value as unknown as CtxMemoryArgs;
 }
 
 function run(
@@ -212,5 +222,134 @@ describe("executeCtxMemory", () => {
             ),
         ).rejects.toBeInstanceOf(ClaimOperationInputError);
         expect(kernel.liveRows()).toHaveLength(0);
+    });
+
+    test("a create replay recovered from the row reports the creating commit as knownAsOf", async () => {
+        const { client } = harness();
+        const args: CtxMemoryArgs = { category: "REJECTED_APPROACH", antiMemory: ANTI_MEMORY };
+        try {
+            setSystemTime(new Date("2026-01-01T12:00:00Z"));
+            const first = JSON.parse(await run(client, "create", args, "call-anti-replay")) as {
+                commitSeq: number;
+            };
+            await run(
+                client,
+                "create",
+                { category: "ARCHITECTURE", content: "unrelated one" },
+                "call-unrelated-1",
+            );
+            await run(
+                client,
+                "create",
+                { category: "ARCHITECTURE", content: "unrelated two" },
+                "call-unrelated-2",
+            );
+            // The generated expiry re-renders two days later, so the daemon answers `operation_key_reused` and the executor recovers the replay from the stored row instead of a receipt. commentlint: allow(JUDGE)
+            setSystemTime(new Date("2026-01-03T12:00:00Z"));
+            const second = JSON.parse(await run(client, "create", args, "call-anti-replay")) as {
+                outcome: string;
+                commitSeq: number;
+                knownAsOf: number;
+            };
+            expect(second.outcome).toBe("already applied");
+            expect(second.commitSeq).toBe(first.commitSeq);
+            expect(second.knownAsOf).toBe(first.commitSeq);
+        } finally {
+            setSystemTime();
+        }
+    });
+
+    test("a null reason on revise inherits the predecessor's rationale", async () => {
+        const { kernel, client } = harness();
+        kernel.seedDecision({
+            object_id: "mem_a",
+            decision_kind: "ARCHITECTURE",
+            summary: "A.",
+            rationale: "keep me",
+        });
+        const text = await run(
+            client,
+            "revise",
+            rawArgs({ objectId: "mem_a", content: "A, revised.", reason: null }),
+            "call-revise-null-reason",
+        );
+        expect((JSON.parse(text) as CommitReply).outcome).toBe("applied");
+        expect(kernel.liveRows()[0]?.decision?.payload.rationale).toBe("keep me");
+    });
+
+    test("a redelivered revise carrying null fields reaches the visibility error, not a TypeError", async () => {
+        const { kernel, client } = harness();
+        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
+        const first = JSON.parse(
+            await run(
+                client,
+                "revise",
+                { objectId: "mem_a", category: "ARCHITECTURE", content: "A2.", reason: "r" },
+                "call-revise-null-probe",
+            ),
+        ) as CommitReply;
+        expect(first.outcome).toBe("applied");
+        // A null reason counts as omitted, and an omitted field makes the reconstructed spec unverifiable, so the probe declines the replay and the ordinary path reports the retired target. commentlint: allow(JUDGE)
+        await expect(
+            run(
+                client,
+                "revise",
+                rawArgs({
+                    objectId: "mem_a",
+                    category: "ARCHITECTURE",
+                    content: "A2.",
+                    reason: null,
+                }),
+                "call-revise-null-probe",
+            ),
+        ).rejects.toBeInstanceOf(ClaimOperationInputError);
+        await expect(
+            run(
+                client,
+                "revise",
+                rawArgs({
+                    objectId: "mem_a",
+                    category: "ARCHITECTURE",
+                    content: null,
+                    reason: "r",
+                }),
+                "call-revise-null-probe",
+            ),
+        ).rejects.toBeInstanceOf(ClaimOperationInputError);
+    });
+
+    test("a create under an identity already spent on a revise surfaces the daemon's rejection", async () => {
+        const { kernel, client } = harness();
+        const seeded = JSON.parse(
+            await run(
+                client,
+                "create",
+                { category: "REJECTED_APPROACH", antiMemory: ANTI_MEMORY, reason: "seed" },
+                "call-seed",
+            ),
+        ) as CommitReply;
+        const revised = JSON.parse(
+            await run(
+                client,
+                "revise",
+                {
+                    objectId: seeded.objectId,
+                    category: "REJECTED_APPROACH",
+                    antiMemory: ANTI_MEMORY,
+                    reason: "same",
+                },
+                "call-shared-identity",
+            ),
+        ) as CommitReply;
+        expect(revised.outcome).toBe("applied");
+        // The successor carries the object id a create under this identity derives, with the same category, rationale, and payload, but its stored operation was a supersede at revision 2, so the create must not report it as already applied. commentlint: allow(JUDGE)
+        const text = await run(
+            client,
+            "create",
+            { category: "REJECTED_APPROACH", antiMemory: ANTI_MEMORY, reason: "same" },
+            "call-shared-identity",
+        );
+        expect(text).toBe("Error: The operation key was reused with a different request digest.");
+        expect(kernel.liveRows()).toHaveLength(1);
     });
 });

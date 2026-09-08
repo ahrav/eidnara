@@ -358,17 +358,17 @@ async function readMemoryRowsChunked(
     };
 }
 
-/** An anti-memory predecessor's summary is parsed back into an `antiMemory` payload — never inherited as `content` — because `assertCtxMemoryWriteShape` requires the payload arm for the anti-memory category. commentlint: allow(JUDGE) */
+/** An anti-memory predecessor's summary is parsed back into an `antiMemory` payload — never inherited as `content` — because `assertCtxMemoryWriteShape` requires the payload arm for the anti-memory category. `null` counts as omitted for every inherited field, matching the shape assertion's admission of null optional strings on the schema-fallback path; a strict `undefined` test would let `reason: null` reach `decisionSpec` as an explicit empty rationale and erase the stored one. commentlint: allow(JUDGE) */
 function revisionArgs(args: CtxMemoryArgs, predecessors: readonly ReadRow[]): CtxMemoryArgs {
     const decision = predecessors[0]?.decision;
     const merged: CtxMemoryArgs = {
         ...args,
-        ...(args.category === undefined && decision ? { category: decision.decision_kind } : {}),
-        ...(args.reason === undefined && decision?.payload.rationale
+        ...(args.category == null && decision ? { category: decision.decision_kind } : {}),
+        ...(args.reason == null && decision?.payload.rationale
             ? { reason: decision.payload.rationale }
             : {}),
     };
-    if (args.content !== undefined || args.antiMemory !== undefined || !decision) return merged;
+    if (args.content != null || args.antiMemory != null || !decision) return merged;
     if (merged.category?.trim() !== ANTI_MEMORY_CATEGORY) {
         return { ...merged, content: decision.payload.summary };
     }
@@ -418,10 +418,13 @@ function plausiblyGeneratedExpiry(
     );
 }
 
-/** The create replay probe answers "already applied" only when the stored row equals the spec this request derives on its own: the derived category and rationale (empty when omitted) must equal the stored decision kind and rationale, a caller-supplied summary must equal the stored one byte for byte, and an anti-memory must re-render to the stored payload under the stored expiry — the one field a generated expiry legitimately drifts on — so any other changed content surfaces the daemon's `operation_key_reused` rejection. commentlint: allow(JUDGE) */
+/** The create replay probe answers "already applied" only when the stored row equals the spec this request derives on its own: the derived category and rationale (empty when omitted) must equal the stored decision kind and rationale, a caller-supplied summary must equal the stored one byte for byte, and an anti-memory must re-render to the stored payload under the stored expiry — the one field a generated expiry legitimately drifts on — so any other changed content surfaces the daemon's `operation_key_reused` rejection. The row must also carry the create spec's lineage, `ctx_memory` at revision 1: a revise or merge under the same identity derives the same object id but writes revision 2 or later, and the stored operation for such a row was a supersede, not the insert this request would issue. commentlint: allow(JUDGE) */
 function replayMatchesRow(args: CtxMemoryArgs, row: ReadRow): boolean {
     const decision = row.decision;
     if (!decision) return false;
+    if (row.object.source_id !== CTX_MEMORY_SOURCE_ID || row.object.source_revision !== 1) {
+        return false;
+    }
     if (decision.decision_kind !== (args.category?.trim() ?? "")) return false;
     if (decision.payload.rationale !== (args.reason?.trim() ?? "")) return false;
     if (args.antiMemory) {
@@ -439,7 +442,7 @@ function replayMatchesRow(args: CtxMemoryArgs, row: ReadRow): boolean {
             return false;
         }
     }
-    if (args.content === undefined) return false;
+    if (args.content == null) return false;
     return decision.payload.summary === args.content.trim();
 }
 
@@ -453,7 +456,7 @@ function replayMatchesSuccessor(
     if (!decision) return false;
     const category = args.category?.trim();
     if (!category || decision.decision_kind !== category) return false;
-    if (args.reason === undefined || decision.payload.rationale !== args.reason.trim()) {
+    if (args.reason == null || decision.payload.rationale !== args.reason.trim()) {
         return false;
     }
     if (args.antiMemory) {
@@ -474,7 +477,7 @@ function replayMatchesSuccessor(
             return false;
         }
     }
-    if (args.content === undefined) return false;
+    if (args.content == null) return false;
     return decision.payload.summary === args.content.trim();
 }
 
@@ -511,13 +514,13 @@ function successorSpec(identity: CtxMemoryWriteIdentity, successor: ReadRow): De
     };
 }
 
-/** Renders a create replay from the row the first delivery wrote. Only `create` uses this: a redelivered generated-expiry create hashes to a different digest, so the daemon answers `operation_key_reused` and no replayed receipt exists to render from; a create touches exactly the object it inserted, so the row alone names the complete affected set. Revise and merge render their replayed probe receipt instead, whose tokens also list the retired predecessors. commentlint: allow(JUDGE) */
-function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow, knownAsOf: number): string {
+/** Renders a create replay from the row the first delivery wrote. Only `create` uses this: a redelivered generated-expiry create hashes to a different digest, so the daemon answers `operation_key_reused` and no replayed receipt exists to render from; a create touches exactly the object it inserted, so the row alone names the complete affected set. Revise and merge render their replayed probe receipt instead, whose tokens also list the retired predecessors. `knownAsOf` is the row's creating commit because a daemon replay reports the stored receipt's commit sequence as `known_as_of`, not the tip the probe read. commentlint: allow(JUDGE) */
+function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow): string {
     return JSON.stringify({
         action,
         outcome: "already applied",
         commitSeq: row.object.created_commit_seq,
-        knownAsOf,
+        knownAsOf: row.object.created_commit_seq,
         objectId: row.object.object_id,
         objects: [row.object.object_id],
     });
@@ -594,7 +597,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
                 ? read.rows.find((row) => row.object.object_id === spec.object_id)
                 : undefined;
             if (read.ok && existing && replayMatchesRow(args, existing)) {
-                return renderReplayedOutcome(action, existing, read.knownAsOf);
+                return renderReplayedOutcome(action, existing);
             }
         }
         return renderCommit(action, result, [], spec.object_id);
