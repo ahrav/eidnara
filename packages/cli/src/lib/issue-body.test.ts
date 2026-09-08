@@ -46,6 +46,20 @@ describe("extractRecentErrors", () => {
         expect(matches.length).toBe(4);
     });
 
+    it("matches async, constructor, and aliased V8 frames", () => {
+        const frames = [
+            "    at async runCommand (file:///x.ts:1:2)",
+            "    at new Historian (file:///y.ts:3:4)",
+            "    at Server.emit [as emit] (node:events:1:2)",
+            "    at async Promise.all (index 0)",
+            "    at Array.map (<anonymous>)",
+        ];
+        const noise = "    at the moment nothing else is logged";
+
+        const matches = extractRecentErrors([...frames, noise].join("\n"), 20);
+        expect(matches).toEqual(frames);
+    });
+
     it("matches `failed` regardless of the punctuation that follows it", () => {
         const log = [
             "[2026-05-20T12:00:00.000Z] ses_abc failed to send notification: ECONNREFUSED",
@@ -234,6 +248,44 @@ describe("capBodyToGithubLimit", () => {
         const capped = capBodyToGithubLimit(body, 10_000);
         expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(10_000);
         expect(capped).toContain("[truncated further to fit GitHub body limit]");
+        // A single oversized line keeps its prefix rather than losing the whole line.
+        expect(capped).toContain("## Description\nxxxx");
+    });
+
+    it("keeps every fence balanced wherever the final byte cut lands", () => {
+        // Sweeping the description length walks the cut across the Recent errors
+        // fences, the Log heading, and the Log fences one byte at a time.
+        function build(descriptionLength: number): string {
+            return [
+                "## Description",
+                "x".repeat(descriptionLength),
+                "",
+                "## Recent errors (last 20, sanitized)",
+                "```",
+                "transform failed: critical error",
+                "```",
+                "",
+                "## Log (last 1 lines, sanitized)",
+                "```",
+                "tiny log",
+                "```",
+            ].join("\n");
+        }
+        const maxBytes = 2_000;
+        const baseline = Buffer.byteLength(build(0), "utf8");
+        for (let over = 1; over <= 160; over += 1) {
+            const body = build(maxBytes + over - baseline);
+            expect(Buffer.byteLength(body, "utf8")).toBe(maxBytes + over);
+
+            const capped = capBodyToGithubLimit(body, maxBytes);
+            const lines = capped.split("\n");
+            const fenceLines = lines.filter((line) => line.startsWith("```")).length;
+
+            expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(maxBytes);
+            expect(capped).toContain("[truncated further to fit GitHub body limit]");
+            expect(fenceLines % 2).toBe(0);
+            expect(lines.some((line) => /^`{1,2}$/.test(line))).toBe(false);
+        }
     });
     it("falls back to raw byte truncation when log heading is missing", () => {
         // Non-ASCII padding verifies that UTF-8 boundary handling preserves valid text.

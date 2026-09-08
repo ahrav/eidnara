@@ -15,6 +15,8 @@ export const MAX_GITHUB_BODY_BYTES = 60_000;
 const LOG_TRUNCATION_MARKER = "[truncated for GitHub 64KB limit — older log lines dropped]\n";
 const FINAL_TRUNCATION_MARKER = "\n\n[truncated further to fit GitHub body limit]\n";
 const FALLBACK_TRUNCATION_MARKER = "\n\n[truncated for GitHub 64KB limit]\n";
+const FENCE = "```";
+const FENCE_CLOSE = `\n${FENCE}`;
 
 /**
  * The stack-frame patterns retain frames to identify the failing call site.
@@ -26,7 +28,7 @@ const ERROR_LOG_PATTERNS = [
     /\b(?:[A-Z][a-zA-Z]*)?Error:\s/,
     /\bEMERGENCY\b/,
     /\bexception\b/i,
-    /^\s+at\s+[\w.<>$]+\s+\(/,
+    /^\s+at\s+(?:async\s+|new\s+)?[\w.<>$]+(?:\s+\[as\s+[\w$]+\])?\s+\(/,
     /^\s+at\s+(?:file:|node_modules\/|[^/\s]+:\d+)/,
 ];
 
@@ -74,10 +76,10 @@ export function capBodyToGithubLimit(
         return enforceFinalBodyLimit(capped, maxBytes);
     }
 
-    const fenceOpenIdx = body.indexOf("\n```", headingIdx);
+    const fenceOpenIdx = body.indexOf(FENCE_CLOSE, headingIdx);
     if (fenceOpenIdx === -1) return enforceFinalBodyLimit(body, maxBytes);
-    const logStart = fenceOpenIdx + "\n```\n".length;
-    const fenceCloseIdx = body.lastIndexOf("\n```");
+    const logStart = fenceOpenIdx + `${FENCE_CLOSE}\n`.length;
+    const fenceCloseIdx = body.lastIndexOf(FENCE_CLOSE);
     if (fenceCloseIdx < logStart) return enforceFinalBodyLimit(body, maxBytes);
 
     const head = body.slice(0, logStart);
@@ -110,13 +112,32 @@ export function capBodyToGithubLimit(
     return enforceFinalBodyLimit(capped, maxBytes);
 }
 
+/**
+ * A byte cut inside a fence line can leave an unclosed Markdown fence.
+ * Drop a trailing partial backtick line and close any open fence.
+ */
 function enforceFinalBodyLimit(body: string, maxBytes: number): string {
     if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
     const markerBytes = Buffer.byteLength(FINAL_TRUNCATION_MARKER, "utf8");
-    if (markerBytes >= maxBytes) {
+    const fenceBytes = Buffer.byteLength(FENCE_CLOSE, "utf8");
+    if (markerBytes + fenceBytes >= maxBytes) {
         return truncateToByteBudget(FINAL_TRUNCATION_MARKER, maxBytes);
     }
-    return truncateToByteBudget(body, maxBytes - markerBytes) + FINAL_TRUNCATION_MARKER;
+    let kept = truncateToByteBudget(body, maxBytes - markerBytes - fenceBytes);
+    const lastLineStart = kept.lastIndexOf("\n") + 1;
+    if (kept.startsWith("`", lastLineStart)) {
+        kept = kept.slice(0, Math.max(0, lastLineStart - 1));
+    }
+    if (hasOpenFence(kept)) kept += FENCE_CLOSE;
+    return kept + FINAL_TRUNCATION_MARKER;
+}
+
+function hasOpenFence(markdown: string): boolean {
+    let open = false;
+    for (const line of markdown.split("\n")) {
+        if (line.startsWith(FENCE)) open = !open;
+    }
+    return open;
 }
 
 /**
