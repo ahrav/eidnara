@@ -52,6 +52,8 @@ interface RepairPlan {
     disableCompaction: boolean;
     disableMemory: boolean;
     writeUserConfig: boolean;
+    /** False when OMP is missing or below the tested minimum; native managers then stay on. */
+    hostSupported: boolean;
 }
 interface HealthReport {
     results: CheckResult[];
@@ -144,6 +146,7 @@ async function runHealthChecks(options: {
         disableCompaction: false,
         disableMemory: false,
         writeUserConfig: false,
+        hostSupported: true,
     };
     // OMP's native settings are global, so the shared user config decides which
     // native managers count as conflicts; a manager Eidnara has switched off
@@ -166,8 +169,11 @@ async function runHealthChecks(options: {
         add(results, "fail", "OMP binary not found on PATH or in standard user bin directories");
     } else {
         const version = options.deps.getOmpVersion(omp.path);
-        if (!version) add(results, "fail", `OMP at ${omp.path} could not report its version`);
-        else if (compareVersionStrings(version, MIN_OMP_VERSION) < 0) {
+        if (!version) {
+            repairPlan.hostSupported = false;
+            add(results, "fail", `OMP at ${omp.path} could not report its version`);
+        } else if (compareVersionStrings(version, MIN_OMP_VERSION) < 0) {
+            repairPlan.hostSupported = false;
             add(results, "fail", `OMP ${version} is older than tested minimum ${MIN_OMP_VERSION}`);
         } else add(results, "pass", `OMP ${version} detected at ${omp.path}`);
 
@@ -355,6 +361,12 @@ async function repair(
             prompts.log.success(result.message);
             fixed += 1;
         } else prompts.log.error(result.message);
+    }
+    if ((plan.disableCompaction || plan.disableMemory) && !plan.hostSupported) {
+        prompts.log.error(
+            `Leaving OMP native compaction and memory on: this OMP is missing a version or older than ${MIN_OMP_VERSION}, so the plugin may not run to replace them`,
+        );
+        return fixed;
     }
     if (plan.disableCompaction || plan.disableMemory) {
         // Turning off OMP's managers only makes sense once the plugin that

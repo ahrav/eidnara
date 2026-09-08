@@ -36,10 +36,10 @@ export interface BundledIssueReport {
 const SESSION_TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/;
 
 /**
- * The filter retains these tags and drops every other mismatched tag, so it
- * never has to infer a session id's format. `[eidnara][pi]` and
- * `[eidnara][pi-status]` are not listed: the plugin writes per-session
- * command output under them, so they fail closed with the session records.
+ * The filter retains these tags and drops every other tag and every untagged
+ * record, so it never has to infer a session id's format or attribute an
+ * unclassified record. `[eidnara][pi]` and `[eidnara][pi-status]` are not
+ * listed: the plugin writes per-session command output under them.
  */
 const NON_SESSION_TAGS: ReadonlySet<string> = new Set(["global"]);
 
@@ -47,7 +47,7 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     if (!sessionId) return lines;
     return filterLogRecords(lines, (firstLine) => {
         const tagged = SESSION_TAG_PATTERN.exec(firstLine)?.[1];
-        return tagged === undefined || tagged === sessionId || NON_SESSION_TAGS.has(tagged);
+        return tagged !== undefined && (tagged === sessionId || NON_SESSION_TAGS.has(tagged));
     });
 }
 

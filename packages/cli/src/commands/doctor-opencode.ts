@@ -304,6 +304,12 @@ export async function runDoctor(
         return true;
     };
 
+    // A host below the plugin minimum may not load the plugin, so nothing may
+
+    // replace the native managers a repair would turn off.
+
+    let openCodeSupported = true;
+
     const installationReports = describeOpenCodeInstallations(detectOpenCodeInstallations());
     const activeInstallation = installationReports[0];
     if (!activeInstallation) {
@@ -333,6 +339,7 @@ export async function runDoctor(
                 : `OpenCode ${activeInstallation.version} installed`,
         );
         if (compareVersionStrings(activeInstallation.version, OPENCODE_MINIMUM_VERSION) < 0) {
+            openCodeSupported = false;
             fail(
                 `OpenCode ${activeInstallation.version} is older than the required ${OPENCODE_MINIMUM_VERSION}; the plugin may fail to load. Upgrade OpenCode.`,
             );
@@ -437,6 +444,10 @@ export async function runDoctor(
             // the installation with no context-window manager at all.
             fail(
                 `Leaving conflicts in place: ${PLUGIN_NAME} is not registered in the OpenCode config, so nothing would replace native compaction. Run 'setup' first.`,
+            );
+        } else if (options.force && !openCodeSupported) {
+            fail(
+                `Leaving conflicts in place: this OpenCode is older than ${OPENCODE_MINIMUM_VERSION}, so the plugin may not load to replace native compaction. Upgrade OpenCode first.`,
             );
         } else if (options.force) {
             try {

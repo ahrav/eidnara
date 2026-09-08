@@ -462,8 +462,20 @@ async function runIssueFlow(options: {
             sessionFilter = choice === "__all__" ? null : choice;
         }
 
+        // A selected session from another project gets that project's config,
+        // loader warnings, and dumps, not the current directory's.
+        const selected = report.recentSessions.find(
+            (session) => session.sessionId === sessionFilter,
+        );
+        let reportForBundle = report;
+        if (selected !== undefined && selected.directory !== options.cwd) {
+            spinner.start(`Collecting diagnostics for ${selected.directory}`);
+            reportForBundle = await options.deps.collectDiagnostics(selected.directory);
+            spinner.stop("Diagnostics collected for the selected session");
+        }
+
         spinner.start("Bundling Pi issue report");
-        const bundled = await bundleIssueReport(report, description, title, {
+        const bundled = await bundleIssueReport(reportForBundle, description, title, {
             cwd: options.cwd,
             now: options.deps.now(),
             sessionFilter,

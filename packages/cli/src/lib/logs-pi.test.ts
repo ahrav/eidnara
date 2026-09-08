@@ -80,7 +80,7 @@ describe("bundleIssueReport session filtering", () => {
         "[2026-05-11T12:00:06.000Z] plugin startup line without a session tag",
     ];
 
-    it("keeps the selected session, untagged lines, and the global label; drops every other tag", async () => {
+    it("keeps only the selected session and the global label; drops every other tag and untagged records", async () => {
         const body = await bundleWithLog(
             "eidnara-pi-issue-filter-",
             `${logLines.join("\n")}\n`,
@@ -89,8 +89,9 @@ describe("bundleIssueReport session filtering", () => {
 
         expect(body).toContain("selected session line");
         expect(body).toContain("global label line");
-        expect(body).toContain("plugin startup line without a session tag");
-        // `pi` and `pi-status` carry per-session command output, so they fail closed.
+        // Untagged records cannot be attributed, and `pi` / `pi-status` carry
+        // per-session command output, so all of them fail closed.
+        expect(body).not.toContain("plugin startup line without a session tag");
         expect(body).not.toContain("status label line");
         expect(body).not.toContain("plugin label line");
         expect(body).not.toContain("other uuid session line");
@@ -114,7 +115,7 @@ describe("bundleIssueReport session filtering", () => {
         expect(body).not.toContain("other-session-frame");
         expect(body).toContain("Error: mine");
         expect(body).toContain("selected-session-frame");
-        expect(body).toContain("continuation of the untagged record");
+        expect(body).not.toContain("continuation of the untagged record");
     });
 
     it("drops untagged lines that precede the first record when a session is selected", async () => {

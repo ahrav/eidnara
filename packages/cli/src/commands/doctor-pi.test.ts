@@ -432,8 +432,101 @@ describe("Pi doctor", () => {
         }
 
         const report = readFileSync(join(cwd, "eidnara-pi-issue-20260428-123456.md"), "utf-8");
-        expect(report).toContain("untagged startup line");
         expect(report).not.toContain("tagged line");
+        expect(report).not.toContain("untagged startup line");
+        expect(report).toContain("<no log output>");
+    });
+
+    it("collects diagnostics from the selected session's directory when it differs from cwd", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const otherProject = makeTempRoot("eidnara-pi-doctor-other-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const originalConsoleLog = console.log;
+        console.log = () => {};
+        class PickSecondSession extends MockPrompts {
+            override async selectOne(_message: string, options: SelectOption[]): Promise<string> {
+                return options[1]?.value ?? options[0].value;
+            }
+        }
+        const prompts = new PickSecondSession({ texts: ["Title", "Description"] });
+        const collected: string[] = [];
+        const reportFor = (directory: string): PiDiagnosticReport => ({
+            timestamp: "2026-04-28T12:34:56.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: join(root, ".pi", "bin", "pi"),
+            piVersion: "0.74.0",
+            settings: {
+                path: join(agentDir, "settings.json"),
+                exists: true,
+                hasEidnaraPackage: true,
+                packages: ["npm:@eidnara/pi"],
+            },
+            configPaths: {
+                agentDir,
+                userConfig: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                projectConfig: join(directory, ".eidnara", "eidnara.jsonc"),
+            },
+            userConfig: {
+                path: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            projectConfig: {
+                path: join(directory, ".eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: { marker: directory === cwd ? "from-cwd" : "from-other-project" },
+            },
+            loadedConfigPaths: [],
+            loadWarnings: [],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
+            recentSessions: [
+                {
+                    sessionId: "cwd-session",
+                    directory: cwd,
+                    lastActiveAt: "2026-04-28T12:00:00.000Z",
+                },
+                {
+                    sessionId: "other-session",
+                    directory: otherProject,
+                    lastActiveAt: "2026-04-28T11:00:00.000Z",
+                },
+            ],
+            sessionDiscovery: "ok",
+            historianDumps: {
+                byProject: [],
+                legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+            },
+        });
+
+        const options = baseOptions(root, cwd, prompts);
+        try {
+            const code = await runDoctor({
+                ...options,
+                issue: true,
+                deps: {
+                    ...options.deps,
+                    collectDiagnostics: async (directory: string) => {
+                        collected.push(directory);
+                        return reportFor(directory);
+                    },
+                },
+            });
+            expect(code).toBe(0);
+        } finally {
+            console.log = originalConsoleLog;
+        }
+
+        expect(collected).toEqual([cwd, otherProject]);
+        const report = readFileSync(join(cwd, "eidnara-pi-issue-20260428-123456.md"), "utf-8");
+        expect(report).toContain("from-other-project");
+        expect(report).not.toContain("from-cwd");
     });
 
     it("sanitizes the issue title before passing it to gh issue create", async () => {

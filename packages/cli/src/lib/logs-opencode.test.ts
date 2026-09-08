@@ -600,7 +600,8 @@ describe("bundleIssueReport secret redaction", () => {
             expect(body).not.toContain("other-session-frame");
             expect(body).toContain("Error: mine");
             expect(body).toContain("selected-session-frame");
-            expect(body).toContain("untagged record");
+            // An untagged record cannot be attributed, so it fails closed.
+            expect(body).not.toContain("untagged record");
         } finally {
             process.chdir(originalCwd);
         }

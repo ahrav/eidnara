@@ -1,7 +1,7 @@
 /**
- * A session filter value no real session id can equal, so every
- * session-tagged record is dropped and only untagged records remain. Used when
- * session discovery failed and the user declined to include every session.
+ * A session filter value no real session id can equal, so no record survives
+ * the filter. Used when session discovery failed and the user declined to
+ * include every session.
  */
 export const EXCLUDE_SESSION_RECORDS = "__exclude-session-records__";
 

@@ -61,13 +61,18 @@ function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
     return matches.reverse();
 }
 
+/**
+ * With a session selected, only records that name that session survive. An
+ * untagged record cannot be attributed, and the plugin writes some per-session
+ * failures without a tag, so it fails closed rather than into the bundle.
+ */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
     // Word boundaries prevent matching `ses_` embedded in longer identifiers.
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    const sessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
     return filterLogRecords(lines, (firstLine) => {
-        const matches = firstLine.match(otherSessionPattern);
-        if (!matches) return true;
+        const matches = firstLine.match(sessionPattern);
+        if (!matches) return false;
         return matches.every((id) => id === sessionId);
     });
 }
