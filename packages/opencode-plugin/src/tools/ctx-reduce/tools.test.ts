@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { RustToolBackends } from "../../plugin/rust-tool-backends";
+import {
+    type RustToolBackends,
+    RustToolSessionDeletedError,
+} from "../../plugin/rust-tool-backends";
 import { createCtxReduceTools } from "./tools";
 
 type ReduceInput = Parameters<NonNullable<RustToolBackends["reduce"]>>[0];
@@ -60,10 +63,8 @@ describe("createCtxReduceTools", () => {
             const rustResult = await rustTools.ctx_reduce.execute({ drop: "3-5" }, rustContext);
 
             expect(rustResult).toBe("Queued: drop 3-5.");
-            expect(calls[0]).toMatchObject({
-                drop: "3-5",
-                projectRoot: "/repo/project",
-            });
+            expect(calls[0]).toMatchObject({ drop: "3-5" });
+            expect(calls[0]).not.toHaveProperty("projectRoot");
             expect(calls[0]?.commandId).toBe("oc-ses-1-call-1");
 
             await rustTools.ctx_reduce.execute({ drop: "3-5" }, rustContext);
@@ -88,6 +89,20 @@ describe("createCtxReduceTools", () => {
 
             await expect(tools.ctx_reduce.execute({ drop: "3-5" }, toolContext())).resolves.toBe(
                 "Error: Failed to queue ctx_reduce operations. module unavailable",
+            );
+        });
+
+        it("reports a deleted session without claiming the module rejected the drop", async () => {
+            const tools = createCtxReduceTools({
+                rustToolBackends: {
+                    reduce: async () => {
+                        throw new RustToolSessionDeletedError();
+                    },
+                },
+            });
+
+            await expect(tools.ctx_reduce.execute({ drop: "3-5" }, toolContext())).resolves.toBe(
+                "Error: Session was deleted before ctx_reduce could run; nothing was queued.",
             );
         });
 

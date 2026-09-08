@@ -490,6 +490,15 @@ interface OpeningRoute {
     promise: Promise<EnsuredRoute>;
 }
 
+export function isModuleCallBodyValid(method: ModuleMethod, body: unknown): boolean {
+    if (!isRecord(body)) return false;
+    if (method === "ctx_note") {
+        const keys = Object.keys(body);
+        return keys.length === 2 && body.name === "ctx_note" && isRecord(body.arguments);
+    }
+    return body.method === method;
+}
+
 export class HostModuleTransport {
     private readonly connectionFile: string;
     private readonly connectionOrigin: ConnectionOrigin;
@@ -719,10 +728,12 @@ export class HostModuleTransport {
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
     }): Promise<unknown> {
-        // Deadline and wrapup policy key off `args.method`, so the body the daemon reads must name the same method.
-        if (!isRecord(args.body) || args.body.method !== args.method) {
+        // Deadline and wrapup policy key off `args.method`; ctx_note is the one facade whose body uses name/arguments instead of a method discriminator.
+        if (!isModuleCallBodyValid(args.method, args.body)) {
             throw new TypeError(
-                `module transport body must carry method ${JSON.stringify(args.method)}`,
+                args.method === "ctx_note"
+                    ? 'module transport ctx_note body must be exactly { name: "ctx_note", arguments: {...} }'
+                    : `module transport body must carry method ${JSON.stringify(args.method)}`,
             );
         }
         const wrapupInFlight = (this.wrapupSessions.get(args.sessionId) ?? 0) > 0;

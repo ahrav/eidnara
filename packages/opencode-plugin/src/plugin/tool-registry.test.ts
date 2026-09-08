@@ -163,6 +163,12 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
 
 type GoldenTool = { description: string; parameters: Record<string, unknown> };
 type GoldenHashBaseline = { bytes: number; md5: string };
+type JsonSchemaNode = {
+    type?: string;
+    enum?: unknown[];
+    items?: JsonSchemaNode;
+    properties?: Record<string, JsonSchemaNode>;
+};
 
 function readA1GoldenGuidance(document: string): Record<string, string> {
     const guidanceSection = document.slice(
@@ -195,27 +201,25 @@ function readA1GoldenTools(): Record<string, GoldenTool> {
     );
     const headings = [...toolSection.matchAll(/^### (ctx_[a-z_]+) —.*$/gm)];
     return Object.fromEntries(
-        headings
-            .map((heading, index) => {
-                const start = (heading.index ?? 0) + heading[0].length;
-                const end = headings[index + 1]?.index ?? toolSection.length;
-                const body = toolSection.slice(start, end);
-                const description = body.match(/\*\*Description:\*\*\s+```\n([\s\S]*?)\n```/)?.[1];
-                const parameters = body.match(
-                    /\*\*Parameters \(JSON Schema per parameter, as serialized to the provider\):\*\*\s+```json\n([\s\S]*?)\n```/,
-                )?.[1];
-                if (description === undefined || parameters === undefined) {
-                    throw new Error(`Malformed A1 golden tool section: ${heading[1]}`);
-                }
-                return [
-                    heading[1],
-                    {
-                        description,
-                        parameters: JSON.parse(parameters) as Record<string, unknown>,
-                    },
-                ] as const;
-            })
-            .filter(([toolId]) => !UNREGISTERED_CATALOG_TOOL_IDS.has(toolId)),
+        headings.map((heading, index) => {
+            const start = (heading.index ?? 0) + heading[0].length;
+            const end = headings[index + 1]?.index ?? toolSection.length;
+            const body = toolSection.slice(start, end);
+            const description = body.match(/\*\*Description:\*\*\s+```\n([\s\S]*?)\n```/)?.[1];
+            const parameters = body.match(
+                /\*\*Parameters \(JSON Schema per parameter, as serialized to the provider\):\*\*\s+```json\n([\s\S]*?)\n```/,
+            )?.[1];
+            if (description === undefined || parameters === undefined) {
+                throw new Error(`Malformed A1 golden tool section: ${heading[1]}`);
+            }
+            return [
+                heading[1],
+                {
+                    description,
+                    parameters: JSON.parse(parameters) as Record<string, unknown>,
+                },
+            ] as const;
+        }),
     );
 }
 
@@ -260,6 +264,57 @@ describe("A1 prompt-surface golden", () => {
             });
         }
     });
+
+    it("keeps guidance within the registered memory address and search-source contracts", () => {
+        const registry = buildRegistry({});
+        const memory = registry.ctx_memory;
+        const search = registry.ctx_search;
+        expect(memory).toBeDefined();
+        expect(search).toBeDefined();
+
+        const memorySchema = tool.schema.toJSONSchema(
+            tool.schema.object(memory?.args ?? {}),
+        ) as JsonSchemaNode;
+        expect(memorySchema.properties?.objectId?.type).toBe("string");
+        expect(memorySchema.properties?.objectIds?.type).toBe("array");
+        expect(memorySchema.properties?.objectIds?.items?.type).toBe("string");
+
+        const objectIdShape = memory?.description.match(/mem_<32hex>/)?.[0];
+        expect(objectIdShape).toBe("mem_<32hex>");
+
+        const searchSchema = tool.schema.toJSONSchema(
+            tool.schema.object(search?.args ?? {}),
+        ) as JsonSchemaNode;
+        const searchSources = searchSchema.properties?.sources?.items?.enum;
+        expect(searchSources).toEqual(["memory"]);
+
+        for (const [, asset] of DAEMON_GUIDANCE_ASSETS) {
+            const guidance = readFileSync(
+                join(import.meta.dir, "../../../../crates/daemon/assets", asset),
+                "utf8",
+            );
+            expect(guidance).toContain(`\`${objectIdShape}\``);
+            expect(guidance).toContain("`objectId`/`objectIds`");
+            expect(guidance).toContain("`publicClaimId`/`publicClaimIds`");
+            expect(guidance).toContain("`mcm_<32hex>`");
+            expect(guidance).toMatch(/Never interchange (these ID forms|them)\./);
+
+            const publicClaimIdLine = guidance.split("\n").find((line) => line.includes("mcm_…"));
+            expect(publicClaimIdLine).toContain("display-only when");
+            expect(publicClaimIdLine).toContain("`objectId`/`objectIds`");
+            expect(publicClaimIdLine).toContain("`publicClaimId`/`publicClaimIds`");
+
+            const sourceScopeLine = guidance
+                .split("\n")
+                .find((line) => line.includes("`sources` permits only `memory`"));
+            expect(sourceScopeLine).toContain("only `memory`");
+            expect(sourceScopeLine).toMatch(/notes or (summarized history|summaries)/);
+            expect(sourceScopeLine).toContain("`ctx_expand`");
+            expect(sourceScopeLine).toContain("When `ctx_expand` is registered");
+            expect(sourceScopeLine).toContain("`## start-end · date · title`");
+            expect(sourceScopeLine).toContain("`<session-history>`");
+        }
+    });
 });
 
 describe("createToolRegistry — prompt-surface registration", () => {
@@ -288,9 +343,6 @@ describe("createToolRegistry — prompt-surface registration", () => {
         }
     });
 
-    // The golden includes `ctx_*` descriptions and fields that the tool modules do not emit:
-    // ctx_search sources beyond `memory`, a ctx_memory `list` action and `limit` field, and
-    // the `packages/plugin/` path in ctx_note. commentlint: allow(JUDGE)
     it("matches the A1 golden for no config and explicit full", () => {
         const golden = readA1GoldenTools();
         const implicit = buildRegistry({});

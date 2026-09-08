@@ -18,10 +18,14 @@ import { log } from "../../shared/logger";
 // The cooldown prevents repeated failed Git probes.
 const GIT_TIMEOUT_MS = 5_000;
 const TRANSIENT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
-/** A cached `git:` identity is valid only while the directory still resolves to the Git root it was derived from. */
-const identityCache = new Map<string, { identity: string; gitRoot: string }>();
+const GIT_IDENTITY_REVALIDATION_MS = 5 * 60 * 1000;
+/** A cached `git:` identity is valid until revalidation while the directory resolves to its recorded Git root. */
+const identityCache = new Map<
+    string,
+    { identity: string; gitRoot: string; revalidateAfterMs: number }
+>();
 const lastKnownGitIdentityCache = new Map<string, { identity: string; gitRoot: string }>();
-// `directoryFallbackCache` stores `dir:` fallbacks only when no ancestor has a `.git` entry.
+// `directoryFallbackCache` stores `dir:` fallbacks by physical path only when no ancestor has a `.git` entry.
 // Resolution bypasses `directoryFallbackCache` when an ancestor has a `.git` entry.
 // A `.git` entry bypasses cached directory identities so Git resolution can replace them.
 // Re-resolving prevents project state from splitting when the first commit is created.
@@ -122,16 +126,17 @@ function getErrorStderr(error: unknown): string {
     return "";
 }
 
-function directoryFallback(directory: string): string {
-    // The hash covers the physical path so a project opened through a symlink and through its real path shares one `dir:` identity; a path with a missing component keeps its lexical spelling.
+function physicalIdentityPath(directory: string): string | undefined {
     const resolved = path.resolve(directory);
-    let canonical: string;
     try {
-        canonical = realpathSync.native(resolved);
+        return realpathSync.native(resolved);
     } catch {
-        canonical = resolved;
+        return undefined;
     }
-    const hash = createHash("md5").update(canonical, "utf8").digest("hex").slice(0, 12);
+}
+
+function directoryFallback(identityPath: string): string {
+    const hash = createHash("md5").update(identityPath, "utf8").digest("hex").slice(0, 12);
     return `dir:${hash}`;
 }
 
@@ -251,7 +256,18 @@ export function resolveProjectIdentityStrict(directory: string): string {
     const gitRoot = gitRootDirectory(canonical);
     const cached = identityCache.get(canonical);
     if (cached !== undefined) {
-        if (cached.gitRoot === gitRoot) return cached.identity;
+        if (cached.gitRoot === gitRoot) {
+            if (nowMs() < cached.revalidateAfterMs) return cached.identity;
+            try {
+                assertDirectoryUsable(canonical, directory);
+            } catch {
+                identityCache.set(canonical, {
+                    ...cached,
+                    revalidateAfterMs: nowMs() + TRANSIENT_FAILURE_COOLDOWN_MS,
+                });
+                return cached.identity;
+            }
+        }
         if (gitRoot === null) {
             try {
                 assertDirectoryUsable(canonical, directory);
@@ -260,9 +276,11 @@ export function resolveProjectIdentityStrict(directory: string): string {
                 return cached.identity;
             }
         }
-        // The accessible directory either moved to another Git root or no longer has Git metadata.
-        identityCache.delete(canonical);
-        lastKnownGitIdentityCache.delete(canonical);
+        if (cached.gitRoot !== gitRoot) {
+            // A changed Git root invalidates cached Git identities.
+            identityCache.delete(canonical);
+            lastKnownGitIdentityCache.delete(canonical);
+        }
     }
 
     assertDirectoryUsable(canonical, directory);
@@ -285,7 +303,20 @@ export function resolveProjectIdentityStrict(directory: string): string {
             timeout: GIT_TIMEOUT_MS,
         }) as string;
     } catch (error) {
-        throw classifyGitError(error, directory);
+        const classified = classifyGitError(error, directory);
+        if (cached !== undefined && cached.gitRoot === gitRoot) {
+            if (classified.errorClass === "not_git_repo") {
+                identityCache.delete(canonical);
+                lastKnownGitIdentityCache.delete(canonical);
+            } else {
+                identityCache.set(canonical, {
+                    ...cached,
+                    revalidateAfterMs: nowMs() + TRANSIENT_FAILURE_COOLDOWN_MS,
+                });
+                return cached.identity;
+            }
+        }
+        throw classified;
     }
 
     // Repositories with multiple root commits require deterministic root selection.
@@ -303,7 +334,11 @@ export function resolveProjectIdentityStrict(directory: string): string {
     }
 
     const identity = `git:${rootCommit}`;
-    identityCache.set(canonical, { identity, gitRoot });
+    identityCache.set(canonical, {
+        identity,
+        gitRoot,
+        revalidateAfterMs: nowMs() + GIT_IDENTITY_REVALIDATION_MS,
+    });
     lastKnownGitIdentityCache.set(canonical, { identity, gitRoot });
     transientFailureCooldown.delete(canonical);
     dubiousOwnershipFallbackDirectories.delete(canonical);
@@ -416,13 +451,17 @@ function canonicalUserHomeDirectory(): string {
  */
 export function resolveProjectIdentity(directory: string): string {
     const canonical = path.resolve(directory);
-    const cachedFallback = directoryFallbackCache.get(canonical);
+    const physicalPath = physicalIdentityPath(canonical);
+    const fallbackIdentityPath = physicalPath ?? canonical;
+    // Missing paths have no stable physical cache key and must be resolved again after creation.
+    const cachedFallback =
+        physicalPath === undefined ? undefined : directoryFallbackCache.get(fallbackIdentityPath);
     if (cachedFallback !== undefined) {
         // Fallback deletion forces re-resolution so the identity can become `git:<root>`.
         if (!hasGitDir(canonical)) {
             return cachedFallback;
         }
-        directoryFallbackCache.delete(canonical);
+        directoryFallbackCache.delete(fallbackIdentityPath);
     }
 
     if (getActiveCooldown(canonical) !== undefined) {
@@ -433,18 +472,20 @@ export function resolveProjectIdentity(directory: string): string {
                 return cachedGitIdentity;
             }
         }
-        return directoryFallback(canonical);
+        return directoryFallback(fallbackIdentityPath);
     }
 
     try {
         return resolveProjectIdentityStrict(directory);
     } catch (error) {
         if (error instanceof ProjectIdentityError && shouldUseDirectoryFallback(error)) {
-            const fallback = directoryFallback(canonical);
+            const fallback = directoryFallback(fallbackIdentityPath);
             const gitRoot = gitRootDirectory(canonical);
             const hasGitMetadata = gitRoot !== null;
             if (!hasGitMetadata) {
-                directoryFallbackCache.set(canonical, fallback);
+                if (physicalPath !== undefined) {
+                    directoryFallbackCache.set(fallbackIdentityPath, fallback);
+                }
                 transientFailureCooldown.delete(canonical);
             } else {
                 transientFailureCooldown.set(canonical, nowMs() + TRANSIENT_FAILURE_COOLDOWN_MS);
@@ -467,7 +508,7 @@ export function resolveProjectIdentityOrFallback(directory: string): string {
         return resolveProjectIdentity(directory);
     } catch (error) {
         const canonical = path.resolve(directory);
-        const fallback = directoryFallback(canonical);
+        const fallback = directoryFallback(physicalIdentityPath(canonical) ?? canonical);
         const message = error instanceof Error ? error.message : String(error);
         log(
             `[eidnara] project identity resolution failed for ${canonical}; using directory fallback ${fallback}: ${message}`,
@@ -562,14 +603,6 @@ export function __clearProjectIdentityTransientCooldownForTests(directory?: stri
         return;
     }
     transientFailureCooldown.delete(path.resolve(directory));
-}
-
-export function __clearProjectIdentityResolutionCacheForTests(directory?: string): void {
-    if (directory === undefined) {
-        identityCache.clear();
-        return;
-    }
-    identityCache.delete(path.resolve(directory));
 }
 
 export function __resetProjectIdentityForTests(): void {

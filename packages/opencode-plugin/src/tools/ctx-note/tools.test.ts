@@ -12,7 +12,11 @@ import {
     __wakePlaneTest,
     WAKE_PLANE_CAPABILITY,
 } from "../../features/context/smart-notes/wake-plane";
-import type { RustNoteToolRequest, RustToolBackends } from "../../plugin/rust-tool-backends";
+import {
+    type RustNoteToolRequest,
+    type RustToolBackends,
+    RustToolSessionDeletedError,
+} from "../../plugin/rust-tool-backends";
 import { createCtxNoteTools } from "./tools";
 
 // OpenCode passes the model's tool-call id to plugin tools as `callID`.
@@ -69,10 +73,11 @@ describe("createCtxNoteTools", () => {
         expect(requests).toHaveLength(1);
         expect(requests[0]).toMatchObject({
             action: "write",
-            memoryProject: "git:project-a",
-            projectPath: "git:project-a",
             sessionId: "ses-note",
         });
+        expect(requests[0]).not.toHaveProperty("projectRoot");
+        expect(requests[0]).not.toHaveProperty("projectPath");
+        expect(requests[0]).not.toHaveProperty("memoryProject");
         expect(preparingResult).toBe(
             "Error: Rust notes authority is not ready. Write REFUSED and NOT saved; RESEND the same ctx_note call (action=write) after authority is ready.\nContent to resend:\nnot yet",
         );
@@ -99,9 +104,12 @@ describe("createCtxNoteTools", () => {
         expect(requests).toHaveLength(0);
     });
 
-    it("proceeds to the facade when no authority probe is registered", async () => {
+    it("leaves project resolution to the facade when no preflight hook is registered", async () => {
         const { requests, note } = recordingNote("Saved session note #1.");
-        const tools = createCtxNoteTools({ resolveProjectPath, rustToolBackends: { note } });
+        const tools = createCtxNoteTools({
+            resolveProjectPath: () => undefined,
+            rustToolBackends: { note },
+        });
 
         const result = await tools.ctx_note.execute(
             { action: "write", content: "probe-less note" },
@@ -142,8 +150,26 @@ describe("createCtxNoteTools", () => {
             toolContext(),
         );
 
-        expect(result).toBe("Error: Could not resolve project identity for ctx_note.");
+        expect(result).toBe(
+            "Error: Could not resolve project identity for ctx_note preflight checks.",
+        );
         expect(requests).toHaveLength(0);
+    });
+
+    it("reports a deleted session without claiming the module returned an invalid response", async () => {
+        const tools = createCtxNoteTools({
+            rustToolBackends: {
+                note: async () => {
+                    throw new RustToolSessionDeletedError();
+                },
+            },
+        });
+
+        const result = await tools.ctx_note.execute({ action: "read" }, toolContext());
+
+        expect(result).toBe(
+            "Error: Session was deleted before ctx_note could run; nothing was read.",
+        );
     });
 
     it("returns the transport error when the backend has no note facade", async () => {
