@@ -425,11 +425,17 @@ export async function sendUserPrompt(
 
     if (typeof c.session?.promptAsync === "function") {
         // `promptAsync` only enqueues the turn, so a call still pending after the deadline is a stuck endpoint, not a long turn.
-        await withTimeout(
-            c.session.promptAsync(input),
-            notificationSendTimeoutMs,
-            "user prompt delivery timed out",
-        );
+        const controller = new AbortController();
+        try {
+            await withTimeout(
+                c.session.promptAsync({ ...input, signal: controller.signal }),
+                notificationSendTimeoutMs,
+                "user prompt delivery timed out",
+            );
+        } catch (error: unknown) {
+            if (error instanceof TimeoutError) controller.abort(error);
+            throw error;
+        }
     } else if (typeof c.session?.prompt === "function") {
         // `prompt` returns after the model turn completes; a deadline here would report a slow turn as an undelivered prompt.
         await Promise.resolve(c.session.prompt(input));

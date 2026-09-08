@@ -75,6 +75,21 @@ describe("resolveSessionDirectory", () => {
         expect(deps.sessionDirectoryBySession.get("ses-pinned")).toBe("/launch");
     });
 
+    it("pins the caller directory when metadata is unavailable", async () => {
+        const deps = {
+            client: {
+                session: { get: mock(async () => Promise.reject(new Error("boom"))) },
+            } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+        };
+
+        expect(await resolveSessionDirectory(deps, "ses-tool", "/session/from-tool")).toBe(
+            "/session/from-tool",
+        );
+        expect(deps.sessionDirectoryBySession.get("ses-tool")).toBe("/session/from-tool");
+    });
+
     it("retries child classification after a failed read without moving the fallback route", async () => {
         __sessionDirectoryTest.setRetryDelayMs(0);
         let fail = true;

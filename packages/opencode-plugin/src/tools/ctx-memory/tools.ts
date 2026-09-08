@@ -101,7 +101,13 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 const action = rawAction as CtxMemoryAction;
                 args.action = action;
                 assertCtxMemoryWriteShape(args);
-                const projectIdentity = deps.resolveProjectPath(toolContext.directory);
+                const directory = deps.resolveSessionDirectory
+                    ? await deps.resolveSessionDirectory(
+                          toolContext.sessionID,
+                          toolContext.directory,
+                      )
+                    : toolContext.directory;
+                const projectIdentity = deps.resolveProjectPath(directory);
                 if (!projectIdentity) {
                     return "Error: Could not resolve project identity for memory action.";
                 }
@@ -111,7 +117,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
                 const client = deps.kernelClient({
                     sessionId: toolContext.sessionID,
-                    projectRoot: resolveProjectRootDirectory(toolContext.directory),
+                    projectRoot: resolveProjectRootDirectory(directory),
                 });
                 return await executeCtxMemory({
                     client,

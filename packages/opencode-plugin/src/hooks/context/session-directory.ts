@@ -29,6 +29,11 @@ export interface SessionDirectoryDeps {
     internalChildSessions?: Set<string>;
 }
 
+export type SessionDirectoryResolver = (
+    sessionId: string,
+    fallbackDirectory?: string,
+) => Promise<string> | string;
+
 export function knownSessionDirectory(deps: SessionDirectoryDeps, sessionId: string): string {
     return deps.sessionDirectoryBySession?.get(sessionId) ?? deps.directory ?? process.cwd();
 }
@@ -42,6 +47,7 @@ export function knownSessionDirectory(deps: SessionDirectoryDeps, sessionId: str
 export async function resolveSessionDirectory(
     deps: SessionDirectoryDeps,
     sessionId: string,
+    fallbackDirectory?: string,
 ): Promise<string> {
     const pinned = deps.sessionDirectoryBySession?.get(sessionId);
     const metadataStates = deps.sessionMetadataReadStateBySession;
@@ -55,7 +61,11 @@ export async function resolveSessionDirectory(
                     Date.now() < metadataState.retryAfterMs)))
     )
         return pinned;
-    const fallback = pinned ?? knownSessionDirectory(deps, sessionId);
+    const fallback =
+        pinned ??
+        (fallbackDirectory && fallbackDirectory.length > 0
+            ? fallbackDirectory
+            : knownSessionDirectory(deps, sessionId));
     const sessionClient = deps.client?.session;
     if (!sessionClient?.get) return pin(deps, sessionId, fallback);
     const attempts = metadataState?.inFlight

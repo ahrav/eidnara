@@ -592,6 +592,7 @@ describe("sendUserPrompt", () => {
         expect(prompt).not.toHaveBeenCalled();
         expect(promptAsync).toHaveBeenCalledWith({
             path: { id: "ses-user" },
+            signal: expect.any(AbortSignal),
             body: { parts: [{ type: "text", text: "hello" }] },
         });
     });
@@ -605,6 +606,7 @@ describe("sendUserPrompt", () => {
         });
         expect(promptAsync).toHaveBeenCalledWith({
             path: { id: "ses-user-ctx" },
+            signal: expect.any(AbortSignal),
             body: {
                 agent: "plan",
                 model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
@@ -621,8 +623,26 @@ describe("sendUserPrompt", () => {
         expect(prompt).toHaveBeenCalledTimes(1);
     });
 
-    it("rejects when promptAsync never settles so the caller can report the lost prompt", async () => {
-        const promptAsync = mock(() => new Promise<never>(() => {}));
+    it("aborts a timed-out promptAsync so it cannot enqueue the prompt later", async () => {
+        let signal: AbortSignal | undefined;
+        let enqueued = false;
+        const promptAsync = mock((input: unknown) => {
+            signal = (input as { signal?: AbortSignal }).signal;
+            return new Promise<void>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    enqueued = true;
+                    resolve();
+                }, 60);
+                signal?.addEventListener(
+                    "abort",
+                    () => {
+                        clearTimeout(timer);
+                        reject(signal?.reason);
+                    },
+                    { once: true },
+                );
+            });
+        });
         __ignoredNotificationTest.setSendTimeoutMs(20);
         try {
             await expect(
@@ -631,6 +651,12 @@ describe("sendUserPrompt", () => {
         } finally {
             __ignoredNotificationTest.reset();
         }
+
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        expect(promptAsync).toHaveBeenCalledTimes(1);
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal?.aborted).toBe(true);
+        expect(enqueued).toBe(false);
     });
 
     it("rejects when the session prompt API is unavailable", async () => {

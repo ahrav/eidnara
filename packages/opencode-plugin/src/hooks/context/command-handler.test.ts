@@ -652,6 +652,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(sidekickClient.session.create).toHaveBeenCalledTimes(1);
             expect(sidekickClient.session.promptAsync).toHaveBeenCalledWith({
                 path: { id: "ses-aug" },
+                signal: expect.any(AbortSignal),
                 body: {
                     agent: "plan",
                     model: { providerID: "anthropic", modelID: "claude-opus-4-8" },

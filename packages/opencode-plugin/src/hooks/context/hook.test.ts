@@ -167,6 +167,7 @@ describe("eidnara hook", () => {
         expect("tool.definition" in hook).toBe(false);
         expect("config" in hook).toBe(false);
         expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+        expect(typeof hook.resolveSessionDirectory).toBe("function");
         expect("noteEvaluationAvailable" in hook.rustToolBackends).toBe(false);
     });
 
@@ -844,6 +845,11 @@ describe("eidnara hook", () => {
         expect(liveSessionState.liveModelBySession.has(sessionId)).toBe(false);
         expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
         expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
+
+        await expect(
+            hook.resolveSessionDirectory(sessionId, "/late/tool-directory"),
+        ).rejects.toThrow("Session was deleted before the Rust tool could run.");
+        expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
 
         // A prompt change after deletion finds no persisted hash, so it initializes instead of flagging a change.
         await selectModel();

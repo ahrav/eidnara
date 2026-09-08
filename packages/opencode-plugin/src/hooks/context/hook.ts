@@ -35,7 +35,7 @@ import { HostModuleTransport } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
-import { resolveSessionDirectory } from "./session-directory";
+import { resolveSessionDirectory, type SessionDirectoryResolver } from "./session-directory";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
@@ -144,8 +144,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         subagentSessions,
         internalChildSessions,
     };
-    const sessionDirectoryFor = (sessionId: string): Promise<string> =>
-        resolveSessionDirectory(sessionDirectoryDeps, sessionId);
+    const sessionDirectoryFor: SessionDirectoryResolver = (sessionId, fallbackDirectory) =>
+        resolveSessionDirectory(sessionDirectoryDeps, sessionId, fallbackDirectory);
     // Sessions deleted in this process; a detached write that resolves after the deletion must not recreate daemon state for them.
     const deletedSessions = new Set<string>();
     const clearDeletedSessionRoutingState = (sessionId: string): void => {
@@ -163,9 +163,12 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         }
         return subagentSessions.has(sessionId);
     };
-    const projectRootForLiveSession = async (sessionId: string): Promise<string> => {
+    const projectRootForLiveSession: SessionDirectoryResolver = async (
+        sessionId,
+        fallbackDirectory,
+    ): Promise<string> => {
         if (deletedSessions.has(sessionId)) throw new RustToolSessionDeletedError();
-        const projectRoot = await sessionDirectoryFor(sessionId);
+        const projectRoot = await sessionDirectoryFor(sessionId, fallbackDirectory);
         if (deletedSessions.has(sessionId)) {
             clearDeletedSessionRoutingState(sessionId);
             throw new RustToolSessionDeletedError();
@@ -210,6 +213,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 deleteSession: (sessionId, projectRoot) =>
                     transport.deleteSession(sessionId, projectRoot),
                 closeSession: (sessionId) => transport.closeSession(sessionId),
+                hasSessionRoute: (sessionId) => transport.hasSessionRoute(sessionId),
             };
             return client;
         })();
@@ -500,9 +504,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     };
     const hooksWithBackends = hooks as typeof hooks & {
         rustToolBackends: RustToolBackends;
+        resolveSessionDirectory: typeof sessionDirectoryFor;
     };
     Object.defineProperty(hooksWithBackends, "rustToolBackends", {
         value: rustToolBackends,
+        enumerable: false,
+    });
+    Object.defineProperty(hooksWithBackends, "resolveSessionDirectory", {
+        value: projectRootForLiveSession,
         enumerable: false,
     });
     return hooksWithBackends;

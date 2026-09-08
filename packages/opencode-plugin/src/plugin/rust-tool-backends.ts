@@ -7,6 +7,9 @@ export interface RustNoteToolRequest {
     /** The host assigns this MCP tool-use ID. */
     commandId?: string;
     sessionId: string;
+    projectRoot?: string;
+    projectPath?: string;
+    memoryProject?: string;
     action: "write" | "read" | "update" | "dismiss";
     content?: string;
     surfaceCondition?: string;
@@ -47,7 +50,12 @@ export function boundedCommandId(id: string): string {
 }
 
 export interface RustToolBackends {
-    reduce?: (args: { sessionId: string; drop: string; commandId: string }) => Promise<unknown>;
+    reduce?: (args: {
+        sessionId: string;
+        projectRoot?: string;
+        drop: string;
+        commandId: string;
+    }) => Promise<unknown>;
     authorityState?: (args: {
         projectPath: string;
         projectRoot: string;
