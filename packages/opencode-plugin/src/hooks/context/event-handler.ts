@@ -279,6 +279,9 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 sessionLog(sessionId, "event session.compacted marker cleanup failed:", error);
             }
             invalidateTrueRawTokenCache({ sessionId, reason: "session.compacted" });
+            // Compaction replaces the context the live usage measured, so the pre-compaction count must not carry over.
+            deps.contextUsageMap.delete(sessionId);
+            clearSidebarSnapshotCache(sessionId);
             deps.onSessionCacheInvalidated?.(sessionId);
             return;
         }

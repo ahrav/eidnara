@@ -278,6 +278,21 @@ describe("createEventHandler — session.compacted", () => {
         expect(calls.cache).toEqual([SESSION]);
         expect(rowCounts()).toEqual({ messages: 2, parts: 0 });
     });
+
+    it("drops the pre-compaction live usage and sticky snapshot", async () => {
+        const { deps, handle } = buildHarness();
+        await handle("message.updated", assistantUpdated({ input: 90_000 }));
+        const scope = { sessionId: SESSION, directory: "/repo", modelKey: "p/m" };
+        applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, inputTokens: 90_000 });
+
+        await handle("session.compacted", { sessionID: SESSION });
+
+        expect(deps.contextUsageMap.has(SESSION)).toBe(false);
+        expect(
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+                .inputTokens,
+        ).toBe(0);
+    });
 });
 
 describe("createEventHandler — session.deleted", () => {
