@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { estimateTokens } from "@eidnara/opencode/hooks/context/read-session-formatting";
+import { DATE_LINE, DATE_LINE_ALL } from "@eidnara/opencode/hooks/context/system-prompt-hash";
 import { BoundedSessionMap } from "@eidnara/opencode/shared/bounded-session-map";
 import { sessionLog } from "@eidnara/opencode/shared/logger";
 import type { PromptSurfacePreset } from "@eidnara/opencode/shared/prompt-surface";
@@ -30,17 +31,13 @@ export interface SystemPromptHashResult {
     currentHash: string;
 }
 
-// A composed prompt can contain multiple date lines; rewrite every occurrence so no live date
-// remains in the hash.
-const DATE_PATTERN = /Today's date: .+/;
-const DATE_PATTERN_ALL = /Today's date: .+/g;
-
 /**
  * The stored per-session hash detects content and prompt-surface preset changes.
  * `processSystemPromptForCache` returns `hashChanged=true` when the stored hash changes.
  *
  * `processSystemPromptForCache` freezes `Today's date` unless `isCacheBusting` or a hash change busts the cache.
  * A cache-busting turn updates the sticky date to the live date.
+ * Only whole `Today's date: <toDateString>` lines participate; a mid-prose mention is neither stored nor rewritten.
  */
 export function processSystemPromptForCache(args: {
     sessionId: string;
@@ -57,12 +54,12 @@ export function processSystemPromptForCache(args: {
 
     // A content or preset change permits the date to advance in the same cache-busting pass.
     let frozenPrompt = systemPrompt;
-    const dateMatch = systemPrompt.match(DATE_PATTERN);
+    const dateMatch = systemPrompt.match(DATE_LINE);
     const liveDate = dateMatch ? dateMatch[0] : null;
     const stickyDate = previousState?.stickyDate;
     const stableCandidate =
         liveDate && stickyDate && liveDate !== stickyDate
-            ? systemPrompt.replace(DATE_PATTERN_ALL, stickyDate)
+            ? systemPrompt.replace(DATE_LINE_ALL, stickyDate)
             : systemPrompt;
     const stableCandidateHash = createHash("md5")
         .update(promptSurfaceHashMaterial(stableCandidate, args.promptSurfacePreset))
@@ -81,7 +78,7 @@ export function processSystemPromptForCache(args: {
                 `system prompt date updated: ${stickyDate} → ${liveDate} (cache-busting pass)`,
             );
         } else {
-            frozenPrompt = systemPrompt.replace(DATE_PATTERN_ALL, stickyDate);
+            frozenPrompt = systemPrompt.replace(DATE_LINE_ALL, stickyDate);
             sessionLog(
                 sessionId,
                 `system prompt date frozen: real=${liveDate}, using=${stickyDate} (cache-stable pass)`,

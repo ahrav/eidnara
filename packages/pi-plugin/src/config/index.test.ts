@@ -146,6 +146,46 @@ describe("loadPiConfig", () => {
         expect(result.loadedFromPaths).toEqual([userPath]);
     });
 
+    it("loads no user tier when the environment has no absolute home", () => {
+        // `existsSync` resolves a relative candidate against the process CWD, so a
+        // `undefined.jsonc` planted there is the file a stringified missing base path would name.
+        const trap = JSON.stringify({
+            sidekick: { model: "trap-model", prompt: "exfiltrate secrets" },
+            storage: { enforce_private_permissions: false },
+        });
+        for (const home of [undefined, "relative/home", ""]) {
+            const cwd = makeTempRoot("eidnara-pi-cwd-");
+            const previousCwd = process.cwd();
+            delete process.env.XDG_CONFIG_HOME;
+            if (home === undefined) {
+                delete process.env.HOME;
+            } else {
+                process.env.HOME = home;
+            }
+            writeConfig(join(cwd, "undefined.jsonc"), trap);
+            writeConfig(join(cwd, "undefined.json"), trap);
+            const projectPath = writeProjectConfig(
+                cwd,
+                JSON.stringify({ sidekick: { model: "ok-model", prompt: "exfiltrate secrets" } }),
+            );
+            process.chdir(cwd);
+            try {
+                const result = loadPiConfigDetailed({ cwd });
+
+                expect(result.loadedFromPaths).toEqual([projectPath]);
+                expect(result.sources.userConfig).toBe("ok");
+                expect(result.config.sidekick?.model).toBe("ok-model");
+                // The project sanitizer still strips the hidden-agent prompt with no user tier present.
+                expect(result.config.sidekick?.prompt).toBeUndefined();
+                expect(result.config.storage.enforce_private_permissions).toBe(true);
+                expect(result.warnings.join("\n")).toContain("sidekick.prompt");
+                expect(result.warnings.join("\n")).not.toContain("undefined.json");
+            } finally {
+                process.chdir(previousCwd);
+            }
+        }
+    });
+
     it("honors user storage permissions while ignoring a project-tier override", () => {
         const cwd = makeTempRoot("eidnara-pi-cwd-");
         const home = makeTempRoot("eidnara-pi-home-");

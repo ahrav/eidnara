@@ -185,6 +185,46 @@ describe("Pi prompt-surface guidance epochs", () => {
         }
     });
 
+    it("freezes only the host date line when project docs mention the phrase", () => {
+        const sessionId = "ses-date-prose";
+        const dayOne = "Today's date: Mon Jan 01 2024";
+        const dayTwo = "Today's date: Tue Jan 02 2024";
+        const prose = "Today's date: comes from the host env block; do not ask the user for it.";
+        const example = `The host writes a line like "${dayTwo}" inside <env>; never ask for the date.`;
+        const render = (date: string) =>
+            `${prose}\n<env>\n  ${date}\n  Platform: linux\n</env>\n${example}`;
+        try {
+            const initial = processSystemPromptForCache({
+                sessionId,
+                systemPrompt: render(dayOne),
+                isCacheBusting: false,
+            });
+            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(dayOne);
+
+            const frozen = processSystemPromptForCache({
+                sessionId,
+                systemPrompt: render(dayTwo),
+                isCacheBusting: false,
+            });
+            expect(frozen.hashChanged).toBe(false);
+            expect(frozen.currentHash).toBe(initial.currentHash);
+            expect(frozen.systemPrompt).toBe(render(dayOne));
+            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(dayOne);
+
+            // Editing the prose is a content change: the hash moves and the date advances with it.
+            const edited = processSystemPromptForCache({
+                sessionId,
+                systemPrompt: render(dayTwo).replace(prose, "Today's date: comes from <env>."),
+                isCacheBusting: false,
+            });
+            expect(edited.hashChanged).toBe(true);
+            expect(edited.systemPrompt).toContain(`<env>\n  ${dayTwo}\n`);
+            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(dayTwo);
+        } finally {
+            clearPiSystemPromptSession(sessionId);
+        }
+    });
+
     it("stores the sticky date in the bounded session entry and clears it with the session", () => {
         const sessionId = "ses-date-entry";
         try {

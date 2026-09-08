@@ -1,9 +1,9 @@
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, type Stats } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import hostRelease from "../../../../release/host-release.json";
 import { writeFileAtomicSync } from "./atomic-file";
 import { getHarness, type HarnessId } from "./harness";
+import { MANAGED_SUBTREE, STORAGE_SUBDIRECTORY } from "./host-release-layout";
 
 /**
  * The absolute `XDG_DATA_HOME` override, or `null` when the variable is
@@ -175,18 +175,11 @@ export function getEidnaraStorageDir(): string {
 }
 
 /**
- * Eidnara's storage subtree under an explicit data root
- * (`${dataRoot}/eidnara/context`), with the segment names taken from
- * the release contract the Rust daemon conforms to. Root-parameterized so
- * harnesses and scripts that manage their own data root name the same tree
- * the daemon writes.
+ * Eidnara's storage subtree under an explicit data root (`${dataRoot}/eidnara/context`).
+ * Harnesses and scripts can use their own data roots while addressing the daemon's storage subtree.
  */
 export function storageSubtreePath(dataRoot: string): string {
-    return path.join(
-        dataRoot,
-        hostRelease.layout.managed_subtree,
-        hostRelease.layout.storage_subdirectory,
-    );
+    return path.join(dataRoot, MANAGED_SUBTREE, STORAGE_SUBDIRECTORY);
 }
 
 let testBackstopDataRoot: string | null = null;
