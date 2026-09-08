@@ -1,39 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { parseIncidentCatalog } from "../src/incident-pool/contract";
 import {
-    HISTORIAN_EVAL_HARNESS_TESTS,
-    assertSrcTestsClassified,
-    historianEvalUnitFiles,
-    incidentUnitFiles,
-    metamorphicEvalUnitFiles,
-    parseArgs,
-    prospectiveUnitFiles,
-    standaloneFilesForSelection,
-    tsOpenCodeStandaloneFiles,
-} from "./run-test-selection";
-import {
-    E2E_ROOT,
     filesForMode,
-    validateGreenIncidentWrapperSource,
-    validateGreenPackageScripts,
+    type ModeManifest,
     validateManifestDocument,
     validateModeManifest,
-    type ModeManifest,
+    validateTestSource,
 } from "./validate-mode-manifest";
 
 const validation = validateModeManifest();
-const catalog = parseIncidentCatalog(
-    JSON.parse(
-        readFileSync(resolve(E2E_ROOT, "incidents", "catalog.json"), "utf8"),
-    ),
-);
-const greenWrapperSource = readFileSync(
-    resolve(E2E_ROOT, "tests", "incident-pool-green.test.ts"),
-    "utf8",
-);
 
 function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
     return {
@@ -43,254 +17,54 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
     };
 }
 
+const VALID_TEST_SOURCE = 'import { it } from "bun:test";\nit("x", () => {});\n';
+
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(62);
-        expect(validation.manifest.entries).toHaveLength(
+        expect(validation.files.length).toBe(9);
+        expect(validation.manifest.entries).toHaveLength(validation.files.length);
+        expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
         );
-        expect(
-            new Set(validation.manifest.entries.map((entry) => entry.path))
-                .size,
-        ).toBe(validation.files.length);
-        expect(
-            validation.manifest.entries.map((entry) => entry.path).sort(),
-        ).toEqual(validation.files);
+        expect(validation.manifest.entries.map((entry) => entry.path).sort()).toEqual(
+            validation.files,
+        );
     });
 
-    it("derives separate TS and Rust invocation lists", () => {
-        const ts = filesForMode(validation, "ts");
-        const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(43);
-        expect(rust).toHaveLength(32);
-        expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(
-            21,
-        );
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(22);
-        expect(filesForMode(validation, "ts", "pi")).toHaveLength(21);
-        expect(new Set([...ts, ...rust]).size).toBe(validation.files.length);
-        expect(filesForMode(validation, "ts", "pi")).not.toContain(
-            "tests/pi-todo-synthesis.test.ts",
-        );
-        expect(rust).not.toContain("tests/todo-synthesis.test.ts");
+    it("selects every entry for rust and every entry is rust-only", () => {
+        expect(filesForMode(validation, "rust")).toEqual(validation.files);
+        expect(validation.manifest.entries.every((entry) => entry.tier === "rust-only")).toBe(true);
     });
 
-    it("rejects a missing, duplicated, or dead manifest path", () => {
+    it("fails when a test file lacks an entry", () => {
         const entries = validation.manifest.entries;
         expect(() =>
-            validateManifestDocument(
-                manifestWith(entries.slice(0, -1)),
-                validation.files,
-            ),
-        ).toThrow(/missing manifest entries/);
+            validateManifestDocument(manifestWith(entries.slice(0, -1)), validation.files),
+        ).toThrow(/missing manifest entries: tests\/rust-tail-mutation-readopt\.test\.ts/);
+    });
+
+    it("rejects a duplicated or dead manifest path", () => {
+        const entries = validation.manifest.entries;
         expect(() =>
-            validateManifestDocument(
-                manifestWith([...entries, entries[0]!]),
-                validation.files,
-            ),
+            validateManifestDocument(manifestWith([...entries, entries[0]!]), validation.files),
         ).toThrow(/duplicate manifest entry/);
         expect(() =>
             validateManifestDocument(
                 manifestWith([
                     ...entries.slice(0, -1),
-                    {
-                        ...entries.at(-1)!,
-                        path: "tests/not-live.test.ts",
-                    },
+                    { ...entries.at(-1)!, path: "tests/not-live.test.ts" },
                 ]),
                 validation.files,
             ),
         ).toThrow(/dead or out-of-scope/);
     });
 
-    it("accepts a both-modes entry in both invocation lists", () => {
-        const entries = validation.manifest.entries;
-        const both = validateManifestDocument(
-            manifestWith([
-                {
-                    ...entries[0]!,
-                    tier: "both-modes",
-                    invocation: { ts: true, rust: true },
-                    contract_refs: ["PARITY.md"],
-                },
-                ...entries.slice(1),
-            ]),
-            validation.files,
-        );
-        expect(filesForMode(both, "ts")).toContain(entries[0]!.path);
-        expect(filesForMode(both, "rust")).toContain(entries[0]!.path);
-    });
-
-    it("accepts only complete canonical green wrapper arrays", () => {
-        const selected = validateGreenIncidentWrapperSource(
-            greenWrapperSource,
-            catalog,
-        );
-        expect(selected).toContain("var-a5-archived-reobservation");
-        expect(selected).toContain("var-parity-a3-ctx-reduce-survival");
-
-        expect(() =>
-            validateGreenIncidentWrapperSource(
-                greenWrapperSource.replace(
-                    '"var-a5-archived-reobservation",',
-                    "",
-                ),
-                catalog,
-            ),
-        ).toThrow(/must equal complete catalog green set/);
-        expect(() =>
-            validateGreenIncidentWrapperSource(
-                greenWrapperSource.replace(
-                    '"var-a5-archived-reobservation",',
-                    '// "var-a5-archived-reobservation",',
-                ),
-                catalog,
-            ),
-        ).toThrow(/must equal complete catalog green set/);
-        expect(() =>
-            validateGreenIncidentWrapperSource(
-                greenWrapperSource.replace(
-                    '"var-a5-archived-reobservation",',
-                    '"var-a32-stale-embedding-recall",',
-                ),
-                catalog,
-            ),
-        ).toThrow(/known-red registry ID/);
-        expect(() =>
-            validateGreenIncidentWrapperSource(
-                `import { parityPiTodoIncidentCases } from "../src/incident-pool/scenarios/parity-pi-todo";\n${greenWrapperSource}`,
-                catalog,
-            ),
-        ).toThrow(/known-red-only scenario module/);
-    });
-
-    it("keeps incident-unit selection closed over manifest negative tests", () => {
-        expect(incidentUnitFiles()).toEqual(
-            expect.arrayContaining([
-                "scripts/check-rust-prerequisites.test.ts",
-                "scripts/validate-incident-history.test.ts",
-                "scripts/validate-incident-verifiers.test.ts",
-                "scripts/validate-mode-manifest.test.ts",
-            ]),
-        );
-    });
-
-    it("selects every prospective unit and classifies every src test", () => {
-        expect(prospectiveUnitFiles()).toEqual(
-            expect.arrayContaining([
-                "src/prospective-holdout/contract.test.ts",
-                "src/prospective-holdout/graduation.test.ts",
-                "scripts/prospective-holdout.test.ts",
-            ]),
-        );
-        expect(() => assertSrcTestsClassified()).not.toThrow();
-    });
-
-    it("owns OpenCode oracle units only in TypeScript OpenCode selections", () => {
-        const opencodeOnly = [
-            "src/oracle-arms/presets.test.ts",
-            "src/oracle-arms/scripted-ctx-search.test.ts",
-        ];
-        expect(standaloneFilesForSelection("ts", "opencode")).toEqual(
-            expect.arrayContaining(opencodeOnly),
-        );
-        for (const file of opencodeOnly) {
-            expect(standaloneFilesForSelection("ts", "pi")).not.toContain(file);
-            expect(standaloneFilesForSelection("rust", "all")).not.toContain(file);
-        }
-        for (const files of [
-            standaloneFilesForSelection("ts", "opencode"),
-            standaloneFilesForSelection("ts", "pi"),
-            standaloneFilesForSelection("rust", "all"),
-        ]) {
-            expect(files).toContain("src/oracle-arms/seed-gold-memories.test.ts");
-        }
-    });
-
-    it("runs the metamorphic lane in its own gate, not the host-mode suites", () => {
-        // `assertSrcTestsClassified` is satisfied by any claimant, so moving these
-        // into `standaloneUnitFiles` would pass it while removing them from the
-        // dedicated `metamorphic-eval-contracts` job — the job whose whole point is
-        // that a deterministic metamorphic gate cannot be skipped by an unrelated
-        // failure. No unit selection picks up standalone files, so that move is
-        // silent non-enforcement.
-        const metamorphic = metamorphicEvalUnitFiles();
-        expect(metamorphic).toContain("src/metamorphic-eval/transforms.test.ts");
-        expect(metamorphic).toContain("src/metamorphic-eval/invariants.test.ts");
-        expect(metamorphic).toContain("src/metamorphic-eval/injection-canary.test.ts");
-
-        // Owned by exactly one gate. The historian selection used to glob these too,
-        // which ran every metamorphic test twice per PR and made a metamorphic-only
-        // regression fail the historian status as well.
-        const historian = historianEvalUnitFiles();
-        for (const file of metamorphic) {
-            expect(historian).not.toContain(file);
-        }
-
-        for (const file of metamorphic) {
-            for (const selection of [
-                standaloneFilesForSelection("ts", "opencode"),
-                standaloneFilesForSelection("ts", "pi"),
-                standaloneFilesForSelection("rust", "all"),
-            ]) {
-                expect(selection).not.toContain(file);
-            }
-        }
-    });
-
-    it("claims a historian-eval harness test in the OpenCode selection once it exists", () => {
-        // The isolated root lets this test materialize HISTORIAN_EVAL_HARNESS_TESTS without adding repository files.
-        const root = mkdtempSync(join(tmpdir(), "hse-selection-"));
-        try {
-            const files = [
-                "src/oracle-arms/presets.test.ts",
-                "src/oracle-arms/scripted-ctx-search.test.ts",
-                "src/historian-eval/contract.test.ts",
-                ...HISTORIAN_EVAL_HARNESS_TESTS,
-            ];
-            for (const file of files) {
-                mkdirSync(dirname(resolve(root, file)), { recursive: true });
-                writeFileSync(resolve(root, file), "");
-            }
-            for (const harnessTest of HISTORIAN_EVAL_HARNESS_TESTS) {
-                expect(tsOpenCodeStandaloneFiles(root)).toContain(harnessTest);
-                expect(historianEvalUnitFiles(root)).not.toContain(harnessTest);
-            }
-            expect(historianEvalUnitFiles(root)).toContain("src/historian-eval/contract.test.ts");
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    });
-
-    it("rejects broad-glob green package scripts", () => {
-        const pkg = JSON.parse(
-            readFileSync(resolve(E2E_ROOT, "package.json"), "utf8"),
-        ) as { scripts: Record<string, string> };
-        pkg.scripts["test:rust-e2e"] = "bun test tests/rust-*.test.ts";
-        expect(() => validateGreenPackageScripts(pkg)).toThrow(
-            /must derive its exact file list/,
-        );
-    });
-
-    it("requires the metamorphic unit selection script", () => {
-        const pkg = JSON.parse(
-            readFileSync(resolve(E2E_ROOT, "package.json"), "utf8"),
-        ) as { scripts: Record<string, string> };
-        delete pkg.scripts["test:metamorphic-unit"];
-        expect(() => validateGreenPackageScripts(pkg)).toThrow(
-            /test:metamorphic-unit/,
-        );
-    });
-
-    it("rejects invalid tiers and a both-modes entry missing an invocation", () => {
+    it("rejects tiers other than rust-only and unknown entry fields", () => {
         const entries = validation.manifest.entries;
         expect(() =>
             validateManifestDocument(
                 manifestWith([
-                    {
-                        ...entries[0]!,
-                        tier: "not-a-tier" as never,
-                    },
+                    { ...entries[0]!, tier: "both-modes" as never },
                     ...entries.slice(1),
                 ]),
                 validation.files,
@@ -299,48 +73,32 @@ describe("mode manifest validator", () => {
         expect(() =>
             validateManifestDocument(
                 manifestWith([
-                    {
-                        ...entries[0]!,
-                        tier: "both-modes",
-                        invocation: { ts: true, rust: false },
-                    },
+                    { ...entries[0]!, invocation: { rust: true } } as never,
                     ...entries.slice(1),
                 ]),
                 validation.files,
             ),
-        ).toThrow(/invocation disagrees with both-modes/);
-    });
-});
-
-describe("test selection arguments", () => {
-    it("accepts exactly one mode", () => {
-        expect(parseArgs(["--mode", "ts"]).selection).toEqual({ kind: "mode", mode: "ts" });
-    });
-
-    it("rejects two different modes", () => {
-        // Previously only a preceding UNIT selection counted as a conflict, so the
-        // second --mode silently overwrote the first and the run proceeded as rust.
-        expect(() => parseArgs(["--mode", "ts", "--mode", "rust"])).toThrow(
-            /select exactly one/,
-        );
+        ).toThrow(/must contain exactly path, tier, rationale, contract_refs/);
+        expect(() =>
+            validateManifestDocument(
+                manifestWith([{ ...entries[0]!, contract_refs: [] }, ...entries.slice(1)]),
+                validation.files,
+            ),
+        ).toThrow(/non-empty string-array contract_refs/);
     });
 
-    it("accepts a repeated identical mode", () => {
-        // Symmetric with the unit branch, which only conflicts on a DIFFERENT flag.
-        expect(parseArgs(["--mode", "ts", "--mode", "ts"]).selection).toEqual({
-            kind: "mode",
-            mode: "ts",
-        });
-    });
-
-    it("rejects a mode combined with a unit selection, in either order", () => {
-        expect(() => parseArgs(["--incident-unit", "--mode", "ts"])).toThrow(/select exactly one/);
-        expect(() => parseArgs(["--mode", "ts", "--incident-unit"])).toThrow(/select exactly one/);
-    });
-
-    it("rejects two different unit selections", () => {
-        expect(() => parseArgs(["--incident-unit", "--prospective-unit"])).toThrow(
-            /select exactly one/,
-        );
+    it("parses each entry's source as a bun:test module", () => {
+        const entries = validation.manifest.entries;
+        expect(() =>
+            validateManifestDocument(manifestWith(entries), validation.files, (path) =>
+                path === entries[0]!.path ? "describe(" : VALID_TEST_SOURCE,
+            ),
+        ).toThrow(/does not parse as TypeScript/);
+        expect(() =>
+            validateManifestDocument(manifestWith(entries), validation.files, (path) =>
+                path === entries[0]!.path ? 'import { x } from "./x";\n' : VALID_TEST_SOURCE,
+            ),
+        ).toThrow(/does not import bun:test/);
+        expect(() => validateTestSource("tests/ok.test.ts", VALID_TEST_SOURCE)).not.toThrow();
     });
 });

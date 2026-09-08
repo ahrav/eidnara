@@ -1,25 +1,11 @@
 /**
+ * Shared prerequisites, gates, and drivers for the rust-mode e2e scenarios.
  *
- * Gating layers:
- *
- *
- *
+ * `rustPrereqs` is evaluated once at import so every suite guards with the same verdict.
+ * Optional scenarios stay gated behind explicit environment switches and print why they skip.
  */
 
-import {
-    RUST_EMERGENCY_WALL_PCT,
-    RUST_FAILURE_PARK_THRESHOLD,
-    RUST_PARK_PROBE_PRESSURE_BYPASS_PCT,
-    RUST_PARK_RETRY_INTERVAL,
-} from "@eidnara/opencode/hooks/context/rust-mode-transform";
 import { RustTestHarness } from "./rust-harness";
-
-export {
-    RUST_EMERGENCY_WALL_PCT,
-    RUST_FAILURE_PARK_THRESHOLD,
-    RUST_PARK_PROBE_PRESSURE_BYPASS_PCT,
-    RUST_PARK_RETRY_INTERVAL,
-};
 
 export const rustPrereqs = RustTestHarness.detectPrereqs();
 
@@ -31,7 +17,6 @@ export const FOLD_SKIP_REASON =
     "requires broad Rust fold qualification beyond the focused direct " +
     "backend fixture; set EIDNARA_RUST_E2E_FOLD=1 to run it";
 
-/* */
 export function duplicateIdInfraEnabled(): boolean {
     return process.env.EIDNARA_RUST_E2E_DUPLICATE_IDS === "1";
 }
@@ -40,14 +25,14 @@ export const DUPLICATE_ID_SKIP_REASON =
     "requires broad duplicate-ID qualification beyond the focused direct " +
     "backend fixture; set EIDNARA_RUST_E2E_DUPLICATE_IDS=1 to run it";
 
-/**
- * Gated scenarios print the skip reason to avoid silent skips.
- */
+/** Gated scenarios print the skip reason to avoid silent skips. */
 export function printSkip(scenario: string, reason: string): void {
     console.log(`[rust-e2e] ${scenario} SKIPPED: ${reason}`);
 }
 
 /**
+ * Drives one pass that lands the initial snapshot plus `deferPasses` growing turns, then waits
+ * until the transform has logged a pass for each, so callers observe a warm steady state.
  */
 export async function driveToSteadyState(
     h: RustTestHarness,
@@ -68,8 +53,7 @@ export async function driveToSteadyState(
     await h.waitForRustPasses(1 + deferPasses);
 }
 
-/**
- */
+/** Placeholders only ever stand in for content on the plugin side; one on the provider wire is a leak. */
 export function assertMessagesHaveNoPlaceholders(
     messages: readonly unknown[],
     lineageKey: string,
@@ -81,16 +65,6 @@ export function assertMessagesHaveNoPlaceholders(
     }
 }
 
-/* */
-export function lineageScopedTagCount(
-    h: RustTestHarness,
-    sessionId: string,
-    status: string,
-): number {
-    if (sessionId.length === 0) throw new Error("lineage-scoped assertion requires a session id");
-    return h.countTagsByStatus(sessionId, status);
-}
-
 export function sessionLogLines(h: RustTestHarness, sessionId: string): string[] {
     if (sessionId.length === 0) throw new Error("log assertion requires a session id");
     return h
@@ -99,43 +73,11 @@ export function sessionLogLines(h: RustTestHarness, sessionId: string): string[]
         .filter((line) => line.includes(`[${sessionId}]`));
 }
 
+/** The transform serves the input unchanged on failure and logs it; a silent failure is the defect. */
 export function assertLoudModuleFailure(h: RustTestHarness, sessionId: string): string[] {
     const lines = sessionLogLines(h, sessionId);
     if (!lines.some((line) => line.includes("rust transform failed"))) {
         throw new Error(`module failure was not logged for lineage ${sessionId}`);
     }
     return lines;
-}
-
-export function assertExactlyOneLkgOutcome(lines: readonly string[], sessionId: string): void {
-    const outcomes = lines.filter((line) =>
-        /lkg_(?:replay_served|miss|invalidated|model_mismatch|content_mismatch|seam)/.test(line),
-    );
-    if (outcomes.length !== 1) {
-        throw new Error(
-            `expected one terminal LKG outcome for lineage ${sessionId}, got ${outcomes.length}`,
-        );
-    }
-}
-
-export async function sendOutagePasses(
-    h: RustTestHarness,
-    sessionId: string,
-    start: number,
-    count: number,
-    label: string,
-    inputTokens = 2_000,
-): Promise<void> {
-    for (let offset = 0; offset < count; offset += 1) {
-        const turn = start + offset;
-        h.mock.setDefault({
-            text: `${label} assistant ${turn}`,
-            usage: {
-                input_tokens: inputTokens,
-                output_tokens: 20,
-                cache_creation_input_tokens: 1_000,
-            },
-        });
-        await h.sendPrompt(sessionId, `${label} turn ${turn}: ${h.ballast(400)}`);
-    }
 }

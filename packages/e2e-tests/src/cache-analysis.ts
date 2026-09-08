@@ -21,8 +21,8 @@
 
 import { createHash } from "node:crypto";
 import {
-    INTERNAL_OPENCODE_AGENT_SIGNATURES,
     EIDNARA_INTERNAL_AGENT_SIGNATURES,
+    INTERNAL_OPENCODE_AGENT_SIGNATURES,
 } from "@eidnara/opencode/hooks/context/internal-agent-signatures";
 
 type Json = Record<string, unknown>;
@@ -50,7 +50,6 @@ export interface PassComparison {
     divergeIndex: number;
     /** `divergeSegmentId` identifies the first diverging segment for diagnostics. */
     divergeSegmentId: string | null;
-    /* */
     cachedPrefixBytes: number;
     /** `cachedPrefixAt` identifies the last breakpoint before divergence. */
     cachedPrefixAt: string;
@@ -266,13 +265,9 @@ export function analyzePasses(requests: MinimalRequest[]): PassComparison[] {
     }
     return out;
 }
-
-/* */
 export function findBusts(requests: MinimalRequest[]): PassComparison[] {
     return analyzePasses(requests).filter((c) => c.verdict === "BUST");
 }
-
-/* */
 export function mainAgentRequests<T extends MinimalRequest>(requests: T[]): T[] {
     return requests.filter((r) => {
         const sys = r.body.system;
@@ -281,10 +276,6 @@ export function mainAgentRequests<T extends MinimalRequest>(requests: T[]): T[] 
         return asString.includes("## Eidnara");
     });
 }
-
-/**
- *
- */
 export function extractMessageText(body: MinimalRequest["body"], marker: string): string | null {
     const messages = Array.isArray(body.messages) ? (body.messages as Json[]) : [];
     for (const m of messages) {
@@ -295,7 +286,11 @@ export function extractMessageText(body: MinimalRequest["body"], marker: string)
             if (content.includes(marker)) return content;
         } else if (Array.isArray(content)) {
             for (const block of content) {
-                if (block && typeof block === "object" && typeof (block as Json).text === "string") {
+                if (
+                    block &&
+                    typeof block === "object" &&
+                    typeof (block as Json).text === "string"
+                ) {
                     const text = (block as Json).text as string;
                     if (text.includes(marker)) return text;
                 }
@@ -304,18 +299,12 @@ export function extractMessageText(body: MinimalRequest["body"], marker: string)
     }
     return null;
 }
-
-/* */
 export function extractM0(body: MinimalRequest["body"]): string | null {
     return extractMessageText(body, "<session-history>");
 }
-
-/* */
 export function extractM1(body: MinimalRequest["body"]): string | null {
     return extractMessageText(body, "<session-history-since>");
 }
-
-/* */
 export function formatBustReport(comparisons: PassComparison[]): string {
     const lines: string[] = [];
     for (const c of comparisons) {

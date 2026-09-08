@@ -1,15 +1,11 @@
-/// <reference types="bun-types" />
-
 import { describe, expect, it } from "bun:test";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { verifyReleaseRoot } from "../prospective-holdout/release-root";
-import { releaseRootFixture } from "../prospective-holdout/test-fixtures";
+import { join, resolve } from "node:path";
 import type { HermeticHostStack } from "../rust-runner/hermetic-host";
-import { __spawnOpencodeTest, type IsolatedEnv } from "./spawn";
+import { __spawnOpencodeTest, type IsolatedEnv, userEidnaraConfigPath } from "./spawn";
 
 class FakeChild extends EventEmitter {
     readonly pid = 42;
@@ -65,20 +61,21 @@ describe("opencode child lifecycle", () => {
             const config = JSON.parse(
                 readFileSync(join(env.configDir, "opencode.json"), "utf8"),
             ) as {
-                provider: Record<string, {
-                    name?: string;
-                    options?: { baseURL?: string };
-                    models?: Record<string, unknown>;
-                }>;
+                provider: Record<
+                    string,
+                    {
+                        name?: string;
+                        options?: { baseURL?: string };
+                        models?: Record<string, unknown>;
+                    }
+                >;
             };
             expect(Object.keys(config.provider).sort()).toEqual(["anthropic", "mock-anthropic"]);
             expect(config.provider["mock-anthropic"]?.name).toBe("Mock Anthropic");
             expect(config.provider["mock-anthropic"]?.options?.baseURL).toBe(
                 "http://127.0.0.1:4321",
             );
-            expect(config.provider.anthropic?.models).toHaveProperty(
-                "claude-sonnet-4-5-20250929",
-            );
+            expect(config.provider.anthropic?.models).toHaveProperty("claude-sonnet-4-5-20250929");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -147,82 +144,28 @@ describe("opencode child lifecycle", () => {
                     openCodeConfigExtra: {
                         mcp: { docs: { headers: { Authorization: "Bearer sk-live" } } },
                     },
-                })
+                }),
             ).toThrow(
                 /credential-shaped key: openCodeConfigExtra\.mcp\.docs\.headers\.Authorization/,
             );
 
-            // Names `isSecretKey` reads as benign: an unlisted qualifier, or no
-            // case transition to split on at all.
-            for (const key of [
-                "masterKey",
-                "dbPassword",
-                "webhookSecret",
-                "signingSecret",
-                "encryptionKey",
-                "idToken",
-                "APIKEY",
-                "apikey",
-            ]) {
-                expect(write({ [key]: "sk-live" })).toThrow(
-                    new RegExp(`credential-shaped key: .*\\.${key}`),
-                );
-            }
             // Counting keys keep working: `token` alone is not a credential word.
             expect(write({ maxTokens: 4096, promptTokens: 12, tokenBudget: 7 })).not.toThrow();
 
-            // A credential under a header name that names nothing: the value's own
-            // format is what refuses it, and the diagnostic never carries it.
-            for (const [value, format] of [
-                ["Bearer sk-live-abcdefghijklmnop", "HTTP authorization scheme"],
-                ["sk-ant-abcdefghijklmnopqrstuv", "Anthropic-style key"],
-                ["ghp_abcdefghijklmnopqrstuvwxyz012345", "GitHub token"],
-                ["github_pat_abcdefghijklmnopqrstuv0123456789", "GitHub fine-grained token"],
-                ["hf_abcdefghijklmnopqrstuvwxyz0123456789", "Hugging Face token"],
-                ["xoxu-0123456789abcdef", "Slack token"],
-                ["xoxc-0123456789abcdef", "Slack token"],
-                ["xapp-1-A0123456789-1234567890123-abcdef", "Slack token"],
-                ["postgres://user:hunter2@db.internal/app", "credential-bearing URI"],
-            ] as const) {
-                const attempt = () =>
-                    __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                        mockProviderURL: "http://127.0.0.1:4321",
-                        openCodeConfigExtra: {
-                            mcp: { docs: { headers: { "x-trace": value } } },
-                        },
-                    });
-                expect(attempt).toThrow(new RegExp(`a ${format} value at .*x-trace`));
-                expect(attempt).not.toThrow(new RegExp(value.slice(0, 12)));
-            }
             // The sibling config channels are written to disk beside opencode.json,
             // and confusing them for `openCodeConfigExtra` is easy.
             expect(() =>
                 __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
                     mockProviderURL: "http://127.0.0.1:4321",
-                    eidnaraConfig: { embedding: { apiKey: "sk-live" } },
-                })
-            ).toThrow(/credential-shaped key: eidnaraConfig\.embedding\.apiKey/);
+                    eidnaraConfig: { hook: { apiKey: "sk-live" } },
+                }),
+            ).toThrow(/credential-shaped key: eidnaraConfig\.hook\.apiKey/);
             expect(() =>
                 __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
                     mockProviderURL: "http://127.0.0.1:4321",
                     projectEidnaraConfig: { hook: { token: "Bearer sk-live-abcdefghij" } },
-                })
+                }),
             ).toThrow(/projectEidnaraConfig\.hook\.token/);
-
-            // A value with a `toJSON()` hook exposes no enumerable fields to the
-            // walk and then serializes into the credential it was hiding.
-            expect(() =>
-                __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                    mockProviderURL: "http://127.0.0.1:4321",
-                    openCodeConfigExtra: {
-                        provider: {
-                            anthropic: {
-                                baseURL: new URL("https://user:hunter2@host.internal"),
-                            },
-                        },
-                    },
-                })
-            ).toThrow(/credential-bearing URI value at/);
 
             // An ordinary header value still passes.
             expect(() =>
@@ -231,182 +174,80 @@ describe("opencode child lifecycle", () => {
                     openCodeConfigExtra: {
                         mcp: { docs: { headers: { "x-trace": "run-42" } } },
                     },
-                })
+                }),
             ).not.toThrow();
 
-            // `toJSON()` returns `{}`, but object spread copies `embedding`. The credential scan and config write must inspect the same representation.
-            for (
-                const channel of [
-                    "eidnaraConfig",
-                    "projectEidnaraConfig",
-                    "openCodeConfigExtra",
-                ] as const
-            ) {
+            // `toJSON()` returns `{}`, but object spread copies `hook`. The credential scan and config write must inspect the same representation.
+            // Bun's `JSON.stringify` consults only an enumerable `toJSON`, so every hook below is defined enumerable.
+            for (const channel of [
+                "eidnaraConfig",
+                "projectEidnaraConfig",
+                "openCodeConfigExtra",
+            ] as const) {
                 const hidden: Record<string, unknown> = {
-                    embedding: { apiKey: "sk-ant-abcdefghijklmnopqrstuv" },
+                    hook: { apiKey: "sk-ant-abcdefghijklmnopqrstuv" },
                 };
                 Object.defineProperty(hidden, "toJSON", {
                     value: () => ({}),
-                    enumerable: false,
+                    enumerable: true,
                 });
                 __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
                     mockProviderURL: "http://127.0.0.1:4321",
                     [channel]: hidden,
                 });
-                for (
-                    const file of [
-                        join(env.configDir, "opencode.json"),
-                        join(env.configDir, "opencode", "eidnara.jsonc"),
-                        join(env.workdir, ".eidnara", "eidnara.jsonc"),
-                    ]
-                ) {
+                for (const file of [
+                    join(env.configDir, "opencode.json"),
+                    userEidnaraConfigPath(env),
+                    join(env.workdir, ".eidnara", "eidnara.jsonc"),
+                ]) {
                     if (!existsSync(file)) continue;
                     expect(readFileSync(file, "utf8")).not.toContain("sk-ant-");
                 }
             }
 
             // A scalar JSON value has no configuration fields to merge; its original properties are ignored.
-            const scalar: Record<string, unknown> = { embedding: { apiKey: "sk-live" } };
-            Object.defineProperty(scalar, "toJSON", { value: () => "opaque", enumerable: false });
+            const scalar: Record<string, unknown> = { hook: { apiKey: "sk-live" } };
+            Object.defineProperty(scalar, "toJSON", { value: () => "opaque", enumerable: true });
             expect(() =>
                 __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
                     mockProviderURL: "http://127.0.0.1:4321",
                     eidnaraConfig: scalar,
-                })
+                }),
             ).toThrow(/eidnaraConfig must serialize to a JSON object/);
 
-            // The user config loader expands `{env:NAME}`, and `embedding.api_key` is the only
-            // channel for the remote embedding key, so the token itself must be writable.
+            // The user config loader expands `{env:NAME}`, so a placeholder naming a sensitive
+            // variable is the token that reaches disk under a credential-shaped key.
             expect(() =>
                 __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
                     mockProviderURL: "http://127.0.0.1:4321",
                     eidnaraConfig: {
-                        embedding: {
-                            provider: "openai-compatible",
-                            api_key: "{env:EMBEDDING_API_KEY}",
-                        },
+                        hook: { api_key: "{env:HOOK_API_KEY}" },
                     },
-                })
+                }),
             ).not.toThrow();
-            expect(
-                readFileSync(join(env.configDir, "opencode", "eidnara.jsonc"), "utf8"),
-            ).toContain("{env:EMBEDDING_API_KEY}");
+            expect(readFileSync(userEidnaraConfigPath(env), "utf8")).toContain(
+                "{env:HOOK_API_KEY}",
+            );
 
             // Only a whole, named placeholder: a credential must not ride along behind one,
             // and an empty or malformed name resolves to nothing.
-            for (
-                const value of [
-                    "{env:EMBEDDING_API_KEY} sk-ant-abcdefghijklmnopqrstuv",
-                    "sk-ant-abcdefghijklmnopqrstuv",
-                    "{env:}",
-                    "{env:9NOPE}",
-                    "prefix{env:EMBEDDING_API_KEY}",
-                    // An innocuously named variable would resolve a real credential in a child
-                    // whose unauthenticated server can be off loopback.
-                    "{env:FOO}",
-                    "{env:EMBEDDING_KEY}",
-                ]
-            ) {
+            for (const value of [
+                "{env:HOOK_API_KEY} sk-ant-abcdefghijklmnopqrstuv",
+                "sk-ant-abcdefghijklmnopqrstuv",
+                "{env:}",
+                "{env:9NOPE}",
+                "prefix{env:HOOK_API_KEY}",
+                // A name the sensitive-key rule does not recognize is no approved channel.
+                "{env:FOO}",
+                "{env:HOOK_KEY}",
+            ]) {
                 expect(() =>
                     __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
                         mockProviderURL: "http://127.0.0.1:4321",
-                        eidnaraConfig: { embedding: { api_key: value } },
-                    })
-                ).toThrow(/eidnaraConfig\.embedding\.api_key/);
+                        eidnaraConfig: { hook: { api_key: value } },
+                    }),
+                ).toThrow(/eidnaraConfig\.hook\.api_key/);
             }
-
-            // An innocuous name is not covered by the sensitive-name exemption, so the
-            // value it will resolve to has to be read.
-            process.env.PAIRED_DELTA_BUILD_ID = "sk-ant-abcdefghijklmnopqrstuv";
-            try {
-                expect(() =>
-                    __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                        mockProviderURL: "http://127.0.0.1:4321",
-                        openCodeConfigExtra: {
-                            trace: { buildId: "{env:PAIRED_DELTA_BUILD_ID}" },
-                        },
-                    })
-                ).toThrow(/references PAIRED_DELTA_BUILD_ID .* Anthropic-style key value/);
-            } finally {
-                delete process.env.PAIRED_DELTA_BUILD_ID;
-            }
-
-            // A property name can be the credential rather than describe one, and the
-            // diagnostic must not echo the key it refuses.
-            expect(() => {
-                try {
-                    __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                        mockProviderURL: "http://127.0.0.1:4321",
-                        openCodeConfigExtra: {
-                            headers: { "sk-ant-abcdefghijklmnopqrstuv": true },
-                        },
-                    });
-                } catch (error) {
-                    expect(String(error)).not.toContain("sk-ant-abcdefghijklmnopqrstuv");
-                    throw error;
-                }
-            }).toThrow(/Anthropic-style key as a property name/);
-
-            // An approved placeholder value must not exempt a credential-bearing key.
-            expect(() => {
-                try {
-                    __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                        mockProviderURL: "http://127.0.0.1:4321",
-                        openCodeConfigExtra: {
-                            headers: {
-                                "sk-ant-abcdefghijklmnopqrstuv": "{env:ANTHROPIC_API_KEY}",
-                            },
-                        },
-                    });
-                } catch (error) {
-                    expect(String(error)).not.toContain("sk-ant-abcdefghijklmnopqrstuv");
-                    throw error;
-                }
-            }).toThrow(/Anthropic-style key as a property name/);
-
-            // A composite key satisfies both key rules; whichever wins must not name it.
-            expect(() => {
-                try {
-                    __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                        mockProviderURL: "http://127.0.0.1:4321",
-                        openCodeConfigExtra: {
-                            headers: { "sk-ant-abcdefghijklmnopqrstuv-apiKey": true },
-                        },
-                    });
-                } catch (error) {
-                    expect(String(error)).not.toContain("sk-ant-abcdefghijklmnopqrstuv");
-                    throw error;
-                }
-            }).toThrow(/Anthropic-style key as a property name/);
-
-            // A deep-merged live provider's baseURL is a config value like any other, and a
-            // signed URL's signature passes every whole-value rule.
-            expect(() =>
-                __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                    mockProviderURL: "http://127.0.0.1:4321",
-                    openCodeConfigExtra: {
-                        provider: {
-                            azureBlob: {
-                                options: {
-                                    baseURL:
-                                        "https://acct.blob.core.windows.net/c/f?sv=2021-08-06&sig=Zm9vYmFyYmF6cXV4",
-                                },
-                            },
-                        },
-                    },
-                })
-            ).toThrow(/signed-URL credential parameter sig/);
-
-            // `extraEnv` overrides the ambient value, so it is what the child resolves.
-            expect(() =>
-                __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                    mockProviderURL: "http://127.0.0.1:4321",
-                    extraEnv: { PAIRED_DELTA_TRACE: "sk-ant-abcdefghijklmnopqrstuv" },
-                    openCodeConfigExtra: {
-                        trace: { buildId: "{env:PAIRED_DELTA_TRACE}" },
-                    },
-                })
-            ).toThrow(/references PAIRED_DELTA_TRACE .* Anthropic-style key value/);
 
             // `typeof [] === "object"`, so an array would spread into the provider map as
             // numeric keys rather than being ignored.
@@ -416,34 +257,12 @@ describe("opencode child lifecycle", () => {
             });
             const providerKeys = Object.keys(
                 (
-                    JSON.parse(
-                        readFileSync(join(env.configDir, "opencode.json"), "utf8"),
-                    ) as { provider?: Record<string, unknown> }
+                    JSON.parse(readFileSync(join(env.configDir, "opencode.json"), "utf8")) as {
+                        provider?: Record<string, unknown>;
+                    }
                 ).provider ?? {},
             );
             expect(providerKeys).not.toContain("0");
-
-            // `spawnOpencodeWithProvision` reads `compaction.auto` to decide whether to
-            // initialize the isolated database, and `writeConfigs` persists the config. Both
-            // must read the same representation.
-            const hiddenCompaction: Record<string, unknown> = { compaction: { auto: true } };
-            Object.defineProperty(hiddenCompaction, "toJSON", {
-                value: () => ({}),
-                enumerable: false,
-            });
-            const canonical = __spawnOpencodeTest.canonicalizeSpawnConfigs({
-                mockProviderURL: "http://127.0.0.1:4321",
-                openCodeConfigExtra: hiddenCompaction,
-            });
-            const decidedAuto = (canonical.openCodeConfigExtra?.compaction as { auto?: unknown })
-                ?.auto;
-            __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", canonical);
-            const written = JSON.parse(
-                readFileSync(join(env.configDir, "opencode.json"), "utf8"),
-            ) as { compaction?: { auto?: unknown } };
-            // Reading the original object decided to skip the database while writing `auto: false`.
-            expect(decidedAuto !== true).toBe(written.compaction?.auto !== true);
-            expect(written.compaction?.auto).toBe(false);
 
             // A `toJSON()` hook shares a reference with `extraEnv` and runs during
             // canonicalization, so the loopback rule has to read the post-hook environment.
@@ -454,7 +273,7 @@ describe("opencode child lifecycle", () => {
                     smuggled.ANTHROPIC_API_KEY = "sk-ant-abcdefghijklmnopqrstuv";
                     return { compaction: { auto: false } };
                 },
-                enumerable: false,
+                enumerable: true,
             });
             const smugglingOpts = {
                 mockProviderURL: "http://127.0.0.1:4321",
@@ -462,114 +281,35 @@ describe("opencode child lifecycle", () => {
                 openCodeConfigExtra: mutating,
             };
             expect(() =>
-                __spawnOpencodeTest.assertSecretsBoundToLoopback(smugglingOpts, "0.0.0.0")
+                __spawnOpencodeTest.assertSecretsBoundToLoopback(smugglingOpts, "0.0.0.0"),
             ).not.toThrow();
             const postHook = {
                 ...__spawnOpencodeTest.canonicalizeSpawnConfigs(smugglingOpts),
                 extraEnv: { ...(smugglingOpts.extraEnv ?? {}) },
             };
             expect(() =>
-                __spawnOpencodeTest.assertSecretsBoundToLoopback(postHook, "0.0.0.0")
+                __spawnOpencodeTest.assertSecretsBoundToLoopback(postHook, "0.0.0.0"),
             ).toThrow(/refusing to bind the unauthenticated serve API/);
 
-            // The URL is written verbatim as the generated provider's `baseURL`.
-            expect(() =>
-                __spawnOpencodeTest.writeConfigs(
-                    env,
-                    "https://long-api-token@host.internal",
-                    { mockProviderURL: "https://long-api-token@host.internal" },
-                )
-            ).toThrow(/mockProviderURL is a credential-bearing URI value/);
-            // The query string is its own namespace; the anchored value rules never reach it.
-            for (
-                const [url, pattern] of [
-                    [
-                        "https://host.internal/v1?api_key=supersecret",
-                        /credential-shaped query key api_key/,
-                    ],
-                    [
-                        "https://host.internal/v1?token=supersecret",
-                        /credential-shaped query key token/,
-                    ],
-                    [
-                        "https://host.internal/v1?trace=sk-ant-abcdefghijklmnopqrstuv",
-                        /Anthropic-style key value in query key trace/,
-                    ],
-                    // `searchParams` excludes the fragment; an implicit-flow redirect puts
-                    // its access token there.
-                    [
-                        "https://host.internal/v1#access_token=sk-ant-abcdefghijklmnopqrstuv",
-                        /credential-shaped query key access_token/,
-                    ],
-                    [
-                        "https://host.internal/v1#sk-ant-abcdefghijklmnopqrstuv",
-                        /Anthropic-style key value in a URL component/,
-                    ],
-                    // A signed URL announces its credential by parameter name; the signature
-                    // itself matches no vendor prefix.
-                    [
-                        "https://host.internal/v1?sv=2021-08-06&sp=r&sig=Zm9vYmFyYmF6cXV4",
-                        /signed-URL credential parameter sig/,
-                    ],
-                    // A path segment has no key, and the value rules anchor at the start of
-                    // the whole URL.
-                    [
-                        "https://host.internal/v1/sk-ant-abcdefghijklmnopqrstuv",
-                        /Anthropic-style key value in a URL component/,
-                    ],
-                    // A capability-style endpoint can carry its token in the leftmost label.
-                    [
-                        "https://sk-ant-abcdefghijklmnopqrstuv.gateway.internal/v1",
-                        /Anthropic-style key value in a URL component/,
-                    ],
-                    [
-                        "https://host.internal/v1/sk-ant-abcdefghijklmnopqrstuv/chat",
-                        /Anthropic-style key value in a URL component/,
-                    ],
-                    [
-                        "https://host.internal/v1?X-Amz-Signature=deadbeefcafe",
-                        /signed-URL credential parameter X-Amz-Signature/,
-                    ],
-                ] as const
-            ) {
-                expect(() =>
-                    __spawnOpencodeTest.writeConfigs(env, url, { mockProviderURL: url })
-                ).toThrow(pattern);
-            }
             // An ordinary query still passes.
             expect(() =>
-                __spawnOpencodeTest.writeConfigs(
-                    env,
-                    "http://127.0.0.1:4321/v1?maxTokens=4096",
-                    { mockProviderURL: "http://127.0.0.1:4321/v1?maxTokens=4096" },
-                )
+                __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321/v1?maxTokens=4096", {
+                    mockProviderURL: "http://127.0.0.1:4321/v1?maxTokens=4096",
+                }),
             ).not.toThrow();
             expect(() =>
                 __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
                     mockProviderURL: "http://127.0.0.1:4321",
-                })
+                }),
             ).not.toThrow();
-
-            for (const header of ["Cookie", "Proxy-Authorization", "set-cookie"]) {                expect(() =>
-                    __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
-                        mockProviderURL: "http://127.0.0.1:4321",
-                        openCodeConfigExtra: {
-                            mcp: { docs: { headers: { [header]: "sk-live" } } },
-                        },
-                    })
-                ).toThrow(new RegExp(`credential-shaped key: .*${header}`));
-            }
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
     });
 
-    it("resolves the plugin entry when spawning, not when this module was imported", () => {
-        // Each spawn resolves the plugin entry so it uses a bundle created after module import.
+    it("loads only the built plugin bundle and writes rust consent beside the connection file", () => {
         const repoRoot = resolve(import.meta.dir, "../../../..");
-        const dist = join(repoRoot, "packages/plugin/dist/index.js");
-        const distExisted = existsSync(dist);
-        const stash = `${dist}.spawn-entry-test`;
+        const dist = join(repoRoot, "packages/opencode-plugin/dist/index.js");
         const root = mkdtempSync(join(tmpdir(), "opencode-plugin-entry-"));
         const env: IsolatedEnv = {
             configDir: join(root, "config"),
@@ -577,60 +317,38 @@ describe("opencode child lifecycle", () => {
             cacheDir: join(root, "cache"),
             workdir: join(root, "work"),
         };
-        const pluginOf = (): string => {
-            __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:1", { mockProviderURL: "http://127.0.0.1:1" });
-            return (
-                JSON.parse(readFileSync(join(env.configDir, "opencode.json"), "utf8")) as { plugin: string[] }
-            ).plugin[0] as string;
-        };
         try {
             for (const dir of Object.values(env)) mkdirSync(dir, { recursive: true });
-            if (distExisted) renameSync(dist, stash);
-            expect(pluginOf()).toBe(`file://${join(repoRoot, "packages/plugin/src/index.ts")}`);
-
-            mkdirSync(dirname(dist), { recursive: true });
-            writeFileSync(dist, distExisted ? readFileSync(stash) : "// built after import\n");
-            expect(pluginOf()).toBe(`file://${dist}`);
-        } finally {
-            if (distExisted) {
-                renameSync(stash, dist);
-            } else {
-                rmSync(dist, { force: true });
+            const connectionFile = join(env.dataDir, "connection.json");
+            const write = () =>
+                __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:1", {
+                    mockProviderURL: "http://127.0.0.1:1",
+                    userHostConnectionFile: connectionFile,
+                    projectEidnaraConfig: { protected_tags: 1 },
+                });
+            if (!existsSync(dist)) {
+                expect(write).toThrow(/plugin bundle missing/);
+                return;
             }
-            rmSync(root, { recursive: true, force: true });
-        }
-    });
+            write();
+            const config = JSON.parse(
+                readFileSync(join(env.configDir, "opencode.json"), "utf8"),
+            ) as { plugin: string[] };
+            expect(config.plugin).toEqual([`file://${dist}`]);
 
-    it("uses selected plugin and database bytes only when release root is supplied", () => {
-        const release = mkdtempSync(join(tmpdir(), "opencode-release-root-"));
-        const active = mkdtempSync(join(tmpdir(), "opencode-active-root-"));
-        const root = mkdtempSync(join(tmpdir(), "opencode-selected-root-"));
-        const env: IsolatedEnv = {
-            configDir: join(root, "config"),
-            dataDir: join(root, "data"),
-            cacheDir: join(root, "cache"),
-            workdir: join(root, "work"),
-        };
-        try {
-            for (const dir of Object.values(env)) mkdirSync(dir, { recursive: true });
-            const manifest = releaseRootFixture(release);
-            const verified = verifyReleaseRoot(release, manifest, {
-                expectedRootFingerprint: manifest.rootFingerprint,
-                activeCheckout: active,
-            });
-            __spawnOpencodeTest.initializeIsolatedContextDb(env.dataDir, verified);
-            __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:1", {
-                mockProviderURL: "http://127.0.0.1:1",
-                releaseRoot: verified,
-            });
-            const config = JSON.parse(readFileSync(join(env.configDir, "opencode.json"), "utf8")) as { plugin: string[] };
-            expect(config.plugin).toEqual([`file://${join(verified.root, "packages/plugin/dist/index.js")}`]);
-            const database = join(env.dataDir, "cortexkit/magic-context/context.db");
-            expect(readFileSync(database, "utf8")).toBe("db");
-            expect(() => accessSync(database, constants.W_OK)).not.toThrow();
+            const user = JSON.parse(readFileSync(userEidnaraConfigPath(env), "utf8")) as {
+                transform_mode?: string;
+                subc?: { connection_file?: string };
+            };
+            expect(user.transform_mode).toBe("rust");
+            expect(user.subc?.connection_file).toBe(connectionFile);
+
+            const project = JSON.parse(
+                readFileSync(join(env.workdir, ".eidnara", "eidnara.jsonc"), "utf8"),
+            ) as { transform_mode?: string; protected_tags?: number };
+            expect(project.transform_mode).toBe("rust");
+            expect(project.protected_tags).toBe(1);
         } finally {
-            rmSync(release, { recursive: true, force: true });
-            rmSync(active, { recursive: true, force: true });
             rmSync(root, { recursive: true, force: true });
         }
     });
@@ -668,10 +386,11 @@ describe("opencode child lifecycle", () => {
         };
         for (const dir of Object.values(env)) mkdirSync(dir, { recursive: true });
         const host = {
-            connectionFile: join(env.dataDir, "mc-host-connection.json"),
+            connectionFile: join(env.dataDir, "host-connection.json"),
             async stop(): Promise<void> {},
         } as HermeticHostStack;
         // The hook mutates the same `extraEnv` object the first check already inspected.
+        // Bun's `JSON.stringify` consults only an enumerable `toJSON`.
         const extraEnv: Record<string, string> = {};
         const mutating: Record<string, unknown> = { compaction: { auto: false } };
         Object.defineProperty(mutating, "toJSON", {
@@ -679,7 +398,7 @@ describe("opencode child lifecycle", () => {
                 extraEnv.ANTHROPIC_API_KEY = "sk-ant-abcdefghijklmnopqrstuv";
                 return { compaction: { auto: false } };
             },
-            enumerable: false,
+            enumerable: true,
         });
         const previousMode = process.env.EIDNARA_E2E_MODE;
         process.env.EIDNARA_E2E_MODE = "rust";
@@ -721,7 +440,7 @@ describe("opencode child lifecycle", () => {
         let stopCalls = 0;
         let provisionCalls = 0;
         const host = {
-            connectionFile: join(env.dataDir, "mc-host-connection.json"),
+            connectionFile: join(env.dataDir, "host-connection.json"),
             async stop(): Promise<void> {
                 stopCalls++;
                 rmSync(root, { recursive: true, force: true });

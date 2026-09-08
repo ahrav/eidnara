@@ -1,8 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-    validateCommittedMatrix,
-    validateHardeningMatrix,
-} from "./validate-shm-hardening-matrix";
+import { validateCommittedMatrix, validateHardeningMatrix } from "./validate-shm-hardening-matrix";
 
 describe("fixed ring manifest validator", () => {
     it("accepts the committed manifest", () => {
@@ -13,9 +10,10 @@ describe("fixed ring manifest validator", () => {
     });
 
     it("accepts one fixed ring transport", () => {
-        expect(
-            validateHardeningMatrix({ arms: { transport: ["ring"] } }),
-        ).toEqual({ outcome: "valid", errors: [] });
+        expect(validateHardeningMatrix({ arms: { transport: ["ring"] } })).toEqual({
+            outcome: "valid",
+            errors: [],
+        });
     });
 
     it("rejects missing, alternate, or multiple transports", () => {

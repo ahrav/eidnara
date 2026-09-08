@@ -8,8 +8,6 @@
  * The server supports Anthropic Messages SSE streaming and single-shot JSON responses.
  */
 
-import { fnv1a32 } from "../fnv1a";
-
 export interface MockUsage {
     input_tokens: number;
     output_tokens: number;
@@ -22,14 +20,12 @@ export interface MockResponse {
     text?: string;
     /** `content` overrides `text` for tool calls or multiple content blocks. */
     content?: unknown[];
-    /* */
     stop_reason?: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence";
     /**
      * Tests use these counts to exercise token thresholds.
      * `usage` is required unless `error` is set; errors omit usage.
      */
     usage?: MockUsage;
-    /* */
     delayMs?: number;
     /** `model` overrides the response model; otherwise the response echoes the request model. */
     model?: string;
@@ -48,48 +44,6 @@ export interface MockResponse {
         /** `message` is regex-matched to detect context overflow. */
         message: string;
     };
-}
-
-/**
- */
-export interface CapturedEmbeddingRequest {
-    receivedAt: number;
-    model: string;
-    /** `inputType` stores OpenAI-compatible `input_type` values such as `query` or `passage`, or null. */
-    inputType: string | null;
-    inputs: string[];
-}
-
-export const EMBEDDING_DIMENSIONS = 8;
-
-/**
- * Tokens on the same axis produce identical vectors despite zero lexical overlap, allowing semantic-only matches that FTS cannot satisfy.
- * accidentally satisfy.
- */
-export const SEMANTIC_MARKER_AXES: readonly (readonly string[])[] = [
-    ["aurora", "borealis"],
-    ["cascade", "rapids"],
-];
-
-/**
- * The embedding is deterministic across processes and runs.
- */
-export function deterministicEmbedding(text: string): number[] {
-    const tokens = text
-        .toLowerCase()
-        .split(/[^a-z0-9]+/)
-        .filter((token) => token.length > 0);
-    const vector: number[] = new Array(EMBEDDING_DIMENSIONS).fill(0);
-    for (const [axis, markers] of SEMANTIC_MARKER_AXES.entries()) {
-        if (tokens.some((token) => markers.includes(token))) vector[axis] += 1;
-    }
-    if (vector.every((component) => component === 0)) {
-        for (const token of tokens) {
-            vector[fnv1a32(token) % EMBEDDING_DIMENSIONS] += 1;
-        }
-    }
-    const norm = Math.hypot(...vector) || 1;
-    return vector.map((component) => component / norm);
 }
 
 export interface CapturedRequest {
@@ -128,14 +82,11 @@ export class MockProvider {
     private server: ReturnType<typeof Bun.serve> | null = null;
     private responses: MockResponse[] = [];
     private captured: CapturedRequest[] = [];
-    private capturedEmbeddings: CapturedEmbeddingRequest[] = [];
     private defaultResponse: MockResponse | null = null;
     private matchers: RequestMatcher[] = [];
     private defaultHitCount = 0;
 
-    async start(
-        options: MockServerOptions = {},
-    ): Promise<{ port: number; baseURL: string }> {
+    async start(options: MockServerOptions = {}): Promise<{ port: number; baseURL: string }> {
         const port = options.port ?? 0; // 0 = pick any available port
         this.server = Bun.serve({
             port,
@@ -154,8 +105,6 @@ export class MockProvider {
             this.server = null;
         }
     }
-
-    /* */
     script(responses: MockResponse[]): void {
         this.responses = [...responses];
     }
@@ -164,8 +113,6 @@ export class MockProvider {
     setDefault(response: MockResponse): void {
         this.defaultResponse = response;
     }
-
-    /* */
     enqueue(response: MockResponse): void {
         this.responses.push(response);
     }
@@ -177,26 +124,12 @@ export class MockProvider {
     addMatcher(matcher: RequestMatcher): void {
         this.matchers.push(matcher);
     }
-
-    /* */
     requests(): CapturedRequest[] {
         return [...this.captured];
     }
-
-    /* */
     lastRequest(): CapturedRequest | null {
         return this.captured[this.captured.length - 1] ?? null;
     }
-
-    /**
-     * Embedding requests persist across reset().
-     * Provenance must cover both the seed embedding and the post-edit re-embedding.
-     */
-    embeddingRequests(): CapturedEmbeddingRequest[] {
-        return [...this.capturedEmbeddings];
-    }
-
-    /* */
     reset(): void {
         this.responses = [];
         this.captured = [];
@@ -231,81 +164,8 @@ export class MockProvider {
         }
         const method = req.method;
 
-        const isEmbeddings =
-            url.pathname === "/embeddings" || url.pathname === "/v1/embeddings";
-        if (method === "POST" && isEmbeddings) {
-            let rawBody: unknown;
-            try {
-                rawBody = await req.json();
-            } catch {
-                rawBody = null;
-            }
-            const bodyIsObject =
-                rawBody !== null &&
-                typeof rawBody === "object" &&
-                !Array.isArray(rawBody);
-            const body = bodyIsObject
-                ? (rawBody as Record<string, unknown>)
-                : null;
-            const rawInput = body?.input;
-            const inputIsValid =
-                typeof rawInput === "string" ||
-                (Array.isArray(rawInput) &&
-                    rawInput.length > 0 &&
-                    rawInput.every((entry) => typeof entry === "string"));
-            const inputTypeIsValid =
-                body !== null &&
-                (!("input_type" in body) ||
-                    typeof body.input_type === "string");
-            if (
-                body === null ||
-                typeof body.model !== "string" ||
-                !inputTypeIsValid ||
-                !inputIsValid
-            ) {
-                return new Response(
-                    JSON.stringify({
-                        error: "bad_request",
-                        message: "invalid embedding request",
-                    }),
-                    {
-                        status: 400,
-                        headers: { "content-type": "application/json" },
-                    },
-                );
-            }
-            const inputs = Array.isArray(rawInput) ? rawInput : [rawInput];
-            const model = body.model;
-            this.capturedEmbeddings.push({
-                receivedAt: Date.now(),
-                model,
-                inputType:
-                    typeof body.input_type === "string"
-                        ? body.input_type
-                        : null,
-                inputs,
-            });
-            return new Response(
-                JSON.stringify({
-                    object: "list",
-                    model,
-                    data: inputs.map((text, index) => ({
-                        object: "embedding",
-                        index,
-                        embedding: deterministicEmbedding(text),
-                    })),
-                    usage: { prompt_tokens: 0, total_tokens: 0 },
-                }),
-                {
-                    status: 200,
-                    headers: { "content-type": "application/json" },
-                },
-            );
-        }
-
         // `baseURL` may include `/v1`, so the mock accepts both paths.
-        const isMessages =
-            url.pathname === "/messages" || url.pathname === "/v1/messages";
+        const isMessages = url.pathname === "/messages" || url.pathname === "/v1/messages";
 
         if (method === "POST" && isMessages) {
             let body: Record<string, unknown> = {};
@@ -340,7 +200,11 @@ export class MockProvider {
             }
             const fromQueue = matcherResponse === null ? this.responses.shift() : undefined;
             const scripted = matcherResponse ?? fromQueue ?? this.defaultResponse;
-            if (matcherResponse === null && fromQueue === undefined && this.defaultResponse !== null) {
+            if (
+                matcherResponse === null &&
+                fromQueue === undefined &&
+                this.defaultResponse !== null
+            ) {
                 this.defaultHitCount += 1;
             }
             if (!scripted) {
@@ -399,13 +263,10 @@ export class MockProvider {
                 );
             }
 
-            const content = scripted.content ?? [
-                { type: "text", text: scripted.text ?? "OK" },
-            ];
+            const content = scripted.content ?? [{ type: "text", text: scripted.text ?? "OK" }];
 
             const respModel =
-                scripted.model ??
-                (typeof body.model === "string" ? body.model : "mock-model");
+                scripted.model ?? (typeof body.model === "string" ? body.model : "mock-model");
 
             const wantsStream = body.stream === true;
             const messageId = `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
@@ -416,10 +277,7 @@ export class MockProvider {
                 const encoder = new TextEncoder();
                 const stream = new ReadableStream({
                     start(controller) {
-                        const send = (
-                            event: string,
-                            data: Record<string, unknown>,
-                        ) => {
+                        const send = (event: string, data: Record<string, unknown>) => {
                             controller.enqueue(
                                 encoder.encode(
                                     `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
@@ -442,8 +300,7 @@ export class MockProvider {
                                     output_tokens: 0,
                                     cache_creation_input_tokens:
                                         usage.cache_creation_input_tokens ?? 0,
-                                    cache_read_input_tokens:
-                                        usage.cache_read_input_tokens ?? 0,
+                                    cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
                                 },
                             },
                         });
@@ -547,9 +404,7 @@ export class MockProvider {
                                     index,
                                     delta: {
                                         type: "input_json_delta",
-                                        partial_json: JSON.stringify(
-                                            toolBlock.input ?? {},
-                                        ),
+                                        partial_json: JSON.stringify(toolBlock.input ?? {}),
                                     },
                                 });
                                 send("content_block_stop", {
@@ -579,10 +434,8 @@ export class MockProvider {
                             usage: {
                                 // `message_delta.usage` repeats the cumulative usage sent in `message_start`.
                                 input_tokens: usage.input_tokens,
-                                cache_creation_input_tokens:
-                                    usage.cache_creation_input_tokens ?? 0,
-                                cache_read_input_tokens:
-                                    usage.cache_read_input_tokens ?? 0,
+                                cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+                                cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
                                 output_tokens: usage.output_tokens,
                             },
                         });
@@ -613,8 +466,7 @@ export class MockProvider {
                 usage: {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
-                    cache_creation_input_tokens:
-                        usage.cache_creation_input_tokens ?? 0,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
                     cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
                 },
             };
@@ -625,12 +477,9 @@ export class MockProvider {
             });
         }
 
-        return new Response(
-            JSON.stringify({ error: "not_found", path: url.pathname }),
-            {
-                status: 404,
-                headers: { "content-type": "application/json" },
-            },
-        );
+        return new Response(JSON.stringify({ error: "not_found", path: url.pathname }), {
+            status: 404,
+            headers: { "content-type": "application/json" },
+        });
     }
 }

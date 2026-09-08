@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 
+import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 
 export interface RustPrerequisiteOptions {
     repoRoot?: string;
@@ -24,10 +24,7 @@ function isExecutable(path: string): boolean {
     }
 }
 
-function pathCommand(
-    command: string,
-    pathEnv: string | undefined,
-): string | undefined {
+function pathCommand(command: string, pathEnv: string | undefined): string | undefined {
     for (const directory of (pathEnv ?? "").split(":").filter(Boolean)) {
         const candidate = join(directory, command);
         if (isExecutable(candidate)) return candidate;
@@ -35,11 +32,7 @@ function pathCommand(
     return undefined;
 }
 
-function cargoMetadata(
-    cargo: string,
-    repoRoot: string,
-    env: NodeJS.ProcessEnv,
-): boolean {
+function cargoMetadata(cargo: string, repoRoot: string, env: NodeJS.ProcessEnv): boolean {
     const result = spawnSync(
         cargo,
         [
@@ -52,12 +45,7 @@ function cargoMetadata(
         ],
         { env, encoding: "utf8" },
     );
-    if (
-        result.error ||
-        result.status !== 0 ||
-        typeof result.stdout !== "string"
-    )
-        return false;
+    if (result.error || result.status !== 0 || typeof result.stdout !== "string") return false;
     try {
         const metadata = JSON.parse(result.stdout) as {
             packages?: Array<{
@@ -70,8 +58,7 @@ function cargoMetadata(
                 ?.find((pkg) => pkg.name === "daemon")
                 ?.targets?.some(
                     (target) =>
-                        target.name === "direct_host_fixture" &&
-                        target.kind?.includes("example"),
+                        target.name === "direct_host_fixture" && target.kind?.includes("example"),
                 ) === true
         );
     } catch {
@@ -79,11 +66,7 @@ function cargoMetadata(
     }
 }
 
-function buildFixture(
-    cargo: string,
-    repoRoot: string,
-    env: NodeJS.ProcessEnv,
-): boolean {
+function buildFixture(cargo: string, repoRoot: string, env: NodeJS.ProcessEnv): boolean {
     const result = spawnSync(
         cargo,
         [
@@ -94,6 +77,7 @@ function buildFixture(
             "direct_host_fixture",
             "--features",
             "direct-host-fixture",
+            "--locked",
             "--manifest-path",
             join(repoRoot, "Cargo.toml"),
         ],
@@ -105,37 +89,25 @@ function buildFixture(
 export function detectRustPrerequisites(
     options: RustPrerequisiteOptions = {},
 ): RustPrerequisiteResult {
-    const repoRoot = resolve(
-        options.repoRoot ?? resolve(import.meta.dir, "../../.."),
-    );
+    const repoRoot = resolve(options.repoRoot ?? resolve(import.meta.dir, "../../.."));
     const env = options.env ?? process.env;
     const missing: string[] = [];
     const cargo = pathCommand("cargo", env.PATH);
     const manifest = join(repoRoot, "Cargo.toml");
     const configured = env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN;
-    const workspaceFixture = join(
-        repoRoot,
-        "target/debug/examples/direct_host_fixture",
-    );
-    let fixtureBin =
-        configured && isExecutable(configured) ? configured : undefined;
+    const workspaceFixture = join(repoRoot, "target/debug/examples/direct_host_fixture");
+    let fixtureBin = configured && isExecutable(configured) ? configured : undefined;
     // A compiled workspace fixture lets callers that forbid building resolve a usable binary.
-    if (!fixtureBin && isExecutable(workspaceFixture))
-        fixtureBin = workspaceFixture;
+    if (!fixtureBin && isExecutable(workspaceFixture)) fixtureBin = workspaceFixture;
 
     if (!existsSync(manifest)) {
         missing.push(`cargo workspace: missing ${manifest}`);
     } else if (!cargo) {
         missing.push("cargo workspace: cargo is not available on PATH");
     } else if (!cargoMetadata(cargo, repoRoot, env)) {
-        missing.push(
-            "cargo workspace: direct_host_fixture example is unavailable",
-        );
+        missing.push("cargo workspace: direct_host_fixture example is unavailable");
     } else if (options.allowBuild && !fixtureBin) {
-        if (
-            buildFixture(cargo, repoRoot, env) &&
-            isExecutable(workspaceFixture)
-        ) {
+        if (buildFixture(cargo, repoRoot, env) && isExecutable(workspaceFixture)) {
             fixtureBin = workspaceFixture;
         } else {
             missing.push("direct host fixture build failed");
@@ -156,9 +128,7 @@ function parseArgs(args: string[]): { build: boolean; print: boolean } {
         if (arg === "--build") build = true;
         else if (arg === "--print") print = true;
         else if (arg === "--help" || arg === "-h") {
-            console.log(
-                "Usage: check-rust-prerequisites.ts [--build] [--print]",
-            );
+            console.log("Usage: check-rust-prerequisites.ts [--build] [--print]");
             process.exit(0);
         } else throw new Error(`unknown argument: ${arg}`);
     }
@@ -170,8 +140,7 @@ if (import.meta.main) {
         const { build, print } = parseArgs(Bun.argv.slice(2));
         const result = detectRustPrerequisites({ allowBuild: build });
         if (!result.ok) {
-            for (const reason of result.missing)
-                console.error(`missing prerequisite: ${reason}`);
+            for (const reason of result.missing) console.error(`missing prerequisite: ${reason}`);
             process.exit(1);
         }
         if (print) console.log(result.fixtureBin ?? "build-on-demand");

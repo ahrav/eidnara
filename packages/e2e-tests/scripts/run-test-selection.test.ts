@@ -1,34 +1,42 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { parseArgs, scorecardUnitFiles } from "./run-test-selection";
+import { parseArgs, selectedTestFiles, UsageError } from "./run-test-selection";
 
-describe("scorecard unit selection", () => {
-    it("selects every scorecard test file plus the operator script test when present", () => {
-        const files = scorecardUnitFiles();
-        expect(files.length).toBeGreaterThan(0);
-        expect(files.every((file) => file.startsWith("src/scorecard/") || file === "scripts/run-scorecard.test.ts")).toBe(true);
-        expect(files).toEqual([...files].sort());
+describe("test selection arguments", () => {
+    it("accepts --mode rust with timeout and concurrency", () => {
+        expect(
+            parseArgs(["--mode", "rust", "--timeout", "600000", "--max-concurrency", "1"]),
+        ).toEqual({
+            mode: "rust",
+            timeoutMs: 600_000,
+            maxConcurrency: 1,
+        });
+        expect(parseArgs(["--mode", "rust"])).toEqual({
+            mode: "rust",
+            timeoutMs: 120_000,
+            maxConcurrency: null,
+        });
     });
 
-    it("fails when the scorecard glob matches nothing", () => {
-        const root = mkdtempSync(join(tmpdir(), "scorecard-selection-"));
-        try {
-            mkdirSync(join(root, "src", "scorecard"), { recursive: true });
-            mkdirSync(join(root, "scripts"), { recursive: true });
-            expect(() => scorecardUnitFiles(root)).toThrow(/scorecard unit selection is empty/);
-            writeFileSync(join(root, "src", "scorecard", "policy.test.ts"), "");
-            expect(() => scorecardUnitFiles(root)).toThrow(/missing scripts\/run-scorecard\.test\.ts/);
-            writeFileSync(join(root, "scripts", "run-scorecard.test.ts"), "");
-            expect(scorecardUnitFiles(root)).toEqual(["scripts/run-scorecard.test.ts", "src/scorecard/policy.test.ts"]);
-        } finally {
-            rmSync(root, { recursive: true, force: true });
+    it("rejects every mode other than rust as a usage error", () => {
+        for (const value of ["ts", "pi", "", "RUST"]) {
+            expect(() => parseArgs(["--mode", value])).toThrow(UsageError);
+            expect(() => parseArgs(["--mode", value])).toThrow(/--mode accepts only rust/);
         }
+        expect(() => parseArgs([])).toThrow(/--mode rust is required/);
+        expect(() => parseArgs(["--harness", "all", "--mode", "rust"])).toThrow(/unknown argument/);
     });
 
-    it("parses --scorecard-unit as a unit selection", () => {
-        expect(parseArgs(["--scorecard-unit"]).selection).toEqual({ kind: "unit", flag: "--scorecard-unit" });
-        expect(() => parseArgs(["--scorecard-unit", "--paired-delta-unit"])).toThrow(/select exactly one/);
+    it("rejects non-positive timeout and concurrency", () => {
+        expect(() => parseArgs(["--mode", "rust", "--timeout", "0"])).toThrow(UsageError);
+        expect(() => parseArgs(["--mode", "rust", "--max-concurrency", "x"])).toThrow(UsageError);
+    });
+
+    it("selects exactly the manifest's files", () => {
+        const files = selectedTestFiles("rust");
+        expect(files.length).toBe(9);
+        expect(files).toEqual([...files].sort());
+        expect(files.every((file) => file.startsWith("tests/") && file.endsWith(".test.ts"))).toBe(
+            true,
+        );
     });
 });

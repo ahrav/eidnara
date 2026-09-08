@@ -49,9 +49,7 @@ export function soakInvocation(args: string[]): SoakInvocation {
                   "--ignored",
                   "--exact",
               ],
-        environment: smoke
-            ? {}
-            : { EIDNARA_SHM_SOAK_SECONDS: String(Math.round(hours * 3600)) },
+        environment: smoke ? {} : { EIDNARA_SHM_SOAK_SECONDS: String(Math.round(hours * 3600)) },
     };
 }
 

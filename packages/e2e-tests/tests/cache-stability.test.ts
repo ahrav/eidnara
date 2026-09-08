@@ -1,36 +1,16 @@
-/// <reference types="bun-types" />
-
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { TestHarness } from "../src/harness";
+import { RustTestHarness } from "../src/rust-harness";
+import { rustPrereqs } from "../src/rust-scenario-support";
 
 /**
+ * Eidnara keeps the Anthropic prompt cache alive across turns, so every defer-pass transform
+ * must serve a byte-identical prefix: the system prompt and every prior message.
  *
- * Eidnara keeps the Anthropic prompt cache alive across turns.
- * The plugin must produce a byte-identical prefix on every defer-pass transform to preserve the cache across turns.
- * Each defer-pass transform must preserve a byte-identical prefix containing the system prompt and prior messages.
+ * OpenCode moves `cache_control` to the latest message each turn, so the comparison strips it.
  *
- * OpenCode moves cache_control to the latest message each turn.
- * comparing.
- *
- *
- *   1. The system field text stays byte-identical across turns 2..N.
- * The prefix excludes the latest user turn and must remain byte-identical across turns 2..N after stripping `cache_control`.
- *
+ *   1. The system field stays byte-identical across turns 2..N.
+ *   2. Each earlier request's messages are a byte-identical prefix of the next request's.
  */
-
-let h: TestHarness;
-
-beforeAll(async () => {
-    h = await TestHarness.create({
-        eidnaraConfig: {
-            execute_threshold_percentage: 80,
-        },
-    });
-});
-
-afterAll(async () => {
-    await h.dispose();
-});
 
 /** stripCacheControl removes `cache_control` because OpenCode moves it to the latest message each turn. */
 function stripCacheControl(value: unknown): unknown {
@@ -50,7 +30,21 @@ function serialize(value: unknown): string {
     return JSON.stringify(stripCacheControl(value));
 }
 
-describe("cache stability", () => {
+describe.skipIf(!rustPrereqs.ok)("cache stability", () => {
+    let h: RustTestHarness;
+
+    beforeAll(async () => {
+        h = await RustTestHarness.create({
+            eidnaraConfig: {
+                execute_threshold_percentage: 80,
+            },
+        });
+    });
+
+    afterAll(async () => {
+        await h?.dispose();
+    });
+
     it("system prompt stays stable across defer passes", async () => {
         h.mock.reset();
         h.mock.setDefault({
@@ -126,9 +120,7 @@ describe("cache stability", () => {
                 const earlierMsg = serialize(earlier[j]);
                 const laterMsg = serialize(later[j]);
                 if (earlierMsg !== laterMsg) {
-                    console.log(
-                        `[TEST] prefix mismatch at turn pair ${i}/${i + 1} message ${j}:`,
-                    );
+                    console.log(`[TEST] prefix mismatch at turn pair ${i}/${i + 1} message ${j}:`);
                     console.log(`  earlier: ${earlierMsg.slice(0, 300)}`);
                     console.log(`  later:   ${laterMsg.slice(0, 300)}`);
                 }

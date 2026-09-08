@@ -1,4 +1,7 @@
-/* */
+/**
+ * Builds, starts, controls, and tears down the `direct_host_fixture` example from `crates/daemon`,
+ * the directly composed host OpenCode's rust transform mode connects to during e2e runs.
+ */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
@@ -7,8 +10,8 @@ import {
     existsSync,
     lstatSync,
     mkdirSync,
-    readFileSync,
     readdirSync,
+    readFileSync,
     realpathSync,
     rmSync,
     writeFileSync,
@@ -16,22 +19,16 @@ import {
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import {
-    HostClient,
-    type BindIdentity,
-} from "@eidnara/opencode/shared/host-client";
+import { type BindIdentity, HostClient } from "@eidnara/opencode/shared/host-client";
 import {
     connectionFilePath,
     managedSubtreePath,
 } from "@eidnara/opencode/shared/host-lifecycle/paths";
+import { probeCapabilities } from "@eidnara/shm-native";
 import { waitForChildExit } from "../process-exit";
-import { releaseRootPath, type VerifiedReleaseRoot } from "../prospective-holdout/release-root";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
-const FIXTURE_BINARY = join(
-    REPO_ROOT,
-    "target/debug/examples/direct_host_fixture",
-);
+const FIXTURE_BINARY = join(REPO_ROOT, "target/debug/examples/direct_host_fixture");
 const CONTROL_FILE = "direct-host-control.sock";
 const PID_FILE = "rust-e2e-pids.json";
 const MAX_LINE_BYTES = 64 * 1024;
@@ -139,25 +136,17 @@ function processStopped(pid: number): boolean | null {
  * Timing out while confirming the process state would report a harness failure instead of a mechanism failure.
  * The function resolves when the process state is unobservable so a harness failure does not mask the drill result.
  */
-async function waitForProcessState(
-    pid: number,
-    stopped: boolean,
-): Promise<void> {
+async function waitForProcessState(pid: number, stopped: boolean): Promise<void> {
     const deadline = Date.now() + SIGNAL_STATE_TIMEOUT_MS;
     for (;;) {
         const observed = processStopped(pid);
         if (observed === null || observed === stopped) return;
         if (Date.now() >= deadline) return;
-        await new Promise((resolvePoll) =>
-            setTimeout(resolvePoll, SIGNAL_STATE_POLL_MS),
-        );
+        await new Promise((resolvePoll) => setTimeout(resolvePoll, SIGNAL_STATE_POLL_MS));
     }
 }
 
-function isStaleRustE2ePidRecord(
-    createdAtMs: number,
-    nowMs = Date.now(),
-): boolean {
+function isStaleRustE2ePidRecord(createdAtMs: number, nowMs = Date.now()): boolean {
     return (
         Number.isFinite(createdAtMs) &&
         createdAtMs <= nowMs &&
@@ -169,14 +158,8 @@ function reapRecordedRustProcesses(): void {
     let candidates: string[];
     try {
         candidates = readdirSync(tmpdir(), { withFileTypes: true })
-            .filter(
-                (entry) =>
-                    entry.isDirectory() &&
-                    entry.name.startsWith("opencode-e2e-"),
-            )
-            .map((entry) =>
-                join(managedSubtreePath(join(tmpdir(), entry.name, "data")), PID_FILE),
-            );
+            .filter((entry) => entry.isDirectory() && entry.name.startsWith("opencode-e2e-"))
+            .map((entry) => join(managedSubtreePath(join(tmpdir(), entry.name, "data")), PID_FILE));
     } catch {
         return;
     }
@@ -184,14 +167,11 @@ function reapRecordedRustProcesses(): void {
         if (!existsSync(pidPath)) continue;
         let stale = false;
         try {
-            const record = JSON.parse(
-                readFileSync(pidPath, "utf8"),
-            ) as RustE2ePidFile;
+            const record = JSON.parse(readFileSync(pidPath, "utf8")) as RustE2ePidFile;
             if (!Array.isArray(record.pids)) continue;
             stale = isStaleRustE2ePidRecord(record.createdAtMs);
             if (!stale) continue;
-            const recordedSecond =
-                Math.floor(record.createdAtMs / 1_000) * 1_000;
+            const recordedSecond = Math.floor(record.createdAtMs / 1_000) * 1_000;
             for (const entry of record.pids) {
                 if (
                     !Number.isInteger(entry?.pid) ||
@@ -212,8 +192,7 @@ function reapRecordedRustProcesses(): void {
                 }
                 try {
                     process.kill(entry.pid, "SIGKILL");
-                } catch {
-                }
+                } catch {}
             }
         } catch {
             // Malformed or unreadable records provide no usable process identity.
@@ -223,7 +202,7 @@ function reapRecordedRustProcesses(): void {
     }
 }
 
-export function detectRustModePrereqs(releaseRoot?: VerifiedReleaseRoot): RustModePrereqs {
+export function detectRustModePrereqs(): RustModePrereqs {
     if (process.platform === "win32") {
         return {
             ok: false,
@@ -231,23 +210,12 @@ export function detectRustModePrereqs(releaseRoot?: VerifiedReleaseRoot): RustMo
         };
     }
     // `BrocaComponent.initialize` rejects non-Linux targets because crash-ownership records and sweeps read `/proc` process identity.
-    // `BrocaComponent.initialize` rejects non-Linux targets because crash-ownership records and sweeps read `/proc` process identity.
     if (process.platform !== "linux") {
         return {
             ok: false,
             skipReason:
                 "direct host fixture requires Linux: broca crash-ownership records depend on /proc process identity",
         };
-    }
-    if (releaseRoot) {
-        releaseRootPath(releaseRoot, "rustHost");
-        if (releaseRoot.manifest.platform !== `${process.platform}-${process.arch}`) {
-            return {
-                ok: false,
-                skipReason: `release root platform ${releaseRoot.manifest.platform} does not match this host`,
-            };
-        }
-        return { ok: true };
     }
     if (!existsSync(join(REPO_ROOT, "Cargo.toml"))) {
         return {
@@ -259,8 +227,6 @@ export function detectRustModePrereqs(releaseRoot?: VerifiedReleaseRoot): RustMo
     if (cargo.error || cargo.status !== 0) {
         return { ok: false, skipReason: "cargo is not available on PATH" };
     }
-    // `Cargo.toml` and `cargo` are insufficient because the workspace requires `../commons` path dependencies.
-    // A checkout without the `../commons` sibling cannot resolve the workspace.
     // `cargo metadata` resolves the whole workspace and identifies the target to build.
     const metadata = spawnSync(
         "cargo",
@@ -293,8 +259,7 @@ export function detectRustModePrereqs(releaseRoot?: VerifiedReleaseRoot): RustMo
                 ?.find((pkg) => pkg.name === "daemon")
                 ?.targets?.some(
                     (target) =>
-                        target.name === "direct_host_fixture" &&
-                        target.kind?.includes("example"),
+                        target.name === "direct_host_fixture" && target.kind?.includes("example"),
                 ) === true;
     } catch {
         fixtureAvailable = false;
@@ -303,6 +268,14 @@ export function detectRustModePrereqs(releaseRoot?: VerifiedReleaseRoot): RustMo
         return {
             ok: false,
             skipReason: "direct_host_fixture example is unavailable in this workspace",
+        };
+    }
+    // The plugin reaches the daemon only through the shared-memory channel, and OpenCode embeds the same Bun release this test runner uses, so a probe here predicts whether the plugin's channel can start inside OpenCode. Bun 1.3.14 lacks `worker_threads.markAsUntransferable`, which the probe requires, so the suite skips on that runtime instead of reporting every pass as unchanged input.
+    const capability = probeCapabilities();
+    if (!capability.available) {
+        return {
+            ok: false,
+            skipReason: `shared-memory channel unavailable on this runtime: ${capability.reason}`,
         };
     }
     return { ok: true };
@@ -320,16 +293,16 @@ function runCargo(args: string[]): Promise<{ ok: boolean; stderr: string }> {
         child.stderr?.on("data", (chunk: Buffer) => {
             stderr = `${stderr}${chunk.toString()}`.slice(-8_000);
         });
-        child.once("error", () =>
-            resolveRun({ ok: false, stderr: "cargo spawn failed" }),
-        );
+        child.once("error", () => resolveRun({ ok: false, stderr: "cargo spawn failed" }));
         child.once("exit", (code) => resolveRun({ ok: code === 0, stderr }));
     });
 }
 
-/** The module caches the U5 fixture per Bun process; Cargo caches builds across processes. */
-export function buildDirectHostFixture(releaseRoot?: VerifiedReleaseRoot): Promise<string> {
-    if (releaseRoot) return Promise.resolve(releaseRootPath(releaseRoot, "rustHost"));
+/**
+ * Resolves the fixture binary once per Bun process; Cargo caches builds across processes.
+ * `EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN` names a prebuilt binary and skips the build.
+ */
+export function buildDirectHostFixture(): Promise<string> {
     if (fixtureBuild) return fixtureBuild;
     fixtureBuild = (async () => {
         const configured = process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN;
@@ -342,25 +315,20 @@ export function buildDirectHostFixture(releaseRoot?: VerifiedReleaseRoot): Promi
             "direct_host_fixture",
             "--features",
             "direct-host-fixture",
+            "--locked",
         ]);
         if (!build.ok || !existsSync(FIXTURE_BINARY)) {
-            throw new Error(
-                `direct host fixture build failed\n${build.stderr}`,
-            );
+            throw new Error(`direct host fixture build failed\n${build.stderr}`);
         }
         return FIXTURE_BINARY;
     })();
     return fixtureBuild;
 }
 
-function exactKeys(
-    value: Record<string, unknown>,
-    expected: string[],
-): boolean {
+function exactKeys(value: Record<string, unknown>, expected: string[]): boolean {
     const actual = Object.keys(value).sort();
     return (
-        actual.length === expected.length &&
-        actual.every((key, index) => key === expected[index])
+        actual.length === expected.length && actual.every((key, index) => key === expected[index])
     );
 }
 
@@ -383,11 +351,7 @@ function parseReadyRecord(line: Buffer): ReadyRecord {
     if (!object || !exactKeys(object, ["catalog", "status", "wire_version"])) {
         throw new Error("fixture readiness record had unknown fields");
     }
-    if (
-        object.status !== "ready" ||
-        object.wire_version !== 2 ||
-        !Array.isArray(object.catalog)
-    ) {
+    if (object.status !== "ready" || object.wire_version !== 2 || !Array.isArray(object.catalog)) {
         throw new Error("fixture readiness record was invalid");
     }
     if (
@@ -408,10 +372,14 @@ function verifyPublication(path: string, expectedMode: number): void {
     try {
         publication = lstatSync(path);
     } catch {
-        throw new Error("direct mc-host readiness preceded secure publication");
+        throw new Error("direct host readiness preceded secure publication");
     }
     const uid = process.getuid?.();
-    if (uid === undefined || publication.uid !== uid || (publication.mode & 0o777) !== expectedMode) {
+    if (
+        uid === undefined ||
+        publication.uid !== uid ||
+        (publication.mode & 0o777) !== expectedMode
+    ) {
         throw new Error("direct host fixture published unsafe owner or permissions");
     }
 }
@@ -439,18 +407,12 @@ class FixtureControlClient {
         const socket = createConnection({ path: this.path });
         this.socket = socket;
         socket.on("data", (chunk: Buffer) => this.onData(chunk));
-        socket.on("error", () =>
-            this.fail(new Error("fixture control connection failed")),
-        );
-        socket.on("close", () =>
-            this.fail(new Error("fixture control connection closed")),
-        );
+        socket.on("error", () => this.fail(new Error("fixture control connection failed")));
+        socket.on("close", () => this.fail(new Error("fixture control connection closed")));
         await new Promise<void>((resolveConnect, rejectConnect) => {
             const timer = setTimeout(() => {
                 socket.destroy();
-                rejectConnect(
-                    new Error("fixture control connection timed out"),
-                );
+                rejectConnect(new Error("fixture control connection timed out"));
             }, this.timeoutMs);
             socket.once("connect", () => {
                 clearTimeout(timer);
@@ -497,33 +459,24 @@ class FixtureControlClient {
 
     private async ack(command: ControlCommand): Promise<void> {
         const result = await this.request(command);
-        if (!this.parseAck(result))
-            throw new Error(`fixture control ${command} was not accepted`);
+        if (!this.parseAck(result)) throw new Error(`fixture control ${command} was not accepted`);
     }
 
     private request(command: ControlCommand): Promise<unknown> {
         if (!this.socket || this.closed)
             return Promise.reject(new Error("fixture control is unavailable"));
         if (this.nextId > Number.MAX_SAFE_INTEGER) {
-            return Promise.reject(
-                new Error("fixture control id space exhausted"),
-            );
+            return Promise.reject(new Error("fixture control id space exhausted"));
         }
         const id = this.nextId++;
-        const line = Buffer.from(
-            JSON.stringify({ id, command: { name: command } }) + "\n",
-        );
+        const line = Buffer.from(JSON.stringify({ id, command: { name: command } }) + "\n");
         if (line.byteLength - 1 > MAX_LINE_BYTES) {
-            return Promise.reject(
-                new Error("fixture control request exceeded 64 KiB"),
-            );
+            return Promise.reject(new Error("fixture control request exceeded 64 KiB"));
         }
         return new Promise((resolveRequest, rejectRequest) => {
             const timer = setTimeout(() => {
                 this.pending.delete(id);
-                rejectRequest(
-                    new Error(`fixture control ${command} timed out`),
-                );
+                rejectRequest(new Error(`fixture control ${command} timed out`));
             }, this.timeoutMs);
             this.pending.set(id, {
                 command,
@@ -548,16 +501,12 @@ class FixtureControlClient {
             const newline = this.incoming.indexOf(0x0a);
             if (newline < 0) {
                 if (this.incoming.byteLength > MAX_LINE_BYTES) {
-                    this.fail(
-                        new Error("fixture control response exceeded 64 KiB"),
-                    );
+                    this.fail(new Error("fixture control response exceeded 64 KiB"));
                 }
                 return;
             }
             if (newline > MAX_LINE_BYTES) {
-                this.fail(
-                    new Error("fixture control response exceeded 64 KiB"),
-                );
+                this.fail(new Error("fixture control response exceeded 64 KiB"));
                 return;
             }
             const line = this.incoming.subarray(0, newline);
@@ -578,12 +527,7 @@ class FixtureControlClient {
         const object = record(parsed);
         if (
             !object ||
-            !exactKeys(
-                object,
-                object.ok === true
-                    ? ["id", "ok", "result"]
-                    : ["error", "id", "ok"],
-            )
+            !exactKeys(object, object.ok === true ? ["id", "ok", "result"] : ["error", "id", "ok"])
         ) {
             this.fail(new Error("fixture control response had unknown fields"));
             return;
@@ -600,11 +544,7 @@ class FixtureControlClient {
         }
         const pending = this.pending.get(numericId);
         if (!pending) {
-            this.fail(
-                new Error(
-                    "fixture control response id did not match a request",
-                ),
-            );
+            this.fail(new Error("fixture control response id did not match a request"));
             return;
         }
         this.responseIds.add(numericId);
@@ -613,21 +553,11 @@ class FixtureControlClient {
         if (object.ok !== true) {
             const error = record(object.error);
             const code = error?.code;
-            if (
-                !error ||
-                !exactKeys(error, ["code", "message"]) ||
-                typeof code !== "string"
-            ) {
-                pending.reject(
-                    new Error("fixture control failure response was malformed"),
-                );
+            if (!error || !exactKeys(error, ["code", "message"]) || typeof code !== "string") {
+                pending.reject(new Error("fixture control failure response was malformed"));
                 return;
             }
-            pending.reject(
-                new Error(
-                    `fixture control ${pending.command} rejected: ${code}`,
-                ),
-            );
+            pending.reject(new Error(`fixture control ${pending.command} rejected: ${code}`));
             return;
         }
         pending.resolve(object.result);
@@ -635,11 +565,7 @@ class FixtureControlClient {
 
     private parseAck(value: unknown): boolean {
         const object = record(value);
-        if (
-            !object ||
-            !exactKeys(object, ["accepted"]) ||
-            typeof object.accepted !== "boolean"
-        ) {
+        if (!object || !exactKeys(object, ["accepted"]) || typeof object.accepted !== "boolean") {
             throw new Error("fixture control acknowledgement was malformed");
         }
         return object.accepted;
@@ -647,22 +573,12 @@ class FixtureControlClient {
 
     private parseCounters(value: unknown): BackendCounters {
         const object = record(value);
-        const keys = [
-            "blocked",
-            "cancelled",
-            "completed",
-            "failed",
-            "released",
-            "started",
-        ];
+        const keys = ["blocked", "cancelled", "completed", "failed", "released", "started"];
         if (!object || !exactKeys(object, keys)) {
             throw new Error("fixture control counters were malformed");
         }
         for (const key of keys) {
-            if (
-                !Number.isSafeInteger(object[key]) ||
-                (object[key] as number) < 0
-            ) {
+            if (!Number.isSafeInteger(object[key]) || (object[key] as number) < 0) {
                 throw new Error("fixture control counters were malformed");
             }
         }
@@ -697,7 +613,7 @@ export interface HermeticHostOptions {
     startTimeoutMs?: number;
 }
 
-/** The U5 direct-host fixture starts no provider or module subprocess. */
+/** The direct-host fixture starts no provider or module subprocess. */
 export class HermeticHostStack {
     readonly connectionFile: string;
     readonly controlPath: string;
@@ -722,13 +638,11 @@ export class HermeticHostStack {
         this.connectionFile = connectionFilePath(this.dataDir);
         this.controlPath = join(this.dataDir, CONTROL_FILE);
         this.fixtureConfigDir = join(this.dataDir, "fixture-config");
-        this.logPath = join(managedSubtreePath(this.dataDir), "direct-mc-host.log");
+        this.logPath = join(managedSubtreePath(this.dataDir), "direct-host.log");
         this.pidFilePath = join(managedSubtreePath(this.dataDir), PID_FILE);
     }
 
-    static async start(
-        options: HermeticHostOptions,
-    ): Promise<HermeticHostStack> {
+    static async start(options: HermeticHostOptions): Promise<HermeticHostStack> {
         reapRecordedRustProcesses();
         const stack = new HermeticHostStack({
             ...options,
@@ -806,8 +720,7 @@ export class HermeticHostStack {
         let file = "";
         try {
             file = readFileSync(this.logPath, "utf8").slice(-MAX_LOG_BYTES);
-        } catch {
-        }
+        } catch {}
         return `${this.stdout}${this.stderr}${file}`.slice(-MAX_LOG_BYTES);
     }
 
@@ -819,12 +732,9 @@ export class HermeticHostStack {
             return;
         }
         this.resumeBeforeTeardown(child);
-        if (child.exitCode === null && child.signalCode === null)
-            child.kill("SIGKILL");
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
         if (!(await waitForChildExit(child, 5_000))) {
-            throw new Error(
-                "direct host fixture did not exit after SIGKILL",
-            );
+            throw new Error("direct host fixture did not exit after SIGKILL");
         }
         if (this.child === child) this.child = null;
         this.persistPidFile();
@@ -843,12 +753,9 @@ export class HermeticHostStack {
             return;
         }
         this.resumeBeforeTeardown(child);
-        if (child.exitCode === null && child.signalCode === null)
-            child.kill("SIGTERM");
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
         if (!(await waitForChildExit(child, 10_000))) {
-            throw new Error(
-                "direct host fixture did not exit after SIGTERM",
-            );
+            throw new Error("direct host fixture did not exit after SIGTERM");
         }
         if (this.child === child) this.child = null;
         this.persistPidFile();
@@ -856,16 +763,14 @@ export class HermeticHostStack {
 
     async pauseHost(): Promise<void> {
         const child = this.child;
-        if (!child || child.exitCode !== null || child.signalCode !== null)
-            return;
+        if (!child || child.exitCode !== null || child.signalCode !== null) return;
         child.kill("SIGSTOP");
         if (child.pid !== undefined) await waitForProcessState(child.pid, true);
     }
 
     async resumeHost(): Promise<void> {
         const child = this.child;
-        if (!child || child.exitCode !== null || child.signalCode !== null)
-            return;
+        if (!child || child.exitCode !== null || child.signalCode !== null) return;
         child.kill("SIGCONT");
         if (child.pid !== undefined) await waitForProcessState(child.pid, false);
     }
@@ -886,8 +791,7 @@ export class HermeticHostStack {
             this.resumeBeforeTeardown(child);
             try {
                 await this.control?.gracefulShutdown();
-            } catch {
-            }
+            } catch {}
             exited = await waitForChildExit(child, 5_000);
             if (!exited) {
                 child.kill("SIGTERM");
@@ -903,9 +807,7 @@ export class HermeticHostStack {
         this.child = null;
         if (!exited) {
             // A surviving child's PID record remains in `dataDir` after failed teardown so the next run's reaper can identify and kill it.
-            throw new Error(
-                "direct host fixture did not exit during teardown",
-            );
+            throw new Error("direct host fixture did not exit during teardown");
         }
         rmSync(this.pidFilePath, { force: true });
         rmSync(this.dataDir, { recursive: true, force: true });
@@ -946,12 +848,10 @@ export class HermeticHostStack {
         let readyBuffer = Buffer.alloc(0);
         let readyResolve: ((record: ReadyRecord) => void) | null = null;
         let readyReject: ((error: Error) => void) | null = null;
-        const readyPromise = new Promise<ReadyRecord>(
-            (resolveReady, rejectReady) => {
-                readyResolve = resolveReady;
-                readyReject = rejectReady;
-            },
-        );
+        const readyPromise = new Promise<ReadyRecord>((resolveReady, rejectReady) => {
+            readyResolve = resolveReady;
+            readyReject = rejectReady;
+        });
         child.stdout?.on("data", (chunk: Buffer) => {
             this.stdout = appendBounded(this.stdout, chunk);
             if (!readyResolve) return;
@@ -959,26 +859,20 @@ export class HermeticHostStack {
             const newline = readyBuffer.indexOf(0x0a);
             if (newline < 0) {
                 if (readyBuffer.byteLength > MAX_LINE_BYTES) {
-                    readyReject?.(
-                        new Error("fixture readiness record exceeded 64 KiB"),
-                    );
+                    readyReject?.(new Error("fixture readiness record exceeded 64 KiB"));
                     readyResolve = null;
                 }
                 return;
             }
             try {
-                const parsed = parseReadyRecord(
-                    readyBuffer.subarray(0, newline),
-                );
+                const parsed = parseReadyRecord(readyBuffer.subarray(0, newline));
                 const resolve = readyResolve;
                 readyResolve = null;
                 resolve(parsed);
             } catch (error) {
                 readyResolve = null;
                 readyReject?.(
-                    error instanceof Error
-                        ? error
-                        : new Error("fixture readiness failed"),
+                    error instanceof Error ? error : new Error("fixture readiness failed"),
                 );
             }
         });
@@ -990,15 +884,11 @@ export class HermeticHostStack {
                 // Diagnostics never own fixture lifecycle.
             }
         });
-        child.once("error", () =>
-            readyReject?.(new Error("direct host fixture failed to start")),
-        );
+        child.once("error", () => readyReject?.(new Error("direct host fixture failed to start")));
         child.once("exit", () => {
             if (this.child === child) this.child = null;
             this.persistPidFile();
-            readyReject?.(
-                new Error("direct host fixture exited before readiness"),
-            );
+            readyReject?.(new Error("direct host fixture exited before readiness"));
         });
 
         let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -1029,7 +919,6 @@ export class HermeticHostStack {
         if (probed.status === "rejected") throw probed.reason;
     }
 
-    /* */
     private async probeCatalog(): Promise<void> {
         const probe = await HostClient.connect({
             connectionFile: this.connectionFile,
@@ -1041,23 +930,20 @@ export class HermeticHostStack {
                 ids.length !== EXPECTED_CATALOG.length ||
                 ids.some((entry, index) => entry !== EXPECTED_CATALOG[index])
             ) {
-                throw new Error("direct mc-host catalog probe failed");
+                throw new Error("direct host catalog probe failed");
             }
         } finally {
             await probe.closeAsync();
         }
     }
 
-    /**
-     */
+    /** A SIGSTOPped child defers SIGTERM until it resumes; SIGCONT first lets graceful teardown proceed. */
     private resumeBeforeTeardown(child: ChildProcess): void {
-        if (child.exitCode === null && child.signalCode === null)
-            child.kill("SIGCONT");
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGCONT");
     }
 
     private requireControl(): FixtureControlClient {
-        if (!this.control)
-            throw new Error("direct host fixture control is unavailable");
+        if (!this.control) throw new Error("direct host fixture control is unavailable");
         return this.control;
     }
 
@@ -1065,9 +951,7 @@ export class HermeticHostStack {
      * The fixture reuses one status client and coalesces concurrent connections onto the in-flight attempt.
      * The `statusClientPromise` check prevents concurrent callers from creating clients before `statusClient` is assigned.
      */
-    private async ensureStatusClient(
-        identity: BindIdentity,
-    ): Promise<HostClient> {
+    private async ensureStatusClient(identity: BindIdentity): Promise<HostClient> {
         if (this.statusClient) return this.statusClient;
         if (this.statusClientPromise) return await this.statusClientPromise;
         const connecting = (async (): Promise<HostClient> => {
@@ -1083,8 +967,7 @@ export class HermeticHostStack {
         try {
             return await connecting;
         } finally {
-            if (this.statusClientPromise === connecting)
-                this.statusClientPromise = null;
+            if (this.statusClientPromise === connecting) this.statusClientPromise = null;
         }
     }
 
@@ -1124,8 +1007,7 @@ export class HermeticHostStack {
                             : [],
                 } satisfies RustE2ePidFile),
             );
-        } catch {
-        }
+        } catch {}
     }
 }
 
@@ -1144,8 +1026,7 @@ export const __hermeticHostTest = {
         let retainedLog = "";
         try {
             retainedLog = readFileSync(internal.logPath, "utf8").slice(-MAX_LOG_BYTES);
-        } catch {
-        }
+        } catch {}
         return { stdout: internal.stdout, stderr: internal.stderr, retainedLog };
     },
     isStaleRustE2ePidRecord,

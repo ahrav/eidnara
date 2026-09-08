@@ -24,11 +24,7 @@ export function validateHardeningMatrix(raw: unknown): MatrixValidation {
     }
 
     const transport = raw.arms.transport;
-    if (
-        !Array.isArray(transport) ||
-        transport.length !== 1 ||
-        transport[0] !== "ring"
-    ) {
+    if (!Array.isArray(transport) || transport.length !== 1 || transport[0] !== "ring") {
         return {
             outcome: "invalid",
             errors: ["arms.transport must contain only ring"],
@@ -42,9 +38,7 @@ export function validateHardeningMatrix(raw: unknown): MatrixValidation {
     if ("failure_hardening" in raw) {
         errors.push("failure_hardening retained tuples are obsolete");
     }
-    return errors.length === 0
-        ? { outcome: "valid", errors: [] }
-        : { outcome: "invalid", errors };
+    return errors.length === 0 ? { outcome: "valid", errors: [] } : { outcome: "invalid", errors };
 }
 
 export function validateCommittedMatrix(): MatrixValidation {

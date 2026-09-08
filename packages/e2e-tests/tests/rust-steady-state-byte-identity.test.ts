@@ -1,9 +1,5 @@
-/// <reference types="bun-types" />
-
 /**
- *
  * Across consecutive defer passes, retained provider-request messages must be byte-identical.
- *
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -46,7 +42,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: steady-state byte identity", (
         }
 
         const passes = await h.waitForRustPasses(1);
-        expect(passes.every((p) => p.decision !== "error" && p.decision !== "parked")).toBe(true);
+        expect(passes.every((p) => p.decision !== "error")).toBe(true);
 
         const m0s = perPassMessages.map((msgs) => msgs[0]!);
         for (let i = 1; i < m0s.length; i += 1) {

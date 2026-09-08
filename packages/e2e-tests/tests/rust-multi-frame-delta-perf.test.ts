@@ -1,7 +1,5 @@
-/// <reference types="bun-types" />
-
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { RustTestHarness, type RustPassLine } from "../src/rust-harness";
+import { type RustPassLine, RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
 const formatTiming = (pass: RustPassLine) => ({
@@ -42,7 +40,6 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
 
         h.appendSyntheticHistory(sessionId, { count: 1_000, textBytes: 1024 });
         await h.restart({
-            rust: true,
             eidnaraConfig: {
                 execute_threshold_percentage: 95,
                 protected_tags: 1,
@@ -124,7 +121,9 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
         } else {
             expect(largeTailDelta.transportBytes).toBeGreaterThan(512 * 1024);
         }
-        expect(providerBytesAfterLargeTail).toBeGreaterThan(providerBytesBeforeLargeTail + 512 * 1024);
+        expect(providerBytesAfterLargeTail).toBeGreaterThan(
+            providerBytesBeforeLargeTail + 512 * 1024,
+        );
         expect(h.lastMainWireSerialized()).toContain("large tail delta");
     }, 600_000);
 });

@@ -1,11 +1,6 @@
 /**
- * Shared e2e harness fixture primitives.
- *
- * The opencode, rust, and pi harnesses configure the same mock provider and
- * speak to the same SDK session surface. The default mock response, the
- * common SDK client shape, and the option fields every harness accepts live
- * here so the three harness facades cannot drift apart on the shared
- * contract; each harness extends these with its own additions.
+ * Harness fixture primitives: the default mock response, the SDK session surface the harness
+ * client exposes, and the option fields the harness accepts.
  */
 
 import type { MockResponse } from "./mock-provider/server";
@@ -24,7 +19,6 @@ export const DEFAULT_MOCK_RESPONSE: MockResponse = {
     },
 };
 
-/** Option fields shared by every harness facade. */
 export interface SharedHarnessOptions {
     /** Eidnara config overrides. Merged onto test defaults. */
     eidnaraConfig?: Record<string, unknown>;
@@ -36,10 +30,7 @@ export interface SharedHarnessOptions {
     mockDefault?: MockResponse;
 }
 
-/**
- * SDK session surface every harness client exposes. Harness-specific clients
- * intersect the `session` object with their own extra endpoints.
- */
+/** SDK session surface the harness client exposes; `SdkClient` intersects `session` with extra endpoints. */
 export interface SdkClientCore {
     session: {
         create: (opts: {

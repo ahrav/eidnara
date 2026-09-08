@@ -1,0 +1,26 @@
+{
+    "name": "@eidnara/e2e-tests",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "lint": "biome check .",
+        "lint:fix": "biome check --write .",
+        "test": "bun run ensure:plugin-dist && bun test scripts src",
+        "test:rust": "bun run ensure:plugin-dist && bun scripts/run-test-selection.ts --mode rust --timeout 600000 --max-concurrency 1",
+        "validate-mode-manifest": "bun scripts/validate-mode-manifest.ts --mode rust",
+        "validate:shm-hardening-matrix": "bun scripts/validate-shm-hardening-matrix.ts",
+        "soak:shm": "bun scripts/run-shm-soak.ts",
+        "ensure:plugin-dist": "test -f ../opencode-plugin/dist/index.js || bun run --cwd ../opencode-plugin build"
+    },
+    "dependencies": {
+        "@eidnara/shm-native": "0.1.0",
+        "@opencode-ai/sdk": "^1.17.11"
+    },
+    "devDependencies": {
+        "@types/bun": "1.3.14",
+        "@types/node": "^22.20.0",
+        "typescript": "5.9.3"
+    }
+}

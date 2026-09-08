@@ -1,20 +1,13 @@
-/// <reference types="bun-types" />
-
 import { describe, expect, it } from "bun:test";
+import { EIDNARA_INTERNAL_AGENT_SIGNATURES } from "@eidnara/opencode/hooks/context/internal-agent-signatures";
 import {
     analyzePasses,
     buildSegments,
     findBusts,
+    isHistorianRequest,
     isInternalAgentRequest,
     mainAgentRequests,
-    isHistorianRequest,
 } from "./cache-analysis";
-import { EIDNARA_INTERNAL_AGENT_SIGNATURES } from "@eidnara/opencode/hooks/context/internal-agent-signatures";
-import { HISTORIAN_SYSTEM_MARKER_FOR_DRIFT_TEST } from "./incident-pool/support/tool-loop";
-
-/**
- *
- */
 
 const EIDNARA_SYSTEM = "## Eidnara\nyou are a long-term partner.";
 
@@ -26,7 +19,13 @@ function req(messages: Array<{ role: string; content: unknown; bp?: boolean }>) 
                 role: m.role,
                 // The fixture preserves content representations across requests.
                 content: m.bp
-                    ? [{ type: "text", text: String(m.content), cache_control: { type: "ephemeral" } }]
+                    ? [
+                          {
+                              type: "text",
+                              text: String(m.content),
+                              cache_control: { type: "ephemeral" },
+                          },
+                      ]
                     : Array.isArray(m.content)
                       ? m.content
                       : [{ type: "text", text: String(m.content) }],
@@ -34,8 +33,6 @@ function req(messages: Array<{ role: string; content: unknown; bp?: boolean }>) 
         },
     };
 }
-
-/* */
 function turn(prefix: Array<{ role: string; content: string }>, tail: string) {
     return req([...prefix.map((m) => ({ ...m })), { role: "user", content: tail, bp: true }]);
 }
@@ -138,13 +135,35 @@ describe("cache-bust oracle", () => {
                 const a = {
                     body: {
                         system: `${EIDNARA_SYSTEM}\nToday's date: 2026-06-06`,
-                        messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }],
+                        messages: [
+                            {
+                                role: "user",
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: "hi",
+                                        cache_control: { type: "ephemeral" },
+                                    },
+                                ],
+                            },
+                        ],
                     },
                 };
                 const b = {
                     body: {
                         system: `${EIDNARA_SYSTEM}\nToday's date: 2026-06-07`,
-                        messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }],
+                        messages: [
+                            {
+                                role: "user",
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: "hi",
+                                        cache_control: { type: "ephemeral" },
+                                    },
+                                ],
+                            },
+                        ],
                     },
                 };
                 const busts = findBusts([a, b]);
@@ -162,7 +181,16 @@ describe("cache-bust oracle", () => {
                     body: {
                         system: EIDNARA_SYSTEM,
                         messages: [
-                            { role: "user", content: [{ type: "text", text: "m0", cache_control: { type: "ephemeral" } }] },
+                            {
+                                role: "user",
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: "m0",
+                                        cache_control: { type: "ephemeral" },
+                                    },
+                                ],
+                            },
                             { role: "assistant", content: [{ type: "text", text: "m1" }] },
                         ],
                     },
@@ -172,7 +200,16 @@ describe("cache-bust oracle", () => {
                         system: EIDNARA_SYSTEM,
                         messages: [
                             { role: "user", content: [{ type: "text", text: "m0" }] },
-                            { role: "assistant", content: [{ type: "text", text: "m1", cache_control: { type: "ephemeral" } }] },
+                            {
+                                role: "assistant",
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: "m1",
+                                        cache_control: { type: "ephemeral" },
+                                    },
+                                ],
+                            },
                         ],
                     },
                 };
@@ -190,7 +227,18 @@ describe("cache-bust oracle", () => {
                 const mk = (nonce: string) => ({
                     body: {
                         system: `${EIDNARA_SYSTEM}\nx-anthropic-billing-header: cch=${nonce};`,
-                        messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }],
+                        messages: [
+                            {
+                                role: "user",
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: "hi",
+                                        cache_control: { type: "ephemeral" },
+                                    },
+                                ],
+                            },
+                        ],
                     },
                 });
                 expect(findBusts([mk("00000"), mk("ab12f")])).toHaveLength(0);
@@ -213,11 +261,11 @@ describe("cache-bust oracle", () => {
     describe("#given mainAgentRequests filtering", () => {
         describe("#when some requests lack the Eidnara system block", () => {
             it("#then only Eidnara-carrying requests are kept", () => {
-                const mc = turn([{ role: "user", content: "a" }], "b");
+                const carrying = turn([{ role: "user", content: "a" }], "b");
                 const subagent = { body: { system: "You are Historian", messages: [] } };
-                const filtered = mainAgentRequests([mc, subagent]);
+                const filtered = mainAgentRequests([carrying, subagent]);
                 expect(filtered).toHaveLength(1);
-                expect(filtered[0]).toBe(mc);
+                expect(filtered[0]).toBe(carrying);
             });
         });
     });
@@ -229,7 +277,6 @@ describe("cache-bust oracle", () => {
                 "Summarize what was done in this conversation. Write like a pull request description.",
                 "You are an anchored context summarization assistant for coding sessions.",
                 "You are Historian — the hippocampus of a long-running coding agent.",
-                "You are a dreamer curate agent for the eidnara system.",
                 "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.",
             ];
             for (const signature of signatures) {
@@ -258,26 +305,17 @@ describe("cache-bust oracle", () => {
         });
     });
 
-    describe("#given the historian selector in the incident-pool tool loop", () => {
-        describe("#when the shared production signature changes", () => {
-            it("#then the narrower selector marker must still be contained by it", () => {
-                // The hidden-agent filter excludes non-main-agent requests; the tool-loop selector matches only historian requests.
-                // Collapsing the broad hidden-agent filter and the tool-loop selector would make historian matchers reply to the dreamer, sidekick, and OpenCode's title, summary, and compaction agents.
-                // The assertion fails when selector drift removes `HISTORIAN_SYSTEM_MARKER_FOR_DRIFT_TEST` from the production signature.
-                const historianSignature = EIDNARA_INTERNAL_AGENT_SIGNATURES.find(
-                    (signature) => signature.includes("Historian"),
-                );
-                expect(historianSignature).toBeDefined();
-                expect(historianSignature).toContain(HISTORIAN_SYSTEM_MARKER_FOR_DRIFT_TEST);
-            });
-        });
-    });
-
     describe("#given buildSegments over a request", () => {
         describe("#when the body has system + messages", () => {
             it("#then it emits one segment per system block then per message in wire order", () => {
                 const segs = buildSegments(
-                    turn([{ role: "user", content: "a" }, { role: "assistant", content: "b" }], "c").body,
+                    turn(
+                        [
+                            { role: "user", content: "a" },
+                            { role: "assistant", content: "b" },
+                        ],
+                        "c",
+                    ).body,
                 );
                 expect(segs[0].id).toBe("system[0]");
                 expect(segs[1].id).toContain("message[0]");

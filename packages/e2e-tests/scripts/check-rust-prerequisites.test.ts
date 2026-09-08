@@ -1,12 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import {
-    chmodSync,
-    existsSync,
-    mkdtempSync,
-    mkdirSync,
-    rmSync,
-    writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectRustPrerequisites } from "./check-rust-prerequisites";
@@ -14,8 +7,7 @@ import { detectRustPrerequisites } from "./check-rust-prerequisites";
 const temporaryRoots: string[] = [];
 
 afterEach(() => {
-    for (const root of temporaryRoots.splice(0))
-        rmSync(root, { recursive: true, force: true });
+    for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 function fakeWorkspace(withFixture = true): { root: string; bin: string } {
@@ -29,9 +21,7 @@ function fakeWorkspace(withFixture = true): { root: string; bin: string } {
         packages: [
             {
                 name: "daemon",
-                targets: withFixture
-                    ? [{ name: "direct_host_fixture", kind: ["example"] }]
-                    : [],
+                targets: withFixture ? [{ name: "direct_host_fixture", kind: ["example"] }] : [],
             },
         ],
     });
@@ -42,12 +32,8 @@ function fakeWorkspace(withFixture = true): { root: string; bin: string } {
 }
 
 describe("Rust direct-host prerequisite detector", () => {
-    it("ignores absent sibling workspaces and removed binaries", () => {
+    it("resolves a workspace that has the fixture target but no prebuilt binary", () => {
         const { root, bin } = fakeWorkspace();
-        const removedBinary = join(root, "target", "release", "eidnara-host");
-        const siblingDaemon = join(root, "..", "sibling-daemon");
-        expect(existsSync(removedBinary)).toBe(false);
-        expect(existsSync(siblingDaemon)).toBe(false);
 
         const result = detectRustPrerequisites({
             repoRoot: root,

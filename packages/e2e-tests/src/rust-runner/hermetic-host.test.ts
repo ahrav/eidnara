@@ -1,27 +1,25 @@
-/// <reference types="bun-types" />
-
 import { afterEach, describe, expect, it } from "bun:test";
-import { createServer, type Server, Socket } from "node:net";
 import {
     chmodSync,
     existsSync,
     lstatSync,
     mkdtempSync,
     readFileSync,
-    realpathSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
+import { createServer, type Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostClient } from "@eidnara/opencode/shared/host-client";
-import { verifyReleaseRoot } from "../prospective-holdout/release-root";
-import { releaseRootFixture } from "../prospective-holdout/test-fixtures";
 import {
     __hermeticHostTest,
     buildDirectHostFixture,
+    detectRustModePrereqs,
     HermeticHostStack,
 } from "./hermetic-host";
+
+const fixturePrereqs = detectRustModePrereqs();
 
 const temporaryRoots: string[] = [];
 
@@ -81,8 +79,11 @@ async function rawControl(path: string, request: Buffer): Promise<Record<string,
 
 async function mockControl(
     responder: (request: Record<string, unknown>, socket: Socket) => void,
-): Promise<{ client: InstanceType<typeof __hermeticHostTest.FixtureControlClient>; server: Server }> {
-    const root = mkdtempSync(join(tmpdir(), "mc-control-client-"));
+): Promise<{
+    client: InstanceType<typeof __hermeticHostTest.FixtureControlClient>;
+    server: Server;
+}> {
+    const root = mkdtempSync(join(tmpdir(), "eidnara-control-client-"));
     temporaryRoots.push(root);
     const path = join(root, "control.sock");
     const server = createServer((socket) => {
@@ -102,18 +103,6 @@ afterEach(() => {
 });
 
 describe("direct host fixture contract", () => {
-    it("selects frozen host artifact without a workspace build", async () => {
-        const release = realpathSync(mkdtempSync(join(tmpdir(), "rust-release-root-")));
-        const active = mkdtempSync(join(tmpdir(), "rust-active-root-"));
-        temporaryRoots.push(release, active);
-        const manifest = releaseRootFixture(release);
-        const verified = verifyReleaseRoot(release, manifest, {
-            expectedRootFingerprint: manifest.rootFingerprint,
-            activeCheckout: active,
-        });
-        expect(await buildDirectHostFixture(verified)).toBe(join(release, "bin/mc-host"));
-    });
-
     it("parses only the bounded readiness schema and reaps only stale PID records", () => {
         const valid = Buffer.from(
             JSON.stringify({
@@ -165,9 +154,7 @@ describe("direct host fixture contract", () => {
             fixtureBin,
             startTimeoutMs: 2_000,
         }).catch((error: unknown) => error);
-        expect(String(startupError)).toContain(
-            "direct mc-host readiness preceded secure publication",
-        );
+        expect(String(startupError)).toContain("direct host readiness preceded secure publication");
         expect(existsSync(root)).toBe(false);
         temporaryRoots.splice(temporaryRoots.indexOf(root), 1);
     }, 15_000);
@@ -176,9 +163,15 @@ describe("direct host fixture contract", () => {
         const cases: Array<(request: Record<string, unknown>, socket: Socket) => void> = [
             (_request, socket) => socket.write("not-json\n"),
             (request, socket) =>
-                socket.write(`${JSON.stringify({ id: request.id, ok: true, result: { accepted: true }, extra: true })}\n`),
-            (_request, socket) => socket.write(`${"x".repeat(__hermeticHostTest.maxLineBytes + 1)}\n`),
-            (_request, socket) => socket.write(`${JSON.stringify({ id: 999, ok: true, result: { accepted: true } })}\n`),
+                socket.write(
+                    `${JSON.stringify({ id: request.id, ok: true, result: { accepted: true }, extra: true })}\n`,
+                ),
+            (_request, socket) =>
+                socket.write(`${"x".repeat(__hermeticHostTest.maxLineBytes + 1)}\n`),
+            (_request, socket) =>
+                socket.write(
+                    `${JSON.stringify({ id: 999, ok: true, result: { accepted: true } })}\n`,
+                ),
         ];
         for (const responder of cases) {
             const { client, server } = await mockControl(responder);
@@ -200,7 +193,7 @@ describe("direct host fixture contract", () => {
         await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     });
 
-    it(
+    it.skipIf(!fixturePrereqs.ok)(
         "proves permissions, controls, managed readiness, redaction, and JSONL shutdown",
         async () => {
             const fixtureBin = await buildDirectHostFixture();
@@ -257,7 +250,9 @@ describe("direct host fixture contract", () => {
                         thrownErrors.push(String(error));
                     }
                 }
-                expect(controlResponses.length + thrownErrors.length).toBe(malformedControls.length);
+                expect(controlResponses.length + thrownErrors.length).toBe(
+                    malformedControls.length,
+                );
                 expect(await stack.backendCounters()).toEqual(before);
 
                 const callFor = async (session: string, prompt: string): Promise<void> => {
@@ -324,7 +319,7 @@ describe("direct host fixture contract", () => {
         180_000,
     );
 
-    it(
+    it.skipIf(!fixturePrereqs.ok)(
         "routes SIGTERM through fixture cleanup",
         async () => {
             const fixtureBin = await buildDirectHostFixture();

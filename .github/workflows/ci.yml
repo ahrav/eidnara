@@ -444,6 +444,12 @@ jobs:
       # Swatinem/rust-cache v2.9.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
+      # actions/setup-node v4.4.0; the E2E harness runs OpenCode, whose npm
+      # package installs through Node.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.18.0
+
       - name: Build and test the addon
         # The addon loads a release build of the cdylib; the package tests
         # then drive the setup handshake, ring geometry, buffer bounds, and
@@ -460,6 +466,18 @@ jobs:
           cargo +1.98 build -p daemon --bin eidnara-host --locked
           bun run payload:dev
           bun run smoke:tarballs
+
+      - name: Rust-mode E2E
+        # OpenCode is pinned to the version the harness closure under
+        # `release/harness-closures/` names. The suite skips itself, with the
+        # reason printed, when the shared-memory channel cannot start on the
+        # runner's Bun; OpenCode embeds Bun, so the probe predicts the plugin.
+        run: |
+          npm install -g opencode-ai@1.18.22
+          cargo +1.98 build -p daemon --example direct_host_fixture \
+            --features direct-host-fixture --locked
+          bun run --cwd packages/e2e-tests validate-mode-manifest
+          bun run --cwd packages/e2e-tests test:rust
 
   unlocked-deps:
     name: pinned toolchain with unlocked latest dependencies

@@ -1,7 +1,7 @@
-import type { TestHarness } from "./harness";
 import type { MockUsage } from "./mock-provider/server";
+import type { RustTestHarness } from "./rust-harness";
 
-/* */
+/** Cache-read-heavy usage keeps a scripted tool turn below every execute threshold the scenarios configure. */
 export const DEFAULT_SCRIPTED_TOOL_USAGE: MockUsage = {
     input_tokens: 2_000,
     output_tokens: 20,
@@ -59,8 +59,8 @@ function toolResultTextOf(block: WireContentBlock): string {
     return "";
 }
 
-/* */
-export function findToolResultText(harness: TestHarness, callId: string): string | null {
+/** Scans every captured request for the `tool_result` block answering `callId`. */
+export function findToolResultText(harness: RustTestHarness, callId: string): string | null {
     for (const request of harness.mock.requests()) {
         const messages = request.body.messages;
         if (!Array.isArray(messages)) continue;
@@ -82,17 +82,16 @@ let scriptedCallCounter = 0;
 /**
  * `runScriptedToolCall` drives one real tool loop and captures its provider-visible tool result.
  * Missing publication or result is an infrastructure failure, not a behavioral verdict.
- * verdict.
  *
  * `mock.reset()` clears captured request history.
  * `mock.reset()` also clears the queue, default response, and matchers.
- * A turn driven before `mock.reset()` is no longer observable.
+ * A turn driven before `mock.reset()` leaves no captured request behind.
  * Callers must reinstall matchers and the default response after `mock.reset()`.
  * The `published === null` diagnostic names only tools published in the current turn.
  * Callers must observe each turn before scripting the next turn.
  */
 export async function runScriptedToolCall(
-    harness: TestHarness,
+    harness: RustTestHarness,
     sessionId: string,
     options: ScriptedToolCallOptions,
 ): Promise<ScriptedToolCall> {
@@ -116,8 +115,8 @@ export async function runScriptedToolCall(
         usage,
     });
     const response = await harness.sendPrompt(sessionId, options.prompt);
-    const assistantMessageId = ((response as { data?: { info?: { id?: unknown } } } | null)
-        ?.data?.info?.id);
+    const assistantMessageId = (response as { data?: { info?: { id?: unknown } } } | null)?.data
+        ?.info?.id;
     if (published === null) {
         const visible = [
             ...new Set(
@@ -147,8 +146,9 @@ export async function runScriptedToolCall(
     return {
         publishedToolName: published,
         resultText,
-        assistantMessageId: typeof assistantMessageId === "string" && assistantMessageId !== ""
-            ? assistantMessageId
-            : null,
+        assistantMessageId:
+            typeof assistantMessageId === "string" && assistantMessageId !== ""
+                ? assistantMessageId
+                : null,
     };
 }

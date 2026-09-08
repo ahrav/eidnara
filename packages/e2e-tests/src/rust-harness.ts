@@ -1,20 +1,21 @@
 /**
- * RustTestHarness drives OpenCode through U5's directly composed host fixture.
+ * RustTestHarness drives OpenCode through the directly composed host fixture.
  *
- * Fixture and OpenCode share an isolated data root; the fixture starts before OpenCode.
- * The fixture starts before OpenCode so plugin discovery reaches a published, authenticated host.
- * OpenCode restarts preserve database and module-store state.
+ * Fixture and OpenCode share an isolated data root; the fixture starts before OpenCode
+ * so plugin discovery reaches a published, authenticated host.
+ * OpenCode restarts preserve OpenCode's own database and the module store.
  *
  * Wire assertions use the model mock's full request bodies.
- * The TS lane asserts against the same full request bodies.
- * Rust transform decisions are also surfaced through the per-suite diagnostic log at `EIDNARA_LOG_PATH`.
- * The Rust transform emits `rust pass: decision=… served_from=… applied=…` lines.
+ * Rust transform decisions are also surfaced through the per-suite diagnostic log at `EIDNARA_LOG_PATH`:
+ * the transform emits `rust pass: decision=… served_from=… applied=…` lines.
+ *
+ * `bun:sqlite` touches only OpenCode's own `opencode.db`, to seed message history the
+ * session API has no bulk path for.
  */
 
 import { Database } from "bun:sqlite";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { storageSubtreePath } from "@eidnara/opencode/shared/data-path";
 import { managedSubtreePath } from "@eidnara/opencode/shared/host-lifecycle/paths";
 import { ballastProse } from "./ballast";
 import {
@@ -23,7 +24,6 @@ import {
     type SharedHarnessOptions,
 } from "./harness-primitives";
 import { MockProvider } from "./mock-provider/server";
-import type { VerifiedReleaseRoot } from "./prospective-holdout/release-root";
 import {
     createIsolatedEnv,
     type IsolatedEnv,
@@ -40,15 +40,6 @@ import {
 export interface RustTestHarnessOptions extends SharedHarnessOptions {
     /** Eidnara USER-tier config overrides (thresholds, memory, etc.). */
     eidnaraConfig?: Record<string, unknown>;
-    /**
-     * Starts OpenCode in TS mode instead of Rust mode.
-     * The direct host continues running, so `restart({ rust: true })` can switch modes against the same data directory.
-     * The plugin transforms in TS on this boot.
-     * Default: false (boot straight into Rust mode).
-     */
-    startInTsMode?: boolean;
-    /** Verified immutable release root. Omitted keeps active-checkout behavior. */
-    releaseRoot?: VerifiedReleaseRoot;
 }
 
 export interface SdkClient extends SdkClientCore {
@@ -82,14 +73,6 @@ export interface RustPassLine {
     raw: string;
 }
 
-export interface RustModuleTodoState {
-    lastTodoState: string | null;
-    syntheticCallId: string | null;
-    syntheticAnchorMessageId: string | null;
-    currentTotalInputTokens: number;
-    contextLimitTokens: number;
-}
-
 export class RustTestHarness {
     readonly mock: MockProvider;
     readonly env: IsolatedEnv;
@@ -98,10 +81,8 @@ export class RustTestHarness {
 
     private opencodeInstance: SpawnedOpencode;
     private clientInstance: SdkClient;
-    private contextDbCached: Database | null = null;
     private modelContextLimit: number | undefined;
     private readonly mockBaseURL: string;
-    private readonly releaseRoot: VerifiedReleaseRoot | undefined;
 
     private constructor(args: {
         mock: MockProvider;
@@ -112,7 +93,6 @@ export class RustTestHarness {
         client: SdkClient;
         logPath: string;
         modelContextLimit: number | undefined;
-        releaseRoot: VerifiedReleaseRoot | undefined;
     }) {
         this.mock = args.mock;
         this.mockBaseURL = args.mockBaseURL;
@@ -122,18 +102,14 @@ export class RustTestHarness {
         this.clientInstance = args.client;
         this.logPath = args.logPath;
         this.modelContextLimit = args.modelContextLimit;
-        this.releaseRoot = args.releaseRoot;
     }
 
-    /* */
     static detectPrereqs(): RustModePrereqs {
         return detectRustModePrereqs();
     }
 
-    static async create(
-        options: RustTestHarnessOptions = {},
-    ): Promise<RustTestHarness> {
-        const prereqs = detectRustModePrereqs(options.releaseRoot);
+    static async create(options: RustTestHarnessOptions = {}): Promise<RustTestHarness> {
+        const prereqs = detectRustModePrereqs();
         if (!prereqs.ok) {
             throw new Error(
                 `RustTestHarness prerequisites unmet: ${prereqs.skipReason ?? "unknown"}. ` +
@@ -141,7 +117,7 @@ export class RustTestHarness {
             );
         }
 
-        const fixtureBin = await buildDirectHostFixture(options.releaseRoot);
+        const fixtureBin = await buildDirectHostFixture();
 
         const mock = new MockProvider();
         const { baseURL } = await mock.start();
@@ -164,7 +140,6 @@ export class RustTestHarness {
                 connectionFile: host.connectionFile,
                 logPath,
                 options,
-                rustMode: !options.startInTsMode,
             });
         } catch (error) {
             // Teardown steps run independently: a failure does not skip later steps.
@@ -197,17 +172,16 @@ export class RustTestHarness {
             client,
             logPath,
             modelContextLimit: options.modelContextLimit,
-            releaseRoot: options.releaseRoot,
         });
     }
 
+    /** The connection file makes the runner write user-tier rust consent and the project's `transform_mode`. */
     private static spawnServe(args: {
         env: IsolatedEnv;
         mockURL: string;
         connectionFile: string;
         logPath: string;
         options: RustTestHarnessOptions;
-        rustMode: boolean;
     }): Promise<SpawnedOpencode> {
         return spawnOpencode({
             mockProviderURL: args.mockURL,
@@ -216,11 +190,7 @@ export class RustTestHarness {
             openCodeConfigExtra: args.options.openCodeConfigExtra,
             eidnaraConfig: args.options.eidnaraConfig,
             userHostConnectionFile: args.connectionFile,
-            projectEidnaraConfig: {
-                transform_mode: args.rustMode ? "rust" : "ts",
-            },
             extraEnv: { EIDNARA_LOG_PATH: args.logPath },
-            releaseRoot: args.options.releaseRoot,
         });
     }
 
@@ -234,24 +204,9 @@ export class RustTestHarness {
 
     /**
      * Restarts `opencode serve` against the same data directory.
-     * The databases, module store, and direct host persist across restarts.
-     * Optionally switches `transform_mode` between `ts` and `rust`.
-     * The cold-start-drop-seed scenario builds TS-mode state before restarting in Rust.
+     * OpenCode's database, the module store, and the direct host persist across restarts.
      */
-    async restart(
-        opts: {
-            rust?: boolean;
-            eidnaraConfig?: Record<string, unknown>;
-        } = {},
-    ): Promise<void> {
-        if (this.contextDbCached) {
-            try {
-                this.contextDbCached.close();
-            } catch {
-                // ignore
-            }
-            this.contextDbCached = null;
-        }
+    async restart(opts: { eidnaraConfig?: Record<string, unknown> } = {}): Promise<void> {
         await this.opencodeInstance.kill();
         this.opencodeInstance = await RustTestHarness.spawnServe({
             env: this.env,
@@ -261,9 +216,7 @@ export class RustTestHarness {
             options: {
                 modelContextLimit: this.modelContextLimit,
                 eidnaraConfig: opts.eidnaraConfig,
-                releaseRoot: this.releaseRoot,
             },
-            rustMode: opts.rust ?? true,
         });
         const sdk = await import("@opencode-ai/sdk");
         // SAFETY: SdkClient is bounded subset of createOpencodeClient used by this harness.
@@ -272,7 +225,6 @@ export class RustTestHarness {
         }) as unknown as SdkClient;
     }
 
-    /* */
     async createSession(): Promise<string> {
         const maxAttempts = 5;
         for (let i = 1; i <= maxAttempts; i++) {
@@ -299,11 +251,11 @@ export class RustTestHarness {
     }
 
     /**
+     * Inserts `count` user text messages of `textBytes` each into OpenCode's own `opencode.db`,
+     * cloned from the session's newest user message, so a later prompt observes a large history
+     * without driving thousands of prompts. Call before `restart()` so OpenCode reloads the session.
      */
-    appendSyntheticHistory(
-        sessionId: string,
-        options: { count: number; textBytes: number },
-    ): void {
+    appendSyntheticHistory(sessionId: string, options: { count: number; textBytes: number }): void {
         const dbPath = join(this.env.dataDir, "opencode", "opencode.db");
         const db = new Database(dbPath);
         try {
@@ -317,21 +269,12 @@ export class RustTestHarness {
                 .prepare(
                     "SELECT m.data AS message_data, p.data AS part_data FROM message m JOIN part p ON p.message_id = m.id WHERE m.session_id = ? AND json_extract(m.data, '$.role') = 'user' AND json_extract(p.data, '$.type') = 'text' ORDER BY m.time_created DESC LIMIT 1",
                 )
-                .get(sessionId) as
-                | { message_data: string; part_data: string }
-                | undefined;
+                .get(sessionId) as { message_data: string; part_data: string } | undefined;
             if (!templateRow) {
-                throw new Error(
-                    "synthetic history requires an existing user text message",
-                );
+                throw new Error("synthetic history requires an existing user text message");
             }
-            const messageTemplate = JSON.parse(
-                templateRow.message_data,
-            ) as Record<string, unknown>;
-            const partTemplate = JSON.parse(templateRow.part_data) as Record<
-                string,
-                unknown
-            >;
+            const messageTemplate = JSON.parse(templateRow.message_data) as Record<string, unknown>;
+            const partTemplate = JSON.parse(templateRow.part_data) as Record<string, unknown>;
             const insertMessage = db.prepare(
                 "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
             );
@@ -347,15 +290,10 @@ export class RustTestHarness {
                 timestamp: number,
                 counter: number,
             ): string => {
-                const encoded = ~(
-                    BigInt(timestamp) * 0x1000n +
-                    BigInt(counter)
-                );
+                const encoded = ~(BigInt(timestamp) * 0x1000n + BigInt(counter));
                 const timeBytes = Buffer.alloc(6);
                 for (let byte = 0; byte < timeBytes.length; byte += 1) {
-                    timeBytes[byte] = Number(
-                        (encoded >> BigInt(40 - 8 * byte)) & 0xffn,
-                    );
+                    timeBytes[byte] = Number((encoded >> BigInt(40 - 8 * byte)) & 0xffn);
                 }
                 return `${prefix}_${timeBytes.toString("hex")}${counter.toString(36).padStart(14, "0")}`;
             };
@@ -377,9 +315,8 @@ export class RustTestHarness {
                             id: messageId,
                             sessionID: sessionId,
                             time: {
-                                ...((messageTemplate.time as
-                                    | Record<string, unknown>
-                                    | undefined) ?? {}),
+                                ...((messageTemplate.time as Record<string, unknown> | undefined) ??
+                                    {}),
                                 created: timestamp,
                             },
                         }),
@@ -420,24 +357,19 @@ export class RustTestHarness {
                 ...(options.agent ? { agent: options.agent } : {}),
             },
         });
-        const timeout = new Promise<null>((r) =>
-            setTimeout(() => r(null), timeoutMs),
-        );
+        const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeoutMs));
         const result = await Promise.race([promptPromise, timeout]);
         if (result === null) {
             throw new Error(
                 `sendPrompt did not complete within ${timeoutMs}ms. stderr:\n${this.opencodeInstance
                     .stderr()
-                    .slice(
-                        -2000,
-                    )}\nhost log:\n${this.host.hostLog().slice(-2000)}`,
+                    .slice(-2000)}\nhost log:\n${this.host.hostLog().slice(-2000)}`,
             );
         }
         return result;
     }
 
-    /**
-     */
+    /** `session.revert` removes the selected message and every later message. */
     async revertMessage(sessionId: string, messageId: string): Promise<void> {
         await this.clientInstance.session.revert({
             path: { id: sessionId },
@@ -445,7 +377,6 @@ export class RustTestHarness {
         });
     }
 
-    /* */
     async listMessages(
         sessionId: string,
     ): Promise<Array<{ info?: { id?: string; role?: string } }>> {
@@ -458,19 +389,13 @@ export class RustTestHarness {
             : [];
     }
 
-
-    /* */
+    /** Requests carrying the Eidnara system block; internal agents (title, summary, …) lack it. */
     mainRequests() {
         return this.mock
             .requests()
-            .filter((r) =>
-                JSON.stringify(r.body.system ?? "").includes(
-                    "## Eidnara",
-                ),
-            );
+            .filter((r) => JSON.stringify(r.body.system ?? "").includes("## Eidnara"));
     }
 
-    /* */
     lastMainMessages(): Array<{ role?: string; content?: unknown }> {
         const req = this.mainRequests().at(-1);
         const messages = req?.body.messages;
@@ -479,28 +404,20 @@ export class RustTestHarness {
             : [];
     }
 
-    /**
-     */
+    /** Byte length of the last main request's messages with `cache_control` markers stripped. */
     lastMainWireBytes(): number {
         const req = this.mainRequests().at(-1);
         if (!req) return 0;
         return Buffer.byteLength(stableSerialize(req.body.messages ?? []));
     }
 
-    /* */
     lastMainWireSerialized(): string {
         const req = this.mainRequests().at(-1);
         return stableSerialize(req?.body.messages ?? []);
     }
 
-
-    /**
-     * Polling avoids the race without a fixed sleep.
-     */
-    async waitForRustPasses(
-        minCount: number,
-        timeoutMs = 15_000,
-    ): Promise<RustPassLine[]> {
+    /** The transform logs its pass line after the provider response is captured; polling avoids that race without a fixed sleep. */
+    async waitForRustPasses(minCount: number, timeoutMs = 15_000): Promise<RustPassLine[]> {
         return this.waitFor(
             () => {
                 const passes = this.readRustPasses();
@@ -510,13 +427,11 @@ export class RustTestHarness {
         );
     }
 
-    /* */
     diagnosticLog(): string {
         if (!existsSync(this.logPath)) return "";
         return readFileSync(this.logPath, "utf8");
     }
 
-    /* */
     readRustPasses(): RustPassLine[] {
         if (!existsSync(this.logPath)) return [];
         const lines = readFileSync(this.logPath, "utf8").split("\n");
@@ -542,12 +457,8 @@ export class RustTestHarness {
                 wireBuildMs: Number(stageField(body, "wire_build") || "0"),
                 wireMessages: Number(stageField(body, "wire_messages") || "0"),
                 transportMs: Number(stageField(body, "transport") || "0"),
-                transportPages: Number(
-                    stageField(body, "transport_pages") || "0",
-                ),
-                transportBytes: Number(
-                    stageField(body, "transport_bytes") || "0",
-                ),
+                transportPages: Number(stageField(body, "transport_pages") || "0"),
+                transportBytes: Number(stageField(body, "transport_bytes") || "0"),
                 rowVersion: Number(field(body, "row_version") || "0"),
                 raw: line,
             });
@@ -555,7 +466,6 @@ export class RustTestHarness {
         return parsed;
     }
 
-    /* */
     async waitFor<T>(
         predicate: () => T | null | undefined | false,
         opts: { timeoutMs?: number; intervalMs?: number; label?: string } = {},
@@ -573,122 +483,11 @@ export class RustTestHarness {
         );
     }
 
-
-    private contextDbPath(): string {
-        return join(storageSubtreePath(this.env.dataDir), "context.db");
-    }
-
-    contextDb(): Database {
-        if (this.contextDbCached) return this.contextDbCached;
-        const dbPath = this.contextDbPath();
-        if (!existsSync(dbPath)) {
-            throw new Error(
-                `context.db not found at ${dbPath} — plugin may not have initialized yet.`,
-            );
-        }
-        this.contextDbCached = new Database(dbPath, { readonly: true });
-        return this.contextDbCached;
-    }
-
-    hasContextDb(): boolean {
-        return existsSync(this.contextDbPath());
-    }
-
-    readModuleTodoState(sessionId: string): RustModuleTodoState | null {
-        const path = join(storageSubtreePath(this.env.dataDir), "store.db");
-        if (!existsSync(path)) return null;
-        const db = new Database(path, { readonly: true });
-        try {
-            db.exec("PRAGMA busy_timeout = 30000");
-            const row = db
-                .prepare("SELECT meta FROM eidnara_cache_state WHERE session_id = ?")
-                .get(sessionId) as { meta: string } | null;
-            if (!row) return null;
-            const meta = JSON.parse(row.meta) as Record<string, unknown>;
-            const synthetic =
-                meta.synthetic_todo && typeof meta.synthetic_todo === "object"
-                    ? (meta.synthetic_todo as Record<string, unknown>)
-                    : null;
-            const usage =
-                meta.last_usage && typeof meta.last_usage === "object"
-                    ? (meta.last_usage as Record<string, unknown>)
-                    : null;
-            return {
-                lastTodoState:
-                    typeof meta.last_todo_state === "string" ? meta.last_todo_state : null,
-                syntheticCallId:
-                    typeof synthetic?.call_id === "string" ? synthetic.call_id : null,
-                syntheticAnchorMessageId:
-                    typeof synthetic?.anchor_mid === "string" ? synthetic.anchor_mid : null,
-                currentTotalInputTokens:
-                    typeof usage?.current_total_input_tokens === "number"
-                        ? usage.current_total_input_tokens
-                        : 0,
-                contextLimitTokens:
-                    typeof usage?.context_limit_tokens === "number"
-                        ? usage.context_limit_tokens
-                        : 0,
-            };
-        } finally {
-            db.close();
-        }
-    }
-
-    countTagsByStatus(sessionId: string, status: string): number {
-        try {
-            const row = this.contextDb()
-                .prepare(
-                    "SELECT COUNT(*) AS n FROM tags WHERE session_id = ? AND status = ?",
-                )
-                .get(sessionId, status) as { n: number } | null;
-            return row?.n ?? 0;
-        } catch {
-            return 0;
-        }
-    }
-
-    /**
-     */
-    setSessionCacheTtl(sessionId: string, cacheTtl: string): void {
-        if (this.contextDbCached) {
-            try {
-                this.contextDbCached.close();
-            } catch {
-            }
-            this.contextDbCached = null;
-        }
-        const dbPath = this.contextDbPath();
-        const db = new Database(dbPath);
-        try {
-            const result = db
-                .prepare(
-                    "UPDATE session_meta SET cache_ttl = ? WHERE session_id = ?",
-                )
-                .run(cacheTtl, sessionId) as { changes?: number };
-            if (result.changes !== 1) {
-                throw new Error(
-                    `session cache TTL update affected ${result.changes ?? 0} rows`,
-                );
-            }
-        } finally {
-            db.close();
-        }
-    }
-
-    /* */
     requests() {
         return this.mock.requests();
     }
 
     async dispose(): Promise<void> {
-        if (this.contextDbCached) {
-            try {
-                this.contextDbCached.close();
-            } catch {
-                // ignore
-            }
-            this.contextDbCached = null;
-        }
         try {
             await this.opencodeInstance.kill();
         } catch {
@@ -715,7 +514,6 @@ export class RustTestHarness {
     }
 }
 
-/* */
 function field(body: string, key: string): string {
     const match = body.match(new RegExp(`(?:^|\\s)${key}=([^\\s]+)`));
     return match ? match[1]! : "";
@@ -726,7 +524,7 @@ function stageField(body: string, key: string): string {
     return match ? match[1]! : "";
 }
 
-/* */
+/** JSON without `cache_control` markers, because OpenCode moves the marker to the newest message each turn. */
 export function stableSerialize(value: unknown): string {
     return JSON.stringify(stripCacheControl(value)) ?? "";
 }
@@ -741,9 +539,7 @@ type CacheStrippedValue =
 
 function stripCacheControl(value: unknown): CacheStrippedValue | undefined {
     if (Array.isArray(value))
-        return value
-            .map(stripCacheControl)
-            .filter((item) => item !== undefined);
+        return value.map(stripCacheControl).filter((item) => item !== undefined);
     if (value && typeof value === "object") {
         const out: { [key: string]: CacheStrippedValue | undefined } = {};
         for (const [key, child] of Object.entries(value)) {
@@ -752,10 +548,7 @@ function stripCacheControl(value: unknown): CacheStrippedValue | undefined {
         }
         return out;
     }
-    if (
-        value === null ||
-        ["boolean", "number", "string"].includes(typeof value)
-    ) {
+    if (value === null || ["boolean", "number", "string"].includes(typeof value)) {
         return value as null | boolean | number | string;
     }
     return undefined;
