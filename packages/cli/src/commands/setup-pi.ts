@@ -20,6 +20,7 @@ import {
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
 import type { PromptIO } from "../lib/prompts";
+import { standaloneVersion } from "../lib/semver";
 import { compareVersionStrings } from "../lib/version";
 
 export interface SetupEnvironment {
@@ -301,7 +302,9 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         return 1;
     }
 
-    const version = env.getPiVersion(binary.path);
+    // Only a line that is nothing but a version counts, so a wrapper warning that quotes
+    // another tool's version cannot pass as the host's; anything else is unverified.
+    const version = standaloneVersion(env.getPiVersion(binary.path));
     spinner.stop(
         version
             ? `${host.displayName} ${version} detected at ${binary.path}`

@@ -679,6 +679,111 @@ describe("Pi doctor", () => {
         expect(report).not.toContain("from-cwd");
     });
 
+    it("keeps the cwd report for a session labelled with a raw slug and sanitizes the spinner line", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const otherProject = makeTempRoot("eidnara-pi-doctor-other-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const originalConsoleLog = console.log;
+        console.log = () => {};
+        const hostileProject = `${otherProject}\u001b[2K\rforged`;
+        // The first session has a slug label (no absolute cwd in its header); the second an
+        // absolute directory carrying terminal controls.
+        const pickIndex = { value: 0 };
+        class PickSession extends MockPrompts {
+            override async selectOne(_message: string, options: SelectOption[]): Promise<string> {
+                return options[pickIndex.value]?.value ?? options[0].value;
+            }
+        }
+        const collected: string[] = [];
+        const reportFor = (directory: string): PiDiagnosticReport => ({
+            timestamp: "2026-04-28T12:34:56.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: join(root, ".pi", "bin", "pi"),
+            piVersion: "0.80.2",
+            settings: {
+                path: join(agentDir, "settings.json"),
+                exists: true,
+                hasEidnaraPackage: true,
+                packages: ["npm:@eidnara/pi"],
+            },
+            configPaths: {
+                agentDir,
+                userConfig: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                projectConfig: join(directory, ".eidnara", "eidnara.jsonc"),
+            },
+            userConfig: null,
+            projectConfig: {
+                path: join(directory, ".eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            loadedConfigPaths: [],
+            loadWarnings: [],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
+            recentSessions: [
+                {
+                    sessionId: "slug-session",
+                    directory: "--tmp-plainproject--",
+                    lastActiveAt: "2026-04-28T12:00:00.000Z",
+                },
+                {
+                    sessionId: "hostile-session",
+                    directory: hostileProject,
+                    lastActiveAt: "2026-04-28T11:00:00.000Z",
+                },
+            ],
+            sessionDiscovery: "ok",
+            historianDumps: {
+                byProject: [],
+                legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+            },
+        });
+        const deps = (options: RunDoctorOptions) => ({
+            ...options.deps,
+            collectDiagnostics: async (directory: string) => {
+                collected.push(directory);
+                return reportFor(directory);
+            },
+        });
+
+        try {
+            const first = new PickSession({ texts: ["Title", "Description"] });
+            const firstOptions = baseOptions(root, cwd, first);
+            expect(
+                await runDoctor({ ...firstOptions, issue: true, deps: deps(firstOptions) }),
+            ).toBe(0);
+            // The slug names no directory, so nothing is recollected under `<cwd>/<slug>`.
+            expect(collected).toEqual([cwd]);
+            expect(first.messages.join("\n")).not.toContain("Collecting diagnostics for");
+
+            pickIndex.value = 1;
+            collected.length = 0;
+            const second = new PickSession({ texts: ["Title", "Description"] });
+            const secondOptions = baseOptions(root, cwd, second);
+            expect(
+                await runDoctor({ ...secondOptions, issue: true, deps: deps(secondOptions) }),
+            ).toBe(0);
+            expect(collected).toEqual([cwd, hostileProject]);
+            const spinnerLine = second.messages.find((message) =>
+                message.startsWith("spinner-start:Collecting diagnostics for"),
+            );
+            expect(spinnerLine).toBeDefined();
+            expect(spinnerLine).toContain("forged");
+            for (const forbidden of ["\u001b", "\r", "[2K"]) {
+                expect(spinnerLine).not.toContain(forbidden);
+            }
+        } finally {
+            console.log = originalConsoleLog;
+        }
+    });
+
     it("flattens and bounds hostile session labels before opening the picker", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
