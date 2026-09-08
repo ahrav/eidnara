@@ -158,69 +158,67 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             return client;
         })();
 
-    const rustToolBackends: RustToolBackends | undefined = rustMode
-        ? {
-              reduce: ({ sessionId, projectRoot, drop, commandId }) =>
-                  moduleClient.call({
-                      sessionId,
-                      projectRoot,
-                      method: "agent_drops.append",
-                      body: {
-                          method: "agent_drops.append",
-                          v: 1,
-                          session_id: sessionId,
-                          drop,
-                          command_id: commandId,
-                      },
-                  }),
-              note: ({
-                  commandId,
-                  sessionId,
-                  projectRoot,
-                  memoryProject,
-                  action,
-                  content,
-                  surfaceCondition,
-                  compiledProvider,
-                  compiledConfig,
-                  compiledAt,
-                  compileStatus,
-                  filter,
-                  limit,
-                  offset,
-                  noteId,
-              }) =>
-                  moduleClient.call({
-                      sessionId,
-                      projectRoot,
-                      method: "ctx_note",
-                      body: {
-                          name: "ctx_note",
-                          arguments: {
-                              ...(commandId ? { command_id: commandId } : {}),
-                              action,
-                              content,
-                              memory_project: memoryProject,
-                              surface_condition: surfaceCondition,
-                              ...(compileStatus
-                                  ? {
-                                        compiled_provider: compiledProvider,
-                                        compiled_config: compiledConfig,
-                                        compiled_at: compiledAt,
-                                        compile_status: compileStatus,
-                                    }
-                                  : {}),
-                              filter,
-                              limit,
-                              offset,
-                              note_id: noteId,
-                          },
-                      },
-                  }),
-              // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note.
-              noteEvaluationAvailable: () => true,
-          }
-        : undefined;
+    const rustToolBackends: RustToolBackends = {
+        reduce: ({ sessionId, projectRoot, drop, commandId }) =>
+            moduleClient.call({
+                sessionId,
+                projectRoot,
+                method: "agent_drops.append",
+                body: {
+                    method: "agent_drops.append",
+                    v: 1,
+                    session_id: sessionId,
+                    drop,
+                    command_id: commandId,
+                },
+            }),
+        note: ({
+            commandId,
+            sessionId,
+            projectRoot,
+            memoryProject,
+            action,
+            content,
+            surfaceCondition,
+            compiledProvider,
+            compiledConfig,
+            compiledAt,
+            compileStatus,
+            filter,
+            limit,
+            offset,
+            noteId,
+        }) =>
+            moduleClient.call({
+                sessionId,
+                projectRoot,
+                method: "ctx_note",
+                body: {
+                    name: "ctx_note",
+                    arguments: {
+                        ...(commandId ? { command_id: commandId } : {}),
+                        action,
+                        content,
+                        memory_project: memoryProject,
+                        surface_condition: surfaceCondition,
+                        ...(compileStatus
+                            ? {
+                                  compiled_provider: compiledProvider,
+                                  compiled_config: compiledConfig,
+                                  compiled_at: compiledAt,
+                                  compile_status: compileStatus,
+                              }
+                            : {}),
+                        filter,
+                        limit,
+                        offset,
+                        note_id: noteId,
+                    },
+                },
+            }),
+        // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note.
+        noteEvaluationAvailable: () => true,
+    };
 
     const systemPromptHash = createSystemPromptHashHandler({
         promptSurface: deps.config.prompt_surface,
@@ -396,7 +394,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         }),
     };
     const hooksWithBackends = hooks as typeof hooks & {
-        rustToolBackends?: RustToolBackends;
+        rustToolBackends: RustToolBackends;
     };
     Object.defineProperty(hooksWithBackends, "rustToolBackends", {
         value: rustToolBackends,

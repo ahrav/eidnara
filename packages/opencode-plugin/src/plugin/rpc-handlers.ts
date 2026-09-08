@@ -40,9 +40,6 @@ import {
 } from "../shared/tail-hygiene-status";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 
-// Each poll processes only assistant rows newer than its watermark because the long-lived RPC server retains each session's carry across polls.
-// A restart discards the in-memory carry; the next poll re-reads the session's assistant rows from the start.
-const workMetricsCarryBySession = new Map<string, WorkMetricsCarry>();
 const RUST_STATUS_CACHE_TTL_MS = 2_000;
 /** Live entries per poll cache. Each open sidebar pane polls one `(session, directory)` pair, so the cap covers concurrent panes while bounding growth across sessions and projects. commentlint: allow(JUDGE) */
 const POLL_CACHE_MAX_ENTRIES = 32;
@@ -105,6 +102,12 @@ export interface RustSessionStatus {
 }
 const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
+    POLL_CACHE_MAX_ENTRIES,
+);
+// Each poll processes only assistant rows newer than its watermark because the long-lived RPC server retains each session's carry across polls.
+// A carry has no expiry because it is a watermark, not a snapshot: evicting one (or a restart) only makes that session's next poll re-read its assistant rows from the start.
+const workMetricsCarryBySession = new BoundedTtlCache<WorkMetricsCarry>(
+    Number.POSITIVE_INFINITY,
     POLL_CACHE_MAX_ENTRIES,
 );
 

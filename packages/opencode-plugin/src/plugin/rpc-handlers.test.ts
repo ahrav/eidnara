@@ -384,4 +384,17 @@ describe("BoundedTtlCache", () => {
         expect(cache.get("b", 3_000)).toBe("beta-2");
         expect(cache.get("c", 3_000)).toBe("gamma");
     });
+
+    test("an infinite TTL never expires an entry but the size cap still evicts the oldest", () => {
+        const cache = new BoundedTtlCache<string>(Number.POSITIVE_INFINITY, 2);
+        cache.set("a", "alpha", 1_000);
+        cache.set("b", "beta", 2_000);
+        expect(cache.get("a", Number.MAX_SAFE_INTEGER)).toBe("alpha");
+        expect(cache.size).toBe(2);
+        cache.set("c", "gamma", 3_000);
+        expect(cache.size).toBe(2);
+        expect(cache.get("a", 4_000)).toBeUndefined();
+        expect(cache.get("b", 4_000)).toBe("beta");
+        expect(cache.get("c", 4_000)).toBe("gamma");
+    });
 });

@@ -126,15 +126,15 @@ describe("eidnara hook", () => {
         }
         expect("tool.definition" in hook).toBe(false);
         expect("config" in hook).toBe(false);
-        expect(Object.keys(hook.rustToolBackends ?? {}).sort()).toEqual([
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual([
             "note",
             "noteEvaluationAvailable",
             "reduce",
         ]);
-        expect(hook.rustToolBackends?.noteEvaluationAvailable?.("any-project")).toBe(true);
+        expect(hook.rustToolBackends.noteEvaluationAvailable?.("any-project")).toBe(true);
     });
 
-    it("leaves rustToolBackends undefined in ts mode", () => {
+    it("attaches the daemon tool backends in ts mode and leaves the messages transform a no-op", async () => {
         useTempDataHome("hook-ts-mode-");
         const fake = createFakeModuleClient();
         const hook = requireHook(
@@ -146,8 +146,26 @@ describe("eidnara hook", () => {
             ),
         );
 
-        expect(hook.rustToolBackends).toBeUndefined();
         expect(Object.keys(hook).sort()).toEqual(HOOK_KEYS);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual([
+            "note",
+            "noteEvaluationAvailable",
+            "reduce",
+        ]);
+
+        await hook.rustToolBackends.reduce?.({
+            sessionId: "ses-ts",
+            projectRoot: "/repo",
+            drop: "1",
+            commandId: "cmd-ts",
+        });
+        expect(fake.calls.map((call) => call.method)).toEqual(["agent_drops.append"]);
+
+        const messages = [{ info: { sessionID: "ses-ts" } }];
+        const output = { messages: [...messages] };
+        await hook["experimental.chat.messages.transform"]({}, output);
+        expect(output.messages).toEqual(messages);
+        expect(fake.calls).toHaveLength(1);
     });
 
     it("returns null and records no_project when no project identity resolves", () => {
