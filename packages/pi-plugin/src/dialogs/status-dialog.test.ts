@@ -42,8 +42,9 @@ function reservedWindowContext(sessionId: string) {
 }
 
 /** A Pi UI whose `custom` renders the dialog once at `width` and records the lines. */
-function renderingContext(sessionId: string, width: number) {
+function renderingContext(sessionId: string, width: number, keepOpen = false) {
     const rendered: string[][] = [];
+    let component: { render: (width: number) => string[]; dispose?: () => void } | undefined;
     const ctx = {
         ...fakeContext(sessionId),
         ui: {
@@ -57,25 +58,37 @@ function renderingContext(sessionId: string, width: number) {
                     keybindings: unknown,
                     done: (value: undefined) => void,
                 ) => { render: (width: number) => string[]; dispose?: () => void };
-                const component = makeComponent(
+                component = makeComponent(
                     { requestRender: () => undefined },
                     { fg: (_name, text) => text, bold: (text) => text },
                     undefined,
                     () => undefined,
                 );
                 rendered.push(component.render(width));
-                component.dispose?.();
+                // Disposing clears the dialog's refresh interval; a `keepOpen` caller drives `refresh` and disposes itself.
+                if (!keepOpen) component.dispose?.();
                 return undefined;
             },
         },
         getSystemPrompt: () => "system prompt",
+    };
+    const refresh = async () => {
+        const open = component as unknown as { refresh: () => Promise<void> };
+        await open.refresh();
+        rendered.push((component as { render: (width: number) => string[] }).render(width));
     };
     return {
         ctx,
         text: () => rendered.flat().join("\n"),
         rows: () => rendered.flat(),
         reset: () => (rendered.length = 0),
+        refresh,
+        dispose: () => component?.dispose?.(),
     };
+}
+
+function daemonSource(initial: RustSessionStatus, read = async () => initial) {
+    return { initial, read };
 }
 
 describe("Pi status dialog", () => {
@@ -154,13 +167,52 @@ describe("Pi status dialog", () => {
     it("renders the daemon hygiene ratio and counts", async () => {
         const sessionId = "ses-status-hygiene";
         const { ctx, text } = renderingContext(sessionId, 90);
-        await showStatusDialog(fakePi, ctx as never, deps(), DAEMON_STATUS);
+        await showStatusDialog(fakePi, ctx as never, deps(), daemonSource(DAEMON_STATUS));
         expect(text()).toContain("Hygiene 65.1% · 65,100 / 100,000 tok");
         expect(text()).toContain("Conversation includes model Reasoning; hygiene excludes it");
         expect(text()).toContain("Counts: 4 compartments");
         expect(text()).toContain("Pending drops: 2");
         expect(text()).toContain("Historian: running");
         expect(text()).not.toContain("Context:");
+    });
+
+    it("re-reads the daemon status on each refresh and keeps the last answer when a read fails", async () => {
+        const sessionId = "ses-status-refresh";
+        const settled: RustSessionStatus = {
+            ...DAEMON_STATUS,
+            compartment_count: 5,
+            pending_drop_count: 0,
+            wrapup_active: false,
+        };
+        const answers: Array<() => Promise<RustSessionStatus>> = [
+            async () => settled,
+            async () => {
+                throw new Error("socket closed");
+            },
+        ];
+        const { ctx, text, reset, refresh, dispose } = renderingContext(sessionId, 90, true);
+        try {
+            await showStatusDialog(
+                fakePi,
+                ctx as never,
+                deps(),
+                daemonSource(DAEMON_STATUS, () => (answers.shift() ?? (async () => settled))()),
+            );
+            expect(text()).toContain("Historian: running");
+
+            reset();
+            await refresh();
+            expect(text()).toContain("Counts: 5 compartments");
+            expect(text()).toContain("Pending drops: 0");
+            expect(text()).toContain("Historian: idle");
+
+            reset();
+            await refresh();
+            expect(text()).toContain("Counts: 5 compartments");
+            expect(text()).toContain("Historian: idle");
+        } finally {
+            dispose();
+        }
     });
 
     it("keeps every row within the render width, including widths under 24 columns", async () => {
@@ -171,7 +223,7 @@ describe("Pi status dialog", () => {
                 fakePi,
                 { ...ctx, getSystemPrompt: () => "system prompt" } as never,
                 deps(),
-                DAEMON_STATUS,
+                daemonSource(DAEMON_STATUS),
             );
             const widths = rows().map((row) => visibleWidth(row));
             expect(widths.length).toBeGreaterThan(2);
@@ -227,15 +279,20 @@ describe("Pi status dialog", () => {
             getContextUsage: () => ({ tokens: 50_000, percent: 50, contextWindow: 100_000 }),
         };
 
-        await showStatusDialog(fakePi, withModel as never, deps(), DAEMON_STATUS);
+        await showStatusDialog(fakePi, withModel as never, deps(), daemonSource(DAEMON_STATUS));
         expect(text()).toContain("42.0%");
         expect(text()).not.toContain("Window ");
 
         reset();
-        await showStatusDialog(fakePi, withModel as never, deps(), {
-            ...DAEMON_STATUS,
-            usage: { current_total_input_tokens: 42_000, context_limit_tokens: 80_000 },
-        });
+        await showStatusDialog(
+            fakePi,
+            withModel as never,
+            deps(),
+            daemonSource({
+                ...DAEMON_STATUS,
+                usage: { current_total_input_tokens: 42_000, context_limit_tokens: 80_000 },
+            }),
+        );
         expect(text()).toContain("52.5%");
         expect(text()).toContain("Window ");
         expect(text()).not.toContain("42.0%");
