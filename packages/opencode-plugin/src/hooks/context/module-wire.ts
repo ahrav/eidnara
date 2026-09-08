@@ -53,12 +53,32 @@ function canonicalNumber(value: number): string {
     return negative ? `-${positional}` : positional;
 }
 
+/**
+ * Order object keys by Unicode code point, as Rust's `String` ordering does. The default
+ * `.sort()` compares UTF-16 code units, which places surrogate pairs (U+10000 and above)
+ * before U+E000..U+FFFF.
+ */
+function compareCodePoints(a: string, b: string): number {
+    const length = Math.min(a.length, b.length);
+    for (let index = 0; index < length; index += 1) {
+        const unitA = a.charCodeAt(index);
+        const unitB = b.charCodeAt(index);
+        if (unitA === unitB) continue;
+        const surrogateA = unitA >= 0xd800 && unitA <= 0xdfff;
+        const surrogateB = unitB >= 0xd800 && unitB <= 0xdfff;
+        if (surrogateA && !surrogateB && unitB >= 0xe000) return 1;
+        if (surrogateB && !surrogateA && unitA >= 0xe000) return -1;
+        return unitA - unitB;
+    }
+    return a.length - b.length;
+}
+
 function canonicalJson(value: unknown): string {
     if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
     if (value !== null && typeof value === "object") {
         const record = value as Record<string, unknown>;
         return `{${Object.keys(record)
-            .sort()
+            .sort(compareCodePoints)
             .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
             .join(",")}}`;
     }
@@ -128,6 +148,53 @@ function mediaBlockFromPart(part: Record<string, unknown>): Record<string, unkno
         ...(filename !== undefined ? { filename } : {}),
         source,
     };
+}
+
+/** The daemon's `opaque_block` source for OpenCode-origin blocks. */
+const OPAQUE_SOURCE = { type: "harness", harness: "opencode" } as const;
+
+function toolOutput(
+    part: Record<string, unknown>,
+    state: Record<string, unknown>,
+    isError: boolean,
+    outputText: string,
+): Record<string, unknown> {
+    const attachmentsValue = state.attachments !== undefined ? state.attachments : part.attachments;
+    if (!Array.isArray(attachmentsValue)) {
+        return { kind: { type: isError ? "error_text" : "text", text: outputText } };
+    }
+    const blocks: Record<string, unknown>[] = [];
+    if (outputText.length > 0) blocks.push({ kind: { type: "text", text: outputText } });
+    for (const attachmentValue of attachmentsValue) {
+        if (
+            attachmentValue === null ||
+            typeof attachmentValue !== "object" ||
+            Array.isArray(attachmentValue)
+        ) {
+            continue;
+        }
+        const attachment = attachmentValue as Record<string, unknown>;
+        const hasMediaShape =
+            attachment.mime !== undefined ||
+            attachment.mimeType !== undefined ||
+            attachment.type === "file" ||
+            attachment.type === "image";
+        blocks.push({
+            kind: hasMediaShape
+                ? { type: "media", media: mediaBlockFromPart(attachment) }
+                : {
+                      type: "opaque",
+                      opaque: {
+                          source: OPAQUE_SOURCE,
+                          kind:
+                              typeof attachment.type === "string" ? attachment.type : "attachment",
+                          raw: attachment,
+                      },
+                  },
+            provider_extras: { opencode: { rawAttachment: attachment } },
+        });
+    }
+    return { kind: { type: isError ? "error_content" : "content", blocks } };
 }
 
 function isSyntheticPart(part: unknown): boolean {
@@ -221,7 +288,6 @@ export async function resolveOrdinalsForModule(args: {
     const currentStoredCount = getRawSessionStoredMessageCount(args.sessionId);
     const expectedStoredCount = (storedCount ?? 0) + newEntries.length;
     if (currentStoredCount !== expectedStoredCount) {
-        memo.clear();
         return { ok: false, reason: "mismatch" };
     }
 
@@ -230,7 +296,6 @@ export async function resolveOrdinalsForModule(args: {
         canonicalCount += 1;
         const prior = memo.get(entry.id);
         if (prior !== undefined && prior !== canonicalCount) {
-            memo.clear();
             return { ok: false, reason: "mismatch", messageId: entry.id };
         }
         memo.set(entry.id, canonicalCount);
@@ -684,37 +749,40 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                         ...providerExecuted,
                     },
                 });
-                if (state.status === "completed" || state.status === "error") {
-                    const output =
-                        typeof state.output === "string"
+                const status =
+                    typeof state.status === "string"
+                        ? state.status
+                        : typeof part.status === "string"
+                          ? part.status
+                          : undefined;
+                if (status === "completed" || status === "error") {
+                    const isError = status === "error";
+                    const outputValue =
+                        state.output !== undefined
                             ? state.output
-                            : typeof state.error === "string"
+                            : state.error !== undefined
                               ? state.error
-                              : "";
+                              : part.output !== undefined
+                                ? part.output
+                                : part.error;
+                    const outputText = typeof outputValue === "string" ? outputValue : "";
                     content.push({
                         kind: {
                             type: "tool_result",
                             id: callId,
                             tool_name: toolName,
-                            output: {
-                                kind: {
-                                    type: state.status === "error" ? "error_text" : "text",
-                                    text: output,
-                                },
-                            },
+                            output: toolOutput(part, state, isError, outputText),
                             ...providerExecuted,
                         },
                     });
                 }
             } else if (type === "file" || type === "image") {
                 content.push({ kind: { type: "media", ...mediaBlockFromPart(part) } });
-            } else if (
-                !["compaction", "step-finish", "snapshot", "patch", "agent", "retry"].includes(type)
-            ) {
+            } else if (!["compaction", "snapshot", "patch", "agent", "retry"].includes(type)) {
                 content.push({
                     kind: {
                         type: "opaque",
-                        source: "opencode",
+                        source: OPAQUE_SOURCE,
                         kind: type,
                         raw: part,
                     },

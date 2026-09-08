@@ -92,6 +92,146 @@ describe("encodeOpenCodeMessagesToCk", () => {
         expect(kinds[3]).not.toHaveProperty("provider_executed");
     });
 
+    it("reads completion status and output from top-level tool fields", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_legacy_tool", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID: "call_legacy",
+                        status: "completed",
+                        input: { cmd: "ls" },
+                        output: "a b c",
+                    },
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID: "call_failed",
+                        status: "error",
+                        error: "boom",
+                    },
+                ],
+            },
+        ]);
+
+        const kinds = (encoded.ck.content as Array<{ kind: Record<string, unknown> }>).map(
+            (block) => block.kind,
+        );
+        expect(kinds.map((kind) => kind.type)).toEqual([
+            "tool_call",
+            "tool_result",
+            "tool_call",
+            "tool_result",
+        ]);
+        expect(kinds[1]).toMatchObject({
+            id: "call_legacy",
+            output: { kind: { type: "text", text: "a b c" } },
+        });
+        expect(kinds[3]).toMatchObject({
+            id: "call_failed",
+            output: { kind: { type: "error_text", text: "boom" } },
+        });
+    });
+
+    it("carries tool-result attachments as content result blocks", () => {
+        const image = { type: "file", mime: "image/png", url: "data:image/png;base64,QUJD" };
+        const other = { type: "note", body: "x" };
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_attachments", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "call_att",
+                        state: {
+                            status: "completed",
+                            input: {},
+                            output: "read it",
+                            attachments: [image, other, "skipped", null],
+                        },
+                    },
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "call_att_err",
+                        state: { status: "error", input: {}, error: "", attachments: [] },
+                    },
+                ],
+            },
+        ]);
+
+        const kinds = (encoded.ck.content as Array<{ kind: Record<string, unknown> }>).map(
+            (block) => block.kind,
+        );
+        expect(kinds[1]).toEqual({
+            type: "tool_result",
+            id: "call_att",
+            tool_name: "read",
+            output: {
+                kind: {
+                    type: "content",
+                    blocks: [
+                        { kind: { type: "text", text: "read it" } },
+                        {
+                            kind: {
+                                type: "media",
+                                media: {
+                                    kind: "image",
+                                    media_type: "image/png",
+                                    source: { type: "data_base64", data: "QUJD" },
+                                },
+                            },
+                            provider_extras: { opencode: { rawAttachment: image } },
+                        },
+                        {
+                            kind: {
+                                type: "opaque",
+                                opaque: {
+                                    source: { type: "harness", harness: "opencode" },
+                                    kind: "note",
+                                    raw: other,
+                                },
+                            },
+                            provider_extras: { opencode: { rawAttachment: other } },
+                        },
+                    ],
+                },
+            },
+        });
+        expect(kinds[3]).toMatchObject({
+            output: { kind: { type: "error_content", blocks: [] } },
+        });
+    });
+
+    it("keeps step-finish parts as opaque blocks with the daemon's source shape", () => {
+        const stepFinish = { type: "step-finish", reason: "stop", cost: 0.01 };
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_step_finish", role: "assistant" },
+                parts: [
+                    { type: "text", text: "done" },
+                    stepFinish,
+                    { type: "snapshot", snapshot: "abc" },
+                ],
+            },
+        ]);
+
+        expect(encoded.ck.content).toEqual([
+            { kind: { type: "text", text: "done" } },
+            {
+                kind: {
+                    type: "opaque",
+                    source: { type: "harness", harness: "opencode" },
+                    kind: "step-finish",
+                    raw: stepFinish,
+                },
+            },
+        ]);
+    });
+
     it("encodes file and image parts as media blocks", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
@@ -207,6 +347,117 @@ describe("transform page digest canonical JSON", () => {
         expect(__moduleWireTest.canonicalJson({ b: [1e-7, "x"], a: null })).toBe(
             '{"a":null,"b":[0.0000001,"x"]}',
         );
+    });
+
+    it("orders object keys by Unicode code point like Rust strings", () => {
+        // UTF-16 code units place U+1F600 (surrogate pair) before U+E000; code points do not.
+        const keys = ["\u{1F600}", "\uE000", "\uFFFF", "z", "\uD7FF"];
+        const record = Object.fromEntries(keys.map((key) => [key, 1]));
+        expect(__moduleWireTest.canonicalJson(record)).toBe(
+            '{"z":1,"\uD7FF":1,"\uE000":1,"\uFFFF":1,"\u{1F600}":1}',
+        );
+        const sorted = [...keys].sort();
+        expect(sorted.indexOf("\u{1F600}")).toBeLessThan(sorted.indexOf("\uE000"));
+    });
+});
+
+describe("resolveOrdinalsForModule stored-count races", () => {
+    it("recovers on the next call after a row lands between the page and count reads", async () => {
+        const sessionId = "module-wire-count-race";
+        const rows = [
+            { id: "m-1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true },
+            { id: "m-2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true },
+        ];
+        let raceOnce = false;
+        const unregister = setRawMessageProvider(sessionId, {
+            readMessages: () => rows,
+            readMessageOrdinalPage: (after, limit) =>
+                rows
+                    .filter(
+                        (row) =>
+                            !after ||
+                            row.timeCreated > after.timeCreated ||
+                            (row.timeCreated === after.timeCreated && row.id > after.id),
+                    )
+                    .slice(0, limit),
+            getStoredMessageCount: () => {
+                // The count read observes a row the page read did not.
+                if (raceOnce) {
+                    raceOnce = false;
+                    rows.push({
+                        id: "m-4",
+                        timeCreated: 4,
+                        contributesOrdinal: true,
+                        hasValidInfo: true,
+                    });
+                }
+                return rows.length;
+            },
+        });
+        const messages = ["m-1", "m-2", "m-3"].map((id) => ({
+            info: { id, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: id }],
+        })) as MessageLike[];
+        const memo = {
+            generation: 1,
+            memoGeneration: 1,
+            entries: new Map<string, number>(),
+            anchor: null,
+            storedCount: null,
+            canonicalCount: 0,
+        };
+        try {
+            const primed = await resolveOrdinalsForModule({
+                sessionId,
+                messages: messages.slice(0, 2),
+                memo,
+            });
+            expect(primed.ok).toBe(true);
+            if (!primed.ok) throw new Error(primed.reason);
+            const bundle = {
+                ...memo,
+                memoGeneration: primed.memoGeneration,
+                anchor: primed.memoAnchor,
+                storedCount: primed.memoStoredCount,
+                canonicalCount: primed.memoCanonicalCount,
+            };
+            rows.push({ id: "m-3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true });
+            raceOnce = true;
+            const raced = await resolveOrdinalsForModule({
+                sessionId,
+                messages: [
+                    ...messages,
+                    {
+                        info: { id: "m-4", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "m-4" }],
+                    } as MessageLike,
+                ],
+                memo: bundle,
+            });
+            expect(raced).toEqual({ ok: false, reason: "mismatch" });
+            expect(memo.entries.get("m-1")).toBe(1);
+
+            const retried = await resolveOrdinalsForModule({
+                sessionId,
+                messages: [
+                    ...messages,
+                    {
+                        info: { id: "m-4", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "m-4" }],
+                    } as MessageLike,
+                ],
+                memo: bundle,
+            });
+            expect(retried.ok).toBe(true);
+            if (!retried.ok) throw new Error(retried.reason);
+            expect(
+                (retried.annotatedInput as Array<{ absolute_ordinal: number }>).map(
+                    (message) => message.absolute_ordinal,
+                ),
+            ).toEqual([1, 2, 3, 4]);
+        } finally {
+            unregister();
+        }
     });
 });
 
