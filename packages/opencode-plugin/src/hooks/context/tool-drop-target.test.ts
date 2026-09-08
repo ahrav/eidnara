@@ -1253,5 +1253,10 @@ describe("tool-drop-target", () => {
             expect(hasMeaningfulPart({ type: "agent" })).toBe(false);
             expect(hasMeaningfulPart({ type: "retry" })).toBe(false);
         });
+
+        it("keeps a meta part that carries fields, since it decodes as opaque content", () => {
+            expect(hasMeaningfulPart({ type: "meta", provider: "x", usage: { in: 1 } })).toBe(true);
+            expect(hasMeaningfulPart({ type: "meta" })).toBe(false);
+        });
     });
 });

@@ -30,7 +30,6 @@ const IGNORE_PART_TYPES = new Set([
     "thinking",
     "reasoning",
     "redacted_thinking",
-    "meta",
     "step-start",
     "step-finish",
     "snapshot",
@@ -277,6 +276,7 @@ export function hasMeaningfulPart(part: unknown): boolean {
     }
     if (typeof type !== "string") return false;
     if (IGNORE_PART_TYPES.has(type)) return false;
+    if (type === "meta") return Object.keys(part).length > 1;
     return true;
 }
 
