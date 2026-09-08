@@ -2,6 +2,7 @@ import { describe, expect, setSystemTime, test } from "bun:test";
 import { KernelClient, TokenCache } from "../../shared/kernel-client";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import { createCtxMemoryTools } from "./tools";
+import { CTX_MEMORY_ACTIONS, type CtxMemoryAction } from "./types";
 
 const PROJECT = "git:kernel-opencode";
 const ROOT = "/tmp/kernel-opencode";
@@ -52,7 +53,7 @@ function harness(kernel = new FakeKernel(), enabled = true) {
 }
 
 function parseJson<T>(text: string): T {
-    expect(text.startsWith("Error:")).toBeFalse();
+    expect(text).not.toStartWith("Error:");
     return JSON.parse(text) as T;
 }
 
@@ -254,21 +255,39 @@ describe("ctx_memory create and revise through the cached token", () => {
         expect(kernel.liveRows()).toHaveLength(1);
     });
 
-    test("a redelivered revise omitting the content the original supplied errors instead of replaying", async () => {
+    test("a redelivered revise that inherited category and reason replays as already applied", async () => {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
+        const tool = harness(kernel);
+        const args = { action: "revise", objectId: "mem_a", content: "A, revised." };
+        const first = parseJson<CommitJson>(await tool.execute(args, "call-revise-inherit"));
+        expect(first.outcome).toBe("applied");
+        // The omitted fields inherited from the retired predecessor, which no read serves; the probe compares only the stated content and lets the daemon's digest prove the rest. commentlint: allow(JUDGE)
+        const second = parseJson<CommitJson>(await tool.execute(args, "call-revise-inherit"));
+        expect(second).toMatchObject({
+            outcome: "already applied",
+            objectId: first.objectId,
+            objects: first.objects,
+        });
+        expect(kernel.liveRows()).toHaveLength(1);
+        expect(kernel.liveRows()[0]?.decision?.payload.summary).toBe("A, revised.");
+    });
+
+    test("a revise reusing an identity with different explicit content errors instead of replaying", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
         const tool = harness(kernel);
         const first = parseJson<CommitJson>(
             await tool.execute(
                 { action: "revise", objectId: "mem_a", content: "A, revised." },
-                "call-revise-omit",
+                "call-revise-differs",
             ),
         );
         expect(first.outcome).toBe("applied");
-        // An omitted-content retry would inherit the retired predecessor's summary, which differs from the committed revision, so the probe must not answer "already applied" for it. commentlint: allow(JUDGE)
+        // An explicit field that differs from the successor is not a redelivery, so the probe declines and the ordinary path reports the retired target. commentlint: allow(JUDGE)
         const text = await tool.execute(
-            { action: "revise", objectId: "mem_a" },
-            "call-revise-omit",
+            { action: "revise", objectId: "mem_a", content: "A, revised differently." },
+            "call-revise-differs",
         );
         expect(text).toBe("Error: memory not found or not visible from this project: mem_a");
         expect(kernel.liveRows()).toHaveLength(1);
@@ -969,7 +988,7 @@ describe("ctx_memory anti-memory", () => {
         expect(Number(match?.[1])).toBeLessThanOrEqual(Date.now() + ninetyDays + day);
     });
 
-    test("get by id returns an expired anti-memory", async () => {
+    test("get reads an expired anti-memory as missing, like search does", async () => {
         const tool = harness();
         const expired = {
             trigger: "Choosing a cache backend",
@@ -987,7 +1006,8 @@ describe("ctx_memory anti-memory", () => {
         const got = parseJson<ReadJson>(
             await tool.execute({ action: "get", objectIds: [objectId] }, "call-anti-expired-get"),
         );
-        expect(got.memories).toHaveLength(1);
+        expect(got.memories).toHaveLength(0);
+        expect(got.missingObjectIds).toEqual([objectId]);
     });
 
     test("creates typed anti-memory, reads it back parsed, and rejects cross-arm shapes", async () => {
@@ -1110,12 +1130,13 @@ describe("ctx_memory anti-memory", () => {
         expect(kernel.objects.get("mem_anti_broken")?.invalidated_commit_seq).toBeNull();
     });
 
-    test("merge inherits from the caller's first target, not store order", async () => {
+    test("merge inherits category and reason from the caller's first target, not store order", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({
             object_id: "mem_first_in_store",
             decision_kind: "ARCHITECTURE",
             summary: "Stored earlier.",
+            rationale: "earlier why",
         });
         kernel.seedDecision({
             object_id: "mem_second_in_store",
@@ -1126,14 +1147,34 @@ describe("ctx_memory anti-memory", () => {
         const tool = harness(kernel);
         const merged = parseJson<CommitJson>(
             await tool.execute(
-                { action: "merge", objectIds: ["mem_second_in_store", "mem_first_in_store"] },
+                {
+                    action: "merge",
+                    objectIds: ["mem_second_in_store", "mem_first_in_store"],
+                    content: "Stored, combined.",
+                },
                 "call-merge-order",
             ),
         );
         const survivor = kernel.objects.get(merged.objectId as string);
         expect(survivor?.decision?.decision_kind).toBe("ARCHITECTURE");
-        expect(survivor?.decision?.payload.summary).toBe("Stored later.");
+        expect(survivor?.decision?.payload.summary).toBe("Stored, combined.");
         expect(survivor?.decision?.payload.rationale).toBe("why");
+    });
+
+    test("merge without survivor content is rejected before any target is retired", async () => {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({ object_id: "mem_a", decision_kind: "NAMING", summary: "A." });
+        kernel.seedDecision({ object_id: "mem_b", decision_kind: "NAMING", summary: "B." });
+        const tool = harness(kernel);
+        const text = await tool.execute(
+            { action: "merge", objectIds: ["mem_a", "mem_b"] },
+            "call-merge-no-content",
+        );
+        expect(text).toStartWith(
+            "Error: merge requires content (with category) or antiMemory for the survivor",
+        );
+        expect(kernel.liveRows()).toHaveLength(2);
+        expect(tool.transport.calls.some((call) => call.method === "kernel.commit")).toBeFalse();
     });
 });
 
@@ -1147,6 +1188,64 @@ describe("ctx_memory human authority", () => {
             "human-host-owned",
         );
         expect(await tool.execute({ action: "delete" }, "call-delete")).toContain("not allowed");
+    });
+});
+
+describe("ctx_memory action allowlist", () => {
+    function toolWith(allowedActions: CtxMemoryAction[] | undefined) {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: "mem_allow",
+            decision_kind: "ARCHITECTURE",
+            summary: "Allowlist probe.",
+        });
+        const transport = new FakeKernelTransport(kernel);
+        const definition = createCtxMemoryTools({
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport, enabled: true, sessionId, projectRoot }),
+            resolveProjectPath: () => PROJECT,
+            ...(allowedActions === undefined ? {} : { allowedActions }),
+        }).ctx_memory;
+        const execute = (args: Record<string, unknown>, callID: string) =>
+            definition.execute(
+                args as never,
+                { sessionID: SESSION, directory: ROOT, callID, agent: "primary" } as never,
+            ) as Promise<string>;
+        return { execute, transport };
+    }
+
+    test("an explicitly empty allowlist admits no action and sends nothing to the daemon", async () => {
+        const tool = toolWith([]);
+        for (const action of CTX_MEMORY_ACTIONS) {
+            const text = await tool.execute(
+                { action, objectIds: ["mem_allow"], category: "ARCHITECTURE", content: "x" },
+                `call-${action}`,
+            );
+            expect(text).toBe(`Error: Action '${action}' is not allowed in this context.`);
+        }
+        expect(tool.transport.calls).toHaveLength(0);
+    });
+
+    test("an omitted allowlist admits every action", async () => {
+        const tool = toolWith(undefined);
+        const text = await tool.execute(
+            { action: "get", objectIds: ["mem_allow"] },
+            "call-get-default",
+        );
+        expect(text.startsWith("Error:")).toBeFalse();
+        expect(text).toContain("mem_allow");
+    });
+
+    test("a partial allowlist admits only the listed actions", async () => {
+        const tool = toolWith(["get"]);
+        expect(
+            await tool.execute(
+                { action: "create", category: "ARCHITECTURE", content: "x" },
+                "call-create-denied",
+            ),
+        ).toBe("Error: Action 'create' is not allowed in this context.");
+        const got = await tool.execute({ action: "get", objectIds: ["mem_allow"] }, "call-get-ok");
+        expect(got.startsWith("Error:")).toBeFalse();
     });
 });
 
@@ -1169,10 +1268,11 @@ describe("ctx_memory response byte budget", () => {
                 "call-get-big",
             ),
         );
+        // The daemon serves rows newest first, so `mem_big_c` leads and the older two are elided by name.
         expect(got.memories).toEqual([
-            expect.objectContaining({ objectId: "mem_big_a", content: bigContent("a") }),
+            expect.objectContaining({ objectId: "mem_big_c", content: bigContent("c") }),
         ]);
-        expect(got.elidedObjectIds).toEqual(["mem_big_b", "mem_big_c"]);
+        expect(got.elidedObjectIds).toEqual(["mem_big_b", "mem_big_a"]);
         expect(got.elisionNote).toContain("2 elided ids");
         expect(got.missingObjectIds).toEqual([]);
     });

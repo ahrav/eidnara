@@ -19,7 +19,12 @@ import type {
 } from "quickjs-emscripten";
 
 import type { SmartNoteCapabilityApi, SmartNoteCapabilityFactory } from "./capabilities";
-import { isSmartNoteNetworkError, type SmartNoteCheckResult } from "./types";
+import {
+    isSmartNoteNetworkError,
+    type SmartNoteCheckResult,
+    SmartNoteNetworkError,
+    smartNoteAbortError,
+} from "./types";
 
 /**
  * The reusable WASM module requires ~1 MB of compilation.
@@ -31,7 +36,8 @@ import { isSmartNoteNetworkError, type SmartNoteCheckResult } from "./types";
  */
 let asyncModulePromise: Promise<QuickJSAsyncWASMModule> | null = null;
 function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
-    asyncModulePromise ??= (async () => {
+    if (asyncModulePromise) return asyncModulePromise;
+    const promise = (async () => {
         const [{ default: singlefileAsyncifyVariant }, { newQuickJSAsyncWASMModuleFromVariant }] =
             await Promise.all([
                 import("@jitl/quickjs-singlefile-cjs-release-asyncify"),
@@ -39,7 +45,12 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
             ]);
         return newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
     })();
-    return asyncModulePromise;
+    // A cached rejection would fail every later check without retrying initialization.
+    promise.catch(() => {
+        if (asyncModulePromise === promise) asyncModulePromise = null;
+    });
+    asyncModulePromise = promise;
+    return promise;
 }
 
 /**
@@ -64,6 +75,10 @@ function withSandboxLock<T>(fn: () => Promise<T>): Promise<T> {
     return run;
 }
 
+/**
+ * The runner installs every capability the API exposes and enforces no manifest.
+ * The caller gates a compiled check against its manifest before invoking the runner.
+ */
 export interface RunCompiledSmartNoteCheckOptions {
     compiledCheck: string;
     capabilities?: SmartNoteCapabilityApi;
@@ -84,6 +99,7 @@ export interface RunCompiledSmartNoteCheckFailure {
     cancelled: false;
     error: string;
     network: boolean;
+    hostNetworkError?: true;
 }
 
 export interface RunCompiledSmartNoteCheckCancelled {
@@ -103,10 +119,17 @@ const DEFAULT_HEAP_LIMIT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_STACK_LIMIT_BYTES = 512 * 1024;
 const MAX_COMPILED_CHECK_BYTES = 64 * 1024;
 const MAX_SANDBOX_ERROR_CHARS = 2 * 1024;
+// A synchronous guest loop is stopped only by the interrupt deadline, so the budget a caller may
+// request is bounded; the memory limits are bounded for the same reason a limit exists at all.
+const MAX_TIMEOUT_MS = 60_000;
+const MAX_HEAP_LIMIT_BYTES = 1024 * 1024 * 1024;
+const MAX_STACK_LIMIT_BYTES = 64 * 1024 * 1024;
 
 // Capabilities that outlive VM interruption must observe signal.
 // A tarpit request can keep the shared QuickJS module suspended past the sandbox budget.
 // A suspended request blocks the next caller on the process-wide lock.
+// The factory path receives the signal; the direct `capabilities` path cannot.
+// `installCapabilityObject` races each host call against the signal.
 function resolveCapabilitiesForRun(
     options: RunCompiledSmartNoteCheckOptions,
     signal: AbortSignal,
@@ -120,10 +143,12 @@ function resolveCapabilitiesForRun(
     throw new Error("smart-note check requires capabilities");
 }
 
+function runAbortReason(signal: AbortSignal): unknown {
+    return signal.reason ?? new Error("smart-note check aborted");
+}
+
 function throwIfRunAborted(signal: AbortSignal): void {
-    if (signal.aborted) {
-        throw signal.reason ?? new Error("smart-note check aborted");
-    }
+    if (signal.aborted) throw runAbortReason(signal);
 }
 
 export async function runCompiledSmartNoteCheck(
@@ -133,9 +158,36 @@ export async function runCompiledSmartNoteCheck(
     if (Buffer.byteLength(options.compiledCheck, "utf8") > MAX_COMPILED_CHECK_BYTES) {
         return failureResult("compiled check exceeds 64 KiB", false);
     }
+    // A non-finite or unreachable deadline never interrupts a synchronous guest loop, and the timer
+    // cannot run while that loop holds the thread; the run would wedge the process-wide lock.
+    for (const [name, value, max] of [
+        ["timeoutMs", options.timeoutMs, MAX_TIMEOUT_MS],
+        ["heapLimitBytes", options.heapLimitBytes, MAX_HEAP_LIMIT_BYTES],
+        ["stackLimitBytes", options.stackLimitBytes, MAX_STACK_LIMIT_BYTES],
+    ] as const) {
+        if (value !== undefined && !(Number.isFinite(value) && value > 0 && value <= max)) {
+            return failureResult(`${name} must be a positive number no greater than ${max}`, false);
+        }
+    }
     // The lock initializes each check's timeout and host-capability controller.
     // A queued check's timeout starts after it acquires the lock.
-    return withSandboxLock(() => runCompiledSmartNoteCheckLocked(options));
+    let acquired = false;
+    const run = withSandboxLock(() => {
+        acquired = true;
+        return runCompiledSmartNoteCheckLocked(options);
+    });
+    const signal = options.signal;
+    if (!signal) return run;
+    // The active run may hold the lock for its whole budget. A caller that cancels a queued check gets
+    // its answer now; the queued slot still executes and returns cancelled at once, so the chain
+    // stays serialized.
+    return new Promise<RunCompiledSmartNoteCheckResult>((resolve, reject) => {
+        const onAbort = () => {
+            if (!acquired) resolve(cancelledResult(signal.reason));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        run.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    });
 }
 
 async function runCompiledSmartNoteCheckLocked(
@@ -155,23 +207,44 @@ async function runCompiledSmartNoteCheckLocked(
         executionTimedOut = true;
         controller.abort(new Error("smart-note check timed out"));
     }, timeoutMs);
+    let hostCalls: HostCallLedger | undefined;
     try {
         throwIfRunAborted(controller.signal);
         const capabilities = resolveCapabilitiesForRun(options, controller.signal);
-        const deadline = Date.now() + timeoutMs;
-        const quickjs = await getAsyncModule();
+        // The timer cannot fire while a synchronous guest loop holds the thread, so the interrupt
+        // predicate is the only stop for that loop; a monotonic clock keeps a wall-clock step from
+        // stretching the budget.
+        const deadline = performance.now() + timeoutMs;
+        // The shared initialization keeps running and stays cached; only this run stops waiting for it.
+        const quickjs = await raceWithAbort(getAsyncModule(), controller.signal, runAbortReason);
         throwIfRunAborted(controller.signal);
         const context = quickjs.newContext();
         try {
             context.runtime.setMemoryLimit(options.heapLimitBytes ?? DEFAULT_HEAP_LIMIT_BYTES);
             context.runtime.setMaxStackSize(options.stackLimitBytes ?? DEFAULT_STACK_LIMIT_BYTES);
             context.runtime.setInterruptHandler(
-                () => controller.signal.aborted || Date.now() > deadline,
+                () => controller.signal.aborted || performance.now() > deadline,
             );
-            installCapabilityObject(context, capabilities);
+            hostCalls = installCapabilityObject(context, capabilities, controller.signal);
             disableAmbientDynamicCode(context);
             const result = await evalCheck(context, options.compiledCheck);
-            const checkResult = result as { met?: unknown } | null;
+            // A guest `try/catch` around a host call can swallow the abort or the host's refusal and
+            // return a value computed without the input.
+            if (controller.signal.aborted) throw smartNoteAbortError(controller.signal);
+            const checkResult = result as { met?: unknown; hostNetworkError?: unknown } | null;
+            const rejectionIndex = checkResult?.hostNetworkError;
+            if (
+                typeof rejectionIndex === "number" &&
+                Number.isSafeInteger(rejectionIndex) &&
+                rejectionIndex >= 0
+            ) {
+                const reason = hostCalls.reasons[rejectionIndex];
+                if (!(reason instanceof SmartNoteNetworkError)) {
+                    throw new Error("sandbox reported a host network error without one");
+                }
+                return failureResult(formatSandboxError(reason), true, true);
+            }
+            if (hostCalls.rejected) throw hostCalls.reason;
             if (!checkResult || typeof checkResult.met !== "boolean") {
                 return failureResult("check() must return { met: boolean }", false);
             }
@@ -181,15 +254,30 @@ async function runCompiledSmartNoteCheckLocked(
         }
     } catch (error) {
         if (externallyCancelled && !executionTimedOut) return cancelledResult(error);
-        return failureResult(formatSandboxError(error), isSmartNoteNetworkError(error));
+        // Guest exceptions arrive with guest-controlled names and messages, so the network class comes
+        // only from errors the runner or a host capability produced.
+        const network =
+            error instanceof SmartNoteNetworkError ||
+            (hostCalls?.rejected === true && isSmartNoteNetworkError(hostCalls.reason));
+        return failureResult(formatSandboxError(error), network);
     } finally {
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", externalAbort);
     }
 }
 
-function failureResult(error: string, network: boolean): RunCompiledSmartNoteCheckFailure {
-    return { ok: false, cancelled: false, error: truncate(error), network };
+function failureResult(
+    error: string,
+    network: boolean,
+    hostNetworkError = false,
+): RunCompiledSmartNoteCheckFailure {
+    return {
+        ok: false,
+        cancelled: false,
+        error: truncate(error),
+        network,
+        ...(hostNetworkError ? { hostNetworkError: true as const } : {}),
+    };
 }
 
 function cancelledResult(reason: unknown): RunCompiledSmartNoteCheckCancelled {
@@ -209,28 +297,93 @@ function truncate(value: string): string {
     return value.slice(0, MAX_SANDBOX_ERROR_CHARS);
 }
 
-function installCapabilityObject(context: QuickJSAsyncContext, cap: SmartNoteCapabilityApi): void {
+// Capabilities resolve `null`, `[]`, or a status for ordinary misses and reject only when the host
+// refused or could not supply the input (abort, network, security). The first rejection is kept so the
+// run fails even when guest code catches the exception.
+interface HostCallLedger {
+    rejected: boolean;
+    reason: unknown;
+    reasons: unknown[];
+}
+
+function installCapabilityObject(
+    context: QuickJSAsyncContext,
+    cap: SmartNoteCapabilityApi,
+    signal: AbortSignal,
+): HostCallLedger {
+    const ledger: HostCallLedger = { rejected: false, reason: undefined, reasons: [] };
+    const guard = <T>(call: () => Promise<T>) => guardHostCall(call, signal, ledger);
     const capObject = context.newObject();
     try {
         installAsyncStringFunction(context, capObject, "__readFile", async (arg) => {
-            const value = await cap.readFile(arg);
+            const value = await guard(() => cap.readFile(arg));
             return value === null ? null : value;
         });
-        installAsyncStringFunction(context, capObject, "__httpGet", async (arg) =>
-            JSON.stringify(await cap.httpGet(arg)),
+        installAsyncStringFunction(context, capObject, "__httpGet", async (arg) => {
+            try {
+                return JSON.stringify({ ok: true, value: await guard(() => cap.httpGet(arg)) });
+            } catch (error) {
+                if (!(error instanceof SmartNoteNetworkError)) throw error;
+                const rejection = ledger.reasons.lastIndexOf(error);
+                if (rejection < 0) throw new Error("network rejection missing from host ledger");
+                return JSON.stringify({
+                    ok: false,
+                    rejection,
+                    name: error.name,
+                    message: error.message,
+                });
+            }
+        });
+        installAsyncNoArgFunction(context, capObject, "__gitHeadSha", () =>
+            guard(() => cap.gitHeadSha()),
         );
-        installAsyncNoArgFunction(context, capObject, "__gitHeadSha", async () => cap.gitHeadSha());
-        installAsyncNoArgFunction(context, capObject, "__gitTag", async () => cap.gitTag());
+        installAsyncNoArgFunction(context, capObject, "__gitTag", () => guard(() => cap.gitTag()));
         installAsyncStringFunction(context, capObject, "__gitLog", async (arg) => {
             const opts = arg
                 ? (JSON.parse(arg) as { maxCount?: number; path?: string; since?: string })
                 : undefined;
-            return JSON.stringify(await cap.gitLog(opts));
+            return JSON.stringify(await guard(() => cap.gitLog(opts)));
         });
         context.setProp(context.global, "__eidnaraHostCap", capObject);
     } finally {
         capObject.dispose();
     }
+    return ledger;
+}
+
+async function guardHostCall<T>(
+    call: () => Promise<T>,
+    signal: AbortSignal,
+    ledger: HostCallLedger,
+): Promise<T> {
+    try {
+        return await raceWithAbort(call(), signal);
+    } catch (error) {
+        ledger.reasons.push(error);
+        if (!ledger.rejected) {
+            ledger.rejected = true;
+            ledger.reason = error;
+        }
+        throw error;
+    }
+}
+
+// A host call that never settles would hold the asyncify suspension past the run budget.
+// Rejecting on abort resumes the guest with a network-class error; the orphaned promise is dropped.
+function raceWithAbort<T>(
+    promise: Promise<T>,
+    signal: AbortSignal,
+    abortReason: (signal: AbortSignal) => unknown = smartNoteAbortError,
+): Promise<T> {
+    if (signal.aborted) return Promise.reject(abortReason(signal));
+    let onAbort: (() => void) | undefined;
+    const abort = new Promise<never>((_, reject) => {
+        onAbort = () => reject(abortReason(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+    return Promise.race([promise, abort]).finally(() => {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+    });
 }
 
 function installAsyncStringFunction(
@@ -260,16 +413,56 @@ function installAsyncNoArgFunction(
     handle.consume((fnHandle) => context.setProp(target, name, fnHandle));
 }
 
+// Function literals expose dynamic-code constructors through their prototype chains.
+// Poisoning all four prototypes' `constructor` closes `(function () {}).constructor("...")()`.
+//
+// A check must evaluate identically on every run with the same capability inputs. Reading the clock or
+// the PRNG is the only way a check can flip without an external signal. `Date.now`, `Date()`, and
+// `new Date()` throw; `Date.parse`, `Date.UTC`, and `new Date(value)` stay available for `authorDate`
+// arithmetic. The native constructor is unreachable: the replacement owns `Date.prototype.constructor`.
+const SANDBOX_PRELUDE = `
+for (const fn of [function () {}, async function () {}, function* () {}, async function* () {}]) {
+  Object.defineProperty(Object.getPrototypeOf(fn), "constructor", {
+    value: undefined, writable: false, enumerable: false, configurable: false,
+  });
+}
+{
+  const frozen = Object.freeze;
+  const poison = (name) => frozen(function () {
+    throw new TypeError(name + " is nondeterministic and disabled in smart-note checks");
+  });
+  const nativeDate = globalThis.Date;
+  const guardedDate = function Date(...args) {
+    if (new.target === undefined || args.length === 0) poison("Date()")();
+    return Reflect.construct(nativeDate, args, new.target);
+  };
+  guardedDate.prototype = nativeDate.prototype;
+  guardedDate.parse = nativeDate.parse;
+  guardedDate.UTC = nativeDate.UTC;
+  guardedDate.now = poison("Date.now");
+  Object.defineProperty(nativeDate.prototype, "constructor", {
+    value: guardedDate, writable: false, enumerable: false, configurable: false,
+  });
+  Object.defineProperty(globalThis, "Date", {
+    value: frozen(guardedDate), writable: false, enumerable: false, configurable: false,
+  });
+  Object.defineProperty(Math, "random", {
+    value: poison("Math.random"), writable: false, enumerable: false, configurable: false,
+  });
+}`;
+
 function disableAmbientDynamicCode(context: QuickJSAsyncContext): void {
     context.setProp(context.global, "eval", context.undefined);
     context.setProp(context.global, "Function", context.undefined);
+    context
+        .unwrapResult(context.evalCode(SANDBOX_PRELUDE, "sandbox-prelude.js", { type: "global" }))
+        .dispose();
 }
 
 async function evalCheck(context: QuickJSAsyncContext, compiledCheck: string): Promise<unknown> {
     const wrapped = `
 "use strict";
-const module = { exports: {} };
-const exports = module.exports;
+const __hostNetworkErrors = new WeakMap();
 const __mcCap = (() => {
   const hostCap = __eidnaraHostCap;
   delete globalThis.__eidnaraHostCap;
@@ -278,18 +471,38 @@ const __mcCap = (() => {
   }
   return Object.freeze({
     readFile(path) { return hostCap.__readFile(String(path)); },
-    httpGet(url) { return JSON.parse(hostCap.__httpGet(String(url))); },
+    httpGet(url) {
+      const result = JSON.parse(hostCap.__httpGet(String(url)));
+      if (result.ok) return result.value;
+      const error = new Error(result.message);
+      error.name = result.name;
+      __hostNetworkErrors.set(error, result.rejection);
+      throw error;
+    },
     gitHeadSha() { return hostCap.__gitHeadSha(); },
     gitTag() { return hostCap.__gitTag(); },
     gitLog(opts) { return JSON.parse(hostCap.__gitLog(JSON.stringify(opts || {}))); },
   });
 })();
+const __check = (() => {
+  const module = { exports: {} };
+  const exports = module.exports;
 ${compiledCheck}
-const __check = typeof check === "function" ? check : module.exports.check;
-if (typeof __check !== "function") throw new Error("compiled check must define check(cap)");
-const __result = __check(__mcCap);
-if (!__result || typeof __result.met !== "boolean") throw new Error("check() must return { met: boolean }");
-JSON.stringify({ met: __result.met });`;
+  const selected = typeof check === "function" ? check : module.exports.check;
+  if (typeof selected !== "function") throw new Error("compiled check must define check(cap)");
+  return selected;
+})();
+let __wireResult;
+try {
+  const result = __check(__mcCap);
+  if (!result || typeof result.met !== "boolean") throw new Error("check() must return { met: boolean }");
+  __wireResult = { met: result.met };
+} catch (error) {
+  const rejection = __hostNetworkErrors.get(error);
+  if (rejection === undefined) throw error;
+  __wireResult = { hostNetworkError: rejection };
+}
+JSON.stringify(__wireResult);`;
     const evalResult = await context.evalCodeAsync(wrapped, "smart-note-check.js", {
         type: "global",
     });

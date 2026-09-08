@@ -1,6 +1,6 @@
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
 // ============================================================================
@@ -12,7 +12,8 @@ export interface ConfigPaths {
     /* */
     opencodeConfig: string;
     opencodeConfigFormat: "json" | "jsonc" | "none";
-    eidnaraConfig: string;
+    /** Absent when the environment provides no absolute home, so no user tier exists to read or write. */
+    eidnaraConfig: string | undefined;
     /* */
     omoConfig: string | null;
     tuiConfig: string;
@@ -98,6 +99,8 @@ export function detectConfigPaths(): ConfigPaths {
 // ============================================================================
 
 function envFirstHomeDir(): string {
+    // Pi and OMP derive their defaults from os.homedir(), which reads USERPROFILE on Windows.
+    if (process.platform === "win32") return homedir();
     const home = process.env.HOME?.trim();
     return home || homedir();
 }
@@ -119,8 +122,8 @@ export function getPiCacheRoot(): string {
     return join(dirname(getPiAgentDir()), "cache");
 }
 
-/** Shared Eidnara user config, independent of any harness agent settings dir. */
-export function getSharedUserConfigPath(): string {
+/** Shared Eidnara user config, independent of any harness agent settings dir; `undefined` when the environment provides no absolute home. */
+export function getSharedUserConfigPath(): string | undefined {
     return resolveEidnaraUserConfigPath();
 }
 
@@ -167,7 +170,8 @@ export function resolveOmpPaths(): OmpPaths {
     let dataRoot = configRoot;
     if (canUseXdg) {
         const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
-        if (xdgDataHome) {
+        // XDG requires an absolute value; a relative one would resolve against this process's cwd.
+        if (xdgDataHome && isAbsolute(xdgDataHome)) {
             const appRoot = join(xdgDataHome, "omp");
             const candidate = profile ? join(appRoot, "profiles", profile) : appRoot;
             if (existsSync(candidate)) dataRoot = candidate;

@@ -71,7 +71,7 @@ export function processHostClient(options: HostClientOptions): Promise<HostClien
     return created;
 }
 
-/** The cache retains resolved promises, so a caller that closes a shared client must first drop the entry or later callers receive the closed instance. Eviction is identity-scoped: a concurrently created replacement under the same key survives. */
+/** The cache retains resolved promises, so a caller that closes a shared client must first drop the entry or later callers receive the closed instance. Eviction is identity-scoped: a concurrently created replacement under the same key survives. A recorded client is deleted synchronously; only a still-pending entry is awaited. */
 export async function evictProcessHostClient(
     options: HostClientOptions,
     client: HostClient,
@@ -79,6 +79,10 @@ export async function evictProcessHostClient(
     const key = ownerKey(options);
     const entry = clients.get(key);
     if (entry === undefined) return;
+    if (entry.client !== undefined) {
+        if (entry.client === client) clients.delete(key);
+        return;
+    }
     const resolved = await entry.promise.then(
         (value) => value,
         () => undefined,

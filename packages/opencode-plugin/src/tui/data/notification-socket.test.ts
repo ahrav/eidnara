@@ -66,6 +66,7 @@ function startLegacyServer(
     sockets: Set<{ close(): void }>;
     helloCursors: number[];
     ackCursors: number[];
+    stop: () => void;
 } {
     const token = "v032-query-token";
     const sockets = new Set<{ close(): void }>();
@@ -124,7 +125,13 @@ function startLegacyServer(
         portFile,
         JSON.stringify({ port: server.port, pid: process.pid, started_at: Date.now(), token }),
     );
-    return { sockets, helloCursors, ackCursors };
+    const stop = () => {
+        for (const ws of sockets) ws.close();
+        server.stop(true);
+        const index = legacyServers.indexOf(server);
+        if (index >= 0) legacyServers.splice(index, 1);
+    };
+    return { sockets, helloCursors, ackCursors, stop };
 }
 
 async function waitFor(condition: () => boolean, label: string, timeoutMs = 4_000): Promise<void> {
@@ -187,6 +194,106 @@ describe("notification socket", () => {
         await waitFor(() => deliveries === 1, "single notification delivery");
         await new Promise((resolve) => setTimeout(resolve, 75));
         expect(deliveries).toBe(1);
+    });
+
+    test("onConnected runs once the socket is open so RPC-backed preferences load from a reachable server", async () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const dataHome = makeDataHome();
+        const directory = "/repo-on-connected";
+        await startServer(dataHome, directory);
+        initRpcClient(directory);
+
+        let connections = 0;
+        startNotificationSocket({
+            getSessionId: () => "ses_connected",
+            onNotification: () => true,
+            onConnected: () => {
+                connections += 1;
+            },
+        });
+
+        await waitFor(() => connections === 1, "onConnected after the socket opened");
+        expect(isTuiConnected("ses_connected")).toBe(true);
+    });
+
+    test("the hello backlog is handled only after a pending onConnected settles", async () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const dataHome = makeDataHome();
+        const directory = "/repo-on-connected-backlog";
+        await startServer(dataHome, directory);
+        // Queued before the socket exists, so the server hands it over as hello backlog.
+        pushNotification("backlog", { ok: true }, "ses_backlog");
+        initRpcClient(directory);
+
+        let releaseConnected: () => void = () => {};
+        const connected = new Promise<void>((resolve) => {
+            releaseConnected = resolve;
+        });
+        const deliveries: SocketNotification[] = [];
+        startNotificationSocket({
+            getSessionId: () => "ses_backlog",
+            onNotification: (notification) => {
+                deliveries.push(notification);
+                return true;
+            },
+            onConnected: () => connected,
+        });
+
+        await waitFor(() => isTuiConnected("ses_backlog"), "backlog socket connection");
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(deliveries).toHaveLength(0);
+
+        releaseConnected();
+        await waitFor(() => deliveries.length === 1, "backlog delivery after onConnected settled");
+        expect(deliveries[0]?.type).toBe("backlog");
+    });
+
+    test("an RPC client replaced during endpoint lookup still gets a socket", async () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const dataHome = makeDataHome();
+        const directory = "/repo-replaced-client";
+        await startServer(dataHome, directory);
+        initRpcClient(directory);
+
+        let deliveries = 0;
+        startNotificationSocket({
+            getSessionId: () => "ses_replaced",
+            onNotification: () => {
+                deliveries += 1;
+                return true;
+            },
+        });
+        // The lookup for the first client is in flight; replacing the client bumps the generation.
+        initRpcClient(directory);
+
+        await waitFor(() => isTuiConnected("ses_replaced"), "connection for the replaced client");
+        pushNotification("after-replace", { ok: true }, "ses_replaced");
+        await waitFor(() => deliveries === 1, "delivery after client replacement");
+    });
+
+    test("an RPC client replaced after the socket opened reconnects on the new client", async () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const dataHome = makeDataHome();
+        const directory = "/repo-replaced-open-client";
+        await startServer(dataHome, directory);
+        initRpcClient(directory);
+
+        const received: string[] = [];
+        startNotificationSocket({
+            getSessionId: () => "ses_reopen",
+            onNotification: (notification) => {
+                received.push(notification.type);
+                return true;
+            },
+        });
+        await waitFor(() => isTuiConnected("ses_reopen"), "first connection");
+        pushNotification("before-swap", { ok: true }, "ses_reopen");
+        await waitFor(() => received.includes("before-swap"), "delivery on the first client");
+
+        initRpcClient(directory);
+        pushNotification("after-swap", { ok: true }, "ses_reopen");
+        await waitFor(() => received.includes("after-swap"), "delivery after client replacement");
+        expect(received).toEqual(["before-swap", "after-swap"]);
     });
 
     test("uses the active session cursor when switching sessions", async () => {
@@ -350,6 +457,37 @@ describe("notification socket", () => {
         expect(legacy.helloCursors[1]).toBe(0);
         expect(consumedCalls).toBe(1);
         await waitFor(() => legacy.ackCursors.includes(2), "gap-safe legacy watermark advance");
+    });
+
+    test("a restarted legacy server gets fresh cursors even though its ids restart at 1", async () => {
+        const dataHome = makeDataHome();
+        const directory = "/repo-v032-restart";
+        const sessionId = "ses_v032_restart";
+        const first = startLegacyServer(dataHome, directory, [
+            { id: 1, type: "first-run", payload: {}, sessionId },
+        ]);
+        initRpcClient(directory);
+
+        const received: string[] = [];
+        startNotificationSocket({
+            getSessionId: () => sessionId,
+            onNotification: (notification) => {
+                received.push(notification.type);
+                return true;
+            },
+        });
+        await waitFor(() => received.includes("first-run"), "first legacy delivery");
+        await waitFor(() => first.ackCursors.includes(1), "first legacy ack");
+
+        // The restarted server reuses id 1 for an unrelated notification and writes a new started_at.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        first.stop();
+        const second = startLegacyServer(dataHome, directory, [
+            { id: 1, type: "second-run", payload: {}, sessionId },
+        ]);
+
+        await waitFor(() => received.includes("second-run"), "delivery after legacy restart");
+        expect(second.helloCursors[0]).toBe(0);
     });
 
     test("serializes back-to-back dialog notification handlers", async () => {

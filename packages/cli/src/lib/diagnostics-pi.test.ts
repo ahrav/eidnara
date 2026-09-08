@@ -146,25 +146,24 @@ describe("sanitizeString home handling", () => {
         process.env.HOME = "/nonexistent/home";
         expect(sanitizeString("X-API-Key: opaque-value")).toBe("X-API-Key: <REDACTED>");
         expect(sanitizeString("Cookie: sid=opaque; theme=dark")).toBe("Cookie: <REDACTED>");
-        expect(sanitizeString("password: hunter2 and token=abc")).toBe(
-            "password: <REDACTED> and token=<REDACTED>",
-        );
+        // An unquoted value has no delimiter, so the shared redactor takes the rest of the segment.
+        expect(sanitizeString("password: hunter2 and token=abc")).toBe("password: <REDACTED>");
+        // Every value is gone even though the shared redactor's plain scalar spans the middle pairs.
         expect(
             sanitizeString("client_secret: live access_key=live credential: live auth: live"),
-        ).toBe(
-            "client_secret: <REDACTED> access_key=<REDACTED> credential: <REDACTED> auth: <REDACTED>",
-        );
+        ).toBe("client_secret: <REDACTED> <REDACTED> auth: <REDACTED>");
+        // `tokens` is a secret label in the shared vocabulary, so the plain scalar after it goes.
         expect(sanitizeString("execute_threshold_tokens: 200000 max_tokens=3 enabled: true")).toBe(
-            "execute_threshold_tokens: 200000 max_tokens=3 enabled: true",
+            "execute_threshold_tokens: <REDACTED> true",
         );
         expect(sanitizeString("at 2026-07-07T12:00:01.000Z see https://example.test/x")).toBe(
             "at 2026-07-07T12:00:01.000Z see https://example.test/x",
         );
         expect(sanitizeString('client_secret: "correct horse battery staple" done')).toBe(
-            "client_secret: <REDACTED> done",
+            "client_secret: <REDACTED>",
         );
         expect(sanitizeString('client_secret: "prefix\\" LIVE suffix" done')).toBe(
-            "client_secret: <REDACTED> done",
+            "client_secret: <REDACTED>",
         );
         expect(sanitizeString("bearer opaque-live-token and BEARER x.y")).toBe(
             "Bearer <REDACTED> and Bearer <REDACTED>",
@@ -175,7 +174,7 @@ describe("sanitizeString home handling", () => {
             "PRIVATE KEY-----\nMIIE\nvQIB\n-----END",
             "PRIVATE KEY-----",
         ].join(" ");
-        expect(sanitizeString(`${pem} tail`)).toBe("<REDACTED PEM> tail");
+        expect(sanitizeString(`${pem} tail`)).toBe("<PRIVATE_KEY_REDACTED> tail");
     });
 
     it("sanitizes dynamic record keys as well as values", () => {
@@ -186,7 +185,8 @@ describe("sanitizeString home handling", () => {
                 prompt_surface: { tool_descriptions: { "X-API-Key: live": "desc" } },
             }),
         ).toEqual({
-            permission: { bash: { "curl -H 'X-API-Key: <REDACTED>": "allow" } },
+            // A key that names a credential is itself secret, so its value is dropped too.
+            permission: { bash: { "curl -H 'X-API-Key: <REDACTED>": "<REDACTED>" } },
             prompt_surface: {
                 tool_descriptions: { "X-API-Key: <REDACTED>": "<REDACTED 4 chars>" },
             },

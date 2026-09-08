@@ -55,6 +55,7 @@
     "files": {
         "includes": [
             "src/**/*.ts",
+            "src/**/*.tsx",
             "!src/tui-compiled",
             "scripts/**/*.ts",
             "scripts/**/*.mjs",

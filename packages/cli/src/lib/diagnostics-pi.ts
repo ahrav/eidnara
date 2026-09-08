@@ -55,10 +55,11 @@ export interface PiDiagnosticReport {
     };
     configPaths: {
         agentDir: string;
-        userConfig: string;
+        /** `null` when the environment provides no absolute home, so no user tier exists. */
+        userConfig: string | null;
         projectConfig: string;
     };
-    userConfig: PiConfigDiagnostic;
+    userConfig: PiConfigDiagnostic | null;
     projectConfig: PiConfigDiagnostic;
     loadedConfigPaths: string[];
     loadWarnings: string[];
@@ -154,9 +155,11 @@ function redactKeyedText(value: string): string {
 }
 
 function redactSecretString(value: string): string {
+    // The shared redactor treats an unquoted value as a YAML plain scalar through the next `: `,
+    // so on one line it would swallow a neighboring `key: value` pair's key and leave that
+    // pair's value in place. Redacting one-token pairs first removes that value.
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
-    const redacted = redactSecretText(value)
-        .replace(/-----BEGIN [A-Z ]+-----[\s\S]*?(?:-----END [A-Z ]+-----|$)/g, "<REDACTED PEM>")
+    const redacted = redactSecretText(redactKeyedText(value))
         .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1<REDACTED>@")
         .replace(
             /(\b(?:Proxy-)?Authorization\s*[:=]\s*|\b(?:Set-)?Cookie\s*[:=]\s*|\bX-API-Key\s*[:=]\s*)[^\r\n]+/gi,
@@ -234,8 +237,9 @@ export function sanitizeValue(value: unknown, key = ""): unknown {
  * `detectConfigFile` applies the Pi loader's precedence: `.jsonc`, then `.json`,
  * and the `.jsonc` path when neither exists.
  */
-function getUserConfigPath(): string {
-    return detectConfigFile(eidnaraUserConfigBasePath()).path;
+function getUserConfigPath(): string | null {
+    const basePath = eidnaraUserConfigBasePath();
+    return basePath === undefined ? null : detectConfigFile(basePath).path;
 }
 
 function getProjectConfigPath(cwd: string): string {
@@ -458,7 +462,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             userConfig: userConfigPath,
             projectConfig: projectConfigPath,
         },
-        userConfig: readConfigDiagnostic(userConfigPath),
+        userConfig: userConfigPath === null ? null : readConfigDiagnostic(userConfigPath),
         projectConfig: readConfigDiagnostic(projectConfigPath),
         loadedConfigPaths: loaded.loadedFromPaths.map(sanitizeString),
         loadWarnings: loaded.warnings.map(sanitizeString),
@@ -491,7 +495,7 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         `- Node: ${report.nodeVersion}`,
         `- Pi installed: ${report.piInstalled}${report.piVersion ? ` (${oneLine(report.piVersion)})` : ""}`,
         `- Eidnara package registered: ${report.settings.hasEidnaraPackage}`,
-        `- User config parse error: ${oneLine(report.userConfig.parseError ?? "none")}`,
+        `- User config parse error: ${oneLine(report.userConfig?.parseError ?? "none")}`,
         `- Project config parse error: ${oneLine(report.projectConfig.parseError ?? "none")}`,
         `- Known Pi extension conflicts: ${report.conflicts.knownConflicts.length === 0 ? "none" : oneLine(report.conflicts.knownConflicts.join("; "))}`,
         "",
@@ -507,7 +511,7 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         "",
         "### User eidnara.jsonc flags",
         "```jsonc",
-        JSON.stringify(report.userConfig.flags, null, 2),
+        JSON.stringify(report.userConfig?.flags ?? null, null, 2),
         "```",
         "",
         "### Project eidnara.jsonc flags",

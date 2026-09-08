@@ -28,33 +28,21 @@ export function promptSurfaceConfigIdentity(config: PromptSurfaceConfig | undefi
 
 export type PromptSurfaceResolutionSource = "exact" | "bare" | "wildcard" | "default";
 
-/** The validator accepts bare model, provider/model, and provider/* routing keys. */
-export function isValidPromptSurfaceModelKey(key: string): boolean {
-    if (key.length === 0 || key.trim() !== key) return false;
-
-    const slash = key.indexOf("/");
-    if (slash < 0) return !key.includes("*");
-    if (slash === 0 || slash === key.length - 1) return false;
-
-    const provider = key.slice(0, slash);
-    const modelID = key.slice(slash + 1);
-    if (
-        provider.trim() !== provider ||
-        modelID.trim() !== modelID ||
-        provider.includes("*") ||
-        (modelID.includes("*") && modelID !== "*")
-    ) {
-        return false;
-    }
-    if (modelID === "*") return true;
-
-    return (
-        modelID.length > 0 &&
-        !modelID.startsWith("/") &&
-        !modelID.endsWith("/") &&
-        !modelID.includes("//")
-    );
-}
+/**
+ * The pattern accepts bare model, provider/model, and provider/* routing keys.
+ *
+ * The JSON Schema generator publishes the regex as `pattern`; it drops `.refine` callbacks,
+ * so editors validating against the asset would otherwise accept keys the loader rejects.
+ *
+ * - `[^\s/*](?:[^/*]*[^\s/*])?` — a bare key or provider: no `/` or `*`, no leading or
+ *   trailing whitespace (interior whitespace is allowed).
+ * - `/\*` — the provider wildcard.
+ * - `/[^\s/*](?:(?:[^/*]|\/(?=[^/*]))*[^\s/*])?` — a model ID: no `*`, no leading or
+ *   trailing whitespace, and every `/` is followed by a non-slash so `//` and a trailing `/`
+ *   are rejected.
+ */
+export const PROMPT_SURFACE_MODEL_KEY_PATTERN =
+    /^[^\s/*](?:[^/*]*[^\s/*])?(?:\/(?:\*|[^\s/*](?:(?:[^/*]|\/(?=[^/*]))*[^\s/*])?))?$/;
 
 export type ModelKeyLookupSource = Exclude<PromptSurfaceResolutionSource, "default">;
 
@@ -70,23 +58,30 @@ export interface ModelKeyCandidate {
  * The lookup checks `provider/*` after exact, base-model, and bare keys.
  * Exact and base-model overrides take precedence over `provider/*`.
  * A provider wildcard applies only when no exact, base-model, or bare key matches.
- * models.
+ *
+ * A bare model key (no `/`) walks the same dash-stripped ladder with only the
+ * bare rungs, so a bare `models` entry resolves the same model whether or not
+ * its provider prefix is present. An empty provider or model segment yields no
+ * candidates.
  */
 export function modelKeyLookupOrder(modelKey: string | undefined): ModelKeyCandidate[] {
     if (!modelKey) return [];
 
     const slash = modelKey.indexOf("/");
-    if (slash <= 0 || slash === modelKey.length - 1) return [];
+    if (slash === 0 || slash === modelKey.length - 1) return [];
 
-    const provider = modelKey.slice(0, slash);
-    let modelID = modelKey.slice(slash + 1);
-    const providerRefs = modelRefLookupOrder(`${provider}/${modelID}`);
+    const providerPrefixes: string[] = [];
+    let modelID = modelKey;
+    if (slash > 0) {
+        modelID = modelKey.slice(slash + 1);
+        for (const providerRef of modelRefLookupOrder(modelKey)) {
+            providerPrefixes.push(providerRef.slice(0, providerRef.indexOf("/")));
+        }
+    }
     const candidates: ModelKeyCandidate[] = [];
 
     while (modelID.length > 0) {
-        for (const providerRef of providerRefs) {
-            const providerSlash = providerRef.indexOf("/");
-            const providerPrefix = providerRef.slice(0, providerSlash);
+        for (const providerPrefix of providerPrefixes) {
             candidates.push({ key: `${providerPrefix}/${modelID}`, source: "exact" });
         }
         candidates.push({ key: modelID, source: "bare" });
@@ -96,9 +91,7 @@ export function modelKeyLookupOrder(modelKey: string | undefined): ModelKeyCandi
         modelID = modelID.slice(0, lastDash);
     }
 
-    for (const providerRef of providerRefs) {
-        const providerSlash = providerRef.indexOf("/");
-        const providerPrefix = providerRef.slice(0, providerSlash);
+    for (const providerPrefix of providerPrefixes) {
         candidates.push({ key: `${providerPrefix}/*`, source: "wildcard" });
     }
 
@@ -118,6 +111,8 @@ function resolveModelConfigValue<T>(
     if (!values) return undefined;
 
     for (const candidate of modelKeyLookupOrder(modelKey)) {
+        // An inherited key such as `toString` or `constructor` is not a configured override.
+        if (!Object.hasOwn(values, candidate.key)) continue;
         const value = values[candidate.key];
         if (value !== undefined) {
             return { value, source: candidate.source };

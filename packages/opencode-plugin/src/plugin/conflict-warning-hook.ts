@@ -7,10 +7,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { openCodeDbExists, withReadOnlySessionDb } from "../hooks/context/read-session-db";
 import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
 import type { ConflictResult } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
+import { normalizeSDKResponse } from "../shared/normalize-sdk-response";
+import type { Database } from "../shared/sqlite";
 
 const CONFLICT_WARNING_MARKER = "⚠️ Eidnara is disabled due to conflicting configuration:";
 const ENABLED_MARKER = "✨ Eidnara is now enabled";
@@ -89,17 +92,6 @@ function readDesktopState(directory: string): DesktopState {
     }
 }
 
-const cachedDesktopStateByDir = new Map<string, DesktopState>();
-
-function getDesktopState(directory: string): DesktopState {
-    let cached = cachedDesktopStateByDir.get(directory);
-    if (!cached) {
-        cached = readDesktopState(directory);
-        cachedDesktopStateByDir.set(directory, cached);
-    }
-    return cached;
-}
-
 async function deleteMessage(
     serverUrl: string,
     sessionId: string,
@@ -148,17 +140,17 @@ async function getSessionMessages(client: unknown, sessionId: string): Promise<S
                 messages?: (input: {
                     path: { id: string };
                     query?: { limit?: number };
-                }) => Promise<{ data?: SdkMessage[] }>;
+                }) => Promise<{ data?: SdkMessage[] } | SdkMessage[]>;
             };
         };
 
         if (typeof c.session?.messages === "function") {
-            // Bounded limit prevents loading the entire session into memory.
+            // The SDK exposes no cursor, so this window is the bounded fallback behind the database scan.
             const result = await c.session.messages({
                 path: { id: sessionId },
                 query: { limit: 50 },
             });
-            return result?.data ?? [];
+            return normalizeSDKResponse(result, [] as SdkMessage[]);
         }
     } catch (error) {
         log(
@@ -169,15 +161,123 @@ async function getSessionMessages(client: unknown, sessionId: string): Promise<S
 }
 
 /**
+ * Search every fetched message because a warning can precede later user and
+ * assistant turns.
+ */
+function findIgnoredMarkerMessageIds(messages: SdkMessage[], marker: string): string[] {
+    const ids: string[] = [];
+    for (const msg of messages) {
+        const msgId = msg.info?.id;
+        if (!msgId || msg.info?.role !== "user") continue;
+
+        const parts = msg.parts ?? [];
+        const matches =
+            parts.length > 0 &&
+            parts.every(
+                (p) =>
+                    p.ignored === true &&
+                    p.type === "text" &&
+                    typeof p.text === "string" &&
+                    p.text.startsWith(marker),
+            );
+        if (matches) ids.push(msgId);
+    }
+    return ids;
+}
+
+/** The same predicate as `findIgnoredMarkerMessageIds`, evaluated over every row of the session. `substr` compares the marker prefix so marker text is never read as a `LIKE` pattern. commentlint: allow(JUDGE) */
+const MARKER_MESSAGE_IDS_SQL = `
+SELECT m.id AS id
+FROM message m
+WHERE m.session_id = ?
+  AND json_extract(m.data, '$.role') = 'user'
+  AND EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM part p
+    WHERE p.message_id = m.id
+      AND NOT (
+        COALESCE(json_extract(p.data, '$.ignored'), 0) IN (1, 'true')
+        AND json_extract(p.data, '$.type') = 'text'
+        AND substr(COALESCE(json_extract(p.data, '$.text'), ''), 1, length(?)) = ?
+      )
+  )
+ORDER BY m.time_created, m.id`;
+
+export function findIgnoredMarkerMessageIdsFromDb(
+    db: Database,
+    sessionId: string,
+    marker: string,
+): string[] {
+    const rows = db.prepare(MARKER_MESSAGE_IDS_SQL).all(sessionId, marker, marker) as Array<{
+        id?: unknown;
+    }>;
+    return rows
+        .map((row) => row.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+/**
+ * OpenCode's database sees the whole session, so a warning buried under more
+ * than the SDK window of later turns is still found. The SDK fetch is the
+ * fallback when the database is unavailable.
+ */
+async function findMarkerMessageIds(
+    client: unknown,
+    sessionId: string,
+    marker: string,
+): Promise<string[]> {
+    if (openCodeDbExists()) {
+        try {
+            return withReadOnlySessionDb((db) =>
+                findIgnoredMarkerMessageIdsFromDb(db, sessionId, marker),
+            );
+        } catch (error) {
+            log(
+                `[eidnara] conflict-warning: database scan failed, falling back to the SDK window: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    }
+    return findIgnoredMarkerMessageIds(await getSessionMessages(client, sessionId), marker);
+}
+
+/**
+ * Deletes all messages concurrently so an endpoint that accepts connections but
+ * never answers costs one request timeout, not one per message. Returns IDs
+ * whose DELETE request failed.
+ */
+async function deleteMessages(
+    serverUrl: string,
+    sessionId: string,
+    messageIds: string[],
+): Promise<string[]> {
+    const results = await Promise.all(
+        messageIds.map(async (messageId) => ({
+            messageId,
+            ok: await deleteMessage(serverUrl, sessionId, messageId),
+        })),
+    );
+    return results.filter((r) => !r.ok).map((r) => r.messageId);
+}
+
+/**
  */
 export async function sendConflictWarning(
     client: unknown,
     directory: string,
     conflictResult: ConflictResult,
 ): Promise<void> {
-    const { sessionId } = getDesktopState(directory);
+    const { sessionId } = readDesktopState(directory);
     if (!sessionId) {
         log("[eidnara] conflict-warning: could not find active session for Desktop warning");
+        return;
+    }
+
+    // Conflict detection re-fires on every startup; a warning already in the session is not repeated.
+    const existing = await findMarkerMessageIds(client, sessionId, CONFLICT_WARNING_MARKER);
+    if (existing.length > 0) {
+        log(
+            `[eidnara] conflict-warning: session ${sessionId} already carries ${existing.length} warning(s); not sending another`,
+        );
         return;
     }
 
@@ -204,45 +304,24 @@ export async function cleanupConflictWarnings(
     directory: string,
     serverUrl?: string,
 ): Promise<void> {
-    const { sessionId } = getDesktopState(directory);
+    const { sessionId, sidecarUrl } = readDesktopState(directory);
     if (!sessionId) {
         log("[eidnara] cleanup: no active Desktop session found");
         return;
     }
-    const messages = await getSessionMessages(client, sessionId);
-    if (messages.length === 0) return;
-
-    const warningMessageIds: string[] = [];
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        const msgId = msg.info?.id;
-        const msgRole = msg.info?.role;
-        if (!msgId || msgRole !== "user") break;
-
-        const parts = msg.parts ?? [];
-        const isWarning =
-            parts.length > 0 &&
-            parts.every(
-                (p) =>
-                    p.ignored === true &&
-                    p.type === "text" &&
-                    typeof p.text === "string" &&
-                    p.text.startsWith(CONFLICT_WARNING_MARKER),
-            );
-
-        if (isWarning) {
-            warningMessageIds.push(msgId);
-        } else {
-            break; // Stop at the first non-warning message from the tail
-        }
-    }
+    const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
+    const warningMessageIds = await findMarkerMessageIds(
+        client,
+        sessionId,
+        CONFLICT_WARNING_MARKER,
+    );
 
     if (warningMessageIds.length === 0) {
-        await cleanupEnabledMessages(messages, serverUrl, sessionId);
+        await cleanupEnabledMessages(client, deleteUrl, sessionId);
         return;
     }
 
-    if (!serverUrl) {
+    if (!deleteUrl) {
         log("[eidnara] cleanup: no serverUrl provided, cannot delete messages");
         return;
     }
@@ -251,11 +330,17 @@ export async function cleanupConflictWarnings(
         `[eidnara] cleaning up ${warningMessageIds.length} conflict warning message(s) from session ${sessionId}`,
     );
 
+    const failedIds = await deleteMessages(deleteUrl, sessionId, warningMessageIds);
     for (const messageId of warningMessageIds) {
-        const ok = await deleteMessage(serverUrl, sessionId, messageId);
-        if (ok) {
+        if (!failedIds.includes(messageId)) {
             log(`[eidnara] deleted conflict warning message ${messageId}`);
         }
+    }
+    if (failedIds.length > 0) {
+        log(
+            `[eidnara] cleanup: ${failedIds.length} conflict warning message(s) still present; skipping the enabled confirmation until the next startup deletes them`,
+        );
+        return;
     }
 
     // Send a brief "enabled" confirmation so the user sees the conflict is
@@ -275,30 +360,7 @@ export async function cleanupConflictWarnings(
     // The plugin identifies enabled confirmations by ENABLED_MARKER and the ignored flag to avoid deleting user messages.
     setTimeout(async () => {
         try {
-            const freshMessages = await getSessionMessages(client, sessionId);
-            for (let i = freshMessages.length - 1; i >= 0; i--) {
-                const msg = freshMessages[i];
-                const msgId = msg.info?.id;
-                const msgRole = msg.info?.role;
-                if (!msgId || msgRole !== "user") break;
-
-                const parts = msg.parts ?? [];
-                const isEnabled =
-                    parts.length > 0 &&
-                    parts.every(
-                        (p) =>
-                            p.ignored === true &&
-                            p.type === "text" &&
-                            typeof p.text === "string" &&
-                            p.text.startsWith(ENABLED_MARKER),
-                    );
-
-                if (isEnabled) {
-                    await deleteMessage(serverUrl, sessionId, msgId);
-                } else {
-                    break;
-                }
-            }
+            await cleanupEnabledMessages(client, deleteUrl, sessionId);
         } catch {
             // Best-effort cleanup
         }
@@ -307,32 +369,12 @@ export async function cleanupConflictWarnings(
 
 /** The startup cleanup removes enabled messages left by an earlier run. */
 async function cleanupEnabledMessages(
-    messages: SdkMessage[],
+    client: unknown,
     serverUrl: string | undefined,
     sessionId: string,
 ): Promise<void> {
     if (!serverUrl) return;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        const msgId = msg.info?.id;
-        const msgRole = msg.info?.role;
-        if (!msgId || msgRole !== "user") break;
-
-        const parts = msg.parts ?? [];
-        const isEnabled =
-            parts.length > 0 &&
-            parts.every(
-                (p) =>
-                    p.ignored === true &&
-                    p.type === "text" &&
-                    typeof p.text === "string" &&
-                    p.text.startsWith(ENABLED_MARKER),
-            );
-
-        if (isEnabled) {
-            await deleteMessage(serverUrl, sessionId, msgId);
-        } else {
-            break;
-        }
-    }
+    const enabledMessageIds = await findMarkerMessageIds(client, sessionId, ENABLED_MARKER);
+    if (enabledMessageIds.length === 0) return;
+    await deleteMessages(serverUrl, sessionId, enabledMessageIds);
 }

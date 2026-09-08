@@ -109,14 +109,14 @@ describe("loadPiConfig", () => {
             cwd,
             `{
                 // JSONC comments and trailing commas are accepted.
-                "enabled": false,
+                "clear_reasoning_age": 60,
                 "memory": { "enabled": false, },
             }`,
         );
 
         const result = loadPiConfig({ cwd });
 
-        expect(result.config.enabled).toBe(false);
+        expect(result.config.clear_reasoning_age).toBe(60);
         expect(result.config.memory.enabled).toBe(false);
         expect(result.warnings).toEqual([]);
         expect(result.loadedFromPaths).toEqual([projectPath]);
@@ -186,8 +186,12 @@ describe("loadPiConfig", () => {
         const result = loadPiConfig({ cwd });
 
         expect(result.config.memory.enabled).toBe(false);
-        expect(result.config.memory.injection_budget_tokens).toBe(9000);
+        // The injection budget is a user-level bound, so the project value is stripped and the user's stays.
+        expect(result.config.memory.injection_budget_tokens).toBe(2000);
         expect(result.config.clear_reasoning_age).toBe(60);
+        expect(result.warnings.join("\n")).toContain(
+            "Ignoring memory.injection_budget_tokens from project config",
+        );
         expect(result.loadedFromPaths).toEqual([projectPath, userPath]);
     });
 
@@ -212,14 +216,14 @@ describe("loadPiConfig", () => {
         writeProjectConfig(
             cwd,
             JSON.stringify({
-                enabled: false,
+                memory: { enabled: false },
                 clear_reasoning_age: 3,
             }),
         );
 
         const result = loadPiConfig({ cwd });
 
-        expect(result.config.enabled).toBe(false);
+        expect(result.config.memory.enabled).toBe(false);
         expect(result.config.clear_reasoning_age).toBe(
             EidnaraConfigSchema.parse({}).clear_reasoning_age,
         );
@@ -419,8 +423,9 @@ describe("loadPiConfig", () => {
         const cwd = makeTempRoot("eidnara-pi-cwd-");
         const home = makeTempRoot("eidnara-pi-home-");
         withHome(home);
-        writeProjectConfig(
-            cwd,
+        // Hidden-agent activation is user-only; a project copy of these keys is stripped before parsing.
+        writeUserConfig(
+            home,
             JSON.stringify({
                 sidekick: { enabled: false, disable: false },
                 historian: { enabled: true },
@@ -440,5 +445,203 @@ describe("loadPiConfig", () => {
         expect(result.warnings.join("\n")).toContain(
             'Removed invalid "historian.enabled" in-memory (run doctor to persist).',
         );
+    });
+
+    it("keeps the user's agent block when an invalid PROJECT field breaks the merged block", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeUserConfig(
+            home,
+            JSON.stringify({
+                historian: { model: "anthropic/user-historian", disable: true },
+                sidekick: { model: "anthropic/user-sidekick", disable: true },
+            }),
+        );
+        writeProjectConfig(
+            cwd,
+            JSON.stringify({
+                historian: { temperature: "not-a-number" },
+                sidekick: { top_p: "not-a-number" },
+            }),
+        );
+
+        const result = loadPiConfigDetailed({ cwd });
+
+        expect(result.config.historian?.model).toBe("anthropic/user-historian");
+        expect(result.config.historian?.disable).toBe(true);
+        expect(result.config.sidekick?.model).toBe("anthropic/user-sidekick");
+        expect(result.config.sidekick?.disable).toBe(true);
+        expect(result.loadOutcome).toBe("schema-recovery");
+        expect(result.recoveredTopLevelKeys.sort()).toEqual(["historian", "sidekick"]);
+        const warnings = result.warnings.join("\n");
+        expect(warnings).toContain(
+            '[merged config] "historian": invalid value (object with keys [model, disable, temperature]) after merging the project config, keeping the user config\'s historian settings.',
+        );
+        expect(warnings).toContain(
+            '[merged config] "sidekick": invalid value (object with keys [model, disable, top_p]) after merging the project config, keeping the user config\'s sidekick settings.',
+        );
+    });
+
+    it("keeps protected USER blocks when the PROJECT replaces the parent with a non-object", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeUserConfig(
+            home,
+            JSON.stringify({
+                compaction: { enabled: false },
+                storage: { enforce_private_permissions: false },
+                pi: { subagent_extensions: ["user-only.ts"] },
+            }),
+        );
+        writeProjectConfig(cwd, JSON.stringify({ compaction: null, storage: "junk", pi: null }));
+
+        const result = loadPiConfigDetailed({ cwd });
+
+        expect(result.config.compaction.enabled).toBe(false);
+        expect(result.config.storage.enforce_private_permissions).toBe(false);
+        expect(result.config.pi?.subagent_extensions).toEqual(["user-only.ts"]);
+        // The sanitizer drops the non-object replacements before the merge, so nothing reaches schema recovery.
+        expect(result.loadOutcome).toBe("ok");
+        expect(result.recoveredTopLevelKeys).toEqual([]);
+        const warnings = result.warnings.join("\n");
+        for (const key of ["compaction", "storage", "pi"]) {
+            expect(warnings).toContain(
+                `[project config] Ignoring ${key} from project config (security: a repository cannot replace a block that carries user-only settings`,
+            );
+        }
+    });
+
+    it("keeps the USER threshold when the PROJECT threshold is wholly invalid", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeUserConfig(
+            home,
+            JSON.stringify({
+                execute_threshold_percentage: 90,
+                execute_threshold_tokens: { default: 50_000 },
+            }),
+        );
+        writeProjectConfig(
+            cwd,
+            JSON.stringify({
+                execute_threshold_percentage: 91,
+                execute_threshold_tokens: "junk",
+            }),
+        );
+
+        const result = loadPiConfigDetailed({ cwd });
+
+        expect(result.config.execute_threshold_percentage).toBe(90);
+        expect(result.config.execute_threshold_tokens).toEqual({ default: 50_000 });
+        // The threshold constraint restores the trusted values before parsing, so nothing reaches schema recovery.
+        expect(result.loadOutcome).toBe("ok");
+        expect(result.recoveredTopLevelKeys).toEqual([]);
+        const warnings = result.warnings.join("\n");
+        for (const key of ["execute_threshold_percentage", "execute_threshold_tokens"]) {
+            expect(warnings).toContain(`Ignoring ${key} from project config`);
+        }
+        expect(warnings).toContain("not a valid threshold");
+    });
+
+    it("keeps a schema default the PROJECT tried to corrupt when the USER config never set the key", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeProjectConfig(cwd, JSON.stringify({ execute_threshold_percentage: "80" }));
+
+        const result = loadPiConfig({ cwd });
+
+        expect(result.config.execute_threshold_percentage).toBe(
+            EidnaraConfigSchema.parse({}).execute_threshold_percentage,
+        );
+    });
+
+    it("drops a block whose required leaf is missing instead of failing recovery outright", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeUserConfig(
+            home,
+            JSON.stringify({
+                enabled: false,
+                fail_closed_blocking: false,
+                subc: {},
+            }),
+        );
+
+        const result = loadPiConfigDetailed({ cwd });
+
+        expect(result.config.enabled).toBe(false);
+        expect(result.config.fail_closed_blocking).toBe(false);
+        expect(result.config.subc).toBeUndefined();
+        expect(result.recoveredTopLevelKeys).toEqual(["subc"]);
+        const warnings = result.warnings.join("\n");
+        expect(warnings).toContain('[merged config] "subc": invalid value (object with keys [])');
+        expect(warnings).not.toContain("Config recovery failed");
+    });
+
+    it("drops an agent block the USER config alone makes invalid", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeUserConfig(home, JSON.stringify({ historian: { two_pass: "not-a-boolean" } }));
+
+        const result = loadPiConfigDetailed({ cwd });
+
+        expect(result.config.historian).toBeUndefined();
+        expect(result.recoveredTopLevelKeys).toEqual(["historian"]);
+        expect(result.warnings.join("\n")).toContain(
+            '[merged config] "historian": invalid agent configuration, ignoring. Check your eidnara.jsonc.',
+        );
+    });
+
+    it("does not let a PROJECT threshold between 80 and 90 lower the USER threshold", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeUserConfig(home, JSON.stringify({ execute_threshold_percentage: 90 }));
+        writeProjectConfig(cwd, JSON.stringify({ execute_threshold_percentage: 85 }));
+
+        const result = loadPiConfig({ cwd });
+
+        expect(result.config.execute_threshold_percentage).toBe(90);
+        expect(result.warnings.join("\n")).toContain("execute_threshold_percentage");
+    });
+
+    it("reports schema-recovery when a source rejected a prototype-pollution key", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeProjectConfig(cwd, '{ "__proto__": { "fail_closed_blocking": false } }');
+
+        const result = loadPiConfigDetailed({ cwd });
+
+        expect(result.sources.projectConfig).toBe("schema-recovery");
+        expect(result.recoveredTopLevelKeys).toEqual([]);
+        expect(result.loadOutcome).toBe("schema-recovery");
+        expect(result.config.fail_closed_blocking).toBe(true);
+    });
+
+    it("treats a non-object config root as a parse failure instead of crashing", () => {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        writeUserConfig(home, "null");
+        writeProjectConfig(cwd, "[1, 2]");
+
+        const result = loadPiConfigDetailed({ cwd });
+
+        expect(result.config).toEqual(EidnaraConfigSchema.parse({}));
+        expect(result.sources.userConfig).toBe("project-file-parse-error");
+        expect(result.sources.projectConfig).toBe("project-file-parse-error");
+        expect(result.loadOutcome).toBe("project-file-parse-error");
+        const warnings = result.warnings.join("\n");
+        expect(warnings).toContain("[user config]");
+        expect(warnings).toContain("config root must be a JSON object, got null");
+        expect(warnings).toContain("[project config]");
+        expect(warnings).toContain("config root must be a JSON object, got array, 2 items");
     });
 });

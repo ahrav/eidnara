@@ -16,9 +16,11 @@ import {
     DESCRIPTOR_SCHEMA_VERSION,
     NativeChannel,
     nativeWireConstants,
+    isRingFullError,
     privateBytes,
     probeCapabilities,
     QUALIFIED_TEST_PROFILE,
+    RING_FULL_MESSAGE,
 } from "../index.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "shm-native-"));
@@ -686,7 +688,15 @@ describe("raw N-API descriptor boundary", () => {
                 publish(held, value);
                 expect(addon.poll(held.second, (t) => { tokens.push(t); })).toBe(true);
             }
-            expect(() => publish(held, depth + 1)).toThrow(/ring is full/);
+            // `isRingFullError` matches by exact message, so the addon's text must equal the export.
+            let full: unknown;
+            try {
+                publish(held, depth + 1);
+            } catch (error) {
+                full = error;
+            }
+            expect((full as Error).message).toBe(RING_FULL_MESSAGE);
+            expect(isRingFullError(full)).toBe(true);
             addon.release(held.second, tokens.shift()!);
             publish(held, depth + 1);
             expect(addon.poll(held.second, (t) => { tokens.push(t); })).toBe(true);

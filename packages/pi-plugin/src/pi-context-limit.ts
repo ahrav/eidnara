@@ -37,6 +37,10 @@ function isSaneLimit(value: number | undefined): value is number {
     );
 }
 
+function isFinitePositive(value: number | undefined): value is number {
+    return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
 export function resolvePiWindowGeometry(
     args: ResolvePiWindowGeometryArgs,
 ): WindowGeometryResult | undefined {
@@ -45,21 +49,18 @@ export function resolvePiWindowGeometry(
         : isSaneLimit(args.model?.contextWindow)
           ? args.model.contextWindow
           : undefined;
+    // The sanity bounds apply to the inferred window, not to the sample's token count.
     const persistedUsable =
-        isSaneLimit(args.persistedInputTokens) &&
-        typeof args.persistedPercentage === "number" &&
-        Number.isFinite(args.persistedPercentage) &&
-        args.persistedPercentage > 0
+        isFinitePositive(args.persistedInputTokens) && isFinitePositive(args.persistedPercentage)
             ? args.persistedInputTokens / (args.persistedPercentage / 100)
             : undefined;
-    const persistedWindow =
-        isSaneLimit(args.persistedInputTokens) &&
-        typeof args.persistedPercentage === "number" &&
-        Number.isFinite(args.persistedPercentage) &&
-        args.persistedPercentage > 0
-            ? args.persistedInputTokens / (args.persistedPercentage / 100)
-            : undefined;
-    const context = runtimeWindow ?? persistedWindow;
+    const contextCap = isSaneLimit(args.detectedContextLimit)
+        ? args.detectedContextLimit
+        : undefined;
+    // A detected overflow is the only window a provider ever reports for an uncatalogued model.
+    // The persisted sample infers a usable size, not a window, so it is the last resort.
+    const context =
+        runtimeWindow ?? contextCap ?? (isSaneLimit(persistedUsable) ? persistedUsable : undefined);
     if (!isSaneLimit(context)) return undefined;
     const providerID = args.model?.provider ?? "unknown";
     const modelID = args.model?.id ?? "unknown";
@@ -73,9 +74,7 @@ export function resolvePiWindowGeometry(
         },
         {
             overlay: resolveWindowOverlayFacts(providerID, modelID, getWindowOverlay()),
-            contextCap: isSaneLimit(args.detectedContextLimit)
-                ? args.detectedContextLimit
-                : undefined,
+            contextCap,
             outputReserveOverride,
             harness: "pi",
         },
@@ -83,10 +82,12 @@ export function resolvePiWindowGeometry(
     if (!result || outputReserveOverride !== undefined || !isSaneLimit(persistedUsable))
         return result;
     const usableSoft = Math.round(persistedUsable);
+    // `result.usableHard` already reflects the runtime window and any detected overflow.
+    // A persisted estimate above `result.usableHard` cannot postpone compaction past the wall.
+    if (usableSoft > result.usableHard) return result;
     return {
         ...result,
         usableSoft,
-        usableHard: Math.max(usableSoft, result.usableHard),
         derivation: {
             ...result.derivation,
             reserve: Math.max(0, result.derivation.window - usableSoft),

@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
+import { boundedCommandId, toolCallIdFromContext } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_REDUCE_DESCRIPTION } from "./constants";
@@ -23,6 +23,31 @@ function formatRawDropForAck(rawDrop: string): string {
         .join(", ");
 }
 
+/** Consecutive tag numbers collapse into one `§a§-§b§` range so a large drop stays short. */
+function formatAcceptedTagsForAck(accepted: readonly number[]): string {
+    const sorted = [...new Set(accepted)].sort((a, b) => a - b);
+    const runs: string[] = [];
+    let index = 0;
+    while (index < sorted.length) {
+        const start = sorted[index] as number;
+        let end = start;
+        while (index + 1 < sorted.length && sorted[index + 1] === end + 1) {
+            index += 1;
+            end = sorted[index] as number;
+        }
+        runs.push(start === end ? `§${start}§` : `§${start}§-§${end}§`);
+        index += 1;
+    }
+    return runs.join(", ");
+}
+
+function tagNumberList(record: Record<string, unknown>, key: string): number[] | undefined {
+    const value = record[key];
+    return Array.isArray(value)
+        ? value.filter((entry): entry is number => typeof entry === "number")
+        : undefined;
+}
+
 const ctxReduceArgsShape = {
     drop: tool.schema
         .string()
@@ -33,28 +58,6 @@ const ctxReduceArgsShape = {
 const ctxReduceArgsSchema = tool.schema.object(ctxReduceArgsShape).passthrough();
 
 function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
-    let fallbackCommandSequence = 0;
-
-    const commandIdForInvocation = (sessionId: string, toolContext: unknown): string => {
-        const context =
-            toolContext !== null && typeof toolContext === "object"
-                ? (toolContext as Record<string, unknown>)
-                : {};
-        const callId =
-            (typeof context.callID === "string" && context.callID.trim()) ||
-            (typeof context.callId === "string" && context.callId.trim());
-        if (callId) {
-            const stableId = `oc-${sessionId}-${callId}`;
-            if (Buffer.byteLength(stableId) <= 128) return stableId;
-            return `oc-${createHash("sha256").update(stableId).digest("hex")}`;
-        }
-        fallbackCommandSequence += 1;
-        const monotonicId = `oc-${sessionId}-${fallbackCommandSequence}`;
-        return Buffer.byteLength(monotonicId) <= 128
-            ? monotonicId
-            : `oc-${createHash("sha256").update(monotonicId).digest("hex")}`;
-    };
-
     return tool({
         description: CTX_REDUCE_DESCRIPTION,
         args: ctxReduceArgsShape,
@@ -67,6 +70,12 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             if (!args.drop) {
                 return "Error: 'drop' must be provided.";
             }
+            // The command id keys the daemon's reduce ledger, so a redelivered call replays instead
+            // of queueing the same tags twice; only the host's tool-call id is stable across deliveries.
+            const callId = toolCallIdFromContext(toolContext);
+            if (!callId) {
+                return "Error: ctx_reduce requires a stable tool-call identity from the host; nothing was queued.";
+            }
 
             const rustReduce = deps.rustToolBackends.reduce;
             if (!rustReduce) {
@@ -77,7 +86,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     sessionId,
                     projectRoot: toolContext.directory,
                     drop: args.drop,
-                    commandId: commandIdForInvocation(sessionId, toolContext),
+                    commandId: boundedCommandId(`oc-${sessionId}-${callId}`),
                 });
                 const value =
                     response !== null && typeof response === "object" && "result" in response
@@ -107,10 +116,30 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     return `Error: Failed to queue ctx_reduce operations. ${message}`;
                 }
                 const queued = typeof record.queued === "number" ? record.queued : 0;
-                if (queued <= 0) {
-                    return "All requested tags were already queued or processed. No new action is needed.";
+                const accepted = tagNumberList(record, "accepted");
+                const alreadyQueued = tagNumberList(record, "already_queued") ?? [];
+                const unknown = tagNumberList(record, "unknown") ?? [];
+                const details: string[] = [];
+                if (alreadyQueued.length > 0) {
+                    details.push(`tags ${alreadyQueued.join(", ")} already queued`);
                 }
-                return `Queued: drop ${formatRawDropForAck(args.drop)}.`;
+                if (unknown.length > 0) details.push(`tags ${unknown.join(", ")} not found`);
+                if (queued <= 0) {
+                    return unknown.length > 0
+                        ? `All known requested tags were already queued or processed. No new action is needed. Tags ${unknown.join(", ")} not found.`
+                        : "All requested tags were already queued or processed. No new action is needed.";
+                }
+                // A daemon that reports the accepted tags is authoritative; the raw
+                // request is echoed only when the response carries no such list.
+                if (accepted === undefined) {
+                    return `Queued: drop ${formatRawDropForAck(args.drop)}.`;
+                }
+                const pendingBefore = new Set(alreadyQueued);
+                const newlyQueued = accepted.filter((tag) => !pendingBefore.has(tag));
+                const targets = formatAcceptedTagsForAck(
+                    newlyQueued.length > 0 ? newlyQueued : accepted,
+                );
+                return `Queued: ${[`drop ${targets}`, ...details].join("; ")}.`;
             } catch (error) {
                 return `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`;
             }

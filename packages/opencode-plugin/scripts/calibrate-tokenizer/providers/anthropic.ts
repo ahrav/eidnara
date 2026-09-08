@@ -2,6 +2,8 @@
  *
  */
 
+import { providerRequestSignal } from "./request-timeout";
+
 interface ModelTest {
     label: string;
     provider: string;
@@ -22,20 +24,31 @@ interface MeasureResult {
 const ANTHROPIC_BETA = "oauth-2025-04-20";
 const COUNT_URL = "https://api.anthropic.com/v1/messages/count_tokens";
 
+/** OAuth tokens go in `authorization` with the OAuth beta flag; API keys go in `x-api-key`. */
+function authHeaders(auth: AuthEntry): Record<string, string> {
+    if (auth.type === "oauth" && auth.access) {
+        return { authorization: `Bearer ${auth.access}`, "anthropic-beta": ANTHROPIC_BETA };
+    }
+    if (auth.type === "api" && auth.key) {
+        return { "x-api-key": auth.key };
+    }
+    throw new Error("Anthropic auth must be an OAuth entry with access or an api entry with key");
+}
+
 async function callCountTokens(
     body: Record<string, unknown>,
-    accessToken: string,
+    headers: Record<string, string>,
 ): Promise<number> {
     const res = await fetch(COUNT_URL, {
         method: "POST",
         headers: {
-            authorization: `Bearer ${accessToken}`,
+            ...headers,
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": ANTHROPIC_BETA,
             "content-type": "application/json",
             "user-agent": "eidnara-calibration/1.0",
         },
         body: JSON.stringify(body),
+        signal: providerRequestSignal(),
     });
     const text = await res.text();
     if (!res.ok) {
@@ -54,17 +67,14 @@ export async function measureAnthropic(
     systemText: string,
     toolsArray: unknown[],
 ): Promise<MeasureResult> {
-    if (auth.type !== "oauth" || !auth.access) {
-        throw new Error("Anthropic auth must be OAuth with access token");
-    }
-    const access = auth.access;
+    const headers = authHeaders(auth);
 
     const systemBody = {
         model: test.modelId,
         system: systemText,
         messages: [{ role: "user", content: "x" }],
     };
-    const systemApi = await callCountTokens(systemBody, access);
+    const systemApi = await callCountTokens(systemBody, headers);
 
     // Tools-only request
     const toolsBody = {
@@ -72,13 +82,13 @@ export async function measureAnthropic(
         tools: toolsArray,
         messages: [{ role: "user", content: "x" }],
     };
-    const toolsApi = await callCountTokens(toolsBody, access);
+    const toolsApi = await callCountTokens(toolsBody, headers);
 
     const baselineBody = {
         model: test.modelId,
         messages: [{ role: "user", content: "x" }],
     };
-    const baseline = await callCountTokens(baselineBody, access);
+    const baseline = await callCountTokens(baselineBody, headers);
     return {
         systemApi: Math.max(0, systemApi - baseline),
         toolsApi: Math.max(0, toolsApi - baseline),

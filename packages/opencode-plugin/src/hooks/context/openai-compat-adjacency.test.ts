@@ -59,4 +59,79 @@ describe("assertOpenAiCompatAdjacency", () => {
         expect(result.ok).toBe(false);
         expect(result.violations.some((v) => v.kind === "missing_tool_messages")).toBe(true);
     });
+
+    test("fails when two tool messages answer the same tool_call_id", () => {
+        const messages: OpenAiCompatWireMessage[] = [
+            { role: "user", content: "go" },
+            {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                    { id: "c1", type: "function", function: { name: "x", arguments: "{}" } },
+                ],
+            },
+            { role: "tool", tool_call_id: "c1", content: "first" },
+            { role: "tool", tool_call_id: "c1", content: "second" },
+        ];
+        const result = assertOpenAiCompatAdjacency(messages);
+        expect(result.ok).toBe(false);
+        expect(result.violations).toHaveLength(1);
+        expect(result.violations[0]).toMatchObject({
+            index: 1,
+            kind: "duplicate_tool_call_id",
+            toolCallId: "c1",
+        });
+    });
+
+    test("fails when an assistant declares the same tool_call_id twice", () => {
+        const messages: OpenAiCompatWireMessage[] = [
+            {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                    { id: "c1", type: "function", function: { name: "x", arguments: "{}" } },
+                    { id: "c1", type: "function", function: { name: "x", arguments: "{}" } },
+                ],
+            },
+            { role: "tool", tool_call_id: "c1", content: "ok" },
+        ];
+        const result = assertOpenAiCompatAdjacency(messages);
+        expect(result.ok).toBe(false);
+        expect(result.violations.map((v) => v.kind)).toEqual(["duplicate_tool_call_id"]);
+    });
+
+    test("fails when a tool message without tool_call_id opens the conversation", () => {
+        const result = assertOpenAiCompatAdjacency([{ role: "tool", content: "orphan" }]);
+        expect(result.ok).toBe(false);
+        expect(result.violations).toEqual([
+            expect.objectContaining({ index: 0, kind: "orphan_tool_message" }),
+        ]);
+    });
+
+    test("fails when a tool message without tool_call_id follows a user message", () => {
+        const messages: OpenAiCompatWireMessage[] = [
+            { role: "user", content: "hi" },
+            { role: "tool", content: "orphan" },
+        ];
+        const result = assertOpenAiCompatAdjacency(messages);
+        expect(result.ok).toBe(false);
+        expect(result.violations.map((v) => v.kind)).toEqual(["orphan_tool_message"]);
+    });
+
+    test("reports a tool message without tool_call_id inside a run exactly once", () => {
+        const messages: OpenAiCompatWireMessage[] = [
+            {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                    { id: "c1", type: "function", function: { name: "x", arguments: "{}" } },
+                ],
+            },
+            { role: "tool", content: "no id" },
+            { role: "tool", tool_call_id: "c1", content: "ok" },
+        ];
+        const result = assertOpenAiCompatAdjacency(messages);
+        expect(result.ok).toBe(false);
+        expect(result.violations.map((v) => v.kind)).toEqual(["unmatched_tool_call_id"]);
+    });
 });

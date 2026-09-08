@@ -15,19 +15,23 @@ export const MAX_GITHUB_BODY_BYTES = 60_000;
 const LOG_TRUNCATION_MARKER = "[truncated for GitHub 64KB limit — older log lines dropped]\n";
 const FINAL_TRUNCATION_MARKER = "\n\n[truncated further to fit GitHub body limit]\n";
 const FALLBACK_TRUNCATION_MARKER = "\n\n[truncated for GitHub 64KB limit]\n";
+const FENCE = "```";
+const FENCE_CLOSE = `\n${FENCE}`;
+const LOG_HEADING = "## Log (last";
+const OTHER_SECTION_HEADING = /^## (?!Log \(last)/m;
 
 /**
  * The stack-frame patterns retain frames to identify the failing call site.
  *
- * The `failed:` pattern excludes status counts such as `0 failed`.
+ * Count telemetry such as `0 failed` or `4 failed;` is excluded when an integer precedes `failed` and line end, `,`, `;`, or `)` follows it.
  */
 const ERROR_LOG_PATTERNS = [
-    /\bfailed:/i,
-    /\b(?:[A-Z][a-zA-Z]*)?Error:\s/,
+    /\bfailed\b(?!\s*(?:$|[,;)]))|(?<!(?:^|[\s(;,:])\d+\s+)\bfailed\b/i,
+    /\b\w*error:\s/i,
     /\bEMERGENCY\b/,
     /\bexception\b/i,
-    /^\s+at\s+[\w.<>$]+\s+\(/,
-    /^\s+at\s+(?:file:|node_modules\/|[^/\s]+:\d+)/,
+    /^\s+at\s+(?:async\s+|new\s+)?[\w.<>$]+(?:\s+\[as\s+[\w$]+\])?\s+\(/,
+    /^\s+at\s+(?:async\s+)?(?:file:|node_modules\/|[^/\s]+:\d+)/,
 ];
 
 function isErrorLogLine(line: string): boolean {
@@ -51,10 +55,7 @@ export function extractRecentErrors(sanitized: string, limit = 20): string[] {
 
 /**
  * When the expected log fence exists, the function drops oldest log lines before enforcing the final limit.
- * The rendered body must place the main log fence after `## Log (last`.
- * slice.
- *
- * shrink first.
+ * The main log starts at the last `## Log (last` heading that opens the final fenced block before the closing fence and leaves a positive log budget.
  *
  * `capBodyToGithubLimit` measures its budget in UTF-8 bytes.
  */
@@ -64,35 +65,29 @@ export function capBodyToGithubLimit(
 ): string {
     if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
 
-    let capped = body;
-
-    const heading = "## Log (last";
-    const headingIdx = body.indexOf(heading);
-    if (headingIdx === -1) {
-        const markerBytes = Buffer.byteLength(FALLBACK_TRUNCATION_MARKER, "utf8");
-        capped = truncateToByteBudget(body, maxBytes - markerBytes) + FALLBACK_TRUNCATION_MARKER;
-        return enforceFinalBodyLimit(capped, maxBytes);
+    if (body.lastIndexOf(LOG_HEADING) === -1) {
+        return truncateWithBalancedFences(body, maxBytes, FALLBACK_TRUNCATION_MARKER);
     }
 
-    const fenceOpenIdx = body.indexOf("\n```", headingIdx);
-    if (fenceOpenIdx === -1) return enforceFinalBodyLimit(body, maxBytes);
-    const logStart = fenceOpenIdx + "\n```\n".length;
-    const fenceCloseIdx = body.indexOf("\n```", logStart);
-    if (fenceCloseIdx === -1) return enforceFinalBodyLimit(body, maxBytes);
+    let capped = body;
+
+    const fenceCloseIdx = body.lastIndexOf(FENCE_CLOSE);
+    const logStart = findMainLogStart(body, fenceCloseIdx, maxBytes);
+    if (logStart === -1) return enforceFinalBodyLimit(body, maxBytes);
 
     const head = body.slice(0, logStart);
     const log = body.slice(logStart, fenceCloseIdx);
     const tail = body.slice(fenceCloseIdx);
 
-    const overheadBytes = Buffer.byteLength(head, "utf8") + Buffer.byteLength(tail, "utf8");
-    const markerBytes = Buffer.byteLength(LOG_TRUNCATION_MARKER, "utf8");
-    const logBudget = maxBytes - overheadBytes - markerBytes;
+    const logBudget = logBudgetFor(body, logStart, fenceCloseIdx, maxBytes);
     if (logBudget <= 0) {
         capped = `${head}${LOG_TRUNCATION_MARKER}${tail}`;
         return enforceFinalBodyLimit(capped, maxBytes);
     }
 
-    const lines = log.split("\n");
+    // A trailing blank line would otherwise remain as the sole kept element,
+    // dropping an oversized newest entry instead of truncating it.
+    const lines = log.replace(/\n+$/, "").split("\n");
     let keepLines = lines;
     let kept = keepLines.join("\n");
     while (Buffer.byteLength(kept, "utf8") > logBudget && keepLines.length > 1) {
@@ -110,13 +105,74 @@ export function capBodyToGithubLimit(
     return enforceFinalBodyLimit(capped, maxBytes);
 }
 
+/**
+ * Search backward so a duplicate description heading cannot outrank the main log.
+ * Ignore headings whose log begins after `fenceCloseIdx` because they occur inside the main log.
+ * Skip candidates whose fixed bytes leave no space for log content.
+ */
+function findMainLogStart(body: string, fenceCloseIdx: number, maxBytes: number): number {
+    let latest = -1;
+    let idx = body.lastIndexOf(LOG_HEADING);
+    while (idx !== -1) {
+        const fenceOpenIdx = body.indexOf(FENCE_CLOSE, idx);
+        if (fenceOpenIdx !== -1) {
+            const logStart = fenceOpenIdx + `${FENCE_CLOSE}\n`.length;
+            if (logStart <= fenceCloseIdx) {
+                if (latest === -1) {
+                    latest = logStart;
+                } else if (OTHER_SECTION_HEADING.test(body.slice(logStart, latest))) {
+                    break;
+                }
+                if (logBudgetFor(body, logStart, fenceCloseIdx, maxBytes) > 0) return logStart;
+            }
+        }
+        idx = idx === 0 ? -1 : body.lastIndexOf(LOG_HEADING, idx - 1);
+    }
+    return latest;
+}
+
+function logBudgetFor(
+    body: string,
+    logStart: number,
+    fenceCloseIdx: number,
+    maxBytes: number,
+): number {
+    const overheadBytes =
+        Buffer.byteLength(body.slice(0, logStart), "utf8") +
+        Buffer.byteLength(body.slice(fenceCloseIdx), "utf8");
+    return maxBytes - overheadBytes - Buffer.byteLength(LOG_TRUNCATION_MARKER, "utf8");
+}
+
 function enforceFinalBodyLimit(body: string, maxBytes: number): string {
     if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
-    const markerBytes = Buffer.byteLength(FINAL_TRUNCATION_MARKER, "utf8");
-    if (markerBytes >= maxBytes) {
-        return truncateToByteBudget(FINAL_TRUNCATION_MARKER, maxBytes);
+    return truncateWithBalancedFences(body, maxBytes, FINAL_TRUNCATION_MARKER);
+}
+
+/**
+ * A byte cut inside a fence line can leave an unclosed Markdown fence.
+ * Drop a trailing partial backtick line and close any open fence.
+ */
+function truncateWithBalancedFences(body: string, maxBytes: number, marker: string): string {
+    const markerBytes = Buffer.byteLength(marker, "utf8");
+    const fenceBytes = Buffer.byteLength(FENCE_CLOSE, "utf8");
+    if (markerBytes + fenceBytes >= maxBytes) {
+        return truncateToByteBudget(marker, maxBytes);
     }
-    return truncateToByteBudget(body, maxBytes - markerBytes) + FINAL_TRUNCATION_MARKER;
+    let kept = truncateToByteBudget(body, maxBytes - markerBytes - fenceBytes);
+    const lastLineStart = kept.lastIndexOf("\n") + 1;
+    if (kept.startsWith("`", lastLineStart)) {
+        kept = kept.slice(0, Math.max(0, lastLineStart - 1));
+    }
+    if (hasOpenFence(kept)) kept += FENCE_CLOSE;
+    return kept + marker;
+}
+
+function hasOpenFence(markdown: string): boolean {
+    let open = false;
+    for (const line of markdown.split("\n")) {
+        if (line.startsWith(FENCE)) open = !open;
+    }
+    return open;
 }
 
 /**
