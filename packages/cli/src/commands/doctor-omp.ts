@@ -3,18 +3,11 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
-import type { ContextDatabase } from "@eidnara/opencode/features/context/storage";
-import { getEidnaraStorageDir } from "@eidnara/opencode/shared/data-path";
+import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
 import { writeFileAtomic } from "../lib/atomic-write";
-import {
-    hasUserConfigLocationMigrationRefusal,
-    migrateConfigLocationsForCli,
-} from "../lib/config-location-migration";
-import { openExistingContextDatabase } from "../lib/database-access";
-import { formatDatabaseRepairGuidance } from "../lib/database-repair-guidance";
 import {
     detectOmpBinary,
     getOmpSetting,
@@ -35,7 +28,6 @@ import {
     getSharedUserConfigPath,
 } from "../lib/paths";
 import { type PromptIO, promptIO } from "../lib/prompts";
-import { sanitizeDiagnosticText } from "../lib/redaction";
 
 const MIN_OMP_VERSION = "17.1.7";
 type Status = "pass" | "warn" | "fail" | "info";
@@ -63,7 +55,6 @@ interface DoctorDeps {
     getOmpSetting: typeof getOmpSetting;
     listOmpPlugins: typeof listOmpPlugins;
     runOmpCommand: typeof runOmpCommand;
-    openExistingContextDatabase: typeof openExistingContextDatabase;
     now: () => Date;
     execFileSync: typeof execFileSync;
     spawnSync: typeof spawnSync;
@@ -84,7 +75,6 @@ const DEFAULT_DEPS: DoctorDeps = {
     getOmpSetting,
     listOmpPlugins,
     runOmpCommand,
-    openExistingContextDatabase,
     now: () => new Date(),
     execFileSync,
     spawnSync,
@@ -261,34 +251,6 @@ async function runHealthChecks(options: {
         add(results, "pass", "Eidnara runtime config loads successfully");
     else for (const warning of loaded.warnings.slice(0, 5)) add(results, "warn", warning);
 
-    const dbPath = join(getEidnaraStorageDir(), "context.db");
-    if (!existsSync(dbPath)) add(results, "info", `Shared context DB will be created at ${dbPath}`);
-    else {
-        let db: ContextDatabase | null = null;
-        try {
-            db = options.deps.openExistingContextDatabase(dbPath, { readonly: true });
-            const integrity = db?.prepare("PRAGMA integrity_check").get() as
-                | { integrity_check?: unknown }
-                | undefined;
-            if (integrity?.integrity_check === "ok")
-                add(results, "pass", "SQLite integrity_check: ok");
-            else
-                add(
-                    results,
-                    "fail",
-                    `SQLite integrity_check: ${String(integrity?.integrity_check)}\n${formatDatabaseRepairGuidance(dbPath)}`,
-                );
-        } catch (error) {
-            add(
-                results,
-                "fail",
-                `Could not inspect shared DB: ${String(error)}\n${formatDatabaseRepairGuidance(dbPath)}`,
-            );
-        } finally {
-            db?.close();
-        }
-    }
-
     add(results, "info", `OMP config: ${getOmpConfigPath()}`);
     add(results, "info", `OMP plugin lock: ${getOmpPluginsLockPath()}`);
     add(results, "info", `OMP sessions: ${getOmpSessionsRoot()}`);
@@ -444,8 +406,6 @@ export async function runDoctor(options: RunOmpDoctorOptions = {}): Promise<numb
     };
     const prompts = options.prompts ?? deps.prompts;
     const cwd = options.cwd ?? process.cwd();
-    const migrationWarnings = migrateConfigLocationsForCli(cwd, prompts.log);
-    const migrationRefused = hasUserConfigLocationMigrationRefusal(migrationWarnings);
     if (options.issue) return runIssueFlow({ cwd, prompts, deps });
 
     prompts.intro("Eidnara for Oh My Pi (OMP) Doctor");
@@ -453,13 +413,6 @@ export async function runDoctor(options: RunOmpDoctorOptions = {}): Promise<numb
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
     if (!options.force) return first.fail === 0 ? 0 : 1;
     if (first.fail === 0 && !first.repairPlan.writeUserConfig) return 0;
-    if (migrationRefused && first.repairPlan.writeUserConfig) {
-        first.repairPlan.writeUserConfig = false;
-        prompts.log.error(
-            "Refusing to write a default shared config while legacy user-config migration is unresolved.",
-        );
-    }
-
     const fixed = await repair(first.repairPlan, deps, prompts, cwd);
     prompts.log.info(`Applied ${fixed} repair(s); re-checking`);
     const second = await runHealthChecks({ cwd, prompts, deps });

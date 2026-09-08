@@ -4,9 +4,14 @@ import {
     type DaemonResultV1,
     HostLifecyclePolicy,
     type LifecycleCommand,
-    releaseContract,
 } from "@eidnara/opencode/shared/host-lifecycle";
-import { type DaemonCommandDependencies, renderDaemonHuman, runDaemonCommand } from "./daemon";
+import hostRelease from "../../../../release/host-release.json";
+import {
+    type DaemonCommandDependencies,
+    PARENT_PACKAGE_NAME,
+    renderDaemonHuman,
+    runDaemonCommand,
+} from "./daemon";
 
 function result(
     command: LifecycleCommand,
@@ -70,6 +75,13 @@ function harness(nextResult: (command: LifecycleCommand) => DaemonResultV1) {
 }
 
 describe("daemon command contract", () => {
+    test("the CLI parent package is a member of the host release contract's packages.parents", () => {
+        const parents: readonly string[] = hostRelease.packages.parents;
+        expect(PARENT_PACKAGE_NAME).toBe("@eidnara/cli");
+        expect(parents).toContain("@eidnara/cli");
+        expect(parents).toContain(PARENT_PACKAGE_NAME);
+    });
+
     test.each([
         "start",
         "stop",
@@ -186,19 +198,19 @@ describe("daemon command contract", () => {
 
     test("human rendering is defined for every closed reason and remediation", () => {
         const reasons = [
-            ...releaseContract.cli.reasons.failing_by_precedence.map((entry) => entry.id),
-            ...releaseContract.cli.reasons.non_failing,
+            ...hostRelease.cli.reasons.failing_by_precedence.map((entry) => entry.id),
+            ...hostRelease.cli.reasons.non_failing,
         ] as DaemonReason[];
 
         for (const reason of reasons) {
             const rendered = renderDaemonHuman(
                 result("doctor", {
-                    ok: !releaseContract.cli.reasons.failing_by_precedence.some(
+                    ok: !hostRelease.cli.reasons.failing_by_precedence.some(
                         (entry) => entry.id === reason,
                     ),
                     reason,
                     remediation:
-                        releaseContract.cli.reasons.failing_by_precedence.find(
+                        hostRelease.cli.reasons.failing_by_precedence.find(
                             (entry) => entry.id === reason,
                         )?.remediation ?? null,
                 }),
@@ -206,7 +218,7 @@ describe("daemon command contract", () => {
             expect(rendered).toContain(reason);
         }
 
-        for (const remediation of releaseContract.cli.remediations) {
+        for (const remediation of hostRelease.cli.remediations) {
             const rendered = renderDaemonHuman(
                 result("doctor", {
                     ok: false,

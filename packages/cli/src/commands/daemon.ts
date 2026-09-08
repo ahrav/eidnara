@@ -5,16 +5,17 @@ import {
     resolveLifecycleDataRoot,
     sensitiveRootsFor,
 } from "@eidnara/opencode/shared/host-lifecycle";
-import { sanitizeDiagnosticText } from "../lib/redaction";
+import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 
 const ACTIONS = new Set<LifecycleCommand>(["start", "stop", "restart", "status", "doctor"]);
 
-/**
- * */
+/** Parent package this command reports to the managed lifecycle policy; the host release contract lists it under `packages.parents`. */
+export const PARENT_PACKAGE_NAME = "@eidnara/cli";
+
+/** Bounds redacted version text so a peer cannot flood the terminal or the JSON result. */
 const MAX_VERSION_TEXT_LEN = 128;
 
-/** Replacing C0 and C1 controls prevents peer-supplied version text from moving the cursor, erasing lines, or forging terminal output.
- * */
+/** Replacing C0 and C1 controls prevents peer-supplied version text from moving the cursor, erasing lines, or forging terminal output. */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: the security boundary intentionally matches C0/C1 ranges
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
@@ -41,7 +42,7 @@ const defaultDependencies: DaemonCommandDependencies = {
         createManagedLifecyclePolicy({
             mode: action === "status" || action === "doctor" ? "observational" : "mutating",
             declaringModuleUrl: import.meta.url,
-            parentPackageName: "@eidnara/cli",
+            parentPackageName: PARENT_PACKAGE_NAME,
             env,
         }),
     stdout: (line) => console.log(line),

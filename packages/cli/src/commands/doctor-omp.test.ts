@@ -216,6 +216,7 @@ describe("OMP doctor", () => {
         expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
         expect(prompts.messages.join("\n")).toContain("automatic global repair is disabled");
     });
+
     it("rejects an array at the Eidnara config root", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-array-"));
         roots.push(root);
@@ -233,35 +234,5 @@ describe("OMP doctor", () => {
 
         expect(code).toBe(1);
         expect(prompts.messages.join("\n")).toContain("Invalid Eidnara config");
-    });
-
-    it("does not write a default config after a refused legacy migration", async () => {
-        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-migration-"));
-        const cwd = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-cwd-"));
-        roots.push(root, cwd);
-        const piAgentDir = join(root, ".pi", "agent");
-        const opencodeDir = join(root, ".config", "opencode");
-        mkdirSync(piAgentDir, { recursive: true });
-        mkdirSync(opencodeDir, { recursive: true });
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        writeFileSync(join(opencodeDir, "eidnara.jsonc"), JSON.stringify({ protected_tags: 7 }));
-        writeFileSync(join(piAgentDir, "eidnara.jsonc"), JSON.stringify({ protected_tags: 13 }));
-        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({ enabled: true }));
-        process.env.HOME = root;
-        process.env.XDG_CONFIG_HOME = join(root, ".config");
-        process.env.PI_CODING_AGENT_DIR = piAgentDir;
-        const prompts = new MockPrompts();
-
-        const code = await runDoctor({
-            cwd,
-            force: true,
-            prompts,
-            deps: { detectOmpBinary: () => null },
-        });
-
-        expect(code).toBe(1);
-        expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(false);
-        expect(prompts.messages.join("\n")).toContain("Eidnara user config migration refused");
-        expect(prompts.messages.join("\n")).not.toContain("Wrote default Eidnara config");
     });
 });
