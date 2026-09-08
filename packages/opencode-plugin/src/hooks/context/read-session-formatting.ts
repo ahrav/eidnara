@@ -35,12 +35,9 @@ export function isMachineAuthoredPart(part: Record<string, unknown>): boolean {
     return (marker as Record<string, unknown>).kind != null;
 }
 
-/**
- * The leading `§N§` tag comes off first: it is Eidnara's own wrapper, and a directive or reminder
- * hidden behind it must still be recognized as injected.
- */
+// Remove system injections before stripping tag prefixes because removal can expose a leading tag.
 function cleanUserText(text: string): string {
-    return removeSystemInjections(stripTagPrefix(text.trim())).trim();
+    return stripTagPrefix(removeSystemInjections(text)).trim();
 }
 
 export function isMeaningfulUserText(text: string): boolean {
@@ -152,42 +149,51 @@ export function formatBlock(block: ChunkBlock): string {
     return `${range} ${block.role}:${commitSuffix} ${block.parts.join(" / ")}`;
 }
 
-function extractCommitHashes(text: string, maxHashes: number): string[] {
+function extractCommitHashes(text: string, recorded: ReadonlySet<string>): string[] {
     const hashes: string[] = [];
-    if (maxHashes <= 0) return hashes;
+    const capacity = MAX_COMMITS_PER_BLOCK - recorded.size;
+    if (capacity <= 0) return hashes;
     const seen = new Set<string>();
     for (const match of text.matchAll(createCommitHashExtractPattern())) {
         const hash = match[1]?.toLowerCase();
-        if (!hash || seen.has(hash)) continue;
+        if (!hash || seen.has(hash) || recorded.has(hash)) continue;
         seen.add(hash);
         hashes.push(hash);
-        if (hashes.length >= maxHashes) break;
+        if (hashes.length >= capacity) break;
     }
     return hashes;
 }
 
-/** Callers pass remaining block capacity as `maxHashes` so hashes beyond it remain in `text`. */
+/**
+ * `recordedHashes` are the hashes the enclosing block already holds. A hash already recorded does
+ * not spend a capacity slot but is still removed from the text, so a repeat mention beside a new
+ * hash lets the new one through. Hashes past the block cap stay in the text.
+ */
 export function compactTextForSummary(
     text: string,
     role: string,
-    maxHashes: number = MAX_COMMITS_PER_BLOCK,
+    recordedHashes: readonly string[] = [],
 ): { text: string; commitHashes: string[] } {
-    const commitHashes = role === "assistant" ? extractCommitHashes(text, maxHashes) : [];
-    if (commitHashes.length === 0 || !COMMIT_VERB_PATTERN.test(text)) {
-        return { text, commitHashes };
-    }
+    if (role !== "assistant") return { text, commitHashes: [] };
+    const recorded = new Set(recordedHashes.map((hash) => hash.toLowerCase()));
+    const commitHashes = extractCommitHashes(text, recorded);
+    if (!COMMIT_VERB_PATTERN.test(text)) return { text, commitHashes };
 
-    const retained = new Set(commitHashes);
+    const removable = new Set([...recorded, ...commitHashes]);
+    let removed = 0;
     const withoutHashes = text
-        .replace(createCommitHashExtractPattern(), (match, hash: string) =>
-            retained.has(hash.toLowerCase()) ? removeHashKeepUnpairedBacktick(match) : match,
-        )
+        .replace(createCommitHashExtractPattern(), (match, hash: string) => {
+            if (!removable.has(hash.toLowerCase())) return match;
+            removed += 1;
+            return removeHashKeepUnpairedBacktick(match);
+        })
         .replace(/\(\s*\)/g, "")
         .replace(/\s+,/g, ",")
         .replace(/,\s*,+/g, ", ")
         .replace(/\s{2,}/g, " ")
         .replace(/\s+([,.;:])/g, "$1")
         .trim();
+    if (removed === 0) return { text, commitHashes };
 
     return {
         text: withoutHashes.length > 0 ? withoutHashes : text,

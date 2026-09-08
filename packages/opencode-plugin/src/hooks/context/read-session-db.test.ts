@@ -411,6 +411,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         "[EMERGENCY CONTEXT WINDOW WARNING] compact",
         "§42§ [SYSTEM DIRECTIVE: EIDNARA continue]",
         "§42§ <system-reminder>hidden</system-reminder>",
+        "<system-reminder>x</system-reminder> §42§ [SYSTEM DIRECTIVE: EIDNARA y]",
     ])("does not release for the unflagged machine notice %j", (notice) => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);

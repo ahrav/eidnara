@@ -151,6 +151,8 @@ describe("extractTexts", () => {
         "§42§ <system-reminder>hidden</system-reminder>",
         "§42§ <!-- OMO_INTERNAL_INITIATOR -->",
         "§7§ §8§ [task CALL FAILED] retry",
+        "<system-reminder>x</system-reminder> §42§ [SYSTEM DIRECTIVE: EIDNARA y]",
+        "<!-- OMO_INTERNAL_INITIATOR --> §42§ <system-reminder>z</system-reminder>",
     ])("recognizes the injection %j behind a leading tag", (text) => {
         expect(hasMeaningfulUserText([{ type: "text", text }])).toBe(false);
         expect(extractTexts([{ type: "text", text }], "user")).toEqual([]);
@@ -161,6 +163,12 @@ describe("extractTexts", () => {
             "real request",
         ]);
         expect(hasMeaningfulUserText([{ type: "text", text: "§42§ real request" }])).toBe(true);
+    });
+
+    it("strips a tag exposed by removing an injection ahead of authored text", () => {
+        const text = "<system-reminder>x</system-reminder> §42§ real request";
+
+        expect(extractTexts([{ type: "text", text }], "user")).toEqual(["real request"]);
     });
 
     it("leaves a leading tag on assistant text", () => {
@@ -311,14 +319,17 @@ describe("compactTextForSummary", () => {
     });
 
     it("extracts only as many hashes as the block has room for and leaves the rest in the text", () => {
-        expect(compactTextForSummary("Committed a1b2c3d and b2c3d4e", "assistant", 1)).toEqual({
-            text: "Committed and b2c3d4e",
-            commitHashes: ["a1b2c3d"],
-        });
+        const recorded = ["a1b2c3d", "b2c3d4e", "c3d4e5f", "d4e5f6a"];
+
+        expect(
+            compactTextForSummary("Committed e5f6a7b and f6a7b8c", "assistant", recorded),
+        ).toEqual({ text: "Committed and f6a7b8c", commitHashes: ["e5f6a7b"] });
     });
 
     it("leaves the text untouched when the block has no room left", () => {
-        expect(compactTextForSummary("Committed f6a7b8c", "assistant", 0)).toEqual({
+        const full = ["a1b2c3d", "b2c3d4e", "c3d4e5f", "d4e5f6a", "e5f6a7b"];
+
+        expect(compactTextForSummary("Committed f6a7b8c", "assistant", full)).toEqual({
             text: "Committed f6a7b8c",
             commitHashes: [],
         });
@@ -326,13 +337,33 @@ describe("compactTextForSummary", () => {
 
     it("keeps a later part's hash visible when merged into a full block", () => {
         const block = ["a1b2c3d", "b2c3d4e", "c3d4e5f", "d4e5f6a", "e5f6a7b"];
-        const later = compactTextForSummary(
-            "Committed f6a7b8c",
-            "assistant",
-            MAX_COMMITS_PER_BLOCK - block.length,
-        );
+        const later = compactTextForSummary("Committed f6a7b8c", "assistant", block);
 
         expect(later.text).toBe("Committed f6a7b8c");
         expect(mergeCommitHashes(block, later.commitHashes)).toEqual(block);
+    });
+
+    it("does not spend capacity on a hash the block already records", () => {
+        const block = ["a1b2c3d", "b2c3d4e", "c3d4e5f", "d4e5f6a"];
+        const later = compactTextForSummary("Committed a1b2c3d and e5f6a7b", "assistant", block);
+
+        expect(later.commitHashes).toEqual(["e5f6a7b"]);
+        expect(later.text).toBe("Committed and");
+        expect(mergeCommitHashes(block, later.commitHashes)).toEqual([...block, "e5f6a7b"]);
+        expect(MAX_COMMITS_PER_BLOCK).toBe(5);
+    });
+
+    it("removes a recorded hash from the text even when nothing new is extracted", () => {
+        expect(compactTextForSummary("Committed a1b2c3d again", "assistant", ["a1b2c3d"])).toEqual({
+            text: "Committed again",
+            commitHashes: [],
+        });
+    });
+
+    it("leaves text without any removable hash untouched", () => {
+        expect(compactTextForSummary("Committed (see notes)", "assistant", ["a1b2c3d"])).toEqual({
+            text: "Committed (see notes)",
+            commitHashes: [],
+        });
     });
 });
