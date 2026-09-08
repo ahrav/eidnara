@@ -11,6 +11,7 @@ import {
     RustToolSessionDeletedError,
 } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { log } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
@@ -24,7 +25,12 @@ import {
     createToolExecuteAfterHook,
     getLiveNotificationParams,
 } from "./hook-handlers";
-import { addBoundedSession, type LiveSessionState } from "./live-session-state";
+import { closeKernelSession } from "./kernel-transport";
+import {
+    addBoundedSession,
+    type LiveSessionState,
+    MAX_LIVE_USAGE_SESSIONS,
+} from "./live-session-state";
 import { HostModuleTransport } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
@@ -91,7 +97,9 @@ function resolveSessionId(messages: readonly MessageLike[]): string | undefined 
 }
 
 export function createEidnaraHook(deps: EidnaraDeps) {
-    const contextUsageMap = new Map<string, ContextUsageEntry>();
+    const contextUsageMap =
+        deps.liveSessionState?.contextUsageBySession ??
+        new BoundedSessionMap<ContextUsageEntry>(MAX_LIVE_USAGE_SESSIONS);
 
     clearHookInitFailure();
     const projectPath = resolveProjectIdentityForSession(
@@ -206,77 +214,75 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             return client;
         })();
 
-    const rustToolBackends: RustToolBackends | undefined = rustMode
-        ? {
-              reduce: async ({ sessionId, drop, commandId }) => {
-                  const projectRoot = await projectRootForLiveSession(sessionId);
-                  return moduleClient.call({
-                      sessionId,
-                      projectRoot,
-                      method: "agent_drops.append",
-                      body: {
-                          method: "agent_drops.append",
-                          v: 1,
-                          session_id: sessionId,
-                          drop,
-                          command_id: commandId,
-                      },
-                  });
-              },
-              note: async ({
-                  commandId,
-                  sessionId,
-                  action,
-                  content,
-                  surfaceCondition,
-                  compiledProvider,
-                  compiledConfig,
-                  compiledAt,
-                  compileStatus,
-                  filter,
-                  limit,
-                  offset,
-                  noteId,
-              }) => {
-                  const projectRoot = await projectRootForLiveSession(sessionId);
-                  const memoryProject = resolveProjectIdentityForSession(
-                      projectRoot,
-                      deps.config.allow_home_project,
-                  );
-                  if (memoryProject === undefined) {
-                      throw new Error("Could not resolve project identity for ctx_note.");
-                  }
-                  return moduleClient.call({
-                      sessionId,
-                      projectRoot,
-                      method: "ctx_note",
-                      body: {
-                          name: "ctx_note",
-                          arguments: {
-                              ...(commandId ? { command_id: commandId } : {}),
-                              action,
-                              content,
-                              memory_project: memoryProject,
-                              surface_condition: surfaceCondition,
-                              ...(compileStatus
-                                  ? {
-                                        compiled_provider: compiledProvider,
-                                        compiled_config: compiledConfig,
-                                        compiled_at: compiledAt,
-                                        compile_status: compileStatus,
-                                    }
-                                  : {}),
-                              filter,
-                              limit,
-                              offset,
-                              note_id: noteId,
-                          },
-                      },
-                  });
-              },
-              // No `noteEvaluationAvailable`: conditioned notes require a live `note.evaluation.register` heartbeat.
-          }
-        : undefined;
+    const rustToolBackends: RustToolBackends = {
+        reduce: async ({ sessionId, drop, commandId }) => {
+            const projectRoot = await projectRootForLiveSession(sessionId);
+            return moduleClient.call({
+                sessionId,
+                projectRoot,
+                method: "agent_drops.append",
+                body: {
+                    method: "agent_drops.append",
+                    v: 1,
+                    session_id: sessionId,
+                    drop,
+                    command_id: commandId,
+                },
+            });
+        },
+        note: async ({
+            commandId,
+            sessionId,
+            action,
+            content,
+            surfaceCondition,
+            compiledProvider,
+            compiledConfig,
+            compiledAt,
+            compileStatus,
+            filter,
+            limit,
+            offset,
+            noteId,
+        }) => {
+            const projectRoot = await projectRootForLiveSession(sessionId);
+            const memoryProject = resolveProjectIdentityForSession(
+                projectRoot,
+                deps.config.allow_home_project,
+            );
+            if (memoryProject === undefined) {
+                throw new Error("Could not resolve project identity for ctx_note.");
+            }
+            return moduleClient.call({
+                sessionId,
+                projectRoot,
+                method: "ctx_note",
+                body: {
+                    name: "ctx_note",
+                    arguments: {
+                        ...(commandId ? { command_id: commandId } : {}),
+                        action,
+                        content,
+                        memory_project: memoryProject,
+                        surface_condition: surfaceCondition,
+                        ...(compileStatus
+                            ? {
+                                  compiled_provider: compiledProvider,
+                                  compiled_config: compiledConfig,
+                                  compiled_at: compiledAt,
+                                  compile_status: compileStatus,
+                              }
+                            : {}),
+                        filter,
+                        limit,
+                        offset,
+                        note_id: noteId,
+                    },
+                },
+            });
+        },
+        // No `noteEvaluationAvailable`: conditioned notes require a live `note.evaluation.register` heartbeat.
+    };
 
     const systemPromptHash = createSystemPromptHashHandler({
         promptSurface: deps.config.prompt_surface,
@@ -356,6 +362,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         onRustWireInvalidated: (sessionId: string) => {
             rustTransform.invalidateWireState(sessionId);
         },
+        onNewestResponseRemoved: (sessionId: string, model) => {
+            if (model) liveModelBySession.set(sessionId, model);
+            else liveModelBySession.delete(sessionId);
+        },
         // Deletion prunes per-session state so entries do not outlive the session.
         onSessionDeleted: (sessionId: string, directory?: string) => {
             addBoundedSession(deletedSessions, sessionId);
@@ -367,6 +377,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             } else {
                 moduleClient.closeSession?.(sessionId);
             }
+            // Memory reads from hooks, tools, and sidebar polls hold kernel routes on the shared transport; host route capacity is finite. commentlint: allow(JUDGE)
+            closeKernelSession(deps.config, sessionId);
             systemPromptHash.clearSession(sessionId);
             lastHeuristicsTurnId.delete(sessionId);
             clearToolPermissionDenied(sessionId);
@@ -487,7 +499,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         }),
     };
     const hooksWithBackends = hooks as typeof hooks & {
-        rustToolBackends?: RustToolBackends;
+        rustToolBackends: RustToolBackends;
     };
     Object.defineProperty(hooksWithBackends, "rustToolBackends", {
         value: rustToolBackends,

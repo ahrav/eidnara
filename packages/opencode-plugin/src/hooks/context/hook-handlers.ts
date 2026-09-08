@@ -1,5 +1,7 @@
+import { clearSessionPollCaches, clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
+import type { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
 import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import {
@@ -7,6 +9,7 @@ import {
     resolveTodowriteAvailability,
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
+import { type ContextUsageEntry, isOlderThanNewestResponse } from "./event-handler";
 import { getMessageUpdatedAssistantInfo, getSessionProperties } from "./event-payloads";
 import { resolveSessionId as resolveEventSessionId } from "./event-resolvers";
 import { clearIgnoredMessages, flushIgnoredMessages } from "./send-session-notification";
@@ -135,10 +138,7 @@ export function createChatMessageHook(args: {
 
 export function createEventHook(args: {
     eventHandler: (input: { event: { type: string; properties?: unknown } }) => Promise<void>;
-    contextUsageMap: Map<
-        string,
-        { usage: { percentage: number; inputTokens: number }; updatedAt: number }
-    >;
+    contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
@@ -163,7 +163,18 @@ export function createEventHook(args: {
 
         if (input.event.type === "message.updated") {
             const assistantInfo = getMessageUpdatedAssistantInfo(input.event.properties);
-            if (assistantInfo?.providerID && assistantInfo?.modelID) {
+            // The turn's transform and tool calls changed daemon state after the last poll; the sidebar refresh this event triggers must read the daemon, not a status cached before them.
+            if (assistantInfo) clearSessionPollCaches(assistantInfo.sessionID);
+            // An edit of an older response must not move the live model off the newest response.
+            if (
+                assistantInfo?.providerID &&
+                assistantInfo?.modelID &&
+                !isOlderThanNewestResponse(
+                    args.contextUsageMap,
+                    assistantInfo.sessionID,
+                    assistantInfo.messageID,
+                )
+            ) {
                 args.liveModelBySession.set(assistantInfo.sessionID, {
                     providerID: assistantInfo.providerID,
                     modelID: assistantInfo.modelID,
@@ -189,6 +200,8 @@ export function createEventHook(args: {
             args.commitSeenLastPass?.delete(sessionId);
             clearIgnoredMessages(sessionId);
             clearSidebarSnapshotCache(sessionId);
+            clearWorkMetricsCarry(sessionId);
+            clearSessionPollCaches(sessionId);
         }
 
         if (input.event.type !== "session.deleted") {

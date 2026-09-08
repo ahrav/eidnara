@@ -178,6 +178,26 @@ describe("work metrics", () => {
         expect(metrics).toEqual(oracle);
     });
 
+    test("a malformed row is skipped; valid rows around it still count and advance the carry", () => {
+        const db = createIncrementalFixture();
+        insertWithId(db, "m1", "ses", 1, "build", 100, 1);
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run("m2", "ses", 2, '{"role":"assistant","tokens":{"input":');
+        insertWithId(db, "m3", "ses", 3, "build", 150, 2);
+
+        const expected = { newWorkTokens: 152, totalInputTokens: 150 };
+        expect(computeOpenCodeWorkMetrics(db, "ses")).toEqual(expected);
+        const { metrics, carry } = computeOpenCodeWorkMetricsIncremental(
+            db,
+            "ses",
+            emptyWorkMetricsCarry(),
+        );
+        expect(metrics).toEqual(expected);
+        // The newest row stays volatile, so a folded carry rests on m1 rather than the empty carry's "".
+        expect(carry.lastId).toBe("m1");
+    });
+
     test("incremental resume across polls equals a single full scan", () => {
         const db = createIncrementalFixture();
         insertWithId(db, "m1", "ses", 1, "build", 100, 1);

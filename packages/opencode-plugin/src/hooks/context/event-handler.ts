@@ -1,4 +1,7 @@
 import { detectOverflow } from "../../features/context/overflow-detection";
+import { clearWorkMetricsCarry, clearWorkMetricsCarryIfFolded } from "../../plugin/rpc-handlers";
+import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
+import type { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsAfterAuthOnce } from "../../shared/models-dev-cache";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
@@ -13,21 +16,46 @@ import {
 } from "./event-payloads";
 import { resolveContextLimit, resolveSessionId } from "./event-resolvers";
 import { recordChildSession } from "./live-session-state";
+import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
-
-const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
 
 export interface ContextUsageEntry {
     usage: ContextUsage;
     updatedAt: number;
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
+    /** The model whose window `usage` was measured against; readers must not pair it with another model's limit. */
+    model?: { providerID: string; modelID: string };
+    /** The assistant message `usage` came from, so removing that message can discard the entry. */
+    messageID?: string;
+    /** The newest assistant response seen when it is later than `messageID` and has reported no usage tokens yet. */
+    newestResponseID?: string;
+}
+
+/** Returns whether `messageID` predates the newest assistant response, with or without usage tokens, using the persisted response when in-memory state is unavailable. OpenCode message ids are time-ordered, so id order tracks response order. commentlint: allow(JUDGE) */
+export function isOlderThanNewestResponse(
+    contextUsageMap: BoundedSessionMap<ContextUsageEntry>,
+    sessionId: string,
+    messageID: string | undefined,
+): boolean {
+    if (!messageID) return false;
+    const entry = contextUsageMap.get(sessionId);
+    const newestResponseId =
+        entry?.newestResponseID ??
+        entry?.messageID ??
+        findLastAssistantModelFromOpenCodeDb(sessionId)?.messageID;
+    return newestResponseId !== undefined && messageID < newestResponseId;
 }
 
 export interface EventHandlerDeps {
-    contextUsageMap: Map<string, ContextUsageEntry>;
+    contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     onSessionCacheInvalidated?: (sessionId: string) => void;
     onRustWireInvalidated?: (sessionId: string) => void;
+    /** Fires when a message at or after the newest usage response is removed; `model` is the newest remaining persisted response's model, or `undefined` when none remains. */
+    onNewestResponseRemoved?: (
+        sessionId: string,
+        model: { providerID: string; modelID: string } | undefined,
+    ) => void;
     onSessionDeleted?: (sessionId: string, directory?: string) => void;
     /** The in-process client OpenCode hands the plugin; the post-auth model-limit re-warm reads provider metadata through it. */
     client?: unknown;
@@ -37,15 +65,6 @@ export interface EventHandlerDeps {
     internalChildSessions?: Set<string>;
     /** `subagentSessions` records every session created with a non-empty `parentID`, in memory only. */
     subagentSessions?: Set<string>;
-}
-
-function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry>): void {
-    const now = Date.now();
-    for (const [sessionId, entry] of contextUsageMap) {
-        if (now - entry.updatedAt > CONTEXT_USAGE_TTL_MS) {
-            contextUsageMap.delete(sessionId);
-        }
-    }
 }
 
 /** An overflow error means the host will rebuild the window, so the session's injection cache is stale. */
@@ -68,8 +87,6 @@ function invalidateOnOverflow(
 
 export function createEventHandler(deps: EventHandlerDeps) {
     return async (input: { event: { type: string; properties?: unknown } }): Promise<void> => {
-        evictExpiredUsageEntries(deps.contextUsageMap);
-
         const properties = getSessionProperties(input.event.properties);
 
         if (input.event.type === "session.created") {
@@ -143,6 +160,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             const now = Date.now();
+            // An update to a row the work-metrics carry has already folded invalidates the carry.
+            if (info.messageID) clearWorkMetricsCarryIfFolded(info.sessionID, info.messageID);
             const usageTokens = [
                 info.tokens?.input,
                 info.tokens?.cache?.read,
@@ -158,11 +177,30 @@ export function createEventHandler(deps: EventHandlerDeps) {
             );
 
             if (!hasUsageTokens) {
+                // A response without usage is still the newest response; an edit to an older row must not displace the live model or usage while it exists. commentlint: allow(JUDGE)
+                const entry = deps.contextUsageMap.get(info.sessionID);
+                if (
+                    entry &&
+                    info.messageID &&
+                    !isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
+                ) {
+                    entry.newestResponseID = info.messageID;
+                }
                 sessionLog(info.sessionID, "event message.updated: skipping — no usage tokens");
                 return;
             }
 
             try {
+                // An edit or retry of an older response updates that older row; its tokens must not replace the newest response's usage.
+                if (
+                    isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
+                ) {
+                    sessionLog(
+                        info.sessionID,
+                        `event message.updated: skipping — ${info.messageID} is older than the newest response`,
+                    );
+                    return;
+                }
                 const totalInputTokens =
                     (info.tokens?.input ?? 0) +
                     (info.tokens?.cache?.read ?? 0) +
@@ -189,6 +227,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     updatedAt: now,
                     lastResponseTime: now,
                     hasUsageTokens: true,
+                    model:
+                        info.providerID && info.modelID
+                            ? { providerID: info.providerID, modelID: info.modelID }
+                            : undefined,
+                    messageID: info.messageID,
                 });
             } catch (error) {
                 sessionLog(info.sessionID, "event message.updated usage tracking failed:", error);
@@ -228,6 +271,32 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     messageId: info.messageID,
                     reason: "message.removed",
                 });
+                // The removed row may sit below the work-metrics watermark; the next poll re-reads the session.
+                clearWorkMetricsCarry(info.sessionID);
+                // Live usage describes one assistant response; once that response is gone, so is the usage, and the sticky snapshot must not restore it. commentlint: allow(JUDGE)
+                if (deps.contextUsageMap.get(info.sessionID)?.messageID === info.messageID) {
+                    deps.contextUsageMap.delete(info.sessionID);
+                    clearSidebarSnapshotCache(info.sessionID);
+                }
+                // The live model follows every assistant response, including one with no usage tokens, so a removal at or after the newest usage response re-derives it from the newest remaining persisted response. commentlint: allow(JUDGE)
+                if (
+                    !isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
+                ) {
+                    const remaining = findLastAssistantModelFromOpenCodeDb(info.sessionID);
+                    const entry = deps.contextUsageMap.get(info.sessionID);
+                    if (entry) {
+                        entry.newestResponseID =
+                            remaining && entry.messageID && remaining.messageID > entry.messageID
+                                ? remaining.messageID
+                                : undefined;
+                    }
+                    deps.onNewestResponseRemoved?.(
+                        info.sessionID,
+                        remaining
+                            ? { providerID: remaining.providerID, modelID: remaining.modelID }
+                            : undefined,
+                    );
+                }
 
                 deps.onSessionCacheInvalidated?.(info.sessionID);
                 sessionLog(
@@ -253,6 +322,9 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 sessionLog(sessionId, "event session.compacted marker cleanup failed:", error);
             }
             invalidateTrueRawTokenCache({ sessionId, reason: "session.compacted" });
+            // Compaction replaces the context the live usage measured, so the pre-compaction count must not carry over.
+            deps.contextUsageMap.delete(sessionId);
+            clearSidebarSnapshotCache(sessionId);
             deps.onSessionCacheInvalidated?.(sessionId);
             return;
         }

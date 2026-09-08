@@ -13,6 +13,11 @@ import {
     resolveProjectIdentityForSession,
 } from "../../features/context/project-identity";
 import { createEidnaraHook, type EidnaraDeps } from "./hook";
+import {
+    createKernelClient,
+    resetKernelClientsForTest,
+    sharedStateForTest,
+} from "./kernel-transport";
 import { createLiveSessionState } from "./live-session-state";
 import { isModuleCallBodyValid } from "./module-transport";
 import { setRawMessageProvider } from "./read-session-chunk";
@@ -72,6 +77,7 @@ function installOneRawMessage(sessionId: string): MessageLike[] {
 
 afterEach(() => {
     closeReadOnlySessionDb();
+    resetKernelClientsForTest();
     for (const unregister of unregisterProviders.splice(0)) unregister();
     __resetProjectIdentityForTests();
     clearHookInitFailure();
@@ -160,11 +166,11 @@ describe("eidnara hook", () => {
         }
         expect("tool.definition" in hook).toBe(false);
         expect("config" in hook).toBe(false);
-        expect(Object.keys(hook.rustToolBackends ?? {}).sort()).toEqual(["note", "reduce"]);
-        expect("noteEvaluationAvailable" in (hook.rustToolBackends ?? {})).toBe(false);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+        expect("noteEvaluationAvailable" in hook.rustToolBackends).toBe(false);
     });
 
-    it("leaves rustToolBackends undefined in ts mode", () => {
+    it("attaches the daemon tool backends in ts mode and leaves the messages transform a no-op", async () => {
         useTempDataHome("hook-ts-mode-");
         const fake = createFakeModuleClient();
         const hook = requireHook(
@@ -176,8 +182,22 @@ describe("eidnara hook", () => {
             ),
         );
 
-        expect(hook.rustToolBackends).toBeUndefined();
         expect(Object.keys(hook).sort()).toEqual(HOOK_KEYS);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+
+        await hook.rustToolBackends.reduce?.({
+            sessionId: "ses-ts",
+            projectRoot: "/repo",
+            drop: "1",
+            commandId: "cmd-ts",
+        });
+        expect(fake.calls.map((call) => call.method)).toEqual(["agent_drops.append"]);
+
+        const messages = [{ info: { sessionID: "ses-ts" } }];
+        const output = { messages: [...messages] };
+        await hook["experimental.chat.messages.transform"]({}, output);
+        expect(output.messages).toEqual(messages);
+        expect(fake.calls).toHaveLength(1);
     });
 
     it("returns null and records no_project when no project identity resolves", () => {
@@ -257,6 +277,9 @@ describe("eidnara hook", () => {
         expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
             ["todo_state.set", "/other/repo"],
         ]);
+        expect(liveSessionState.sessionDirectoryBySession.get("ses-todo-routed")).toBe(
+            "/other/repo",
+        );
     });
 
     it("classifies a restored child before forwarding its first todo snapshot", async () => {
@@ -763,16 +786,33 @@ describe("eidnara hook", () => {
                 : { ok: true },
         );
         const liveSessionState = createLiveSessionState();
+        const kernelConfig = {
+            subc: { connection_file: "/nonexistent/eidnara-hook-test/subc.json" },
+        };
         const hook = requireHook(
             createEidnaraHook(
                 createDeps({
                     client: createClientMock(undefined, "/other/repo"),
                     rustModeModuleClient: fake.client,
                     liveSessionState,
+                    config: {
+                        protected_tags: 3,
+                        cache_ttl: "5m",
+                        transform_mode: "rust",
+                        ...kernelConfig,
+                    },
                 }),
             ),
         );
         const sessionId = "ses-deleted";
+        // A memory read holds a kernel route on the shared transport until the session closes it.
+        createKernelClient({ sessionId, projectRoot: "/other/repo", config: kernelConfig });
+        const sharedKernel = sharedStateForTest(kernelConfig)?.module;
+        if (!sharedKernel) throw new Error("the kernel client must resolve a shared transport");
+        const closedKernelSessions: string[] = [];
+        sharedKernel.closeSession = (closing: string) => {
+            closedKernelSessions.push(closing);
+        };
         const selectModel = () =>
             hook["chat.message"]({
                 sessionID: sessionId,
@@ -800,6 +840,7 @@ describe("eidnara hook", () => {
         // Session deletion uses the transform's recorded project root, not the plugin launch directory.
         expect(fake.deleteSession).toHaveBeenCalledWith(sessionId, "/other/repo");
         expect(fake.closeSession).toHaveBeenCalledWith(sessionId);
+        expect(closedKernelSessions).toEqual([sessionId]);
         expect(liveSessionState.liveModelBySession.has(sessionId)).toBe(false);
         expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
         expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);

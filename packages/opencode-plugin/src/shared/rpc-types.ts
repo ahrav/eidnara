@@ -33,6 +33,11 @@ export interface SidebarSnapshot {
      * The status-detail payload uses snake_case field names.
      */
     compaction_enabled?: boolean;
+    /**
+     * native_compaction_active is set when compaction_enabled is false: whether OpenCode's own
+     * compaction.auto or compaction.prune owns the window. Absent when the host's setting is unknown.
+     */
+    native_compaction_active?: boolean;
     systemPromptTokens: number;
     compartmentCount: number;
     /** Historical compartment rows retained while native compaction owns the window. */
@@ -114,6 +119,8 @@ export interface SidebarSnapshot {
         message?: string;
         note?: string;
     } | null;
+    dreamerProgress?: { task: string; processed: number; total: number } | null;
+    dreamerBacklog?: Record<string, { pending: number; total: number }>;
 }
 
 /** A `+` suffix marks a truncated read; the count is a lower bound. */
@@ -121,6 +128,16 @@ export function formatMemoryCount(
     snapshot: Pick<SidebarSnapshot, "memoryCount" | "memoryTruncated">,
 ): string {
     return `${snapshot.memoryCount}${snapshot.memoryTruncated ? "+" : ""}`;
+}
+
+/** A non-`available` state such as `disabled` or `unavailable:daemon_absent` replaces the count, which is 0 only because nothing was read. commentlint: allow(JUDGE) */
+export function formatMemoryStatus(
+    snapshot: Pick<SidebarSnapshot, "memoryCount" | "memoryTruncated" | "memoryState">,
+): string {
+    if (snapshot.memoryState && snapshot.memoryState !== "available") {
+        return snapshot.memoryState;
+    }
+    return formatMemoryCount(snapshot);
 }
 
 export interface StatusDetail extends SidebarSnapshot {

@@ -49,7 +49,7 @@ import type { MessageLike } from "./tag-content-primitives";
 import { logTransformTiming } from "./transform-stage-logger";
 
 export interface RustModeTransformDeps extends SessionDirectoryDeps {
-    contextUsageMap: Map<string, ContextUsageEntry>;
+    contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     protectedTags?: number;
     clearReasoningAge: number;
     executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
-import { closeQuietly } from "../../shared/sqlite-helpers";
+import { closeQuietly, jsonField } from "../../shared/sqlite-helpers";
 import { isMachineAuthoredPart, isMeaningfulUserText } from "./read-session-formatting";
 
 interface AssistantMidTurnRow {
@@ -68,15 +68,6 @@ export function withReadOnlySessionDb<T>(fn: (db: Database) => T): T {
 
 export function closeReadOnlySessionDb(): void {
     closeCachedReadOnlyDb();
-}
-
-/**
- * Builds a `json_extract` that yields NULL for a malformed `column` instead of raising `malformed JSON`.
- * `CASE` evaluates only the taken branch, so the extract never runs on an invalid document; an `AND`
- * guard has no such ordering guarantee. `column` and `path` are code literals, never caller input.
- */
-function jsonField(column: string, path: string): string {
-    return `CASE WHEN json_valid(${column}) = 1 THEN json_extract(${column}, '${path}') END`;
 }
 
 /** Treat errors reading an existing database as mid-turn; a missing database is idle. */
@@ -286,14 +277,17 @@ export function getMessageTimesFromOpenCodeDb(
     return result;
 }
 
+/** The newest assistant row with a model, regardless of usage tokens; `messageID` is that row's id. */
 export function findLastAssistantModelFromOpenCodeDb(
     sessionId: string,
-): { providerID: string; modelID: string; agent?: string } | null {
+): { messageID: string; providerID: string; modelID: string; agent?: string } | null {
+    if (!openCodeDbExists()) return null;
     try {
         return withReadOnlySessionDb((db) => {
             const row = db
                 .prepare(
-                    `SELECT json_extract(data, '$.providerID') as providerID,
+                    `SELECT id as messageID,
+                            json_extract(data, '$.providerID') as providerID,
                             json_extract(data, '$.modelID') as modelID,
                             json_extract(data, '$.agent') as agent
                      FROM message
@@ -304,13 +298,21 @@ export function findLastAssistantModelFromOpenCodeDb(
                      ORDER BY time_created DESC, id DESC
                      LIMIT 1`,
                 )
-                .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
-            if (!row || typeof row.providerID !== "string" || typeof row.modelID !== "string") {
+                .get(sessionId) as
+                | (AssistantModelRow & { messageID?: unknown; agent?: string | null })
+                | null;
+            if (
+                !row ||
+                typeof row.messageID !== "string" ||
+                typeof row.providerID !== "string" ||
+                typeof row.modelID !== "string"
+            ) {
                 return null;
             }
             const agent =
                 typeof row.agent === "string" && row.agent.length > 0 ? row.agent : undefined;
             return {
+                messageID: row.messageID,
                 providerID: row.providerID,
                 modelID: row.modelID,
                 ...(agent ? { agent } : {}),
@@ -318,6 +320,118 @@ export function findLastAssistantModelFromOpenCodeDb(
         });
     } catch (error) {
         log("[eidnara] failed to recover live model from OpenCode DB:", error);
+        return null;
+    }
+}
+
+export interface PersistedAssistantUsage {
+    messageID: string;
+    providerID: string;
+    modelID: string;
+    /** Prompt tokens: `input + cache.read + cache.write`. */
+    inputTokens: number;
+    /** `time.completed` when the row has one, else `time_created`. */
+    respondedAt: number;
+}
+
+/** Whether the session holds a compaction summary row, the boundary `findLastAssistantUsageFromOpenCodeDb` skips back to. */
+export function sessionHasCompactionSummaryInOpenCodeDb(sessionId: string): boolean {
+    if (!openCodeDbExists()) return false;
+    try {
+        return withReadOnlySessionDb((db) => {
+            const row = db
+                .prepare(
+                    `SELECT 1 AS present
+                     FROM message
+                     WHERE session_id = ?
+                       AND COALESCE(${jsonField("data", "$.summary")}, 0) = 1
+                     LIMIT 1`,
+                )
+                .get(sessionId);
+            return row !== null && row !== undefined;
+        });
+    } catch (error) {
+        log("[eidnara] failed to probe compaction summary in OpenCode DB:", error);
+        return false;
+    }
+}
+
+/** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary in `(time_created, id)` order are skipped, so a compacted session reports no usage until a post-compaction response lands. commentlint: allow(JUDGE) */
+export function findLastAssistantUsageFromOpenCodeDb(
+    sessionId: string,
+): PersistedAssistantUsage | null {
+    if (!openCodeDbExists()) return null;
+    const promptTokens = `COALESCE(${jsonField("m.data", "$.tokens.input")}, 0)
+                              + COALESCE(${jsonField("m.data", "$.tokens.cache.read")}, 0)
+                              + COALESCE(${jsonField("m.data", "$.tokens.cache.write")}, 0)`;
+    try {
+        return withReadOnlySessionDb((db) => {
+            const row = db
+                .prepare(
+                    `WITH boundary AS (
+                       SELECT time_created, id
+                       FROM message
+                       WHERE session_id = ?1
+                         AND COALESCE(${jsonField("data", "$.summary")}, 0) = 1
+                       ORDER BY time_created DESC, id DESC
+                       LIMIT 1
+                     )
+                     SELECT m.id,
+                            ${jsonField("m.data", "$.providerID")} as providerID,
+                            ${jsonField("m.data", "$.modelID")} as modelID,
+                            ${promptTokens} as inputTokens,
+                            ${jsonField("m.data", "$.time.completed")} as completedAt,
+                            m.time_created as timeCreated
+                     FROM message m
+                     LEFT JOIN boundary b
+                     WHERE m.session_id = ?1
+                       AND ${jsonField("m.data", "$.role")} = 'assistant'
+                       AND COALESCE(${jsonField("m.data", "$.summary")}, 0) <> 1
+                       AND (
+                         b.id IS NULL
+                         OR m.time_created > b.time_created
+                         OR (m.time_created = b.time_created AND m.id > b.id)
+                       )
+                       AND ${jsonField("m.data", "$.providerID")} IS NOT NULL
+                       AND ${jsonField("m.data", "$.modelID")} IS NOT NULL
+                       AND ${promptTokens} > 0
+                     ORDER BY m.time_created DESC, m.id DESC
+                     LIMIT 1`,
+                )
+                .get(sessionId) as {
+                id?: unknown;
+                providerID?: unknown;
+                modelID?: unknown;
+                inputTokens?: unknown;
+                completedAt?: unknown;
+                timeCreated?: unknown;
+            } | null;
+            if (
+                !row ||
+                typeof row.id !== "string" ||
+                typeof row.providerID !== "string" ||
+                typeof row.modelID !== "string" ||
+                typeof row.inputTokens !== "number" ||
+                row.inputTokens <= 0
+            ) {
+                return null;
+            }
+            const respondedAt =
+                typeof row.completedAt === "number"
+                    ? row.completedAt
+                    : typeof row.timeCreated === "number"
+                      ? row.timeCreated
+                      : 0;
+            return {
+                messageID: row.id,
+                providerID: row.providerID,
+                modelID: row.modelID,
+                inputTokens: row.inputTokens,
+                respondedAt,
+            };
+        });
+    } catch (error) {
+        log("[eidnara] failed to recover assistant usage from OpenCode DB:", error);
         return null;
     }
 }

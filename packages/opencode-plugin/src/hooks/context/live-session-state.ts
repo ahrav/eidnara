@@ -1,4 +1,9 @@
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import type { ContextUsageEntry } from "./event-handler";
 import type { AgentBySession, LiveModelBySession, VariantBySession } from "./hook-handlers";
+
+/** Sessions whose live usage stays resident. Each entry is the session's newest-response record; `session.deleted` clears it, and an evicted session is re-read from OpenCode's database on the next poll. Matches the sticky sidebar cache's session cap. commentlint: allow(JUDGE) */
+export const MAX_LIVE_USAGE_SESSIONS = 100;
 
 export interface SessionMetadataReadState {
     attempts: number;
@@ -14,6 +19,8 @@ export interface LiveSessionState {
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
+    /** `contextUsageBySession` holds each session's input-token usage from its latest assistant response; the sidebar reads it when the daemon supplies no usage. commentlint: allow(JUDGE) */
+    contextUsageBySession: BoundedSessionMap<ContextUsageEntry>;
     historyRefreshSessions: Set<string>;
     deferredHistoryRefreshSessions: Set<string>;
     systemPromptRefreshSessions: Set<string>;
@@ -72,6 +79,7 @@ export function createLiveSessionState(): LiveSessionState {
         liveModelBySession: new Map<string, { providerID: string; modelID: string }>(),
         variantBySession: new Map<string, string | undefined>(),
         agentBySession: new Map<string, string>(),
+        contextUsageBySession: new BoundedSessionMap<ContextUsageEntry>(MAX_LIVE_USAGE_SESSIONS),
         historyRefreshSessions: new Set<string>(),
         deferredHistoryRefreshSessions: new Set<string>(),
         systemPromptRefreshSessions: new Set<string>(),

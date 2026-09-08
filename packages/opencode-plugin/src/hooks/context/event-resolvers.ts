@@ -64,6 +64,19 @@ export function resolveCacheTtl(cacheTtl: CacheTtlConfig, modelKey: string | und
     return resolveModelConfigOrDefault(cacheTtl, modelKey, cacheTtl.default ?? "5m");
 }
 
+const CACHE_TTL_UNIT_MS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000 };
+/** The daemon's `scheduler_ttl_ms` substitutes this for a TTL `parse_cache_ttl` rejects. */
+export const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1_000;
+
+/** Matches the daemon's `parse_cache_ttl` grammar so both sides agree on when a lane expires. `never` is `Infinity`; unparseable text is `undefined`. commentlint: allow(JUDGE) */
+export function parseCacheTtlMs(ttl: string): number | undefined {
+    const normalized = ttl.trim();
+    if (normalized.toLowerCase() === "never") return Number.POSITIVE_INFINITY;
+    const match = /^(\d+)([smh]?)$/.exec(normalized);
+    if (!match) return undefined;
+    return Number(match[1]) * (match[2] ? CACHE_TTL_UNIT_MS[match[2]] : 1);
+}
+
 type ExecuteThresholdConfig = number | { default: number; [modelKey: string]: number };
 type ExecuteThresholdTokensConfig =
     | { default?: number; [modelKey: string]: number | undefined }

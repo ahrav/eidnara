@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+    parseCacheTtlMs,
     resolveCacheTtl,
     resolveContextLimit,
     resolveExecuteThreshold,
@@ -11,6 +12,21 @@ import {
 } from "./event-resolvers";
 
 describe("event-resolvers", () => {
+    describe("parseCacheTtlMs", () => {
+        it("follows the daemon grammar: bare ms, s/m/h units, never, and rejects the rest", () => {
+            expect(parseCacheTtlMs("1500")).toBe(1_500);
+            expect(parseCacheTtlMs("30s")).toBe(30_000);
+            expect(parseCacheTtlMs("5m")).toBe(300_000);
+            expect(parseCacheTtlMs(" 1h ")).toBe(3_600_000);
+            expect(parseCacheTtlMs("never")).toBe(Number.POSITIVE_INFINITY);
+            expect(parseCacheTtlMs("NEVER")).toBe(Number.POSITIVE_INFINITY);
+            expect(parseCacheTtlMs("")).toBeUndefined();
+            expect(parseCacheTtlMs("5d")).toBeUndefined();
+            expect(parseCacheTtlMs("1.5m")).toBeUndefined();
+            expect(parseCacheTtlMs("m")).toBeUndefined();
+        });
+    });
+
     describe("resolveContextLimit", () => {
         // getModelsDevContextLimit overlays opencode.json provider limits on the models.dev cache.
 
