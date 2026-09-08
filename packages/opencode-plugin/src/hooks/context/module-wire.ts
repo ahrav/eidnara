@@ -597,9 +597,15 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                     (typeof part.id === "string" && part.id) ||
                     `${id}#${content.length}`;
                 const toolName = typeof part.tool === "string" ? part.tool : "unknown";
-                const input = state.input ?? part.input ?? part.args ?? {};
-                content.push({ kind: { type: "tool_call", id: callId, name: toolName, input } });
-                if (state.status === "completed" || state.status === "error") {
+                const input = state.input ?? part.input ?? part.args;
+                const finished = state.status === "completed" || state.status === "error";
+                // Pi folds a tool result into the next message as a finished part without input.
+                if (input !== undefined || !finished) {
+                    content.push({
+                        kind: { type: "tool_call", id: callId, name: toolName, input: input ?? {} },
+                    });
+                }
+                if (finished) {
                     const output =
                         typeof state.output === "string"
                             ? state.output

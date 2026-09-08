@@ -40,6 +40,45 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
     });
 
+    it("emits only a tool_result for a finished tool part that carries no input", () => {
+        const kinds = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "asst", role: "assistant" },
+                parts: [{ type: "tool", tool: "read", callID: "tc-1", state: { input: {} } }],
+            },
+            {
+                info: { id: "user", role: "user" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "tc-1",
+                        state: { status: "completed", output: "done" },
+                    },
+                ],
+            },
+        ]).map((message) =>
+            (message.ck.content as Array<{ kind: { type: string } }>).map((c) => c.kind.type),
+        );
+
+        expect(kinds).toEqual([["tool_call"], ["tool_result"]]);
+    });
+
+    it("keeps the tool_call for an unfinished tool part without input", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "asst", role: "assistant" },
+                parts: [
+                    { type: "tool", tool: "read", callID: "tc-1", state: { status: "pending" } },
+                ],
+            },
+        ]);
+
+        expect(
+            (encoded.ck.content as Array<{ kind: { type: string } }>).map((c) => c.kind.type),
+        ).toEqual(["tool_call"]);
+    });
+
     it("matches the module golden generated from raw OpenCode reasoning parts", () => {
         const golden = JSON.parse(
             readFileSync(
