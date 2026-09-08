@@ -14,6 +14,7 @@ import {
     callDaemonSession,
     type DaemonSessionDeps,
     formatRustStatusText,
+    statusContextLimitTokens,
     statusInputTokens,
 } from "./daemon-session-routes";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
@@ -77,7 +78,12 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
                 if (daemonStatus) {
                     const value = daemonStatus as Record<string, unknown>;
                     lines.push("", formatRustStatusText(value));
-                    if (windowGeometry) {
+                    // A daemon limit that differs from `usableSoft` would put two denominators on one status, so the derivation renders only when the daemon limit is absent or agrees. commentlint: allow(JUDGE)
+                    const daemonLimit = statusContextLimitTokens(value);
+                    if (
+                        windowGeometry &&
+                        (daemonLimit ?? windowGeometry.usableSoft) === windowGeometry.usableSoft
+                    ) {
                         lines.push(
                             `- ${formatWindowDerivationLine(statusInputTokens(value), windowGeometry)}`,
                         );

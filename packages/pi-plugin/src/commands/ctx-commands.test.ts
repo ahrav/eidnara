@@ -184,6 +184,40 @@ describe("Pi /ctx-status", () => {
         expect(entry?.text).toContain("65.1%");
     });
 
+    it("renders the window derivation only when the daemon limit is absent or equals the usable window", async () => {
+        const reservedModel = {
+            model: {
+                provider: "anthropic",
+                id: "claude",
+                contextWindow: 100_000,
+                maxTokens: 20_000,
+            },
+            getContextUsage: () => ({ tokens: 42_000, percent: 42, contextWindow: 100_000 }),
+        };
+        const statuses = [
+            { ...DAEMON_STATUS.usage },
+            { current_total_input_tokens: 42_000, context_limit_tokens: 80_000 },
+            { current_total_input_tokens: 42_000 },
+        ];
+        const { pi, run } = harness();
+        const module = fakeModuleClient(() => ({
+            result: { ...DAEMON_STATUS, usage: statuses.shift() },
+        }));
+        registerCtxStatusCommand(pi, statusDeps(module.client));
+
+        const [differing] = await run("ctx-status", "", reservedModel);
+        expect(differing?.text).toContain("- Usage: 42,000 / 100,000 tokens");
+        expect(differing?.text).not.toContain("usable (");
+
+        const [, agreeing] = await run("ctx-status", "", reservedModel);
+        expect(agreeing?.text).toContain("- Usage: 42,000 / 80,000 tokens");
+        expect(agreeing?.text).toContain("42k / 80k usable (52.5%)");
+
+        const [, , noLimit] = await run("ctx-status", "", reservedModel);
+        expect(noLimit?.text).toContain("- Usage: 42,000 tokens");
+        expect(noLimit?.text).toContain("42k / 80k usable (52.5%)");
+    });
+
     it("reports the unavailable line when session.status fails and notes compaction-off", async () => {
         const { pi, run } = harness();
         const module = fakeModuleClient(() => {
