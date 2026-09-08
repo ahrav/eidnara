@@ -143,6 +143,25 @@ describe("tool-drop-target", () => {
             expect(partHasCompletedResult({ type: "tool", callID: "c" })).toBe(false);
         });
 
+        it("falls back to the top-level status when the nested status is not a string", () => {
+            expect(
+                partHasCompletedResult({
+                    type: "tool",
+                    callID: "c",
+                    status: "completed",
+                    state: { status: null, attachments: [{ type: "file", mime: "image/png" }] },
+                }),
+            ).toBe(true);
+            expect(
+                partHasCompletedResult({
+                    type: "tool",
+                    callID: "c",
+                    status: "running",
+                    state: { status: "completed" },
+                }),
+            ).toBe(true);
+        });
+
         it("keeps a running OpenCode tool part (no output, no error) open", () => {
             expect(
                 partHasCompletedResult({
@@ -318,6 +337,28 @@ describe("tool-drop-target", () => {
                     // A second clear over already-cleared text is a no-op and keeps the stamp.
                     expect(target.drop()).toBe("removed");
                     expect(versionOf(reasoning)).toBe(stamped);
+                });
+
+                it("#then the clamped clone carries a fresh version even when the harness version is enumerable", () => {
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-clone-ver",
+                        version: 7,
+                        state: { output: "x".repeat("[dropped \u00a733\u00a7]".length) },
+                    };
+                    const messages: MessageLike[] = [
+                        message("m-clone-ver", "assistant", [toolPart]),
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-clone-ver", [], index, batch, 33);
+
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as Record<string, unknown>;
+                    expect(wire.version).toBe(7);
+                    expect(typeof wire[RAW_PART_VERSION_KEY]).toBe("string");
+                    expect(RAW_PART_VERSION_KEY in toolPart).toBe(false);
                 });
             });
         });

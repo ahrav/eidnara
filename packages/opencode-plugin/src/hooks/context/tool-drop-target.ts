@@ -64,7 +64,8 @@ function firstPresent(refs: FieldRef[]): FieldRef | undefined {
 
 function toolPartFields(part: Record<string, unknown>): ToolPartFields {
     const state = isRecord(part.state) ? part.state : null;
-    const statusValue = state !== null && "status" in state ? state.status : part.status;
+    const nestedStatus = state?.status;
+    const statusValue = typeof nestedStatus === "string" ? nestedStatus : part.status;
     const status = typeof statusValue === "string" ? statusValue : undefined;
 
     const resultCandidates: FieldRef[] = [];
@@ -155,6 +156,8 @@ function clonePart(part: unknown): unknown {
 function clampCloneInPlace(occurrence: IndexedOccurrence, clamp: (part: unknown) => void): void {
     const clone = clonePart(occurrence.part);
     clamp(clone);
+    // `structuredClone` keeps enumerable harness versions, so the clamped clone needs its own stamp.
+    if (clone !== null && typeof clone === "object") markPartMutated(clone);
     const parts = occurrence.message.parts;
     const index = parts.indexOf(occurrence.part);
     if (index >= 0) {
