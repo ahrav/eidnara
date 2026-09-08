@@ -255,21 +255,39 @@ describe("ctx_memory create and revise through the cached token", () => {
         expect(kernel.liveRows()).toHaveLength(1);
     });
 
-    test("a redelivered revise omitting the content the original supplied errors instead of replaying", async () => {
+    test("a redelivered revise that inherited category and reason replays as already applied", async () => {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
+        const tool = harness(kernel);
+        const args = { action: "revise", objectId: "mem_a", content: "A, revised." };
+        const first = parseJson<CommitJson>(await tool.execute(args, "call-revise-inherit"));
+        expect(first.outcome).toBe("applied");
+        // The omitted fields inherited from the retired predecessor, which no read serves; the probe compares only the stated content and lets the daemon's digest prove the rest. commentlint: allow(JUDGE)
+        const second = parseJson<CommitJson>(await tool.execute(args, "call-revise-inherit"));
+        expect(second).toMatchObject({
+            outcome: "already applied",
+            objectId: first.objectId,
+            objects: first.objects,
+        });
+        expect(kernel.liveRows()).toHaveLength(1);
+        expect(kernel.liveRows()[0]?.decision?.payload.summary).toBe("A, revised.");
+    });
+
+    test("a revise reusing an identity with different explicit content errors instead of replaying", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
         const tool = harness(kernel);
         const first = parseJson<CommitJson>(
             await tool.execute(
                 { action: "revise", objectId: "mem_a", content: "A, revised." },
-                "call-revise-omit",
+                "call-revise-differs",
             ),
         );
         expect(first.outcome).toBe("applied");
-        // An omitted-content retry would inherit the retired predecessor's summary, which differs from the committed revision, so the probe must not answer "already applied" for it. commentlint: allow(JUDGE)
+        // An explicit field that differs from the successor is not a redelivery, so the probe declines and the ordinary path reports the retired target. commentlint: allow(JUDGE)
         const text = await tool.execute(
-            { action: "revise", objectId: "mem_a" },
-            "call-revise-omit",
+            { action: "revise", objectId: "mem_a", content: "A, revised differently." },
+            "call-revise-differs",
         );
         expect(text).toBe("Error: memory not found or not visible from this project: mem_a");
         expect(kernel.liveRows()).toHaveLength(1);
