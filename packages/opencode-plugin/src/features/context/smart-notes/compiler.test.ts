@@ -265,6 +265,27 @@ describe("compileSmartNoteCheck", () => {
         }
     });
 
+    test("waives the dry run when a later declared URL's failure escapes after an earlier one was caught", async () => {
+        const httpGet = mock(async (url: string) => {
+            throw new SmartNoteNetworkError(`SMART_NOTE_NETWORK: connect ECONNREFUSED ${url}`);
+        });
+        const client = createCompilerClient([
+            compilerOutput(
+                `function check(cap) { try { cap.httpGet("https://a.example/"); } catch (e) {} cap.httpGet("https://b.example/"); return { met: true }; }`,
+            ),
+        ]);
+
+        const result = await compileSmartNoteCheck(
+            compileArgs(client, { capabilityFactory: () => ({ ...fakeCap, httpGet }) }),
+        );
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect(result.dryRun).toBeNull();
+            expect(result.dryRunNetworkError).toContain("https://b.example/");
+        }
+    });
+
     test("bounds child-session deletion so a stalled delete cannot hold the result", async () => {
         const client = createCompilerClient([compilerOutput(VALID_CHECK)]);
         client.session.delete = mock(
@@ -489,9 +510,9 @@ describe("bindDeclaredRequests", () => {
         );
         const cap = bound.factory(signal());
 
-        expect(bound.servedNetworkFailure()).toBeNull();
+        expect(bound.servedNetworkFailures()).toEqual([]);
         await expect(cap.httpGet("https://down.example/")).rejects.toBe(unreachable);
-        expect(bound.servedNetworkFailure()).toBe(unreachable.message);
+        expect(bound.servedNetworkFailures()).toEqual([unreachable.message]);
     });
 
     test("propagates a non-network prefetch failure even for a URL the guest never requests", async () => {
@@ -716,6 +737,10 @@ describe("smart-note compiler output bounds", () => {
             ],
             [
                 `function check(cap) { let get; const n = class {} / (get = cap.httpGet) / 1; return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { let get; const n = class X extends (class {}) {} / (get = cap.httpGet) / 1; return { met: true }; }`,
                 /only be called directly/,
             ],
             [

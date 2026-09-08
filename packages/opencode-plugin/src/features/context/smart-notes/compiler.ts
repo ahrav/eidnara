@@ -231,20 +231,18 @@ async function validateCompilerOutput(
     if (dryRun.ok) {
         return { compiledCheck, manifest, checkCron, dryRun: dryRun.result };
     }
-    // A dry run remains pending only when the check propagates its served network failure
+    // A dry run remains pending only when the check propagates a served network failure
     // unchanged; a check that catches it and then fails for another reason is not waived.
-    const servedNetworkFailure = bound.servedNetworkFailure();
-    if (
-        !dryRun.cancelled &&
-        servedNetworkFailure !== null &&
-        dryRun.error === `${SmartNoteNetworkError.name}: ${servedNetworkFailure}`
-    ) {
+    const escaped = bound
+        .servedNetworkFailures()
+        .find((message) => dryRun.error === `${SmartNoteNetworkError.name}: ${message}`);
+    if (!dryRun.cancelled && escaped !== undefined) {
         return {
             compiledCheck,
             manifest,
             checkCron,
             dryRun: null,
-            dryRunNetworkError: boundedError(servedNetworkFailure),
+            dryRunNetworkError: boundedError(escaped),
         };
     }
     throw new Error(`dry-run failed: ${dryRun.error}`);
@@ -256,8 +254,8 @@ type BoundResponse =
 
 export interface BoundRequests {
     factory: SmartNoteCapabilityFactory;
-    /** Message of the first prefetch network failure the guest's `httpGet` received, or null. */
-    servedNetworkFailure(): string | null;
+    /** Messages of the prefetch network failures the guest's `httpGet` has received. */
+    servedNetworkFailures(): readonly string[];
 }
 
 /**
@@ -290,9 +288,9 @@ export async function bindDeclaredRequests(
             }
         }),
     );
-    let served: string | null = null;
+    const served: string[] = [];
     return {
-        servedNetworkFailure: () => served,
+        servedNetworkFailures: () => served,
         factory: (runSignal) => {
             const cap: SmartNoteCapabilityApi = factory(runSignal);
             return {
@@ -304,7 +302,7 @@ export async function bindDeclaredRequests(
                     const bound = responses.get(url);
                     if (!bound) return Promise.reject(nonLiteralArgumentError("httpGet", url));
                     if (bound.ok) return Promise.resolve(bound.value);
-                    served ??= bound.error.message;
+                    served.push(bound.error.message);
                     return Promise.reject(bound.error);
                 },
                 gitHeadSha: () => cap.gitHeadSha(),

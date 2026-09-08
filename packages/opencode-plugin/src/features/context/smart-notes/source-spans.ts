@@ -263,8 +263,18 @@ function braceOpensValue(source: string, brace: number, lastCloseParen: OpenPare
     if (index < 0) return false;
     const previous = source[index];
     if (previous === ")") {
-        const keyword = lastCloseParen ? functionKeywordBefore(source, lastCloseParen.open) : -1;
-        return keyword >= 0 && expressionPrecedes(source, keyword);
+        if (!lastCloseParen) return false;
+        const keyword = functionKeywordBefore(source, lastCloseParen.open);
+        if (keyword >= 0) return expressionPrecedes(source, keyword);
+        // `class X extends (expr) {`: the heritage clause ends in a parenthesized expression.
+        if (wordBefore(source, lastCloseParen.open) === "extends") {
+            const classKeyword = classKeywordBefore(
+                source,
+                wordStartBefore(source, lastCloseParen.open) + "extends".length,
+            );
+            return classKeyword >= 0 && expressionPrecedes(source, classKeyword);
+        }
+        return false;
     }
     const classKeyword = classKeywordBefore(source, brace);
     if (classKeyword >= 0) return expressionPrecedes(source, classKeyword);
