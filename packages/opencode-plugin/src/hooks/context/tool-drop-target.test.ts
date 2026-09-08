@@ -697,6 +697,84 @@ describe("tool-drop-target", () => {
                     expect(wire.state.input.already).toBe("abc...[truncated]");
                 });
             });
+
+            describe("#when an argument contains non-BMP characters", () => {
+                it("#then the clamp counts Unicode scalars, keeping five or fewer intact", () => {
+                    const fiveEmoji = "\u{1F600}".repeat(5);
+                    const sixEmoji = "\u{1F600}".repeat(6);
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-emoji",
+                        state: {
+                            input: { five: fiveEmoji, six: sixEmoji, pad: "p".repeat(600) },
+                            output: "done",
+                        },
+                    };
+                    const messages: MessageLike[] = [message("m-emoji", "assistant", [toolPart])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-emoji", [], index, batch, 19);
+
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as {
+                        state: { input: { five: string; six: string } };
+                    };
+                    expect(wire.state.input.five).toBe(fiveEmoji);
+                    expect(wire.state.input.six).toBe(`${fiveEmoji}...[truncated]`);
+                });
+            });
+        });
+
+        describe("#given a completed OpenCode tool that carries attachments", () => {
+            describe("#when the result is truncated or replaced", () => {
+                it("#then truncate removes attachments from the wire clone only", () => {
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-att",
+                        attachments: [{ type: "file", mime: "image/png", url: "data:..." }],
+                        state: {
+                            attachments: [{ type: "file", mime: "image/png", url: "data:..." }],
+                            output: "screenshot taken",
+                        },
+                    };
+                    const pristine = JSON.stringify(toolPart);
+                    const messages: MessageLike[] = [message("m-att", "assistant", [toolPart])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-att", [], index, batch, 20);
+
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as Record<string, unknown> & {
+                        state: Record<string, unknown>;
+                    };
+                    expect(wire.state.output).toBe("[dropped \u00a720\u00a7]");
+                    expect("attachments" in wire.state).toBe(false);
+                    expect("attachments" in wire).toBe(false);
+                    expect(JSON.stringify(toolPart)).toBe(pristine);
+                });
+
+                it("#then setContent removes attachments and reports the change", () => {
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-att-2",
+                        state: {
+                            attachments: [{ type: "file", mime: "image/png", url: "data:..." }],
+                            output: "same text",
+                        },
+                    };
+                    const messages: MessageLike[] = [message("m-att-2", "assistant", [toolPart])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-att-2", [], index, batch, 21);
+
+                    // Same text, but the attachment removal is itself a change.
+                    expect(target.setContent("same text")).toBe(true);
+                    expect("attachments" in toolPart.state).toBe(false);
+                    expect(target.setContent("same text")).toBe(false);
+                });
+            });
         });
 
         describe("#given a partless message the batch never touched", () => {

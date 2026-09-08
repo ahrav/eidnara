@@ -42,6 +42,17 @@ function isErrorState(state: Record<string, unknown>): boolean {
     return state.status === "error" && typeof state.error === "string";
 }
 
+// `crates/daemon/src/codec/opencode.rs` reads `state.attachments`, then `part.attachments`, into result blocks.
+function clearToolAttachments(
+    part: Record<string, unknown>,
+    state: Record<string, unknown>,
+): boolean {
+    const had = "attachments" in state || "attachments" in part;
+    delete state.attachments;
+    delete part.attachments;
+    return had;
+}
+
 function getToolContent(part: unknown): string | undefined {
     if (!isRecord(part)) return undefined;
     if (part.type === "tool" && isRecord(part.state)) {
@@ -55,17 +66,21 @@ function getToolContent(part: unknown): string | undefined {
     return undefined;
 }
 
-function setToolContent(part: unknown, content: string): void {
-    if (!isRecord(part)) return;
+function setToolContent(part: unknown, content: string): boolean {
+    if (!isRecord(part)) return false;
     if (part.type === "tool" && isRecord(part.state)) {
         const state = part.state;
+        const changed = getToolContent(part) !== content || clearToolAttachments(part, state);
         state.output = content;
         if (isErrorState(state)) state.error = content;
-        return;
+        return changed;
     }
     if (part.type === "tool_result") {
+        const changed = part.content !== content;
         part.content = content;
+        return changed;
     }
+    return false;
 }
 
 /**
@@ -107,6 +122,7 @@ function truncateToolPart(part: unknown, tagId: number): void {
         const state = part.state;
         state.output = sentinel;
         if (isErrorState(state)) state.error = sentinel;
+        clearToolAttachments(part, state);
 
         if (isRecord(state.input)) {
             const inputSize = estimateInputSize(state.input);
@@ -161,31 +177,34 @@ function readToolPartInput(part: unknown): Record<string, unknown> | null {
 
 const TRUNCATION_SENTINEL = "...[truncated]";
 const SKELETON_ARG_LEN = 5;
-/** Longest value `truncateInputValues` can emit. */
-const MAX_CLAMPED_ARG_LEN = SKELETON_ARG_LEN + TRUNCATION_SENTINEL.length;
 
-/**
- */
-function safeSlice(str: string, maxLen: number): string {
-    if (str.length <= maxLen) return str;
-    const lastCharCode = str.charCodeAt(maxLen - 1);
-    if (lastCharCode >= 0xd800 && lastCharCode <= 0xdbff) {
-        return str.slice(0, maxLen - 1);
+// Iterating by Unicode scalar preserves surrogate pairs and matches the daemon's `chars().count()` clamp measure.
+function scalarPrefix(str: string, count: number): string | null {
+    let prefix = "";
+    let seen = 0;
+    for (const scalar of str) {
+        if (seen === count) return prefix;
+        prefix += scalar;
+        seen += 1;
     }
-    return str.slice(0, maxLen);
+    return null;
+}
+
+function isClampedArg(value: string): boolean {
+    if (!value.endsWith(TRUNCATION_SENTINEL)) return false;
+    const head = value.slice(0, value.length - TRUNCATION_SENTINEL.length);
+    return scalarPrefix(head, SKELETON_ARG_LEN) === null;
 }
 
 function truncateInputValues(input: Record<string, unknown>): void {
     for (const key of Object.keys(input)) {
         const value = input[key];
         if (typeof value === "string") {
-            const alreadyClamped =
-                value.endsWith(TRUNCATION_SENTINEL) && value.length <= MAX_CLAMPED_ARG_LEN;
-            if (alreadyClamped || value === "[object]" || /^\[\d+ items\]$/.test(value)) continue;
-            input[key] =
-                value.length > SKELETON_ARG_LEN
-                    ? `${safeSlice(value, SKELETON_ARG_LEN)}${TRUNCATION_SENTINEL}`
-                    : value;
+            if (isClampedArg(value) || value === "[object]" || /^\[\d+ items\]$/.test(value)) {
+                continue;
+            }
+            const prefix = scalarPrefix(value, SKELETON_ARG_LEN);
+            if (prefix !== null) input[key] = `${prefix}${TRUNCATION_SENTINEL}`;
         } else if (Array.isArray(value)) {
             input[key] = `[${value.length} items]`;
         } else if (value !== null && typeof value === "object") {
@@ -340,11 +359,7 @@ export function createToolDropTarget(
             let changed = false;
             for (const occurrence of entry.occurrences) {
                 if (occurrence.kind !== "result") continue;
-                const prevContent = getToolContent(occurrence.part);
-                if (prevContent !== content) {
-                    setToolContent(occurrence.part, content);
-                    changed = true;
-                }
+                if (setToolContent(occurrence.part, content)) changed = true;
             }
             return changed;
         },
