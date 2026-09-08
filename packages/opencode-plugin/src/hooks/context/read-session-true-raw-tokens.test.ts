@@ -7,8 +7,11 @@ import {
     buildToolArcs,
     buildTrueRawTokenIndex,
     buildTrueRawTokenIndexFromTokenCountsForTest,
+    completedToolArcCrossesBoundary,
     computeRawRangeFingerprint,
     estimateTrueRawMessageTokens,
+    fenceBoundaryForToolArcs,
+    invalidateTrueRawTokenCache,
 } from "./read-session-true-raw-tokens";
 
 function singlePartMessage(part: unknown, ordinal = 1): RawMessage {
@@ -156,9 +159,115 @@ describe("tool arcs", () => {
         expect(breakdown.toolInput).toBeGreaterThan(0);
         expect(breakdown.toolOutput).toBeGreaterThan(0);
     });
+
+    it("treats an explicit null tool-invocation result as a completed call", () => {
+        const message: RawMessage = {
+            id: "invocation",
+            role: "assistant",
+            parts: [{ type: "tool-invocation", toolCallId: "call_1", args: {}, result: null }],
+            ordinal: 1,
+        };
+
+        expect(buildToolArcs([message])).toEqual([
+            { callId: "call_1", invOrdinal: 1, resOrdinal: 1 },
+        ]);
+    });
+});
+
+describe("tool arc fences", () => {
+    it("retreats to the invocation when a completed arc above the floor straddles the candidate", () => {
+        const arcs = [{ callId: "c", invOrdinal: 3, resOrdinal: 7 }];
+        expect(fenceBoundaryForToolArcs(5, arcs, 1, 1)).toBe(3);
+    });
+
+    it("advances past the result when the invocation is already below the floor", () => {
+        const arcs = [{ callId: "c", invOrdinal: 1, resOrdinal: 3 }];
+        expect(fenceBoundaryForToolArcs(2, arcs, 1, 1)).toBe(4);
+    });
+
+    it("fences the whole overlapping component so no completed arc is split", () => {
+        const arcs = [
+            { callId: "ordinary", invOrdinal: 122, resOrdinal: 124 },
+            { callId: "reasoning", invOrdinal: 123, resOrdinal: 125 },
+        ];
+        const fenced = fenceBoundaryForToolArcs(125, arcs, 1, 1);
+        expect(fenced).toBe(122);
+        for (const arc of arcs) {
+            expect(completedToolArcCrossesBoundary(arc.invOrdinal, arc.resOrdinal, fenced)).toBe(
+                false,
+            );
+        }
+    });
+
+    it("leaves a candidate untouched when no completed arc straddles it", () => {
+        const arcs = [{ callId: "c", invOrdinal: 2, resOrdinal: 4 }];
+        expect(fenceBoundaryForToolArcs(5, arcs, 1, 1)).toBe(5);
+        expect(fenceBoundaryForToolArcs(2, arcs, 1, 1)).toBe(2);
+    });
+
+    it("re-fences completed arcs after an open arc pulls the boundary back", () => {
+        const arcs = [
+            { callId: "done", invOrdinal: 4, resOrdinal: 8 },
+            { callId: "open", invOrdinal: 6, resOrdinal: null },
+        ];
+        expect(fenceBoundaryForToolArcs(10, arcs, 1, 1)).toBe(4);
+    });
 });
 
 describe("message token cache keys", () => {
+    it("invalidates by session id even when the namespace does not contain it", () => {
+        const message = (text: string): RawMessage => ({
+            id: "msg",
+            role: "user",
+            parts: [{ type: "text", text, updated_at: 1 }],
+            ordinal: 1,
+        });
+        const options = {
+            providerShapeVersion: "opencode-v1" as const,
+            cacheNamespace: "unrelated-namespace",
+        };
+
+        const ascii = buildTrueRawTokenIndex("session-A", [message("hello world foo")], options);
+        expect(ascii.tokenForOrdinal(1)).toBeGreaterThan(0);
+
+        invalidateTrueRawTokenCache({ sessionId: "session-A", reason: "message.updated" });
+
+        const cjk = buildTrueRawTokenIndex(
+            "session-A",
+            [message("日本語日本語日本語日本語日本語")],
+            options,
+        );
+        const fresh = buildTrueRawTokenIndex(
+            "session-A",
+            [message("日本語日本語日本語日本語日本語")],
+            { ...options, cacheNamespace: "unrelated-namespace-fresh" },
+        );
+        expect(cjk.tokenForOrdinal(1)).toBe(fresh.tokenForOrdinal(1));
+        expect(cjk.tokenForOrdinal(1)).not.toBe(ascii.tokenForOrdinal(1));
+    });
+
+    it("does not invalidate a session whose id merely contains the target id", () => {
+        const message = (text: string): RawMessage => ({
+            id: "msg",
+            role: "user",
+            parts: [{ type: "text", text, updated_at: 1 }],
+            ordinal: 1,
+        });
+        const options = {
+            providerShapeVersion: "opencode-v1" as const,
+            cacheNamespace: "prefix-namespace",
+        };
+
+        const ascii = buildTrueRawTokenIndex("s-1", [message("hello world foo")], options);
+        invalidateTrueRawTokenCache({ sessionId: "s", reason: "session.deleted" });
+        const stillCached = buildTrueRawTokenIndex(
+            "s-1",
+            [message("日本語日本語日本語日本語日本語")],
+            options,
+        );
+        expect(stillCached.tokenForOrdinal(1)).toBe(ascii.tokenForOrdinal(1));
+    });
+
     it("separates cache entries by image heuristic identity", () => {
         const message = (): RawMessage => ({
             id: "image-message",
@@ -232,6 +341,15 @@ describe("raw range fingerprints", () => {
         );
         expect(fingerprintOf({ type: "file", content: "one" })).not.toBe(
             fingerprintOf({ type: "file", content: "two" }),
+        );
+    });
+
+    it("hashes the whole part when the tokenizer falls back to serializing it", () => {
+        expect(fingerprintOf({ type: "file", url: "file:///a.txt", mime: "text/plain" })).not.toBe(
+            fingerprintOf({ type: "file", url: "file:///b-longer-name.txt", mime: "text/plain" }),
+        );
+        expect(fingerprintOf({ type: "custom", payload: { a: 1 } })).not.toBe(
+            fingerprintOf({ type: "custom", payload: { a: 2 } }),
         );
     });
 

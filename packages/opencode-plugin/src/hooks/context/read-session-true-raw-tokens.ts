@@ -188,6 +188,14 @@ function hasOwn(record: Record<string, unknown>, key: string): boolean {
     return Object.hasOwn(record, key);
 }
 
+/** Presence, not value, decides a match: an own `null` or `undefined` field is a present field. */
+function firstOwnKey(record: Record<string, unknown>, keys: readonly string[]): string | null {
+    for (const key of keys) {
+        if (hasOwn(record, key)) return key;
+    }
+    return null;
+}
+
 function recursiveByteLength(value: unknown): number {
     if (value === null || value === undefined) return 0;
     if (typeof value === "string") return value.length;
@@ -263,15 +271,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
 
     if (type === "tool") {
         const hasInput = state !== null && hasOwn(state, "input");
-        const outputKey = state
-            ? hasOwn(state, "output")
-                ? "output"
-                : hasOwn(state, "error")
-                  ? "error"
-                  : hasOwn(state, "result")
-                    ? "result"
-                    : null
-            : null;
+        const outputKey = state ? firstOwnKey(state, ["output", "error", "result"]) : null;
         const hasOutput = outputKey !== null;
         const outputValue = outputKey && state ? state[outputKey] : undefined;
         const providerExecuted = part.providerExecuted === true;
@@ -287,39 +287,39 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
     }
 
     if (type === "tool-invocation") {
-        const args = part.args ?? part.input;
-        const output = part.result ?? part.output;
+        const argsKey = firstOwnKey(part, ["args", "input"]);
+        const outputKey = firstOwnKey(part, ["result", "output"]);
         return {
             callId,
-            hasInput: args !== undefined,
-            hasOutput: output !== undefined,
+            hasInput: argsKey !== null,
+            hasOutput: outputKey !== null,
             providerExecuted: false,
-            inputText: args !== undefined ? stringValue(args) : "",
-            outputText: output !== undefined ? textFromToolResultContent(output) : "",
+            inputText: argsKey ? stringValue(part[argsKey]) : "",
+            outputText: outputKey ? textFromToolResultContent(part[outputKey]) : "",
         };
     }
 
     if (type === "tool_use") {
-        const input = part.input;
+        const hasInput = hasOwn(part, "input");
         return {
             callId,
-            hasInput: input !== undefined,
+            hasInput,
             hasOutput: false,
             providerExecuted: false,
-            inputText: input !== undefined ? stringValue(input) : "",
+            inputText: hasInput ? stringValue(part.input) : "",
             outputText: "",
         };
     }
 
     if (type === "tool_result") {
-        const content = part.content ?? part.output ?? part.result;
+        const contentKey = firstOwnKey(part, ["content", "output", "result"]);
         return {
             callId,
             hasInput: false,
-            hasOutput: content !== undefined,
+            hasOutput: contentKey !== null,
             providerExecuted: false,
             inputText: "",
-            outputText: content !== undefined ? textFromToolResultContent(content) : "",
+            outputText: contentKey ? textFromToolResultContent(part[contentKey]) : "",
         };
     }
 
@@ -350,14 +350,16 @@ function imageHeuristicCacheKey(heuristic: TrueRawEstimateOptions["imageTokenHeu
     return `image:${id}`;
 }
 
+/** `invalidateTrueRawTokenCache` matches session and message IDs only as `\0`-delimited segments. */
 function messageCacheKey(
+    sessionId: string,
     message: RawMessage,
-    options: TrueRawTokenIndexBuildOptions | TrueRawEstimateOptions,
+    options: TrueRawTokenIndexBuildOptions,
 ): string {
-    const namespace = "cacheNamespace" in options ? options.cacheNamespace : "estimate";
     const cheapFingerprint = message.parts.map(partCheapFingerprint).join("|");
     return [
-        namespace,
+        options.cacheNamespace,
+        sessionId,
         options.providerShapeVersion,
         imageHeuristicCacheKey(options.imageTokenHeuristic),
         message.id || `ordinal:${message.ordinal}`,
@@ -389,60 +391,81 @@ function cloneBreakdown(value: TrueRawTokenBreakdown): TrueRawTokenBreakdown {
     return { ...value };
 }
 
-function estimateNonToolPart(
-    part: unknown,
-    options: TrueRawEstimateOptions,
-    breakdown: TrueRawTokenBreakdown,
-): boolean {
-    if (!isRecord(part)) {
-        if (part !== null && part !== undefined)
-            addBreakdown(breakdown, "other", estimateStructured(part));
-        return true;
-    }
+type NonToolPartContent =
+    | { kind: "skip" }
+    | { kind: "text"; text: string }
+    | { kind: "reasoning"; text: string }
+    | { kind: "image"; altText: string | null }
+    | { kind: "structured" };
+
+/**
+ * Invariant: `estimateNonToolPart` and `partContentFingerprint` must both classify through this
+ * function. A second classifier lets the fingerprint miss content the tokenizer counts.
+ * commentlint: allow(JUDGE)
+ */
+function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent {
     const type = partType(part);
     if (
         type === "step-start" ||
         type === "step-finish" ||
         (type === "meta" && Object.keys(part).length <= 1)
     ) {
-        return true;
+        return { kind: "skip" };
     }
     if (type === "text") {
         const text = firstStringField(part, ["text", "content"]);
-        if (text) addBreakdown(breakdown, "text", estimateTokens(text));
-        return true;
+        return text ? { kind: "text", text } : { kind: "skip" };
     }
     if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
         const text = firstStringField(part, ["thinking", "text", "content", "reasoning"]);
-        if (text) {
-            addBreakdown(breakdown, "reasoning", estimateTokens(text));
-        } else {
-            addBreakdown(breakdown, "other", estimateStructured(part));
-        }
-        return true;
+        return text ? { kind: "reasoning", text } : { kind: "structured" };
     }
-    const reasoningText = firstStringField(part, ["thinking", "reasoning"]);
-    if (reasoningText && type.length === 0) {
-        addBreakdown(breakdown, "reasoning", estimateTokens(reasoningText));
-        return true;
+    if (type.length === 0) {
+        const reasoningText = firstStringField(part, ["thinking", "reasoning"]);
+        if (reasoningText) return { kind: "reasoning", text: reasoningText };
     }
     if (looksImageLike(part)) {
-        addBreakdown(
-            breakdown,
-            "image",
-            options.imageTokenHeuristic?.(part) ?? defaultImageTokenHeuristic(part),
-        );
-        const altText = firstStringField(part, ["alt", "text", "description"]);
-        if (altText) addBreakdown(breakdown, "text", estimateTokens(altText));
-        return true;
+        return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
     }
     if (type.includes("file") || type === "source") {
         const content = firstStringField(part, ["content", "text", "source"]);
-        if (content) addBreakdown(breakdown, "text", estimateTokens(content));
-        else addBreakdown(breakdown, "other", estimateStructured(part));
-        return true;
+        return content ? { kind: "text", text: content } : { kind: "structured" };
     }
-    return false;
+    return { kind: "structured" };
+}
+
+function estimateNonToolPart(
+    part: unknown,
+    options: TrueRawEstimateOptions,
+    breakdown: TrueRawTokenBreakdown,
+): void {
+    if (!isRecord(part)) {
+        if (part !== null && part !== undefined)
+            addBreakdown(breakdown, "other", estimateStructured(part));
+        return;
+    }
+    const content = classifyNonToolPart(part);
+    switch (content.kind) {
+        case "skip":
+            return;
+        case "text":
+            addBreakdown(breakdown, "text", estimateTokens(content.text));
+            return;
+        case "reasoning":
+            addBreakdown(breakdown, "reasoning", estimateTokens(content.text));
+            return;
+        case "image":
+            addBreakdown(
+                breakdown,
+                "image",
+                options.imageTokenHeuristic?.(part) ?? defaultImageTokenHeuristic(part),
+            );
+            if (content.altText) addBreakdown(breakdown, "text", estimateTokens(content.altText));
+            return;
+        case "structured":
+            addBreakdown(breakdown, "other", estimateStructured(part));
+            return;
+    }
 }
 
 export function estimateTrueRawMessageTokens(
@@ -475,9 +498,7 @@ export function estimateTrueRawMessageTokens(
             }
             continue;
         }
-        if (!estimateNonToolPart(part, options, breakdown)) {
-            addBreakdown(breakdown, "other", estimateStructured(part));
-        }
+        estimateNonToolPart(part, options, breakdown);
     }
     return breakdown;
 }
@@ -528,39 +549,82 @@ export function buildToolArcs(messages: readonly RawMessage[]): ToolArc[] {
     );
 }
 
+interface CompletedToolArc {
+    invOrdinal: number;
+    resOrdinal: number;
+}
+
+/**
+ * Overlapping completed arcs form one atomic interval.
+ * When that interval crosses `candidate`, the fence returns its first invocation, keeping the whole interval in the protected tail.
+ * The fence returns the ordinal after the interval's last result only when its first invocation is below `publicationFloorOrdinal`, where nothing can be protected.
+ */
+function fenceBoundaryForCompletedToolArcs(
+    candidate: number,
+    arcs: readonly ToolArc[],
+    publicationFloorOrdinal: number,
+): number {
+    const completed: CompletedToolArc[] = [];
+    for (const arc of arcs) {
+        if (arc.resOrdinal !== null) {
+            completed.push({ invOrdinal: arc.invOrdinal, resOrdinal: arc.resOrdinal });
+        }
+    }
+    const component = completed.filter((arc) =>
+        completedToolArcCrossesBoundary(arc.invOrdinal, arc.resOrdinal, candidate),
+    );
+    if (component.length === 0) return candidate;
+
+    for (let pass = 0; pass <= completed.length; pass += 1) {
+        const minInvocation = Math.min(...component.map((arc) => arc.invOrdinal));
+        const maxResult = Math.max(...component.map((arc) => arc.resOrdinal));
+        const previousLength = component.length;
+        for (const arc of completed) {
+            if (
+                arc.invOrdinal <= maxResult &&
+                arc.resOrdinal >= minInvocation &&
+                !component.includes(arc)
+            ) {
+                component.push(arc);
+            }
+        }
+        if (component.length === previousLength) break;
+    }
+
+    const minInvocation = Math.min(...component.map((arc) => arc.invOrdinal));
+    const maxResult = Math.max(...component.map((arc) => arc.resOrdinal));
+    return minInvocation < publicationFloorOrdinal ? maxResult + 1 : minInvocation;
+}
+
+/** `lastCompartmentEndOrdinal + 1` is the publication floor: the first ordinal the fence can still protect. */
 export function fenceBoundaryForToolArcs(
     candidate: number,
     arcs: readonly ToolArc[],
     lastCompartmentEndOrdinal: number,
     recentOpenArcCutoff: number,
 ): number {
-    let boundary = candidate;
+    const publicationFloorOrdinal = lastCompartmentEndOrdinal + 1;
+    let boundary = fenceBoundaryForCompletedToolArcs(candidate, arcs, publicationFloorOrdinal);
     for (const arc of arcs) {
-        if (arc.resOrdinal !== null) {
-            if (completedToolArcCrossesBoundary(arc.invOrdinal, arc.resOrdinal, boundary)) {
-                boundary = arc.resOrdinal + 1;
-            }
-            continue;
-        }
         // The historian protects only open arcs inside the live protected-tail window.
         // Protecting stale open arcs can block compaction of the eligible region.
         // Compaction emits no dangling `tool_use`.
-        if (arc.invOrdinal < recentOpenArcCutoff) continue;
-        if (arc.invOrdinal >= lastCompartmentEndOrdinal + 1 && arc.invOrdinal < boundary) {
-            return arc.invOrdinal;
-        }
-        if (arc.invOrdinal >= boundary) {
-            return arc.invOrdinal;
+        if (arc.resOrdinal !== null || arc.invOrdinal < recentOpenArcCutoff) continue;
+        if (arc.invOrdinal >= publicationFloorOrdinal || arc.invOrdinal >= boundary) {
+            boundary = arc.invOrdinal;
+            break;
         }
     }
-    return boundary;
+    // An open-arc boundary can land inside an overlapping completed arc, so the completed fence runs again.
+    return fenceBoundaryForCompletedToolArcs(boundary, arcs, publicationFloorOrdinal);
 }
 
 function tokenForMessage(
+    sessionId: string,
     message: RawMessage,
     options: TrueRawTokenIndexBuildOptions,
 ): TrueRawTokenBreakdown {
-    const key = messageCacheKey(message, options);
+    const key = messageCacheKey(sessionId, message, options);
     const cached = messageEstimateCache.get(key);
     if (cached) return cloneBreakdown(cached.breakdown);
     const breakdown = estimateTrueRawMessageTokens(message, options);
@@ -597,7 +661,7 @@ export function buildTrueRawTokenIndex(
         const total =
             stored !== undefined && stored !== null
                 ? stored
-                : tokenForMessage(message, options).total;
+                : tokenForMessage(sessionId, message, options).total;
         tokensByOrdinal.set(message.ordinal, total);
         idsByOrdinal.set(message.ordinal, message.id);
         const relative = message.ordinal - firstOrdinal + 1;
@@ -677,40 +741,33 @@ export function buildTrueRawTokenIndex(
 }
 
 /**
- * Every field `estimateNonToolPart` and `defaultImageTokenHeuristic` read from a non-tool part.
- * A field missing here lets content change without changing the fingerprint.
- */
-const TOKENIZED_PART_FIELDS = [
-    "text",
-    "thinking",
-    "reasoning",
-    "content",
-    "source",
-    "alt",
-    "description",
-    "width",
-    "height",
-] as const;
-
-/**
- *
- * The fingerprint hashes only the content-bearing fields counted by the tokenizer.
- * The fingerprint excludes the JSON envelope and `updated-at` metadata.
+ * The fingerprint hashes the content the tokenizer counts for each part.
+ * Text-bearing parts contribute only their counted text, so `updated-at` metadata cannot perturb them.
+ * Structured parts are tokenized as a whole, so they hash as a whole.
  */
 function partContentFingerprint(part: unknown): string {
     if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
     const tool = toolSignalFromPart(part);
     if (tool) {
-        return contentStringsHash([tool.inputText, tool.outputText]);
+        return contentStringsHash(["tool", tool.inputText, tool.outputText]);
     }
-    const fields: string[] = [];
-    for (const name of TOKENIZED_PART_FIELDS) {
-        const value = part[name];
-        if (typeof value === "string" || typeof value === "number") {
-            fields.push(`${name}=${String(value)}`);
-        }
+    const content = classifyNonToolPart(part);
+    switch (content.kind) {
+        case "skip":
+            return contentStringsHash(["skip"]);
+        case "text":
+        case "reasoning":
+            return contentStringsHash([content.kind, content.text]);
+        case "image":
+            return contentStringsHash([
+                "image",
+                stringValue(part.width),
+                stringValue(part.height),
+                content.altText ?? "",
+            ]);
+        case "structured":
+            return contentStringsHash(["structured", stableStringify(part)]);
     }
-    return contentStringsHash(fields);
 }
 
 export function computeRawRangeFingerprint(
@@ -740,7 +797,7 @@ export function invalidateTrueRawTokenCache(args: {
         | "provider.unregistered"
         | "schema.migration";
 }): void {
-    const sessionNeedle = args.sessionId ? `${args.sessionId}` : null;
+    const sessionNeedle = args.sessionId ? `\0${args.sessionId}\0` : null;
     const messageNeedle = args.messageId ? `\0${args.messageId}\0` : null;
     for (const [key, value] of messageEstimateCache) {
         const sessionMatches = sessionNeedle === null || key.includes(sessionNeedle);
