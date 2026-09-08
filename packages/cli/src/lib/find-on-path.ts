@@ -53,7 +53,7 @@ export function isExecutableFile(path: string, isWindows = process.platform === 
     }
 }
 
-/** Global-install launcher locations for `bun` and `npm`. */
+/** Global-install launcher locations for `bun`, `npm`, and Homebrew. */
 export function packageManagerBinCandidates(
     binary: string,
     platform: NodeJS.Platform,
@@ -61,7 +61,12 @@ export function packageManagerBinCandidates(
     appData?: string,
 ): string[] {
     if (platform !== "win32") {
-        return [join(home, ".bun", "bin", binary), join(home, ".local", "bin", binary)];
+        return [
+            join(home, ".bun", "bin", binary),
+            join(home, ".local", "bin", binary),
+            `/usr/local/bin/${binary}`,
+            `/opt/homebrew/bin/${binary}`,
+        ];
     }
     const npmRoot = appData?.trim();
     return [

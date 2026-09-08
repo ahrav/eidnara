@@ -96,6 +96,8 @@ describe("Pi fallback discovery", () => {
             join(home, ".pi", "bin", "pi"),
             join(home, ".bun", "bin", "pi"),
             join(home, ".local", "bin", "pi"),
+            "/usr/local/bin/pi",
+            "/opt/homebrew/bin/pi",
         ]);
     });
 
