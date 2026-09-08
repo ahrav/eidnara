@@ -484,6 +484,16 @@ function invalid(detail: string): BootstrapError {
 }
 
 /**
+ * Sparse files can report large logical sizes without occupying blocks.
+ * A debug `eidnara-host` with full debuginfo measures about 380 MiB. commentlint: allow(JUDGE)
+ */
+const MAX_LAUNCHER_BYTES = 1 << 30;
+
+function assertLauncherSize(size: number, what: string): void {
+    if (size > MAX_LAUNCHER_BYTES) throw invalid(`${what} exceeds the launcher size cap`);
+}
+
+/**
  * Reading until live EOF lets an endlessly appended object block the reader indefinitely.
  * A digest covers only bytes read; a grown object produces a corruption-like mismatch.
  */
@@ -577,6 +587,7 @@ export function revalidateRetainedBootstrap(
     try {
         const stat = fstatSync(fd);
         if (!stat.isFile()) throw invalid("retained bootstrap is not a regular file");
+        assertLauncherSize(stat.size, "retained bootstrap");
         if (stat.nlink !== 1) throw invalid("retained bootstrap is not single-link");
         if (stat.uid !== uid) throw invalid("retained bootstrap has a foreign owner");
         if ((stat.mode & 0o077) !== 0)
@@ -751,6 +762,7 @@ export function stageBootstrap(options: {
     try {
         const before = fstatSync(sourceFd);
         if (!before.isFile()) throw invalid("launcher source is not a regular file");
+        assertLauncherSize(before.size, "launcher source");
         mkdirSync(destDir, { recursive: true, mode: 0o700 });
         destFd = openStagingDir(destDir, uid);
         const destBefore = fstatSync(destFd);

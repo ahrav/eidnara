@@ -14,6 +14,7 @@ import {
     readFileSync,
     rmSync,
     symlinkSync,
+    truncateSync,
     writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
@@ -317,6 +318,41 @@ describe("install layout resolution (U3 scenario 4)", () => {
                 layout: "npm_hoisted",
                 packageDir: path.join(root, "node_modules", PKG),
             });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a dangling ancestor symlink is absence, so the walk still climbs; a redirecting one is refused", () => {
+        const root = tempDir("eidnara-layout-dangling-");
+        try {
+            const hoisted = path.join(root, "node_modules", PKG);
+            mkdirSync(hoisted, { recursive: true });
+
+            // A dangling `node_modules` cannot contain the candidate, exactly like a deleted one.
+            const dangling = path.join(root, "dangling");
+            mkdirSync(dangling);
+            symlinkSync(path.join(root, "nonexistent"), path.join(dangling, "node_modules"));
+            expect(
+                resolvePayloadPackageDir({ declaringParentRoot: dangling, packageName: PKG }),
+            ).toEqual({ ok: true, layout: "npm_hoisted", packageDir: hoisted });
+
+            // A `node_modules` symlink that resolves to a foreign install is present, so it does
+            // not license climbing, and containment rejects it.
+            const foreign = path.join(root, "foreign", "node_modules", PKG);
+            mkdirSync(foreign, { recursive: true });
+            const redirecting = path.join(root, "redirecting");
+            mkdirSync(redirecting);
+            symlinkSync(
+                path.join(root, "foreign", "node_modules"),
+                path.join(redirecting, "node_modules"),
+            );
+            const resolved = resolvePayloadPackageDir({
+                declaringParentRoot: redirecting,
+                packageName: PKG,
+            });
+            expect(resolved.ok).toBe(false);
+            if (!resolved.ok) expect(resolved.reason).toBe("unsupported_install_layout");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -973,6 +1009,42 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
             expect(existsSync(foreign)).toBe(true);
             expect(existsSync(unrelated)).toBe(true);
             expect(readFileSync(staged.path)).toEqual(bytes);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("an oversized launcher is invalid before any destination effect or hashing", () => {
+        const dir = tempDir("eidnara-size-cap-");
+        try {
+            // A sparse file reports the logical size without allocating blocks, so the
+            // test is fast and the cap, not the digest, is what rejects it.
+            const oversized = path.join(dir, "oversized");
+            writeFileSync(oversized, "", { mode: 0o755 });
+            truncateSync(oversized, (1 << 30) + 1);
+            const digest = "a".repeat(64);
+
+            const destDir = path.join(dir, "store");
+            const stageReason = reasonOf(() =>
+                stageBootstrap({
+                    sourcePath: oversized,
+                    destDir,
+                    expectedSha256: digest,
+                    availableBytesOverride: 1n << 50n,
+                }),
+            );
+            expect(stageReason).toBe("native_payload_invalid");
+            expect(existsSync(destDir)).toBe(false);
+
+            const store = path.join(dir, "retained-store");
+            mkdirSync(store, { mode: 0o700 });
+            const retained = path.join(store, digest);
+            writeFileSync(retained, "", { mode: 0o500 });
+            execFileSync("chmod", ["0700", retained]);
+            truncateSync(retained, (1 << 30) + 1);
+            execFileSync("chmod", ["0500", retained]);
+            const retainedReason = reasonOf(() => revalidateRetainedBootstrap(retained, digest));
+            expect(retainedReason).toBe("native_payload_invalid");
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
