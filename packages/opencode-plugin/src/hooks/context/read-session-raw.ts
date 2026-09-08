@@ -126,6 +126,41 @@ function attachRawPartVersion(value: unknown, timeUpdated: number | undefined): 
     return value;
 }
 
+/**
+ * Message ids per `IN (...)` query. Each id uses one bind parameter; chunking keeps every statement under
+ * SQLite's compile-time variable limit, which is 32766 by default, so a large page or tail cannot fail with
+ * `too many SQL variables`.
+ */
+const PART_LOOKUP_CHUNK = 800;
+
+/** Parts for the given message ids, grouped by message and ordered by `time_created, id` within each message. */
+function readRawPartsByMessageId(
+    db: Database,
+    sessionId: string,
+    messageIds: readonly string[],
+): Map<string, unknown[]> {
+    const partsByMessageId = new Map<string, unknown[]>();
+    for (let i = 0; i < messageIds.length; i += PART_LOOKUP_CHUNK) {
+        const slice = messageIds.slice(i, i + PART_LOOKUP_CHUNK);
+        const placeholders = slice.map(() => "?").join(", ");
+        const partRows = db
+            .prepare(
+                `SELECT message_id, data, time_updated
+                 FROM part
+                 WHERE session_id = ? AND message_id IN (${placeholders})
+                 ORDER BY time_created ASC, id ASC`,
+            )
+            .all(sessionId, ...slice)
+            .filter(isRawPartRow);
+        for (const part of partRows) {
+            const list = partsByMessageId.get(part.message_id) ?? [];
+            list.push(attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated));
+            partsByMessageId.set(part.message_id, list);
+        }
+    }
+    return partsByMessageId;
+}
+
 export function readRawSessionMessagesFromDb(db: Database, sessionId: string): RawMessage[] {
     const messageRows = db
         .prepare(
@@ -172,7 +207,7 @@ interface PagedRawMessageRow extends RawMessageRow {
 }
 
 /**
- * The page limit bounds JSON parsing and per-call work.
+ * The page limit bounds JSON parsing and per-call work. Negative `afterOrdinal` values start at row 1.
  */
 export function readRawSessionMessagePageFromDb(
     db: Database,
@@ -181,7 +216,8 @@ export function readRawSessionMessagePageFromDb(
     limit: number,
     finalWatermark = Number.MAX_SAFE_INTEGER,
 ): RawMessage[] {
-    const remaining = Math.max(0, Math.floor(finalWatermark) - Math.floor(afterOrdinal));
+    const start = Math.max(0, Math.floor(afterOrdinal));
+    const remaining = Math.max(0, Math.floor(finalWatermark) - start);
     const pageSize = Math.min(Math.max(1, Math.floor(limit)), remaining);
     if (pageSize === 0) return [];
 
@@ -194,33 +230,22 @@ export function readRawSessionMessagePageFromDb(
              ORDER BY time_created ASC, id ASC
              LIMIT ? OFFSET ?`,
         )
-        .all(sessionId, pageSize, Math.max(0, Math.floor(afterOrdinal)))
+        .all(sessionId, pageSize, start)
         .filter(isRawMessageRow)
         .map(
             (row, index): PagedRawMessageRow => ({
                 ...row,
-                ordinal: Math.floor(afterOrdinal) + index + 1,
+                ordinal: start + index + 1,
             }),
         );
 
     if (messageRows.length === 0) return [];
 
-    const placeholders = messageRows.map(() => "?").join(", ");
-    const partRows = db
-        .prepare(
-            `SELECT message_id, data, time_updated
-             FROM part
-             WHERE session_id = ? AND message_id IN (${placeholders})
-             ORDER BY time_created ASC, id ASC`,
-        )
-        .all(sessionId, ...messageRows.map((row) => row.id))
-        .filter(isRawPartRow);
-    const partsByMessageId = new Map<string, unknown[]>();
-    for (const part of partRows) {
-        const list = partsByMessageId.get(part.message_id) ?? [];
-        list.push(attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated));
-        partsByMessageId.set(part.message_id, list);
-    }
+    const partsByMessageId = readRawPartsByMessageId(
+        db,
+        sessionId,
+        messageRows.map((row) => row.id),
+    );
 
     return messageRows.map((row) => {
         const info = parseJsonRecord(row.data);
@@ -378,26 +403,11 @@ export function readRawSessionTailFromDb(
         return !(info?.summary === true && info?.finish === "stop");
     });
 
-    const ids = filtered.map((row) => row.id);
-    const partsByMessageId = new Map<string, unknown[]>();
-    if (ids.length > 0) {
-        const CHUNK = 800;
-        for (let i = 0; i < ids.length; i += CHUNK) {
-            const slice = ids.slice(i, i + CHUNK);
-            const placeholders = slice.map(() => "?").join(",");
-            const partRows = db
-                .prepare(
-                    `SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND message_id IN (${placeholders}) ORDER BY time_created ASC, id ASC`,
-                )
-                .all(sessionId, ...slice)
-                .filter(isRawPartRow);
-            for (const part of partRows) {
-                const list = partsByMessageId.get(part.message_id) ?? [];
-                list.push(attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated));
-                partsByMessageId.set(part.message_id, list);
-            }
-        }
-    }
+    const partsByMessageId = readRawPartsByMessageId(
+        db,
+        sessionId,
+        filtered.map((row) => row.id),
+    );
 
     const messages: RawMessage[] = [];
     let ord = baseOrdinal;

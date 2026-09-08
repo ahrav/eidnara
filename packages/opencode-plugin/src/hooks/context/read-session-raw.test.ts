@@ -134,6 +134,70 @@ describe("raw session message id ordinals", () => {
                 ["m-tool-result", 7],
             ]);
             expect(countRawSessionMessageOrdinalsFromDb(db, "session")).toBe(7);
+
+            // A negative cursor reads from the start, numbers the first row 1, and stays inside the watermark.
+            expect(
+                readRawSessionMessagePageFromDb(db, "session", -1, 100, 5).map(
+                    ({ id, ordinal }) => [id, ordinal],
+                ),
+            ).toEqual([
+                ["m-user", 1],
+                ["m-assistant", 2],
+                ["m-weird", 3],
+                ["m-malformed", 4],
+                ["m-array", 5],
+            ]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    it("reads a page wider than one part-lookup chunk with every part attached in order", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec(`
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE part (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+            `);
+            const insertMessage = db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, 'session', ?, ?, ?)",
+            );
+            const insertPart = db.prepare(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, 'session', ?, ?, ?)",
+            );
+            const messageCount = 1_700;
+            db.exec("BEGIN");
+            for (let i = 1; i <= messageCount; i += 1) {
+                const id = `m-${String(i).padStart(5, "0")}`;
+                insertMessage.run(id, i, i, JSON.stringify({ role: "user" }));
+                insertPart.run(`${id}-b`, id, i * 10 + 2, i * 10 + 2, JSON.stringify({ seq: 2 }));
+                insertPart.run(`${id}-a`, id, i * 10 + 1, i * 10 + 1, JSON.stringify({ seq: 1 }));
+            }
+            db.exec("COMMIT");
+
+            const page = readRawSessionMessagePageFromDb(db, "session", 0, messageCount);
+            expect(page.length).toBe(messageCount);
+            expect(page[0]).toMatchObject({ id: "m-00001", ordinal: 1 });
+            expect(page[messageCount - 1]).toMatchObject({
+                id: `m-${String(messageCount).padStart(5, "0")}`,
+                ordinal: messageCount,
+            });
+            for (const message of page) {
+                expect(message.parts).toEqual([{ seq: 1 }, { seq: 2 }]);
+            }
         } finally {
             closeQuietly(db);
         }
