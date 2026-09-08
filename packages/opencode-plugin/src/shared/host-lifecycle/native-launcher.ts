@@ -77,7 +77,7 @@ export interface NativeLaunchOptions {
     payloadManifestDigest?: string;
     /** JSON-serializable startup envelope written to stdin, or null. */
     envelope?: unknown;
-    /** Absolute wall-clock budget; the child is killed at expiry. */
+    /** Wall-clock budget for the whole call, measured from entry. */
     deadlineMs: number;
     /** Additional child environment. `XDG_DATA_HOME` is owned by `dataRoot` and may not appear here. */
     env?: Record<string, string>;
@@ -200,6 +200,8 @@ export async function runNativeLifecycle(
     target: NativeLaunchTarget,
     options: NativeLaunchOptions,
 ): Promise<DaemonResultV1> {
+    // The budget covers the whole call, including pre-spawn work; the child receives the remaining time.
+    const startedAt = performance.now();
     const args: string[] = [options.command];
     if (options.payloadDir !== undefined) {
         args.push("--payload-dir", options.payloadDir);
@@ -286,6 +288,15 @@ export async function runNativeLifecycle(
     } else {
         executable = target.path;
     }
+    // Serializing a large envelope can consume the budget on its own; spawning
+    // a mutating command after that would give it a fresh full deadline.
+    const remainingMs = options.deadlineMs - (performance.now() - startedAt);
+    if (remainingMs <= 0) {
+        throw new NativeLaunchError(
+            "timeout",
+            "native lifecycle deadline expired before the child was spawned",
+        );
+    }
     try {
         child = spawn(executable, args, {
             shell: false,
@@ -306,7 +317,7 @@ export async function runNativeLifecycle(
     } else {
         child.stdin?.end(serializedEnvelope);
     }
-    const collected = await collectChild(child, options.deadlineMs);
+    const collected = await collectChild(child, remainingMs);
     if (collected.timedOut) {
         throw new NativeLaunchError("timeout", "native lifecycle command exceeded its deadline");
     }

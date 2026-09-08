@@ -259,6 +259,61 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         expect(Date.now() - started).toBeLessThan(5_000);
     }, 10_000);
 
+    test("the deadline clock starts at entry, so slow pre-spawn work spawns no child", async () => {
+        // `toJSON` consumes the deadline budget before child spawning.
+        const sentinel = path.join(dir, "late-spawn-ran");
+        const binary = scriptBinary(dir, `touch ${sentinel}`);
+        const busyWaitMs = 150;
+        const envelope = {
+            toJSON() {
+                const until = performance.now() + busyWaitMs;
+                while (performance.now() < until) {
+                    // spin
+                }
+                return { probe: true };
+            },
+        };
+        let error: NativeLaunchError | null = null;
+        try {
+            await runNativeLifecycle(
+                { kind: "test-binary", path: binary },
+                { command: "start", dataRoot: dir, deadlineMs: 50, envelope },
+            );
+        } catch (caught) {
+            error = caught as NativeLaunchError;
+        }
+        expect(error?.code).toBe("timeout");
+        expect(error?.message).toContain("before the child was spawned");
+        expect(existsSync(sentinel)).toBe(false);
+    }, 10_000);
+
+    test("the child receives only the budget remaining after pre-spawn work", async () => {
+        const busyWaitMs = 700;
+        const deadlineMs = 1_000;
+        const envelope = {
+            toJSON() {
+                const until = performance.now() + busyWaitMs;
+                while (performance.now() < until) {
+                    // spin
+                }
+                return { probe: true };
+            },
+        };
+        const binary = scriptBinary(dir, `sleep 30`);
+        const started = performance.now();
+        let error: NativeLaunchError | null = null;
+        try {
+            await runNativeLifecycle(
+                { kind: "test-binary", path: binary },
+                { command: "probe", dataRoot: dir, deadlineMs, envelope },
+            );
+        } catch (caught) {
+            error = caught as NativeLaunchError;
+        }
+        expect(error?.code).toBe("timeout");
+        expect(performance.now() - started).toBeLessThan(busyWaitMs + deadlineMs);
+    }, 10_000);
+
     test("an exhausted deadline is rejected before any child is spawned", async () => {
         // setTimeout coerces a nonpositive or non-finite delay to 1ms, so
         // without a pre-spawn check a mutating transaction would start and be
