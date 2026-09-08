@@ -2,6 +2,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
+import { cargoTestEvidence } from "./mutation-evidence-output";
 
 type CommandResult = {
     exit_status: number;
@@ -29,9 +30,6 @@ const families: Record<string, { caseIndex: number; family: string }> = {
 
 const TEXT_PATH = (index: number) => `cases[${index}].input.messages[0].content[0].kind.text`;
 
-/* Compile noise and target paths vary per host; the harness lines are the evidence. */
-const EVIDENCE_LINE = /^(test |test result:|thread '|assertion `|\s+left:|\s+right:|failures:)/;
-
 function runGoldens(): CommandResult {
     const result = Bun.spawnSync({
         cmd: command.split(" "),
@@ -41,11 +39,12 @@ function runGoldens(): CommandResult {
         env: process.env,
     });
     const decoder = new TextDecoder();
-    const output = `${decoder.decode(result.stdout)}${decoder.decode(result.stderr)}`
-        .split("\n")
-        .filter((line) => EVIDENCE_LINE.test(line))
-        .join("\n");
-    return { exit_status: result.exitCode, output };
+    return {
+        exit_status: result.exitCode,
+        output: cargoTestEvidence(
+            `${decoder.decode(result.stdout)}${decoder.decode(result.stderr)}`,
+        ),
+    };
 }
 
 function mutatedGolden(

@@ -67,6 +67,7 @@ function fixtureFiles(): FixtureFiles {
                             verifier: "demo/verifier",
                             binding_status: "declared",
                             invalid_state_evidence: ["false success narration fixture"],
+                            oracle_dependencies: [],
                         },
                         blocked_by: [],
                         evidence_refs: [],

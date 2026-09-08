@@ -66,9 +66,11 @@ bound to that verifier. Each crafted invalid state must still produce the
 reviewed red result before merge. Keep observed-red and reverted-green evidence.
 
 The contributor gate derives each bound verifier's bytes from the trusted event
-base and rejects any drift. The gate does not claim replay occurred and has no
-replay-evidence ingestion path. Land verifier changes only after adding reviewed
-replay support to that gate.
+base and rejects any drift. A binding's `oracle_dependencies` name the other
+package modules whose bytes decide the verdict, such as the cache-bust oracle,
+and the gate freezes them with the bound module. The gate does not claim replay
+occurred and has no replay-evidence ingestion path. Land verifier changes only
+after adding reviewed replay support to that gate.
 
 ## Publication and privacy
 

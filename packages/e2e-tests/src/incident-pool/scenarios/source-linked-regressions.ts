@@ -67,6 +67,7 @@ export const FIRST_RENDER_A1_CHECKS = [
 ] as const;
 
 export const FIRST_RENDER_A3_CHECKS = [
+    "check-a3-defer-request-floor",
     "check-a3-reduce-on-wire",
     "check-a3-zero-prefix-busts",
     "check-a3-reduce-retained-final-wire",
@@ -91,6 +92,7 @@ export interface FirstRenderDeferObservation extends CacheStabilityEvidence {
 }
 
 export interface AgedCtxReduceObservation extends CacheStabilityEvidence {
+    mainRequestCount: number;
     sawReduceOnWire: boolean;
     finalWireHasCtxReduce: boolean;
 }
@@ -265,6 +267,7 @@ export async function driveAgedCtxReduceSurvival(
     const requests = mainAgentRequests(h.mock.requests());
     const finalBody = requests.at(-1)?.body;
     return {
+        mainRequestCount: requests.length,
         sawReduceOnWire,
         finalWireHasCtxReduce:
             finalBody !== undefined && hasCtxReducePair(finalBody, FIRST_RENDER_A3_FIXTURE.callId),
@@ -277,6 +280,10 @@ export function verifyAgedCtxReduceSurvival(
 ): RegressionResult {
     const stability = cacheStabilityChecks("a3", observation, FIRST_RENDER_A3_FIXTURE.turns);
     return resultFromChecks([
+        {
+            id: "check-a3-defer-request-floor",
+            passed: observation.mainRequestCount >= FIRST_RENDER_A3_FIXTURE.turns,
+        },
         { id: "check-a3-reduce-on-wire", passed: observation.sawReduceOnWire },
         stability.busts,
         {
@@ -516,8 +523,11 @@ export async function driveThinkingNudgeAnchor(
     await h.sendPrompt(sessionId, "turn 3 — defer pass must not mutate signed msg");
 
     const reqs = mainRequests(h);
-    const lastBody = reqs.at(-1)?.body ?? {};
-    const assistants = messagesOf(lastBody).filter((m) => m.role === "assistant");
+    // The mock accepts what Anthropic would reject, so a mutation on turn 2 that is cleared before turn 3 is visible only on turn 2's request.
+    const inspected = reqs.slice(1).map((request) => request.body);
+    const assistants = inspected.flatMap((body) =>
+        messagesOf(body).filter((m) => m.role === "assistant"),
+    );
 
     const nudgeMarkerFound = assistants.some((asst) => {
         const serialized = JSON.stringify(asst.content);
@@ -528,7 +538,10 @@ export async function driveThinkingNudgeAnchor(
         mainRequestCount: reqs.length,
         assistantCandidates: assistants.length,
         nudgeMarkerFound,
-        thinkingBlockCount: findThinkingBlocks(lastBody).length,
+        thinkingBlockCount: inspected.reduce(
+            (count, body) => count + findThinkingBlocks(body).length,
+            0,
+        ),
     };
 }
 
@@ -920,11 +933,13 @@ function normalizeFirstRenderA1(raw: JsonValue): FirstRenderDeferObservation {
 
 function normalizeFirstRenderA3(raw: JsonValue): AgedCtxReduceObservation {
     const value = exactPrimitiveObservation(raw, "parity-a3", {
+        mainRequestCount: "number",
         sawReduceOnWire: "boolean",
         finalWireHasCtxReduce: "boolean",
         ...CACHE_STABILITY_FIELDS,
     });
     return {
+        mainRequestCount: numberField(value, "mainRequestCount"),
         sawReduceOnWire: booleanField(value, "sawReduceOnWire"),
         finalWireHasCtxReduce: booleanField(value, "finalWireHasCtxReduce"),
         ...cacheStabilityFields(value),

@@ -2,6 +2,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
+import { bunTestEvidence } from "./mutation-evidence-output";
 
 type CommandResult = { exit_status: number; output: string };
 
@@ -68,8 +69,15 @@ writeFileSync(
                         after: replacement,
                         changed: true,
                     },
-                    observed_failure: observedFailure,
-                    reverted_rerun: { ...revertedRerun, status: "pass" },
+                    observed_failure: {
+                        ...observedFailure,
+                        output: bunTestEvidence(observedFailure.output),
+                    },
+                    reverted_rerun: {
+                        ...revertedRerun,
+                        output: bunTestEvidence(revertedRerun.output),
+                        status: "pass",
+                    },
                     adequacy_finding: null,
                 },
             ],

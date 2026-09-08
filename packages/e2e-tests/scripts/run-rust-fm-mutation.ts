@@ -2,6 +2,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
+import { bunTestEvidence } from "./mutation-evidence-output";
 
 type MutationCase = {
     name: string;
@@ -120,9 +121,10 @@ for (const mutation of mutations[drill]) {
             after: mutation.replacement,
             changed: before !== after,
         },
-        observed_failure: observedFailure,
+        observed_failure: { ...observedFailure, output: bunTestEvidence(observedFailure.output) },
         reverted_rerun: {
             ...revertedRerun,
+            output: bunTestEvidence(revertedRerun.output),
             status: revertedRerun.exit_status === 0 ? "pass" : "fail",
         },
         adequacy_finding:

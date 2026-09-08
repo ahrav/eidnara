@@ -105,6 +105,8 @@ export interface VerifierBinding {
     verifier: string;
     binding_status: BindingStatus;
     invalid_state_evidence: string[];
+    /** Package-relative modules, beyond the bound module, whose bytes decide the verdict. */
+    oracle_dependencies: string[];
 }
 
 export interface SemanticRevision {
@@ -311,7 +313,7 @@ function parseVerifierBinding(raw: unknown, label: string): VerifierBinding {
     const record = asRecord(raw, label);
     requireExactKeys(
         record,
-        ["driver", "verifier", "binding_status", "invalid_state_evidence"],
+        ["driver", "verifier", "binding_status", "invalid_state_evidence", "oracle_dependencies"],
         label,
     );
     const evidence = asArray(record.invalid_state_evidence, `${label}.invalid_state_evidence`).map(
@@ -322,11 +324,18 @@ function parseVerifierBinding(raw: unknown, label: string): VerifierBinding {
     if (new Set(evidence).size !== evidence.length) {
         fail(`${label}.invalid_state_evidence`, "must not contain duplicates");
     }
+    const dependencies = asArray(record.oracle_dependencies, `${label}.oracle_dependencies`).map(
+        (entry, i) => asNonEmptyString(entry, `${label}.oracle_dependencies[${i}]`),
+    );
+    if (new Set(dependencies).size !== dependencies.length) {
+        fail(`${label}.oracle_dependencies`, "must not contain duplicates");
+    }
     return {
         driver: asNonEmptyString(record.driver, `${label}.driver`),
         verifier: asNonEmptyString(record.verifier, `${label}.verifier`),
         binding_status: asEnum(record.binding_status, BINDING_STATUSES, `${label}.binding_status`),
         invalid_state_evidence: evidence,
+        oracle_dependencies: dependencies,
     };
 }
 

@@ -641,15 +641,17 @@ export function boundVerifierFiles(catalog: IncidentCatalog): string[] {
             if (!EXECUTABLE_LANES.includes(variant.lane)) continue;
             const binding = variant.verifier_binding;
             if (!binding) continue;
-            for (const reference of [binding.driver, binding.verifier]) {
-                const path = reference.split("#")[0]?.trim() ?? "";
+            const modules = [binding.driver, binding.verifier].map(
+                (reference) => reference.split("#")[0]?.trim() ?? "",
+            );
+            for (const path of [...modules, ...binding.oracle_dependencies]) {
                 if (
                     path.length === 0 ||
                     path.startsWith("/") ||
                     path.split(/[\\/]/).includes("..")
                 ) {
                     throw new Error(
-                        `variant ${variant.id} verifier binding ${reference} is not a confined relative path`,
+                        `variant ${variant.id} verifier binding ${path} is not a confined relative path`,
                     );
                 }
                 paths.add(path);

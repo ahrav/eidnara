@@ -92,6 +92,7 @@ function variantFixture(id: string, overrides: Partial<IncidentVariant> = {}): I
             verifier: "demo/verifier",
             binding_status: "declared",
             invalid_state_evidence: ["stale-plus-current coexistence fixture"],
+            oracle_dependencies: [],
         },
         blocked_by: [],
         evidence_refs: [],

@@ -57,8 +57,11 @@ describe("catalog-bound executable verifier gate", () => {
         const files = boundVerifierFiles(committedCatalog());
         expect(files.length).toBeGreaterThan(0);
         for (const file of files) {
-            expect(file.startsWith("src/incident-pool/scenarios/")).toBe(true);
+            expect(file.startsWith("src/")).toBe(true);
         }
+        expect(files.some((file) => file.startsWith("src/incident-pool/scenarios/"))).toBe(true);
+        // The A1/A3 verdicts come from `analyzePasses`, so the gate freezes the oracle module with the bound scenario module.
+        expect(files).toContain("src/cache-analysis.ts");
         expect(builtinIncidentCaseRegistry().size).toBe(2);
     });
 

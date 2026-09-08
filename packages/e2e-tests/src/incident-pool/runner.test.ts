@@ -96,6 +96,7 @@ function rawVariant(spec: VariantSpec): Record<string, unknown> {
             verifier: "demo#caseVerifier",
             binding_status: spec.bindingStatus ?? "live",
             invalid_state_evidence: ["crafted stale-plus-current coexistence"],
+            oracle_dependencies: [],
         },
         blocked_by: contract.blocked_by,
         evidence_refs: [],
