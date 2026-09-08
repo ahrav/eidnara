@@ -35,7 +35,7 @@ import {
 } from "../lib/pi-helpers";
 import { isPromptCancelledError, type PromptIO, promptIO } from "../lib/prompts";
 import { standaloneVersion } from "../lib/semver";
-import { printableBlock } from "../lib/terminal-text";
+import { printableBlock, printableLine } from "../lib/terminal-text";
 import { compareVersionStrings } from "../lib/version";
 import { writePiSettingsPackage } from "./setup-pi";
 
@@ -121,6 +121,8 @@ function describeVersionOutput(output: string): string {
 
 /** The plugin log is append-only and never rotated, so reads of it are bounded. */
 const LOG_TAIL_BYTES = 64 * 1024;
+/** Upper bound for one picker row: a project path plus a session id. */
+const SESSION_LABEL_MAX_LENGTH = 120;
 
 function readLastNonEmptyLine(path: string): string | undefined {
     return readLogTailLines(path, LOG_TAIL_BYTES)
@@ -342,6 +344,7 @@ async function runHealthChecks(options: {
         // named by EIDNARA_LOG_PATH) is a broken logging setup, not a doctor crash.
         try {
             const stat = statSync(logPath);
+            if (!stat.isFile()) throw new Error("not a regular file");
             const sizeKb = (stat.size / 1024).toFixed(0);
             const lastLine = readLastNonEmptyLine(logPath);
             add(results, "info", `Log file: ${logPath} (${sizeKb} KB)`);
@@ -494,8 +497,10 @@ async function runIssueFlow(options: {
             const choice = await options.prompts.selectOne(
                 "Which Pi session is this issue about? (filters log lines from other sessions)",
                 [
+                    // Session ids and directories come from the filesystem and JSONL headers, so the
+                    // label is flattened and bounded before it reaches the terminal.
                     ...report.recentSessions.map((session, index) => ({
-                        label: `${session.directory} — ${session.sessionId}${index === 0 ? " (most recent)" : ""}`,
+                        label: `${printableLine(`${session.directory} — ${session.sessionId}`, SESSION_LABEL_MAX_LENGTH)}${index === 0 ? " (most recent)" : ""}`,
                         value: session.sessionId,
                     })),
                     {

@@ -142,16 +142,20 @@ export function getPiAgentDir(): string {
 }
 
 /**
- * Whether `envFirstHomeDir()` can resolve a home. Doctors probe this before building user-level
- * paths so a missing home degrades to a reported failure instead of aborting the run.
+ * `envFirstHomeDir()` for callers that degrade without a home: binary detectors skip their
+ * home-relative candidates and doctors report user-level paths as unavailable, instead of
+ * aborting the run.
  */
-export function hasHomeDir(): boolean {
+export function tryEnvFirstHomeDir(): string | null {
     try {
-        envFirstHomeDir();
-        return true;
+        return envFirstHomeDir();
     } catch {
-        return false;
+        return null;
     }
+}
+
+export function hasHomeDir(): boolean {
+    return tryEnvFirstHomeDir() !== null;
 }
 
 /** Without a home directory or `PI_CODING_AGENT_DIR`, `getPiAgentDir()` has no base a doctor may inspect or write. */

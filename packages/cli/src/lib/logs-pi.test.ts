@@ -208,7 +208,7 @@ describe("bundleIssueReport session filtering", () => {
         });
 
         expect(bundled.bodyMarkdown).toContain("<log unreadable: ");
-        expect(bundled.bodyMarkdown).toContain("EISDIR");
+        expect(bundled.bodyMarkdown).toContain("not a regular file");
         expect(bundled.bodyMarkdown).toContain("## Diagnostics");
     });
 

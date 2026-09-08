@@ -604,6 +604,89 @@ describe("Pi doctor", () => {
         expect(report).not.toContain("from-cwd");
     });
 
+    it("flattens and bounds hostile session labels before opening the picker", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const originalConsoleLog = console.log;
+        console.log = () => {};
+        const seenLabels: string[] = [];
+        class CaptureLabels extends MockPrompts {
+            override async selectOne(_message: string, options: SelectOption[]): Promise<string> {
+                seenLabels.push(...options.map((option) => option.label));
+                return "__all__";
+            }
+        }
+        const prompts = new CaptureLabels({ texts: ["Title", "Description"] });
+        const hostileDirectory = `${cwd}\u001b[2K\rforged\n${"x".repeat(200)}`;
+        const report: PiDiagnosticReport = {
+            timestamp: "2026-04-28T12:34:56.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: join(root, ".pi", "bin", "pi"),
+            piVersion: "0.80.2",
+            settings: {
+                path: join(agentDir, "settings.json"),
+                exists: true,
+                hasEidnaraPackage: true,
+                packages: ["npm:@eidnara/pi"],
+            },
+            configPaths: {
+                agentDir,
+                userConfig: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                projectConfig: join(cwd, ".eidnara", "eidnara.jsonc"),
+            },
+            userConfig: null,
+            projectConfig: {
+                path: join(cwd, ".eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            loadedConfigPaths: [],
+            loadWarnings: [],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
+            recentSessions: [
+                {
+                    sessionId: "session\u202eone",
+                    directory: hostileDirectory,
+                    lastActiveAt: "2026-04-28T12:00:00.000Z",
+                },
+                { sessionId: "two", directory: cwd, lastActiveAt: "2026-04-28T11:00:00.000Z" },
+            ],
+            sessionDiscovery: "ok",
+            historianDumps: {
+                byProject: [],
+                legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+            },
+        };
+
+        const options = baseOptions(root, cwd, prompts);
+        try {
+            const code = await runDoctor({
+                ...options,
+                issue: true,
+                deps: { ...options.deps, collectDiagnostics: async () => report },
+            });
+            expect(code).toBe(0);
+        } finally {
+            console.log = originalConsoleLog;
+        }
+
+        expect(seenLabels).toHaveLength(3);
+        const [hostile] = seenLabels;
+        for (const forbidden of ["\u001b", "\r", "\n", "\u007f", "\u202e"]) {
+            expect(hostile).not.toContain(forbidden);
+        }
+        expect(hostile.length).toBeLessThanOrEqual(120 + " (most recent)".length);
+        expect(hostile).toEndWith("... (most recent)");
+        expect(hostile).toContain("forged");
+    });
+
     it("sanitizes the issue title before passing it to gh issue create", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
@@ -693,6 +776,9 @@ describe("Pi doctor", () => {
         delete process.env.HOME;
         delete process.env.PI_CODING_AGENT_DIR;
         delete process.env.XDG_CONFIG_HOME;
+        // An empty PATH sends binary detection to its home-relative candidates, the path CI takes.
+        const originalPath = process.env.PATH;
+        process.env.PATH = "";
         const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
             throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
                 code: "ERR_SYSTEM_ERROR",
@@ -720,6 +806,8 @@ describe("Pi doctor", () => {
         } finally {
             console.error = originalConsoleError;
             homedirSpy.mockRestore();
+            if (originalPath === undefined) delete process.env.PATH;
+            else process.env.PATH = originalPath;
         }
     });
 

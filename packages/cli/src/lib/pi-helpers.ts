@@ -8,7 +8,7 @@ import {
     invocationSpawnOptions,
 } from "./command-invocation";
 import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
-import { envFirstHomeDir } from "./paths";
+import { envFirstHomeDir, tryEnvFirstHomeDir } from "./paths";
 
 export interface PiBinaryInfo {
     path: string;
@@ -87,7 +87,8 @@ export function detectPiBinary(): PiBinaryInfo | null {
     const fromPath = findOnPath("pi");
     if (fromPath) return { path: fromPath, source: "path" };
 
-    const home = envFirstHomeDir();
+    const home = tryEnvFirstHomeDir();
+    if (home === null) return null;
     const candidates = getPiFallbackCandidates(process.platform, home, process.env.APPDATA);
     const candidate = candidates.find((path) => isExecutableFile(path));
     return candidate ? { path: candidate, source: "home" } : null;

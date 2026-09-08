@@ -1,14 +1,20 @@
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 
 export const DEFAULT_LOG_TAIL_BYTES = 4 * 1024 * 1024;
 
 export const TRUNCATED_RECORD_MARKER = "[truncated record] ";
 
-/** Limits the read to the final `maxBytes` to bound memory use on an unrotated log. */
+/**
+ * Limits the read to the final `maxBytes` to bound memory use on an unrotated log.
+ * A FIFO without a writer blocks a blocking open; O_NONBLOCK lets the function reject it after fstat.
+ */
 export function readLogTailLines(path: string, maxBytes = DEFAULT_LOG_TAIL_BYTES): string[] {
-    const fd = openSync(path, "r");
+    const { O_RDONLY, O_NONBLOCK } = constants;
+    const fd = openSync(path, O_RDONLY | (O_NONBLOCK ?? 0));
     try {
-        const size = fstatSync(fd).size;
+        const stat = fstatSync(fd);
+        if (!stat.isFile()) throw new Error(`not a regular file: ${path}`);
+        const size = stat.size;
         const start = Math.max(0, size - maxBytes);
         // One extra byte before the window tells whether the window opens on a record boundary.
         const readStart = start > 0 ? start - 1 : 0;

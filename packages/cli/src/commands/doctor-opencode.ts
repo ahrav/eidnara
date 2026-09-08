@@ -572,9 +572,18 @@ export async function runDoctor(
 
     const logPath = getEidnaraLogPath("opencode");
     if (existsSync(logPath)) {
-        const logStat = statSync(logPath);
-        const sizeKb = (logStat.size / 1024).toFixed(0);
-        log.info(`Log file: ${logPath} (${sizeKb} KB)`);
+        // A path that exists but is not a readable regular file (a directory or FIFO named by
+        // EIDNARA_LOG_PATH) means the plugin cannot append to it, so the check fails.
+        try {
+            const logStat = statSync(logPath);
+            if (!logStat.isFile()) throw new Error("not a regular file");
+            const sizeKb = (logStat.size / 1024).toFixed(0);
+            log.info(`Log file: ${logPath} (${sizeKb} KB)`);
+        } catch (error) {
+            fail(
+                `Log file ${logPath} exists but could not be read: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
     } else {
         log.info(`Log file: ${logPath} (not yet created)`);
     }

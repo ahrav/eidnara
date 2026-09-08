@@ -23,6 +23,7 @@ const ENV_KEYS = [
     "OPENCODE_CONFIG",
     "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_DISABLE_AUTOCOMPACT",
+    "EIDNARA_LOG_PATH",
 ] as const;
 
 const tempDirs: string[] = [];
@@ -227,6 +228,26 @@ describe("doctor OpenCode conflict repair", () => {
             expect(
                 errors.some((message) => message.startsWith("Leaving conflicts in place:")),
             ).toBe(false);
+        } finally {
+            restore();
+        }
+    });
+
+    it("fails when EIDNARA_LOG_PATH names a directory instead of a log file", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, REGISTERED_TUI);
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const logDir = makeTempDir("eidnara-doctor-log-dir-");
+        process.env.EIDNARA_LOG_PATH = logDir;
+        const { errors, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({});
+
+            expect(code).toBe(1);
+            expect(errors).toContain(
+                `Log file ${logDir} exists but could not be read: not a regular file`,
+            );
         } finally {
             restore();
         }
