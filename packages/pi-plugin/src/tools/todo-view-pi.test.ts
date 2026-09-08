@@ -200,6 +200,24 @@ describe("todowrite tool rendering", () => {
             renderCall({}, identityTheme, { toolCallId: "call-51" } as never).render(80)[0],
         ).toContain("Todos — 1 active");
     });
+    it("renders a todo whose content carries line breaks as one row", () => {
+        const tool = createTodowriteTool();
+        const renderResult = tool.renderResult;
+        if (!renderResult) throw new Error("todowrite renderResult missing");
+        const lines = renderResult(
+            {
+                details: {
+                    todos: [
+                        { id: "m", content: "Line one\nLine two\r\n\tthree", status: "pending" },
+                    ],
+                },
+            },
+            { expanded: false, isPartial: false },
+            identityTheme,
+            {} as never,
+        ).render(120);
+        expect(lines).toEqual(["○ #m Line one Line two three"]);
+    });
     it("caps result rows at 12 with a +N more tail", async () => {
         const tool = createTodowriteTool();
         const todos = Array.from({ length: 14 }, (_, index) => ({
@@ -391,6 +409,33 @@ describe("TodoOverlay lifecycle", () => {
                 toolCallId: "call-session-switch",
             } as never).render(80)[0],
         ).toContain("Todos — 0 active");
+    });
+    it("hides completed tasks the row cap kept off screen along with the visible ones", () => {
+        setTodoSnapshot("ses-overlay", [
+            ...Array.from({ length: 13 }, (_, index) => ({
+                id: `c${index + 1}`,
+                content: `Done ${index + 1}`,
+                status: "completed" as const,
+            })),
+            { id: "p", content: "Pending", status: "pending" },
+        ]);
+        const overlay = new TodoOverlay();
+        const { ui, setWidgetCalls } = makeUi();
+        overlay.setUICtx("ses-overlay", ui);
+        overlay.update("ses-overlay");
+        const widget = widgetFactory(setWidgetCalls[0])(
+            { requestRender: () => undefined },
+            identityTheme,
+        );
+        const firstTurn = widget.render(120);
+        expect(firstTurn).toHaveLength(13); // header + 11 completed + tail
+        expect(firstTurn[firstTurn.length - 1]).toContain("+3 more");
+        expect(firstTurn.join("\n")).not.toContain("Done 12");
+        overlay.hideCompletedTasksFromPreviousTurn();
+        const nextTurn = widget.render(120);
+        expect(nextTurn).toHaveLength(2); // header + the pending task
+        expect(nextTurn.join("\n")).not.toContain("Done");
+        expect(nextTurn[1]).toContain("○ #p Pending");
     });
     it("caps content rows with a +N more tail", () => {
         setTodoSnapshot(

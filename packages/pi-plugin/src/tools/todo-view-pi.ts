@@ -5,6 +5,7 @@ import type {
     Theme,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { normalizeText } from "@eidnara/opencode/hooks/context/read-session-formatting";
 import {
     TITLE_DONE_STATUSES,
     TODO_PRIORITIES,
@@ -217,7 +218,9 @@ function formatTodoLine(todo: TodoItem, theme: Theme, options: { showId?: boolea
     const glyph = theme.fg(STATUS_COLOR[todo.status], STATUS_GLYPH[todo.status]);
     const id = options.showId && todo.id ? `${theme.fg("accent", `#${todo.id}`)} ` : "";
     const color = todo.status === "pending" || todo.status === "in_progress" ? "text" : "dim";
-    let content = theme.fg(color, todo.content);
+    // The widget reports one terminal row per returned string, so a line
+    // break inside `content` would draw rows the widget does not report.
+    let content = theme.fg(color, normalizeText(todo.content));
     if (todo.status === "completed" || todo.status === "cancelled") {
         content = theme.strikethrough(content);
     }
@@ -226,7 +229,7 @@ function formatTodoLine(todo: TodoItem, theme: Theme, options: { showId?: boolea
 
 function formatCommandLine(todo: TodoItem): string {
     const id = todo.id ? `#${todo.id} ` : "";
-    return `  ${STATUS_GLYPH[todo.status]} ${id}${todo.content}`;
+    return `  ${STATUS_GLYPH[todo.status]} ${id}${normalizeText(todo.content)}`;
 }
 
 function lineComponent(renderLines: (width: number) => string[]): Component {
@@ -478,13 +481,18 @@ export class TodoOverlay {
         const truncate = (line: string) => truncateToWidth(line, width, "…");
         const lines = [truncate(heading)];
 
+        // Completed items are recorded before capping so off-screen completions
+        // from this turn do not reappear next turn.
+        for (const { todo, key } of overlayTodos) {
+            if (todo.status === "completed") this.completedTaskIdsPendingHide.add(key);
+        }
+
         const { visible, hiddenCount } = capTodoRows(overlayTodos);
 
-        for (const [index, { todo, key }] of visible.entries()) {
+        for (const [index, { todo }] of visible.entries()) {
             const isLast = index === visible.length - 1 && hiddenCount === 0;
             const branch = theme.fg("dim", isLast ? "└─" : "├─");
             lines.push(truncate(`${branch} ${formatTodoLine(todo, theme, { showId: true })}`));
-            if (todo.status === "completed") this.completedTaskIdsPendingHide.add(key);
         }
 
         if (hiddenCount > 0) {
