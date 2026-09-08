@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { childPathWithLauncherDir } from "./command-invocation";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import {
     describeOpenCodeInstallations,
@@ -84,21 +85,28 @@ describe("OpenCode command execution", () => {
         expect(getOpenCodeCommandInvocation("C:\\npm\\opencode.CMD", ["--version"])).toEqual({
             command: "custom-cmd.exe",
             args: ["/d", "/s", "/v:off", "/c", '""%EIDNARA_OPENCODE_BINARY%" "--version""'],
-            env: { EIDNARA_OPENCODE_BINARY: "C:\\npm\\opencode.CMD" },
+            env: {
+                PATH: childPathWithLauncherDir("C:\\npm\\opencode.CMD"),
+                EIDNARA_OPENCODE_BINARY: "C:\\npm\\opencode.CMD",
+            },
             windowsVerbatimArguments: true,
         });
         expect(getOpenCodeCommandInvocation("C:\\npm\\opencode.bat", ["models"])).toEqual({
             command: "custom-cmd.exe",
             args: ["/d", "/s", "/v:off", "/c", '""%EIDNARA_OPENCODE_BINARY%" "models""'],
-            env: { EIDNARA_OPENCODE_BINARY: "C:\\npm\\opencode.bat" },
+            env: {
+                PATH: childPathWithLauncherDir("C:\\npm\\opencode.bat"),
+                EIDNARA_OPENCODE_BINARY: "C:\\npm\\opencode.bat",
+            },
             windowsVerbatimArguments: true,
         });
     });
 
-    it("invokes native executables directly", () => {
+    it("invokes native executables directly with their directory on the child PATH", () => {
         expect(getOpenCodeCommandInvocation("/usr/local/bin/opencode", ["--version"])).toEqual({
             command: "/usr/local/bin/opencode",
             args: ["--version"],
+            env: { PATH: childPathWithLauncherDir("/usr/local/bin/opencode") },
         });
     });
 

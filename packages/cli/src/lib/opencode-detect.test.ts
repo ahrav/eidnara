@@ -67,6 +67,19 @@ describe("detectOpenCode", () => {
         expect(result).toEqual({ kind: "cli", binary: pathBinary });
     });
 
+    it("finds a Bun global install that is absent from PATH", () => {
+        const bunBin = join(HOME, ".bun", "bin", "opencode");
+        expect(detectOpenCode(deps(new Set([bunBin]), "linux"))).toEqual({
+            kind: "cli",
+            binary: bunBin,
+        });
+        const winBunBin = join(HOME, ".bun", "bin", "opencode.exe");
+        expect(detectOpenCode(deps(new Set([winBunBin]), "win32"))).toEqual({
+            kind: "cli",
+            binary: winBunBin,
+        });
+    });
+
     it("reports desktop when a channel's opencode.settings marker exists", () => {
         const d = deps(new Set());
         const marker = openCodeDesktopSettingsMarkers(d)[0]; // prod channel

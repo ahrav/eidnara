@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { findOnPath, isExecutableFile } from "./find-on-path";
+import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
 export type OpenCodeInstallSource = "PATH" | "home-bin" | "desktop" | "app";
 export interface OpenCodeInstallation {
     /** CLI installs execute `path`; all installations display `path`. */
@@ -64,15 +64,16 @@ function stockCliBinary(d: DetectDeps): string {
         : join(d.home, ".opencode", "bin", "opencode");
 }
 function extraCliCandidates(d: DetectDeps): string[] {
+    const packageManagerLaunchers = packageManagerBinCandidates(
+        "opencode",
+        d.platform,
+        d.home,
+        d.env.APPDATA,
+    );
     if (d.platform === "win32") {
-        const appdata = d.env.APPDATA ?? "";
         const localappdata = d.env.LOCALAPPDATA ?? "";
         const userprofile = d.env.USERPROFILE ?? d.home;
-        const out: string[] = [];
-        if (appdata) {
-            out.push(join(appdata, "npm", "opencode.cmd"));
-            out.push(join(appdata, "npm", "opencode.exe"));
-        }
+        const out: string[] = [...packageManagerLaunchers];
         if (localappdata) {
             out.push(join(localappdata, "Microsoft", "WinGet", "Links", "opencode.exe"));
             out.push(join(localappdata, "opencode", "bin", "opencode.exe"));
@@ -85,7 +86,7 @@ function extraCliCandidates(d: DetectDeps): string[] {
     return [
         "/usr/local/bin/opencode",
         "/opt/homebrew/bin/opencode",
-        join(d.home, ".local", "bin", "opencode"),
+        ...packageManagerLaunchers,
         join(d.home, ".local", "share", "mise", "shims", "opencode"),
         join(d.home, ".asdf", "shims", "opencode"),
         join(d.home, ".volta", "bin", "opencode"),

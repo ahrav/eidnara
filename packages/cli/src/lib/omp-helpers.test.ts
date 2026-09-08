@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
     detectOmpBinary,
     getOmpCommandInvocation,
     getOmpFallbackCandidates,
     getOmpSetting,
+    getOmpVersion,
     parseOmpModelsOutput,
     runOmpCommand,
 } from "./omp-helpers";
@@ -74,14 +75,32 @@ describe("OMP binary discovery", () => {
         });
     });
 
-    it("leaves a native OMP binary path untouched", () => {
+    it("runs a native OMP binary directly with its directory on the child PATH", () => {
         const { binDir } = makePackageRoot();
         process.env.PATH = binDir;
 
         expect(getOmpCommandInvocation("/usr/bin/omp", ["config", "path"])).toEqual({
             command: "/usr/bin/omp",
             args: ["config", "path"],
+            env: { PATH: `/usr/bin${delimiter}${binDir}` },
         });
+    });
+});
+
+describe.if(process.platform !== "win32")("OMP fallback launchers", () => {
+    it("runs an env-shebang launcher whose Bun runtime sits beside it, outside the parent PATH", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-bun-"));
+        roots.push(root);
+        const bunBin = join(root, ".bun", "bin");
+        mkdirSync(bunBin, { recursive: true });
+        // The stand-in "bun" runtime echoes the script's arguments so the test sees it ran.
+        writeFileSync(join(bunBin, "bun"), '#!/bin/sh\nshift\necho "omp/1.2.3 $*"\n');
+        chmodSync(join(bunBin, "bun"), 0o755);
+        writeFileSync(join(bunBin, "omp"), "#!/usr/bin/env bun\n");
+        chmodSync(join(bunBin, "omp"), 0o755);
+        process.env.PATH = join(root, "empty-bin");
+
+        expect(getOmpVersion(join(bunBin, "omp"))).toBe("1.2.3");
     });
 });
 

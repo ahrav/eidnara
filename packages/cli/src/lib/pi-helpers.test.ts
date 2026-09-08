@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { childPathWithLauncherDir } from "./command-invocation";
 import {
     getAvailableModels,
     getPiCommandInvocation,
@@ -127,17 +128,18 @@ describe("Pi command execution", () => {
         expect(getPiCommandInvocation(shim, ["--version"])).toEqual({
             command: comSpec,
             args: ["/d", "/s", "/v:off", "/c", '""%EIDNARA_PI_BINARY%" "--version""'],
-            env: { EIDNARA_PI_BINARY: shim },
+            env: { PATH: childPathWithLauncherDir(shim), EIDNARA_PI_BINARY: shim },
             windowsVerbatimArguments: true,
         });
         expect(getPiVersion(shim)).toBe("0.75.1");
         expect(getAvailableModels(shim)).toEqual(["anthropic/claude-fable-5"]);
     }, 30_000);
 
-    it("invokes a POSIX binary directly", () => {
+    it("invokes a POSIX binary directly with its directory on the child PATH", () => {
         expect(getPiCommandInvocation("/usr/local/bin/pi", ["--version"])).toEqual({
             command: "/usr/local/bin/pi",
             args: ["--version"],
+            env: { PATH: childPathWithLauncherDir("/usr/local/bin/pi") },
         });
     });
 });
