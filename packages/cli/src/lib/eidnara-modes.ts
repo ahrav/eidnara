@@ -32,6 +32,10 @@ export function projectModeOverrides(projectConfigPath: string, shared: EidnaraM
     if (typeof project.enabled === "boolean" && project.enabled !== shared.enabled) {
         overrides.push(`enabled: ${project.enabled}`);
     }
+    const compaction = isRecord(project.compaction) ? project.compaction.enabled : undefined;
+    if (typeof compaction === "boolean" && compaction !== shared.compactionEnabled) {
+        overrides.push(`compaction.enabled: ${compaction}`);
+    }
     const memory = isRecord(project.memory) ? project.memory.enabled : undefined;
     if (typeof memory === "boolean" && memory !== shared.memoryEnabled) {
         overrides.push(`memory.enabled: ${memory}`);
