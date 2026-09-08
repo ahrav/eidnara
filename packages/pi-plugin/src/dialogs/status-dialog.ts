@@ -12,6 +12,10 @@ import {
     resolveExecuteThresholdDetail,
 } from "@eidnara/opencode/hooks/context/event-resolvers";
 import { estimateTokens } from "@eidnara/opencode/hooks/context/read-session-formatting";
+import {
+    calibrateBuckets,
+    resolveModelCalibration,
+} from "@eidnara/opencode/hooks/context/tokenizer-calibration";
 import type { RustSessionStatus } from "@eidnara/opencode/plugin/rpc-handlers";
 import {
     formatThresholdClampNote,
@@ -120,7 +124,7 @@ export async function showStatusDialog(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     deps: StatusDialogDeps,
-    daemonStatus: RustSessionStatus | null = null,
+    daemon: DaemonStatusSource | null = null,
 ): Promise<void> {
     const sessionId = resolveSessionId(ctx);
     if (!sessionId) throw new Error("No active Pi session is available.");
@@ -132,7 +136,7 @@ export async function showStatusDialog(
                 pi,
                 ctx,
                 deps,
-                daemonStatus,
+                daemon,
                 sessionId,
                 memory,
                 theme,
@@ -146,11 +150,18 @@ export async function showStatusDialog(
     );
 }
 
+/** Initial daemon status and the reader that refreshes it. */
+export interface DaemonStatusSource {
+    initial: RustSessionStatus;
+    /** Rejects when the daemon cannot answer; the dialog then keeps the previous snapshot. commentlint: allow(JUDGE) */
+    read: () => Promise<RustSessionStatus>;
+}
+
 interface StatusDialogProps {
     pi: ExtensionAPI;
     ctx: ExtensionCommandContext;
     deps: StatusDialogDeps;
-    daemonStatus: RustSessionStatus | null;
+    daemon: DaemonStatusSource | null;
     sessionId: string;
     /** The memory read taken before the dialog opened; refresh ticks re-read. */
     memory: KernelMemorySnapshot;
@@ -181,19 +192,21 @@ export async function readStatusMemory(
 class StatusDialogComponent implements Component {
     private readonly props: StatusDialogProps;
     private detail: StatusDialogDetail;
+    private daemonStatus: RustSessionStatus | null;
     private refreshTimer: ReturnType<typeof setInterval> | null = null;
     private closed = false;
     private refreshing = false;
 
     constructor(props: StatusDialogProps) {
         this.props = props;
+        this.daemonStatus = props.daemon?.initial ?? null;
         this.detail = buildPiStatusDetail(
             props.pi,
             props.ctx,
             props.deps,
             props.sessionId,
             props.memory,
-            props.daemonStatus,
+            this.daemonStatus,
         );
         this.refreshTimer = setInterval(() => {
             void this.refresh();
@@ -205,25 +218,34 @@ class StatusDialogComponent implements Component {
         if (this.closed || this.refreshing) return;
         this.refreshing = true;
         try {
-            const memory = await readStatusMemory(
-                this.props.deps,
-                this.props.sessionId,
-                this.props.ctx.cwd,
-            );
+            const [memory, daemonStatus] = await Promise.all([
+                readStatusMemory(this.props.deps, this.props.sessionId, this.props.ctx.cwd),
+                this.readDaemonStatus(),
+            ]);
             if (this.closed) return;
+            this.daemonStatus = daemonStatus;
             this.detail = buildPiStatusDetail(
                 this.props.pi,
                 this.props.ctx,
                 this.props.deps,
                 this.props.sessionId,
                 memory,
-                this.props.daemonStatus,
+                daemonStatus,
             );
             this.props.tui.requestRender();
         } catch {
             // On refresh failure, retain the previous detail.
         } finally {
             this.refreshing = false;
+        }
+    }
+
+    private async readDaemonStatus(): Promise<RustSessionStatus | null> {
+        if (!this.props.daemon) return null;
+        try {
+            return await this.props.daemon.read();
+        } catch {
+            return this.daemonStatus;
         }
     }
 
@@ -255,8 +277,7 @@ class StatusDialogComponent implements Component {
         // `drawBorder` reserves two columns for borders and one for padding.
         // `renderInner` receives the remaining width so the segmented bar fills each row.
         // `renderInner` avoids a fixed 56-character cap so the segmented bar fills the available width.
-        const innerWidth = Math.max(20, width - 4);
-        const inner = renderInner(this.detail, this.props.theme, innerWidth);
+        const inner = renderInner(this.detail, this.props.theme, innerWidthFor(width));
         return drawBorder(inner, width, this.props.theme);
     }
 
@@ -354,11 +375,16 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
     return lines;
 }
 
+function innerWidthFor(width: number): number {
+    // 2 chars border + 1 padding each side
+    return Math.max(1, width - 4);
+}
+
 /**
  * The `borderMuted` border distinguishes the overlay from its background.
  */
 function drawBorder(inner: string[], width: number, theme: Theme): string[] {
-    const innerWidth = Math.max(20, width - 4); // 2 chars border + 1 padding each side
+    const innerWidth = innerWidthFor(width);
     const border = (s: string) => theme.fg("borderMuted", s);
 
     const top = border(`╭${"─".repeat(innerWidth + 2)}╮`);
@@ -400,6 +426,10 @@ export function buildPiStatusDetail(
     const contextLimit = daemonContextLimit ?? windowGeometry?.usableSoft ?? 0;
     const usagePercentage =
         contextLimit > 0 && inputTokens > 0 ? (inputTokens / contextLimit) * 100 : 0;
+    // The derivation line divides by `usableSoft`; a daemon limit that differs from it would put
+    // two denominators on one dialog, so the line renders only when both agree.
+    const displayedWindowGeometry =
+        windowGeometry && windowGeometry.usableSoft === contextLimit ? windowGeometry : undefined;
 
     const compartmentCount = positiveNumber(daemonStatus?.compartment_count) ?? 0;
     const compartmentTokens = positiveNumber(daemonStatus?.compartment_tokens) ?? 0;
@@ -430,19 +460,21 @@ export function buildPiStatusDetail(
         // best effort
     }
 
-    // Compartments carry the daemon's measured count; the other local buckets are zero, so the
-    // conversation bucket absorbs the remainder and the buckets sum to exactly inputTokens.
-    const factTokens = 0;
-    const memoryTokens = 0;
-    const docsTokens = 0;
-    const profileTokens = 0;
-    const toolCallTokens = 0;
-    const conversationTokens = Math.max(
-        0,
-        inputTokens - systemPromptTokens - compartmentTokens - toolDefinitionTokens,
-    );
-
     const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+    const calibrated = calibrateBuckets({
+        inputTokens,
+        systemLocal: systemPromptTokens,
+        toolDefsLocal: toolDefinitionTokens,
+        compartmentsLocal: compartmentTokens,
+        factsLocal: 0,
+        memoriesLocal: 0,
+        docsLocal: 0,
+        profileLocal: 0,
+        conversationLocal: 0,
+        toolCallsLocal: 0,
+        calibration: resolveModelCalibration(ctx.model?.provider, ctx.model?.id),
+    });
+
     const threshold = resolveExecuteThresholdDetail(
         deps.executeThresholdPercentage ?? 65,
         modelKey,
@@ -453,7 +485,7 @@ export function buildPiStatusDetail(
             sessionId,
         },
     );
-    const historyBlockTokens = compartmentTokens + factTokens;
+    const historyBlockTokens = calibrated.compartmentTokens + calibrated.factTokens;
     const historyBudgetPercentage = deps.historyBudgetPercentage ?? 0.15;
     const compressionBudget =
         contextLimit > 0
@@ -468,7 +500,7 @@ export function buildPiStatusDetail(
         sessionId,
         usagePercentage,
         inputTokens,
-        systemPromptTokens,
+        systemPromptTokens: calibrated.systemTokens,
         compartmentCount,
         // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
         memoryCount: memory.rows.filter((row) => isServedMemoryDecisionRow(row, Date.now())).length,
@@ -482,7 +514,7 @@ export function buildPiStatusDetail(
         lastTransformError: null,
         isSubagent: false,
         contextLimit,
-        windowGeometry,
+        windowGeometry: displayedWindowGeometry,
         executeThreshold: threshold.percentage,
         executeThresholdMode: threshold.mode,
         executeThresholdClamped: threshold.clamped,
@@ -498,14 +530,14 @@ export function buildPiStatusDetail(
         droppedTags: 0,
         totalTags: 0,
         activeBytes: 0,
-        compartmentTokens,
-        factTokens,
-        memoryTokens,
-        docsTokens,
-        profileTokens,
-        conversationTokens,
-        toolCallTokens,
-        toolDefinitionTokens,
+        compartmentTokens: calibrated.compartmentTokens,
+        factTokens: calibrated.factTokens,
+        memoryTokens: calibrated.memoryTokens,
+        docsTokens: calibrated.docsTokens,
+        profileTokens: calibrated.profileTokens,
+        conversationTokens: calibrated.conversationTokens,
+        toolCallTokens: calibrated.toolCallTokens,
+        toolDefinitionTokens: calibrated.toolDefinitionTokens,
         ...(tailHygiene === undefined ? {} : { tailHygiene }),
         newWorkTokens: 0,
         totalInputTokens: 0,
@@ -582,8 +614,7 @@ function breakdownSegments(s: StatusDialogDetail): Array<{
 }
 
 function renderBar(s: StatusDialogDetail, innerWidth: number): string {
-    // The 20-column minimum keeps segments visible in narrow terminals.
-    const barWidth = Math.max(20, innerWidth);
+    const barWidth = Math.max(1, innerWidth);
     const segs = breakdownSegments(s);
     if (segs.length === 0) return "";
     const widths = segs.map((seg) =>

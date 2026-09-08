@@ -104,6 +104,20 @@ describe("Pi ctx_note", () => {
         });
     });
 
+    it("hashes a command id longer than 128 bytes and keeps it stable across retries", async () => {
+        const { requests, note } = recordingNote("Saved session note #1.");
+        const callId = "c".repeat(200);
+        const params = { action: "write", content: "module owned note" };
+
+        await callNote({ rustToolBackends: { note }, callId, params });
+        await callNote({ rustToolBackends: { note }, callId, params });
+
+        expect(requests).toHaveLength(2);
+        expect(requests[0]?.commandId).toMatch(/^pi-[0-9a-f]{64}$/);
+        expect(Buffer.byteLength(requests[0]?.commandId ?? "")).toBeLessThanOrEqual(128);
+        expect(requests[1]?.commandId).toBe(requests[0]?.commandId);
+    });
+
     it("compiles surface_condition when the daemon evaluates notes for the project", async () => {
         const { requests, note } = recordingNote("Created smart note #1.");
         const surfaceCondition = "when path /tmp/project-binding-key exists";

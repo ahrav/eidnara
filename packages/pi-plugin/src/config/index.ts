@@ -83,9 +83,14 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
             isProjectConfig: scope === "project",
         });
         const rejectedKeyPaths: string[] = [];
-        const config = parseConfigJsonc<Record<string, unknown>>(substituted.text, {
+        const parsed = parseConfigJsonc<unknown>(substituted.text, {
             onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
         });
+        // Reject non-object roots because `removedKeyWarnings` and the raw merge index them by key.
+        if (!isPlainObject(parsed)) {
+            throw new Error(`config root must be a JSON object, got ${redactConfigValue(parsed)}`);
+        }
+        const config = parsed;
         const unsafeKeyWarnings = rejectedKeyPaths.map(
             (keyPath) =>
                 `Ignored unsafe config key "${keyPath}" (security: prototype-pollution keys are not allowed).`,
@@ -179,9 +184,30 @@ function removedKeyWarnings(raw: Record<string, unknown>): string[] {
     );
 }
 
+/** Omitting keys absent from `userRaw` preserves per-leaf pruning during project-config recovery. */
+function userTierFallbackFor(
+    projectRaw: Record<string, unknown>,
+    userRaw: Record<string, unknown> | undefined,
+    trustedBaseConfig: EidnaraConfig,
+): Map<string, unknown> {
+    const trusted = trustedBaseConfig as unknown as Record<string, unknown>;
+    const fallback = new Map<string, unknown>();
+    if (userRaw === undefined) return fallback;
+    for (const key of Object.keys(projectRaw)) {
+        if (Object.hasOwn(userRaw, key)) fallback.set(key, trusted[key]);
+    }
+    return fallback;
+}
+
+interface ParsePiConfigOptions {
+    recoveredTopLevelKeys?: string[];
+    /** Stores user-tier values used instead of schema defaults when recovery rejects merged top-level keys. */
+    userTierFallback?: ReadonlyMap<string, unknown>;
+}
+
 function parsePiConfig(
     rawConfig: Record<string, unknown>,
-    recoveredTopLevelKeys: string[] = [],
+    { recoveredTopLevelKeys = [], userTierFallback }: ParsePiConfigOptions = {},
 ): {
     config: EidnaraConfig;
     warnings: string[];
@@ -216,6 +242,21 @@ function parsePiConfig(
         recoveredTopLevelKeys.push(key);
         const isAgentConfig = key === "historian" || key === "sidekick";
 
+        // A project config key with a user-tier fallback restores that fallback instead
+        // of forcing the schema default.
+        if (userTierFallback?.has(key)) {
+            const fallback = userTierFallback.get(key);
+            if (fallback === undefined) {
+                delete patched[key];
+            } else {
+                patched[key] = fallback;
+            }
+            warnings.push(
+                `"${key}": invalid value (${redactConfigValue(rawConfig[key])}) after merging the project config, keeping the user config's ${key} settings. Check the project's eidnara.jsonc.`,
+            );
+            continue;
+        }
+
         if (isAgentConfig) {
             delete patched[key];
             warnings.push(
@@ -236,7 +277,7 @@ function parsePiConfig(
             rawValue !== null &&
             !Array.isArray(rawValue);
         if (allNested) {
-            let prunedBlock: Record<string, unknown> = {
+            let prunedBlock: Record<string, unknown> | undefined = {
                 ...(rawValue as Record<string, unknown>),
             };
             const prunedLeaves: string[] = [];
@@ -248,13 +289,19 @@ function parsePiConfig(
                 if (result) {
                     prunedBlock = result.block;
                     prunedLeaves.push(result.removed);
+                    continue;
                 }
+                // A missing required leaf has nothing to prune, so the whole block goes.
+                prunedBlock = undefined;
+                break;
             }
-            patched[key] = prunedBlock;
-            warnings.push(
-                `"${key}": invalid nested field(s) ${prunedLeaves.map((l) => `"${l}"`).join(", ")}, using defaults for those.`,
-            );
-            continue;
+            if (prunedBlock !== undefined) {
+                patched[key] = prunedBlock;
+                warnings.push(
+                    `"${key}": invalid nested field(s) ${prunedLeaves.map((l) => `"${l}"`).join(", ")}, using defaults for those.`,
+                );
+                continue;
+            }
         }
 
         delete patched[key];
@@ -298,6 +345,7 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
     const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
     // The threshold trust boundary uses the effective USER/default config as its baseline.
     const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
+    let userTierFallback: Map<string, unknown> | undefined;
 
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
@@ -312,6 +360,7 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
             for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
                 warnings.push(`${prefix} ${warning}`);
             }
+            userTierFallback = userTierFallbackFor(projectRaw, userRaw, trustedBaseConfig);
             rawConfig = mergeRawConfigs(rawConfig, projectRaw);
             for (const warning of constrainProjectThresholdOverrides({
                 mergedRaw: rawConfig,
@@ -325,7 +374,7 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
         }
     }
 
-    const parsed = parsePiConfig(rawConfig);
+    const parsed = parsePiConfig(rawConfig, { userTierFallback });
     setOutputReserveConfig(parsed.config.output_reserve);
     setWindowOverlayPath(parsed.config.models?.window_overlay_path);
     warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
@@ -382,7 +431,9 @@ function combinedOutcome(args: {
     const sourceOutcomes = Object.values(args.sources);
     if (sourceOutcomes.includes("project-file-parse-error")) return "project-file-parse-error";
     if (sourceOutcomes.includes("project-file-io-error")) return "project-file-io-error";
-    if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
+    if (args.recoveredTopLevelKeys.length > 0 || sourceOutcomes.includes("schema-recovery")) {
+        return "schema-recovery";
+    }
     if (args.substitutionFailures.length > 0) return "substitution-failure";
     return "ok";
 }
@@ -412,6 +463,7 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
     // A cloned repository may delay compaction but must not lower thresholds enough to increase historian work for the user's account.
     const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
+    let userTierFallback: Map<string, unknown> | undefined;
 
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
@@ -425,6 +477,7 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
             for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
                 warnings.push(`${prefix} ${warning}`);
             }
+            userTierFallback = userTierFallbackFor(projectRaw, userRaw, trustedBaseConfig);
             rawConfig = mergeRawConfigs(rawConfig, projectRaw);
             for (const warning of constrainProjectThresholdOverrides({
                 mergedRaw: rawConfig,
@@ -439,7 +492,7 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     }
 
     const recoveredTopLevelKeys: string[] = [];
-    const parsed = parsePiConfig(rawConfig, recoveredTopLevelKeys);
+    const parsed = parsePiConfig(rawConfig, { recoveredTopLevelKeys, userTierFallback });
     setOutputReserveConfig(parsed.config.output_reserve);
     setWindowOverlayPath(parsed.config.models?.window_overlay_path);
     warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));

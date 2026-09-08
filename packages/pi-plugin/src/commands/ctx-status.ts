@@ -14,6 +14,7 @@ import {
     callDaemonSession,
     type DaemonSessionDeps,
     formatRustStatusText,
+    statusContextLimitTokens,
     statusInputTokens,
 } from "./daemon-session-routes";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
@@ -44,22 +45,30 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
                 ...deps.resolveProjectSettings(ctx),
             };
 
-            let daemonStatus: RustSessionStatus | null = null;
-            let statusError: string | undefined;
-            try {
-                daemonStatus = (await callDaemonSession(deps, ctx.cwd, "session.status", {
+            const readDaemonStatus = async () =>
+                (await callDaemonSession(deps, ctx, "session.status", {
                     method: "session.status",
                     v: 1,
                     session_id: sessionId,
                 })) as RustSessionStatus;
+
+            let daemonStatus: RustSessionStatus | null = null;
+            let statusError: string | undefined;
+            try {
+                daemonStatus = await readDaemonStatus();
             } catch (error) {
                 sessionLog(sessionId, "rust session.status failed:", error);
                 statusError = error instanceof Error ? error.message : String(error);
             }
 
             try {
-                if (ctx.hasUI) {
-                    await showStatusDialog(pi, ctx, dialogDeps, daemonStatus);
+                // The dialog renders a missing daemon answer as zero counts and cannot render
+                // compaction-off status, so both cases use the text path.
+                if (ctx.hasUI && daemonStatus && !deps.compactionOff) {
+                    await showStatusDialog(pi, ctx, dialogDeps, {
+                        initial: daemonStatus,
+                        read: readDaemonStatus,
+                    });
                     return;
                 }
 
@@ -79,7 +88,12 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
                 if (daemonStatus) {
                     const value = daemonStatus as Record<string, unknown>;
                     lines.push("", formatRustStatusText(value));
-                    if (windowGeometry) {
+                    // A daemon limit that differs from `usableSoft` would put two denominators on one status, so the derivation renders only when the daemon limit is absent or agrees. commentlint: allow(JUDGE)
+                    const daemonLimit = statusContextLimitTokens(value);
+                    if (
+                        windowGeometry &&
+                        (daemonLimit ?? windowGeometry.usableSoft) === windowGeometry.usableSoft
+                    ) {
                         lines.push(
                             `- ${formatWindowDerivationLine(statusInputTokens(value), windowGeometry)}`,
                         );

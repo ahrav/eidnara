@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { setOutputReserveConfig } from "@eidnara/opencode/shared/models-dev-cache";
-import { resolvePiUsableContextLimit } from "./pi-context-limit";
+import { resolvePiUsableContextLimit, resolvePiWindowGeometry } from "./pi-context-limit";
 
 describe("resolvePiUsableContextLimit", () => {
     afterEach(() => setOutputReserveConfig(undefined));
@@ -57,5 +57,81 @@ describe("resolvePiUsableContextLimit", () => {
                 model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
             }),
         ).toBe(100_000);
+    });
+
+    test("a detected limit is the window when no catalog window or persisted sample exists", () => {
+        const geometry = resolvePiWindowGeometry({
+            detectedContextLimit: 120_000,
+            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
+        });
+        expect(geometry?.derivation.window).toBe(120_000);
+        expect(geometry?.usableSoft).toBe(100_000);
+    });
+
+    test("a detected limit outranks a persisted sample as the window for an uncatalogued model", () => {
+        const geometry = resolvePiWindowGeometry({
+            detectedContextLimit: 120_000,
+            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
+            persistedInputTokens: 50_000,
+            persistedPercentage: 50,
+        });
+        expect(geometry?.derivation.window).toBe(120_000);
+        expect(geometry?.usableHard).toBe(120_000 - 4_096);
+        expect(geometry?.usableSoft).toBe(100_000);
+    });
+
+    test("a persisted estimate above the detected cap leaves the capped geometry intact", () => {
+        const geometry = resolvePiWindowGeometry({
+            rawContextWindow: 272_000,
+            detectedContextLimit: 120_000,
+            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
+            persistedInputTokens: 139_400,
+            persistedPercentage: (139_400 / 204_000) * 100,
+        });
+        expect(geometry?.derivation.window).toBe(120_000);
+        expect(geometry?.usableSoft).toBe(100_000);
+        expect(geometry?.usableHard).toBe(120_000 - 4_096);
+    });
+
+    test("a persisted estimate above the runtime window leaves the derived geometry intact", () => {
+        const geometry = resolvePiWindowGeometry({
+            rawContextWindow: 120_000,
+            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
+            persistedInputTokens: 139_400,
+            persistedPercentage: (139_400 / 204_000) * 100,
+        });
+        expect(geometry?.derivation.window).toBe(120_000);
+        expect(geometry?.usableSoft).toBe(100_000);
+        expect(geometry?.usableHard).toBe(120_000 - 4_096);
+    });
+
+    test("a persisted estimate below the hard wall refines the soft threshold only", () => {
+        const geometry = resolvePiWindowGeometry({
+            rawContextWindow: 272_000,
+            detectedContextLimit: 120_000,
+            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
+            persistedInputTokens: 55_000,
+            persistedPercentage: 50,
+        });
+        expect(geometry?.usableSoft).toBe(110_000);
+        expect(geometry?.usableHard).toBe(120_000 - 4_096);
+    });
+
+    test("a low-token persisted sample still infers the usable window for an unknown model", () => {
+        expect(
+            resolvePiUsableContextLimit({
+                persistedInputTokens: 5_000,
+                persistedPercentage: 5,
+            }),
+        ).toBe(100_000);
+    });
+
+    test("a persisted sample whose inferred window is implausible is ignored", () => {
+        expect(
+            resolvePiUsableContextLimit({
+                persistedInputTokens: 50,
+                persistedPercentage: 50,
+            }),
+        ).toBeUndefined();
     });
 });

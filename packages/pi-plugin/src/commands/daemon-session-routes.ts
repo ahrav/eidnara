@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { COMPACTION_ENABLED_PATH } from "@eidnara/opencode/config/agent-disable";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/rust-mode-transform";
 import type { CtxStatusLevel } from "./pi-command-utils";
 
@@ -38,11 +39,12 @@ export function rustCommandId(operation: string): string {
 
 /**
  * The daemon reads `session_id` from the body; the transport routes on the same id.
- * `projectRoot` is the invoking command's current `ctx.cwd`; the transport keys routes by `(session, root)`, and a root fixed at boot would address a different lineage than the session's tools after `/cd`. commentlint: allow(JUDGE)
+ *
+ * `projectRoot` follows the invocation cwd: session lineage and `session.wrapup` authority are keyed by `(session, root)`, in the same git-root spelling the kernel memory routes bind, so a Pi `/cd` moves later commands with it. commentlint: allow(JUDGE)
  */
 export async function callDaemonSession(
     deps: DaemonSessionDeps,
-    projectRoot: string,
+    ctx: { cwd: string },
     method: DaemonSessionMethod,
     body: Record<string, unknown>,
     timeoutMs?: number,
@@ -50,7 +52,7 @@ export async function callDaemonSession(
     return moduleResponseValue(
         await deps.moduleClient.call({
             sessionId: body.session_id as string,
-            projectRoot,
+            projectRoot: resolveProjectRootDirectory(ctx.cwd),
             method,
             body,
             ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -105,16 +107,21 @@ export function statusInputTokens(value: Record<string, unknown>): number {
         : 0;
 }
 
+/** The daemon's context limit, or `undefined` when the status carries none. */
+export function statusContextLimitTokens(value: Record<string, unknown>): number | undefined {
+    const limit = statusUsage(value).context_limit_tokens;
+    return typeof limit === "number" && limit > 0 ? limit : undefined;
+}
+
 export function formatRustStatusText(value: Record<string, unknown>): string {
-    const usage = statusUsage(value);
     const tokens = statusInputTokens(value);
-    const limit = typeof usage.context_limit_tokens === "number" ? usage.context_limit_tokens : 0;
+    const limit = statusContextLimitTokens(value);
     const coverage = value.coverage_ordinal == null ? "none" : String(value.coverage_ordinal);
     const boundary = value.boundary_present === true ? "present" : "absent";
     const compartments = typeof value.compartment_count === "number" ? value.compartment_count : 0;
     return [
         "### Module Cache",
-        `- Usage: ${tokens.toLocaleString()}${limit > 0 ? ` / ${limit.toLocaleString()} tokens` : " tokens"}`,
+        `- Usage: ${tokens.toLocaleString()}${limit === undefined ? " tokens" : ` / ${limit.toLocaleString()} tokens`}`,
         `- Boundary: ${boundary}`,
         `- Coverage ordinal: ${coverage}`,
         `- Compartments: ${compartments}`,
