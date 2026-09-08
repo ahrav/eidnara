@@ -1,5 +1,6 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 
+import { resolveProjectRootDirectory } from "../../features/context/project-root";
 import {
     compileSurfaceCondition,
     conditionCompileReplySuffix,
@@ -217,8 +218,9 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
             if ((action === "write" || action === "update") && surfaceCondition) {
                 if (deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true) {
+                    // Resolve relative paths and default repository predicates against the repository root.
                     compilation = await compileSurfaceCondition(surfaceCondition, {
-                        projectPath: toolContext.directory,
+                        projectPath: resolveProjectRootDirectory(toolContext.directory),
                     });
                 } else if (!commandId) {
                     return "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not written.";

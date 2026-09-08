@@ -550,6 +550,25 @@ describe("system-prompt-hash sticky dates", () => {
         );
     });
 
+    it("leaves a date-shaped example embedded in user prose untouched by the freeze", async () => {
+        useTempDataHome("sph-sticky-embedded-example-");
+        const sessionId = "ses-sticky-embedded";
+        const historyRefreshSessions = new Set<string>();
+        const { handler } = buildHandler({ historyRefreshSessions });
+        const guidance = `The host writes a line like "${DAY_TWO}" inside <env>; never ask for the date.`;
+
+        await handler(
+            { sessionID: sessionId },
+            { system: [guidance, `<env>\n  ${DAY_ONE}\n</env>`] },
+        );
+        const system = [guidance, `<env>\n  ${DAY_TWO}\n</env>`];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system[0]).toBe(guidance);
+        expect(system[1]).toBe(`<env>\n  ${DAY_ONE}\n</env>`);
+        expect(historyRefreshSessions.has(sessionId)).toBe(false);
+    });
+
     it("forgets the sticky date together with the evicted prompt state", async () => {
         useTempDataHome("sph-sticky-evict-");
         const sessionId = "ses-sticky-evict";

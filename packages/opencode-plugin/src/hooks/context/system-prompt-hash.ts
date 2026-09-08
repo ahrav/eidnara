@@ -30,10 +30,12 @@ interface SessionTracking {
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
 
 /**
- * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`.
- * Matching that shape leaves prose that merely mentions the phrase unfrozen and untouched by the rewrite.
+ * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`. commentlint: allow(JUDGE)
+ * Matches only complete date lines, excluding prose mentions and date-shaped examples mid-sentence.
+ * The lookarounds keep the matched text to the phrase itself, so the rewrite preserves indentation.
  */
-const DATE_LINE = /Today's date: [A-Z][a-z]{2} [A-Z][a-z]{2} \d{2} \d{4}/;
+const DATE_LINE =
+    /(?<=(?:^|\n)[ \t]*)Today's date: [A-Z][a-z]{2} [A-Z][a-z]{2} \d{2} \d{4}(?=[ \t]*(?:\n|$))/;
 const DATE_LINE_ALL = new RegExp(DATE_LINE.source, "g");
 
 /**

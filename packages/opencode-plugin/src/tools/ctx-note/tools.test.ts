@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
     compileSurfaceCondition,
@@ -565,5 +568,49 @@ describe("ctx_note raw argument fallback", () => {
         );
         expect(conditionResult).toBe("Error: 'surface_condition' must be a string.");
         expect(requests).toHaveLength(0);
+    });
+});
+
+describe("ctx_note smart-note compile root", () => {
+    it("resolves a relative file condition against the repository root, not the nested working directory", async () => {
+        const root = realpathSync(mkdtempSync(join(tmpdir(), "ctx-note-root-")));
+        try {
+            mkdirSync(join(root, ".git"));
+            mkdirSync(join(root, "packages", "foo"), { recursive: true });
+            mkdirSync(join(root, "nested", "deeper"), { recursive: true });
+            writeFileSync(join(root, "packages", "foo", "flag.txt"), "pending\n");
+
+            const { requests, note } = recordingNote({
+                content: [{ type: "text", text: "Created smart note #1." }],
+            });
+            const tools = createCtxNoteTools({
+                resolveProjectPath,
+                rustToolBackends: {
+                    authorityState: async () => "MODULE",
+                    noteEvaluationAvailable: () => true,
+                    note,
+                },
+            });
+
+            await tools.ctx_note.execute(
+                {
+                    action: "write",
+                    content: "Wait for the flag to flip.",
+                    surface_condition: "when file packages/foo/flag.txt contains done",
+                },
+                toolContext("ses-note", join(root, "nested", "deeper")),
+            );
+
+            expect(requests).toHaveLength(1);
+            expect(requests[0]?.compileStatus).toBe("compiled");
+            const config = JSON.parse(requests[0]?.compiledConfig ?? "{}") as {
+                kind?: string;
+                path?: string;
+            };
+            expect(config.kind).toBe("file_contains");
+            expect(config.path).toBe(join(root, "packages", "foo", "flag.txt"));
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });
