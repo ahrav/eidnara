@@ -159,19 +159,22 @@ export function listOmpPlugins(ompPath: string): OmpPluginInfo[] | null {
         if (parsed === null || typeof parsed !== "object") return null;
         const npm = (parsed as { npm?: unknown }).npm;
         if (!Array.isArray(npm)) return null;
-        return npm.flatMap((entry): OmpPluginInfo[] => {
-            if (!entry || typeof entry !== "object") return [];
+        const plugins: OmpPluginInfo[] = [];
+        for (const entry of npm) {
+            // A row that does not fit the schema makes the whole probe unknown;
+            // dropping malformed entries could report present plugins as absent.
+            if (!entry || typeof entry !== "object") return null;
             const value = entry as Record<string, unknown>;
-            if (typeof value.name !== "string" || typeof value.version !== "string") return [];
-            return [
-                {
-                    name: value.name,
-                    version: value.version,
-                    enabled: value.enabled !== false,
-                    ...(typeof value.path === "string" ? { path: value.path } : {}),
-                },
-            ];
-        });
+            if (typeof value.name !== "string" || typeof value.version !== "string") return null;
+            if (value.enabled !== undefined && typeof value.enabled !== "boolean") return null;
+            plugins.push({
+                name: value.name,
+                version: value.version,
+                enabled: value.enabled !== false,
+                ...(typeof value.path === "string" ? { path: value.path } : {}),
+            });
+        }
+        return plugins;
     } catch {
         return null;
     }
@@ -187,9 +190,10 @@ export function getOmpSetting(
     if (!result.ok) return null;
     try {
         const parsed = JSON.parse(result.stdout) as { value?: unknown };
-        return typeof parsed.value === "boolean" || typeof parsed.value === "string"
-            ? parsed.value
-            : null;
+        if (key === "compaction.enabled") {
+            return typeof parsed.value === "boolean" ? parsed.value : null;
+        }
+        return typeof parsed.value === "string" ? parsed.value : null;
     } catch {
         return null;
     }

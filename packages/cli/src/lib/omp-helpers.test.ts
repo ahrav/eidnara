@@ -6,6 +6,7 @@ import {
     detectOmpBinary,
     getOmpCommandInvocation,
     getOmpFallbackCandidates,
+    getOmpSetting,
     listOmpPlugins,
     parseOmpModelsOutput,
     runOmpCommand,
@@ -151,10 +152,37 @@ describe("OMP plugin listing", () => {
                 chmodSync(fake, 0o755);
                 expect(listOmpPlugins(fake)).toBeNull();
             }
+            const malformedRow = join(root, "omp-malformed-row");
+            writeFileSync(
+                malformedRow,
+                `#!/bin/sh\nprintf '%s' '{"npm":[{"name":"@eidnara/pi","enabled":true}]}'\n`,
+            );
+            chmodSync(malformedRow, 0o755);
+            expect(listOmpPlugins(malformedRow)).toBeNull();
             const empty = join(root, "omp-empty");
             writeFileSync(empty, `#!/bin/sh\nprintf '%s' '{"npm":[],"marketplace":[]}'\n`);
             chmodSync(empty, 0o755);
             expect(listOmpPlugins(empty)).toEqual([]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("OMP setting probes", () => {
+    it("rejects a value whose type does not match the requested key", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-setting-"));
+        try {
+            const fake = join(root, "omp");
+            writeFileSync(
+                fake,
+                `#!/bin/sh
+if [ "$3" = "compaction.enabled" ]; then printf '%s' '{"value":"true"}'; else printf '%s' '{"value":true}'; fi
+`,
+            );
+            chmodSync(fake, 0o755);
+            expect(getOmpSetting(fake, "compaction.enabled")).toBeNull();
+            expect(getOmpSetting(fake, "memory.backend")).toBeNull();
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

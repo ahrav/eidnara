@@ -298,6 +298,23 @@ function readEidnaraModes(configPath: string): EidnaraModes {
     };
 }
 
+/**
+ * Host native settings are global, so setup decides from the shared config
+ * and only reports a project-tier disagreement.
+ */
+function projectModeOverrides(projectConfigPath: string, shared: EidnaraModes): string[] {
+    const project = readJsoncLenient(projectConfigPath).value;
+    const overrides: string[] = [];
+    if (typeof project.enabled === "boolean" && project.enabled !== shared.enabled) {
+        overrides.push(`enabled: ${project.enabled}`);
+    }
+    const memory = isRecord(project.memory) ? project.memory.enabled : undefined;
+    if (typeof memory === "boolean" && memory !== shared.memoryEnabled) {
+        overrides.push(`memory.enabled: ${memory}`);
+    }
+    return overrides;
+}
+
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const prompts = options.prompts ?? (await getDefaultPrompts());
     const env = options.env ?? DEFAULT_ENV;
@@ -395,12 +412,11 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             `Eidnara is disabled (\`enabled: false\`) in ${configPath}; setup keeps that setting and leaves ${host.displayName}'s native context managers on.`,
         );
     }
-    // Project config is a per-project opt-out layered over the shared config.
-    // Native host settings are global, so `eidnara` follows the shared config.
     const projectConfigPath = resolveEidnaraProjectConfigPath(process.cwd());
-    if (readJsoncLenient(projectConfigPath).value.enabled === false) {
+    const overrides = projectModeOverrides(projectConfigPath, eidnara);
+    if (overrides.length > 0) {
         prompts.log.warn(
-            `Eidnara is disabled (\`enabled: false\`) by the project config ${projectConfigPath}; it will not run in this project after setup.`,
+            `Project config ${projectConfigPath} overrides ${overrides.join(", ")}; ${host.displayName}'s native settings follow the shared config, so this project may run both Eidnara and the native manager, or neither. Adjust one of the configs if that is not intended.`,
         );
     }
     const rollbackHost =

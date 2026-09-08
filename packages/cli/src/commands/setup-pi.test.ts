@@ -596,7 +596,69 @@ describe("runSetup", () => {
             expect(code).toBe(0);
             expect(seen?.enabled).toBe(true);
             expect(prompts.messages.join("\n")).toContain(
-                `warn:Eidnara is disabled (\`enabled: false\`) by the project config ${join(project, ".eidnara", "eidnara.jsonc")}`,
+                `warn:Project config ${join(project, ".eidnara", "eidnara.jsonc")} overrides enabled: false;`,
+            );
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
+
+    it("warns when the project config re-enables modes the shared config turned off", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const configPath = join(root, ".config", "eidnara", "eidnara.jsonc");
+        mkdirSync(join(root, ".config", "eidnara"), { recursive: true });
+        writeFileSync(configPath, JSON.stringify({ enabled: false, memory: { enabled: false } }));
+        const project = join(root, "project");
+        mkdirSync(join(project, ".eidnara"), { recursive: true });
+        writeFileSync(
+            join(project, ".eidnara", "eidnara.jsonc"),
+            JSON.stringify({ enabled: true, memory: { enabled: true } }),
+        );
+        const originalCwd = process.cwd();
+        process.chdir(project);
+
+        try {
+            const env: SetupEnvironment = {
+                detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+                getPiVersion: () => "0.74.0",
+                getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+                paths: {
+                    getPiAgentConfigDir: () => agentDir,
+                    getPiUserConfigPath: () => configPath,
+                    getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+                },
+            };
+            let seen: { enabled: boolean; memoryEnabled: boolean } | undefined;
+            const host: PiCompatibleSetupHost = {
+                displayName: "Fake",
+                cliName: "fake",
+                packageSource: "npm:fake",
+                ensurePluginEntry: async () => ({
+                    ok: true,
+                    action: "already_present",
+                    message: "present",
+                    configPath: "unused",
+                }),
+                beforeWrite: async ({ eidnara }) => {
+                    seen = eidnara;
+                    return async () => {};
+                },
+            };
+            const prompts = new MockPrompts({ confirms: [true, false] });
+
+            const code = await runSetup({ prompts, env, host });
+
+            expect(code).toBe(0);
+            expect(seen).toEqual({
+                enabled: false,
+                compactionEnabled: false,
+                memoryEnabled: false,
+            });
+            expect(prompts.messages.join("\n")).toContain(
+                "overrides enabled: true, memory.enabled: true;",
             );
         } finally {
             process.chdir(originalCwd);
