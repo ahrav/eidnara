@@ -101,9 +101,9 @@ export interface AgedCtxReduceObservation extends CacheStabilityEvidence {
 async function collectCacheStabilityEvidence(
     h: RustTestHarness,
     requests: ReturnType<typeof mainAgentRequests>,
-    promptCount: number,
+    requestFloor: number,
 ): Promise<CacheStabilityEvidence> {
-    const passes = await h.waitForRustPasses(promptCount);
+    const passes = await h.waitForRustPasses(requestFloor);
     const comparisons = analyzePasses(requests);
     const busts = comparisons.filter((comparison) => comparison.verdict === "BUST");
     return {
@@ -120,7 +120,7 @@ async function collectCacheStabilityEvidence(
 function cacheStabilityChecks(
     prefix: "a1" | "a3",
     observation: CacheStabilityEvidence,
-    promptCount: number,
+    requestFloor: number,
 ): { busts: RegressionCheck; cached: RegressionCheck; served: RegressionCheck } {
     return {
         busts: {
@@ -134,7 +134,7 @@ function cacheStabilityChecks(
         served: {
             id: `check-${prefix}-transform-served`,
             passed:
-                observation.rustPassCount >= promptCount &&
+                observation.rustPassCount >= requestFloor &&
                 observation.transformServedPassCount === observation.rustPassCount,
         },
     };
@@ -271,18 +271,18 @@ export async function driveAgedCtxReduceSurvival(
         sawReduceOnWire,
         finalWireHasCtxReduce:
             finalBody !== undefined && hasCtxReducePair(finalBody, FIRST_RENDER_A3_FIXTURE.callId),
-        ...(await collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A3_FIXTURE.turns)),
+        ...(await collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A3_FIXTURE.mainRequests)),
     };
 }
 
 export function verifyAgedCtxReduceSurvival(
     observation: AgedCtxReduceObservation,
 ): RegressionResult {
-    const stability = cacheStabilityChecks("a3", observation, FIRST_RENDER_A3_FIXTURE.turns);
+    const stability = cacheStabilityChecks("a3", observation, FIRST_RENDER_A3_FIXTURE.mainRequests);
     return resultFromChecks([
         {
             id: "check-a3-defer-request-floor",
-            passed: observation.mainRequestCount >= FIRST_RENDER_A3_FIXTURE.turns,
+            passed: observation.mainRequestCount >= FIRST_RENDER_A3_FIXTURE.mainRequests,
         },
         { id: "check-a3-reduce-on-wire", passed: observation.sawReduceOnWire },
         stability.busts,
@@ -416,6 +416,12 @@ function emitThinkingCtxReduceOnce(h: RustTestHarness, tag: number): () => boole
 }
 
 /** The helper resolves the public §N§ handle for the message containing `needle`. */
+/** The daemon always emits the `<session-history>` wrapper, empty or not, so only a compartment heading inside it shows that a history range replaced covered turns. */
+export function hasPublishedHistoryRange(text: string): boolean {
+    const block = text.match(/<session-history>([\s\S]*?)<\/session-history>/u);
+    return block !== null && /^\s*## \d+-\d+ /mu.test(block[1] ?? "");
+}
+
 function tagForText(body: Record<string, unknown>, needle: string): number {
     for (const message of messagesOf(body)) {
         if (!Array.isArray(message.content)) continue;
@@ -788,7 +794,7 @@ export async function driveThinkingImageSurvival(
     return {
         dropEmitted: reduced.dropEmitted,
         droppedTextAbsent: !allUserText.includes("see this screenshot for the bug"),
-        coveredByRustHistory: allUserText.includes("<session-history>"),
+        coveredByRustHistory: hasPublishedHistoryRange(allUserText),
         imageBlockCount: imageBlocks.length,
         imagePayloadPreserved,
         placeholderPresent: /\[dropped \u00a7\d+\u00a7\]/.test(allUserText),
@@ -856,6 +862,8 @@ export const FIRST_RENDER_A1_FIXTURE = {
 export const FIRST_RENDER_A3_FIXTURE = {
     scenario: "aged-ctx-reduce-defer-growth",
     turns: 8,
+    // Turn 2's `ctx_reduce` tool_use adds one continuation request carrying the tool result.
+    mainRequests: 9,
     drop: "99999",
     callId: "toolu_incident_a3_ctx_reduce",
     requiredWireEvidence: "matching ctx_reduce tool_use and tool_result blocks",

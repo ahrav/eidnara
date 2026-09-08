@@ -6,7 +6,9 @@ import { boundVerifierFiles, E2E_ROOT } from "../src/incident-pool/evidence";
 import { builtinIncidentCaseRegistry } from "../src/incident-pool/registry";
 import {
     assertBoundVerifierBytesUnchanged,
+    assertCatalogBindingsUnchanged,
     assertCatalogBoundVerifierBytesUnchanged,
+    catalogBindings,
 } from "./validate-incident-verifiers";
 
 function committedCatalog() {
@@ -95,5 +97,59 @@ describe("catalog-bound executable verifier gate", () => {
         expect(() =>
             assertCatalogBoundVerifierBytesUnchanged({}, { [key]: "b".repeat(64) }),
         ).not.toThrow();
+    });
+});
+
+describe("per-variant binding gate", () => {
+    const module = "src/incident-pool/scenarios/source-linked-regressions.ts";
+
+    it("derives one binding per committed executable variant, including oracle dependencies", () => {
+        const bindings = catalogBindings(committedCatalog());
+        expect(Object.keys(bindings).sort()).toEqual([
+            "var-parity-a1-pure-defer-stability",
+            "var-parity-a3-ctx-reduce-survival",
+        ]);
+        for (const binding of Object.values(bindings)) {
+            expect(binding).toContain(`${module}#drive`);
+            expect(binding).toContain(`${module}#verify`);
+            expect(binding).toContain("src/cache-analysis.ts");
+        }
+    });
+
+    it("blocks rebinding an accepted variant even when every previously bound path keeps its bytes", () => {
+        // Rebinding A1 to a new module leaves A3 holding the accepted paths, so the path-set gates see nothing.
+        const accepted = {
+            "var-a1": `${module}#driveA1\n${module}#verifyA1\nsrc/cache-analysis.ts`,
+            "var-a3": `${module}#driveA3\n${module}#verifyA3\nsrc/cache-analysis.ts`,
+        };
+        const rebound = {
+            ...accepted,
+            "var-a1":
+                "src/incident-pool/scenarios/other.ts#driveA1\nsrc/incident-pool/scenarios/other.ts#verifyA1\nsrc/cache-analysis.ts",
+        };
+        expect(() => assertCatalogBindingsUnchanged(accepted, rebound)).toThrow(
+            /rebound their verifier without recorded replay support: var-a1/,
+        );
+        const resymboled = {
+            ...accepted,
+            "var-a1": accepted["var-a1"].replace("verifyA1", "verifyA1Loose"),
+        };
+        expect(() => assertCatalogBindingsUnchanged(accepted, resymboled)).toThrow(/var-a1/);
+        const droppedDependency = {
+            ...accepted,
+            "var-a1": `${module}#driveA1\n${module}#verifyA1`,
+        };
+        expect(() => assertCatalogBindingsUnchanged(accepted, droppedDependency)).toThrow(/var-a1/);
+    });
+
+    it("blocks dropping an accepted executable variant's binding and accepts a new variant", () => {
+        const accepted = { "var-a1": "a" };
+        expect(() => assertCatalogBindingsUnchanged(accepted, {})).toThrow(
+            /accepted executable variants no longer bind a verifier: var-a1/,
+        );
+        expect(() =>
+            assertCatalogBindingsUnchanged(accepted, { ...accepted, "var-new": "b" }),
+        ).not.toThrow();
+        expect(() => assertCatalogBindingsUnchanged({}, { "var-new": "b" })).not.toThrow();
     });
 });

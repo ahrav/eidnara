@@ -57,8 +57,8 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a3-6",
-                        "fingerprint": "021cbc123e231d72a37c504baacf1f64d98b83e4949672c54f43f90f0fbeaa13"
+                        "id": "rev-parity-a3-7",
+                        "fingerprint": "59259a3afa6e7784d082e5f7d0f835e7f59455da56858d46f4b1889ae54b3465"
                     },
                     "normative_checks": [
                         "check-a3-defer-request-floor",

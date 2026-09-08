@@ -138,6 +138,9 @@ const CARGO_INTEGRATION_RE = /cargo test -p ([\w-]+) --test ([\w-]+)/;
 /** `cargo test -p <crate> --lib <module>::…::<test>` resolves to the source file for `<module>`.
  * */
 const CARGO_UNIT_RE = /cargo test -p ([\w-]+) --lib ([\w:]+)/;
+/* `dg_goldens_*` tests live in `crates/daemon/src/differential_goldens.rs`. */
+const GOLDENS_TEST_RE =
+    /cargo test -p daemon --lib (?:differential_goldens::)?dg_goldens_\w+(?:\s|$)/;
 /* */
 const PACKAGE_SRC_TEST_PATH_RE = /(?:^|[\s'"])(src\/[\w./-]+\.test\.ts)/;
 
@@ -145,7 +148,8 @@ const PACKAGE_SRC_TEST_PATH_RE = /(?:^|[\s'"])(src\/[\w./-]+\.test\.ts)/;
  * Rust verifier paths follow Cargo's target layout.
  * */
 function verifierFromCommand(repoRoot: string, command: string, label: string): string {
-    if (command.startsWith("cargo test -p daemon")) {
+    // The goldens test filter is a bare test name, which the unit resolver below cannot map to a module.
+    if (GOLDENS_TEST_RE.test(command)) {
         return "crates/daemon/src/differential_goldens.rs";
     }
     const integration = command.match(CARGO_INTEGRATION_RE);

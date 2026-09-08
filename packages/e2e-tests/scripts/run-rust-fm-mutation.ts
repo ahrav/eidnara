@@ -112,7 +112,13 @@ for (const mutation of mutations[drill]) {
         writeFileSync(mutation.source, before);
     }
 
+    if (observedFailure.exit_status === 0) {
+        throw new Error(`${mutation.name}: mutation did not redden the drill`);
+    }
     const revertedRerun = runBuildAndDrill(drill);
+    if (revertedRerun.exit_status !== 0) {
+        throw new Error(`${mutation.name}: reverted rerun did not pass`);
+    }
     results.push({
         name: mutation.name,
         applied_diff: {
@@ -125,16 +131,10 @@ for (const mutation of mutations[drill]) {
         reverted_rerun: {
             ...revertedRerun,
             output: bunTestEvidence(revertedRerun.output),
-            status: revertedRerun.exit_status === 0 ? "pass" : "fail",
+            status: "pass",
         },
-        adequacy_finding:
-            observedFailure.exit_status === 0
-                ? "mutation did not redden the drill; investigate drill adequacy"
-                : null,
+        adequacy_finding: null,
     });
-    if (revertedRerun.exit_status !== 0) {
-        throw new Error(`${mutation.name}: reverted rerun did not pass`);
-    }
 }
 
 const recordPath = resolve(e2eRoot, `mutations/fm-oc-${drill}.json`);

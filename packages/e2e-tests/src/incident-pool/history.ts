@@ -534,5 +534,23 @@ export function compareWithAcceptedSnapshot(
         },
     );
 
+    // The ledger records fingerprints, not revision ids, so the accepted catalog is the only record of which variant an id belonged to.
+    const acceptedRevisionOwner = new Map<string, string>();
+    for (const family of acceptedState.catalog.families) {
+        for (const variant of family.variants) {
+            acceptedRevisionOwner.set(variant.semantic_revision.id, variant.id);
+        }
+    }
+    for (const family of candidateState.catalog.families) {
+        for (const variant of family.variants) {
+            const owner = acceptedRevisionOwner.get(variant.semantic_revision.id);
+            if (owner !== undefined && owner !== variant.id) {
+                throw new Error(
+                    `variant ${variant.id} reuses semantic revision id ${variant.semantic_revision.id}, which the accepted catalog assigned to ${owner}`,
+                );
+            }
+        }
+    }
+
     return { accepted: acceptedState, candidate: candidateState };
 }

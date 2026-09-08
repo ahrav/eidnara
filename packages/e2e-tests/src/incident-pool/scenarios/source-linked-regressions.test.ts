@@ -11,6 +11,7 @@ import {
     type FirstRenderDeferObservation,
     failedCheckIds,
     hasCtxReducePair,
+    hasPublishedHistoryRange,
     THINKING_DROPPED_SHELL_CHECKS,
     THINKING_IMAGE_SURVIVAL_CHECKS,
     THINKING_NUDGE_ANCHOR_CHECKS,
@@ -44,7 +45,7 @@ function a3Observation(
     overrides: Partial<AgedCtxReduceObservation> = {},
 ): AgedCtxReduceObservation {
     return {
-        mainRequestCount: 8,
+        mainRequestCount: 9,
         sawReduceOnWire: true,
         bustCount: 0,
         bustReport: "",
@@ -143,7 +144,7 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         expect(
             failedCheckIds(
                 verifyAgedCtxReduceSurvival(
-                    a3Observation({ rustPassCount: 7, transformServedPassCount: 7 }),
+                    a3Observation({ rustPassCount: 8, transformServedPassCount: 8 }),
                 ),
             ),
         ).toEqual(["check-a3-transform-served"]);
@@ -201,8 +202,9 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         expect(
             failedCheckIds(verifyAgedCtxReduceSurvival(a3Observation({ sawReduceOnWire: false }))),
         ).toEqual(["check-a3-reduce-on-wire"]);
+        // Eight prompts produce nine main requests because the ctx_reduce tool_use adds a continuation.
         expect(
-            failedCheckIds(verifyAgedCtxReduceSurvival(a3Observation({ mainRequestCount: 1 }))),
+            failedCheckIds(verifyAgedCtxReduceSurvival(a3Observation({ mainRequestCount: 8 }))),
         ).toEqual(["check-a3-defer-request-floor"]);
     });
 });
@@ -252,6 +254,16 @@ describe("thinking-block successor verifiers", () => {
     });
 
     it("passes clean image-survival observations and rejects a stripped image", () => {
+        // The daemon emits the wrapper even with no history, so the wrapper alone does not prove coverage.
+        expect(hasPublishedHistoryRange("§3§ <session-history></session-history>")).toBe(false);
+        expect(hasPublishedHistoryRange("<session-history>\n\n</session-history>")).toBe(false);
+        expect(
+            hasPublishedHistoryRange(
+                "<session-history>\n## 1-4 · Screenshot triage\n user shared bug.png\n</session-history>",
+            ),
+        ).toBe(true);
+        expect(hasPublishedHistoryRange("## 1-4 · outside the wrapper")).toBe(false);
+
         const raw = verifyThinkingImageSurvival(imageObservation());
         expect(raw.verdict).toBe("pass");
         expect(raw.checks.map((check) => check.id)).toEqual([...THINKING_IMAGE_SURVIVAL_CHECKS]);

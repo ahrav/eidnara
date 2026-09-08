@@ -228,6 +228,33 @@ describe("mutation evidence normalization (R11)", () => {
         }
     });
 
+    it("resolves daemon unit-test commands to the module under test, not always the goldens", () => {
+        const temp = mkdtempSync(join(tmpdir(), "incident-evidence-"));
+        try {
+            cpSync(resolve(E2E_ROOT, "mutations"), join(temp, "mutations"), { recursive: true });
+            const artifact = join(temp, "mutations", "zz-daemon.json");
+            const verifierFor = (command: string): string => {
+                writeFileSync(
+                    artifact,
+                    JSON.stringify({ command, mutations: [executedRecord("ZZ_DAEMON")] }),
+                );
+                const view = loadMutationEvidence(temp, REPO_ROOT);
+                return view.records.find((record) => record.evidenceId === "ev-zz-daemon")!
+                    .verifierPath;
+            };
+            expect(
+                verifierFor(
+                    "cargo test -p daemon --lib dg_goldens_match_ts_wire_surface_and_gate_labels --locked",
+                ),
+            ).toBe("crates/daemon/src/differential_goldens.rs");
+            expect(
+                verifierFor("cargo test -p daemon --lib transform::tests::some_case --locked"),
+            ).toBe("crates/daemon/src/transform.rs");
+        } finally {
+            rmSync(temp, { recursive: true, force: true });
+        }
+    });
+
     it("rejects records the runner never drove red and green", () => {
         const temp = mkdtempSync(join(tmpdir(), "incident-evidence-"));
         try {

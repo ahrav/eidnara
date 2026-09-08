@@ -3,7 +3,11 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseIncidentCatalog } from "../src/incident-pool/contract";
+import {
+    EXECUTABLE_LANES,
+    type IncidentCatalog,
+    parseIncidentCatalog,
+} from "../src/incident-pool/contract";
 import {
     boundVerifierDigests,
     loadMutationEvidence,
@@ -112,9 +116,45 @@ function trustedCiCommit(gitRunner: GitRunner): string {
     });
 }
 
+/** Rebinding a variant to another module or symbol is a verifier change even when every previously bound path keeps its bytes, so the gate compares each accepted variant's whole binding. */
+export function assertCatalogBindingsUnchanged(
+    acceptedBindings: Record<string, string>,
+    currentBindings: Record<string, string>,
+): void {
+    const { changed, unbound } = digestDrift(acceptedBindings, currentBindings);
+    if (unbound.length > 0) {
+        throw new Error(
+            `accepted executable variants no longer bind a verifier: ${unbound.join(", ")}`,
+        );
+    }
+    if (changed.length > 0) {
+        throw new Error(
+            `executable variants rebound their verifier without recorded replay support: ${changed.join(", ")}`,
+        );
+    }
+}
+
+/** One canonical string per executable variant: driver and verifier references plus the sorted oracle dependencies. */
+export function catalogBindings(catalog: IncidentCatalog): Record<string, string> {
+    const bindings: Record<string, string> = {};
+    for (const family of catalog.families) {
+        for (const variant of family.variants) {
+            if (!EXECUTABLE_LANES.includes(variant.lane) || !variant.verifier_binding) continue;
+            const binding = variant.verifier_binding;
+            bindings[variant.id] = [
+                binding.driver,
+                binding.verifier,
+                ...[...binding.oracle_dependencies].sort(),
+            ].join("\n");
+        }
+    }
+    return bindings;
+}
+
 interface TrustedVerifierState {
     mutationDigests: Record<string, string>;
     catalogBoundDigests: Record<string, string>;
+    catalogBindings: Record<string, string>;
 }
 
 /* */
@@ -124,18 +164,20 @@ function readVerifierState(worktree: string, repoRoot: string): TrustedVerifierS
     // A tree without catalog.json binds no executable verifiers.
     // Such a tree contributes no accepted bytes, so every current binding is new.
     // Deleting the current catalog leaves accepted bindings without counterparts.
-    const catalogBoundDigests = existsSync(catalogPath)
-        ? boundVerifierDigests(
-              parseIncidentCatalog(JSON.parse(readFileSync(catalogPath, "utf8")) as unknown),
-              e2eRoot,
-          )
-        : {};
+    const catalog = existsSync(catalogPath)
+        ? parseIncidentCatalog(JSON.parse(readFileSync(catalogPath, "utf8")) as unknown)
+        : null;
+    const catalogBoundDigests = catalog ? boundVerifierDigests(catalog, e2eRoot) : {};
     // Without mutations/, mutation records bind no verifiers.
     // Deleting the current directory leaves every accepted mutation-bound verifier without a counterpart, which `assertBoundVerifierBytesUnchanged` rejects.
     const mutationDigests = existsSync(resolve(e2eRoot, "mutations"))
         ? loadMutationEvidence(e2eRoot, repoRoot).verifierDigests
         : {};
-    return { mutationDigests, catalogBoundDigests };
+    return {
+        mutationDigests,
+        catalogBoundDigests,
+        catalogBindings: catalog ? catalogBindings(catalog) : {},
+    };
 }
 
 function loadTrustedEvidence(baseCommit: string): TrustedVerifierState {
@@ -182,6 +224,7 @@ export function validateIncidentVerifiers(baseCommit: string): number {
         accepted.catalogBoundDigests,
         current.catalogBoundDigests,
     );
+    assertCatalogBindingsUnchanged(accepted.catalogBindings, current.catalogBindings);
     return (
         Object.keys(accepted.mutationDigests).length +
         Object.keys(accepted.catalogBoundDigests).length

@@ -603,6 +603,33 @@ describe("repository-baseline comparison", () => {
         expect(() => compareWithAcceptedSnapshot(accepted, rewrite("rev-two-two"))).not.toThrow();
     });
 
+    it("rejects a new variant that takes a revision id the accepted catalog assigned to another variant", () => {
+        const accepted = snapshot(fixture());
+        const taken = fixture();
+        // The owner advances past rev-green-one, so the catalog parser sees no duplicate; only the accepted snapshot remembers who held it.
+        variants(taken)[0] = variantFixture("var-green-one", {
+            lane: "green",
+            source_claims: ["claim-green-one"],
+            semantic_revision: { id: "rev-green-two", fingerprint: HEX("8") },
+            normative_checks: ["check-green-holds"],
+        });
+        taken.events.push(
+            chainedGreenBaseline("adj-green-two", "var-green-one", 2, HEX("8"), {
+                supersedes: "adj-green-one",
+            }),
+        );
+        variants(taken).push(
+            variantFixture("var-new-one", {
+                source_claims: ["claim-two-one"],
+                semantic_revision: { id: "rev-green-one", fingerprint: HEX("7") },
+            }),
+        );
+        taken.events.push(chainedGreenBaseline("adj-new-one", "var-new-one", 1, HEX("7")));
+        expect(() => compareWithAcceptedSnapshot(accepted, snapshot(taken))).toThrow(
+            /var-new-one reuses semantic revision id rev-green-one, which the accepted catalog assigned to var-green-one/,
+        );
+    });
+
     it("allows a newly introduced identity to change until it is accepted", () => {
         const accepted = fixture();
         const withNew = fixture();
