@@ -410,8 +410,12 @@ function reuseLastKnownGitIdentity(canonical: string, gitRoot: string): string |
     return cached.identity;
 }
 
+function shellQuote(value: string): string {
+    return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 function formatDubiousOwnershipWarning(canonical: string): string {
-    return `Eidnara: git refused to read ${canonical} (dubious ownership — the repo is owned by a different user). Using a directory-based project identity for now, which keeps memory separate from this repo's normal identity. Fix: git config --global --add safe.directory ${canonical}`;
+    return `Eidnara: git refused to read ${canonical} (dubious ownership — the repo is owned by a different user). Using a directory-based project identity for now, which keeps memory separate from this repo's normal identity. Fix: git config --global --add safe.directory ${shellQuote(canonical)}`;
 }
 
 function recordDubiousOwnershipFallback(canonical: string): void {

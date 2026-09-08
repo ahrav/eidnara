@@ -423,7 +423,7 @@ describe("project identity", () => {
     });
 
     it("classifies dubious ownership and falls back until the cooldown expires", () => {
-        const directory = makeRepoWithGitMetadata("project-identity-dubious-");
+        const directory = makeRepoWithGitMetadata("project identity ';$()-dubious-");
         let now = 1_000;
         let recovered = false;
         const execMock = mock(() => {
@@ -445,9 +445,9 @@ describe("project identity", () => {
         expect(strictError.errorClass).toBe("dubious_ownership");
 
         expect(resolveProjectIdentity(directory)).toBe(expectedDirIdentity(directory));
-        expect(takeDubiousOwnershipProjectIdentityWarning(directory)).toContain(
-            "git config --global --add safe.directory",
-        );
+        const warning = takeDubiousOwnershipProjectIdentityWarning(directory);
+        const quotedDirectory = `'${path.resolve(directory).replaceAll("'", "'\\''")}'`;
+        expect(warning).toContain(`git config --global --add safe.directory ${quotedDirectory}`);
         expect(takeDubiousOwnershipProjectIdentityWarning(directory)).toBeNull();
 
         recovered = true;

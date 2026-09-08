@@ -491,6 +491,29 @@ describe("createEidnaraCommandHandler", () => {
             ]);
         });
 
+        it("starts wrapup without waiting for the best-effort progress notification", async () => {
+            const moduleCall = mock(async () => ({ disposition: "nothing_to_compact" }));
+            const sendNotification = mock(async (_sessionId: string, text: string) => {
+                if (text.includes("Starting wrapup")) await new Promise<void>(() => {});
+            });
+            const handler = createEidnaraCommandHandler({
+                moduleClient: { call: moduleCall },
+                sendNotification,
+                isSubagentSession: () => false,
+            });
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    { command: "ctx-wrapup", sessionID: "ses-wrapup-progress", arguments: "" },
+                    { parts: [{ type: "text", text: "" }] },
+                    {},
+                ),
+                "ctx-wrapup",
+            );
+
+            expect(moduleCall).toHaveBeenCalledTimes(1);
+        });
+
         it("defaults messagesToKeep to 20", async () => {
             const { run, calls, texts } = setup(() => ({ disposition: "nothing_to_compact" }));
 
