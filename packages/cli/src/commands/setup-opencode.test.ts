@@ -195,6 +195,30 @@ describe("setup-opencode config safety", () => {
         });
     });
 
+    it("keeps comments inside an existing cache_ttl record", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(
+            path,
+            `{\n  "cache_ttl": {\n    // ttl keep\n    "default": "10m",\n    "openai/gpt-5": 30\n  }\n}\n`,
+        );
+
+        writeEidnaraConfig(path, {
+            historianModel: null,
+            sidekickEnabled: false,
+            sidekickModel: null,
+            claudeMax: true,
+        });
+
+        const text = readFileSync(path, "utf-8");
+        expect(text).toContain("ttl keep");
+        const written = parseJsonc(text) as Record<string, unknown>;
+        expect(written.cache_ttl).toEqual({
+            default: "10m",
+            "anthropic/claude-sonnet-4-6": "59m",
+            "anthropic/claude-opus-4-6": "59m",
+        });
+    });
+
     it("extends the Claude Max overrides to the selected Anthropic models only", () => {
         expect(
             withClaudeMaxCacheTtl(undefined, ["anthropic/claude-haiku-4-5", "openai/gpt-5", null]),
@@ -349,6 +373,14 @@ describe("setup-opencode plugin list shape", () => {
         expect(() => assertPluginListShape([scalar])).toThrow(/"plugin" must be an array/);
         expect(() => assertPluginListShape([object])).toThrow(/object\.json/);
         expect(() => assertPluginListShape([array, join(root, "missing.json")])).not.toThrow();
+
+        // The writers repeat the check on the value they re-read at commit time.
+        expect(() => addPluginToOpenCodeConfig(scalar, "json")).toThrow(
+            /"plugin" must be an array/,
+        );
+        expect(() => addPluginToTuiConfig(object, "json")).toThrow(/"plugin" must be an array/);
+        expect(readFileSync(scalar, "utf-8")).toBe(`{"plugin":"@other/plugin"}`);
+        expect(readFileSync(object, "utf-8")).toBe(`{"plugin":{"name":"@other/plugin"}}`);
     });
 });
 

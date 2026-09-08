@@ -40,14 +40,13 @@ describe("readEidnaraModes", () => {
 describe("projectModeOverrides", () => {
     const shared = { enabled: true, compactionEnabled: false, memoryEnabled: true };
 
-    it("reports enabled, compaction, and memory disagreements", () => {
+    it("reports enabled and memory disagreements, not the stripped compaction mode", () => {
         const project = write(
             "p.jsonc",
             `{"enabled":false,"compaction":{"enabled":true},"memory":{"enabled":false}}`,
         );
         expect(projectModeOverrides(project, shared)).toEqual([
             "enabled: false",
-            "compaction.enabled: true",
             "memory.enabled: false",
         ]);
     });
