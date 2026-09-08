@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import productionInputs from "../../../../../release/production-inputs.lock.json";
-import { Deadline } from "../../shared/host-client";
+import { Deadline, RouteHandle } from "../../shared/host-client";
 import { WaiterDetachedError } from "../../shared/host-lifecycle/policy";
 import {
     __moduleTransportTest,
@@ -16,12 +16,50 @@ const REPO_ROOT = join(import.meta.dir, "../../../../..");
 
 type TransportInternals = {
     connectionPromise: Promise<unknown> | null;
+    client: { closeRoute(handle: RouteHandle): Promise<void> } | null;
+    routes: Map<string, { route: RouteHandle; generation: number }>;
     ensureConnected(deadline: Deadline, signal?: AbortSignal): Promise<unknown>;
 };
 
 function internals(transport: HostModuleTransport): TransportInternals {
     return transport as unknown as TransportInternals;
 }
+
+describe("HostModuleTransport forgetRoute", () => {
+    test("closes the cached route on the host as it evicts the handle, without waiting on the close", () => {
+        const transport = new HostModuleTransport("/tmp/unused-eidnara-host.json");
+        const state = internals(transport);
+        const closed: RouteHandle[] = [];
+        state.client = {
+            closeRoute(handle: RouteHandle): Promise<void> {
+                closed.push(handle);
+                return new Promise<void>(() => {});
+            },
+        };
+        const route = new RouteHandle(7, 1);
+        state.routes.set("session-a\0/repo/missing-project", { route, generation: 0 });
+
+        transport.forgetRoute("session-a", "/repo/missing-project");
+
+        expect(closed).toEqual([route]);
+        expect(state.routes.size).toBe(0);
+    });
+
+    test("a route absent from the cache sends no close", () => {
+        const transport = new HostModuleTransport("/tmp/unused-eidnara-host.json");
+        const state = internals(transport);
+        const closed: RouteHandle[] = [];
+        state.client = {
+            async closeRoute(handle: RouteHandle): Promise<void> {
+                closed.push(handle);
+            },
+        };
+
+        transport.forgetRoute("session-a", "/repo/missing-project");
+
+        expect(closed).toEqual([]);
+    });
+});
 
 describe("HostModuleTransport shared connection wait", () => {
     test("each caller stops waiting at its own deadline without cancelling the shared flight", async () => {

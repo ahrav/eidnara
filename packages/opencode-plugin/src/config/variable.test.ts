@@ -192,6 +192,31 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings[0]).toContain(missing);
         });
 
+        it("emits warning and empty string for an empty file", () => {
+            const emptyFile = join(tmpDir, "empty.txt");
+            writeFileSync(emptyFile, "");
+            const input = `{ "api_key": "{file:${emptyFile}}" }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "" }`);
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("is empty");
+            expect(result.warnings[0]).toContain(emptyFile);
+        });
+
+        it("emits warning and empty string for a whitespace-only file", () => {
+            const blankFile = join(tmpDir, "blank.txt");
+            writeFileSync(blankFile, "  \n\t\n");
+            const input = `{ "api_key": "{file:${blankFile}}" }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "" }`);
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("is empty");
+        });
+
         it("passes {file:} literally through (matches OpenCode regex: at least one char required)", () => {
             const input = `{ "api_key": "{file:}" }`;
 
@@ -279,6 +304,34 @@ describe("substituteConfigVariables", () => {
 
             expect(result.text).toBe(`{ "api_key": "indirect-value" }`);
         });
+
+        it("withholds an env-expanded file path from the missing-file warning", () => {
+            process.env.EIDNARA_SECRET_DIR = join(tmpDir, "hunter2-secret-dir");
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_SECRET_DIR}/missing.txt}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "" }`);
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("not found");
+            expect(result.warnings[0]).toContain("{file:{env:EIDNARA_SECRET_DIR}");
+            expect(result.warnings[0]).toContain("path withheld");
+            expect(result.warnings[0]).not.toContain("hunter2-secret-dir");
+            delete process.env.EIDNARA_SECRET_DIR;
+        });
+
+        it("still names the resolved path for a literal file token next to an expanded one", () => {
+            process.env.EIDNARA_SECRET_DIR = join(tmpDir, "hunter2-secret-dir");
+            const literalMissing = join(tmpDir, "literal-missing.txt");
+
+            const input = `{ "a": "{file:{env:EIDNARA_SECRET_DIR}/x.txt}", "b": "{file:${literalMissing}}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.warnings).toHaveLength(2);
+            expect(result.warnings[0]).not.toContain("hunter2-secret-dir");
+            expect(result.warnings[1]).toContain(literalMissing);
+            delete process.env.EIDNARA_SECRET_DIR;
+        });
     });
 
     describe("no-op cases", () => {
@@ -298,6 +351,51 @@ describe("substituteConfigVariables", () => {
 
             expect(result.text).toBe(input);
             expect(result.warnings).toHaveLength(0);
+        });
+    });
+
+    describe("project-level config", () => {
+        it("leaves tokens literal and warns once", () => {
+            process.env.EIDNARA_PROJECT = "must-not-expand";
+            const input = `{ "a": "{env:EIDNARA_PROJECT}", "b": "{file:./key.txt}" }`;
+
+            const result = substituteConfigVariables({ text: input, isProjectConfig: true });
+
+            expect(result.text).toBe(input);
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("{env:} and {file:}");
+        });
+
+        it("does not warn for tokens that appear only inside comments", () => {
+            const input = [
+                `{`,
+                `    // use {env:API_KEY} in the user config`,
+                `    /* or {file:~/key.txt} */`,
+                `    "a": "literal"`,
+                `}`,
+            ].join("\n");
+
+            const result = substituteConfigVariables({ text: input, isProjectConfig: true });
+
+            // The comments survive in the output; only the warning scan ignores them.
+            expect(result.text).toBe(input);
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("still warns when a real token sits beside a commented one", () => {
+            const input = [
+                `{`,
+                `    // {file:~/docs.txt} is documented here`,
+                `    "a": "{env:REAL_TOKEN}"`,
+                `}`,
+            ].join("\n");
+
+            const result = substituteConfigVariables({ text: input, isProjectConfig: true });
+
+            expect(result.text).toBe(input);
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("{env:}");
+            expect(result.warnings[0]).not.toContain("{file:}");
         });
     });
 

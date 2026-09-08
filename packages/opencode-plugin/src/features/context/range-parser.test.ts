@@ -30,8 +30,22 @@ describe("parseRangeString", () => {
         ["throws on non-numeric input", "abc"],
         ["throws on reversed range", "5-3"],
         ["throws on range of 1001 elements", "1-1001"],
+        // 2^53 is where `i++` stops advancing, so an unrejected endpoint there would never terminate.
+        ["throws on a single id above MAX_SAFE_INTEGER", "9007199254740992"],
+        [
+            "throws on a range whose endpoints are above MAX_SAFE_INTEGER",
+            "9007199254740992-9007199254740992",
+        ],
+        [
+            "throws on a range whose end is above MAX_SAFE_INTEGER",
+            "9007199254740990-9007199254740992",
+        ],
     ] as Array<[string, string]>)("%s", (_title, input) => {
         expect(() => parseRangeString(input)).toThrow();
+    });
+
+    it("accepts MAX_SAFE_INTEGER as an id", () => {
+        expect(parseRangeString("9007199254740991")).toEqual([9007199254740991]);
     });
 
     it("throws on range exceeding 1000 elements", () => {
@@ -40,6 +54,20 @@ describe("parseRangeString", () => {
         expect(() => parseRangeString(input)).toThrow(
             'Range "1-10000" exceeds maximum size of 1000 elements (got 10000)',
         );
+    });
+
+    it("rejects many small ranges as soon as the total passes 1000 elements", () => {
+        const input = Array.from({ length: 5 }, (_, i) => `${i * 1000}-${i * 1000 + 999}`).join(
+            ",",
+        );
+        // A size of 1001 proves the parser stopped at the first excess id instead of expanding all 5000.
+        expect(() => parseRangeString(input)).toThrow(
+            "Total range size exceeds maximum of 1000 elements (got 1001)",
+        );
+    });
+
+    it("dedupes overlapping ranges before applying the total cap", () => {
+        expect(parseRangeString("1-1000,1-1000,500-1000")).toHaveLength(1000);
     });
 
     it("allows max valid range of 1000 elements", () => {

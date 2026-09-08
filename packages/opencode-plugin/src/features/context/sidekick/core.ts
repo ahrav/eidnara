@@ -21,15 +21,20 @@ Rules:
 
 /**
  * Reasoning-model `<think>` blocks must not reach augmentation output.
- * suppress them.
+ *
+ * An unclosed `<think>` is removed through end of input so raw reasoning
+ * cannot pass as a nonempty result. Closed blocks are removed first so their
+ * opening tags do not trigger the unclosed-block pass and discard following
+ * output.
  */
 export function stripThinkingBlocks(text: string): string {
-    return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    return text
+        .replace(/<think>[\s\S]*?<\/think>/g, "")
+        .replace(/<think>[\s\S]*$/, "")
+        .trim();
 }
 
-/**
- *
- */
+/** Matches the exact no-result reply the system prompt requests, tolerating case and trailing punctuation. */
 export function isEmptySidekickResult(text: string): boolean {
     const trimmed = text
         .trim()

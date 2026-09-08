@@ -35,9 +35,21 @@ export interface KernelTransportCall {
 export interface KernelTransport {
     /** False marks the daemon unreachable; a transport that starts the daemon during `call` answers true with no connection file. commentlint: allow(JUDGE) */
     connectionFileExists(): boolean;
+    /** Resolves the daemon's raw response. Rejects with `StoreLifecycleError` when the daemon is reachable but its store is not ready to serve; any other rejection is a transport failure. commentlint: allow(JUDGE) */
     call(args: KernelTransportCall): Promise<unknown>;
     /** Rebinds the session route after the daemon reports `route_unbound`. */
     ensureRoute(args: { sessionId: string; projectRoot: string }): Promise<void>;
+}
+
+/** The store lifecycle states a transport can observe before any request reaches a kernel route. */
+export type StoreLifecycleReason = "store_starting" | "store_unavailable";
+
+/** Thrown by a transport whose daemon reports the store as not ready before the request is sent; the client maps `reason` to the same-named `unavailable` state instead of `invalid:internal`. commentlint: allow(JUDGE) */
+export class StoreLifecycleError extends Error {
+    constructor(readonly reason: StoreLifecycleReason) {
+        super(`daemon store is ${reason === "store_starting" ? "starting" : "unavailable"}`);
+        this.name = "StoreLifecycleError";
+    }
 }
 
 export type Surface = "auto_inject" | "auto_search" | "explicit_search";
@@ -361,6 +373,7 @@ export class KernelClient {
                     return failed(invalid("internal"));
                 }
                 if (isDaemonAbsent(error)) return absent();
+                if (error instanceof StoreLifecycleError) return failed(unavailable(error.reason));
                 return failed(invalid("internal"));
             }
         }

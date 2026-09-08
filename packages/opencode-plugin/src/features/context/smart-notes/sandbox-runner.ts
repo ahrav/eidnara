@@ -19,7 +19,12 @@ import type {
 } from "quickjs-emscripten";
 
 import type { SmartNoteCapabilityApi, SmartNoteCapabilityFactory } from "./capabilities";
-import { isSmartNoteNetworkError, type SmartNoteCheckResult, smartNoteAbortError } from "./types";
+import {
+    isSmartNoteNetworkError,
+    type SmartNoteCheckResult,
+    SmartNoteNetworkError,
+    smartNoteAbortError,
+} from "./types";
 
 /**
  * The reusable WASM module requires ~1 MB of compilation.
@@ -137,10 +142,12 @@ function resolveCapabilitiesForRun(
     throw new Error("smart-note check requires capabilities");
 }
 
+function runAbortReason(signal: AbortSignal): unknown {
+    return signal.reason ?? new Error("smart-note check aborted");
+}
+
 function throwIfRunAborted(signal: AbortSignal): void {
-    if (signal.aborted) {
-        throw signal.reason ?? new Error("smart-note check aborted");
-    }
+    if (signal.aborted) throw runAbortReason(signal);
 }
 
 export async function runCompiledSmartNoteCheck(
@@ -199,6 +206,7 @@ async function runCompiledSmartNoteCheckLocked(
         executionTimedOut = true;
         controller.abort(new Error("smart-note check timed out"));
     }, timeoutMs);
+    let hostCalls: HostCallLedger | undefined;
     try {
         throwIfRunAborted(controller.signal);
         const capabilities = resolveCapabilitiesForRun(options, controller.signal);
@@ -206,7 +214,8 @@ async function runCompiledSmartNoteCheckLocked(
         // predicate is the only stop for that loop; a monotonic clock keeps a wall-clock step from
         // stretching the budget.
         const deadline = performance.now() + timeoutMs;
-        const quickjs = await getAsyncModule();
+        // The shared initialization keeps running and stays cached; only this run stops waiting for it.
+        const quickjs = await raceWithAbort(getAsyncModule(), controller.signal, runAbortReason);
         throwIfRunAborted(controller.signal);
         const context = quickjs.newContext();
         try {
@@ -215,7 +224,7 @@ async function runCompiledSmartNoteCheckLocked(
             context.runtime.setInterruptHandler(
                 () => controller.signal.aborted || performance.now() > deadline,
             );
-            const hostCalls = installCapabilityObject(context, capabilities, controller.signal);
+            hostCalls = installCapabilityObject(context, capabilities, controller.signal);
             disableAmbientDynamicCode(context);
             const result = await evalCheck(context, options.compiledCheck);
             // A guest `try/catch` around a host call can swallow the abort or the host's refusal and
@@ -232,7 +241,12 @@ async function runCompiledSmartNoteCheckLocked(
         }
     } catch (error) {
         if (externallyCancelled && !executionTimedOut) return cancelledResult(error);
-        return failureResult(formatSandboxError(error), isSmartNoteNetworkError(error));
+        // Guest exceptions arrive with guest-controlled names and messages, so the network class comes
+        // only from errors the runner or a host capability produced.
+        const network =
+            error instanceof SmartNoteNetworkError ||
+            (hostCalls?.rejected === true && isSmartNoteNetworkError(hostCalls.reason));
+        return failureResult(formatSandboxError(error), network);
     } finally {
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", externalAbort);
@@ -319,11 +333,15 @@ async function guardHostCall<T>(
 
 // A host call that never settles would hold the asyncify suspension past the run budget.
 // Rejecting on abort resumes the guest with a network-class error; the orphaned promise is dropped.
-function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-    if (signal.aborted) return Promise.reject(smartNoteAbortError(signal));
+function raceWithAbort<T>(
+    promise: Promise<T>,
+    signal: AbortSignal,
+    abortReason: (signal: AbortSignal) => unknown = smartNoteAbortError,
+): Promise<T> {
+    if (signal.aborted) return Promise.reject(abortReason(signal));
     let onAbort: (() => void) | undefined;
     const abort = new Promise<never>((_, reject) => {
-        onAbort = () => reject(smartNoteAbortError(signal));
+        onAbort = () => reject(abortReason(signal));
         signal.addEventListener("abort", onAbort, { once: true });
     });
     return Promise.race([promise, abort]).finally(() => {

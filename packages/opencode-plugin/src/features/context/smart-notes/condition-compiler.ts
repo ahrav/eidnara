@@ -39,6 +39,13 @@ type RawPredicate =
 const VALUE = String.raw`(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)`;
 
 /**
+ * Mirrors the daemon's `MAX_SHORT_FIELD_BYTES` cap on the stored `compiled_config` string
+ * (`crates/daemon/src/lib.rs`). Resolved absolute paths and JSON framing make a config larger
+ * than its surface condition, so a condition under the surface cap can still overflow here.
+ */
+const COMPILED_CONFIG_MAX_BYTES = 4 * 1024;
+
+/**
  * compileSurfaceCondition compiles only deterministic local filesystem phrases.
  * Prose outside the grammar returns { status: "plain" }.
  */
@@ -87,6 +94,14 @@ export async function compileSurfaceCondition(
         return {
             status: "refused",
             reason: `provider schema: ${singleLine(validation.reason)}`.slice(0, 180),
+        };
+    }
+
+    const configBytes = Buffer.byteLength(JSON.stringify(validation.config), "utf8");
+    if (configBytes > COMPILED_CONFIG_MAX_BYTES) {
+        return {
+            status: "refused",
+            reason: `compiled config is ${configBytes} bytes; the storage limit is ${COMPILED_CONFIG_MAX_BYTES}`,
         };
     }
 
@@ -154,8 +169,8 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         ),
     );
     if (fileContains) {
-        const path = unquote(fileContains[1]);
-        const needle = unquote(fileContains[3].trim());
+        const path = unquoteNonEmpty(fileContains[1]);
+        const needle = unquoteNonEmpty(fileContains[3].trim());
         if (path === null || needle === null) return null;
         return {
             kind: "file_contains",
@@ -172,7 +187,7 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         ),
     );
     if (commit) {
-        const repoPath = unquote(commit[1]);
+        const repoPath = unquoteNonEmpty(commit[1]);
         if (repoPath === null) return null;
         return {
             kind: "git_commit_after",
@@ -188,9 +203,10 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         ),
     );
     if (tag) {
-        const pattern = tag[1] ? unquote(tag[1]) : "*";
-        const above = unquote(tag[2] ?? tag[3] ?? "");
-        const repoPath = tag[4] ? unquote(tag[4]) : projectPath;
+        const pattern = tag[1] ? unquoteNonEmpty(tag[1]) : "*";
+        const aboveCapture = tag[2] ?? tag[3];
+        const above = aboveCapture === undefined ? "" : unquoteNonEmpty(aboveCapture);
+        const repoPath = tag[4] ? unquoteNonEmpty(tag[4]) : projectPath;
         if (pattern === null || above === null || repoPath === null) return null;
         return {
             kind: "git_tag_matching",
@@ -207,7 +223,7 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         ),
     );
     if (mtime) {
-        const path = unquote(mtime[1]);
+        const path = unquoteNonEmpty(mtime[1]);
         if (path === null) return null;
         return {
             kind: "mtime_after",
@@ -219,7 +235,7 @@ function parseAtomicCondition(text: string, projectPath: string): RawPredicate |
         new RegExp(`^(?:when\\s+)?(?:path\\s+)?(${VALUE})\\s+(exists|is gone)$`, "i"),
     );
     if (pathExists) {
-        const path = unquote(pathExists[1]);
+        const path = unquoteNonEmpty(pathExists[1]);
         if (path === null) return null;
         return {
             kind: "path_exists",
@@ -333,6 +349,12 @@ function unquote(value: string): string | null {
         }
     }
     return value.slice(1, -1).replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+}
+
+/** `unquote` for operands where the empty string is malformed rather than a value. */
+function unquoteNonEmpty(value: string): string | null {
+    const unquoted = unquote(value);
+    return unquoted === null || unquoted.length === 0 ? null : unquoted;
 }
 
 function singleLine(value: string): string {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -91,6 +91,43 @@ describe("smart-note readFile capability", () => {
                 }),
             ).toThrow(RangeError);
         }
+    });
+
+    test("treats a backslash as an ordinary byte where the host does not use it as a separator", async () => {
+        if (process.platform === "win32") return;
+        await withTempDir(async (dir) => {
+            await mkdir(path.join(dir, "a"));
+            await writeFile(path.join(dir, "a", "b"), "nested", "utf8");
+            await writeFile(path.join(dir, "a\\b"), "literal backslash", "utf8");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.readFile("a/b")).toBe("nested");
+            expect(await cap.readFile("a\\b")).toBe("literal backslash");
+        });
+    });
+
+    test("an unreadable parent directory rejects instead of reading as missing", async () => {
+        if (process.getuid?.() === 0) return;
+        await withTempDir(async (dir) => {
+            const locked = path.join(dir, "locked");
+            await mkdir(path.join(locked, "inner"), { recursive: true });
+            await writeFile(path.join(locked, "inner", "status.txt"), "hidden", "utf8");
+            await chmod(locked, 0o000);
+            try {
+                const cap = createSmartNoteCapabilities({
+                    projectRoot: dir,
+                    signal: new AbortController().signal,
+                });
+                await expect(cap.readFile("locked/inner/status.txt")).rejects.toMatchObject({
+                    code: "EACCES",
+                });
+                expect(await cap.readFile("absent/status.txt")).toBeNull();
+            } finally {
+                await chmod(locked, 0o755);
+            }
+        });
     });
 
     test("accepts in-tree names whose first component begins with dots", async () => {
@@ -223,6 +260,28 @@ describe("smart-note git capabilities", () => {
         });
     });
 
+    test("gitTag is null when the only tags are unreachable from HEAD", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            await git(dir, "tag", "-d", "v1.2.3");
+            await git(dir, "checkout", "-q", "--orphan", "side");
+            await git(
+                dir,
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Record the orphan history that carries the tag",
+            );
+            await git(dir, "tag", "v9.0.0");
+            await git(dir, "checkout", "-q", "main");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitTag()).toBeNull();
+        });
+    });
+
     test("ordinary git failures resolve to an empty result", async () => {
         await withTempDir(async (dir) => {
             const cap = createSmartNoteCapabilities({
@@ -232,6 +291,81 @@ describe("smart-note git capabilities", () => {
             expect(await cap.gitHeadSha()).toBeNull();
             expect(await cap.gitTag()).toBeNull();
             expect(await cap.gitLog()).toEqual([]);
+        });
+    });
+
+    test("a repository with no commits yields empty answers", async () => {
+        await withTempDir(async (dir) => {
+            await git(dir, "init", "--initial-branch=main");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitHeadSha()).toBeNull();
+            expect(await cap.gitTag()).toBeNull();
+            expect(await cap.gitLog()).toEqual([]);
+        });
+    });
+
+    test("a HEAD ref whose commit object is missing rejects instead of answering", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            await git(dir, "tag", "-d", "v1.2.3");
+            await writeFile(
+                path.join(dir, ".git", "refs", "heads", "main"),
+                "0123456789abcdef0123456789abcdef01234567\n",
+                "utf8",
+            );
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            await expect(cap.gitHeadSha()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            await expect(cap.gitTag()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            await expect(cap.gitLog()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+        });
+    });
+
+    test("a partial clone fails on a missing object instead of fetching it", async () => {
+        await withTempDir(async (source) => {
+            await withTempDir(async (parent) => {
+                await createTaggedRepository(source);
+                await git(source, "config", "uploadpack.allowFilter", "true");
+                const clone = path.join(parent, "clone");
+                await git(
+                    parent,
+                    "clone",
+                    "--quiet",
+                    "--filter=tree:0",
+                    "--no-checkout",
+                    `file://${source}`,
+                    clone,
+                );
+                const cap = createSmartNoteCapabilities({
+                    projectRoot: clone,
+                    signal: new AbortController().signal,
+                });
+                // Commit objects are present, so a log without a path filter needs no trees.
+                expect(await cap.gitLog({ maxCount: 1 })).toHaveLength(1);
+                // A path filter needs the tree, which the clone does not have.
+                await expect(cap.gitLog({ path: "state.txt" })).rejects.toBeInstanceOf(
+                    SmartNoteNetworkError,
+                );
+            });
+        });
+    });
+
+    test("a repository git cannot read rejects instead of answering empty", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            await writeFile(path.join(dir, ".git", "HEAD"), "garbage\n", "utf8");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            await expect(cap.gitHeadSha()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            await expect(cap.gitTag()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            await expect(cap.gitLog()).rejects.toBeInstanceOf(SmartNoteNetworkError);
         });
     });
 
@@ -263,6 +397,8 @@ describe("smart-note git capabilities", () => {
             expect(await cap.gitLog({ path: ":(top).env" })).toEqual([]);
             expect(await cap.gitLog({ path: ":/.env" })).toEqual([]);
             expect(await cap.gitLog({ path: "*" })).toEqual([]);
+            expect(await cap.gitLog({ path: "" })).toEqual([]);
+            expect(await cap.gitLog({ path: "   " })).toEqual([]);
         });
     });
 
