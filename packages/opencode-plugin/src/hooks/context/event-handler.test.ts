@@ -20,6 +20,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeCompactionMarkerConnection, MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { type ContextUsageEntry, createEventHandler, type EventHandlerDeps } from "./event-handler";
 import { DEFAULT_CONTEXT_LIMIT, resolveContextLimit } from "./event-resolvers";
+import { closeReadOnlySessionDb } from "./read-session-db";
 import type { RawMessage } from "./read-session-raw";
 import { buildTrueRawTokenIndex } from "./read-session-true-raw-tokens";
 
@@ -159,6 +160,7 @@ beforeEach(() => {
 
 afterEach(() => {
     closeCompactionMarkerConnection();
+    closeReadOnlySessionDb();
     _resetHarnessForTesting();
     resetSidebarSnapshotCache();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -280,6 +282,39 @@ describe("createEventHandler — message.updated", () => {
         newer.info.id = "msg-9";
         await handle("message.updated", newer);
         expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(41_000);
+    });
+
+    it("uses the newest persisted response as the reference when the usage map is empty", async () => {
+        const db = openCodeDb();
+        try {
+            db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            ).run(
+                "msg-9",
+                SESSION,
+                9_000,
+                9_000,
+                JSON.stringify({
+                    role: "assistant",
+                    providerID: "no-such-provider",
+                    modelID: "no-such-model",
+                    tokens: { input: 40_000, output: 10, cache: { read: 0, write: 0 } },
+                }),
+            );
+        } finally {
+            closeQuietly(db);
+        }
+        const { deps, handle } = buildHarness();
+
+        const older = assistantUpdated({ input: 5_000 });
+        older.info.id = "msg-3";
+        await handle("message.updated", older);
+        expect(deps.contextUsageMap.has(SESSION)).toBe(false);
+
+        const newest = assistantUpdated({ input: 40_500 });
+        newest.info.id = "msg-9";
+        await handle("message.updated", newest);
+        expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(40_500);
     });
 
     it("evicts usage entries older than the TTL on the next event", async () => {

@@ -15,6 +15,7 @@ import {
 } from "./event-payloads";
 import { resolveContextLimit, resolveSessionId } from "./event-resolvers";
 import { recordChildSession } from "./live-session-state";
+import { findLastAssistantUsageFromOpenCodeDb } from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
@@ -28,6 +29,19 @@ export interface ContextUsageEntry {
     model?: { providerID: string; modelID: string };
     /** The assistant message `usage` came from, so removing that message can discard the entry. */
     messageID?: string;
+}
+
+/** Returns whether `messageID` predates the newest response, using the persisted response when in-memory state is unavailable. OpenCode message ids are time-ordered, so id order tracks response order. commentlint: allow(JUDGE) */
+export function isOlderThanNewestResponse(
+    contextUsageMap: Map<string, ContextUsageEntry>,
+    sessionId: string,
+    messageID: string | undefined,
+): boolean {
+    if (!messageID) return false;
+    const newestResponseId =
+        contextUsageMap.get(sessionId)?.messageID ??
+        findLastAssistantUsageFromOpenCodeDb(sessionId)?.messageID;
+    return newestResponseId !== undefined && messageID < newestResponseId;
 }
 
 export interface EventHandlerDeps {
@@ -171,12 +185,13 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             try {
-                // An edit or retry of an older response updates that older row; its tokens must not replace the newest response's usage. OpenCode message ids are time-ordered. commentlint: allow(JUDGE)
-                const current = deps.contextUsageMap.get(info.sessionID);
-                if (current?.messageID && info.messageID && info.messageID < current.messageID) {
+                // An edit or retry of an older response updates that older row; its tokens must not replace the newest response's usage.
+                if (
+                    isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
+                ) {
                     sessionLog(
                         info.sessionID,
-                        `event message.updated: skipping — ${info.messageID} is older than the recorded response ${current.messageID}`,
+                        `event message.updated: skipping — ${info.messageID} is older than the newest response`,
                     );
                     return;
                 }
