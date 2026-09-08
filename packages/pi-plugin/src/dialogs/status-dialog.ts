@@ -12,6 +12,10 @@ import {
     resolveExecuteThresholdDetail,
 } from "@eidnara/opencode/hooks/context/event-resolvers";
 import { estimateTokens } from "@eidnara/opencode/hooks/context/read-session-formatting";
+import {
+    calibrateBuckets,
+    resolveModelCalibration,
+} from "@eidnara/opencode/hooks/context/tokenizer-calibration";
 import type { RustSessionStatus } from "@eidnara/opencode/plugin/rpc-handlers";
 import {
     formatThresholdClampNote,
@@ -400,6 +404,10 @@ export function buildPiStatusDetail(
     const contextLimit = daemonContextLimit ?? windowGeometry?.usableSoft ?? 0;
     const usagePercentage =
         contextLimit > 0 && inputTokens > 0 ? (inputTokens / contextLimit) * 100 : 0;
+    // The derivation line divides by `usableSoft`; a daemon limit that differs from it would put
+    // two denominators on one dialog, so the line renders only when both agree.
+    const displayedWindowGeometry =
+        windowGeometry && windowGeometry.usableSoft === contextLimit ? windowGeometry : undefined;
 
     const compartmentCount = positiveNumber(daemonStatus?.compartment_count) ?? 0;
     const compartmentTokens = positiveNumber(daemonStatus?.compartment_tokens) ?? 0;
@@ -430,19 +438,21 @@ export function buildPiStatusDetail(
         // best effort
     }
 
-    // Compartments carry the daemon's measured count; the other local buckets are zero, so the
-    // conversation bucket absorbs the remainder and the buckets sum to exactly inputTokens.
-    const factTokens = 0;
-    const memoryTokens = 0;
-    const docsTokens = 0;
-    const profileTokens = 0;
-    const toolCallTokens = 0;
-    const conversationTokens = Math.max(
-        0,
-        inputTokens - systemPromptTokens - compartmentTokens - toolDefinitionTokens,
-    );
-
     const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+    const calibrated = calibrateBuckets({
+        inputTokens,
+        systemLocal: systemPromptTokens,
+        toolDefsLocal: toolDefinitionTokens,
+        compartmentsLocal: compartmentTokens,
+        factsLocal: 0,
+        memoriesLocal: 0,
+        docsLocal: 0,
+        profileLocal: 0,
+        conversationLocal: 0,
+        toolCallsLocal: 0,
+        calibration: resolveModelCalibration(ctx.model?.provider, ctx.model?.id),
+    });
+
     const threshold = resolveExecuteThresholdDetail(
         deps.executeThresholdPercentage ?? 65,
         modelKey,
@@ -453,7 +463,7 @@ export function buildPiStatusDetail(
             sessionId,
         },
     );
-    const historyBlockTokens = compartmentTokens + factTokens;
+    const historyBlockTokens = calibrated.compartmentTokens + calibrated.factTokens;
     const historyBudgetPercentage = deps.historyBudgetPercentage ?? 0.15;
     const compressionBudget =
         contextLimit > 0
@@ -468,7 +478,7 @@ export function buildPiStatusDetail(
         sessionId,
         usagePercentage,
         inputTokens,
-        systemPromptTokens,
+        systemPromptTokens: calibrated.systemTokens,
         compartmentCount,
         // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
         memoryCount: memory.rows.filter((row) => isServedMemoryDecisionRow(row, Date.now())).length,
@@ -482,7 +492,7 @@ export function buildPiStatusDetail(
         lastTransformError: null,
         isSubagent: false,
         contextLimit,
-        windowGeometry,
+        windowGeometry: displayedWindowGeometry,
         executeThreshold: threshold.percentage,
         executeThresholdMode: threshold.mode,
         executeThresholdClamped: threshold.clamped,
@@ -498,14 +508,14 @@ export function buildPiStatusDetail(
         droppedTags: 0,
         totalTags: 0,
         activeBytes: 0,
-        compartmentTokens,
-        factTokens,
-        memoryTokens,
-        docsTokens,
-        profileTokens,
-        conversationTokens,
-        toolCallTokens,
-        toolDefinitionTokens,
+        compartmentTokens: calibrated.compartmentTokens,
+        factTokens: calibrated.factTokens,
+        memoryTokens: calibrated.memoryTokens,
+        docsTokens: calibrated.docsTokens,
+        profileTokens: calibrated.profileTokens,
+        conversationTokens: calibrated.conversationTokens,
+        toolCallTokens: calibrated.toolCallTokens,
+        toolDefinitionTokens: calibrated.toolDefinitionTokens,
         ...(tailHygiene === undefined ? {} : { tailHygiene }),
         newWorkTokens: 0,
         totalInputTokens: 0,
