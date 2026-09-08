@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { sanitizeParsedJson } from "@eidnara/opencode/shared/jsonc-parser";
 import { parse as parseCommentJson } from "comment-json";
 
@@ -46,8 +46,23 @@ function parseErrorLocation(content: string, error: unknown): { line: number; co
 
 type JsoncDocumentResult =
     | { kind: "missing" }
-    | { kind: "parsed"; tree: Record<string, unknown>; plain: Record<string, unknown> }
+    | {
+          kind: "parsed";
+          tree: Record<string, unknown>;
+          plain: Record<string, unknown>;
+          /** `true` when a number lost precision in parsing, so serializing `tree` would alter it. */
+          lossyNumber: boolean;
+      }
     | { kind: "parse-error"; error: ConfigParseError };
+
+/** An integer at or beyond 2^53 cannot be told apart from its neighbors after parsing. */
+function containsLossyNumber(value: unknown): boolean {
+    if (typeof value === "number")
+        return Number.isFinite(value) && !Number.isSafeInteger(value) && Number.isInteger(value);
+    if (Array.isArray(value)) return value.some(containsLossyNumber);
+    if (value && typeof value === "object") return Object.values(value).some(containsLossyNumber);
+    return false;
+}
 
 /**
  * `tree` preserves comment metadata during serialization; `plain` contains
@@ -55,12 +70,26 @@ type JsoncDocumentResult =
  * a non-object root, rejects the whole file.
  */
 function readJsoncDocument(path: string): JsoncDocumentResult {
-    if (!existsSync(path)) return { kind: "missing" };
+    // `statSync` follows symlinks, so a link to a regular file reads normally.
+    // A FIFO is refused before the read because reading one blocks until a writer appears.
+    let entry: ReturnType<typeof statSync> | undefined;
+    try {
+        entry = statSync(path, { throwIfNoEntry: false });
+    } catch (error) {
+        return { kind: "parse-error", error: new ConfigParseError(path, "", error) };
+    }
+    if (entry === undefined) return { kind: "missing" };
+    if (!entry.isFile()) {
+        return {
+            kind: "parse-error",
+            error: new ConfigParseError(path, "", new Error("not a regular file")),
+        };
+    }
 
     // The read stays inside the failure boundary: a path that exists but
-    // cannot be read (permissions, a directory, deleted between the existsSync
-    // probe and the read) reports as parse-error instead of throwing, so
-    // lenient diagnostic callers can explain the bad file rather than abort.
+    // cannot be read (permissions, deleted between the stat and the read)
+    // reports as parse-error instead of throwing, so lenient diagnostic
+    // callers can explain the bad file rather than abort.
     let content = "";
     try {
         content = readFileSync(path, "utf-8");
@@ -79,6 +108,7 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
             kind: "parsed",
             tree: tree as Record<string, unknown>,
             plain: plain as Record<string, unknown>,
+            lossyNumber: containsLossyNumber(plain),
         };
     } catch (error) {
         return { kind: "parse-error", error: new ConfigParseError(path, content, error) };
@@ -96,12 +126,21 @@ export function readJsoncConfig(path: string): JsoncReadResult {
 /**
  * Returns the comment-json tree so a mutated config serializes with its
  * comments intact. A missing file yields an empty object; an unparseable or
- * unsafe one throws instead of being overwritten.
+ * unsafe one throws instead of being overwritten. A file holding an integer
+ * that parsing rounded also throws, because serializing the tree would write
+ * the rounded value back over the user's literal.
  */
 export function readJsoncConfigForUpdate(path: string): Record<string, unknown> {
     const result = readJsoncDocument(path);
     if (result.kind === "missing") return {};
     if (result.kind === "parse-error") throw result.error;
+    if (result.lossyNumber) {
+        throw new ConfigParseError(
+            path,
+            "",
+            new Error("an integer literal outside the safe range would not survive a rewrite"),
+        );
+    }
     return result.tree;
 }
 

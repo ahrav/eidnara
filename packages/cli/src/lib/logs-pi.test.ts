@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PiDiagnosticReport } from "./diagnostics-pi";
@@ -134,6 +134,9 @@ describe("bundleIssueReport session filtering", () => {
 
         expect(bundled.bodyMarkdown).toContain("extension loaded");
         expect(bundled.bodyMarkdown).toContain("dir=/srv/p");
+        if (process.platform !== "win32") {
+            expect(statSync(bundled.path).mode & 0o777).toBe(0o600);
+        }
     });
 
     it("escapes a log line that would close the Markdown fence", async () => {

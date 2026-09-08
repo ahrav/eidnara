@@ -226,8 +226,10 @@ function redactProse(value: unknown): unknown {
 }
 
 export function sanitizeValue(value: unknown, key = ""): unknown {
-    if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+    // A boolean cannot carry a credential, but a number under a credential key can (a numeric PIN or token).
+    if (value === null || typeof value === "boolean") return value;
     if (shouldRedactKey(key)) return "<REDACTED>";
+    if (typeof value === "number") return value;
     if (isPromptKey(key)) return redactProse(value);
     if (typeof value === "string") return sanitizeString(value);
     if (Array.isArray(value)) return value.map((entry) => sanitizeValue(entry));
