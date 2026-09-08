@@ -9,6 +9,7 @@ interface ChildSessionSpawnArgs {
     parentSessionId?: string;
     title: string;
     directory?: string;
+    signal?: AbortSignal;
 }
 
 export async function createChildSession(args: ChildSessionSpawnArgs): Promise<unknown> {
@@ -18,6 +19,7 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
             title: args.title,
         },
         query: { directory: args.directory },
+        ...(args.signal ? { signal: args.signal } : {}),
     } as never);
 }
 
@@ -36,11 +38,13 @@ export function childSessionMessagesFetcher(
     sessionId: string,
     directory: string | undefined,
     limit: number,
+    signal?: AbortSignal,
 ): () => Promise<unknown[]> {
     return async () => {
         const messagesResponse = await client.session.messages({
             path: { id: sessionId },
             query: { directory, limit },
+            ...(signal ? { signal } : {}),
         } as never);
         return normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,

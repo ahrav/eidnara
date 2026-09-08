@@ -48,6 +48,10 @@ const KNOWN_SLOTS: Record<string, KnownSlot> = {
         classification: "VERDICT",
         reason: "Correct by contract: preload is a one-shot warm; after it fails the process keeps the deterministic heuristic fallback until restart, as warnTokenizerFallback documents.",
     },
+    "packages/opencode-plugin/src/shared/token-estimator.ts:tokenizerPoisoned": {
+        classification: "VERDICT",
+        reason: "Correct by contract: after an encode failure the process keeps the heuristic estimator until restart, so identical text never alternates between exact and approximate counts.",
+    },
     "packages/opencode-plugin/src/hooks/context/module-transport.ts:stateSyncCapabilityCache": {
         classification: "VERDICT",
         reason: "Saved: invalidateStateSyncCapabilities runs on NEED_FULL_SYNC and connection invalidation before the next capability probe.",
@@ -95,7 +99,7 @@ function declaredOneShotSlots(source: string): string[] {
     const declarations =
         /^(?:export\s+)?let\s+([A-Za-z_$][\w$]*)\b[^\n]*(?:=\s*(?:null|false|true)|Promise<)/gm;
     const verdictName =
-        /(?:attempted|availability|compatible|cooldown|disabled|failed|failure|latch|missing|permission|promise|registered|unavailable)/i;
+        /(?:attempted|availability|compatible|cooldown|disabled|failed|failure|latch|missing|permission|poisoned|promise|registered|unavailable)/i;
     const moduleSlots = [...source.matchAll(declarations)].map((match) => match[1]);
     // Provider-local permanent failures short-circuit later provider calls without re-probing.
     const providerLatches = [

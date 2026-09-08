@@ -10,9 +10,65 @@
 
 import * as path from "node:path";
 import { z } from "zod";
-import { EidnaraConfigSchema } from "../src/config/schema/eidnara";
+import { isValidLanguageCode } from "../src/agents/language-directive";
+import { EidnaraConfigSchema, LanguageCodeSchema } from "../src/config/schema/eidnara";
 
 const SCHEMA_ID = "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json";
+
+/**
+ * The runtime check consults ICU, which JSON Schema cannot call, so the accepted set is expanded
+ * from the same predicate into a case-insensitive alternation that keeps the runtime's
+ * whitespace handling.
+ */
+export function languageCodePattern(): string {
+    const alternatives: string[] = [];
+    for (let first = 97; first <= 122; first++) {
+        for (let second = 97; second <= 122; second++) {
+            const code = String.fromCharCode(first) + String.fromCharCode(second);
+            if (!isValidLanguageCode(code)) continue;
+            const [a, b] = code;
+            alternatives.push(`[${a}${a.toUpperCase()}][${b}${b.toUpperCase()}]`);
+        }
+    }
+    return `^\\s*(?:${alternatives.join("|")})\\s*$`;
+}
+
+/**
+ * The loader reads these top-level keys from raw configuration, not `EidnaraConfigSchema`.
+ * The root is closed with `additionalProperties: false`, so publishing each loader-only key
+ * prevents editors from rejecting configuration that the loader accepts.
+ */
+const LOADER_ONLY_PROPERTIES: Record<string, unknown> = {
+    $schema: {
+        type: "string",
+        description: "JSON Schema reference for editor validation and autocomplete.",
+    },
+    disabled_hooks: {
+        type: "array",
+        items: { type: "string" },
+        description:
+            "Hook IDs to disable. User and project values are union-merged, so a project can only add to the user's list.",
+    },
+    command: {
+        type: "object",
+        description: "Custom slash commands keyed by command name.",
+        additionalProperties: {
+            type: "object",
+            properties: {
+                template: { type: "string", description: "Prompt template for the command." },
+                description: { type: "string", description: "Command description." },
+                agent: { type: "string", description: "Agent that runs the command." },
+                model: { type: "string", description: "Model override for the command." },
+                subtask: {
+                    type: "boolean",
+                    description: "Run the command as a subtask.",
+                },
+            },
+            required: ["template"],
+            additionalProperties: false,
+        },
+    },
+};
 
 export function buildSchema(): Record<string, unknown> {
     // The generator uses `io: "input"` so optional and defaulted fields describe accepted JSONC input rather than `.transform` output.
@@ -20,18 +76,21 @@ export function buildSchema(): Record<string, unknown> {
     const generated = z.toJSONSchema(EidnaraConfigSchema, {
         target: "draft-7",
         io: "input",
+        override: (ctx) => {
+            if (ctx.zodSchema === LanguageCodeSchema) {
+                ctx.jsonSchema.pattern = languageCodePattern();
+            }
+        },
     }) as Record<string, unknown>;
 
     delete generated.$schema;
 
     const properties = (generated.properties ?? {}) as Record<string, unknown>;
 
-    // The generated schema allows `$schema` for editor validation and autocomplete although `EidnaraConfigSchema` does not define it.
-    if (!("$schema" in properties)) {
-        properties.$schema = {
-            type: "string",
-            description: "JSON Schema reference for editor validation and autocomplete.",
-        };
+    for (const [key, definition] of Object.entries(LOADER_ONLY_PROPERTIES)) {
+        if (!(key in properties)) {
+            properties[key] = definition;
+        }
     }
 
     return {

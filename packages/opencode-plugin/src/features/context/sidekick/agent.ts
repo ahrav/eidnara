@@ -11,7 +11,7 @@ import { extractLatestAssistantText } from "../../../shared/assistant-message-ex
 import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log, sessionLog } from "../../../shared/logger";
 import { resolveFallbackChain } from "../../../shared/resolve-fallbacks";
-import { SIDEKICK_SYSTEM_PROMPT, stripThinkingBlocks } from "./core";
+import { isEmptySidekickResult, SIDEKICK_SYSTEM_PROMPT, stripThinkingBlocks } from "./core";
 
 export { SIDEKICK_SYSTEM_PROMPT };
 
@@ -88,6 +88,11 @@ export async function runSidekick(deps: {
             },
         );
 
+        // The no-result sentinel is a valid completion, not a failure, so it is filtered
+        // after validation rather than thrown into the fallback-model retry.
+        if (isEmptySidekickResult(sidekickRun.validated)) {
+            return null;
+        }
         return sidekickRun.validated;
     } catch (error) {
         if (deps.sessionId) {

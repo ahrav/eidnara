@@ -29,7 +29,7 @@
         "model": {
           "description": "Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model).",
           "type": "string",
-          "minLength": 1
+          "pattern": "\\S"
         }
       }
     },
@@ -44,7 +44,8 @@
     },
     "language": {
       "description": "Output language for Eidnara's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, sidekick, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
-      "type": "string"
+      "type": "string",
+      "pattern": "^\\s*(?:[aA][aA]|[aA][bB]|[aA][eE]|[aA][fF]|[aA][kK]|[aA][mM]|[aA][nN]|[aA][rR]|[aA][sS]|[aA][vV]|[aA][yY]|[aA][zZ]|[bB][aA]|[bB][eE]|[bB][gG]|[bB][hH]|[bB][iI]|[bB][mM]|[bB][nN]|[bB][oO]|[bB][rR]|[bB][sS]|[cC][aA]|[cC][eE]|[cC][hH]|[cC][oO]|[cC][rR]|[cC][sS]|[cC][uU]|[cC][vV]|[cC][yY]|[dD][aA]|[dD][eE]|[dD][vV]|[dD][zZ]|[eE][eE]|[eE][lL]|[eE][nN]|[eE][oO]|[eE][sS]|[eE][tT]|[eE][uU]|[fF][aA]|[fF][fF]|[fF][iI]|[fF][jJ]|[fF][oO]|[fF][rR]|[fF][yY]|[gG][aA]|[gG][dD]|[gG][lL]|[gG][nN]|[gG][uU]|[gG][vV]|[hH][aA]|[hH][eE]|[hH][iI]|[hH][oO]|[hH][rR]|[hH][tT]|[hH][uU]|[hH][yY]|[hH][zZ]|[iI][aA]|[iI][dD]|[iI][eE]|[iI][gG]|[iI][iI]|[iI][kK]|[iI][nN]|[iI][oO]|[iI][sS]|[iI][tT]|[iI][uU]|[iI][wW]|[jJ][aA]|[jJ][iI]|[jJ][vV]|[jJ][wW]|[kK][aA]|[kK][gG]|[kK][iI]|[kK][jJ]|[kK][kK]|[kK][lL]|[kK][mM]|[kK][nN]|[kK][oO]|[kK][rR]|[kK][sS]|[kK][uU]|[kK][vV]|[kK][wW]|[kK][yY]|[lL][aA]|[lL][bB]|[lL][gG]|[lL][iI]|[lL][nN]|[lL][oO]|[lL][tT]|[lL][uU]|[lL][vV]|[mM][gG]|[mM][hH]|[mM][iI]|[mM][kK]|[mM][lL]|[mM][nN]|[mM][oO]|[mM][rR]|[mM][sS]|[mM][tT]|[mM][yY]|[nN][aA]|[nN][bB]|[nN][dD]|[nN][eE]|[nN][gG]|[nN][lL]|[nN][nN]|[nN][oO]|[nN][rR]|[nN][vV]|[nN][yY]|[oO][cC]|[oO][jJ]|[oO][mM]|[oO][rR]|[oO][sS]|[pP][aA]|[pP][iI]|[pP][lL]|[pP][sS]|[pP][tT]|[qQ][uU]|[rR][mM]|[rR][nN]|[rR][oO]|[rR][uU]|[rR][wW]|[sS][aA]|[sS][cC]|[sS][dD]|[sS][eE]|[sS][gG]|[sS][hH]|[sS][iI]|[sS][kK]|[sS][lL]|[sS][mM]|[sS][nN]|[sS][oO]|[sS][qQ]|[sS][rR]|[sS][sS]|[sS][tT]|[sS][uU]|[sS][vV]|[sS][wW]|[tT][aA]|[tT][eE]|[tT][gG]|[tT][hH]|[tT][iI]|[tT][kK]|[tT][lL]|[tT][nN]|[tT][oO]|[tT][rR]|[tT][sS]|[tT][tT]|[tT][wW]|[tT][yY]|[uU][gG]|[uU][kK]|[uU][rR]|[uU][zZ]|[vV][eE]|[vV][iI]|[vV][oO]|[wW][aA]|[wW][oO]|[xX][hH]|[yY][iI]|[yY][oO]|[zZ][aA]|[zZ][hH]|[zZ][uU])\\s*$"
     },
     "historian": {
       "description": "Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.)",
@@ -111,11 +112,29 @@
           "type": "object",
           "properties": {
             "edit": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
               ]
             },
             "bash": {
@@ -161,13 +180,57 @@
               ]
             },
             "external_directory": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
               ]
             }
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ask",
+                  "allow",
+                  "deny"
+                ]
+              },
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                }
+              }
+            ]
           }
         },
         "maxTokens": {
@@ -284,7 +347,8 @@
           "description": "Literal per-model routing. Keys are bare model IDs, provider/model, or provider/*; matching is case-sensitive and preserves additional slashes in model IDs.",
           "type": "object",
           "propertyNames": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[^\\s/*](?:[^/*]*[^\\s/*])?(?:\\/(?:\\*|[^\\s/*](?:(?:[^/*]|\\/(?=[^/*]))*[^\\s/*])?))?$"
           },
           "additionalProperties": {
             "type": "string",
@@ -296,16 +360,19 @@
         },
         "guidance_override_path": {
           "description": "USER-LEVEL ONLY path to a complete primary guidance section. Relative paths resolve from the user config file.",
-          "type": "string"
+          "type": "string",
+          "pattern": "\\S"
         },
         "tool_descriptions": {
           "description": "USER-LEVEL ONLY top-level description overrides keyed by ctx_* tool ID; parameter schemas and descriptions are unchanged.",
           "type": "object",
           "propertyNames": {
-            "type": "string"
+            "type": "string",
+            "pattern": "\\S"
           },
           "additionalProperties": {
-            "type": "string"
+            "type": "string",
+            "pattern": "\\S"
           }
         }
       }
@@ -341,7 +408,7 @@
       "properties": {
         "window_overlay_path": {
           "type": "string",
-          "minLength": 1
+          "pattern": "\\S"
         }
       }
     },
@@ -354,7 +421,7 @@
     },
     "execute_threshold_percentage": {
       "default": 65,
-      "description": "Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, \"provider/model\": 45 }). Values above 90 are rejected because the runtime caps at 90% of the output-reserved safe window (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE",
+      "description": "Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, \"provider/model\": 45 }); `default` falls back to DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE when omitted. Values above 90 are rejected because the runtime caps at 90% of the output-reserved safe window (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE",
       "anyOf": [
         {
           "type": "number",
@@ -370,9 +437,6 @@
               "maximum": 90
             }
           },
-          "required": [
-            "default"
-          ],
           "additionalProperties": {
             "type": "number",
             "minimum": 20,
@@ -515,7 +579,7 @@
         "connection_file": {
           "description": "Path to the owner-only subc connection file.",
           "type": "string",
-          "minLength": 1
+          "pattern": "\\S"
         }
       },
       "required": [
@@ -594,7 +658,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "pattern": "\\S"
           }
         }
       }
@@ -796,11 +860,29 @@
           "type": "object",
           "properties": {
             "edit": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
               ]
             },
             "bash": {
@@ -846,13 +928,57 @@
               ]
             },
             "external_directory": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
               ]
             }
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "ask",
+                  "allow",
+                  "deny"
+                ]
+              },
+              {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                }
+              }
+            ]
           }
         },
         "maxTokens": {
@@ -904,6 +1030,46 @@
     "$schema": {
       "type": "string",
       "description": "JSON Schema reference for editor validation and autocomplete."
+    },
+    "disabled_hooks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Hook IDs to disable. User and project values are union-merged, so a project can only add to the user's list."
+    },
+    "command": {
+      "type": "object",
+      "description": "Custom slash commands keyed by command name.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string",
+            "description": "Prompt template for the command."
+          },
+          "description": {
+            "type": "string",
+            "description": "Command description."
+          },
+          "agent": {
+            "type": "string",
+            "description": "Agent that runs the command."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model override for the command."
+          },
+          "subtask": {
+            "type": "boolean",
+            "description": "Run the command as a subtask."
+          }
+        },
+        "required": [
+          "template"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": false
