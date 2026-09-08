@@ -384,6 +384,7 @@ describe("incident history cross-checks", () => {
         const data = fixture();
         variants(data).push(
             variantFixture("var-note-only", {
+                semantic_revision: { id: "rev-note-only", fingerprint: FP_TWO },
                 lane: "adjudication-only",
                 applicability: null,
                 normative_checks: [],
@@ -492,6 +493,7 @@ describe("repository-baseline comparison", () => {
         ];
         variants(acceptedData).push(
             variantFixture("var-info-only", {
+                semantic_revision: { id: "rev-info-only", fingerprint: FP_TWO },
                 lane: "adjudication-only",
                 source_claims: ["claim-info-one"],
                 applicability: null,

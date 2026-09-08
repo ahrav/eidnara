@@ -1,6 +1,6 @@
 /**
  * A stale `ctx_reduce` strip requires growth, an EXECUTE pass that freezes drop state, and a
- * subsequent DEFER pass. DEFER passes must not change the cached prefix. `findBusts` counts
+ * subsequent DEFER pass. DEFER passes must not change the cached prefix. `analyzePasses` counts
  * changes between consecutive requests to a wire segment before the final `cache_control`
  * breakpoint.
  *
@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { findBusts, formatBustReport, mainAgentRequests } from "../src/cache-analysis";
+import { analyzePasses, formatBustReport, mainAgentRequests } from "../src/cache-analysis";
 import {
     driveAgedCtxReduceSurvival,
     driveFirstRenderPureDeferStability,
@@ -84,6 +84,7 @@ describe.skipIf(!rustPrereqs.ok)("cache invariants — replay class", () => {
 
                 h.mock.setDefault({ text: "A2 high usage", usage: EXECUTE_USAGE });
                 await h.sendPrompt(sessionId, "A2 turn 3: high usage triggers an execute pass.");
+                const passesBeforeDefer = (await h.waitForRustPasses(3)).length;
 
                 // The execute pass busts once when drops and markers materialize.
                 // DEFER passes following the execute pass are byte-stable.
@@ -93,10 +94,24 @@ describe.skipIf(!rustPrereqs.ok)("cache invariants — replay class", () => {
                     await h.sendPrompt(sessionId, `A2 turn ${i}: defer growth after execute.`);
                 }
 
-                // `findBusts` evaluates only the post-execute DEFER window.
+                // Zero busts is evidence only if the transform ran every pass and each request cached a prefix.
+                const window = (await h.waitForRustPasses(passesBeforeDefer + 5)).slice(
+                    passesBeforeDefer,
+                );
+                expect(window.every((pass) => pass.servedFrom === "transform")).toBe(true);
+                expect(
+                    window.some((pass) => pass.decision === "HARD" || pass.decision === "SOFT"),
+                ).toBe(true);
+                expect(
+                    window.filter((pass) => pass.decision === "SOFT+").length,
+                ).toBeGreaterThanOrEqual(4);
+
+                // `analyzePasses` evaluates only the post-execute DEFER window.
                 const deferRequests = mainAgentRequests(h.mock.requests().slice(firstDeferIndex));
                 expect(deferRequests.length).toBeGreaterThanOrEqual(4);
-                const busts = findBusts(deferRequests);
+                const comparisons = analyzePasses(deferRequests);
+                expect(comparisons.slice(1).every((c) => c.prevHadBreakpoint)).toBe(true);
+                const busts = comparisons.filter((c) => c.verdict === "BUST");
                 if (busts.length > 0) {
                     console.error(
                         `[cache-invariant:A2-post-execute-defer] ${busts.length} bust(s):\n${formatBustReport(busts)}`,

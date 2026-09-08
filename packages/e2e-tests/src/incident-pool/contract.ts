@@ -438,6 +438,7 @@ export function parseIncidentCatalog(raw: unknown): IncidentCatalog {
     }
     const familyIds = new Set<string>();
     const variantIds = new Set<string>();
+    const revisionIds = new Set<string>();
     const families = asArray(root.families, "catalog.families").map((rawFamily, i) => {
         const label = `catalog.families[${i}]`;
         const family = asRecord(rawFamily, label);
@@ -457,6 +458,11 @@ export function parseIncidentCatalog(raw: unknown): IncidentCatalog {
             if (variantIds.has(variant.id))
                 fail(`${label}.variants[${j}]`, `duplicate variant id ${variant.id}`);
             variantIds.add(variant.id);
+            // A revision id names one reviewed contract; two variants sharing it would report the same identity for different behavior.
+            const revisionId = variant.semantic_revision.id;
+            if (revisionIds.has(revisionId))
+                fail(`${label}.variants[${j}]`, `duplicate semantic revision id ${revisionId}`);
+            revisionIds.add(revisionId);
             return variant;
         });
         if (variants.length === 0) fail(`${label}.variants`, "must contain at least one variant");

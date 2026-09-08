@@ -47,7 +47,8 @@ function variant(id: string, overrides: Partial<IncidentVariant> = {}): Incident
         lane: "green",
         source_claims: ["claim-red-one"],
         applicability: { harness: "rust", omitted: [] },
-        semantic_revision: { id: "rev-one", fingerprint: HEX("c") },
+        // Revision ids are unique across the catalog, so each fixture variant derives its own from its id.
+        semantic_revision: { id: `rev-${id.slice("var-".length)}`, fingerprint: HEX("c") },
         normative_checks: ["check-durable-state", "check-tool-result"],
         verifier_binding: {
             driver: "audit-memory-search/driver",
@@ -202,6 +203,19 @@ describe("incident catalog contract", () => {
         expect(() =>
             parseIncidentCatalog(catalog([variant("var-red-one"), variant("var-red-one")])),
         ).toThrow(/duplicate variant id/);
+    });
+
+    it("rejects two variants that share a semantic revision id", () => {
+        expect(() =>
+            parseIncidentCatalog(
+                catalog([
+                    variant("var-red-one"),
+                    variant("var-red-two", {
+                        semantic_revision: { id: "rev-red-one", fingerprint: HEX("d") },
+                    }),
+                ]),
+            ),
+        ).toThrow(/variants\[1\]: duplicate semantic revision id rev-red-one/);
     });
 
     it("rejects unknown variant fields", () => {
