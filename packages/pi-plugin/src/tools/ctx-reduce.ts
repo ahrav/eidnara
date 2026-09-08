@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { RustToolBackends } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { getErrorMessage } from "@eidnara/opencode/shared/error-message";
 import { CTX_REDUCE_DESCRIPTION } from "@eidnara/opencode/tools/ctx-reduce/constants";
 import { unwrapImitatedReducedArgs } from "@eidnara/opencode/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
+import { boundedCommandId } from "./command-id";
 
 const ParamsSchema = Type.Object(
     {
@@ -49,19 +49,12 @@ export interface CtxReduceToolDeps {
 export function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition<typeof ParamsSchema> {
     let fallbackCommandSequence = 0;
 
-    // The daemon caps command ids at 128 bytes; longer ids hash so a redelivered call still maps to one command.
+    // A call without a provider id gets a per-instance sequence so retries of distinct calls never share a command.
     const commandIdForInvocation = (sessionId: string, toolCallId: string | undefined): string => {
         const callId = toolCallId?.trim();
-        if (callId) {
-            const stableId = `pi-${sessionId}-${callId}`;
-            if (Buffer.byteLength(stableId) <= 128) return stableId;
-            return `pi-${createHash("sha256").update(stableId).digest("hex")}`;
-        }
+        if (callId) return boundedCommandId(`pi-${sessionId}-${callId}`);
         fallbackCommandSequence += 1;
-        const monotonicId = `pi-${sessionId}-${fallbackCommandSequence}`;
-        return Buffer.byteLength(monotonicId) <= 128
-            ? monotonicId
-            : `pi-${createHash("sha256").update(monotonicId).digest("hex")}`;
+        return boundedCommandId(`pi-${sessionId}-${fallbackCommandSequence}`);
     };
 
     return {
