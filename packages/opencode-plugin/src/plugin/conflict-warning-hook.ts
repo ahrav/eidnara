@@ -7,17 +7,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import {
-    jsonField,
-    openCodeDbExists,
-    withReadOnlySessionDb,
-} from "../hooks/context/read-session-db";
+import { openCodeDbExists, withReadOnlySessionDb } from "../hooks/context/read-session-db";
 import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
 import type { ConflictResult } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
 import { normalizeSDKResponse } from "../shared/normalize-sdk-response";
 import type { Database } from "../shared/sqlite";
+import { jsonField } from "../shared/sqlite-helpers";
 
 const CONFLICT_WARNING_MARKER = "⚠️ Eidnara is disabled due to conflicting configuration:";
 const ENABLED_MARKER = "✨ Eidnara is now enabled";

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
-import { closeQuietly } from "../../shared/sqlite-helpers";
+import { closeQuietly, jsonField } from "../../shared/sqlite-helpers";
 import { isMachineAuthoredPart, isMeaningfulUserText } from "./read-session-formatting";
 
 interface AssistantMidTurnRow {
@@ -68,15 +68,6 @@ export function withReadOnlySessionDb<T>(fn: (db: Database) => T): T {
 
 export function closeReadOnlySessionDb(): void {
     closeCachedReadOnlyDb();
-}
-
-/**
- * Builds a `json_extract` that yields NULL for a malformed `column` instead of raising `malformed JSON`.
- * `CASE` evaluates only the taken branch, so the extract never runs on an invalid document; an `AND`
- * guard has no such ordering guarantee. `column` and `path` are code literals, never caller input.
- */
-export function jsonField(column: string, path: string): string {
-    return `CASE WHEN json_valid(${column}) = 1 THEN json_extract(${column}, '${path}') END`;
 }
 
 /** Treat errors reading an existing database as mid-turn; a missing database is idle. */
