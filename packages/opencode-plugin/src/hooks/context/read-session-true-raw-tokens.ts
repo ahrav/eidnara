@@ -158,16 +158,13 @@ function stringValue(value: unknown): string {
     return stableStringify(value);
 }
 
+/** Typed blocks require an image/file type or image-like fields; untyped OpenCode attachments use MIME presence. */
 function isMediaResultBlock(entry: Record<string, unknown>): boolean {
     const type = partType(entry);
+    if (type === "image" || type === "file") return true;
     if (type === "text") return false;
-    return (
-        type === "image" ||
-        type === "file" ||
-        hasOwn(entry, "mime") ||
-        hasOwn(entry, "mimeType") ||
-        looksImageLike(entry)
-    );
+    if (type.length > 0) return looksImageLike(entry);
+    return hasOwn(entry, "mime") || hasOwn(entry, "mimeType") || looksImageLike(entry);
 }
 
 function mergeToolResultContent(a: ToolResultContent, b: ToolResultContent): ToolResultContent {
@@ -385,7 +382,6 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (type === "tool") {
         const inputOwner = state && hasOwn(state, "input") ? state : part;
         const inputKey = firstOwnKey(inputOwner, ["input", "args"]);
-        const hasInput = inputKey !== null;
         const outputOwner =
             state && firstOwnKey(state, ["output", "error", "result"]) !== null ? state : part;
         const outputKey = firstOwnKey(outputOwner, ["output", "error", "result"]);
@@ -394,14 +390,12 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             outputKey ? toolResultContent(outputOwner[outputKey]) : emptyToolResultContent(),
             toolAttachments(part, state),
         );
-        const providerExecuted = providerExecutedFromPart(part);
-        const openInvocation = !providerExecuted && !hasOutput;
         return {
             callId,
             toolName,
-            hasInput: hasInput || openInvocation,
+            hasInput: true,
             hasOutput,
-            providerExecuted,
+            providerExecuted: providerExecutedFromPart(part),
             inputText: inputKey ? stringValue(inputOwner[inputKey]) : "",
             outputText: output.text,
             outputMedia: output.media,
@@ -592,9 +586,7 @@ function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent 
         return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
     }
     if (type.includes("file")) {
-        const content = firstStringField(part, ["content", "text", "source"]);
-        if (content) return { kind: "text", text: content };
-        // A file without inline text is a media block, however large its URL or base64 payload.
+        // Every file part is a media block, whatever inline fields it carries.
         return { kind: "image", altText: firstStringField(part, ["alt", "description"]) };
     }
     if (type === "source") {

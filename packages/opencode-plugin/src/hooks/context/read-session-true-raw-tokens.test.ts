@@ -421,6 +421,23 @@ describe("tool arcs", () => {
             { callId: "native-1", invOrdinal: 1, resOrdinal: 2 },
         ]);
     });
+
+    it("closes a completed OpenCode tool that stored no input", () => {
+        const message: RawMessage = {
+            id: "no-input",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "c1",
+                    tool: "bash",
+                    state: { status: "completed", output: "done" },
+                },
+            ],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([{ callId: "c1", invOrdinal: 1, resOrdinal: 1 }]);
+    });
 });
 
 describe("tool token accounting", () => {
@@ -622,6 +639,34 @@ describe("tool token accounting", () => {
         expect(
             estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).other,
         ).toBeGreaterThan(0);
+    });
+
+    it("treats every standalone file part as media, even with inline content", () => {
+        const message = singlePartMessage({
+            type: "file",
+            mime: "text/plain",
+            filename: "big.txt",
+            content: "lorem ipsum ".repeat(2000),
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 400,
+        });
+        expect(breakdown.image).toBe(400);
+        expect(breakdown.text).toBe(0);
+    });
+
+    it("keeps a typed non-media result block opaque even when it carries a MIME field", () => {
+        const message = singlePartMessage({
+            type: "tool_result",
+            tool_use_id: "c",
+            content: [{ type: "opaque", mimeType: "application/x-custom", data: "Z".repeat(8000) }],
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolOutput).toBeGreaterThan(1000);
+        expect(breakdown.image).toBe(0);
     });
 
     it("counts an empty text block in a tool result as empty output", () => {
