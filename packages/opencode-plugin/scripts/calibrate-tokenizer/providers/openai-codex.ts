@@ -3,6 +3,8 @@
  *
  */
 
+import { providerRequestSignal } from "./request-timeout";
+
 interface ModelTest {
     label: string;
     provider: string;
@@ -46,6 +48,7 @@ async function streamResponses(
         method: "POST",
         headers,
         body: JSON.stringify({ ...body, stream: true, store: false }),
+        signal: providerRequestSignal(),
     });
     if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");
