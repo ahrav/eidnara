@@ -126,7 +126,7 @@ function timerDelay(deadlineMs: number): number {
 }
 
 function nativeChildRan(error: unknown): boolean {
-    return error instanceof NativeLaunchError && error.childSpawned;
+    return error instanceof NativeLaunchError && error.childMayHaveActed;
 }
 
 /** `lifecycle_busy` and `harness_unavailable` return before the binary spawns or stops anything. commentlint: allow(JUDGE) */

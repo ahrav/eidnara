@@ -51,10 +51,12 @@ export type NativeLaunchFailureCode =
     | "usage_error";
 
 /**
- * Whether a failure with this code was raised after `spawn` returned a child.
+ * Whether a failure with this code can follow lifecycle work in the child.
+ * `usage_error` covers both local validation and an exit code of 2, which the
+ * binary returns from argument parsing before it dispatches any command.
  * `timeout` is raised on both sides of the spawn, so that site states it explicitly.
  */
-const CHILD_SPAWNED_BY_CODE: Readonly<Record<NativeLaunchFailureCode, boolean>> = {
+const CHILD_MAY_HAVE_ACTED_BY_CODE: Readonly<Record<NativeLaunchFailureCode, boolean>> = {
     spawn_failed: false,
     unsupported_platform: false,
     usage_error: false,
@@ -68,17 +70,17 @@ const CHILD_SPAWNED_BY_CODE: Readonly<Record<NativeLaunchFailureCode, boolean>> 
 
 /** Typed launch failure. Never carries stdout/stderr bytes or raw paths. */
 export class NativeLaunchError extends Error {
-    /** A failure raised after the child existed leaves its effects unknown; one raised before it committed nothing. */
-    readonly childSpawned: boolean;
+    /** True when a native child may have begun its command, so effects are unknown. */
+    readonly childMayHaveActed: boolean;
 
     constructor(
         readonly code: NativeLaunchFailureCode,
         message: string,
-        options: { childSpawned?: boolean } = {},
+        options: { childMayHaveActed?: boolean } = {},
     ) {
         super(message);
         this.name = "NativeLaunchError";
-        this.childSpawned = options.childSpawned ?? CHILD_SPAWNED_BY_CODE[code];
+        this.childMayHaveActed = options.childMayHaveActed ?? CHILD_MAY_HAVE_ACTED_BY_CODE[code];
     }
 }
 
@@ -338,7 +340,7 @@ export async function runNativeLifecycle(
         throw new NativeLaunchError(
             "timeout",
             "native lifecycle deadline expired before the child was spawned",
-            { childSpawned: false },
+            { childMayHaveActed: false },
         );
     }
     try {
