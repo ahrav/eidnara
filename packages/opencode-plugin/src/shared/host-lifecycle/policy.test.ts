@@ -567,6 +567,44 @@ describe("native invocation mapping", () => {
         }
     });
 
+    test("a component still starting carries the state its promoted reason requires", async () => {
+        const cases = [
+            { component: "transport", record: { state: "starting", reason: "starting" } },
+            { component: "storage", record: { state: "starting", reason: "starting" } },
+            { component: "synapse", record: { state: "starting", reason: "starting" } },
+            { component: "kernel", record: { state: "starting", reason: "starting" } },
+        ] as const;
+        for (const { component, record } of cases) {
+            const root = tempDir(`eidnara-policy-${component}-starting-`);
+            const { binary } = fakeBinary(root);
+            try {
+                const policy = policyFor({
+                    env: { XDG_DATA_HOME: root },
+                    launchTarget: { kind: "test-binary", path: binary },
+                    readinessProbe: async () => ({
+                        ...compatibleObservation(),
+                        readiness: {
+                            transport: { state: "ready", reason: "healthy" },
+                            storage: { state: "ready", reason: "healthy" },
+                            synapse: { state: "ready", reason: "healthy" },
+                            kernel: { state: "ready", reason: "healthy" },
+                            [component]: record,
+                        },
+                    }),
+                });
+                for (const result of [await policy.status(), await policy.doctor()]) {
+                    expect(result.ok).toBe(false);
+                    expect(result.reason).toBe("starting");
+                    expect(result.state).toBe("starting");
+                    expect(result.remediation).toBe("wait_and_retry");
+                    expect(() => parseDaemonResult(JSON.stringify(result))).not.toThrow();
+                }
+            } finally {
+                rmSync(root, { recursive: true, force: true });
+            }
+        }
+    });
+
     test("status and doctor surface authenticated daemon, module, and epoch mismatches", async () => {
         const cases = [
             {
@@ -1255,12 +1293,16 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         const root = tempDir("eidnara-policy-probe-hang-");
         const { binary, invocationLog } = fakeBinary(root);
         let storageProbes = 0;
+        let compatibilityProbes = 0;
         try {
             const policy = policyFor({
                 env: { XDG_DATA_HOME: root },
                 launchTarget: { kind: "test-binary", path: binary },
                 outerAggregateMs: 750,
-                compatibilityProbe: () => new Promise<never>(() => {}),
+                compatibilityProbe: () => {
+                    compatibilityProbes += 1;
+                    return new Promise<never>(() => {});
+                },
                 storageProbe: async () => {
                     storageProbes += 1;
                     return "ready";
@@ -1280,6 +1322,10 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(outcome.storage).toBeNull();
             expect(storageProbes).toBe(0);
             expect(invocations(invocationLog)).toEqual(["start"]);
+
+            // The expired probe was evicted, so the next demand starts a fresh one.
+            await policy.demandStart({ origin: "managed-default", capability: "context" });
+            expect(compatibilityProbes).toBe(2);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

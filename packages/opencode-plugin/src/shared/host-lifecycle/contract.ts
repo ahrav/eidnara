@@ -66,6 +66,25 @@ export function reasonPrecedence(reason: DaemonReason): number | null {
     return FAILING_REASONS.get(reason)?.precedence ?? null;
 }
 
+const FIXED_REASON_STATES: Partial<Record<DaemonReason, DaemonState>> = {
+    healthy: "running",
+    started: "running",
+    already_running: "running",
+    stopped: "stopped",
+    already_stopped: "stopped",
+    not_running: "stopped",
+    no_data_dir: "unavailable",
+    starting: "starting",
+    stopping: "stopping",
+    wedged: "wedged",
+    shutdown_timeout: "stopping",
+};
+
+/** The one top-level state a reason admits, or `undefined` when the reason leaves the state free. */
+export function fixedStateForReason(reason: DaemonReason): DaemonState | undefined {
+    return FIXED_REASON_STATES[reason];
+}
+
 /**
  * For `harness_unavailable`, this function returns null because remediation depends on the subreason.
  * Warn-class non-failing reasons resolve through `warn_remediations`; every other non-failing reason has none.
@@ -309,25 +328,12 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     if (!remediationMatches) {
         fail("remediation does not match its reason");
     }
-    const fixedReasonStates: Partial<Record<DaemonReason, DaemonState>> = {
-        healthy: "running",
-        started: "running",
-        already_running: "running",
-        stopped: "stopped",
-        already_stopped: "stopped",
-        not_running: "stopped",
-        no_data_dir: "unavailable",
-        starting: "starting",
-        stopping: "stopping",
-        wedged: "wedged",
-        shutdown_timeout: "stopping",
-    };
     // Non-failing top-level verdicts require a fixed daemon state; component-only
     // reasons such as `kernel_lagging` are rejected here.
-    if (NON_FAILING_REASONS.has(reason) && fixedReasonStates[reason] === undefined) {
+    if (NON_FAILING_REASONS.has(reason) && fixedStateForReason(reason) === undefined) {
         fail("a component-only reason is not a top-level verdict");
     }
-    const expectedState = fixedReasonStates[reason];
+    const expectedState = fixedStateForReason(reason);
     if (expectedState !== undefined && state !== expectedState) {
         fail("state contradicts the selected reason");
     }

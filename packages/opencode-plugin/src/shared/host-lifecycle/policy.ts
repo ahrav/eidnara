@@ -37,6 +37,7 @@ import {
     type DaemonReason,
     type DaemonResultV1,
     type DaemonState,
+    fixedStateForReason,
     preNativeState,
     probeFallbackVerdict,
     reasonPrecedence,
@@ -244,9 +245,9 @@ function timeoutResult(
     root: string,
     effectsKnown: boolean,
 ): DaemonResultV1 {
-    const state: DaemonState =
-        command === "stop" ? "stopping" : preNativeState(classifyPreNativeRoots(root));
-    return localResult(command, false, state, TIMEOUT_REASON[command], effectsKnown);
+    const reason = TIMEOUT_REASON[command];
+    const state = fixedStateForReason(reason) ?? preNativeState(classifyPreNativeRoots(root));
+    return localResult(command, false, state, reason, effectsKnown);
 }
 
 /** A native start without an authenticated compatibility snapshot must not authorize traffic against its daemon. */
@@ -428,30 +429,23 @@ export class HostLifecyclePolicy {
         if (compatibilityProbe === undefined) {
             return { result: unprovenCompatibility(result), storage: null };
         }
-        const compatibilityAggregateMs = this.compatibilityAggregateMs();
-        const compatibilityCallerBound =
-            remainingMs !== undefined && remainingMs <= compatibilityAggregateMs;
-        const compatibilityBudget = compatibilityCallerBound
-            ? remainingMs
-            : compatibilityAggregateMs;
         let snapshot: CompatibilitySnapshot;
         try {
             snapshot = await this.raceDetached(
-                this.sharedCompatibility(compatibilityProbe, rootKey, compatibilityAggregateMs),
+                this.sharedCompatibility(
+                    compatibilityProbe,
+                    rootKey,
+                    this.compatibilityAggregateMs(),
+                ),
                 request.signal,
-                compatibilityBudget,
+                remainingMs,
             );
         } catch (error) {
             // Detachment is the caller's own deadline or signal and stays a
             // thrown control outcome. Any other probe failure is an unproven
             // compatibility claim, so it becomes a typed closed result rather
             // than an unclassified rejection callers cannot act on.
-            if (
-                error instanceof WaiterDetachedError &&
-                (error.cause_kind === "aborted" || compatibilityCallerBound)
-            ) {
-                throw error;
-            }
+            if (error instanceof WaiterDetachedError) throw error;
             return { result: unprovenCompatibility(result), storage: null };
         }
         const applied = this.applyCompatibility(result, snapshot);
@@ -506,6 +500,11 @@ export class HostLifecyclePolicy {
      * mint a probe too short for the long-lived waiters that join it, and they
      * would read that truncated failure as an unproven compatibility claim while
      * still holding ample time.
+     *
+     * The shared promise itself settles by that aggregate even if the probe
+     * ignores its budget. Eviction runs on settlement, so an unbounded promise
+     * would never leave the map and every later demand for the root would join
+     * a probe that can no longer answer.
      */
     private sharedCompatibility(
         probe: (budgetMs: number, signal?: AbortSignal) => Promise<CompatibilitySnapshot>,
@@ -514,7 +513,14 @@ export class HostLifecyclePolicy {
     ): Promise<CompatibilitySnapshot> {
         const existing = this.inflightCompatibility.get(root);
         if (existing) return existing;
-        const shared = probe(budgetMs);
+        const shared = this.raceDetached(probe(budgetMs), undefined, budgetMs).catch(
+            (error: unknown) => {
+                // The policy aggregate's expiry fails the probe for every waiter.
+                throw error instanceof WaiterDetachedError
+                    ? new Error("compatibility probe exceeded the policy aggregate")
+                    : error;
+            },
+        );
         this.inflightCompatibility.set(root, shared);
         const evict = (): void => {
             if (this.inflightCompatibility.get(root) === shared) {
@@ -774,11 +780,6 @@ export class HostLifecyclePolicy {
     private async observationalCommand(command: "status" | "doctor"): Promise<DaemonResultV1> {
         const preflight = this.preflight(command);
         if (!preflight.ok) return preflight.result;
-        const platform = checkPlatform(this.platformReaders);
-        if (!platform.ok) {
-            const state = preNativeState(classifyPreNativeRoots(preflight.root));
-            return localResult(command, false, state, "unsupported_platform");
-        }
         if (this.launchTarget === null) {
             // No trusted retained current-release bootstrap: only the bounded
             // no-follow classifier may speak, and it authorizes nothing.
@@ -874,10 +875,15 @@ export class HostLifecyclePolicy {
                     const candidate = reasonPrecedence(check.reason) ?? Number.MAX_SAFE_INTEGER;
                     return candidate < winning ? check : winner;
                 }, undefined);
+            const state =
+                failed === undefined
+                    ? compatible.state
+                    : (fixedStateForReason(failed.reason) ?? compatible.state);
             return {
                 ...compatible,
                 command,
                 ok: failed === undefined,
+                state,
                 reason: failed?.reason ?? "healthy",
                 remediation: failed?.remediation ?? null,
                 readiness: observed.readiness,
