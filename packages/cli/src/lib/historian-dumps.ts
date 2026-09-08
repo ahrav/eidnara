@@ -156,6 +156,14 @@ export interface HistorianDumpsReportLike {
     legacyDumps: { dir: string; count: number };
 }
 
+export function scopeDumpBucketsToSession<
+    T extends { primarySessionId: string; sessionIds: string[] },
+>(buckets: readonly T[], sessionId: string): T[] {
+    return buckets
+        .filter((bucket) => bucket.sessionIds.includes(sessionId))
+        .map((bucket) => ({ ...bucket, primarySessionId: sessionId, sessionIds: [sessionId] }));
+}
+
 /** Check lines a doctor prints for the dumps it found: a warning for the total, info lines for the three newest per project. */
 export function describeHistorianDumps(
     report: HistorianDumpsReportLike,

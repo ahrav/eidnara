@@ -351,3 +351,56 @@ describe("bundleIssueReport log reading", () => {
         expect(body.length).toBeLessThan(70_000);
     });
 });
+
+describe("bundleIssueReport session scoping of diagnostics", () => {
+    it("keeps only the selected session's dump bucket and session entry", async () => {
+        const root = makeTempRoot();
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(logPath, "");
+        const report: PiDiagnosticReport = {
+            ...reportWithLog(logPath),
+            recentSessions: [
+                {
+                    sessionId: "sel",
+                    directory: "/work/selected",
+                    lastActiveAt: "2026-05-11T12:00:00.000Z",
+                },
+                {
+                    sessionId: "oth",
+                    directory: "/work/other-private",
+                    lastActiveAt: "2026-05-11T11:00:00.000Z",
+                },
+            ],
+            historianDumps: {
+                byProject: [
+                    {
+                        directory: "/work/selected",
+                        primarySessionId: "sel",
+                        sessionIds: ["sel", "oth"],
+                        count: 1,
+                        recent: [{ name: "keep.xml", ageMinutes: 1, sizeKb: 1 }],
+                    },
+                    {
+                        directory: "/work/other-private",
+                        primarySessionId: "oth",
+                        sessionIds: ["oth"],
+                        count: 1,
+                        recent: [{ name: "drop.xml", ageMinutes: 2, sizeKb: 1 }],
+                    },
+                ],
+                legacyDumps: { dir: "/x/legacy", count: 0, recent: [] },
+            },
+        };
+
+        const bundled = await bundleIssueReport(report, "desc", "title", {
+            cwd: root,
+            sessionFilter: "sel",
+        });
+        const body = readFileSync(bundled.path, "utf-8");
+
+        expect(body).toContain("keep.xml");
+        expect(body).not.toContain("drop.xml");
+        expect(body).not.toContain("other-private");
+        expect(body).not.toContain('"oth"');
+    });
+});

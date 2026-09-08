@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { parse as parseJsonc } from "comment-json";
@@ -683,6 +683,44 @@ describe("Pi doctor", () => {
         expect(titleArg).toStartWith("[pi] Crash in ");
         expect(titleArg).not.toContain(root);
         expect(titleArg).not.toContain("abc123");
+    });
+
+    it("reports user-level Pi paths as unavailable without a home and still checks the project", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        delete process.env.HOME;
+        delete process.env.PI_CODING_AGENT_DIR;
+        delete process.env.XDG_CONFIG_HOME;
+        const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
+            throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
+                code: "ERR_SYSTEM_ERROR",
+            });
+        });
+        const prompts = new MockPrompts();
+        const stderr: string[] = [];
+        const originalConsoleError = console.error;
+        console.error = (message: string) => {
+            stderr.push(message);
+        };
+        try {
+            const code = await runDoctor({ ...baseOptions(root, cwd, prompts), force: true });
+
+            expect(code).toBe(1);
+            const failures = stderr.join("\n");
+            expect(failures).toContain("FAIL Pi user-level paths are unavailable");
+            expect(failures).toContain("FAIL No user Eidnara config path");
+            expect(prompts.messages.join("\n")).toContain(
+                "PASS project eidnara.jsonc is valid JSONC",
+            );
+            // Nothing is written relative to the working directory.
+            expect(existsSync(join(cwd, ".pi"))).toBe(false);
+            expect(existsSync(join(process.cwd(), ".pi", "agent", "settings.json"))).toBe(false);
+        } finally {
+            console.error = originalConsoleError;
+            homedirSpy.mockRestore();
+        }
     });
 
     it("reports an unknown CLI version as info instead of pass-current", async () => {

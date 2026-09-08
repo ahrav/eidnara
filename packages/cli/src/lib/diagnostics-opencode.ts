@@ -235,7 +235,7 @@ function configHasPluginEntry(config: Record<string, unknown> | null, baseDir: s
 }
 
 /** `detectConfigFile` prefers `.jsonc` over `.json` at each location, matching `collectPluginEntries` in the conflict detector. */
-function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
+export function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
     const locations = [join(cwd, ".opencode", "opencode"), join(cwd, "opencode")];
     const report: ProjectOpenCodeConfigReport = { paths: [], hasPlugin: false, parseErrors: [] };
     for (const basePath of locations) {

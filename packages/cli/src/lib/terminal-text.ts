@@ -24,3 +24,10 @@ export function printableLine(text: string, maxLength: number): string {
     if (flat.length <= maxLength) return flat;
     return `${flat.slice(0, Math.max(0, maxLength - 3))}...`;
 }
+
+/** Multi-line text keeps its line and tab structure; every other control is replaced. */
+export function printableBlock(text: string): string {
+    return text
+        .replace(ANSI_ESCAPE_SEQUENCES, " ")
+        .replace(TERMINAL_CONTROL_CHARS, (char) => (char === "\n" || char === "\t" ? char : " "));
+}
