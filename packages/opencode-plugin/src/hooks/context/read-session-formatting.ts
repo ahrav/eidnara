@@ -27,7 +27,13 @@ export function isTruthyFlag(value: unknown): boolean {
 }
 
 export function isMachineAuthoredPart(part: Record<string, unknown>): boolean {
-    if (isTruthyFlag(part.synthetic) || isTruthyFlag(part.ignored)) return true;
+    if (
+        isTruthyFlag(part.synthetic) ||
+        isTruthyFlag(part.syntheticTodoMarker) ||
+        isTruthyFlag(part.ignored)
+    ) {
+        return true;
+    }
     const metadata = part.metadata;
     if (metadata === null || typeof metadata !== "object") return false;
     const marker = (metadata as Record<string, unknown>).marker;
@@ -78,7 +84,11 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
-        if (p.type !== "tool" || typeof p.tool !== "string") continue;
+        if (p.type !== "tool") continue;
+        const toolName = resolveToolName(p);
+        if (toolName === null) continue;
+        // A synthetic tool part is the daemon's own bookkeeping, not a call the model made.
+        if (isMachineAuthoredPart(p)) continue;
 
         const state = asRecord(p.state);
         const input = asRecord(state?.input) ?? asRecord(p.input) ?? asRecord(p.args);
@@ -92,11 +102,18 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
             continue;
         }
 
-        const toolName = p.tool as string;
         const keyArg = extractKeyArg(toolName, input);
         summaries.push(keyArg ? `TC: ${toolName}(${keyArg})` : `TC: ${toolName}`);
     }
     return summaries;
+}
+
+function resolveToolName(part: Record<string, unknown>): string | null {
+    for (const key of ["tool", "toolName", "name"] as const) {
+        const value = part[key];
+        if (typeof value === "string" && value.length > 0) return value;
+    }
+    return null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -136,7 +153,9 @@ export function normalizeText(text: string): string {
 export function compactRole(role: string): string {
     if (role === "assistant") return "A";
     if (role === "user") return "U";
-    return role.slice(0, 1).toUpperCase() || "M";
+    // The first code point, not the first code unit: `slice(0, 1)` on an astral initial yields a lone surrogate.
+    const initial = role.codePointAt(0);
+    return initial === undefined ? "M" : String.fromCodePoint(initial).toUpperCase();
 }
 
 export function formatBlock(block: ChunkBlock): string {

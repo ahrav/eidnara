@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import {
+    compactRole,
     compactTextForSummary,
     extractTexts,
     extractToolCallSummaries,
@@ -231,6 +232,41 @@ describe("extractToolCallSummaries", () => {
                 },
             ]),
         ).toEqual(["TC: read(state.ts)"]);
+    });
+
+    it.each([
+        ["toolName", { type: "tool", toolName: "read", state: { input: { filePath: "a.ts" } } }],
+        ["name", { type: "tool", name: "read", state: { input: { filePath: "a.ts" } } }],
+    ])("resolves the tool name from the compatibility field %s", (_label, part) => {
+        expect(extractToolCallSummaries([part])).toEqual(["TC: read(a.ts)"]);
+    });
+
+    it("skips a tool part with no resolvable name", () => {
+        expect(extractToolCallSummaries([{ type: "tool", tool: "", state: {} }])).toEqual([]);
+        expect(extractToolCallSummaries([{ type: "tool", state: {} }])).toEqual([]);
+    });
+
+    it.each([
+        ["synthetic", { synthetic: true }],
+        ["syntheticTodoMarker", { syntheticTodoMarker: true }],
+        ["ignored", { ignored: true }],
+    ])("skips a tool part flagged %s", (_label, flags) => {
+        expect(
+            extractToolCallSummaries([
+                { type: "tool", tool: "todowrite", state: { input: { todos: [] } }, ...flags },
+            ]),
+        ).toEqual([]);
+    });
+});
+
+describe("compactRole", () => {
+    it("abbreviates the known roles and takes the first code point of others", () => {
+        expect(compactRole("assistant")).toBe("A");
+        expect(compactRole("user")).toBe("U");
+        expect(compactRole("tool")).toBe("T");
+        expect(compactRole("😀role")).toBe("😀");
+        expect(compactRole("😀role").isWellFormed()).toBe(true);
+        expect(compactRole("")).toBe("M");
     });
 });
 
