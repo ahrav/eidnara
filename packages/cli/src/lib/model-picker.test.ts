@@ -33,6 +33,13 @@ describe("validateModelId", () => {
         expect(validateModelId("openai/gpt\t5")).toMatch(/without spaces/);
     });
 
+    it("rejects NUL and other control characters inside the id", () => {
+        expect(validateModelId("openai/gpt-5\u0000")).toMatch(/control characters/);
+        expect(validateModelId("open\u0000ai/gpt-5")).toMatch(/control characters/);
+        expect(validateModelId("openai/gpt\u001b5")).toMatch(/control characters/);
+        expect(validateModelId("openai/gpt\u007f5")).toMatch(/control characters/);
+    });
+
     it("rejects a provider or model segment that starts with a dash", () => {
         expect(validateModelId("-openai/gpt-5")).toMatch(/start with '-'/);
         expect(validateModelId("openai/-gpt-5")).toMatch(/start with '-'/);
