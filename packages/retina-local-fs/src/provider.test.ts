@@ -197,6 +197,17 @@ describe("git predicates", () => {
         const next = await poll(config, matching.scalar);
         expect(next.events[0]?.id).not.toBe(matching.events[0]?.id);
     });
+
+    test("git_tag_matching treats an option-shaped pattern as a glob, not a git flag", async () => {
+        const { repo } = await createRepository();
+        await git(repo, "tag", "v1.0.0");
+        const result = await poll({
+            kind: "git_tag_matching",
+            repo_path: repo,
+            pattern: "--format=%(objectname)",
+        });
+        expect(result.events).toHaveLength(0);
+    });
 });
 
 describe("compound scalar behavior", () => {
