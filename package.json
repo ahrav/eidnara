@@ -14,8 +14,10 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json && bun run --cwd packages/shm-native typecheck && bun run --cwd packages/retina-local-fs typecheck && bun run --cwd packages/retina-local-fs build && bun run --cwd packages/opencode-plugin typecheck && bun run --cwd packages/pi-plugin typecheck && bun run --cwd packages/cli typecheck",
     "lint": "bun run --cwd packages/retina-local-fs lint && bun run --cwd packages/opencode-plugin lint && bun run --cwd packages/pi-plugin lint && bun run --cwd packages/cli lint",
-    "test": "bun run --cwd packages/shm-native test && bun run --cwd packages/retina-local-fs test && bun run --cwd packages/opencode-plugin test && bun run --cwd packages/pi-plugin test && bun run --cwd packages/cli test",
+    "test": "bun run --cwd packages/shm-native test && bun run --cwd packages/retina-local-fs test && bun run --cwd packages/opencode-plugin test && bun run --cwd packages/pi-plugin test && bun run --cwd packages/cli test && bun test ./scripts",
     "build": "bun run --cwd packages/shm-native build:js && bun run --cwd packages/retina-local-fs build && bun run --cwd packages/opencode-plugin build && bun run --cwd packages/pi-plugin build && bun run --cwd packages/cli build",
+    "payload:dev": "bun scripts/build-host-payload.ts --dev",
+    "smoke:tarballs": "bun scripts/smoke-tarball-install.ts",
     "check:repo": "bun run typecheck && bun run lint && bun run test && bun run build && git diff --exit-code -- packages/opencode-plugin/src/tui-compiled"
   }
 }

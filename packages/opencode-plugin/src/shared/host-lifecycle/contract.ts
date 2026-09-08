@@ -256,10 +256,11 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         "reason",
         "remediation",
         "effects",
-        "readiness",
         "checks",
         "versions",
     ];
+    // `crates/daemon/src/bin/eidnara-host.rs` serializes no `readiness` field: component readiness is a `host.status` observation, not a CLI verdict. A result that carries the key is still validated in full.
+    if ("readiness" in record) resultKeys.push("readiness");
     if ("shared_memory" in record) resultKeys.push("shared_memory");
     requireExactKeys(record, resultKeys, "result");
     if (record.schema !== DAEMON_RESULT_SCHEMA) fail("schema is not eidnara.daemon/v1");
@@ -358,7 +359,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         fail("a successful restart must carry its effects");
     }
     let readiness: DaemonReadiness | null = null;
-    if (record.readiness !== null) {
+    if (record.readiness !== null && record.readiness !== undefined) {
         const rawReadiness = requireObject(record.readiness, "readiness");
         readiness = {};
         for (const [component, value] of Object.entries(rawReadiness)) {

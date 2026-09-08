@@ -419,7 +419,7 @@ jobs:
   native-addon:
     name: native addon package (Bun)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       # The claimed-target flag makes an addon-load failure fail the suite
       # instead of skipping the tests that need the artifact.
@@ -454,6 +454,12 @@ jobs:
           bun run --cwd packages/shm-native test
           bun run --cwd packages/shm-native test:capability:bun
           bun run --cwd packages/opencode-plugin test src/shared/host-client
+
+      - name: Payload and tarball smoke
+        run: |
+          cargo +1.98 build -p daemon --bin eidnara-host --locked
+          bun run payload:dev
+          bun run smoke:tarballs
 
   unlocked-deps:
     name: pinned toolchain with unlocked latest dependencies

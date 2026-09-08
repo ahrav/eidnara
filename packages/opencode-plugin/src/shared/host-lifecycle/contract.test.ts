@@ -107,6 +107,19 @@ describe("parseDaemonResult", () => {
         expect(parsed.readiness).toBeNull();
     });
 
+    test("a result without a readiness key parses with readiness null", () => {
+        const { readiness: _omitted, ...withoutReadiness } = validResult({
+            command: "status",
+            ok: false,
+            state: "stopped",
+            reason: "not_running",
+            remediation: "run_daemon_start",
+            checks: [],
+        });
+        const parsed = parseDaemonResult(JSON.stringify(withoutReadiness));
+        expect(parsed.readiness).toBeNull();
+    });
+
     test("readiness may not be ready with a failing reason", () => {
         const withReadiness = (readiness: unknown) =>
             JSON.stringify(
