@@ -12,6 +12,7 @@ import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
+import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { parse } from "comment-json";
 
 import {
@@ -154,7 +155,7 @@ async function runIssueFlow(): Promise<number> {
                     "-R",
                     "ahrav/eidnara",
                     "--title",
-                    title,
+                    sanitizeDiagnosticText(title),
                     "--body-file",
                     bundled.path,
                 ],
