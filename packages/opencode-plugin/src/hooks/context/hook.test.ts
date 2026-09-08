@@ -252,6 +252,49 @@ describe("eidnara hook", () => {
         ]);
     });
 
+    it("classifies a restored child before forwarding its first todo snapshot", async () => {
+        useTempDataHome("hook-todo-restored-child-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        let postResolutionGate = false;
+        const hasSubagent = liveSessionState.subagentSessions.has.bind(
+            liveSessionState.subagentSessions,
+        );
+        liveSessionState.subagentSessions.has = mock((sessionId: string) => {
+            const result = hasSubagent(sessionId);
+            if (result) postResolutionGate = true;
+            return result;
+        });
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(async () => ({
+            data: { directory: "/other/repo", parentID: "ses-parent" },
+        }));
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-restored-todo-child",
+            args: { todos: [{ status: "pending", priority: "high", content: "Child task" }] },
+        });
+        for (let attempt = 0; attempt < 20 && !postResolutionGate; attempt += 1) {
+            await Bun.sleep(0);
+        }
+
+        expect(postResolutionGate).toBe(true);
+        expect(liveSessionState.subagentSessions.has("ses-restored-todo-child")).toBe(true);
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
+    });
+
     it("drops a detached todo snapshot whose session was deleted while it awaited the directory", async () => {
         useTempDataHome("hook-todo-deleted-race-");
         const fake = createFakeModuleClient();

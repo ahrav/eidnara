@@ -101,6 +101,35 @@ describe("sendIgnoredMessage", () => {
         ]);
     });
 
+    it("retains forced results and skips ordinary notices when the title read times out", async () => {
+        const originalSetTimeout = globalThis.setTimeout;
+        globalThis.setTimeout = ((handler: Parameters<typeof setTimeout>[0]) => {
+            if (typeof handler === "function") handler();
+            return 0 as never;
+        }) as typeof setTimeout;
+        try {
+            const client = {
+                session: {
+                    get: () => new Promise<never>(() => {}),
+                    prompt: mock(async () => ({})),
+                },
+            };
+
+            expect(
+                await sendIgnoredMessage(client, "ses-timeout-forced", "command result", {}, true),
+            ).toBe("queued");
+            expect(__ignoredNotificationTest.pendingTexts("ses-timeout-forced")).toEqual([
+                "command result",
+            ]);
+            expect(
+                await sendIgnoredMessage(client, "ses-timeout-ordinary", "ordinary notice", {}),
+            ).toBe("skipped");
+            expect(client.session.prompt).not.toHaveBeenCalled();
+        } finally {
+            globalThis.setTimeout = originalSetTimeout;
+        }
+    });
+
     // `messages` supplies the last assistant turn to `resolvePromptContext`.
     // `get` supplies a title so `sendIgnoredMessage` does not skip the session.
     function titledClientWithLastTurn() {

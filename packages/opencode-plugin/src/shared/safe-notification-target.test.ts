@@ -91,4 +91,25 @@ describe("waitForSafeNotificationTarget", () => {
             await waitForSafeNotificationTarget(direct, "ses-direct", { attempts: 2, delayMs: 1 }),
         ).toBe("safe");
     });
+
+    it("returns skip when title reads time out", async () => {
+        let calls = 0;
+        const hanging = {
+            session: {
+                get: () => {
+                    calls += 1;
+                    return new Promise<never>(() => {});
+                },
+            },
+        };
+
+        expect(
+            await waitForSafeNotificationTarget(hanging, "ses-title-timeout", {
+                attempts: 4,
+                delayMs: 1,
+                readTimeoutMs: 10,
+            }),
+        ).toBe("skip");
+        expect(calls).toBe(1);
+    });
 });

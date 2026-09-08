@@ -413,8 +413,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             todoStateSet: rustMode
                 ? async ({ sessionId, stateJson, ownerMessageId }) => {
                       const projectRoot = await sessionDirectoryFor(sessionId);
-                      // The write is detached from the hook, so the deletion check runs after the await it can lose to.
-                      if (deletedSessions.has(sessionId)) return undefined;
+                      // Session deletion and child classification may complete during the directory read, so both gates follow it.
+                      if (deletedSessions.has(sessionId) || subagentSessions.has(sessionId)) {
+                          return undefined;
+                      }
                       return moduleClient.call({
                           sessionId,
                           projectRoot,

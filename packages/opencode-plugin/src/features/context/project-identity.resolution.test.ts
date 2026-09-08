@@ -264,6 +264,28 @@ describe("project identity", () => {
         expect(resolveProjectIdentity(nested)).toBe(expectedDirIdentity(nested));
     });
 
+    it("does not reuse a lexical ancestor's identity for a symlinked repository", () => {
+        const outer = makeRepoWithGitMetadata("project-identity-symlink-outer-");
+        const target = makeRepoWithGitMetadata("project-identity-symlink-target-");
+        const targetSubdirectory = join(target, "nested");
+        mkdirSync(targetSubdirectory);
+        const link = join(outer, "linked-repository");
+        try {
+            symlinkSync(targetSubdirectory, link, "dir");
+        } catch (error) {
+            if ((error as { code?: unknown }).code === "EPERM") return;
+            throw error;
+        }
+        const execMock = mock((_file: string, _args: string[], options: { cwd?: string }) => {
+            if (options.cwd === link) throw makeGitFailure({ code: "ETIMEDOUT" });
+            return `${FIRST_ROOT_COMMIT}\n`;
+        });
+        __setProjectIdentityTestHooks({ execFileSync: execMock as unknown as typeof execFileSync });
+
+        expect(resolveProjectIdentity(outer)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(targetSubdirectory));
+    });
+
     it("reuses the last successful git identity during transient failures and cooldown", () => {
         const directory = makeRepoWithGitMetadata("project-identity-last-known-");
         let now = 1_000;

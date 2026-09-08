@@ -1,4 +1,4 @@
-import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "./with-timeout";
+import { HOST_SDK_READ_TIMEOUT_MS, TimeoutError, withTimeout } from "./with-timeout";
 
 /**
  * Post ignored notifications only to sessions with non-default titles.
@@ -24,7 +24,11 @@ export function isDefaultSessionTitle(title: string): boolean {
 
 /**
  */
-async function readSessionTitle(client: unknown, sessionId: string): Promise<string | null> {
+async function readSessionTitle(
+    client: unknown,
+    sessionId: string,
+    timeoutMs: number,
+): Promise<string | null | undefined> {
     try {
         const c = client as {
             session?: { get?: (input: unknown) => unknown };
@@ -32,13 +36,14 @@ async function readSessionTitle(client: unknown, sessionId: string): Promise<str
         if (typeof c.session?.get !== "function") return null;
         const raw = await withTimeout(
             Promise.resolve(c.session.get({ path: { id: sessionId } })),
-            HOST_SDK_READ_TIMEOUT_MS,
+            timeoutMs,
             "session title read timed out",
         );
         const obj = raw as { data?: { title?: unknown }; title?: unknown } | null;
         const title = obj && typeof obj === "object" ? (obj.data?.title ?? obj.title) : undefined;
         return typeof title === "string" ? title : null;
-    } catch {
+    } catch (error) {
+        if (error instanceof TimeoutError) return undefined;
         return null;
     }
 }
@@ -48,6 +53,8 @@ export interface SafeTargetOptions {
     attempts?: number;
     /* */
     delayMs?: number;
+    /* */
+    readTimeoutMs?: number;
 }
 
 /**
@@ -64,9 +71,11 @@ export async function waitForSafeNotificationTarget(
 ): Promise<"safe" | "skip"> {
     const attempts = Math.max(1, options?.attempts ?? 4);
     const delayMs = options?.delayMs ?? 15_000;
+    const readTimeoutMs = options?.readTimeoutMs ?? HOST_SDK_READ_TIMEOUT_MS;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-        const title = await readSessionTitle(client, sessionId);
+        const title = await readSessionTitle(client, sessionId, readTimeoutMs);
         if (title === null) return "safe";
+        if (title === undefined) return "skip";
         if (!isDefaultSessionTitle(title)) return "safe";
         if (attempt < attempts - 1) {
             await new Promise((resolve) => setTimeout(resolve, delayMs));
