@@ -1,5 +1,6 @@
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import { removeSystemReminders } from "../../shared/system-directive";
+import { tokenEstimatorGeneration } from "../../shared/token-estimator";
 import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
 import {
     type ChunkBlock,
@@ -48,13 +49,21 @@ export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
  *
  * `blockTokenMemo` evicts least-recently-used entries past 2,048 entries or 4 Mi retained
  * characters; exact string keys avoid hash collisions. A block larger than the character budget
- * is tokenized but not retained.
+ * is tokenized but not retained. Entries hold counts from one estimator generation; the memo is
+ * cleared when the generation changes, so a heuristic count never outlives tokenizer activation.
  */
 const BLOCK_TOKEN_MEMO_MAX_ENTRIES = 2048;
 const BLOCK_TOKEN_MEMO_MAX_CHARS = 4 * 1024 * 1024;
 const blockTokenMemo = new Map<string, number>();
 let blockTokenMemoChars = 0;
+let blockTokenMemoGeneration = -1;
 function estimateBlockTokens(blockText: string): number {
+    const generation = tokenEstimatorGeneration();
+    if (generation !== blockTokenMemoGeneration) {
+        blockTokenMemo.clear();
+        blockTokenMemoChars = 0;
+        blockTokenMemoGeneration = generation;
+    }
     const cached = blockTokenMemo.get(blockText);
     if (cached !== undefined) {
         // `delete` and `set` refresh recency because `Map` preserves insertion order.

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { installTokenizerForTest, resetTokenEstimatorForTest } from "../../shared/token-estimator";
 import {
     blockTokenMemoStatsForTest,
     getProtectedTailStartOrdinal,
@@ -447,6 +448,26 @@ describe("readSessionChunk", () => {
         const stats = blockTokenMemoStatsForTest();
         expect(stats.chars).toBeLessThanOrEqual(stats.maxChars);
         expect(stats.entries).toBeLessThan(6);
+    });
+
+    it("re-tokenizes memoized blocks after the tokenizer becomes available", () => {
+        useTempDataHome("read-session-memo-generation-");
+        createOpenCodeDbWithMessages("ses-memo-generation", [
+            { id: "m-1", role: "user", part: { type: "text", text: "count me twice" } },
+        ]);
+
+        try {
+            installTokenizerForTest(null);
+            const heuristic = readSessionChunk("ses-memo-generation", 100_000, 1).tokenEstimate;
+
+            installTokenizerForTest({ encode: () => [1, 2, 3] });
+            const tokenized = readSessionChunk("ses-memo-generation", 100_000, 1).tokenEstimate;
+
+            expect(heuristic).toBe(Math.ceil("[1] U: count me twice".length / 3.5));
+            expect(tokenized).toBe(3);
+        } finally {
+            resetTokenEstimatorForTest();
+        }
     });
 
     it("extracts commit hashes into compact assistant block metadata", () => {
