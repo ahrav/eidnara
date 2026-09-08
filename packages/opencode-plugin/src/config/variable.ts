@@ -41,9 +41,15 @@ function isWithinDirectory(dir: string, candidate: string): boolean {
     return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-/**
- * User-level configs warn, rather than block, when `{file:}` resolves under these directories.
- */
+function realPathOrSelf(path: string): string {
+    try {
+        return realpathSync.native(path);
+    } catch {
+        return path;
+    }
+}
+
+/** User-level configs warn, rather than block, when `{file:}` resolves under these directories. Each directory is compared by its spelled path and by its real path, so a home or credential directory that is itself a symlink still catches a candidate given by its real location. commentlint: allow(JUDGE) */
 function sensitiveFilePathReason(resolvedPath: string): string | null {
     const home = homeDir();
     const sensitiveDirs: Array<{ dir: string; label: string }> = [
@@ -53,9 +59,9 @@ function sensitiveFilePathReason(resolvedPath: string): string | null {
         { dir: resolve(home, ".config", "gh"), label: "GitHub CLI auth" },
     ];
     for (const { dir, label } of sensitiveDirs) {
-        if (isWithinDirectory(dir, resolvedPath)) {
-            return label;
-        }
+        if (isWithinDirectory(dir, resolvedPath)) return label;
+        const realDir = realPathOrSelf(dir);
+        if (realDir !== dir && isWithinDirectory(realDir, resolvedPath)) return label;
     }
     return null;
 }
@@ -164,12 +170,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
 
             // The read follows symlinks, so an existing file's real path is classified too; a link elsewhere into a credential directory is still a credential read. commentlint: allow(JUDGE)
             if (!spelledReason) {
-                let realPath = filePath;
-                try {
-                    realPath = realpathSync.native(filePath);
-                } catch {
-                    // A path that exists but cannot be resolved keeps its spelling and fails the read below.
-                }
+                const realPath = realPathOrSelf(filePath);
                 const realReason = realPath === filePath ? null : sensitiveFilePathReason(realPath);
                 if (realReason) warnSensitive(realReason, `${filePath} -> ${realPath}`);
             }

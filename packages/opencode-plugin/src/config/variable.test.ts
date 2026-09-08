@@ -485,5 +485,20 @@ describe("substituteConfigVariables", () => {
             expect(warning).toContain("SSH keys");
             expect(warning).toContain(`${link} -> `);
         });
+
+        it("warns when the credential directory is itself a symlink and the file is named by its real location", () => {
+            process.env.HOME = tmpDir;
+            const vault = join(tmpDir, "vault-ssh");
+            mkdirSync(vault);
+            writeFileSync(join(vault, "id_rsa"), "private-key");
+            symlinkSync(vault, join(tmpDir, ".ssh"));
+
+            const result = substituteConfigVariables({
+                text: `{ "key": "{file:${join(vault, "id_rsa")}}" }`,
+            });
+
+            expect(result.text).toBe(`{ "key": "private-key" }`);
+            expect(result.warnings.some((w) => w.includes("SSH keys"))).toBe(true);
+        });
     });
 });
