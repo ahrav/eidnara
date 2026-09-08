@@ -621,7 +621,9 @@ export class PiSubagentRunner implements SubagentRunner {
                 return;
             }
 
-            if (options.signal?.aborted) {
+            // The abort listener is registered before `emitProgress` because `AbortSignal` does not replay earlier aborts.
+            const onAbort = () => {
+                if (settled) return;
                 terminateChild(child);
                 settle({
                     ok: false,
@@ -629,6 +631,10 @@ export class PiSubagentRunner implements SubagentRunner {
                     error: "pi subagent aborted by caller",
                     durationMs: Date.now() - startTime,
                 });
+            };
+            options.signal?.addEventListener("abort", onAbort, { once: true });
+            if (options.signal?.aborted) {
+                onAbort();
                 return;
             }
 
@@ -864,18 +870,6 @@ export class PiSubagentRunner implements SubagentRunner {
                     });
                 }, remainingMs);
             }
-
-            const onAbort = () => {
-                if (settled) return;
-                terminateChild(child);
-                settle({
-                    ok: false,
-                    reason: "abort",
-                    error: "pi subagent aborted by caller",
-                    durationMs: Date.now() - startTime,
-                });
-            };
-            options.signal?.addEventListener("abort", onAbort, { once: true });
 
             child.on("error", (error) => {
                 if (timeoutHandle) clearTimeout(timeoutHandle);

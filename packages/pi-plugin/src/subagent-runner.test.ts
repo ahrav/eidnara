@@ -2470,6 +2470,38 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         expect(child.killSignals).toEqual(["SIGTERM"]);
     });
 
+    it("returns abort when the caller aborts from inside the spawned progress callback", async () => {
+        const child = createMockChild();
+        const { runner } = runnerWith(child);
+        const controller = new AbortController();
+
+        const resultPromise = runner.run({
+            ...baseOptions,
+            signal: controller.signal,
+            onProgress: (event) => {
+                if (event.type === "spawned") controller.abort();
+            },
+        });
+        // A child that answers anyway must not turn the aborted run into a success.
+        child.writeStdoutLine(
+            agentEnd([
+                {
+                    role: "assistant",
+                    content: [{ type: "text", text: "too late" }],
+                    stopReason: "stop",
+                },
+            ]),
+        );
+        child.emitClose(0);
+
+        const result = await resultPromise;
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+            expect(result.reason).toBe("abort");
+        }
+        expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    });
+
     it("does not send SIGKILL when child exits after SIGTERM before escalation timeout", async () => {
         const child = createMockChild();
 
