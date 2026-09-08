@@ -355,6 +355,25 @@ describe("project identity", () => {
         expect(execMock).toHaveBeenCalledTimes(3);
     });
 
+    it("reuses a root-keyed git identity for a sibling after a transient failure", () => {
+        const repo = makeRepoWithGitMetadata("project-identity-sibling-");
+        const first = join(repo, "first");
+        const second = join(repo, "second");
+        mkdirSync(first);
+        mkdirSync(second);
+        const execMock = mock((_file: string, _args: string[], options: { cwd?: string }) => {
+            if (options.cwd === second) throw makeGitFailure({ code: "ETIMEDOUT" });
+            return `${FIRST_ROOT_COMMIT}\n`;
+        });
+        __setProjectIdentityTestHooks({
+            execFileSync: execMock as unknown as typeof execFileSync,
+        });
+
+        expect(resolveProjectIdentity(first)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(resolveProjectIdentity(second)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(execMock).toHaveBeenCalledTimes(2);
+    });
+
     it("revalidates a successful git identity after the bounded cache window", () => {
         const directory = makeRepoWithGitMetadata("project-identity-revalidate-");
         let now = 1_000;

@@ -280,6 +280,7 @@ export function resolveProjectIdentityStrict(directory: string): string {
             // A changed Git root invalidates cached Git identities.
             identityCache.delete(canonical);
             lastKnownGitIdentityCache.delete(canonical);
+            if (gitRoot === null) lastKnownGitIdentityCache.delete(cached.gitRoot);
         }
     }
 
@@ -308,6 +309,7 @@ export function resolveProjectIdentityStrict(directory: string): string {
             if (classified.errorClass === "not_git_repo") {
                 identityCache.delete(canonical);
                 lastKnownGitIdentityCache.delete(canonical);
+                lastKnownGitIdentityCache.delete(gitRoot);
             } else {
                 identityCache.set(canonical, {
                     ...cached,
@@ -340,6 +342,7 @@ export function resolveProjectIdentityStrict(directory: string): string {
         revalidateAfterMs: nowMs() + GIT_IDENTITY_REVALIDATION_MS,
     });
     lastKnownGitIdentityCache.set(canonical, { identity, gitRoot });
+    lastKnownGitIdentityCache.set(gitRoot, { identity, gitRoot });
     transientFailureCooldown.delete(canonical);
     dubiousOwnershipFallbackDirectories.delete(canonical);
     transientGitIdentityReuseLoggedDirectories.delete(canonical);
