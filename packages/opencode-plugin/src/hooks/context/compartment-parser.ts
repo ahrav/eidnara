@@ -255,11 +255,16 @@ function parseEvents(text: string): ParsedEvent[] {
     return events;
 }
 
+const XML_ENTITY_REGEX = /&(amp|apos|quot|lt|gt);/g;
+const XML_ENTITY_VALUES: Record<string, string> = {
+    amp: "&",
+    apos: "'",
+    quot: '"',
+    lt: "<",
+    gt: ">",
+};
+
+// One pass decodes one entity layer; `&amp;lt;` becomes `&lt;`, not `<`.
 function unescapeXml(s: string): string {
-    return s
-        .replace(/&amp;/g, "&")
-        .replace(/&apos;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">");
+    return s.replace(XML_ENTITY_REGEX, (match, name: string) => XML_ENTITY_VALUES[name] ?? match);
 }

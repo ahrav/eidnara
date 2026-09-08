@@ -95,6 +95,27 @@ describe("parseCompartmentOutput — v2 5-category facts", () => {
             content: "Preserve Sam's decision & keep <eidnara> wording.",
         });
     });
+
+    it("decodes one entity layer so an escaped entity stays literal text", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="1" end="2" title="Prose about &amp;lt;">Write &amp;lt; for a literal &lt; and &amp;amp; for &amp;.</compartment>
+</compartments>
+<facts>
+<PROJECT_RULES>
+* Escape as &amp;quot; in attributes.
+</PROJECT_RULES>
+</facts>
+</output>`);
+
+        expect(parsed.compartments[0].title).toBe("Prose about &lt;");
+        expect(parsed.compartments[0].content).toBe("Write &lt; for a literal < and &amp; for &.");
+        expect(parsed.facts).toContainEqual({
+            category: "PROJECT_RULES",
+            content: "Escape as &quot; in attributes.",
+        });
+    });
 });
 
 describe("parseCompartmentOutput — v2 tiers/importance/episode_type", () => {

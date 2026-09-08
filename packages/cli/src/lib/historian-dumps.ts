@@ -15,7 +15,7 @@ export interface HistorianDumpSummary {
     sizeKb: number;
     /** Parsed metadata — only structural fields, never raw XML content. */
     meta?: HistorianDumpMeta;
-    /** If the XML could not be parsed, reason for failure. */
+    /** Set when the file could not be read or holds no usable `<compartment>` element. */
     parseError?: string;
 }
 
@@ -50,6 +50,9 @@ export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { erro
     try {
         const xml = readFileSync(path, "utf-8");
         const parsed = parseCompartmentOutput(xml);
+        if (parsed.compartments.length === 0) {
+            return { error: "no usable <compartment> elements" };
+        }
         const factCountByCategory: Record<string, number> = {};
         for (const fact of parsed.facts) {
             factCountByCategory[fact.category] = (factCountByCategory[fact.category] ?? 0) + 1;
@@ -58,11 +61,14 @@ export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { erro
         const ends = parsed.compartments.map((c) => c.endMessage);
         let gaps = 0;
         let overlaps = 0;
+        // Compartments are sorted by startMessage. Compare each range with coveredEnd, not the
+        // previous range's end: [1,10], [2,3], [8,12] has no gap.
+        let coveredEnd = parsed.compartments[0].endMessage;
         for (let i = 1; i < parsed.compartments.length; i++) {
-            const prev = parsed.compartments[i - 1];
             const curr = parsed.compartments[i];
-            if (curr.startMessage > prev.endMessage + 1) gaps += 1;
-            else if (curr.startMessage <= prev.endMessage) overlaps += 1;
+            if (curr.startMessage > coveredEnd + 1) gaps += 1;
+            else if (curr.startMessage <= coveredEnd) overlaps += 1;
+            coveredEnd = Math.max(coveredEnd, curr.endMessage);
         }
         return {
             compartmentCount: parsed.compartments.length,
@@ -81,7 +87,9 @@ export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { erro
 
 /**
  * Walk a directory's `*.xml` files and return them as HistorianDumpSummary
- * entries, sorted newest-first. Returns up to `limit` entries.
+ * entries, sorted newest-first. Returns up to `limit` entries. An entry that
+ * cannot be statted, such as a dangling symlink or a dump removed mid-walk, is
+ * left out; the rest of the listing survives.
  *
  * Both dump walkers call this so the dump-listing shape lives in one place.
  */
@@ -92,13 +100,13 @@ export function listDumpsInDir(
     try {
         const entries = readdirSync(dir)
             .filter((name) => name.endsWith(".xml"))
-            .map((name) => {
-                const stat = statSync(join(dir, name));
-                return {
-                    name,
-                    mtime: stat.mtimeMs,
-                    sizeKb: Math.round(stat.size / 1024),
-                };
+            .flatMap((name) => {
+                try {
+                    const stat = statSync(join(dir, name));
+                    return [{ name, mtime: stat.mtimeMs, sizeKb: Math.round(stat.size / 1024) }];
+                } catch {
+                    return [];
+                }
             })
             .sort((a, b) => b.mtime - a.mtime);
 
