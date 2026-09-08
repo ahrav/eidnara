@@ -68,6 +68,50 @@ describe("redactSecretText — token counts and scalar diagnostics stay visible"
     });
 });
 
+describe("redactSecretText — unquoted colon assignments and quoted env values", () => {
+    test("redacts `key: value` with an unquoted key", () => {
+        expect(redactSecretText("token: abc123")).toBe("token: <REDACTED:token>");
+        expect(redactSecretText("set api_key: sk-live-abc in the env")).toBe(
+            "set api_key: <REDACTED:api_key> in the env",
+        );
+        expect(redactSecretText('password: "hunter two"')).toBe('password: "<REDACTED:password>"');
+    });
+
+    test('redacts quoted `KEY="value"` assignments and keeps the quotes', () => {
+        expect(redactSecretText('API_KEY="abc def"')).toBe('API_KEY="<REDACTED:api_key>"');
+        expect(redactSecretText("export TOKEN='abc def'")).toBe("export TOKEN='<REDACTED:token>'");
+    });
+
+    test("keeps numeric and boolean colon values whose key merely contains a secret word", () => {
+        expect(redactSecretText("tokens: 4096")).toBe("tokens: 4096");
+        expect(redactSecretText("max_tokens: 4096, temperature: 0.2")).toBe(
+            "max_tokens: 4096, temperature: 0.2",
+        );
+        expect(redactSecretText("hasUsageTokens: true")).toBe("hasUsageTokens: true");
+    });
+
+    test("keeps the scheme word for Authorization headers and redacts the credential", () => {
+        expect(redactSecretText("Authorization: Bearer abc123def456ghi789")).toBe(
+            "Authorization: Bearer <REDACTED:bearer>",
+        );
+        expect(redactSecretText("Authorization: Basic dXNlcjpwYXNzd29yZA==")).toBe(
+            "Authorization: Basic <REDACTED:basic>",
+        );
+        expect(redactSecretText("authorization: token abcdefghij1234567890")).toBe(
+            "authorization: token <REDACTED:token>",
+        );
+    });
+
+    test("a bare `key:` at end of line does not consume the next line", () => {
+        expect(redactSecretText("token:\nnext line stays")).toBe("token:\nnext line stays");
+    });
+
+    test("a colon value stops at punctuation that closes a structure", () => {
+        expect(redactSecretText("{token: abc123}")).toBe("{token: <REDACTED:token>}");
+        expect(redactSecretText("token: abc123; next")).toBe("token: <REDACTED:token>; next");
+    });
+});
+
 describe("hasShareabilitySensitiveText", () => {
     test("safe project facts are shareable", () => {
         expect(

@@ -1,8 +1,9 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { readLogTailLines } from "./log-tail";
 
 /**
  *
@@ -10,6 +11,12 @@ import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
  */
 export function sanitizeLogContent(content: string): string {
     return sanitizeDiagnosticText(content);
+}
+
+/** A Desktop install reports no version, so absence is decided by the install kind, not the version. */
+function describeOpenCodeInstall(report: DiagnosticReport): string {
+    if (!report.opencodeInstalled) return "not installed";
+    return `${report.opencodeVersion ?? "unknown version"} [${report.opencodeInstallKind}]`;
 }
 
 function formatTimestamp(date: Date): string {
@@ -60,16 +67,22 @@ function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
 }
 
 /**
- *
+ * Each record starts with a bracketed ISO timestamp. Stack frames following an
+ * `Error` record have no session tag, so they inherit that record's filter decision.
  */
+const RECORD_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T/;
+
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
     // Word boundaries prevent matching `ses_` embedded in longer identifiers.
     const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    let keepRecord = true;
     return lines.filter((line) => {
-        const matches = line.match(otherSessionPattern);
-        if (!matches) return true;
-        return matches.every((id) => id === sessionId);
+        if (RECORD_START_PATTERN.test(line)) {
+            const matches = line.match(otherSessionPattern);
+            keepRecord = !matches || matches.every((id) => id === sessionId);
+        }
+        return keepRecord;
     });
 }
 
@@ -80,9 +93,7 @@ export async function bundleIssueReport(
     sessionFilter: string | null = null,
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists
-        ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
-        : [];
+    const allLogLines = report.logFile.exists ? readLogTailLines(report.logFile.path) : [];
     const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
@@ -94,8 +105,14 @@ export async function bundleIssueReport(
     const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
     const recentErrorLines = extractRecentErrors(errorScanWindow, 20);
 
-    const configBody = JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2);
-    const sanitizedConfigPath = sanitizeDiagnosticText(report.configPaths.eidnaraConfig);
+    const userConfigBody = JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2);
+    const projectConfigBody = JSON.stringify(
+        sanitizeConfigValue(report.projectConfig.flags),
+        null,
+        2,
+    );
+    const sanitizedUserConfigPath = sanitizeDiagnosticText(report.eidnaraConfig.path);
+    const sanitizedProjectConfigPath = sanitizeDiagnosticText(report.projectConfig.path);
     const sanitizedDescription = sanitizeDiagnosticText(description);
     const sanitizedTitle = sanitizeDiagnosticText(title).trim();
 
@@ -108,12 +125,16 @@ export async function bundleIssueReport(
         `- Plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- OpenCode: ${report.opencodeVersion ?? "not installed"}`,
+        `- OpenCode: ${describeOpenCodeInstall(report)}`,
         "",
         "## Configuration",
-        `Config from \`${sanitizedConfigPath}\`:`,
+        `User config from \`${sanitizedUserConfigPath}\`${report.eidnaraConfig.exists ? "" : " (missing)"}:`,
         "```jsonc",
-        configBody,
+        userConfigBody,
+        "```",
+        `Project config from \`${sanitizedProjectConfigPath}\`${report.projectConfig.exists ? "" : " (missing)"}:`,
+        "```jsonc",
+        projectConfigBody,
         "```",
         "",
         "## Diagnostics",

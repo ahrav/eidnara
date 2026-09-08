@@ -159,8 +159,9 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<GOOGLE_API_KEY_REDACTED>",
     },
     {
-        pattern: /\b(Authorization\s*:\s*Bearer\s+)([A-Za-z0-9._~+/=-]{8,})/gi,
-        replacement: (_full: string, prefix: string) => `${prefix}<REDACTED:bearer>`,
+        pattern: /\b(Authorization\s*:\s*(Bearer|Basic|Token)\s+)([A-Za-z0-9._~+/=-]{8,})/gi,
+        replacement: (_full: string, prefix: string, scheme: string) =>
+            `${prefix}<REDACTED:${scheme.toLowerCase()}>`,
     },
     {
         pattern: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
@@ -181,11 +182,40 @@ const SECRET_TEXT_PATTERNS: Array<{
                 ? full
                 : `${quote}${key}${quote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`,
     },
+    // The negative lookahead preserves `Bearer`, `Basic`, and `Token` values for scheme-specific redaction.
+    // `[ \t]*` around the colon keeps a bare `key:` at end of line from consuming the next line's first word.
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*([^\s'"`]+)/gi,
-        replacement: (full: string, key: string, value: string) =>
-            isNonSecretScalarValue(value) ? full : `${key}=<REDACTED:${redactionTypeForKey(key)}>`,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Digest\b)(?:(["'`])([^"'`\r\n]*)\3|([^\s'"`,;}\])]+))/gi,
+        replacement: (
+            full: string,
+            key: string,
+            separator: string,
+            quote: string | undefined,
+            quoted: string | undefined,
+            bare: string | undefined,
+        ) => {
+            const value = quote ? (quoted ?? "") : (bare ?? "");
+            if (value === "" || isNonSecretScalarValue(value)) return full;
+            const q = quote ?? "";
+            return `${key}${separator}${q}<REDACTED:${redactionTypeForKey(key)}>${q}`;
+        },
+    },
+    {
+        pattern:
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])([^"'`\r\n]*)\2|([^\s'"`]+))/gi,
+        replacement: (
+            full: string,
+            key: string,
+            quote: string | undefined,
+            quoted: string | undefined,
+            bare: string | undefined,
+        ) => {
+            const value = quote ? (quoted ?? "") : (bare ?? "");
+            if (value === "" || isNonSecretScalarValue(value)) return full;
+            const q = quote ?? "";
+            return `${key}=${q}<REDACTED:${redactionTypeForKey(key)}>${q}`;
+        },
     },
 ];
 

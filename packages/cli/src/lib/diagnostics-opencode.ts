@@ -7,14 +7,20 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import {
+    eidnaraProjectConfigBasePath,
+    eidnaraUserConfigBasePath,
+} from "@eidnara/opencode/config/config-paths";
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
+import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import {
     sanitizeConfigValue,
     sanitizeDiagnosticText,
     sanitizePathString,
 } from "@eidnara/opencode/shared/redaction";
 import { parse as parseJsonc } from "comment-json";
+import { matchesPluginEntry } from "../adapters/opencode";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
@@ -28,6 +34,17 @@ import {
 export type { HistorianDumpMeta, HistorianDumpSummary } from "./historian-dumps";
 
 const OPENCODE_PLUGIN_NAME = "@eidnara/opencode";
+
+/**
+ * One Eidnara config tier as the plugin loader resolves it: `.jsonc` first, then `.json`.
+ * `path` is the detected file, or the canonical `.jsonc` path when neither exists.
+ */
+export interface EidnaraConfigTier {
+    path: string;
+    exists: boolean;
+    parseError?: string;
+    flags: Record<string, unknown>;
+}
 
 export interface DiagnosticReport {
     timestamp: string;
@@ -43,11 +60,10 @@ export interface DiagnosticReport {
     configPaths: ConfigPaths;
     opencodeConfigHasPlugin: boolean;
     tuiConfigHasPlugin: boolean;
-    eidnaraConfig: {
-        exists: boolean;
-        parseError?: string;
-        flags: Record<string, unknown>;
-    };
+    /** User tier under `$XDG_CONFIG_HOME/eidnara/`. */
+    eidnaraConfig: EidnaraConfigTier;
+    /** Project tier under `<cwd>/.eidnara/`; its overrides win over the user tier. */
+    projectConfig: EidnaraConfigTier;
     conflicts: {
         hasConflict: boolean;
         reasons: string[];
@@ -158,14 +174,20 @@ function readConfig(path: string): { value: Record<string, unknown> | null; erro
     }
 }
 
+function readEidnaraConfigTier(basePath: string): EidnaraConfigTier {
+    const detected = detectConfigFile(basePath);
+    const parsed = readConfig(detected.path);
+    return {
+        path: detected.path,
+        exists: detected.format !== "none",
+        ...(parsed.error ? { parseError: parsed.error } : {}),
+        flags: (sanitizeValue(parsed.value ?? {}) as Record<string, unknown>) ?? {},
+    };
+}
+
 function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
     const plugins = Array.isArray(config?.plugin) ? config.plugin : [];
-    return plugins.some((entry) => {
-        if (typeof entry !== "string") return false;
-        if (entry === OPENCODE_PLUGIN_NAME) return true;
-        if (entry.startsWith(`${OPENCODE_PLUGIN_NAME}@`)) return true;
-        return false;
-    });
+    return plugins.some((entry) => matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME));
 }
 
 /**
@@ -285,19 +307,20 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     }
 }
 
-export async function collectDiagnostics(): Promise<DiagnosticReport> {
+export async function collectDiagnostics(cwd = process.cwd()): Promise<DiagnosticReport> {
     const pluginVersion = getSelfVersion();
     const configPaths = detectConfigPaths();
     const opencodeConfig = readConfig(configPaths.opencodeConfig);
     const tuiConfig = readConfig(configPaths.tuiConfig);
-    const eidnaraConfig = readConfig(configPaths.eidnaraConfig);
+    const eidnaraConfig = readEidnaraConfigTier(eidnaraUserConfigBasePath());
+    const projectConfig = readEidnaraConfigTier(eidnaraProjectConfigBasePath(cwd));
 
     const logPath = getEidnaraLogPath("opencode");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
 
     let compactionEnabled = false;
     try {
-        compactionEnabled = isCompactionEnabled(loadPluginConfig(process.cwd()));
+        compactionEnabled = isCompactionEnabled(loadPluginConfig(cwd));
     } catch (error) {
         console.warn(
             `[eidnara] Could not load Eidnara config to resolve compaction mode; ` +
@@ -305,7 +328,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
                 `(${error instanceof Error ? error.message : String(error)})`,
         );
     }
-    const conflictResult = detectConflicts(process.cwd(), { compactionEnabled });
+    const conflictResult = detectConflicts(cwd, { compactionEnabled });
     const recentSessions = await collectRecentSessions();
     const opencodeInstallations = describeOpenCodeInstallations(detectOpenCodeInstallations());
     const activeInstallation = opencodeInstallations[0];
@@ -328,11 +351,8 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         configPaths,
         opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value),
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value),
-        eidnaraConfig: {
-            exists: existsSync(configPaths.eidnaraConfig),
-            ...(eidnaraConfig.error ? { parseError: eidnaraConfig.error } : {}),
-            flags: (sanitizeValue(eidnaraConfig.value ?? {}) as Record<string, unknown>) ?? {},
-        },
+        eidnaraConfig,
+        projectConfig,
         conflicts: {
             hasConflict: conflictResult.hasConflict,
             reasons: conflictResult.reasons,
@@ -399,6 +419,11 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         lastActiveAt: session.lastActiveAt,
     }));
 
+    const describeConfigTier = (tier: EidnaraConfigTier) =>
+        `\`${sanitizeString(tier.path)}\`${tier.exists ? "" : " (missing)"}`;
+    const describeParseError = (tier: EidnaraConfigTier) =>
+        tier.parseError ? sanitizeDiagnosticText(tier.parseError) : "none";
+
     return [
         `- Timestamp: ${report.timestamp}`,
         `- Plugin: v${report.pluginVersion}`,
@@ -407,7 +432,10 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
-        `- eidnara.jsonc parse error: ${report.eidnaraConfig.parseError ?? "none"}`,
+        `- User config: ${describeConfigTier(report.eidnaraConfig)}`,
+        `- User config parse error: ${describeParseError(report.eidnaraConfig)}`,
+        `- Project config: ${describeConfigTier(report.projectConfig)}`,
+        `- Project config parse error: ${describeParseError(report.projectConfig)}`,
         `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}`,
         `- Eidnara compaction mode: ${report.conflicts.compactionEnabled ? "on" : "off"}`,
         `- Native compaction: auto=${report.conflicts.nativeCompaction?.auto ?? "unknown"}, prune=${report.conflicts.nativeCompaction?.prune ?? "unknown"}`,
@@ -418,9 +446,14 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         JSON.stringify(configPaths, null, 2),
         "```",
         "",
-        "### eidnara.jsonc flags",
+        "### User config flags",
         "```jsonc",
         JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2),
+        "```",
+        "",
+        "### Project config flags",
+        "```jsonc",
+        JSON.stringify(sanitizeConfigValue(report.projectConfig.flags), null, 2),
         "```",
         "",
         "### Recent sessions",

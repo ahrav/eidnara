@@ -1,14 +1,185 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DiagnosticReport } from "./diagnostics-opencode";
+import { readLogTailLines } from "./log-tail";
 import { bundleIssueReport, sanitizeLogContent } from "./logs-opencode";
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
     for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+function makeReport(root: string, overrides: Partial<DiagnosticReport> = {}): DiagnosticReport {
+    return {
+        timestamp: "2026-05-11T12:00:00.000Z",
+        platform: "darwin",
+        arch: "arm64",
+        nodeVersion: "v24.0.0",
+        pluginVersion: "0.18.0",
+        opencodeInstalled: true,
+        opencodeVersion: "1.0.0",
+        opencodeInstallKind: "cli",
+        opencodeInstallations: [
+            {
+                path: join(root, "opencode"),
+                source: "PATH",
+                kind: "cli",
+                version: "1.0.0",
+                active: true,
+            },
+        ],
+        configPaths: {
+            configDir: join(root, ".config", "opencode"),
+            opencodeConfig: join(root, ".config", "opencode", "opencode.jsonc"),
+            opencodeConfigFormat: "jsonc",
+            eidnaraConfig: join(root, ".config", "eidnara", "eidnara.jsonc"),
+            tuiConfig: join(root, ".config", "opencode", "tui.jsonc"),
+            tuiConfigFormat: "jsonc",
+            omoConfig: null,
+        },
+        opencodeConfigHasPlugin: true,
+        tuiConfigHasPlugin: true,
+        eidnaraConfig: {
+            path: join(root, ".config", "eidnara", "eidnara.jsonc"),
+            exists: false,
+            flags: {},
+        },
+        projectConfig: {
+            path: join(root, ".eidnara", "eidnara.jsonc"),
+            exists: false,
+            flags: {},
+        },
+        conflicts: {
+            hasConflict: false,
+            reasons: [],
+            compactionEnabled: true,
+            nativeCompaction: { auto: false, prune: false },
+        },
+        logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
+        recentSessions: [],
+        historianDumps: {
+            byProject: [],
+            legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+        },
+        ...overrides,
+    };
+}
+
+async function bundleInTempCwd(
+    root: string,
+    report: DiagnosticReport,
+    sessionFilter: string | null = null,
+): Promise<string> {
+    const originalCwd = process.cwd();
+    process.chdir(root);
+    try {
+        const bundled = await bundleIssueReport(report, "description", "title", sessionFilter);
+        return readFileSync(bundled.path, "utf-8");
+    } finally {
+        process.chdir(originalCwd);
+    }
+}
+
+describe("readLogTailLines", () => {
+    it("returns every line of a file smaller than the byte cap", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        const path = join(root, "eidnara.log");
+        writeFileSync(path, "one\ntwo\nthree\n");
+        expect(readLogTailLines(path, 1024)).toEqual(["one", "two", "three", ""]);
+    });
+
+    it("reads only the final bytes of a large file and drops the partial first line", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        const path = join(root, "eidnara.log");
+        const lines = Array.from(
+            { length: 10_000 },
+            (_, i) => `[2026-05-11T12:00:00.000Z] line ${i}`,
+        );
+        writeFileSync(path, `${lines.join("\n")}\n`);
+        const tail = readLogTailLines(path, 2048);
+        expect(tail.length).toBeLessThan(100);
+        expect(tail.at(-2)).toBe("[2026-05-11T12:00:00.000Z] line 9999");
+        // A cut inside a record must not surface as a truncated line.
+        for (const line of tail.slice(0, -1)) expect(line).toMatch(/^\[2026-/);
+    });
+
+    it("does not split a multi-byte character at the cut", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        const path = join(root, "eidnara.log");
+        const line = "[2026-05-11T12:00:00.000Z] ééééééééééééééééééééé";
+        writeFileSync(path, `${Array.from({ length: 50 }, () => line).join("\n")}\n`);
+        const tail = readLogTailLines(path, 101);
+        expect(tail.join("\n")).not.toContain("\uFFFD");
+        for (const entry of tail.slice(0, -1)) expect(entry).toBe(line);
+    });
+});
+
+describe("bundleIssueReport environment line", () => {
+    it("reports a Desktop-only install as installed with an unknown version", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-desktop-"));
+        tempDirs.push(root);
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, {
+                opencodeInstalled: true,
+                opencodeInstallKind: "desktop",
+                opencodeVersion: null,
+            }),
+        );
+        expect(body).toContain("- OpenCode: unknown version [desktop]");
+        expect(body).not.toContain("- OpenCode: not installed");
+    });
+
+    it("reports a missing install as not installed", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-none-"));
+        tempDirs.push(root);
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, {
+                opencodeInstalled: false,
+                opencodeInstallKind: "none",
+                opencodeVersion: null,
+                opencodeInstallations: [],
+            }),
+        );
+        expect(body).toContain("- OpenCode: not installed");
+    });
+});
+
+describe("bundleIssueReport session filter", () => {
+    it("drops the stack frames that follow another session's Error record", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-session-"));
+        tempDirs.push(root);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "[2026-05-11T12:00:00.000Z] [eidnara][ses_keepme0001] historian ran",
+                "[2026-05-11T12:00:01.000Z] [eidnara][ses_other00002] historian failure: boom",
+                "Error: boom",
+                "    at otherFrame (/srv/app/other.ts:1:1)",
+                "[2026-05-11T12:00:02.000Z] [eidnara][ses_keepme0001] Error: mine",
+                "    at mineFrame (/srv/app/mine.ts:2:2)",
+                "",
+            ].join("\n"),
+        );
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, { logFile: { path: logPath, exists: true, sizeKb: 1 } }),
+            "ses_keepme0001",
+        );
+        expect(body).toContain("ses_keepme0001");
+        expect(body).toContain("mineFrame");
+        expect(body).not.toContain("ses_other00002");
+        expect(body).not.toContain("otherFrame");
+        expect(body).not.toContain("Error: boom");
+    });
 });
 
 describe("sanitizeLogContent — secret token redaction (council finding #9)", () => {
@@ -352,6 +523,7 @@ describe("bundleIssueReport secret redaction", () => {
                 opencodeConfigHasPlugin: true,
                 tuiConfigHasPlugin: true,
                 eidnaraConfig: {
+                    path: join(root, ".config", "eidnara", "eidnara.jsonc"),
                     exists: true,
                     flags: {
                         embedding: {
@@ -364,6 +536,11 @@ describe("bundleIssueReport secret redaction", () => {
                         },
                         historian: { api_key: "historian-secret-value" },
                     },
+                },
+                projectConfig: {
+                    path: join(root, ".eidnara", "eidnara.jsonc"),
+                    exists: false,
+                    flags: {},
                 },
                 conflicts: {
                     hasConflict: false,
@@ -440,7 +617,15 @@ describe("bundleIssueReport secret redaction", () => {
                 opencodeConfigHasPlugin: true,
                 tuiConfigHasPlugin: true,
                 eidnaraConfig: {
+                    path: "/Users/alice/.config/eidnara/eidnara.jsonc",
                     exists: true,
+                    flags: {},
+                },
+                projectConfig: {
+                    path: "/Users/alice/project/.eidnara/eidnara.json",
+                    exists: true,
+                    parseError:
+                        "EACCES: permission denied, open '/Users/alice/project/.eidnara/eidnara.json'",
                     flags: {},
                 },
                 conflicts: {
@@ -476,7 +661,15 @@ describe("bundleIssueReport secret redaction", () => {
             expect(body).toContain(
                 "Description with /Users/<USER>/private and token=<REDACTED:token>",
             );
-            expect(body).toContain("Config from `/Users/<USER>/.config/eidnara/eidnara.jsonc`:");
+            expect(body).toContain(
+                "User config from `/Users/<USER>/.config/eidnara/eidnara.jsonc`:",
+            );
+            expect(body).toContain(
+                "Project config from `/Users/<USER>/project/.eidnara/eidnara.json`:",
+            );
+            expect(body).toContain(
+                "- Project config parse error: EACCES: permission denied, open '/Users/<USER>/project/.eidnara/eidnara.json'",
+            );
             expect(body).toContain(
                 '"title": "Problem at /Users/<USER>/private token=<REDACTED:token>"',
             );
