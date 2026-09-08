@@ -278,6 +278,86 @@ describe("Pi doctor", () => {
         expect(report).not.toContain("sk-12345678901234567890");
     });
 
+    it("filters the log to a lone discovered session without showing the picker", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "[2026-04-28T12:00:00.000Z] [eidnara][only-session] line from the only session",
+                "[2026-04-28T12:00:01.000Z] [eidnara][older-session] line from an older session",
+            ].join("\n"),
+        );
+        const originalConsoleLog = console.log;
+        console.log = () => {};
+        const prompts = new MockPrompts({ texts: ["Title", "Description"] });
+        const diagnosticReport: PiDiagnosticReport = {
+            timestamp: "2026-04-28T12:34:56.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: join(root, ".pi", "bin", "pi"),
+            piVersion: "0.74.0",
+            settings: {
+                path: join(agentDir, "settings.json"),
+                exists: true,
+                hasEidnaraPackage: true,
+                packages: ["npm:@eidnara/pi"],
+            },
+            configPaths: {
+                agentDir,
+                userConfig: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                projectConfig: join(cwd, ".eidnara", "eidnara.jsonc"),
+            },
+            userConfig: {
+                path: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            projectConfig: {
+                path: join(cwd, ".eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            loadedConfigPaths: [],
+            loadWarnings: [],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: logPath, exists: true, sizeKb: 1 },
+            recentSessions: [
+                {
+                    sessionId: "only-session",
+                    directory: cwd,
+                    lastActiveAt: "2026-04-28T12:00:00.000Z",
+                },
+            ],
+            historianDumps: {
+                byProject: [],
+                legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+            },
+        };
+
+        const options = baseOptions(root, cwd, prompts);
+        try {
+            const code = await runDoctor({
+                ...options,
+                issue: true,
+                deps: { ...options.deps, collectDiagnostics: async () => diagnosticReport },
+            });
+            expect(code).toBe(0);
+        } finally {
+            console.log = originalConsoleLog;
+        }
+
+        const report = readFileSync(join(cwd, "eidnara-pi-issue-20260428-123456.md"), "utf-8");
+        expect(report).toContain("line from the only session");
+        expect(report).not.toContain("line from an older session");
+    });
+
     it("sanitizes the issue title before passing it to gh issue create", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");

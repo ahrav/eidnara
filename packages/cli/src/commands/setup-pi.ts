@@ -300,11 +300,27 @@ async function pickCopilotThinkingLevel(
  * config resolves to the schema defaults (both enabled).
  */
 function readEidnaraModes(configPath: string): EidnaraModes {
-    const config = readJsoncLenient(configPath).value;
+    return eidnaraModesFrom(readJsoncLenient(configPath).value);
+}
+
+/**
+ * Accepts both a leniently read raw config and a parsed `EidnaraConfig`.
+ * `enabled: false` turns every mode off: a disabled plugin skips its hooks,
+ * so a native manager must stay on.
+ */
+export function eidnaraModesFrom(config: {
+    enabled?: unknown;
+    compaction?: unknown;
+    memory?: unknown;
+}): EidnaraModes {
     const enabled = config.enabled !== false;
     return {
         enabled,
-        compactionEnabled: enabled && isCompactionEnabled(config),
+        compactionEnabled:
+            enabled &&
+            isCompactionEnabled({
+                compaction: isRecord(config.compaction) ? config.compaction : null,
+            }),
         memoryEnabled: enabled && (!isRecord(config.memory) || config.memory.enabled !== false),
     };
 }

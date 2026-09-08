@@ -415,6 +415,105 @@ describe("OMP doctor", () => {
         expect(statSync(reportPath).size).toBeLessThanOrEqual(60_000 + 1);
     });
 
+    it("keeps OMP compaction and memory on when the effective Eidnara config turns them off", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-modes-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(
+            join(configDir, "eidnara.jsonc"),
+            JSON.stringify({ compaction: { enabled: false }, memory: { enabled: false } }),
+        );
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const calls: string[][] = [];
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    { name: "@eidnara/pi", version: "0.33.0", enabled: true, path: pluginDir },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? true : "mnemopi") as never,
+                runOmpCommand: (_path, args) => {
+                    calls.push(args);
+                    return { ok: true, stdout: agentDir, stderr: "" };
+                },
+            },
+        });
+
+        expect(code).toBe(0);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain(
+            "OMP native compaction stays enabled because Eidnara compaction is off",
+        );
+        expect(output).toContain(
+            "OMP memory.backend=mnemopi stays enabled because Eidnara memory is off",
+        );
+        expect(output).not.toContain("conflicts with Eidnara");
+        expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
+    });
+
+    it("treats enabled: false as turning both Eidnara managers off", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-disabled-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "eidnara.jsonc"), JSON.stringify({ enabled: false }));
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const calls: string[][] = [];
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    { name: "@eidnara/pi", version: "0.33.0", enabled: true, path: pluginDir },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? true : "mnemopi") as never,
+                runOmpCommand: (_path, args) => {
+                    calls.push(args);
+                    return { ok: true, stdout: agentDir, stderr: "" };
+                },
+            },
+        });
+
+        expect(code).toBe(0);
+        expect(calls.some((args) => args[0] === "config" && args[1] === "set")).toBe(false);
+    });
+
     it("sanitizes the issue title before passing it to gh issue create", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-title-"));
         roots.push(root);

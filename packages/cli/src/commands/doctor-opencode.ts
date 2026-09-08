@@ -47,6 +47,8 @@ const PLUGIN_NAME = "@eidnara/opencode";
 function resolveCompactionEnabledForDoctor(cwd: string): boolean {
     try {
         const config = loadPluginConfig(cwd);
+        // With `enabled: false` the plugin skips every hook, so native compaction must stay on.
+        if (config.enabled === false) return false;
         return isCompactionEnabled(config);
     } catch (error) {
         console.warn(
@@ -116,7 +118,8 @@ async function runIssueFlow(): Promise<number> {
         const report = await collectDiagnostics();
         s.stop("Diagnostics collected");
 
-        let sessionFilter: string | null = null;
+        // A lone discovered session still filters: the append-only log can hold older sessions' records.
+        let sessionFilter: string | null = report.recentSessions[0]?.sessionId ?? null;
         if (report.recentSessions.length > 1) {
             const choice = await selectOne(
                 "Which session is this issue about? (filters log lines from other sessions)",

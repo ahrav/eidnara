@@ -463,7 +463,8 @@ async function runIssueFlow(options: {
         const report = await options.deps.collectDiagnostics(options.cwd);
         spinner.stop("Diagnostics collected");
 
-        let sessionFilter: string | null = null;
+        // A lone discovered session still filters: the append-only log can hold older sessions' records.
+        let sessionFilter: string | null = report.recentSessions[0]?.sessionId ?? null;
         if (report.recentSessions.length > 1) {
             const choice = await options.prompts.selectOne(
                 "Which Pi session is this issue about? (filters log lines from other sessions)",

@@ -34,6 +34,7 @@ import {
     getOmpSessionsRoot,
 } from "../lib/paths";
 import { type PromptIO, promptIO } from "../lib/prompts";
+import { eidnaraModesFrom } from "./setup-pi";
 
 const MIN_OMP_VERSION = "17.1.7";
 type Status = "pass" | "warn" | "fail" | "info";
@@ -154,6 +155,10 @@ async function runHealthChecks(options: {
         disableMemory: false,
         writeUserConfig: false,
     };
+    // The effective (user + project) Eidnara config decides which native OMP
+    // managers count as conflicts; a manager Eidnara has switched off stays on.
+    const loaded = loadPiConfig({ cwd: options.cwd });
+    const eidnara = eidnaraModesFrom(loaded.config);
     const omp = options.deps.detectOmpBinary();
     if (!omp) {
         add(results, "fail", "OMP binary not found on PATH or in standard user bin directories");
@@ -192,14 +197,26 @@ async function runHealthChecks(options: {
 
         const compaction = options.deps.getOmpSetting(omp.path, "compaction.enabled");
         if (compaction === false) add(results, "pass", "OMP native compaction is disabled");
-        else if (compaction === true) {
+        else if (compaction === true && !eidnara.compactionEnabled) {
+            add(
+                results,
+                "pass",
+                "OMP native compaction stays enabled because Eidnara compaction is off in the effective config",
+            );
+        } else if (compaction === true) {
             add(results, "fail", "OMP native compaction is enabled and conflicts with Eidnara");
             repairPlan.disableCompaction = true;
         } else add(results, "fail", "Could not read OMP compaction.enabled");
 
         const memory = options.deps.getOmpSetting(omp.path, "memory.backend");
         if (memory === "off") add(results, "pass", "OMP automatic memory backend is disabled");
-        else if (typeof memory === "string") {
+        else if (typeof memory === "string" && !eidnara.memoryEnabled) {
+            add(
+                results,
+                "pass",
+                `OMP memory.backend=${memory} stays enabled because Eidnara memory is off in the effective config`,
+            );
+        } else if (typeof memory === "string") {
             add(
                 results,
                 "fail",
@@ -265,7 +282,6 @@ async function runHealthChecks(options: {
             add(results, "pass", `Eidnara ${label} config parses: ${basename(detected.path)}`);
         }
     }
-    const loaded = loadPiConfig({ cwd: options.cwd });
     if (loaded.warnings.length === 0)
         add(results, "pass", "Eidnara runtime config loads successfully");
     else for (const warning of loaded.warnings.slice(0, 5)) add(results, "warn", warning);
