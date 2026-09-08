@@ -1,8 +1,24 @@
 // Eidnara, Oh My OpenCode, and Oh My Claude directives share this prefix.
 const SYSTEM_DIRECTIVE_PREFIX = "[SYSTEM DIRECTIVE:";
 
+// Hooks write these machine notices as unflagged user text.
+const SYSTEM_INJECTION_PREFIXES = [
+    SYSTEM_DIRECTIVE_PREFIX,
+    "[Category+Skill Reminder]",
+    "[EDIT ERROR - IMMEDIATE ACTION REQUIRED]",
+    "[task CALL FAILED",
+    "[EMERGENCY CONTEXT WINDOW WARNING]",
+    "Unstable background agent appears idle",
+    "**THE SUBAGENT JUST CLAIMED THIS TASK IS DONE.",
+] as const;
+
 export function isSystemDirective(text: string): boolean {
     return text.trimStart().startsWith(SYSTEM_DIRECTIVE_PREFIX);
+}
+
+export function isSystemInjectedText(text: string): boolean {
+    const trimmed = text.trimStart();
+    return SYSTEM_INJECTION_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
 }
 
 function createSystemReminderTagPattern(): RegExp {

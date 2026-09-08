@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { isSystemDirective, removeSystemReminders } from "./system-directive";
+import { isSystemDirective, isSystemInjectedText, removeSystemReminders } from "./system-directive";
 
 describe("removeSystemReminders", () => {
     it("drops a single reminder and trims", () => {
@@ -64,5 +64,31 @@ describe("isSystemDirective", () => {
     it("rejects text that does not start with the directive prefix", () => {
         expect(isSystemDirective("hello [SYSTEM DIRECTIVE: EIDNARA]")).toBe(false);
         expect(isSystemDirective("hello")).toBe(false);
+    });
+});
+
+describe("isSystemInjectedText", () => {
+    it.each([
+        "[SYSTEM DIRECTIVE: EIDNARA do x]",
+        "[SYSTEM DIRECTIVE: OH-MY-OPENCODE do x]",
+        "[Category+Skill Reminder] use the skill",
+        "[EDIT ERROR - IMMEDIATE ACTION REQUIRED] fix",
+        "[task CALL FAILED - IMMEDIATE RETRY REQUIRED] retry",
+        "[task CALL FAILED] retry",
+        "[EMERGENCY CONTEXT WINDOW WARNING] compact",
+        "Unstable background agent appears idle",
+        "**THE SUBAGENT JUST CLAIMED THIS TASK IS DONE. verify",
+        "  \n[Category+Skill Reminder] after whitespace",
+    ])("classifies %j as injected", (text) => {
+        expect(isSystemInjectedText(text)).toBe(true);
+    });
+
+    it.each([
+        "please retry the task",
+        "the agent appears idle",
+        "I fixed the [EDIT ERROR] myself",
+        "",
+    ])("does not classify %j as injected", (text) => {
+        expect(isSystemInjectedText(text)).toBe(false);
     });
 });

@@ -1,6 +1,6 @@
 import { COMMIT_VERB_PATTERN, createCommitHashExtractPattern } from "../../shared/commit-detection";
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
-import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
+import { isSystemInjectedText, removeSystemReminders } from "../../shared/system-directive";
 
 export interface SessionChunkLine {
     ordinal: number;
@@ -26,17 +26,22 @@ export function isTruthyFlag(value: unknown): boolean {
     return value === true || value === 1 || value === "true";
 }
 
+export function isMachineAuthoredPart(part: Record<string, unknown>): boolean {
+    if (isTruthyFlag(part.synthetic) || isTruthyFlag(part.ignored)) return true;
+    const metadata = part.metadata;
+    if (metadata === null || typeof metadata !== "object") return false;
+    const marker = (metadata as Record<string, unknown>).marker;
+    if (marker === null || typeof marker !== "object") return false;
+    return (marker as Record<string, unknown>).kind != null;
+}
+
 function cleanUserText(text: string): string {
     return removeSystemReminders(text).replaceAll(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
 }
 
 export function isMeaningfulUserText(text: string): boolean {
     const cleaned = cleanUserText(text);
-    return cleaned.length > 0 && !isSystemDirective(cleaned);
-}
-
-function isMachineAuthoredText(part: Record<string, unknown>): boolean {
-    return isTruthyFlag(part.synthetic) || isTruthyFlag(part.ignored);
+    return cleaned.length > 0 && !isSystemInjectedText(cleaned);
 }
 
 export function hasMeaningfulUserText(parts: unknown[]): boolean {
@@ -44,7 +49,7 @@ export function hasMeaningfulUserText(parts: unknown[]): boolean {
         if (part === null || typeof part !== "object") continue;
         const candidate = part as Record<string, unknown>;
         if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
-        if (isMachineAuthoredText(candidate)) continue;
+        if (isMachineAuthoredPart(candidate)) continue;
         if (isMeaningfulUserText(candidate.text)) return true;
     }
 
@@ -57,12 +62,12 @@ export function extractTexts(parts: unknown[], role: string): string[] {
         if (part === null || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
         if (p.type !== "text" || typeof p.text !== "string") continue;
-        if (isMachineAuthoredText(p)) continue;
+        if (isMachineAuthoredPart(p)) continue;
         // `hasMeaningfulUserText` evaluates cleaned text, so summaries clean user text too.
         const text = role === "user" ? cleanUserText(p.text) : p.text.trim();
         if (text.length === 0) continue;
-        // A directive part admitted beside real user text is machine control text, not user input.
-        if (role === "user" && isSystemDirective(text)) continue;
+        // An injected notice admitted beside real user text is machine control text, not user input.
+        if (role === "user" && isSystemInjectedText(text)) continue;
         texts.push(text);
     }
     return texts;
@@ -121,7 +126,8 @@ function truncateArg(value: string, maxLen = 60): string {
 export { estimateTokens, preloadTokenizer } from "../../shared/token-estimator";
 
 export function normalizeText(text: string): string {
-    return text.replace(/\s+/g, " ").trim();
+    // `\s` omits U+0085 NEXT LINE, which Unicode `White_Space` includes; the daemon's `split_whitespace` collapses it.
+    return text.replace(/[\s\u0085]+/g, " ").trim();
 }
 
 export function compactRole(role: string): string {

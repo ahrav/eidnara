@@ -396,6 +396,20 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
+    it.each([
+        "[task CALL FAILED - IMMEDIATE RETRY REQUIRED] retry now",
+        "[Category+Skill Reminder] remember the skill",
+        "Unstable background agent appears idle",
+        "[EMERGENCY CONTEXT WINDOW WARNING] compact",
+    ])("does not release for the unflagged machine notice %j", (notice) => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: notice }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "text", text: notice });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
     it("is not mid-turn when there is no assistant message", () => {
         const db = createMidTurnDb();
 

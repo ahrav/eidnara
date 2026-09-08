@@ -7,6 +7,7 @@ import {
     extractToolCallSummaries,
     hasMeaningfulUserText,
     mergeCommitHashes,
+    normalizeText,
 } from "./read-session-formatting";
 
 describe("extractTexts", () => {
@@ -101,6 +102,47 @@ describe("extractTexts", () => {
         expect(
             extractTexts([{ type: "text", text: "generated", synthetic: true }], "assistant"),
         ).toEqual([]);
+    });
+
+    it.each([
+        "[task CALL FAILED - IMMEDIATE RETRY REQUIRED] retry now",
+        "[Category+Skill Reminder] remember the skill",
+        "Unstable background agent appears idle",
+        "[EDIT ERROR - IMMEDIATE ACTION REQUIRED] re-read",
+        "[EMERGENCY CONTEXT WINDOW WARNING] compact",
+        "**THE SUBAGENT JUST CLAIMED THIS TASK IS DONE. verify",
+    ])("drops the unflagged machine notice %j from user text", (notice) => {
+        const parts = [
+            { type: "text", text: notice },
+            { type: "text", text: "real request" },
+        ];
+
+        expect(hasMeaningfulUserText([parts[0]])).toBe(false);
+        expect(extractTexts(parts, "user")).toEqual(["real request"]);
+    });
+
+    it("drops a text part carrying a marker kind", () => {
+        const parts = [
+            { type: "text", text: "✉ Inbox from peer", metadata: { marker: { kind: "inbox" } } },
+            { type: "text", text: "real request" },
+        ];
+
+        expect(hasMeaningfulUserText([parts[0]])).toBe(false);
+        expect(extractTexts(parts, "user")).toEqual(["real request"]);
+    });
+
+    it("keeps a text part whose metadata has no marker kind", () => {
+        const parts = [{ type: "text", text: "real request", metadata: { other: 1 } }];
+
+        expect(hasMeaningfulUserText(parts)).toBe(true);
+        expect(extractTexts(parts, "user")).toEqual(["real request"]);
+    });
+});
+
+describe("normalizeText", () => {
+    it("collapses runs of whitespace, including U+0085 NEXT LINE", () => {
+        expect(normalizeText("a\u0085b")).toBe("a b");
+        expect(normalizeText("  a \u00a0\u2028 b\u3000c\u0085\u0085d  ")).toBe("a b c d");
     });
 });
 

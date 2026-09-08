@@ -4,7 +4,7 @@ import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { isMeaningfulUserText, isTruthyFlag } from "./read-session-formatting";
+import { isMachineAuthoredPart, isMeaningfulUserText } from "./read-session-formatting";
 
 interface AssistantMidTurnRow {
     id?: string;
@@ -213,15 +213,6 @@ function parsePart(row: PartDataRow): Record<string, unknown> | null {
     } catch {
         return null;
     }
-}
-
-function isMachineAuthoredPart(part: Record<string, unknown>): boolean {
-    if (isTruthyFlag(part.synthetic) || isTruthyFlag(part.ignored)) return true;
-    const metadata = part.metadata;
-    if (metadata === null || typeof metadata !== "object") return false;
-    const marker = (metadata as Record<string, unknown>).marker;
-    if (marker === null || typeof marker !== "object") return false;
-    return (marker as Record<string, unknown>).kind != null;
 }
 
 interface AssistantModelRow {
