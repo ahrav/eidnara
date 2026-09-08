@@ -146,7 +146,7 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
         label: "Eidnara: Notes",
         description: CTX_NOTE_DESCRIPTION,
         parameters: ParamsSchema,
-        async execute(toolCallId, rawParams: CtxNoteParams, _signal, _onUpdate, ctx) {
+        async execute(toolCallId, rawParams: CtxNoteParams, signal, _onUpdate, ctx) {
             const args = unwrapImitatedReducedArgs(
                 rawParams as CtxNoteArgs,
                 ["action", "content"],
@@ -226,6 +226,7 @@ export function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition<typeof 
                 limit: args.limit,
                 offset: args.offset,
                 noteId: args.note_id,
+                ...(signal ? { signal } : {}),
             };
             try {
                 const text = moduleNoteText(await rustNote(request), args, action);

@@ -14,6 +14,7 @@ import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import type { EidnaraConfig, SidekickConfig } from "@eidnara/opencode/config/schema/eidnara";
 import { resolveProjectIdentityForSession } from "@eidnara/opencode/features/context/project-identity";
 import { setCtxReduceRegisteredGlobally } from "@eidnara/opencode/hooks/context/ctx-reduce-availability";
+import { closeKernelSession } from "@eidnara/opencode/hooks/context/kernel-transport";
 import {
     configureManagedDemandStart,
     createHostModuleClient,
@@ -281,10 +282,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     configureManagedDemandStart(managedDemandStart);
     markPiEidnaraActive();
 
-    await startPiEidnaraRuntime(pi);
+    // Only a registered runtime installs the `session_shutdown` handler that clears the latch.
+    // A disabled or failed startup therefore clears it here, or `/reload` could never initialize a later enabled configuration.
+    let registered = false;
+    try {
+        registered = await startPiEidnaraRuntime(pi);
+    } finally {
+        if (!registered) clearPiEidnaraActive();
+    }
 }
 
-async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
+/** Returns `true` once every hook, tool, and command is registered; `false` when configuration disables the runtime. */
+async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // The boot project affects only initial config loading and logging.
     // Identity and path resolution use `ctx.cwd` for each hook and command, so cwd switches follow the active project without reloading config.
     const projectDir = process.cwd();
@@ -316,15 +325,15 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
 
     if (!config.enabled) {
         info("plugin DISABLED via config (enabled: false) — skipping registration");
-        return;
+        return false;
     }
 
     // The connection file is user-tier configuration, so one daemon client serves every project in this process.
     const moduleClient: RustModeModuleClient = createHostModuleClient(config.subc?.connection_file);
     const rustToolBackends = createRustToolBackends(moduleClient);
+    // Each command routes on its own `ctx.cwd`, so the deps carry no project root.
     const daemonSessionDeps: DaemonSessionDeps = {
         moduleClient,
-        projectRoot: projectDir,
         compactionOff,
     };
 
@@ -602,23 +611,31 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
         }
     });
 
+    function sessionIdFromContext(ctx: unknown): string | undefined {
+        const sm = (
+            ctx as {
+                sessionManager?: { getSessionId?: () => string | undefined };
+            }
+        ).sessionManager;
+        const sessionId = typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
+        return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
+    }
+
+    // Clears one session's prompt state and closes its routes on both daemon transports; a closed route reopens on the session's next call, so no durable state is lost. commentlint: allow(JUDGE)
+    function releaseSessionResources(sessionId: string): void {
+        clearPiSystemPromptSession(sessionId);
+        promptSurfaceGuidanceEpochs.clear(sessionId);
+        systemPromptRefreshSessions.delete(sessionId);
+        moduleClient.closeSession?.(sessionId);
+        closeKernelSession(sessionId);
+    }
+
     // `/reload` tears down extensions and re-runs the default export.
     pi.on("session_shutdown", async (_event, ctx) => {
-        // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session maps.
+        // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session state.
         try {
-            const sm = (
-                ctx as unknown as {
-                    sessionManager?: { getSessionId?: () => string | undefined };
-                }
-            ).sessionManager;
-            const sessionId =
-                typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
-            if (typeof sessionId === "string" && sessionId.length > 0) {
-                clearPiSystemPromptSession(sessionId);
-                promptSurfaceGuidanceEpochs.clear(sessionId);
-                systemPromptRefreshSessions.delete(sessionId);
-                moduleClient.closeSession?.(sessionId);
-            }
+            const sessionId = sessionIdFromContext(ctx);
+            if (sessionId) releaseSessionResources(sessionId);
         } catch {
             // best-effort cleanup
         }
@@ -626,22 +643,12 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<void> {
         clearPiEidnaraActive();
     });
 
+    // Each session swap releases the outgoing session's prompt state and daemon routes, or the process retains them for its lifetime.
     pi.on("session_before_switch", (_event, ctx) => {
         try {
-            const sm = (
-                ctx as unknown as {
-                    sessionManager?: { getSessionId?: () => string | undefined };
-                }
-            ).sessionManager;
-            const outgoingSessionId =
-                typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
-            if (typeof outgoingSessionId === "string" && outgoingSessionId.length > 0) {
-                // `session_before_switch` clears in-memory per-session maps so they do not retain one entry per session swap.
-                // `session_before_switch` must not clear durable state: users can return to the prior session.
-                clearPiSystemPromptSession(outgoingSessionId);
-                promptSurfaceGuidanceEpochs.clear(outgoingSessionId);
-                systemPromptRefreshSessions.delete(outgoingSessionId);
-            }
+            const outgoingSessionId = sessionIdFromContext(ctx);
+            if (outgoingSessionId) releaseSessionResources(outgoingSessionId);
         } catch {}
     });
+    return true;
 }

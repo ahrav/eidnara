@@ -115,6 +115,15 @@ function sharedState(connectionFile: string | undefined): SharedKernelState {
     return shared;
 }
 
+/**
+ * Closes one session's routes on every shared transport. A route is keyed by `(session, root)` and otherwise lives until its transport disconnects, so a long-lived host that cycles through sessions would hold one route per session it ever served. The next call for that session reopens its route. commentlint: allow(JUDGE)
+ */
+export function closeKernelSession(sessionId: string): void {
+    for (const shared of sharedByConnectionFile.values()) {
+        shared.module.closeSession(sessionId);
+    }
+}
+
 export interface CreateKernelClientArgs {
     sessionId: string;
     projectRoot: string;

@@ -44,7 +44,7 @@ export function registerCtxRecompCommand(pi: ExtensionAPI, deps: RegisterCtxReco
                 result = `## Eidnara Recomp — Unsupported\n\nRequested range: \`${parsedArgs.range.start}-${parsedArgs.range.end}\`. ${RECOMP_RANGE_UNSUPPORTED}\n\n${RECOMP_USAGE}`;
             } else {
                 try {
-                    const value = await callDaemonSession(deps, "session.recomp", {
+                    const value = await callDaemonSession(deps, ctx.cwd, "session.recomp", {
                         method: "session.recomp",
                         v: 1,
                         session_id: sessionId,

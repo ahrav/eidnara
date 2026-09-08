@@ -21,6 +21,8 @@ export interface RustNoteToolRequest {
     limit?: number;
     offset?: number;
     noteId?: number;
+    /** The harness's tool-call abort signal; the transport settles an aborted call without waiting for the daemon. */
+    signal?: AbortSignal;
 }
 
 export function toolCallIdFromContext(context: unknown): string | undefined {
@@ -46,6 +48,7 @@ export interface RustToolBackends {
         projectRoot: string;
         drop: string;
         commandId: string;
+        signal?: AbortSignal;
     }) => Promise<unknown>;
     authorityState?: (args: {
         projectPath: string;
@@ -58,7 +61,7 @@ export interface RustToolBackends {
 
 export function createRustToolBackends(moduleClient: RustModeModuleClient): RustToolBackends {
     return {
-        reduce: ({ sessionId, projectRoot, drop, commandId }) =>
+        reduce: ({ sessionId, projectRoot, drop, commandId, signal }) =>
             moduleClient.call({
                 sessionId,
                 projectRoot,
@@ -70,6 +73,7 @@ export function createRustToolBackends(moduleClient: RustModeModuleClient): Rust
                     drop,
                     command_id: commandId,
                 },
+                ...(signal ? { signal } : {}),
             }),
         note: ({
             commandId,
@@ -87,6 +91,7 @@ export function createRustToolBackends(moduleClient: RustModeModuleClient): Rust
             limit,
             offset,
             noteId,
+            signal,
         }) =>
             moduleClient.call({
                 sessionId,
@@ -114,6 +119,7 @@ export function createRustToolBackends(moduleClient: RustModeModuleClient): Rust
                         note_id: noteId,
                     },
                 },
+                ...(signal ? { signal } : {}),
             }),
         // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note. commentlint: allow(JUDGE)
         noteEvaluationAvailable: () => true,

@@ -15,7 +15,6 @@ export const RECOMP_RANGE_UNSUPPORTED =
 
 export interface DaemonSessionDeps {
     moduleClient: RustModeModuleClient;
-    projectRoot: string;
     /** Command paths use boot-resolved mode and must not reread configuration. */
     compactionOff?: boolean;
 }
@@ -37,9 +36,13 @@ export function rustCommandId(operation: string): string {
     return `opencode-${operation}-${randomUUID()}`;
 }
 
-/** The daemon reads `session_id` from the body; the transport routes on the same id. */
+/**
+ * The daemon reads `session_id` from the body; the transport routes on the same id.
+ * `projectRoot` is the invoking command's current `ctx.cwd`; the transport keys routes by `(session, root)`, and a root fixed at boot would address a different lineage than the session's tools after `/cd`. commentlint: allow(JUDGE)
+ */
 export async function callDaemonSession(
     deps: DaemonSessionDeps,
+    projectRoot: string,
     method: DaemonSessionMethod,
     body: Record<string, unknown>,
     timeoutMs?: number,
@@ -47,7 +50,7 @@ export async function callDaemonSession(
     return moduleResponseValue(
         await deps.moduleClient.call({
             sessionId: body.session_id as string,
-            projectRoot: deps.projectRoot,
+            projectRoot,
             method,
             body,
             ...(timeoutMs === undefined ? {} : { timeoutMs }),

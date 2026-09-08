@@ -40,14 +40,15 @@ describe("Pi ctx_reduce tool", () => {
         expect(calls).toHaveLength(0);
     });
 
-    it("forwards the raw drop string, the session, and a stable command id", async () => {
+    it("forwards the raw drop string, the session, a stable command id, and the abort signal", async () => {
         const { calls, reduce } = recordingReduce();
         const tool = createCtxReduceTool({ rustToolBackends: { reduce } });
+        const signal = new AbortController().signal;
         const execute = (callId: string) =>
             tool.execute(
                 callId,
                 { drop: "3-5" } as never,
-                new AbortController().signal,
+                signal,
                 undefined,
                 fakeContext("ses-1", "/repo/project") as never,
             );
@@ -59,6 +60,7 @@ describe("Pi ctx_reduce tool", () => {
             projectRoot: "/repo/project",
             drop: "3-5",
             commandId: "pi-ses-1-call-1",
+            signal,
         });
 
         await execute("call-1");

@@ -69,7 +69,7 @@ export function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition<typ
         label: "Eidnara: Reduce",
         description: CTX_REDUCE_DESCRIPTION,
         parameters: ParamsSchema,
-        async execute(toolCallId, params: CtxReduceParams, _signal, _onUpdate, ctx) {
+        async execute(toolCallId, params: CtxReduceParams, signal, _onUpdate, ctx) {
             params = unwrapImitatedReducedArgs(params, ["drop"], { drop: "string" });
             const sessionId = ctx.sessionManager.getSessionId();
 
@@ -89,6 +89,7 @@ export function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition<typ
                     projectRoot: ctx.cwd,
                     drop: params.drop,
                     commandId: commandIdForInvocation(sessionId, toolCallId),
+                    ...(signal ? { signal } : {}),
                 });
                 const value =
                     response !== null && typeof response === "object" && "result" in response

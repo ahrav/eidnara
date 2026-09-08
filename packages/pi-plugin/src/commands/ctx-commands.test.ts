@@ -42,11 +42,11 @@ function harness() {
             entries.push(data);
         },
     } as unknown as ExtensionAPI;
-    const run = async (name: string, args = "") => {
+    const run = async (name: string, args = "", cwd = "/tmp/pi") => {
         const command = fake.commands.get(name) as {
             handler: (args: string, ctx: unknown) => Promise<void>;
         };
-        await command.handler(args, { ...fakeContext("ses-1", "/tmp/pi"), hasUI: false });
+        await command.handler(args, { ...fakeContext("ses-1", cwd), hasUI: false });
         return entries;
     };
     return { pi, run };
@@ -56,24 +56,36 @@ describe("Pi /ctx-flush", () => {
     it("routes session.flush through the module client and reports the armed result", async () => {
         const { pi, run } = harness();
         const module = fakeModuleClient(() => ({ result: { armed: true } }));
-        registerCtxFlushCommand(pi, { moduleClient: module.client, projectRoot: "/proj" });
+        registerCtxFlushCommand(pi, { moduleClient: module.client });
         const [entry] = await run("ctx-flush");
         expect(module.calls).toEqual([
             {
                 method: "session.flush",
                 body: { method: "session.flush", v: 1, session_id: "ses-1" },
                 timeoutMs: undefined,
-                projectRoot: "/proj",
+                projectRoot: "/tmp/pi",
             },
         ]);
         expect(entry?.text).toContain("Flushed: Changes take effect on next message.");
         expect(entry?.level).toBe("success");
     });
 
+    it("routes on the invoking context's cwd, so a /cd moves the command with the session", async () => {
+        const { pi, run } = harness();
+        const module = fakeModuleClient(() => ({ result: { armed: true } }));
+        registerCtxFlushCommand(pi, { moduleClient: module.client });
+        await run("ctx-flush", "", "/tmp/project-a");
+        await run("ctx-flush", "", "/tmp/project-b");
+        expect(module.calls.map((call) => call.projectRoot)).toEqual([
+            "/tmp/project-a",
+            "/tmp/project-b",
+        ]);
+    });
+
     it("reports nothing pending when the daemon is not armed", async () => {
         const { pi, run } = harness();
         const module = fakeModuleClient(() => ({ armed: false }));
-        registerCtxFlushCommand(pi, { moduleClient: module.client, projectRoot: "/proj" });
+        registerCtxFlushCommand(pi, { moduleClient: module.client });
         const [entry] = await run("ctx-flush");
         expect(entry?.text).toContain("No pending operations to flush.");
     });
@@ -83,7 +95,7 @@ describe("Pi /ctx-flush", () => {
         const module = fakeModuleClient(() => {
             throw new Error("daemon down");
         });
-        registerCtxFlushCommand(pi, { moduleClient: module.client, projectRoot: "/proj" });
+        registerCtxFlushCommand(pi, { moduleClient: module.client });
         const [entry] = await run("ctx-flush");
         expect(entry?.text).toContain("Error: Failed to flush context operations. daemon down");
         expect(entry?.level).toBe("error");
@@ -94,7 +106,6 @@ describe("Pi /ctx-flush", () => {
         const module = fakeModuleClient(() => ({}));
         registerCtxFlushCommand(pi, {
             moduleClient: module.client,
-            projectRoot: "/proj",
             compactionOff: true,
         });
         const [entry] = await run("ctx-flush");
@@ -107,7 +118,6 @@ describe("Pi /ctx-flush", () => {
 describe("Pi /ctx-status", () => {
     const statusDeps = (moduleClient: RustModeModuleClient, compactionOff = false) => ({
         moduleClient,
-        projectRoot: "/proj",
         compactionOff,
         kernelClient: fakeKernelResolver().kernelClient,
         projectIdentity: "proj",
@@ -169,7 +179,7 @@ describe("Pi /ctx-recomp", () => {
         it(`maps the ${disposition} disposition`, async () => {
             const { pi, run } = harness();
             const module = fakeModuleClient(() => ({ result: { disposition } }));
-            registerCtxRecompCommand(pi, { moduleClient: module.client, projectRoot: "/proj" });
+            registerCtxRecompCommand(pi, { moduleClient: module.client });
             const [entry] = await run("ctx-recomp");
             const body = module.calls[0]?.body ?? {};
             expect(module.calls[0]?.method).toBe("session.recomp");
@@ -183,7 +193,7 @@ describe("Pi /ctx-recomp", () => {
     it("refuses a message range without calling the daemon", async () => {
         const { pi, run } = harness();
         const module = fakeModuleClient(() => ({}));
-        registerCtxRecompCommand(pi, { moduleClient: module.client, projectRoot: "/proj" });
+        registerCtxRecompCommand(pi, { moduleClient: module.client });
         const [entry] = await run("ctx-recomp", "1-40");
         expect(module.calls).toHaveLength(0);
         expect(entry?.text).toContain("## Eidnara Recomp — Unsupported");
@@ -196,7 +206,6 @@ describe("Pi /ctx-recomp", () => {
         const module = fakeModuleClient(() => ({}));
         registerCtxRecompCommand(pi, {
             moduleClient: module.client,
-            projectRoot: "/proj",
             compactionOff: true,
         });
         const [entry] = await run("ctx-recomp");

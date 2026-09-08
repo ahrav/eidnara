@@ -37,7 +37,7 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
             let daemonStatus: RustSessionStatus | null = null;
             let statusError: string | undefined;
             try {
-                daemonStatus = (await callDaemonSession(deps, "session.status", {
+                daemonStatus = (await callDaemonSession(deps, ctx.cwd, "session.status", {
                     method: "session.status",
                     v: 1,
                     session_id: sessionId,

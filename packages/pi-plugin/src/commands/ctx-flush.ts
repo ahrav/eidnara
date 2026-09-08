@@ -32,7 +32,7 @@ export function registerCtxFlushCommand(pi: ExtensionAPI, deps: RegisterCtxFlush
 
             let result: string;
             try {
-                const value = await callDaemonSession(deps, "session.flush", {
+                const value = await callDaemonSession(deps, ctx.cwd, "session.flush", {
                     method: "session.flush",
                     v: 1,
                     session_id: sessionId,

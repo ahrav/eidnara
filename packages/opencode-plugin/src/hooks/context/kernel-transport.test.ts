@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
     isAvailable,
     KernelClient,
@@ -7,6 +7,7 @@ import {
     TokenCache,
 } from "../../shared/kernel-client";
 import {
+    closeKernelSession,
     createKernelClient,
     createKernelTransport,
     MAX_TOKEN_CACHE_PROJECTS,
@@ -194,5 +195,56 @@ describe("createKernelClient token-cache scoping", () => {
             });
         }
         expect(shared.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 1 });
+    });
+});
+
+describe("closeKernelSession", () => {
+    afterEach(() => {
+        resetKernelClientsForTest();
+    });
+
+    test("closes the session on every shared transport and only those", () => {
+        const closeSession = spyOn(
+            HostModuleTransport.prototype,
+            "closeSession",
+        ).mockImplementation(() => undefined);
+        try {
+            createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: {} });
+            createKernelClient({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                config: { subc: { connection_file: "/tmp/kernel-transport-test-other.json" } },
+            });
+            // A custom transport is not shared state and stays untouched.
+            createKernelClient({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                config: {},
+                transport: inertTransport(),
+            });
+
+            closeKernelSession(SESSION);
+
+            expect(closeSession).toHaveBeenCalledTimes(2);
+            expect(closeSession.mock.calls.map(([sessionId]) => sessionId)).toEqual([
+                SESSION,
+                SESSION,
+            ]);
+        } finally {
+            closeSession.mockRestore();
+        }
+    });
+
+    test("is a no-op before any shared transport exists", () => {
+        const closeSession = spyOn(
+            HostModuleTransport.prototype,
+            "closeSession",
+        ).mockImplementation(() => undefined);
+        try {
+            closeKernelSession(SESSION);
+            expect(closeSession).not.toHaveBeenCalled();
+        } finally {
+            closeSession.mockRestore();
+        }
     });
 });
