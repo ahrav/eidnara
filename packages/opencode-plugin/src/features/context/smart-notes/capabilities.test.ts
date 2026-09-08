@@ -19,10 +19,18 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
     }
 }
 
+const COMMIT_DATE = "2020-01-01T00:00:00Z";
+
 async function git(repo: string, ...args: string[]): Promise<string> {
     const { stdout } = await execFileAsync("git", ["-C", repo, ...args], {
         encoding: "utf8",
-        env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+        env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_CONFIG_SYSTEM: "/dev/null",
+            GIT_AUTHOR_DATE: COMMIT_DATE,
+            GIT_COMMITTER_DATE: COMMIT_DATE,
+        },
     });
     return stdout.trim();
 }
@@ -32,7 +40,8 @@ async function createTaggedRepository(dir: string): Promise<void> {
     await git(dir, "config", "user.name", "Smart Note Test");
     await git(dir, "config", "user.email", "smart-note@example.invalid");
     await writeFile(path.join(dir, "state.txt"), "one\n");
-    await git(dir, "add", "state.txt");
+    await writeFile(path.join(dir, ".env"), "TOKEN=1\n");
+    await git(dir, "add", "state.txt", ".env");
     await git(dir, "commit", "-m", "Record the first tagged state");
     await git(dir, "tag", "v1.2.3");
 }
@@ -169,6 +178,76 @@ describe("smart-note git capabilities", () => {
             expect(await cap.gitHeadSha()).toBeNull();
             expect(await cap.gitTag()).toBeNull();
             expect(await cap.gitLog()).toEqual([]);
+        });
+    });
+
+    test("an unparseable since filter selects no commits instead of widening the log", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitLog({ since: "2019/01/01" })).toHaveLength(1);
+            expect(await cap.gitLog({ since: "Jan 1, 2019" })).toHaveLength(1);
+            expect(await cap.gitLog({ since: "2999/01/01" })).toEqual([]);
+            expect(await cap.gitLog({ since: "not a date" })).toEqual([]);
+            expect(await cap.gitLog({ since: "2019-01-01\n" })).toEqual([]);
+            expect(await cap.gitLog({ since: "" })).toEqual([]);
+        });
+    });
+
+    test("pathspec magic cannot reach a denied path or widen the requested history", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitLog({ path: "state.txt" })).toHaveLength(1);
+            expect(await cap.gitLog({ path: ".env" })).toEqual([]);
+            expect(await cap.gitLog({ path: ":(top).env" })).toEqual([]);
+            expect(await cap.gitLog({ path: ":/.env" })).toEqual([]);
+            expect(await cap.gitLog({ path: "*" })).toEqual([]);
+        });
+    });
+
+    test("repository-local git environment does not redirect queries away from the project", async () => {
+        await withTempDir(async (project) => {
+            await withTempDir(async (other) => {
+                await createTaggedRepository(project);
+                await createTaggedRepository(other);
+                await writeFile(path.join(other, "state.txt"), "two\n");
+                await git(
+                    other,
+                    "commit",
+                    "-am",
+                    "Record the second state in the other repository",
+                );
+                const projectHead = await git(project, "rev-parse", "HEAD");
+                const otherHead = await git(other, "rev-parse", "HEAD");
+                expect(projectHead).not.toBe(otherHead);
+
+                const saved = {
+                    GIT_DIR: process.env.GIT_DIR,
+                    GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+                };
+                process.env.GIT_DIR = path.join(other, ".git");
+                process.env.GIT_WORK_TREE = other;
+                try {
+                    const cap = createSmartNoteCapabilities({
+                        projectRoot: project,
+                        signal: new AbortController().signal,
+                    });
+                    expect(await cap.gitHeadSha()).toBe(projectHead);
+                    expect((await cap.gitLog())[0]?.sha).toBe(projectHead);
+                } finally {
+                    for (const [name, value] of Object.entries(saved)) {
+                        if (value === undefined) delete process.env[name];
+                        else process.env[name] = value;
+                    }
+                }
+            });
         });
     });
 

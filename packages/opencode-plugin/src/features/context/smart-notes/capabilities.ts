@@ -11,6 +11,33 @@ const execFileAsync = promisify(execFile);
 
 const DEFAULT_FILE_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_GIT_TIMEOUT_MS = 3_000;
+const MAX_GIT_SINCE_CHARS = 128;
+
+// `git -C <root>` does not override repository-local variables (`git rev-parse --local-env-vars`), so a
+// process launched from a hook would query the hook's repository. Pathspec-mode variables conflict with
+// the `--literal-pathspecs` flag every command passes.
+const GIT_ENV_DENYLIST = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+] as const;
 
 export interface SmartNoteCapabilityApi {
     readFile(repoRelativePath: string): Promise<string | null>;
@@ -246,10 +273,14 @@ async function guardedGitLog(
 ): Promise<Array<{ sha: string; subject: string; authorDate: string }>> {
     const maxCount = Math.max(1, Math.min(50, Math.floor(opts?.maxCount ?? 10)));
     const args = ["log", `-${maxCount}`, "--format=%H%x1f%aI%x1f%s", "--no-ext-diff", "--no-color"];
-    if (opts?.since && /^[0-9A-Za-z: +._-]{1,64}$/.test(opts.since)) {
+    if (opts?.since !== undefined) {
+        // Git decides which date spellings it accepts; an unparseable value selects no commits.
+        // Dropping the filter instead would return history the check did not ask for.
+        if (!isSaneGitArgument(opts.since, MAX_GIT_SINCE_CHARS)) return [];
         args.push(`--since=${opts.since}`);
     }
     if (opts?.path) {
+        // `--literal-pathspecs` in runGit keeps `:(top)`, `:/`, and glob magic from widening this path.
         const normalized = normalizeRepoPath(opts.path);
         if (!normalized || isSecretDeniedPath(normalized)) return [];
         args.push("--", normalized);
@@ -271,11 +302,16 @@ async function guardedGitLog(
 async function runGit(projectRoot: string, args: string[], signal: AbortSignal): Promise<string> {
     throwIfAborted(signal);
     try {
-        const result = await execFileAsync("git", ["-C", projectRoot, ...args], {
-            timeout: DEFAULT_GIT_TIMEOUT_MS,
-            maxBuffer: 128 * 1024,
-            signal,
-        });
+        const result = await execFileAsync(
+            "git",
+            ["--literal-pathspecs", "-C", projectRoot, ...args],
+            {
+                timeout: DEFAULT_GIT_TIMEOUT_MS,
+                maxBuffer: 128 * 1024,
+                signal,
+                env: gitEnvironment(),
+            },
+        );
         return result.stdout;
     } catch (error) {
         if (
@@ -286,6 +322,18 @@ async function runGit(projectRoot: string, args: string[], signal: AbortSignal):
         }
         return "";
     }
+}
+
+function gitEnvironment(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const name of GIT_ENV_DENYLIST) delete env[name];
+    return env;
+}
+
+// One argv element is never re-tokenized, so only length and control characters need bounding.
+function isSaneGitArgument(value: string, maxChars: number): boolean {
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are the rejection target
+    return value.length > 0 && value.length <= maxChars && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 function throwIfAborted(signal: AbortSignal): void {
