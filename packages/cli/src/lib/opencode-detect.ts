@@ -197,8 +197,12 @@ export function detectOpenCodeInstallations(deps?: Partial<DetectDeps>): OpenCod
         }
     }
 
-    for (const marker of openCodeDesktopSettingsMarkers(d)) {
-        if (d.exists(marker)) {
+    // One channel's state files describe one installation, so only the first existing file is reported.
+    for (const appId of OPENCODE_DESKTOP_APP_IDS) {
+        const marker = OPENCODE_DESKTOP_STATE_FILES.map((file) =>
+            join(desktopUserDataDir(d, appId), file),
+        ).find((candidate) => d.exists(candidate));
+        if (marker) {
             addCandidate(installations, seenRealpaths, d, marker, "desktop", "desktop");
         }
     }

@@ -94,19 +94,6 @@ export class OpenCodeAdapter implements HarnessAdapter {
                 };
             }
 
-            const current = plugin[existingIdx];
-            if (typeof current === "string" && current !== PLUGIN_NAME) {
-                plugin[existingIdx] = PLUGIN_NAME;
-                cfg.plugin = plugin;
-                writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
-                return {
-                    ok: true,
-                    action: "updated",
-                    message: `Updated plugin entry to ${PLUGIN_NAME} in ${target}.`,
-                    configPath: target,
-                };
-            }
-
             return {
                 ok: true,
                 action: "already_present",

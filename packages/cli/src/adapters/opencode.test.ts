@@ -78,6 +78,19 @@ describe("OpenCodeAdapter config safety", () => {
         const result = await adapter.ensurePluginEntry();
         expect(result.action).toBe("already_present");
     });
+
+    it("leaves a version-pinned plugin entry as written", async () => {
+        const root = configRoot();
+        const configPath = join(root, "opencode.json");
+        const before = JSON.stringify({ plugin: ["@eidnara/opencode@0.1.0"] });
+        writeFileSync(configPath, before);
+        const adapter = new OpenCodeAdapter();
+
+        expect(adapter.hasPluginEntry()).toBe(true);
+        const result = await adapter.ensurePluginEntry();
+        expect(result.action).toBe("already_present");
+        expect(readFileSync(configPath, "utf-8")).toBe(before);
+    });
 });
 
 describe("isLocalPathPluginEntry", () => {

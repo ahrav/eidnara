@@ -35,6 +35,7 @@ export interface OmpPluginInfo {
 export const OMP_PLUGIN_PACKAGE = "@eidnara/pi";
 
 const OMP_BINARY_ENV = "EIDNARA_OMP_BINARY";
+const BUN_BINARY_ENV = "EIDNARA_BUN_BINARY";
 
 /**
  * OMP publishes its CLI as a Bun script (`#!/usr/bin/env bun`), not a native executable.
@@ -59,7 +60,8 @@ function detectOmpPackageCli(): string | null {
 export function getOmpCommandInvocation(ompPath: string, args: string[]): CommandInvocation {
     if (extname(ompPath).toLowerCase() === ".js") {
         const bun = findBunRuntime();
-        if (bun) return { command: bun, args: [ompPath, ...args] };
+        // A Bun found as an npm `.cmd` shim needs cmd.exe like any other shim.
+        if (bun) return getCommandInvocation(bun, [ompPath, ...args], BUN_BINARY_ENV);
     }
     return getCommandInvocation(ompPath, args, OMP_BINARY_ENV);
 }

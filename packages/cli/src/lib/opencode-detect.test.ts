@@ -139,6 +139,23 @@ describe("detectOpenCode", () => {
         expect(detectOpenCode(deps(new Set([dat])))).toEqual({ kind: "desktop", marker: dat });
     });
 
+    it("reports one desktop installation per channel when both state files exist", () => {
+        const userData = join(HOME, "Library", "Application Support", "ai.opencode.desktop");
+        const settings = join(userData, "opencode.settings");
+        const dat = join(userData, "opencode.global.dat");
+        const betaDat = join(
+            HOME,
+            "Library",
+            "Application Support",
+            "ai.opencode.desktop.beta",
+            "opencode.global.dat",
+        );
+        expect(detectOpenCodeInstallations(deps(new Set([settings, dat, betaDat])))).toEqual([
+            { path: settings, source: "desktop", kind: "desktop" },
+            { path: betaDat, source: "desktop", kind: "desktop" },
+        ]);
+    });
+
     it("enumerates Desktop settings and GUI app probes after CLI probes", () => {
         const d = deps(new Set());
         const marker = openCodeDesktopSettingsMarkers(d)[0];

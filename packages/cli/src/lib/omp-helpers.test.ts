@@ -77,6 +77,7 @@ describe("OMP binary discovery", () => {
         expect(getOmpCommandInvocation(cli, ["--version"])).toEqual({
             command: join(bunBin, "bun"),
             args: [cli, "--version"],
+            env: { PATH: `${bunBin}${delimiter}${process.env.PATH}` },
         });
     });
 
@@ -88,6 +89,7 @@ describe("OMP binary discovery", () => {
         expect(getOmpCommandInvocation(cli, ["--version"])).toEqual({
             command: join(binDir, "bun"),
             args: [cli, "--version"],
+            env: { PATH: `${binDir}${delimiter}${process.env.PATH}` },
         });
     });
 
