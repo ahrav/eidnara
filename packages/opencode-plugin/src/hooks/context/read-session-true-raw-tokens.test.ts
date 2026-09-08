@@ -3,6 +3,7 @@
 import { describe, expect, it } from "bun:test";
 
 import type { RawMessage } from "./read-session-raw";
+import type { ProviderShapeVersion } from "./read-session-true-raw-tokens";
 import {
     buildToolArcs,
     buildTrueRawTokenIndex,
@@ -18,8 +19,8 @@ function singlePartMessage(part: unknown, ordinal = 1): RawMessage {
     return { id: `m-${ordinal}`, role: "user", parts: [part], ordinal };
 }
 
-function fingerprintOf(part: unknown): string {
-    return computeRawRangeFingerprint([singlePartMessage(part)], 1, 2);
+function fingerprintOf(part: unknown, shape: ProviderShapeVersion = "opencode-v1"): string {
+    return computeRawRangeFingerprint([singlePartMessage(part)], 1, 2, shape);
 }
 
 describe("true raw token indexes with continued ordinals", () => {
@@ -142,7 +143,7 @@ describe("tool arcs", () => {
             },
         ];
 
-        expect(buildToolArcs(messages)).toEqual([
+        expect(buildToolArcs(messages, "opencode-v1")).toEqual([
             { callId: "toolu_1", invOrdinal: 1, resOrdinal: 2 },
         ]);
 
@@ -168,7 +169,7 @@ describe("tool arcs", () => {
             ordinal: 1,
         };
 
-        expect(buildToolArcs([message])).toEqual([]);
+        expect(buildToolArcs([message], "opencode-v1")).toEqual([]);
 
         const breakdown = estimateTrueRawMessageTokens(message, {
             providerShapeVersion: "opencode-v1",
@@ -192,7 +193,7 @@ describe("tool arcs", () => {
             ordinal: 1,
         };
 
-        expect(buildToolArcs([message])).toEqual([
+        expect(buildToolArcs([message], "opencode-v1")).toEqual([
             { callId: "call_1", invOrdinal: 1, resOrdinal: 1 },
         ]);
 
@@ -211,7 +212,7 @@ describe("tool arcs", () => {
             ordinal: 1,
         };
 
-        expect(buildToolArcs([message])).toEqual([
+        expect(buildToolArcs([message], "opencode-v1")).toEqual([
             { callId: "call_1", invOrdinal: 1, resOrdinal: 1 },
         ]);
     });
@@ -231,7 +232,7 @@ describe("tool arcs", () => {
             ],
             ordinal: 1,
         };
-        expect(buildToolArcs([message])).toEqual([]);
+        expect(buildToolArcs([message], "opencode-v1")).toEqual([]);
     });
 
     it("reads top-level input and output fields on OpenCode tool parts", () => {
@@ -255,7 +256,9 @@ describe("tool arcs", () => {
         });
         expect(breakdown.toolInput).toBeGreaterThan(0);
         expect(breakdown.toolOutput).toBeGreaterThan(0);
-        expect(buildToolArcs([message])).toEqual([{ callId: "c1", invOrdinal: 1, resOrdinal: 1 }]);
+        expect(buildToolArcs([message], "opencode-v1")).toEqual([
+            { callId: "c1", invOrdinal: 1, resOrdinal: 1 },
+        ]);
     });
 
     it("closes an arc on a terminal status even without an output payload", () => {
@@ -279,7 +282,7 @@ describe("tool arcs", () => {
                 ordinal: 3,
             },
         ];
-        expect(buildToolArcs(messages)).toEqual([
+        expect(buildToolArcs(messages, "opencode-v1")).toEqual([
             { callId: "c1", invOrdinal: 1, resOrdinal: 1 },
             { callId: "c2", invOrdinal: 2, resOrdinal: 2 },
             { callId: "c3", invOrdinal: 3, resOrdinal: null },
@@ -296,7 +299,7 @@ describe("tool arcs", () => {
             ],
             ordinal: 7,
         };
-        const arcs = buildToolArcs([message]);
+        const arcs = buildToolArcs([message], "opencode-v1");
         expect(arcs).toHaveLength(2);
         expect(arcs[0].callId).not.toBe(arcs[1].callId);
         expect(arcs.every((arc) => arc.invOrdinal === 7 && arc.resOrdinal === null)).toBe(true);
@@ -311,7 +314,7 @@ describe("tool arcs", () => {
             ],
             ordinal: 1,
         };
-        expect(buildToolArcs([message])).toEqual([
+        expect(buildToolArcs([message], "pi-folded-v1")).toEqual([
             { callId: "tc1", invOrdinal: 1, resOrdinal: null },
         ]);
         const breakdown = estimateTrueRawMessageTokens(message, {
@@ -328,7 +331,7 @@ describe("tool arcs", () => {
             parts: [{ type: "toolCall", name: "bash", arguments: { cmd: "ls" } }],
             ordinal: 1,
         };
-        const arcs = buildToolArcs([message]);
+        const arcs = buildToolArcs([message], "pi-folded-v1");
         expect(arcs).toHaveLength(1);
         expect(arcs[0].resOrdinal).toBeNull();
         const breakdown = estimateTrueRawMessageTokens(message, {
@@ -361,7 +364,7 @@ describe("tool arcs", () => {
             ],
             ordinal: 2,
         };
-        expect(buildToolArcs([call, folded])).toEqual([
+        expect(buildToolArcs([call, folded], "pi-folded-v1")).toEqual([
             { callId: "tc1", invOrdinal: 1, resOrdinal: 2 },
         ]);
         const breakdown = estimateTrueRawMessageTokens(folded, {
@@ -380,7 +383,7 @@ describe("tool arcs", () => {
             parts: [{ type: "toolCall", id: "tc1", name: "noop" }],
             ordinal: 1,
         };
-        expect(buildToolArcs([message])).toEqual([
+        expect(buildToolArcs([message], "pi-folded-v1")).toEqual([
             { callId: "tc1", invOrdinal: 1, resOrdinal: null },
         ]);
     });
@@ -419,7 +422,7 @@ describe("tool arcs", () => {
             parts: [{ role: "toolResult", toolCallId: "tc1", toolName: "noop" }],
             ordinal: 2,
         };
-        expect(buildToolArcs([call, result])).toEqual([
+        expect(buildToolArcs([call, result], "pi-folded-v1")).toEqual([
             { callId: "tc1", invOrdinal: 1, resOrdinal: 2 },
         ]);
     });
@@ -439,7 +442,7 @@ describe("tool arcs", () => {
             parts: [{ role: "toolResult", toolCallId: "native-1", content: "ok" }],
             ordinal: 2,
         };
-        expect(buildToolArcs([call, result])).toEqual([
+        expect(buildToolArcs([call, result], "pi-folded-v1")).toEqual([
             { callId: "native-1", invOrdinal: 1, resOrdinal: 2 },
         ]);
     });
@@ -458,7 +461,9 @@ describe("tool arcs", () => {
             ],
             ordinal: 1,
         };
-        expect(buildToolArcs([message])).toEqual([{ callId: "c1", invOrdinal: 1, resOrdinal: 1 }]);
+        expect(buildToolArcs([message], "opencode-v1")).toEqual([
+            { callId: "c1", invOrdinal: 1, resOrdinal: 1 },
+        ]);
     });
 
     it("keeps a running OpenCode tool open even when partial output is stored", () => {
@@ -475,9 +480,24 @@ describe("tool arcs", () => {
             ],
             ordinal: 1,
         };
-        expect(buildToolArcs([message])).toEqual([
+        expect(buildToolArcs([message], "opencode-v1")).toEqual([
             { callId: "c", invOrdinal: 1, resOrdinal: null },
         ]);
+    });
+
+    it("does not treat an OpenCode-only tool type as a tool under the Pi shape", () => {
+        const message: RawMessage = {
+            id: "pi-opaque-tool",
+            role: "assistant",
+            parts: [{ type: "tool", payload: "X".repeat(8000) }],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message], "pi-folded-v1")).toEqual([]);
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.other).toBeGreaterThan(100);
+        expect(breakdown.toolInput).toBe(0);
     });
 });
 
@@ -519,9 +539,9 @@ describe("tool token accounting", () => {
         expect(
             estimateTrueRawMessageTokens(message("R".repeat(2000)), options).reasoning,
         ).toBeGreaterThan(100);
-        expect(computeRawRangeFingerprint([message("A".repeat(100))], 1, 2)).not.toBe(
-            computeRawRangeFingerprint([message("B".repeat(3000))], 1, 2),
-        );
+        expect(
+            computeRawRangeFingerprint([message("A".repeat(100))], 1, 2, "pi-folded-v1"),
+        ).not.toBe(computeRawRangeFingerprint([message("B".repeat(3000))], 1, 2, "pi-folded-v1"));
         expect(
             estimateTrueRawMessageTokens(
                 {
@@ -549,6 +569,56 @@ describe("tool token accounting", () => {
         };
         expect(
             estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
+    });
+
+    it("keeps Pi blocks that share OpenCode bookkeeping names as opaque content", () => {
+        const message = singlePartMessage({ type: "snapshot", payload: "S".repeat(8000) });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "pi-folded-v1" }).other,
+        ).toBeGreaterThan(1000);
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
+    });
+
+    it("never reads content as text for a text part", () => {
+        const message = singlePartMessage({ type: "text", content: "stale content ".repeat(100) });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
+    });
+
+    it("ignores non-string OpenCode output values", () => {
+        const message = singlePartMessage({
+            type: "tool",
+            callID: "c",
+            tool: "x",
+            state: {
+                status: "completed",
+                input: {},
+                output: { rows: Array.from({ length: 500 }, (_, i) => ({ i, v: "vvvv" })) },
+            },
+        });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" })
+                .toolOutput,
+        ).toBe(0);
+    });
+
+    it("does not fall back to top-level attachments when state.attachments is present", () => {
+        const message = singlePartMessage({
+            type: "tool",
+            callID: "c",
+            tool: "x",
+            attachments: [{ mime: "image/png", url: "u" }],
+            state: { status: "completed", input: {}, output: "", attachments: "not-an-array" },
+        });
+        expect(
+            estimateTrueRawMessageTokens(message, {
+                providerShapeVersion: "opencode-v1",
+                imageTokenHeuristic: () => 400,
+            }).image,
         ).toBe(0);
     });
 
@@ -1137,8 +1207,29 @@ describe("raw range fingerprints", () => {
         const message = (role: string): RawMessage[] => [
             { id: "x", role, parts: [{ type: "text", text: "hi" }], ordinal: 1 },
         ];
-        expect(computeRawRangeFingerprint(message("user"), 1, 2)).not.toBe(
-            computeRawRangeFingerprint(message("assistant"), 1, 2),
+        expect(computeRawRangeFingerprint(message("user"), 1, 2, "opencode-v1")).not.toBe(
+            computeRawRangeFingerprint(message("assistant"), 1, 2, "opencode-v1"),
+        );
+    });
+
+    it("changes when a tool result flips between success and error", () => {
+        const openCode = (status: string, key: string) => ({
+            type: "tool",
+            callID: "c",
+            tool: "x",
+            state: { status, input: {}, [key]: "same" },
+        });
+        expect(fingerprintOf(openCode("completed", "output"))).not.toBe(
+            fingerprintOf(openCode("error", "error")),
+        );
+        const pi = (isError: boolean) => ({
+            role: "toolResult",
+            toolCallId: "c",
+            content: "same",
+            ...(isError ? { isError: true } : {}),
+        });
+        expect(fingerprintOf(pi(false), "pi-folded-v1")).not.toBe(
+            fingerprintOf(pi(true), "pi-folded-v1"),
         );
     });
 

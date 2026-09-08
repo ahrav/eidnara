@@ -13,9 +13,42 @@ export interface TrueRawTokenBreakdown {
     total: number;
 }
 
+export type ProviderShapeVersion = "opencode-v1" | "pi-folded-v1";
+
 export interface TrueRawEstimateOptions {
-    providerShapeVersion: "opencode-v1" | "pi-folded-v1";
+    providerShapeVersion: ProviderShapeVersion;
     imageTokenHeuristic?: (part: unknown) => number;
+}
+
+/**
+ * Rules for part types that differ by harness decoder.
+ * Types outside `toolTypes` are never tool signals, even when they carry tool-like fields.
+ * `skippedTypes` are bookkeeping parts the decoder discards.
+ * `honorsIgnoredText` drops `text` parts flagged `ignored: true`.
+ */
+interface ProviderPartRules {
+    readonly toolTypes: ReadonlySet<string>;
+    readonly skippedTypes: ReadonlySet<string>;
+    readonly honorsIgnoredText: boolean;
+}
+
+const GENERIC_TOOL_TYPES = ["tool_use", "tool_result", "tool-invocation"] as const;
+
+const PROVIDER_PART_RULES: Record<ProviderShapeVersion, ProviderPartRules> = {
+    "opencode-v1": {
+        toolTypes: new Set([...GENERIC_TOOL_TYPES, "tool"]),
+        skippedTypes: new Set(["snapshot", "patch", "agent", "retry", "compaction"]),
+        honorsIgnoredText: true,
+    },
+    "pi-folded-v1": {
+        toolTypes: new Set([...GENERIC_TOOL_TYPES, "toolCall"]),
+        skippedTypes: new Set(),
+        honorsIgnoredText: false,
+    },
+};
+
+function partRulesFor(providerShapeVersion: ProviderShapeVersion): ProviderPartRules {
+    return PROVIDER_PART_RULES[providerShapeVersion];
 }
 
 export interface TrueRawTokenIndex {
@@ -80,6 +113,8 @@ interface ToolSignal {
     hasOutput: boolean;
     /** Provider-executed tools run on the provider's side, so they never form an in-flight local arc. */
     providerExecuted: boolean;
+    /** Error polarity of the result, which the decoders preserve as a distinct output kind. */
+    isError: boolean;
     inputText: string;
     outputText: string;
     /** Image and file blocks inside a tool result, counted through the image heuristic instead of as text. */
@@ -359,12 +394,13 @@ function emptyToolResultContent(): ToolResultContent {
     return { text: "", media: [] };
 }
 
+/** A present `state.attachments` wins even when it is not an array; the decoder never falls back to the top level then. */
 function toolAttachments(
     part: Record<string, unknown>,
     state: Record<string, unknown> | null,
 ): ToolResultContent {
     const attachments =
-        state && Array.isArray(state.attachments) ? state.attachments : part.attachments;
+        state && hasOwn(state, "attachments") ? state.attachments : part.attachments;
     if (!Array.isArray(attachments)) return emptyToolResultContent();
     return toolResultContent(attachments.filter(isRecord), "attachment");
 }
@@ -372,6 +408,10 @@ function toolAttachments(
 function metadataDescriptionFromState(state: Record<string, unknown> | null): string {
     const metadata = state && isRecord(state.metadata) ? state.metadata : null;
     return metadata ? (firstStringField(metadata, ["description"]) ?? "") : "";
+}
+
+function resultIsError(part: Record<string, unknown>): boolean {
+    return part.isError === true || part.is_error === true;
 }
 
 /**
@@ -389,9 +429,10 @@ const SYNTHESIZED_ID_TOOL_TYPES = new Set(["tool", "toolCall"]);
 /** The Pi decoder names a folded result with no `toolCallId` after the generic tool. */
 const FOLDED_RESULT_DEFAULT_CALL_ID = "tool";
 
-function toolSignalFromPart(part: unknown): ToolSignal | null {
+function toolSignalFromPart(part: unknown, rules: ProviderPartRules): ToolSignal | null {
     if (!isRecord(part)) return null;
     const type = toolPartType(part);
+    if (!rules.toolTypes.has(type)) return null;
     const state = isRecord(part.state) ? part.state : null;
     let callId = callIdFromPart(part);
     if (!callId && part.role === "toolResult") callId = FOLDED_RESULT_DEFAULT_CALL_ID;
@@ -401,21 +442,25 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (type === "tool") {
         const inputOwner = state && hasOwn(state, "input") ? state : part;
         const inputKey = firstOwnKey(inputOwner, ["input", "args"]);
-        // The OpenCode decoder reads only `output` and `error`; a `result` field is not decoded output.
+        // Non-string `output` or `error` values produce empty text; attachments decode separately.
         const outputOwner =
             state && firstOwnKey(state, ["output", "error"]) !== null ? state : part;
         const outputKey = firstOwnKey(outputOwner, ["output", "error"]);
-        const hasOutput = toolStatusIsTerminal(part, state);
+        const outputValue = outputKey ? outputOwner[outputKey] : undefined;
+        const status =
+            (state ? firstStringField(state, ["status"]) : null) ??
+            firstStringField(part, ["status"]);
         const output = mergeToolResultContent(
-            outputKey ? toolResultContent(outputOwner[outputKey]) : emptyToolResultContent(),
+            { text: typeof outputValue === "string" ? outputValue : "", media: [] },
             toolAttachments(part, state),
         );
         return {
             callId,
             toolName,
             hasInput: true,
-            hasOutput,
+            hasOutput: toolStatusIsTerminal(part, state),
             providerExecuted: providerExecutedFromPart(part),
+            isError: status === "error" || outputKey === "error",
             inputText: inputKey ? stringValue(inputOwner[inputKey]) : "",
             outputText: output.text,
             outputMedia: output.media,
@@ -433,6 +478,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             hasInput: true,
             hasOutput: outputKey !== null,
             providerExecuted: false,
+            isError: resultIsError(part) || part.state === "error",
             inputText: argsKey ? stringValue(part[argsKey]) : "",
             outputText: output.text,
             outputMedia: output.media,
@@ -451,6 +497,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             hasInput: true,
             hasOutput: false,
             providerExecuted: false,
+            isError: false,
             inputText: inputKey ? stringValue(part[inputKey]) : "",
             outputText: "",
             outputMedia: [],
@@ -467,6 +514,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             hasInput: false,
             hasOutput: true,
             providerExecuted: false,
+            isError: resultIsError(part),
             inputText: "",
             outputText: output.text,
             outputMedia: output.media,
@@ -555,14 +603,6 @@ type NonToolPartContent =
     | { kind: "structured" };
 
 /**
- * Invariant: `estimateNonToolPart` and `partContentFingerprint` must both classify through this
- * function. A second classifier lets the fingerprint miss content the tokenizer counts.
- * commentlint: allow(JUDGE)
- */
-/** OpenCode bookkeeping parts the daemon decoder discards; they occupy no context. */
-const SKIPPED_PART_TYPES = new Set(["snapshot", "patch", "agent", "retry", "compaction"]);
-
-/**
  * The opaque payload of a redacted reasoning block.
  * Anthropic stores it in `data`; Pi in `thinkingSignature` with `redacted: true`.
  * OpenCode stores it in a string `redacted` field at the top level or under `metadata`.
@@ -580,14 +620,23 @@ function redactedReasoningData(part: Record<string, unknown>): string | null {
     return null;
 }
 
-function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent {
+/**
+ * Invariant: `estimateNonToolPart` and `partContentFingerprint` must both classify through this
+ * function. A second classifier lets the fingerprint miss content the tokenizer counts.
+ * commentlint: allow(JUDGE)
+ */
+function classifyNonToolPart(
+    part: Record<string, unknown>,
+    rules: ProviderPartRules,
+): NonToolPartContent {
     const type = partType(part);
-    if (SKIPPED_PART_TYPES.has(type) || (type === "meta" && Object.keys(part).length <= 1)) {
+    if (rules.skippedTypes.has(type) || (type === "meta" && Object.keys(part).length <= 1)) {
         return { kind: "skip" };
     }
     if (type === "text") {
-        if (part.ignored === true) return { kind: "skip" };
-        const text = firstStringFieldAllowEmpty(part, ["text", "content"]);
+        if (rules.honorsIgnoredText && part.ignored === true) return { kind: "skip" };
+        // Both decoders read only `text`; a `content` field is never text.
+        const text = firstStringFieldAllowEmpty(part, ["text"]);
         return text ? { kind: "text", text } : { kind: "skip" };
     }
     if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
@@ -627,7 +676,7 @@ function estimateNonToolPart(
             addBreakdown(breakdown, "other", estimateStructured(part));
         return;
     }
-    const content = classifyNonToolPart(part);
+    const content = classifyNonToolPart(part, partRulesFor(options.providerShapeVersion));
     switch (content.kind) {
         case "skip":
             return;
@@ -657,9 +706,10 @@ export function estimateTrueRawMessageTokens(
     options: TrueRawEstimateOptions,
 ): TrueRawTokenBreakdown {
     const breakdown = cloneBreakdown(EMPTY_BREAKDOWN);
+    const rules = partRulesFor(options.providerShapeVersion);
 
     for (const part of message.parts) {
-        const signal = toolSignalFromPart(part);
+        const signal = toolSignalFromPart(part, rules);
         if (signal) {
             if (signal.hasInput) {
                 addBreakdown(breakdown, "toolInput", estimateTokens(signal.inputText));
@@ -685,12 +735,16 @@ function synthesizedToolCallId(ordinal: number, partIndex: number, signal: ToolS
     return `synth-tool-${ordinal}-${partIndex}-${signal.toolName || "tool"}-${contentStringsHash([signal.inputText])}`;
 }
 
-export function buildToolArcs(messages: readonly RawMessage[]): ToolArc[] {
+export function buildToolArcs(
+    messages: readonly RawMessage[],
+    providerShapeVersion: ProviderShapeVersion,
+): ToolArc[] {
+    const rules = partRulesFor(providerShapeVersion);
     const openQueues = new Map<string, number[]>();
     const arcs: ToolArc[] = [];
     for (const message of messages) {
         for (const [partIndex, part] of message.parts.entries()) {
-            const rawSignal = toolSignalFromPart(part);
+            const rawSignal = toolSignalFromPart(part, rules);
             if (!rawSignal) continue;
             // Provider-executed calls cannot leave a local invocation for the fence to protect.
             if (rawSignal.providerExecuted) continue;
@@ -971,9 +1025,9 @@ function mediaFingerprintFields(media: Record<string, unknown>): string[] {
  * Text-bearing parts contribute only their counted text, so `updated-at` metadata cannot perturb them.
  * Tool fingerprints include fields consumed by `buildToolArcs` and tool-call summaries, so topology and displayed-name changes invalidate them.
  */
-function partContentFingerprint(part: unknown): string {
+function partContentFingerprint(part: unknown, rules: ProviderPartRules): string {
     if (!isRecord(part)) return nonRecordPartFingerprint(part);
-    const tool = toolSignalFromPart(part);
+    const tool = toolSignalFromPart(part, rules);
     if (tool) {
         return contentStringsHash([
             "tool",
@@ -982,13 +1036,14 @@ function partContentFingerprint(part: unknown): string {
             tool.hasInput ? "in" : "",
             tool.hasOutput ? "out" : "",
             tool.providerExecuted ? "provider" : "",
+            tool.isError ? "error" : "",
             tool.inputText,
             tool.outputText,
             tool.metadataDescription,
             ...tool.outputMedia.flatMap(mediaFingerprintFields),
         ]);
     }
-    const content = classifyNonToolPart(part);
+    const content = classifyNonToolPart(part, rules);
     switch (content.kind) {
         case "skip":
             return contentStringsHash(["skip"]);
@@ -1006,11 +1061,15 @@ export function computeRawRangeFingerprint(
     messages: readonly RawMessage[],
     startInclusive: number,
     endExclusive: number,
+    providerShapeVersion: ProviderShapeVersion,
 ): string {
+    const rules = partRulesFor(providerShapeVersion);
     const pieces: string[] = [];
     for (const message of messages) {
         if (message.ordinal < startInclusive || message.ordinal >= endExclusive) continue;
-        const partFingerprint = message.parts.map(partContentFingerprint).join(",");
+        const partFingerprint = message.parts
+            .map((part) => partContentFingerprint(part, rules))
+            .join(",");
         pieces.push(
             `${message.ordinal}:${message.id}:${message.role}:${message.parts.length}:${partFingerprint}`,
         );
