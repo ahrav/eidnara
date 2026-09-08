@@ -788,6 +788,14 @@ export class HostModuleTransport {
                     if (sessionClosedSinceStart()) {
                         throw this.sessionClosedError(args.sessionId);
                     }
+                    // The facade admits synchronously, so an already-expired budget is refused here rather than after the body is on the wire.
+                    if (deadline.isExpired()) {
+                        throw new HostCallError(
+                            "not_sent",
+                            "module transport deadline expired before the request was written",
+                            "deadline_expired",
+                        );
+                    }
                     requestInvoked = true;
                     const response = await this.beforeDeadline(
                         ensuredRoute.client.request(ensuredRoute.route, args.body, {
@@ -963,11 +971,12 @@ export class HostModuleTransport {
         const opening = this.routeOpenings.get(routeKey);
         if (opening?.client === client && opening.generation === generation) {
             if ((opening.credentialSourceVersion ?? "") === (credentialSourceVersion ?? "")) {
-                // A joiner keeps its own deadline and signal; the shared open runs on.
+                // A joiner keeps its own deadline and signal; the shared open runs on. Its expiry is a waiter detach, not a connection failure.
                 return await this.beforeDeadline(
                     untilAborted(opening.promise, signal),
                     deadline,
                     "opening the module route",
+                    () => new WaiterDetachedError("deadline"),
                 );
             }
             // An open bound under older credentials must not be reused; its late success closes the route instead of caching it.
@@ -1013,6 +1022,16 @@ export class HostModuleTransport {
                     );
                     delayMs = Math.min(delayMs * 2, ROUTE_OPEN_RETRY_CAP_MS);
                     if (deadline.isExpired()) throw error;
+                    // The fence and the connection can both move during the sleep; a local close or turnover must not start another bind.
+                    if (
+                        state.closed ||
+                        this.client !== client ||
+                        generation !== this.connectionGeneration
+                    ) {
+                        throw this.connectionChangedError(
+                            "daemon connection changed while opening module route",
+                        );
+                    }
                 }
             }
             if (

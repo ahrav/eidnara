@@ -526,6 +526,33 @@ describe("route opening observes the caller's abort", () => {
             Bun.sleep(500).then(() => "still_waiting"),
         ]);
         expect(joined).toMatchObject({ code: "ETIMEDOUT" });
+        // The joiner's expiry is its own; it must not read as a connection failure.
+        expect(joined).toBeInstanceOf(WaiterDetachedError);
+        expect(__moduleTransportTest.isConnectionFailure(joined)).toBe(false);
+    });
+
+    test("a close during route-open backoff stops the next bind attempt", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let attempts = 0;
+        const client = {
+            routeOpen: async () => {
+                attempts += 1;
+                throw new HostCallError("terminal", "module is reloading", "module_reloading");
+            },
+            closeRoute: async () => {},
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const opening = transport
+            .ensureRoute("s", "/tmp", Deadline.start(5_000))
+            .catch((error: unknown) => error);
+        await Bun.sleep(0);
+        expect(attempts).toBe(1);
+        transport.closeSession("s");
+        const outcome = await opening;
+        expect(outcome).toMatchObject({ code: "ECONNRESET" });
+        expect(attempts).toBe(1);
     });
 
     test("an opening bound under older credentials is fenced, not joined", async () => {
@@ -577,6 +604,35 @@ describe("route opening observes the caller's abort", () => {
 });
 
 describe("possibly sent bodies fence the session lane", () => {
+    test("an expired budget is refused before the body reaches the facade", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let requests = 0;
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            request: async () => {
+                requests += 1;
+                return { ok: true };
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureRoute = async (sessionId, _root, deadline) => {
+            // The open settles only once the operation budget is gone.
+            await Bun.sleep(deadline.remainingMs() + 5);
+            return { client, route, routeKey: `${sessionId}\0/tmp`, generation: 0 };
+        };
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                timeoutMs: 40,
+            }),
+        ).rejects.toMatchObject({ kind: "not_sent", code: "deadline_expired" });
+        expect(requests).toBe(0);
+    });
+
     test("the lane stays held until the superseded connection's teardown settles", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         let releaseTeardown: (() => void) | undefined;
