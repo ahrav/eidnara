@@ -15,6 +15,8 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeCompactionMarkerConnection, MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { type ContextUsageEntry, createEventHandler, type EventHandlerDeps } from "./event-handler";
 import { DEFAULT_CONTEXT_LIMIT, resolveContextLimit } from "./event-resolvers";
+import type { RawMessage } from "./read-session-raw";
+import { buildTrueRawTokenIndex } from "./read-session-true-raw-tokens";
 
 const SESSION = "ses-1";
 const RETAINED_ID = generateMessageId(1_002, 0n, "retained");
@@ -146,9 +148,58 @@ describe("createEventHandler — session.created", () => {
         expect(deps.subagentSessions?.size).toBe(0);
         expect(deps.internalChildSessions?.size).toBe(0);
     });
+
+    it("keeps only the newest 1000 children in each set", async () => {
+        const { deps, handle } = buildHarness();
+        await handle("session.created", sessionCreated("child-0", "parent-1", "eidnara-0"));
+        for (let i = 1; i <= 1000; i++) {
+            await handle(
+                "session.created",
+                sessionCreated(`child-${i}`, "parent-1", `eidnara-${i}`),
+            );
+        }
+
+        expect(deps.subagentSessions?.size).toBe(1000);
+        expect(deps.internalChildSessions?.size).toBe(1000);
+        expect(deps.subagentSessions?.has("child-0")).toBe(false);
+        expect(deps.internalChildSessions?.has("child-0")).toBe(false);
+        expect(deps.subagentSessions?.has("child-1")).toBe(true);
+        expect(deps.subagentSessions?.has("child-1000")).toBe(true);
+    });
 });
 
 describe("createEventHandler — message.updated", () => {
+    it("drops a user message's cached token estimate so a same-length edit is re-counted", async () => {
+        const { handle } = buildHarness();
+        const before = "hello hello hello hello hello hello hello hello";
+        const after = "h3ll0 w0rld xyzq !!@@ ##$$ %%^^ &&** (())[]{}<>";
+        expect(after.length).toBe(before.length);
+        const options = {
+            providerShapeVersion: "opencode-v1" as const,
+            cacheNamespace: `${SESSION}:event-handler-test`,
+        };
+        const message = (text: string): RawMessage => ({
+            id: "msg-user-1",
+            role: "user",
+            parts: [{ type: "text", text }],
+            ordinal: 1,
+        });
+
+        const first = buildTrueRawTokenIndex(SESSION, [message(before)], options).tokenForOrdinal(
+            1,
+        );
+        const recounted = buildTrueRawTokenIndex(SESSION, [message(after)], options);
+        // The cache key fingerprints part type and byte length only, so the edit is invisible to it.
+        expect(recounted.tokenForOrdinal(1)).toBe(first);
+
+        await handle("message.updated", {
+            info: { role: "user", id: "msg-user-1", sessionID: SESSION },
+        });
+
+        const fresh = buildTrueRawTokenIndex(SESSION, [message(after)], options).tokenForOrdinal(1);
+        expect(fresh).not.toBe(first);
+    });
+
     it("records inputTokens and a percentage against the resolved context limit", async () => {
         const { deps, handle } = buildHarness();
         await handle(
