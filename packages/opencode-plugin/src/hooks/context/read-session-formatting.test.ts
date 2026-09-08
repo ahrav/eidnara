@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
+import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import {
     extractTexts,
     extractToolCallSummaries,
+    hasMeaningfulUserText,
     mergeCommitHashes,
 } from "./read-session-formatting";
 
@@ -13,22 +15,44 @@ describe("extractTexts", () => {
             { type: "text", text: "fix the bug" },
         ];
 
-        expect(extractTexts(parts)).toEqual(["fix the bug"]);
+        expect(extractTexts(parts, "user")).toEqual(["fix the bug"]);
     });
 
     it("returns nothing for an ignored-only message", () => {
-        expect(extractTexts([{ type: "text", text: "## Claude Quotas", ignored: true }])).toEqual(
-            [],
-        );
+        expect(
+            extractTexts([{ type: "text", text: "## Claude Quotas", ignored: true }], "user"),
+        ).toEqual([]);
     });
 
     it("trims and drops blank text parts", () => {
         expect(
-            extractTexts([
-                { type: "text", text: "  hello  " },
-                { type: "text", text: "   " },
-            ]),
+            extractTexts(
+                [
+                    { type: "text", text: "  hello  " },
+                    { type: "text", text: "   " },
+                ],
+                "assistant",
+            ),
         ).toEqual(["hello"]);
+    });
+
+    it("strips an injected system reminder and the initiator marker from user text", () => {
+        const text = `fix the bug <system-reminder>\ncontrol block\n</system-reminder> ${OMO_INTERNAL_INITIATOR_MARKER}`;
+
+        expect(extractTexts([{ type: "text", text }], "user")).toEqual(["fix the bug"]);
+    });
+
+    it("drops a user part that is only a system reminder", () => {
+        const text = "<system-reminder>control block</system-reminder>";
+
+        expect(hasMeaningfulUserText([{ type: "text", text }])).toBe(false);
+        expect(extractTexts([{ type: "text", text }], "user")).toEqual([]);
+    });
+
+    it("leaves assistant text untouched", () => {
+        const text = "the file mentions <system-reminder>foo</system-reminder> literally";
+
+        expect(extractTexts([{ type: "text", text }], "assistant")).toEqual([text]);
     });
 });
 

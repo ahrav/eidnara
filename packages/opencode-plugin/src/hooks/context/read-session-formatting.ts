@@ -22,6 +22,10 @@ export interface ChunkBlock {
 
 const MAX_COMMITS_PER_BLOCK = 5;
 
+function cleanUserText(text: string): string {
+    return removeSystemReminders(text).replaceAll(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
+}
+
 export function hasMeaningfulUserText(parts: unknown[]): boolean {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
@@ -29,9 +33,7 @@ export function hasMeaningfulUserText(parts: unknown[]): boolean {
         if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
         if (candidate.ignored === true) continue;
 
-        const cleaned = removeSystemReminders(candidate.text)
-            .replace(OMO_INTERNAL_INITIATOR_MARKER, "")
-            .trim();
+        const cleaned = cleanUserText(candidate.text);
 
         if (!cleaned) continue;
         if (isSystemDirective(cleaned)) continue;
@@ -41,7 +43,7 @@ export function hasMeaningfulUserText(parts: unknown[]): boolean {
     return false;
 }
 
-export function extractTexts(parts: unknown[]): string[] {
+export function extractTexts(parts: unknown[], role: string): string[] {
     const texts: string[] = [];
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
@@ -49,8 +51,10 @@ export function extractTexts(parts: unknown[]): string[] {
         if (p.type !== "text" || typeof p.text !== "string") continue;
         // `hasMeaningfulUserText` skips ignored parts (routing and quota notices); the summary must not carry them either.
         if (p.ignored === true) continue;
-        if (p.text.trim().length > 0) {
-            texts.push(p.text.trim());
+        // `hasMeaningfulUserText` evaluates cleaned text, so summaries clean user text too.
+        const text = role === "user" ? cleanUserText(p.text) : p.text.trim();
+        if (text.length > 0) {
+            texts.push(text);
         }
     }
     return texts;

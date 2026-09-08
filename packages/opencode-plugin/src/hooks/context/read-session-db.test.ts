@@ -185,6 +185,33 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });
 
+    it("is not mid-turn when the provider-executed flag sits under metadata (persisted OpenCode shape)", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
+        insertPart(db, "session-1", "assistant-1", "part-1", {
+            type: "tool",
+            tool: "web_search",
+            callID: "call-1",
+            state: { status: "completed", input: {} },
+            metadata: { providerExecuted: true },
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("stays mid-turn when metadata is present but providerExecuted is not set", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
+        insertPart(db, "session-1", "assistant-1", "part-1", {
+            type: "tool",
+            tool: "todowrite",
+            state: { status: "completed", input: {} },
+            metadata: { openai: { itemId: "fc_1" } },
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
     it("is not mid-turn when the latest assistant has no tool parts", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });

@@ -5,10 +5,6 @@ import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 
-interface RawCountRow {
-    count?: number;
-}
-
 interface AssistantMidTurnRow {
     id?: string;
     finish?: string | null;
@@ -69,18 +65,6 @@ export function closeReadOnlySessionDb(): void {
     closeCachedReadOnlyDb();
 }
 
-export function getRawSessionMessageCountFromDb(db: Database, sessionId: string): number {
-    // COALESCE treats NULL json_extract results from messages without summary or finish fields as non-summary values.
-    const row = db
-        .prepare(
-            `SELECT COUNT(*) as count FROM message WHERE session_id = ?
-             AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
-                      AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')`,
-        )
-        .get(sessionId) as RawCountRow | null;
-    return typeof row?.count === "number" ? row.count : 0;
-}
-
 export function isMidTurn(_deps: unknown, sessionId: string): boolean {
     try {
         return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
@@ -120,11 +104,22 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         if (typeof row.data !== "string" || row.data.length === 0) return false;
         try {
             const part = JSON.parse(row.data) as Record<string, unknown>;
-            return part.type === "tool" && part.providerExecuted !== true;
+            return part.type === "tool" && !isProviderExecuted(part);
         } catch {
             return false;
         }
     });
+}
+
+/** Accepts `providerExecuted` at `metadata.providerExecuted` (the persisted OpenCode shape) or at top level. */
+function isProviderExecuted(part: Record<string, unknown>): boolean {
+    if (part.providerExecuted === true) return true;
+    const metadata = part.metadata;
+    return (
+        metadata !== null &&
+        typeof metadata === "object" &&
+        (metadata as Record<string, unknown>).providerExecuted === true
+    );
 }
 
 function hasNewerRealUserMessage(
