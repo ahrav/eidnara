@@ -1,3 +1,6 @@
+# Slice partitioning requires 0.9.127 or newer.
+nextest-version = { required = "0.9.127", recommended = "0.9.143" }
+
 # `shm-transport`'s `hardware_envelope` bench does not answer `--list`, so nextest cannot enumerate it.
 # Bench targets therefore stay out of every nextest run.
 [profile.default]
