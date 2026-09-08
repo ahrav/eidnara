@@ -13,11 +13,11 @@ const PermissionRuleSchema = z.union([
 // an MCP tool name, `*`). The catch-all validates those keys instead.
 const PermissionSchema = z
     .object({
-        edit: PermissionValueSchema.optional(),
+        edit: PermissionRuleSchema.optional(),
         bash: PermissionRuleSchema.optional(),
         webfetch: PermissionValueSchema.optional(),
         doom_loop: PermissionValueSchema.optional(),
-        external_directory: PermissionValueSchema.optional(),
+        external_directory: PermissionRuleSchema.optional(),
     })
     .catchall(PermissionRuleSchema)
     .optional();

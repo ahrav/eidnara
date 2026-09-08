@@ -41,6 +41,30 @@ describe("AgentOverrideConfigSchema permission", () => {
         expect(result.data.permission).toEqual({ read: { "*.env": "deny", "*": "allow" } });
     });
 
+    it("accepts pattern maps on the named rule-capable keys", () => {
+        const permission = {
+            edit: { "*": "deny", "src/**": "allow" },
+            bash: { "git *": "allow", "*": "ask" },
+            external_directory: { "/tmp/**": "allow" },
+        };
+        const result = AgentOverrideConfigSchema.safeParse({ permission });
+
+        expect(result.success).toBe(true);
+        if (!result.success) {
+            return;
+        }
+        expect(result.data.permission).toEqual(permission);
+    });
+
+    it("rejects a pattern map on an action-only named key", () => {
+        for (const key of ["webfetch", "doom_loop"]) {
+            const result = AgentOverrideConfigSchema.safeParse({
+                permission: { [key]: { "*": "allow" } },
+            });
+            expect(result.success).toBe(false);
+        }
+    });
+
     it("rejects an invalid action on an unnamed permission key", () => {
         const result = AgentOverrideConfigSchema.safeParse({
             permission: { read: "maybe" },
