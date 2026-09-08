@@ -124,6 +124,27 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).toBe(body);
     });
 
+    it("truncates inside a longer fence without splitting the fence", () => {
+        const logLines = Array.from({ length: 2000 }, (_, i) =>
+            i === 100 ? "```" : `LINE${String(i).padStart(6, "0")}: ${"x".repeat(60)}`,
+        );
+        const body = [
+            "## Description",
+            "fenced log",
+            "",
+            "## Log (last 400 lines, sanitized)",
+            "````",
+            logLines.join("\n"),
+            "````",
+        ].join("\n");
+        const capped = capBodyToGithubLimit(body, 60_000);
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(60_000);
+        expect(capped).toContain("## Log (last 400 lines, sanitized)\n````\n[truncated");
+        expect(capped.endsWith("\n````")).toBe(true);
+        expect(capped).toContain("LINE001999");
+        expect(capped).not.toContain("LINE000000");
+    });
+
     it("truncates the main log section when body exceeds budget", () => {
         const body = makeBody({ logLineCount: 5000, lineSize: 200 });
         const originalBytes = Buffer.byteLength(body, "utf8");

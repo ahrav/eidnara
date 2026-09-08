@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
-import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { capBodyToGithubLimit, codeFenceFor, extractRecentErrors } from "./issue-body";
 import { readLogTailLines } from "./log-tail";
 
 /**
@@ -150,6 +150,15 @@ export async function bundleIssueReport(
     const sanitizedProjectConfigPath = sanitizeDiagnosticText(report.projectConfig.path);
     const sanitizedDescription = sanitizeDiagnosticText(description);
     const sanitizedTitle = sanitizeDiagnosticText(title).trim();
+    const historianBlock = historianFailureLines.join("\n");
+    const errorBlock = recentErrorLines.join("\n");
+    const fence = codeFenceFor(
+        userConfigBody,
+        projectConfigBody,
+        historianBlock,
+        errorBlock,
+        recentLog,
+    );
 
     const rawBodyMarkdown = [
         ...(sanitizedTitle ? ["## Title", sanitizedTitle, ""] : []),
@@ -164,13 +173,13 @@ export async function bundleIssueReport(
         "",
         "## Configuration",
         `User config from \`${sanitizedUserConfigPath}\`${report.eidnaraConfig.exists ? "" : " (missing)"}:`,
-        "```jsonc",
+        `${fence}jsonc`,
         userConfigBody,
-        "```",
+        fence,
         `Project config from \`${sanitizedProjectConfigPath}\`${report.projectConfig.exists ? "" : " (missing)"}:`,
-        "```jsonc",
+        `${fence}jsonc`,
         projectConfigBody,
-        "```",
+        fence,
         "",
         "## Diagnostics",
         renderDiagnosticsMarkdown(scopedReport),
@@ -178,18 +187,18 @@ export async function bundleIssueReport(
         "## Historian failure signals (log, sanitized)",
         historianFailureLines.length === 0
             ? "_No historian failure log lines found in recent history._"
-            : ["```", historianFailureLines.join("\n"), "```"].join("\n"),
+            : [fence, historianBlock, fence].join("\n"),
         "",
         "## Recent errors (last 20, sanitized)",
         recentErrorLines.length === 0
             ? "_No error-shaped log lines found in recent history._"
-            : ["```", recentErrorLines.join("\n"), "```"].join("\n"),
+            : [fence, errorBlock, fence].join("\n"),
         "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
         ...(logReadError ? [`_Log could not be read: ${logReadError}_`] : []),
-        "```",
+        fence,
         recentLog || "<no log output>",
-        "```",
+        fence,
     ].join("\n");
 
     const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);

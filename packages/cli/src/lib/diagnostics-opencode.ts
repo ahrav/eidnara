@@ -23,6 +23,7 @@ import {
 import { parse as parseJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
+import { codeFenceFor } from "./issue-body";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
 import {
@@ -209,22 +210,15 @@ function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
     );
 }
 
-/**
- * OpenCode also loads `<cwd>/.opencode/opencode.json(c)` and `<cwd>/opencode.json(c)`, so a plugin
- * registered only there is active for the diagnosed project.
- */
+/** `detectConfigFile` prefers `.jsonc` over `.json` at each location, matching `collectPluginEntries` in the conflict detector. */
 function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
-    const candidates = [
-        join(cwd, ".opencode", "opencode.jsonc"),
-        join(cwd, ".opencode", "opencode.json"),
-        join(cwd, "opencode.jsonc"),
-        join(cwd, "opencode.json"),
-    ];
+    const locations = [join(cwd, ".opencode", "opencode"), join(cwd, "opencode")];
     const report: ProjectOpenCodeConfigReport = { paths: [], hasPlugin: false, parseErrors: [] };
-    for (const path of candidates) {
-        if (!existsSync(path)) continue;
-        report.paths.push(path);
-        const parsed = readConfig(path);
+    for (const basePath of locations) {
+        const detected = detectConfigFile(basePath);
+        if (detected.format === "none") continue;
+        report.paths.push(detected.path);
+        const parsed = readConfig(detected.path);
         if (parsed.error) report.parseErrors.push(parsed.error);
         if (configHasPluginEntry(parsed.value)) report.hasPlugin = true;
     }
@@ -481,6 +475,23 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
     const describeParseError = (error: string | undefined) =>
         error ? sanitizeDiagnosticText(error) : "none";
 
+    const configPathsJson = JSON.stringify(configPaths, null, 2);
+    const userFlagsJson = JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2);
+    const projectFlagsJson = JSON.stringify(
+        sanitizeConfigValue(report.projectConfig.flags),
+        null,
+        2,
+    );
+    const recentSessionsJson = JSON.stringify(recentSessions, null, 2);
+    const historianDumpsJson = JSON.stringify(historianDumps, null, 2);
+    const fence = codeFenceFor(
+        configPathsJson,
+        userFlagsJson,
+        projectFlagsJson,
+        recentSessionsJson,
+        historianDumpsJson,
+    );
+
     return [
         `- Timestamp: ${report.timestamp}`,
         `- Plugin: v${report.pluginVersion}`,
@@ -512,31 +523,31 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         ...openCodeInstallationTable,
         "",
         "### Config paths",
-        "```json",
-        JSON.stringify(configPaths, null, 2),
-        "```",
+        `${fence}json`,
+        configPathsJson,
+        fence,
         "",
         "### User config flags",
-        "```jsonc",
-        JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2),
-        "```",
+        `${fence}jsonc`,
+        userFlagsJson,
+        fence,
         "",
         "### Project config flags",
-        "```jsonc",
-        JSON.stringify(sanitizeConfigValue(report.projectConfig.flags), null, 2),
-        "```",
+        `${fence}jsonc`,
+        projectFlagsJson,
+        fence,
         "",
         "### Recent sessions",
         recentSessions.length === 0
             ? "_No recent OpenCode sessions found (or OpenCode DB unavailable on this runtime)._"
-            : ["```json", JSON.stringify(recentSessions, null, 2), "```"].join("\n"),
+            : [`${fence}json`, recentSessionsJson, fence].join("\n"),
         "",
         "### Historian dumps",
         "(Metadata only — XML content is not included in this report.)",
         "Dumps are stored per-project under `<project>/.eidnara/context/historian/`.",
-        "```json",
-        JSON.stringify(historianDumps, null, 2),
-        "```",
+        `${fence}json`,
+        historianDumpsJson,
+        fence,
         "",
         "### Log file",
         `- Path: ${sanitizeString(report.logFile.path)}`,

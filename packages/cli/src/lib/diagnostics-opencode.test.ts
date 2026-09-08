@@ -150,6 +150,20 @@ describe("collectDiagnostics plugin registration", () => {
         expect(markdown).toMatch(/- project opencode config parse errors: (?!none)/);
     });
 
+    it("lets a project `.jsonc` shadow a sibling `.json`, matching the loader", async () => {
+        const { cwd } = isolatedRoot();
+        writeFileSync(join(cwd, "opencode.jsonc"), '{ "plugin": [] }');
+        writeFileSync(
+            join(cwd, "opencode.json"),
+            JSON.stringify({ plugin: ["@eidnara/opencode"] }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.projectOpencodeConfig.paths).toEqual([join(cwd, "opencode.jsonc")]);
+        expect(report.projectOpencodeConfig.hasPlugin).toBe(false);
+    });
+
     it("says so when the project has no opencode config", async () => {
         const { cwd } = isolatedRoot();
 

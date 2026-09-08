@@ -209,7 +209,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         pattern:
-            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])([^"']*)\4/gi,
+            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])((?:\\.|[^\\"'\r\n])*)\4/gi,
         replacement: (
             full: string,
             quote: string,
@@ -226,7 +226,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     // `[ \t]*` around the colon keeps a bare `key:` at end of line from consuming the next line's first word.
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])([^"'`\r\n]*)\3|([^\s'"`,;}\])]+))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|[^\\"'`\r\n])*)\3|([^\s'"`,;}\])]+))/gi,
         replacement: (
             full: string,
             key: string,
@@ -245,7 +245,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])([^"'`\r\n]*)\2|([^\s'"`]+))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])((?:\\.|[^\\"'`\r\n])*)\2|([^\s'"`]+))/gi,
         replacement: (
             full: string,
             key: string,

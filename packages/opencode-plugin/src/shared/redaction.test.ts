@@ -255,3 +255,13 @@ describe("sanitizePathString without a passwd entry", () => {
         }
     });
 });
+
+describe("redactSecretText — escaped quotes inside secret values", () => {
+    test("consumes escape sequences so the value is redacted through its real closing quote", () => {
+        const secret = ["abc", '"def', "ghijk"].join("");
+        const json = JSON.stringify({ password: secret });
+        expect(redactSecretText(json)).toBe('{"password":"<REDACTED:password>"}');
+        expect(redactSecretText(`token: "abc\\"def"`)).toBe('token: "<REDACTED:token>"');
+        expect(redactSecretText(`API_KEY="abc\\"def"`)).toBe('API_KEY="<REDACTED:api_key>"');
+    });
+});

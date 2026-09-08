@@ -50,6 +50,34 @@ export function extractRecentErrors(sanitized: string, limit = 20): string[] {
 }
 
 /**
+ * A fence one backtick longer than any run inside the fenced content cannot be closed early
+ * by that content (CommonMark closes a fence only with a run at least as long as the opener).
+ */
+export function codeFenceFor(...blocks: string[]): string {
+    let longest = 0;
+    for (const block of blocks) {
+        for (const run of block.match(/`+/g) ?? []) {
+            if (run.length > longest) longest = run.length;
+        }
+    }
+    return "`".repeat(Math.max(3, longest + 1));
+}
+
+/** The opener is the first run of three or more backticks after `## Log (last`, and the closer matches its length. */
+function locateLogFence(
+    body: string,
+    headingIdx: number,
+): { logStart: number; fenceCloseIdx: number } | null {
+    const openMatch = /\n(`{3,})[^\n]*\n/.exec(body.slice(headingIdx));
+    if (!openMatch) return null;
+    const fence = openMatch[1];
+    const logStart = headingIdx + openMatch.index + openMatch[0].length;
+    const fenceCloseIdx = body.indexOf(`\n${fence}`, logStart);
+    if (fenceCloseIdx === -1) return null;
+    return { logStart, fenceCloseIdx };
+}
+
+/**
  * When the expected log fence exists, the function drops oldest log lines before enforcing the final limit.
  * The rendered body must place the main log fence after `## Log (last`.
  * slice.
@@ -74,11 +102,9 @@ export function capBodyToGithubLimit(
         return enforceFinalBodyLimit(capped, maxBytes);
     }
 
-    const fenceOpenIdx = body.indexOf("\n```", headingIdx);
-    if (fenceOpenIdx === -1) return enforceFinalBodyLimit(body, maxBytes);
-    const logStart = fenceOpenIdx + "\n```\n".length;
-    const fenceCloseIdx = body.indexOf("\n```", logStart);
-    if (fenceCloseIdx === -1) return enforceFinalBodyLimit(body, maxBytes);
+    const located = locateLogFence(body, headingIdx);
+    if (!located) return enforceFinalBodyLimit(body, maxBytes);
+    const { logStart, fenceCloseIdx } = located;
 
     const head = body.slice(0, logStart);
     const log = body.slice(logStart, fenceCloseIdx);

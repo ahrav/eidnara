@@ -122,6 +122,34 @@ describe("readLogTailLines", () => {
     });
 });
 
+describe("bundleIssueReport code fences", () => {
+    it("chooses a fence longer than any backtick run in the log so content cannot close it", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-fence-"));
+        tempDirs.push(root);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "[2026-05-11T12:00:00.000Z] error payload follows",
+                "```",
+                "# not a heading, still log content",
+                "```",
+                "[2026-05-11T12:00:01.000Z] done",
+                "",
+            ].join("\n"),
+        );
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, { logFile: { path: logPath, exists: true, sizeKb: 1 } }),
+        );
+        const logSection = body.slice(body.indexOf("## Log (last"));
+        const fenceLines = logSection.split("\n").filter((line) => /^`{3,}$/.test(line));
+        // Opener and closer are the same four-backtick run; the three-backtick lines are log content.
+        expect(fenceLines).toEqual(["````", "```", "```", "````"]);
+        expect(logSection).toContain("# not a heading, still log content");
+    });
+});
+
 describe("bundleIssueReport output path", () => {
     it("does not overwrite a bundle written in the same second", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-collide-"));
