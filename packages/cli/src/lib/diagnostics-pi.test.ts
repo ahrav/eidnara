@@ -200,6 +200,8 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString('{"api key": 123456, "retries": 3}')).toBe(
             '{"api key": "<REDACTED>", "retries": 3}',
         );
+        // The key is classified after its JSON escapes are decoded.
+        expect(sanitizeString('{"\\u0070assword":123456}')).toBe('{"\\u0070assword":"<REDACTED>"}');
         // A bare `key=` is an assignment, so its value goes even when numeric; `key:` stays prose.
         expect(sanitizeString("key=123456 and press any key: continue")).toBe(
             "key=<REDACTED> and press any key: continue",
@@ -413,6 +415,20 @@ describe("collectDiagnostics Pi path resolution", () => {
             expect(report.loadedConfigPaths).toEqual([]);
             expect(report.loadWarnings.some((w) => w.includes("not a regular file"))).toBe(true);
             expect(report.userConfig?.parseError).toContain("not a regular file");
+        },
+    );
+
+    it.if(process.platform !== "win32")(
+        "ignores a non-regular sibling the Pi loader would never select",
+        async () => {
+            const { cwd, configHome } = isolateEnv();
+            writeFileSync(join(configHome, "eidnara", "eidnara.jsonc"), JSON.stringify({}));
+            execFileSync("mkfifo", [join(configHome, "eidnara", "eidnara.json")]);
+
+            const report = await collectDiagnostics(cwd);
+
+            expect(report.loadedConfigPaths.some((p) => p.endsWith("eidnara.jsonc"))).toBe(true);
+            expect(report.loadWarnings.some((w) => w.includes("not a regular file"))).toBe(false);
         },
     );
 
