@@ -23,7 +23,7 @@ const FALLBACK_TRUNCATION_MARKER = "\n\n[truncated for GitHub 64KB limit]\n";
  */
 const ERROR_LOG_PATTERNS = [
     /\bfailed:/i,
-    /\b(?:[A-Z][a-zA-Z]*)?Error:\s/,
+    /\b(?:[A-Za-z][a-zA-Z]*)?[Ee]rror:\s/,
     /\bEMERGENCY\b/,
     /\bexception\b/i,
     /^\s+at\s+[\w.<>$]+\s+\(/,

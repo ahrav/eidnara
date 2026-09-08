@@ -34,6 +34,17 @@ describe("extractRecentErrors", () => {
         expect(matches).not.toContain("2026-05-20 12:00:07 some other info line");
     });
 
+    it("matches lowercase error records such as `[rpc] handler error:`", () => {
+        const log = [
+            "[2026-05-11T12:00:00.000Z] [rpc] handler error: boom",
+            "[2026-05-11T12:00:01.000Z] processed 0 errors: fine",
+            "[2026-05-11T12:00:02.000Z] all good",
+        ].join("\n");
+        expect(extractRecentErrors(log)).toEqual([
+            "[2026-05-11T12:00:00.000Z] [rpc] handler error: boom",
+        ]);
+    });
+
     it("matches V8 stack-trace frames", () => {
         const log = [
             "Error: thing broke",

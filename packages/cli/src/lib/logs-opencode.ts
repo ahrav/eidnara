@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import {
     type DiagnosticReport,
     describeProbeText,
@@ -148,25 +148,13 @@ export async function bundleIssueReport(
     const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
     const recentErrorLines = extractRecentErrors(errorScanWindow, 20);
 
-    const userConfigBody = JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2);
-    const projectConfigBody = JSON.stringify(
-        sanitizeConfigValue(report.projectConfig.flags),
-        null,
-        2,
-    );
     const sanitizedUserConfigPath = sanitizeDiagnosticText(report.eidnaraConfig.path);
     const sanitizedProjectConfigPath = sanitizeDiagnosticText(report.projectConfig.path);
     const sanitizedDescription = sanitizeDiagnosticText(description);
     const sanitizedTitle = sanitizeDiagnosticText(title).trim();
     const historianBlock = historianFailureLines.join("\n");
     const errorBlock = recentErrorLines.join("\n");
-    const fence = codeFenceFor(
-        userConfigBody,
-        projectConfigBody,
-        historianBlock,
-        errorBlock,
-        recentLog,
-    );
+    const fence = codeFenceFor(historianBlock, errorBlock, recentLog);
 
     const rawBodyMarkdown = [
         ...(sanitizedTitle ? ["## Title", sanitizedTitle, ""] : []),
@@ -180,14 +168,9 @@ export async function bundleIssueReport(
         `- OpenCode: ${describeOpenCodeInstall(report)}`,
         "",
         "## Configuration",
-        `User config from \`${sanitizedUserConfigPath}\`${report.eidnaraConfig.exists ? "" : " (missing)"}:`,
-        `${fence}jsonc`,
-        userConfigBody,
-        fence,
-        `Project config from \`${sanitizedProjectConfigPath}\`${report.projectConfig.exists ? "" : " (missing)"}:`,
-        `${fence}jsonc`,
-        projectConfigBody,
-        fence,
+        `User config from \`${sanitizedUserConfigPath}\`${report.eidnaraConfig.exists ? "" : " (missing)"}`,
+        `Project config from \`${sanitizedProjectConfigPath}\`${report.projectConfig.exists ? "" : " (missing)"}`,
+        "Sanitized flags for both tiers are listed under Diagnostics.",
         "",
         "## Diagnostics",
         renderDiagnosticsMarkdown(scopedReport),

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -326,5 +326,25 @@ describe("collectDiagnostics log file", () => {
         expect(report.logFile.path).toBe(join(root, "log", "eidnara.log"));
         expect(report.logFile.exists).toBe(true);
         expect(report.logFile.sizeKb).toBe(2);
+    });
+});
+
+describe("collectHistorianDumps entry failures", () => {
+    it("keeps the valid dumps when one directory entry cannot be statted", () => {
+        const { root } = isolatedRoot();
+        const project = join(root, "project-a");
+        const historianDir = join(project, ".eidnara", "context", "historian");
+        mkdirSync(historianDir, { recursive: true });
+        writeFileSync(join(historianDir, "dump-1.xml"), "<x/>");
+        // A dangling symlink is listed by readdir but fails stat, like a file removed mid-walk.
+        symlinkSync(join(root, "gone.xml"), join(historianDir, "dump-2.xml"));
+
+        const dumps = collectHistorianDumps([
+            { sessionId: "ses_a1", title: "", directory: project, lastActiveAt: "" },
+        ]);
+
+        expect(dumps.byProject).toHaveLength(1);
+        expect(dumps.byProject[0]?.count).toBe(1);
+        expect(dumps.byProject[0]?.recent.map((dump) => dump.name)).toEqual(["dump-1.xml"]);
     });
 });

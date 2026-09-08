@@ -176,8 +176,9 @@ export function sanitizePathString(value: string): string {
         .replace(/[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]/gi, "C:\\Users\\<USER>\\");
     // A username that is itself a secret vocabulary word (`token`, `auth`) would erase the key
     // the secret rules match on; the path patterns above still cover its home directory.
+    // Whole-word matching keeps a username such as `pass` out of `password:`.
     if (username && !hasSecretKeySegment(username)) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
+        sanitized = sanitized.replace(new RegExp(`\\b${escapeRegex(username)}\\b`, "g"), "<USER>");
     }
     return sanitized;
 }
@@ -186,10 +187,10 @@ const SECRET_TEXT_PATTERNS: Array<{
     pattern: RegExp;
     replacement: string | ((match: string, ...groups: string[]) => string);
 }> = [
-    // A terminated PEM block is replaced whole; an unterminated header takes its base64 lines with it.
+    // A terminated PEM block is replaced whole; an unterminated header takes its `Proc-Type:`/`DEK-Info:` lines and base64 body with it.
     {
         pattern:
-            /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|(?:\r?\n[A-Za-z0-9+/=]{16,}(?=\r?\n|$))*)/g,
+            /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|(?:\r?\n(?:[A-Za-z-]+:[^\r\n]*|[A-Za-z0-9+/=]{16,}(?=\r?\n|$)|(?=\r?\n)))*)/g,
         replacement: "<PRIVATE_KEY_REDACTED>",
     },
     {

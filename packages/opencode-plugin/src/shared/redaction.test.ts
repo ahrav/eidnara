@@ -467,3 +467,35 @@ describe("sanitizePathString with hostile OS identities", () => {
         }
     });
 });
+
+describe("redactSecretText — round-nine edge cases", () => {
+    test("does not let a username that is a substring of a key word erase the key", () => {
+        const spy = spyOn(os, "userInfo").mockImplementation(
+            () => ({ username: "pass" }) as ReturnType<typeof os.userInfo>,
+        );
+        try {
+            expect(sanitizeDiagnosticText("password: hunter2 by /home/pass/x")).toBe(
+                "password: <REDACTED:password>",
+            );
+            expect(sanitizeDiagnosticText("/srv/pass/app.log by pass")).toBe(
+                "/srv/<USER>/app.log by <USER>",
+            );
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test("consumes the metadata lines of an unterminated encrypted PEM block", () => {
+        const block = [
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "Proc-Type: 4,ENCRYPTED",
+            "DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF",
+            "",
+            "MIIEpAIBAAKCAQEA7Vv3xkQzq0Fh6",
+            "hkiG9w0BAQEFAASCBKcwggSjAgEA",
+        ].join("\n");
+        expect(redactSecretText(`${block}\nnext log line`)).toBe(
+            "<PRIVATE_KEY_REDACTED>\nnext log line",
+        );
+    });
+});

@@ -163,6 +163,26 @@ describe("bundleIssueReport code fences", () => {
     });
 });
 
+describe("bundleIssueReport configuration section", () => {
+    it("renders each config tier's flags once, under Diagnostics", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-config-once-"));
+        tempDirs.push(root);
+        const body = await bundleInTempCwd(
+            root,
+            makeReport(root, {
+                eidnaraConfig: {
+                    path: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                    exists: true,
+                    flags: { historian: { disable: true }, marker_value_once: "unique-marker" },
+                },
+            }),
+        );
+        expect(body.split("unique-marker").length - 1).toBe(1);
+        expect(body).toContain("### User config flags");
+        expect(body).toContain("Sanitized flags for both tiers are listed under Diagnostics.");
+    });
+});
+
 describe("bundleIssueReport output path", () => {
     it("does not overwrite a bundle written in the same second", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-collide-"));
@@ -926,10 +946,10 @@ describe("bundleIssueReport secret redaction", () => {
                 "Description with /Users/<USER>/private and token=<REDACTED:token>",
             );
             expect(body).toContain(
-                "User config from `/Users/<USER>/.config/eidnara/eidnara.jsonc`:",
+                "User config from `/Users/<USER>/.config/eidnara/eidnara.jsonc`",
             );
             expect(body).toContain(
-                "Project config from `/Users/<USER>/project/.eidnara/eidnara.json`:",
+                "Project config from `/Users/<USER>/project/.eidnara/eidnara.json`",
             );
             expect(body).toContain(
                 "- Project config parse error: EACCES: permission denied, open '/Users/<USER>/project/.eidnara/eidnara.json'",

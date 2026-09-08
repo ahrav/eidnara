@@ -288,10 +288,11 @@ export function collectHistorianDumps(
 async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     // Runtime `XDG_DATA_HOME` or `HOME` overrides determine the database path.
     // Node's `homedir()` honors runtime `HOME` overrides; Bun's does not.
-    const dataHome =
-        process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), ".local", "share");
+    // `homedir()` throws for a UID without a passwd entry when `HOME` is unset.
     let opencodeDbPath: string;
     try {
+        const dataHome =
+            process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), ".local", "share");
         opencodeDbPath = resolveOpenCodeDatabasePath(dataHome);
     } catch {
         return [];
