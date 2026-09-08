@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { EidnaraConfigSchema } from "../config/schema/eidnara";
+import { createEventHandler } from "../hooks/context/event-handler";
 import { resetKernelClientsForTest } from "../hooks/context/kernel-transport";
 import { createLiveSessionState } from "../hooks/context/live-session-state";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
@@ -655,6 +656,10 @@ describe("buildStatusDetail", () => {
     test("cache countdown and tag totals follow the live response time and daemon status", () => {
         const sessionId = "ses-status-countdown";
         const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
         const now = Date.now();
         live.contextUsageBySession.set(sessionId, {
             usage: { percentage: 10, inputTokens: 10_000 },
@@ -695,11 +700,27 @@ describe("buildStatusDetail", () => {
         );
         expect(expired.cacheRemainingMs).toBe(0);
         expect(expired.cacheExpired).toBe(true);
+
+        // A response recorded for another model does not start the new model's countdown.
+        const switched = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "test-provider/other-model",
+            { cache_ttl: "5m" },
+            live,
+        );
+        expect(switched.lastResponseTime).toBe(0);
+        expect(switched.cacheRemainingMs).toBe(0);
+        expect(switched.cacheExpired).toBe(false);
     });
 
     test("an unparseable cache TTL falls back to the daemon's five-minute default", () => {
         const sessionId = "ses-status-bad-ttl";
         const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
         const now = Date.now();
         live.contextUsageBySession.set(sessionId, {
             usage: { percentage: 10, inputTokens: 10_000 },
@@ -894,6 +915,30 @@ describe("clearWorkMetricsCarry", () => {
 
         clearWorkMetricsCarry(sessionId);
         expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(0);
+    });
+
+    test("message.removed clears the carry so the next poll re-reads the session", async () => {
+        const sessionId = "ses-carry-removed";
+        const db = openTempOpenCodeDb();
+        // A prompt drop at `b` closes a 3k phase, so the total is 3k + 2k while `a` exists and 2k once it is gone.
+        insertAssistantRow(db, sessionId, "a", 1, 3_000);
+        insertAssistantRow(db, sessionId, "b", 2, 1_000);
+        insertAssistantRow(db, sessionId, "c", 3, 2_000);
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
+
+        db.exec("DELETE FROM message WHERE id = 'a'");
+        closeQuietly(db);
+        // The carry already folded `a`, so a poll without the event still reports the closed phase.
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
+
+        const handle = createEventHandler({ contextUsageMap: new Map() });
+        await handle({
+            event: {
+                type: "message.removed",
+                properties: { sessionID: sessionId, messageID: "a" },
+            },
+        });
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(2_000);
     });
 });
 

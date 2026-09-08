@@ -1,4 +1,5 @@
 import { detectOverflow } from "../../features/context/overflow-detection";
+import { clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
 import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsAfterAuthOnce } from "../../shared/models-dev-cache";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
@@ -240,6 +241,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     messageId: info.messageID,
                     reason: "message.removed",
                 });
+                // The removed row may sit below the work-metrics watermark; the next poll re-reads the session.
+                clearWorkMetricsCarry(info.sessionID);
 
                 deps.onSessionCacheInvalidated?.(info.sessionID);
                 sessionLog(

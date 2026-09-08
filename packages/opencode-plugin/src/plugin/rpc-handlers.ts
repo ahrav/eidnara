@@ -9,6 +9,7 @@ import {
     emptyWorkMetricsCarry,
     type WorkMetricsCarry,
 } from "../features/context/work-metrics";
+import type { ContextUsageEntry } from "../hooks/context/event-handler";
 import {
     DEFAULT_CACHE_TTL_MS,
     parseCacheTtlMs,
@@ -219,6 +220,16 @@ function modelKeyOf(model: ActiveModel | undefined): string | undefined {
     return model ? `${model.providerID}/${model.modelID}` : undefined;
 }
 
+/** The live usage entry for `sessionId`, only when it was measured against `modelKey`; after a model switch the previous model's tokens and response timing must not be read against the new model. commentlint: allow(JUDGE) */
+function liveUsageEntryFor(
+    liveSessionState: LiveSessionState | undefined,
+    sessionId: string,
+    modelKey: string | undefined,
+): ContextUsageEntry | undefined {
+    const entry = liveSessionState?.contextUsageBySession.get(sessionId);
+    return entry?.model && modelKeyOf(entry.model) === modelKey ? entry : undefined;
+}
+
 /**
  * A model named by the request wins over live state. The live lookup still runs so a missing model or
  * agent is recovered from OpenCode's SQLite database and cached for later polls and hooks.
@@ -273,12 +284,8 @@ export function buildSidebarSnapshot(
         const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
-        // The daemon's usage wins. The live event usage covers `ts` mode and a daemon that has not persisted usage yet, but only when it was measured against the active model: after a model switch the previous model's tokens must not be shown against the new window. commentlint: allow(JUDGE)
-        const liveEntry = liveSessionState?.contextUsageBySession.get(sessionId);
-        const liveUsage =
-            liveEntry?.model && modelKeyOf(liveEntry.model) === modelKey
-                ? liveEntry.usage
-                : undefined;
+        // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
+        const liveUsage = liveUsageEntryFor(liveSessionState, sessionId, modelKey)?.usage;
         const effectiveInputTokens =
             typeof moduleInputTokens === "number" && moduleInputTokens > 0
                 ? moduleInputTokens
@@ -475,7 +482,7 @@ export function buildStatusDetail(
     // The daemon counts every minted tag and publishes no per-tag state, so only the total is known here.
     const totalTags = typeof moduleStatus?.tag_count === "number" ? moduleStatus.tag_count : 0;
     const lastResponseTime =
-        liveSessionState?.contextUsageBySession.get(sessionId)?.lastResponseTime ?? 0;
+        liveUsageEntryFor(liveSessionState, sessionId, effectiveModelKey)?.lastResponseTime ?? 0;
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
