@@ -615,11 +615,14 @@ export function readSessionChunk(
      * once the final emitted message precedes such a row.
      */
     let budgetExhausted = false;
+    // `lines.join("\n")` inserts one separator before every block after the first.
+    const separatorTokens = estimateTokens("\n");
 
     function flushCurrentBlock(): boolean {
         if (!currentBlock) return true;
         const blockText = formatBlock(currentBlock);
-        const blockTokens = estimateBlockTokens(blockText);
+        const blockTokens =
+            estimateBlockTokens(blockText) + (lines.length === 0 ? 0 : separatorTokens);
         if (totalTokens + blockTokens > tokenBudget && totalTokens > 0) {
             return false;
         }
@@ -659,6 +662,12 @@ export function readSessionChunk(
         if (msg.ordinal < startOrdinal) continue;
 
         const meta = { ordinal: msg.ordinal, messageId: msg.id };
+
+        // System rows are prompt text, not transcript; they never reach the historian.
+        if (msg.role === "system") {
+            pendingNoiseMeta.push(meta);
+            continue;
+        }
 
         // `user` messages without meaningful text are skipped unless `extractToolCallSummaries` finds tool-result descriptions.
         if (msg.role === "user" && !hasMeaningfulUserText(msg.parts)) {

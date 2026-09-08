@@ -1,5 +1,6 @@
 import { COMMIT_VERB_PATTERN, createCommitHashExtractPattern } from "../../shared/commit-detection";
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
+import { isRecord } from "../../shared/record-type-guard";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
 
 export interface SessionChunkLine {
@@ -94,12 +95,14 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
-        if (p.type !== "tool" || typeof p.tool !== "string") continue;
+        if (p.type !== "tool") continue;
+        const toolName = firstString(p, ["tool", "toolName", "name"]);
+        if (toolName === null) continue;
 
-        const state = p.state as Record<string, unknown> | null;
-        if (!state || typeof state !== "object") continue;
-        const input = state.input as Record<string, unknown> | null;
-        const metadata = state.metadata as Record<string, unknown> | null;
+        // OpenCode persists tool fields under `state` or flat on the part; `state` wins when both exist.
+        const state = isRecord(p.state) ? p.state : null;
+        const input = firstRecord([state?.input, p.input, p.args]);
+        const metadata = firstRecord([state?.metadata, p.metadata]);
 
         const description =
             (input && typeof input.description === "string" && input.description) ||
@@ -109,11 +112,25 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
             continue;
         }
 
-        const toolName = p.tool as string;
         const keyArg = extractKeyArg(toolName, input);
         summaries.push(keyArg ? `TC: ${toolName}(${keyArg})` : `TC: ${toolName}`);
     }
     return summaries;
+}
+
+function firstString(record: Record<string, unknown>, keys: readonly string[]): string | null {
+    for (const key of keys) {
+        const value = record[key];
+        if (typeof value === "string" && value.length > 0) return value;
+    }
+    return null;
+}
+
+function firstRecord(candidates: readonly unknown[]): Record<string, unknown> | null {
+    for (const candidate of candidates) {
+        if (isRecord(candidate)) return candidate;
+    }
+    return null;
 }
 
 function extractKeyArg(_toolName: string, input: Record<string, unknown> | null): string | null {

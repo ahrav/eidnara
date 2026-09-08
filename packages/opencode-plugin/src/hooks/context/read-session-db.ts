@@ -122,11 +122,22 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         if (typeof row.data !== "string" || row.data.length === 0) return false;
         try {
             const part = JSON.parse(row.data) as Record<string, unknown>;
-            return part.type === "tool" && part.providerExecuted !== true;
+            return part.type === "tool" && !providerExecuted(part);
         } catch {
             return false;
         }
     });
+}
+
+/** OpenCode persists the flag either at the top level or under `metadata`. */
+function providerExecuted(part: Record<string, unknown>): boolean {
+    if (part.providerExecuted === true) return true;
+    const metadata = part.metadata;
+    return (
+        typeof metadata === "object" &&
+        metadata !== null &&
+        (metadata as Record<string, unknown>).providerExecuted === true
+    );
 }
 
 /**

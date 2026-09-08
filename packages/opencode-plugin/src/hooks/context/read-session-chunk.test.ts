@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { installTokenizerForTest, resetTokenEstimatorForTest } from "../../shared/token-estimator";
+import {
+    estimateTokens,
+    installTokenizerForTest,
+    resetTokenEstimatorForTest,
+} from "../../shared/token-estimator";
 import {
     blockTokenMemoStatsForTest,
     getProtectedTailStartOrdinal,
@@ -261,6 +265,61 @@ describe("readSessionChunk", () => {
             expect(chunk.text).toContain("please fix the auth bug");
             expect(chunk.text).not.toContain("Eidnara Status");
         });
+    });
+
+    it("treats system rows as noise rather than emitting them as blocks", () => {
+        useTempDataHome("read-session-system-row-");
+        createOpenCodeDbWithMessages("ses-system", [
+            { id: "m-1", role: "system", part: { type: "text", text: "You are a helpful bot." } },
+            { id: "m-2", role: "user", part: { type: "text", text: "hello" } },
+            { id: "m-3", role: "assistant", part: { type: "text", text: "hi there" } },
+        ]);
+
+        const chunk = readSessionChunk("ses-system", 10_000, 1);
+
+        expect(chunk.text).not.toContain("helpful bot");
+        expect(chunk.text).not.toMatch(/S:/);
+        // The system row's ordinal is absorbed into the next block's range.
+        expect(chunk.text).toContain("[1-2] U: hello");
+    });
+
+    it("summarizes a flat OpenCode tool part through the same field fallbacks as the codec", () => {
+        useTempDataHome("read-session-flat-tool-");
+        createOpenCodeDbWithMessages("ses-flat-tool", [
+            { id: "m-1", role: "user", part: { type: "text", text: "read it" } },
+            {
+                id: "m-2",
+                role: "assistant",
+                part: {
+                    type: "tool",
+                    tool: "read",
+                    status: "completed",
+                    input: { filePath: "/src/main.rs" },
+                    output: "fn main() {}",
+                },
+            },
+        ]);
+
+        const chunk = readSessionChunk("ses-flat-tool", 10_000, 1);
+
+        expect(chunk.text).toContain("TC: read(/src/main.rs)");
+        expect(chunk.toolOnlyRanges).toEqual([{ start: 2, end: 2 }]);
+    });
+
+    it("charges the separator between blocks against the budget", () => {
+        useTempDataHome("read-session-separator-budget-");
+        createOpenCodeDbWithMessages("ses-separator", [
+            { id: "m-1", role: "user", part: { type: "text", text: "a" } },
+            { id: "m-2", role: "assistant", part: { type: "text", text: "b" } },
+            { id: "m-3", role: "user", part: { type: "text", text: "c" } },
+        ]);
+
+        const unbounded = readSessionChunk("ses-separator", 100_000, 1);
+        const joined = unbounded.text;
+        const blocks = joined.split("\n");
+        expect(blocks).toHaveLength(3);
+        const blocksOnly = blocks.reduce((sum, line) => sum + estimateTokens(line), 0);
+        expect(unbounded.tokenEstimate).toBe(blocksOnly + 2 * estimateTokens("\n"));
     });
 
     it("reuses cached raw messages within nested cache scopes and clears afterward", () => {
