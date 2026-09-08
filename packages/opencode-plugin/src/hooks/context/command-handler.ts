@@ -132,6 +132,12 @@ function throwSentinel(command: string): never {
     throw sentinel;
 }
 
+class SessionDeletedDuringCommandError extends Error {}
+
+function rethrowDeletedCommand(error: unknown, command: string): void {
+    if (error instanceof SessionDeletedDuringCommandError) throwSentinel(command);
+}
+
 function moduleResponseValue(response: unknown): Record<string, unknown> {
     if (response && typeof response === "object") {
         const value = response as Record<string, unknown>;
@@ -287,7 +293,7 @@ async function executeAugmentation(
         await deps.sendNotification(
             sessionId,
             "## /ctx-aug\n\nSidekick is not configured. Add sidekick settings to `eidnara.jsonc` to use /ctx-aug.",
-            {},
+            { forcePersist: !isTuiConnected(sessionId) },
         );
         throwSentinel("CTX-AUG");
     }
@@ -297,7 +303,7 @@ async function executeAugmentation(
         await deps.sendNotification(
             sessionId,
             "## /ctx-aug\n\nUsage: `/ctx-aug <your prompt>`\n\nProvide a prompt to augment with project memory context.",
-            {},
+            { forcePersist: !isTuiConnected(sessionId) },
         );
         throwSentinel("CTX-AUG");
     }
@@ -339,7 +345,7 @@ async function executeAugmentation(
             error instanceof TimeoutError
                 ? `## /ctx-aug — Delivery unconfirmed\n\nOpenCode did not confirm the augmented prompt in time: ${reason}\n\nThe prompt may still arrive. If it does not appear in this session, send it again, with or without /ctx-aug:\n\n${prompt}`
                 : `## /ctx-aug — Failed\n\nThe augmented prompt was not sent to the session: ${reason}\n\nYour original prompt was not sent either. Send it again, with or without /ctx-aug:\n\n${prompt}`;
-        await deps.sendNotification(sessionId, notice, {});
+        await deps.sendNotification(sessionId, notice, { forcePersist: true });
     }
 
     throwSentinel("CTX-AUG");
@@ -351,6 +357,8 @@ export function createEidnaraCommandHandler(deps: {
     getLiveModelKey?: (sessionId: string) => string | undefined;
     /** The `session.wrapup` request carries no subagent flag, so the handler gates `/ctx-wrapup` on this predicate. */
     isSubagentSession: (sessionId: string) => boolean | Promise<boolean>;
+    /** Prevents a command whose route lookup lost to session deletion from recreating daemon state. */
+    isSessionDeleted?: (sessionId: string) => boolean;
     onFlush?: (sessionId: string) => void;
     sendNotification: (
         sessionId: string,
@@ -390,17 +398,22 @@ export function createEidnaraCommandHandler(deps: {
         method: Parameters<RustModeModuleClient["call"]>[0]["method"],
         body: Record<string, unknown>,
         timeoutMs?: number,
-    ): Promise<Record<string, unknown>> =>
-        moduleResponseValue(
+        resolvedProjectRoot?: string,
+    ): Promise<Record<string, unknown>> => {
+        const sessionId = body.session_id as string;
+        const projectRoot =
+            resolvedProjectRoot ?? (await deps.resolveProjectRoot?.(sessionId)) ?? process.cwd();
+        if (deps.isSessionDeleted?.(sessionId)) throw new SessionDeletedDuringCommandError();
+        return moduleResponseValue(
             await deps.moduleClient.call({
-                sessionId: body.session_id as string,
-                projectRoot:
-                    (await deps.resolveProjectRoot?.(body.session_id as string)) ?? process.cwd(),
+                sessionId,
+                projectRoot,
                 method,
                 body,
                 ...(timeoutMs === undefined ? {} : { timeoutMs }),
             }),
         );
+    };
 
     return {
         "command.execute.before": async (
@@ -426,7 +439,7 @@ export function createEidnaraCommandHandler(deps: {
                 await deps.sendNotification(
                     sessionId,
                     `Eidnara compaction is disabled (${COMPACTION_ENABLED_PATH}: false) — ${command} manages compacted history and has no effect in this mode.`,
-                    {},
+                    { forcePersist: !isTuiConnected(sessionId) },
                 );
                 throwSentinel(input.command);
             }
@@ -448,6 +461,7 @@ export function createEidnaraCommandHandler(deps: {
                             ? "No pending operations to flush."
                             : "Flushed: Changes take effect on next message.";
                 } catch (error) {
+                    rethrowDeletedCommand(error, input.command);
                     result = `Error: Failed to flush context operations. ${error instanceof Error ? error.message : String(error)}`;
                 }
                 deps.onFlush?.(sessionId);
@@ -472,6 +486,7 @@ export function createEidnaraCommandHandler(deps: {
                         session_id: sessionId,
                     });
                 } catch (error) {
+                    rethrowDeletedCommand(error, input.command);
                     sessionLog(sessionId, "rust session.status failed:", error);
                     statusError = error instanceof Error ? error.message : String(error);
                 }
@@ -536,6 +551,9 @@ export function createEidnaraCommandHandler(deps: {
                     result = `## Eidnara Wrapup — Invalid Arguments\n\n${parsed.message}`;
                 } else {
                     const keep = parsed.messagesToKeep;
+                    const projectRoot =
+                        (await deps.resolveProjectRoot?.(sessionId)) ?? process.cwd();
+                    if (deps.isSessionDeleted?.(sessionId)) throwSentinel(input.command);
                     await deps.sendNotification(
                         sessionId,
                         "## Eidnara Wrapup\n\nStarting wrapup…",
@@ -552,9 +570,11 @@ export function createEidnaraCommandHandler(deps: {
                                 command_id: rustCommandId("wrapup"),
                             },
                             MAX_WRAPUP_REQUEST_BUDGET_MS,
+                            projectRoot,
                         );
                         result = formatRustOperationMessage("wrapup", value);
                     } catch (error) {
+                        rethrowDeletedCommand(error, input.command);
                         result = `## Eidnara Wrapup — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
                     }
                 }
@@ -576,12 +596,15 @@ export function createEidnaraCommandHandler(deps: {
                         });
                         result = formatRustOperationMessage("recomp", value);
                     } catch (error) {
+                        rethrowDeletedCommand(error, input.command);
                         result = `## Eidnara Recomp — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
                     }
                 }
             }
 
-            await deps.sendNotification(sessionId, result, {});
+            await deps.sendNotification(sessionId, result, {
+                forcePersist: !isTuiConnected(sessionId),
+            });
             sessionLog(sessionId, `command ${input.command} handled via command.execute.before`);
 
             throwSentinel(input.command);

@@ -143,6 +143,28 @@ describe("project identity", () => {
         }
     });
 
+    it("drops a cached git identity when an accessible directory loses its metadata", () => {
+        const repo = makeRepoWithGitMetadata("project-identity-metadata-removed-");
+        const execMock = mock(returningRootCommit(FIRST_ROOT_COMMIT));
+        __setProjectIdentityTestHooks({ execFileSync: execMock as unknown as typeof execFileSync });
+
+        expect(resolveProjectIdentity(repo)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        rmSync(join(repo, ".git"), { recursive: true, force: true });
+
+        expect(resolveProjectIdentity(repo)).toBe(expectedDirIdentity(repo));
+        expect(execMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("retains a cached git identity while its directory is missing", () => {
+        const repo = makeRepoWithGitMetadata("project-identity-cached-missing-");
+        __setProjectIdentityTestHooks({ execFileSync: returningRootCommit(FIRST_ROOT_COMMIT) });
+        const identity = resolveProjectIdentity(repo);
+
+        rmSync(repo, { recursive: true, force: true });
+
+        expect(resolveProjectIdentity(repo)).toBe(identity);
+    });
+
     it("resolveProjectIdentity falls back to dir identity for non-git directories", () => {
         const directory = makeTempDir("project-identity-wrapper-");
 

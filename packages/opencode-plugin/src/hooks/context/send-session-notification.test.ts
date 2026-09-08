@@ -43,6 +43,63 @@ describe("sendIgnoredMessage", () => {
         }
     });
 
+    it("retains a forced command result until the session gets a real title", async () => {
+        const originalSetTimeout = globalThis.setTimeout;
+        globalThis.setTimeout = ((
+            handler: Parameters<typeof setTimeout>[0],
+            _timeout?: number,
+            ...args: unknown[]
+        ) => {
+            if (typeof handler === "function") handler(...args);
+            return 0 as never;
+        }) as typeof setTimeout;
+        try {
+            let title = DEFAULT_TITLE;
+            const prompt = mock(async () => ({}));
+            const get = mock(async () => ({ title }));
+            const client = { session: { get, prompt } };
+
+            const result = await sendIgnoredMessage(
+                client,
+                "ses-command-result",
+                "full command result",
+                {},
+                true,
+            );
+            expect(result).toBe("queued");
+            expect(get).toHaveBeenCalledTimes(1);
+            expect(prompt).not.toHaveBeenCalled();
+            expect(__ignoredNotificationTest.pendingTexts("ses-command-result")).toEqual([
+                "full command result",
+            ]);
+
+            title = "Real title";
+            await flushIgnoredMessages("ses-command-result");
+            expect(prompt).toHaveBeenCalledTimes(1);
+            expect(__ignoredNotificationTest.pendingTexts("ses-command-result")).toEqual([]);
+        } finally {
+            globalThis.setTimeout = originalSetTimeout;
+        }
+    });
+
+    it("uses one title read per retry for a forced result that remains untitled", async () => {
+        const get = mock(async () => ({ title: DEFAULT_TITLE }));
+        const prompt = mock(async () => ({}));
+        const client = { session: { get, prompt } };
+
+        expect(
+            await sendIgnoredMessage(client, "ses-still-untitled", "command result", {}, true),
+        ).toBe("queued");
+        await flushIgnoredMessages("ses-still-untitled");
+        await flushIgnoredMessages("ses-still-untitled");
+
+        expect(get).toHaveBeenCalledTimes(3);
+        expect(prompt).not.toHaveBeenCalled();
+        expect(__ignoredNotificationTest.pendingTexts("ses-still-untitled")).toEqual([
+            "command result",
+        ]);
+    });
+
     // `messages` supplies the last assistant turn to `resolvePromptContext`.
     // `get` supplies a title so `sendIgnoredMessage` does not skip the session.
     function titledClientWithLastTurn() {

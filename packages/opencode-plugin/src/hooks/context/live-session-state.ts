@@ -1,5 +1,15 @@
 import type { AgentBySession, LiveModelBySession, VariantBySession } from "./hook-handlers";
 
+export interface SessionMetadataReadState {
+    attempts: number;
+    retryAfterMs: number;
+    inFlight?: Promise<{
+        directory?: unknown;
+        parentID?: unknown;
+        title?: unknown;
+    } | null>;
+}
+
 export interface LiveSessionState {
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
@@ -11,6 +21,8 @@ export interface LiveSessionState {
     deferredMaterializationSessions: Set<string>;
     /** `sessionDirectoryBySession` caches `session.directory` values to avoid later SDK calls. */
     sessionDirectoryBySession: Map<string, string>;
+    /** `retryAfterMs` prevents one hook turn from spending both bounded metadata reads. commentlint: allow(JUDGE) */
+    sessionMetadataReadStateBySession: Map<string, SessionMetadataReadState>;
     /**
      * `internalChildSessions` holds the ids of hidden `eidnara-` child sessions;
      * the transform and system-prompt hooks exempt them from the Eidnara pipeline.
@@ -66,6 +78,7 @@ export function createLiveSessionState(): LiveSessionState {
         pendingMaterializationSessions: new Set<string>(),
         deferredMaterializationSessions: new Set<string>(),
         sessionDirectoryBySession: new Map<string, string>(),
+        sessionMetadataReadStateBySession: new Map(),
         internalChildSessions: new Set<string>(),
         subagentSessions: new Set<string>(),
     };

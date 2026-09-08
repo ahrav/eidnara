@@ -10,6 +10,7 @@ export interface NotificationParams {
     modelId?: string;
     /* */
     toastDurationMs?: number;
+    forcePersist?: boolean;
 }
 
 export type NotificationDeliveryDisposition = "sent" | "queued" | "skipped" | "failed";
@@ -167,7 +168,16 @@ async function sendIgnoredMessageNow(
     // Ignored messages are hidden from the LLM but are not `synthetic`, so OpenCode counts them as real user messages for title generation.
     // A notification persisted before title generation permanently suppresses that session's title generation.
     const { waitForSafeNotificationTarget } = await import("../../shared/safe-notification-target");
-    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") {
+    const target = await waitForSafeNotificationTarget(
+        client,
+        sessionId,
+        forcePersist ? { attempts: 1, delayMs: 0 } : undefined,
+    );
+    if (target === "skip") {
+        if (forcePersist) {
+            queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
+            return "queued";
+        }
         sessionLog(sessionId, "notification skipped (session not titled yet)");
         return "skipped";
     }
