@@ -34,4 +34,10 @@ describe("getEidnaraBuiltinCommands", () => {
             expect(command.description).not.toContain(UNAVAILABLE);
         }
     });
+
+    it("does not advertise a message range for /ctx-recomp", () => {
+        const description = getEidnaraBuiltinCommands(true)["ctx-recomp"]?.description ?? "";
+        expect(description).not.toContain("<start>-<end>");
+        expect(description).not.toMatch(/range/i);
+    });
 });
