@@ -1,0 +1,2 @@
+[test]
+preload = ["../opencode-plugin/test-preload.ts"]

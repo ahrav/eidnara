@@ -1,0 +1,751 @@
+/**
+ * The test environment uses separate config and data directories to avoid modifying the user's setup.
+ *
+ */
+
+import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { storageSubtreePath } from "@eidnara/opencode/shared/data-path";
+import {
+    credentialValueFormat,
+    isCredentialBearingConfigKey,
+    urlCredentialFinding,
+} from "@eidnara/opencode/shared/redaction";
+import { createDirectTestDatabase } from "@eidnara/opencode/features/context/test-database";
+import { initializeIsolatedContextDb as initializeContextDbFromRelease } from "../initialize-context-db";
+import { waitForChildExit } from "../process-exit";
+import { releaseRootPath, type VerifiedReleaseRoot } from "../prospective-holdout/release-root";
+import { isSensitiveEnvKey } from "../secret-env-keys";
+import {
+    buildDirectHostFixture,
+    detectRustModePrereqs,
+    HermeticHostStack,
+} from "../rust-runner/hermetic-host";
+
+const REPO_ROOT = resolve(import.meta.dir, "../../../..");
+// Use the bundle: loading `src/index.ts` can delay startup enough to exhaust readiness polling on slow CI.
+const PLUGIN_DIST_ENTRY = join(REPO_ROOT, "packages/plugin/dist/index.js");
+const PLUGIN_SRC_ENTRY = join(REPO_ROOT, "packages/plugin/src/index.ts");
+/**
+ *
+ * Resolve the entrypoint at spawn time so a bundle built after import is selected.
+ *
+ */
+export function pluginEntryPath(): string {
+    return existsSync(PLUGIN_DIST_ENTRY) ? PLUGIN_DIST_ENTRY : PLUGIN_SRC_ENTRY;
+}
+
+/** Exported for provenance: a caller recording which plugin bytes ran needs the
+ *  same bundle path this module loads, not a second copy of the join. */
+export const PLUGIN_BUNDLE_ENTRY = PLUGIN_DIST_ENTRY;
+export const PLUGIN_REPO_ROOT = REPO_ROOT;
+
+function initializeIsolatedContextDb(
+    dataDir: string,
+    releaseRoot?: VerifiedReleaseRoot,
+): void {
+    if (releaseRoot) {
+        initializeContextDbFromRelease(dataDir, releaseRoot);
+        return;
+    }
+    const path = join(storageSubtreePath(dataDir), "context.db");
+    if (existsSync(path)) return;
+    mkdirSync(dirname(path), { recursive: true });
+    createDirectTestDatabase({ path }).db.close();
+}
+
+export interface IsolatedEnv {
+    configDir: string;
+    dataDir: string;
+    cacheDir: string;
+    workdir: string;
+}
+
+/**
+ * `ServeHostname` permits only addresses reachable at `http://127.0.0.1:${port}`.
+ *
+ * Otherwise readiness polling times out because the fixed client URL cannot reach the listener.
+ * Adding another address requires deriving the client URL from it, including IPv6 brackets.
+ */
+export type ServeHostname = "0.0.0.0" | "127.0.0.1";
+
+export interface SpawnedOpencode {
+    url: string;
+    port: number;
+    env: IsolatedEnv;
+    kill: () => Promise<void>;
+    stdout: () => string;
+    stderr: () => string;
+    /** Direct host fixture provisioned for EIDNARA_E2E_MODE=rust. */
+    hostStack?: HermeticHostStack;
+}
+
+export interface SpawnOptions {
+    /* */
+    mockProviderURL: string;
+    /** Port for opencode serve. Default: random available */
+    port?: number;
+    /* */
+    eidnaraConfig?: Record<string, unknown>;
+    /** Extra opencode.json provider/model config, merged with defaults. */
+    openCodeConfigExtra?: Record<string, unknown>;
+    /** Override the mock model's context token limit. Default 200000. */
+    modelContextLimit?: number;
+    /** Reuse an isolated env so direct host starts before OpenCode and survives serve restarts. */
+    existingEnv?: IsolatedEnv;
+    /** User-tier host connection file used by Rust mode. */
+    userHostConnectionFile?: string;
+    /** `projectEidnaraConfig` is written to `<workdir>/.eidnara/eidnara.jsonc` when set. */
+    projectEidnaraConfig?: Record<string, unknown>;
+    /**
+     * extraEnv overrides inherited environment variables.
+     */
+    extraEnv?: Record<string, string>;
+    /**
+     * hostname defaults to "0.0.0.0".
+     * Bind to `0.0.0.0` so readiness polling can reach the server.
+     * The serve HTTP API is unauthenticated.
+     * Spawns with real child-environment credentials must use "127.0.0.1".
+     * Using "127.0.0.1" keeps the unauthenticated API off non-loopback interfaces.
+     */
+    hostname?: ServeHostname;
+    /**
+     * allowSecretEnvOffLoopback permits non-loopback serving only for fake fixture credentials.
+     */
+    allowSecretEnvOffLoopback?: boolean;
+    /** Omitting `releaseRoot` initializes `context.db` from the active checkout. */
+    releaseRoot?: VerifiedReleaseRoot;
+}
+
+/**
+ */
+async function pickFreePort(): Promise<number> {
+    const server = Bun.serve({ port: 0, fetch: () => new Response() });
+    const port: number = server.port ?? 0;
+    server.stop(true);
+    if (!port) throw new Error("could not allocate a free port");
+    return port;
+}
+
+/**
+ *
+ * The direct host needs dataDir before OpenCode starts to publish its connection file.
+ * Reusing the environment preserves opencode.db and context.db across serve restarts.
+ */
+export function createIsolatedEnv(): IsolatedEnv {
+    const unique = `opencode-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const base = join(tmpdir(), unique);
+    const configDir = join(base, "config");
+    const dataDir = join(base, "data");
+    const cacheDir = join(base, "cache");
+    const workdir = join(base, "work");
+    for (const d of [configDir, dataDir, cacheDir, workdir]) {
+        mkdirSync(d, { recursive: true });
+    }
+    return { configDir, dataDir, cacheDir, workdir };
+}
+
+/**
+ *
+ * - eidnara.jsonc: starts with small thresholds so tests trigger historian
+ */
+function writeConfigs(
+    env: IsolatedEnv,
+    mockProviderURL: string,
+    opts: SpawnOptions,
+): void {
+    const pluginEntry = opts.releaseRoot
+        ? releaseRootPath(opts.releaseRoot, "opencodePlugin")
+        : pluginEntryPath();
+    const pluginSpec = `file://${pluginEntry}`;
+    /** The component scan runs first so the diagnostic names where the credential is. The value rules match a vendor prefix anywhere in the string, so on a URL they would fire on a credential the component scan can attribute to a specific query key or path segment, and report only that the whole value matched. */
+    const urlFinding = urlCredentialFinding(mockProviderURL);
+    if (urlFinding !== null) {
+        throw new Error(
+            `mockProviderURL carries a ${urlFinding}; pass credentials through extraEnv`,
+        );
+    }
+    /** The URL is written verbatim as the generated provider's `baseURL`, so it reaches the same file the object channels are scanned for: URI userinfo — `https://token@host` — is a credential the guard refuses anywhere else, and one the component scan does not read. Checked here rather than at the spawn path so a direct caller cannot write one either. */
+    const urlFormat = credentialValueFormat(mockProviderURL);
+    if (urlFormat !== null) {
+        throw new Error(
+            `mockProviderURL is a ${urlFormat} value; pass credentials through extraEnv`,
+        );
+    }
+    /** Every caller-supplied config channel is written to disk beside the others, and all three are `Record<string, unknown>` — an easy mix-up — so each is guarded rather than only the one an unauthenticated serve reads. */
+    /** Snapshotted before the hooks below run, for the same reason `canonicalizeSpawnConfigs` snapshots it. */
+    const scannedEnv = opts.extraEnv === undefined ? undefined : { ...opts.extraEnv };
+    const extra =
+        canonicalConfig(opts.openCodeConfigExtra, "openCodeConfigExtra", scannedEnv) ?? {};
+    const eidnaraConfig = canonicalConfig(
+        opts.eidnaraConfig,
+        "eidnaraConfig",
+        scannedEnv,
+    );
+    const projectEidnaraConfig = canonicalConfig(
+        opts.projectEidnaraConfig,
+        "projectEidnaraConfig",
+        scannedEnv,
+    );
+    const contributedProviders = extra.provider;
+    const extraWithoutProvider = { ...extra };
+    delete extraWithoutProvider.provider;
+
+    const opencodeConfig: Record<string, unknown> = {
+        $schema: "https://opencode.ai/config.json",
+        plugin: [pluginSpec],
+        // `autoupdate: false` disables telemetry-style checks that make network requests.
+        autoupdate: false,
+        // OpenCode enables compaction by default; Eidnara disables its conflict detector when compaction is enabled.
+        // When compaction is enabled, Eidnara disables its conflict detector and the plugin does nothing.
+        compaction: { auto: false, prune: false },
+        provider: {
+            ...(contributedProviders &&
+                    typeof contributedProviders === "object" &&
+                    !Array.isArray(contributedProviders)
+                ? contributedProviders
+                : {}),
+            "mock-anthropic": {
+                api: "@ai-sdk/anthropic",
+                name: "Mock Anthropic",
+                npm: "@ai-sdk/anthropic",
+                env: [],
+                options: {
+                    apiKey: "test-key-not-real",
+                    baseURL: mockProviderURL,
+                },
+                models: {
+                    "mock-sonnet": {
+                        id: "mock-sonnet",
+                        name: "Mock Sonnet",
+                        cost: { input: 0, output: 0 },
+                        limit: { context: opts.modelContextLimit ?? 200000, output: 8192 },
+                        // The mock advertises image and PDF input so OpenCode preserves inline file parts.
+                        // OpenCode replaces inline file parts for unsupported inputs with text error messages.
+                        // The mock mirrors Sonnet's image and PDF input capabilities.
+                        modalities: {
+                            input: ["text", "image", "pdf"],
+                            output: ["text"],
+                        },
+                        options: {},
+                    },
+                },
+            },
+        },
+        ...extraWithoutProvider,
+    };
+
+    const eidnara: Record<string, unknown> = {
+        $schema:
+            "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json",
+        execute_threshold_percentage: 40,
+        history_budget_percentage: 0.15,
+        dreamer: { disable: true },
+        sidekick: { disable: true },
+        ...(eidnaraConfig ?? {}),
+    };
+    if (opts.userHostConnectionFile) {
+        Object.assign(eidnara, {
+            subc: { connection_file: opts.userHostConnectionFile },
+        });
+    }
+
+    writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2));
+
+    //
+    // The child environment sets XDG_CONFIG_HOME to env.configDir, so user configuration resolves under env.configDir/opencode.
+    const userConfigDir = join(env.configDir, "opencode");
+    mkdirSync(userConfigDir, { recursive: true });
+    writeFileSync(
+        join(userConfigDir, "eidnara.jsonc"),
+        JSON.stringify(eidnara, null, 2),
+    );
+
+    if (projectEidnaraConfig) {
+        const projectConfigDir = join(env.workdir, ".eidnara");
+        mkdirSync(projectConfigDir, { recursive: true });
+        writeFileSync(
+            join(projectConfigDir, "eidnara.jsonc"),
+            JSON.stringify(
+                {
+                    $schema:
+                        "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json",
+                    ...projectEidnaraConfig,
+                },
+                null,
+                2,
+            ),
+        );
+    }
+
+}
+
+/**
+ * Every decision that reads a caller-supplied config reads the same serialized value: `writeConfigs` persists it, and the provisioning path reads `compaction.auto` from it to decide whether to initialize the isolated database. Canonicalizing in only one of the two would let a `toJSON()` hook write one configuration and provision for another.
+ */
+function canonicalizeSpawnConfigs(opts: SpawnOptions): SpawnOptions {
+    /** Copied before any `toJSON()` runs, and returned so the child is given the same map that was validated: a hook that replaces `extraEnv` rather than mutating it would otherwise have its replacement forwarded while validation read the map it displaced. */
+    const extraEnv = opts.extraEnv === undefined ? undefined : { ...opts.extraEnv };
+    return {
+        ...opts,
+        extraEnv,
+        openCodeConfigExtra: canonicalConfig(
+            opts.openCodeConfigExtra,
+            "openCodeConfigExtra",
+            extraEnv,
+        ),
+        eidnaraConfig: canonicalConfig(
+            opts.eidnaraConfig,
+            "eidnaraConfig",
+            extraEnv,
+        ),
+        projectEidnaraConfig: canonicalConfig(
+            opts.projectEidnaraConfig,
+            "projectEidnaraConfig",
+            extraEnv,
+        ),
+    };
+}
+
+/**
+ * Serialize before validation so `toJSON()` transformations cannot bypass credential checks.
+ * Cyclic input causes `JSON.stringify` to throw before credential validation.
+ */
+function canonicalConfig(
+    value: Record<string, unknown> | undefined,
+    label: string,
+    extraEnv?: Record<string, string>,
+): Record<string, unknown> | undefined {
+    if (value === undefined) return undefined;
+    /** A spread copies own enumerable fields whatever `toJSON()` reported, so the scan and the write must read one representation; `writeConfigs` assembles every file from this return value. */
+    const serialized = JSON.parse(JSON.stringify(value)) as unknown;
+    /** A `toJSON()` returning a non-object leaves no fields to spread, and treating it as a config would write the scalar's own properties instead. */
+    if (serialized === null || typeof serialized !== "object" || Array.isArray(serialized)) {
+        throw new Error(`${label} must serialize to a JSON object`);
+    }
+    const canonical = serialized as Record<string, unknown>;
+    assertConfigHasNoCredentials(canonical, label, extraEnv);
+    return canonical;
+}
+
+/**
+ * The user config loader expands `{env:NAME}` before the plugin reads a value, and `embedding.api_key` is the schema's only channel for the remote embedding key, so a harness cannot deliver it through `extraEnv` alone.
+ * Anchored at both ends and restricted to an environment variable name, so a credential cannot ride along after the placeholder and an empty name is refused.
+ * The captured name is required to be sensitive by `isSensitiveEnvKey`, which keeps `extraEnv` the only channel that can deliver the resolved value and leaves `assertSecretsBoundToLoopback` covering it: `isInheritableEnvKey` drops ambient sensitive names, so an innocuously named variable would otherwise resolve a real credential inside a child whose unauthenticated server is off loopback.
+ */
+const ENV_PLACEHOLDER = /^\{env:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}$/;
+
+/**
+ * `assertConfigHasNoCredentials` refuses a credential-shaped key name and a value in a named
+ * credential format. Neither test reads a value into a diagnostic: a match is reported by
+ * format name, so a refusal never puts the secret in a log.
+ *
+ * A credential in no recognized format, under an innocuous name, still reaches
+ * `opencode.json` — `extraEnv` remains the only channel that is governed by shape rather
+ * than by recognition.
+ */
+function assertConfigHasNoCredentials(
+    value: unknown,
+    label: string,
+    extraEnv?: Record<string, string>,
+): void {
+    const seen = new WeakSet<object>();
+    const visit = (current: unknown, path: string): void => {
+        if (current === null || typeof current !== "object" || seen.has(current)) return;
+        seen.add(current);
+        for (const [key, child] of Object.entries(current)) {
+            const childPath = `${path}.${key}`;
+            /** The key is judged before anything about the value is considered, including the placeholder exemption below: that exemption is about what a *value* stands for and says nothing about the name it sits under, so letting it `continue` first meant a credential-bearing key was accepted whenever its value happened to be an approved placeholder — the same key with any other value being refused. The label omits the key, because the key is the credential. */
+            if (!Array.isArray(current)) {
+                const keyFormat = credentialValueFormat(key) ?? urlCredentialFinding(key);
+                if (keyFormat !== null) {
+                    throw new Error(
+                        `config contains a ${keyFormat} as a property name under ${path}; ` +
+                            "pass credentials through extraEnv",
+                    );
+                }
+            }
+            /** A placeholder is not a credential: what reaches disk is the token, and the value it stands for is resolved from the environment after the file is read. Checked before the key rule so a credential-shaped name can still carry one. */
+            const placeholder = typeof child === "string" ? ENV_PLACEHOLDER.exec(child) : null;
+            if (placeholder !== null) {
+                const name = placeholder[1] as string;
+                if (isSensitiveEnvKey(name)) continue;
+                /** A name the sensitive-key rule does not recognize is the case the exemption cannot cover by name alone: `substituteConfigVariables` expands every `{env:NAME}` without consulting that rule, and `isInheritableEnvKey` only strips names it recognizes, so an ambient variable holding a real token under an innocuous label would resolve into the written config. The resolved value is read here so the shape rules judge what the placeholder will become. */
+                /** `extraEnv` is what the child is actually given and it overrides the ambient value, so reading `process.env` alone judged a variable the child will never see. The forwarded value is consulted first for that reason. */
+                const resolvedFormat = credentialValueFormat(
+                    extraEnv?.[name] ?? process.env[name] ?? "",
+                );
+                if (resolvedFormat !== null) {
+                    throw new Error(
+                        `config references ${name} at ${childPath}, which holds a ` +
+                            `${resolvedFormat} value; rename it so it is recognized as ` +
+                            "sensitive, or pass it through extraEnv",
+                    );
+                }
+                /** No `continue`: an unrecognized name falls through to the rules below, where the credential-bearing-key rule is what refuses it. Only a name the sensitive-key rule recognizes is an approved channel. */
+            }
+            if (!Array.isArray(current) && isCredentialBearingConfigKey(key)) {
+                throw new Error(
+                    `config contains credential-shaped key: ${childPath}; ` +
+                        "pass credentials through extraEnv",
+                );
+            }
+            if (typeof child === "string") {
+                /** A config value can be a URL as easily as the harness's own can, and a deep-merged live provider's `baseURL` is exactly that: a signed URL's signature is recognized by parameter name, which no value rule reads. Run first for the same reason as above — it names the component. */
+                const urlValueFinding = urlCredentialFinding(child);
+                if (urlValueFinding !== null) {
+                    throw new Error(
+                        `config contains a ${urlValueFinding} at ${childPath}; ` +
+                            "pass credentials through extraEnv",
+                    );
+                }
+                const format = credentialValueFormat(child);
+                if (format !== null) {
+                    throw new Error(
+                        `config contains a ${format} value at ${childPath}; ` +
+                            "pass credentials through extraEnv",
+                    );
+                }
+            }
+            visit(child, childPath);
+        }
+    };
+    visit(value, label);
+}
+
+/**
+ *
+ * Bun limits fetch to about five minutes even when AbortSignal.timeout is longer; bound each attempt so retries can honor the overall deadline.
+ * Each fetch attempt uses a timeout so a hung fetch cannot consume the overall retry deadline.
+ */
+// OpenCode readiness allows up to 300 seconds for first-run initialization in CI.
+// GitHub-hosted runners can delay OpenCode readiness while the server initializes plugins and first-run state.
+// OpenCode can perform a one-time SQLite migration when CI uses a fresh XDG_DATA_HOME.
+async function waitForReady(
+    url: string,
+    timeoutMs = 300_000,
+    cancellation?: AbortSignal,
+): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const FETCH_TIMEOUT_MS = 2_000;
+    let lastFetchErr: unknown = null;
+    let fetchAttempts = 0;
+
+    while (Date.now() < deadline) {
+        if (cancellation?.aborted) throw new Error("opencode readiness cancelled");
+        try {
+            fetchAttempts++;
+            const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+            const res = await fetch(`${url}/doc`, {
+                method: "GET",
+                signal: cancellation ? AbortSignal.any([timeout, cancellation]) : timeout,
+            });
+            if (res.ok || res.status === 404 || res.status === 401) {
+                // A 2xx, 401, or 404 response confirms that the server is reachable.
+                return;
+            }
+        } catch (err) {
+            if (cancellation?.aborted) throw new Error("opencode readiness cancelled");
+            lastFetchErr = err;
+        }
+        await Bun.sleep(200);
+    }
+    throw new Error(
+        `opencode serve did not become ready in ${timeoutMs}ms.\n` +
+            `  url=${url}/doc\n` +
+            `  fetchAttempts=${fetchAttempts}\n` +
+            `  fetchLastErr=${String(lastFetchErr)}`,
+    );
+}
+
+interface RustSpawnResources {
+    env: IsolatedEnv;
+    connectionFile: string;
+    host: HermeticHostStack;
+}
+
+/**
+ * The readiness wait rejects when the child fails to spawn or exits before readiness.
+ * A child can start and then die without emitting `error`; handling `exit` prevents the startup race from waiting for its timeout.
+ */
+function rejectOnSpawnError(child: ChildProcess, cancellation?: AbortSignal): Promise<never> {
+    return new Promise((_, rejectSpawn) => {
+        const detach = (): void => {
+            child.off("error", onError);
+            child.off("exit", onExit);
+        };
+        const onError = (error: Error): void => {
+            detach();
+            cancellation?.removeEventListener("abort", onAbort);
+            rejectSpawn(error);
+        };
+        const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+            detach();
+            cancellation?.removeEventListener("abort", onAbort);
+            rejectSpawn(
+                new Error(
+                    `opencode serve exited before readiness (code=${code}, signal=${signal})`,
+                ),
+            );
+        };
+        const onAbort = (): void => {
+            detach();
+        };
+        if (cancellation?.aborted) return;
+        child.once("error", onError);
+        child.once("exit", onExit);
+        cancellation?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+async function stopChild(child: ChildProcess, timeoutMs = 3_000): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
+
+    const exitedAfterTerm = waitForChildExit(child, timeoutMs);
+    child.kill("SIGTERM");
+    if (await exitedAfterTerm) return;
+
+    const exitedAfterKill = waitForChildExit(child, timeoutMs);
+    child.kill("SIGKILL");
+    if (!(await exitedAfterKill)) {
+        throw new Error("opencode serve did not exit after SIGKILL");
+    }
+}
+
+/** The direct host is provisioned before OpenCode so OpenCode can publish its connection file. */
+async function provisionRustMode(releaseRoot?: VerifiedReleaseRoot): Promise<RustSpawnResources> {
+    const prereqs = detectRustModePrereqs(releaseRoot);
+    if (!prereqs.ok) {
+        throw new Error(
+            `EIDNARA_E2E_MODE=rust prerequisite failure: ${prereqs.skipReason ?? "unknown prerequisite"}`,
+        );
+    }
+    const fixtureBin = await buildDirectHostFixture(releaseRoot);
+    const env = createIsolatedEnv();
+    try {
+        const host = await HermeticHostStack.start({ dataDir: env.dataDir, fixtureBin });
+        return { env, connectionFile: host.connectionFile, host };
+    } catch (error) {
+        // A surviving `dataDir` records failed teardown because it contains the leaked fixture's PID file.
+        // The next run uses the leaked fixture's PID file as its only handle on that process.
+        // Preserving `dataDir` lets the next run reclaim the leaked process from its PID file.
+        if (!existsSync(env.dataDir)) {
+            try {
+                rmSync(dirname(env.dataDir), { recursive: true, force: true });
+            } catch {
+                // Preserving a leaked `dataDir` does not mask the startup failure.
+            }
+        }
+        throw new Error(
+            `EIDNARA_E2E_MODE=rust failed to start direct host fixture: ${String(error)}`,
+        );
+    }
+}
+
+/**
+ *
+ * The explicit environment list prevents the child from inheriting runner variables.
+ * port.
+ */
+function isInheritableEnvKey(key: string): boolean {
+    // Tests run unsecured on a random localhost port; inherited auth would require Basic headers that SDK requests do not set.
+    if (key === "OPENCODE_SERVER_PASSWORD" || key === "OPENCODE_SERVER_USERNAME") return false;
+    // Exclude `NODE_ENV` because Bun sets it to `test`, which silences the plugin logger.
+    // Exclude `NODE_ENV` so the subprocess writes diagnostic logs.
+    if (key === "NODE_ENV") return false;
+    // The harness clears `EIDNARA_MODULE_ID` and `EIDNARA_LAUNCH_NONCE` because an inherited supervisor identity makes the plugin send a nonce the hermetic host rejects.
+    // The hermetic host rejects an inherited supervisor identity whose nonce does not match a supervised launch.
+    if (key === "EIDNARA_MODULE_ID" || key === "EIDNARA_LAUNCH_NONCE") return false;
+    // Ambient secrets are never forwarded.
+    // Ambient secrets would be exposed through the unauthenticated API to any process that reaches the port.
+    // The child uses the mock provider; credentialed spawns pass credentials through `extraEnv`.
+    // Dropping ambient secrets leaves `extraEnv` as the only caller-secret channel, so `assertSecretsBoundToLoopback` covers all caller secrets.
+    if (isSensitiveEnvKey(key)) return false;
+    return true;
+}
+
+/**
+ * The spawn path rejects caller-supplied secrets on non-loopback interfaces.
+ *
+ * The spawned environment's default `ANTHROPIC_API_KEY` is a fixture value.
+ * Checking the assembled environment would reject every default spawn because it contains the fake `ANTHROPIC_API_KEY`.
+ *
+ * `assertSecretsBoundToLoopback` does not inspect credentials embedded in `openCodeConfigExtra`.
+ * `writeConfigs` applies `assertConfigHasNoCredentials` to that channel instead.
+ *
+ * `Pick<SpawnOptions>` permits forwarding `extraEnv` without `hostname`.
+ * Omitting `hostname` uses the all-interfaces default.
+ * `extraEnv` secrets reach the unauthenticated serve API when `hostname` falls back to `0.0.0.0`.
+ *
+ * `assertSecretsBoundToLoopback` runs before provisioning to avoid creating Rust resources for rejected spawns.
+ * `isSensitiveEnvKey` matches names because fake credentials cannot be distinguished from real credentials by value.
+ * `allowSecretEnvOffLoopback` permits explicitly waived sensitive environment variables off loopback.
+ * `assertSafeExtraEnv` rejects sensitive environment variables with the same predicate.
+ */
+function assertSecretsBoundToLoopback(
+    resolvedOpts: SpawnOptions,
+    hostname: ServeHostname,
+): void {
+    if (hostname === "127.0.0.1" || resolvedOpts.allowSecretEnvOffLoopback) return;
+    const secretKeys = Object.keys(resolvedOpts.extraEnv ?? {}).filter(isSensitiveEnvKey);
+    if (secretKeys.length === 0) return;
+    throw new Error(
+        `refusing to bind the unauthenticated serve API to ${hostname} while extraEnv carries ` +
+            `${secretKeys.join(", ")}. Pass hostname: "127.0.0.1" to keep the API on loopback, ` +
+            `or allowSecretEnvOffLoopback: true if the value is a fake fixture credential.`,
+    );
+}
+
+async function spawnOpencodeWithProvision(
+    opts: SpawnOptions,
+    provision: () => Promise<RustSpawnResources>,
+): Promise<SpawnedOpencode> {
+    const hostname = opts.hostname ?? "0.0.0.0";
+    assertSecretsBoundToLoopback(opts, hostname);
+    /** Canonicalized and scanned before provisioning, for the same reason the loopback gate runs first: a rejected spawn must not have created a hermetic Rust stack to tear down. `canonicalizeSpawnConfigs` snapshots `extraEnv` ahead of any `toJSON()` and returns that snapshot, so the map the scan read is the map the child is given — re-reading `opts.extraEnv` later would forward whatever a hook left behind, and a hook that replaces the map is never seen by the scan at all. A hook serializes config; it does not get a say in the child's environment. */
+    const canonicalOpts: SpawnOptions = canonicalizeSpawnConfigs(opts);
+    /** The gate reads both maps merged. A hook cannot reach the child, but adding a sensitive name is still an attempt worth refusing rather than silently dropping, and this gate is the one that reads the hostname. */
+    assertSecretsBoundToLoopback({
+        ...canonicalOpts,
+        extraEnv: { ...(canonicalOpts.extraEnv ?? {}), ...(opts.extraEnv ?? {}) },
+    }, hostname);
+
+    // `EIDNARA_E2E_MODE` is evaluated at this shared spawn path so Rust suites share provisioning behavior.
+    const rustMode = process.env.EIDNARA_E2E_MODE === "rust";
+    const resources = rustMode && !opts.userHostConnectionFile ? await provision() : null;
+
+    let child: ChildProcess | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const cleanup = (): Promise<void> => {
+        cleanupPromise ??= (async () => {
+            let cleanupError: unknown;
+            if (child) {
+                try {
+                    await stopChild(child);
+                } catch (error) {
+                    cleanupError = error;
+                }
+            }
+            try {
+                await resources?.host.stop();
+            } catch (error) {
+                cleanupError ??= error;
+            }
+            if (cleanupError !== undefined) throw cleanupError;
+        })();
+        return cleanupPromise;
+    };
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    try {
+        const resolvedOpts: SpawnOptions = resources
+            ? {
+                  ...canonicalOpts,
+                  existingEnv: resources.env,
+                  userHostConnectionFile: resources.connectionFile,
+                  projectEidnaraConfig: {
+                      ...(canonicalOpts.projectEidnaraConfig ?? {}),
+                      transform_mode: "rust",
+                  },
+              }
+            : canonicalOpts;
+
+        const env = resolvedOpts.existingEnv ?? createIsolatedEnv();
+        const port = resolvedOpts.port ?? (await pickFreePort());
+
+        const compaction = resolvedOpts.openCodeConfigExtra?.compaction as
+            | { auto?: unknown }
+            | undefined;
+        if (compaction?.auto !== true) initializeIsolatedContextDb(env.dataDir, resolvedOpts.releaseRoot);
+        writeConfigs(env, resolvedOpts.mockProviderURL, resolvedOpts);
+
+        const childEnv: Record<string, string> = {};
+        for (const [key, value] of Object.entries(process.env)) {
+            if (value === undefined) continue;
+            if (!isInheritableEnvKey(key)) continue;
+            childEnv[key] = value;
+        }
+        childEnv.OPENCODE_CONFIG_DIR = env.configDir;
+        childEnv.XDG_CONFIG_HOME = env.configDir;
+        childEnv.XDG_DATA_HOME = env.dataDir;
+        childEnv.XDG_CACHE_HOME = env.cacheDir;
+        childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
+        for (const [key, value] of Object.entries(resolvedOpts.extraEnv ?? {})) {
+            childEnv[key] = value;
+        }
+
+        // Sensitive `extraEnv` requires `hostname: "127.0.0.1"` unless `allowSecretEnvOffLoopback` is true.
+        child = spawn(
+            "opencode",
+            [
+                "serve",
+                "--port",
+                String(port),
+                "--hostname",
+                hostname,
+            ],
+            {
+                cwd: env.workdir,
+                env: childEnv,
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        );
+
+        child.stdout?.on("data", (chunk: Buffer) => {
+            stdoutBuf += chunk.toString();
+        });
+        child.stderr?.on("data", (chunk: Buffer) => {
+            stderrBuf += chunk.toString();
+        });
+
+        const url = `http://127.0.0.1:${port}`;
+        const startup = new AbortController();
+        try {
+            await Promise.race([
+                waitForReady(url, 300_000, startup.signal),
+                rejectOnSpawnError(child, startup.signal),
+            ]);
+        } finally {
+            startup.abort();
+        }
+
+        return {
+            url,
+            port,
+            env,
+            stdout: () => stdoutBuf,
+            stderr: () => stderrBuf,
+            hostStack: resources?.host,
+            kill: cleanup,
+        };
+    } catch (error) {
+        let cleanupError: unknown;
+        try {
+            await cleanup();
+        } catch (failure) {
+            cleanupError = failure;
+        }
+        throw new Error(
+            `opencode serve failed to start.\n--- stdout ---\n${stdoutBuf}\n--- stderr ---\n${stderrBuf}\n\n${String(error)}` +
+                (cleanupError === undefined ? "" : `\ncleanup failed: ${String(cleanupError)}`),
+        );
+    }
+}
+
+export function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode> {
+    return spawnOpencodeWithProvision(opts, () => provisionRustMode(opts.releaseRoot));
+}
+
+export const __spawnOpencodeTest = {
+    assertSecretsBoundToLoopback,
+    canonicalizeSpawnConfigs,
+    isInheritableEnvKey,
+    initializeIsolatedContextDb,
+    rejectOnSpawnError,
+    stopChild,
+    spawnOpencodeWithProvision,
+    writeConfigs,
+};
