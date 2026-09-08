@@ -1,4 +1,4 @@
-import { resolveModelConfigOrDefault } from "../shared/prompt-surface";
+import { modelKeyLookupOrder } from "../shared/prompt-surface";
 import {
     DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
     MAX_EXECUTE_THRESHOLD_PERCENTAGE,
@@ -236,11 +236,14 @@ function resolveTrustedThreshold<T extends number | undefined>(
     if (exact !== undefined) return exact;
 
     if (projectKey.includes("/")) {
-        return resolveModelConfigOrDefault<T | number>(
-            Object.fromEntries(base.overrides),
-            projectKey,
-            base.defaultValue,
-        );
+        const isWildcard = projectKey.endsWith("/*");
+        for (const candidate of modelKeyLookupOrder(projectKey)) {
+            // Skip the bare `*` candidate for provider wildcards: it is never a real model ID.
+            if (isWildcard && candidate.source === "bare") continue;
+            const value = base.overrides.get(candidate.key);
+            if (value !== undefined) return value;
+        }
+        return base.defaultValue;
     }
 
     let effective: T | number = base.defaultValue;
@@ -488,12 +491,7 @@ export function constrainProjectThresholdOverrides(args: {
         if (isValidPercentageThreshold(projectValue)) {
             constrained.defaultValue = Math.max(basePercentage.defaultValue, projectValue);
             for (const [modelKey, threshold] of basePercentage.overrides) {
-                const raisedThreshold = Math.max(threshold, projectValue);
-                if (raisedThreshold === constrained.defaultValue) {
-                    constrained.overrides.delete(modelKey);
-                } else {
-                    constrained.overrides.set(modelKey, raisedThreshold);
-                }
+                constrained.overrides.set(modelKey, Math.max(threshold, projectValue));
             }
             if (percentageThresholdsEqual(constrained, basePercentage)) {
                 warnings.push(
@@ -537,11 +535,7 @@ export function constrainProjectThresholdOverrides(args: {
                 }
                 const baseValue = resolveTrustedThreshold(basePercentage, modelKey);
                 if (rawValue > baseValue) {
-                    if (rawValue === constrained.defaultValue) {
-                        constrained.overrides.delete(modelKey);
-                    } else {
-                        constrained.overrides.set(modelKey, rawValue);
-                    }
+                    constrained.overrides.set(modelKey, rawValue);
                 } else {
                     warnings.push(
                         makeProjectThresholdWarning(
@@ -617,11 +611,7 @@ export function constrainProjectThresholdOverrides(args: {
                     continue;
                 }
                 if (rawValue > baseValue) {
-                    if (rawValue === constrained.defaultValue) {
-                        constrained.overrides.delete(modelKey);
-                    } else {
-                        constrained.overrides.set(modelKey, rawValue);
-                    }
+                    constrained.overrides.set(modelKey, rawValue);
                 } else {
                     warnings.push(
                         makeProjectThresholdWarning(

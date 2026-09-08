@@ -546,6 +546,78 @@ describe("constrainProjectThresholdOverrides", () => {
         expect(warnings).toHaveLength(0);
     });
 
+    it("keeps a per-model raise that equals the raised default so a lower trusted key is not exposed", () => {
+        const trusted = { default: 65, "gpt-4": 70 };
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { default: 80, "gpt-4": 70, "openai/gpt-4": 80 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { default: 80, "openai/gpt-4": 80 } },
+            trustedBaseConfig: { execute_threshold_percentage: trusted },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toEqual({
+            default: 80,
+            "gpt-4": 70,
+            "openai/gpt-4": 80,
+        });
+        expect(warnings).toHaveLength(0);
+
+        const tokens: Record<string, unknown> = {
+            execute_threshold_tokens: { default: 30_000, "gpt-4": 20_000, "openai/gpt-4": 30_000 },
+        };
+        constrainProjectThresholdOverrides({
+            mergedRaw: tokens,
+            projectRaw: { execute_threshold_tokens: { default: 30_000, "openai/gpt-4": 30_000 } },
+            trustedBaseConfig: { execute_threshold_tokens: { default: 10_000, "gpt-4": 20_000 } },
+        });
+        expect(tokens.execute_threshold_tokens).toEqual({
+            default: 30_000,
+            "gpt-4": 20_000,
+            "openai/gpt-4": 30_000,
+        });
+    });
+
+    it("compares a project provider wildcard with the trusted wildcard or default, not a bare *", () => {
+        const trusted = { default: 80, "*": 70 };
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { ...trusted, "openai/*": 75 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { "openai/*": 75 } },
+            trustedBaseConfig: { execute_threshold_percentage: trusted },
+        });
+        expect(mergedRaw.execute_threshold_percentage).toEqual(trusted);
+        expect(warnings).toEqual([
+            expect.stringContaining("execute_threshold_percentage.openai/*"),
+        ]);
+
+        const withWildcard = { default: 65, "openai/*": 70 };
+        const raised: Record<string, unknown> = {
+            execute_threshold_percentage: { ...withWildcard, "openai/*": 75 },
+        };
+        const raisedWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: raised,
+            projectRaw: { execute_threshold_percentage: { "openai/*": 75 } },
+            trustedBaseConfig: { execute_threshold_percentage: withWildcard },
+        });
+        expect(raised.execute_threshold_percentage).toEqual({ default: 65, "openai/*": 75 });
+        expect(raisedWarnings).toHaveLength(0);
+
+        const tokens: Record<string, unknown> = {
+            execute_threshold_tokens: { "*": 20_000, "openai/*": 30_000 },
+        };
+        const tokenWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: tokens,
+            projectRaw: { execute_threshold_tokens: { "openai/*": 30_000 } },
+            trustedBaseConfig: { execute_threshold_tokens: { "*": 20_000 } },
+        });
+        expect(tokens.execute_threshold_tokens).toEqual({ "*": 20_000 });
+        expect(tokenWarnings[0]).toContain("cannot introduce");
+    });
+
     it("preserves a trusted __proto__ model key when serializing the merged thresholds", () => {
         const trustedPercentage = JSON.parse('{"default":65,"__proto__":90}') as Record<
             string,
