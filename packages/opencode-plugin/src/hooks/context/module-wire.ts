@@ -154,9 +154,9 @@ function transformPageDigest(arrays: Record<string, unknown[]>): string {
 }
 
 function getMessageId(message: MessageLike): string | null {
-    return typeof message.info.id === "string" && message.info.id.length > 0
-        ? message.info.id
-        : null;
+    if (typeof message.info.id === "string" && message.info.id.length > 0) return message.info.id;
+    const topLevel = (message as { id?: unknown }).id;
+    return typeof topLevel === "string" && topLevel.length > 0 ? topLevel : null;
 }
 
 /** An explicit absolute ordinal the daemon reads with `Value::as_u64`; zero is a valid value. */
@@ -209,6 +209,17 @@ function mediaBlockFromPart(part: Record<string, unknown>): Record<string, unkno
         ...(filename !== undefined ? { filename } : {}),
         source,
     };
+}
+
+function messageCreatedAtMs(info: Record<string, unknown>): number | undefined {
+    const time = info.time;
+    if (time !== null && typeof time === "object") {
+        const created = (time as Record<string, unknown>).created;
+        if (typeof created === "number") return created;
+    }
+    if (typeof info.time_created === "number") return info.time_created;
+    if (typeof info.timeCreated === "number") return info.timeCreated;
+    return undefined;
 }
 
 /** The daemon's `opaque_block` source for OpenCode-origin blocks. */
@@ -869,7 +880,18 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
         const synthetic = isSyntheticMessageParts(parts);
         const content: Record<string, unknown>[] = [];
         for (const [partIndex, partValue] of parts.entries()) {
-            if (partValue === null || typeof partValue !== "object") continue;
+            if (partValue === null || typeof partValue !== "object") {
+                // The daemon types a non-object part as `unknown` and keeps its value as an opaque block.
+                content.push({
+                    kind: {
+                        type: "opaque",
+                        source: OPAQUE_SOURCE,
+                        kind: "unknown",
+                        raw: partValue,
+                    },
+                });
+                continue;
+            }
             const part = partValue as Record<string, unknown>;
             const type = typeof part.type === "string" ? part.type : "unknown";
             if (type === "text" && part.ignored !== true) {
@@ -1002,6 +1024,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
             }
         }
         const origin = opencodeOrigin(info) ?? (info === raw ? undefined : opencodeOrigin(raw));
+        const createdAtMs = messageCreatedAtMs(info);
         return {
             mid: id,
             ordinal,
@@ -1016,11 +1039,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                     summary: info.summary === true,
                     errored: info.error !== undefined && info.error !== null,
                     ...(typeof info.finish === "string" ? { finish: info.finish } : {}),
-                    ...(typeof info.time_created === "number"
-                        ? { created_at_ms: info.time_created }
-                        : typeof info.timeCreated === "number"
-                          ? { created_at_ms: info.timeCreated }
-                          : {}),
+                    ...(createdAtMs !== undefined ? { created_at_ms: createdAtMs } : {}),
                 },
             },
         };

@@ -41,6 +41,56 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
     });
 
+    it("keeps non-object parts as unknown opaque blocks", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_primitive_parts", role: "user" },
+                parts: ["stray", 7, null, { type: "text", text: "real" }],
+            },
+        ]);
+        expect(encoded.ck.content).toEqual([
+            {
+                kind: {
+                    type: "opaque",
+                    source: { type: "harness", harness: "opencode" },
+                    kind: "unknown",
+                    raw: "stray",
+                },
+            },
+            {
+                kind: {
+                    type: "opaque",
+                    source: { type: "harness", harness: "opencode" },
+                    kind: "unknown",
+                    raw: 7,
+                },
+            },
+            {
+                kind: {
+                    type: "opaque",
+                    source: { type: "harness", harness: "opencode" },
+                    kind: "unknown",
+                    raw: null,
+                },
+            },
+            { kind: { type: "text", text: "real" } },
+        ]);
+    });
+
+    it("reads the nested creation timestamp before the flat aliases", () => {
+        const [nested, flat, none] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "t1", role: "user", time: { created: 1700000000000, completed: 1 } },
+                parts: [],
+            },
+            { info: { id: "t2", role: "user", time_created: 5 }, parts: [] },
+            { info: { id: "t3", role: "user" }, parts: [] },
+        ]);
+        expect((nested.ck.meta as { created_at_ms?: number }).created_at_ms).toBe(1700000000000);
+        expect((flat.ck.meta as { created_at_ms?: number }).created_at_ms).toBe(5);
+        expect(none.ck.meta).not.toHaveProperty("created_at_ms");
+    });
+
     it("preserves an explicitly empty reasoning signature", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
@@ -702,6 +752,41 @@ describe("transform page digest canonical JSON", () => {
         );
         const sorted = [...keys].sort();
         expect(sorted.indexOf("\u{1F600}")).toBeLessThan(sorted.indexOf("\uE000"));
+    });
+});
+
+describe("resolveOrdinalsForModule message identity", () => {
+    it("resolves a message whose id is only at the top level", async () => {
+        const sessionId = "module-wire-top-level-id";
+        const unregister = setRawMessageProvider(sessionId, {
+            readMessages: () => [],
+            readMessageOrdinalPage: () => [],
+            getStoredMessageCount: () => 1,
+        });
+        try {
+            const resolved = await resolveOrdinalsForModule({
+                sessionId,
+                messages: [
+                    { info: { role: "user", sessionID: sessionId }, id: "m-1", parts: [] },
+                ] as unknown as MessageLike[],
+                memo: {
+                    generation: 1,
+                    memoGeneration: 1,
+                    entries: new Map([["m-1", 1]]),
+                    anchor: { timeCreated: 1, id: "m-1" },
+                    storedCount: 1,
+                    canonicalCount: 1,
+                },
+            });
+            expect(resolved.ok).toBe(true);
+            if (!resolved.ok) throw new Error(resolved.reason);
+            expect(encodeOpenCodeMessagesToCk(resolved.annotatedInput)[0]).toMatchObject({
+                mid: "m-1",
+                ordinal: 1,
+            });
+        } finally {
+            unregister();
+        }
     });
 });
 
