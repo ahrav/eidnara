@@ -1,4 +1,7 @@
-import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import {
+    COMPACTION_ENABLED_PATH,
+    isCompactionEnabled,
+} from "@eidnara/opencode/config/agent-disable";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { readJsoncLenient } from "./jsonc-config";
 
@@ -31,6 +34,15 @@ export function projectModeOverrides(projectConfigPath: string, shared: EidnaraM
     const overrides: string[] = [];
     if (typeof project.enabled === "boolean" && project.enabled !== shared.enabled) {
         overrides.push(`enabled: ${project.enabled}`);
+    }
+    // The value is read only through `isCompactionEnabled`; the `in` check detects an explicit project setting.
+    if (isRecord(project.compaction) && "enabled" in project.compaction) {
+        const projectCompaction = isCompactionEnabled({
+            compaction: project.compaction as { enabled?: boolean },
+        });
+        if (projectCompaction !== shared.compactionEnabled) {
+            overrides.push(`${COMPACTION_ENABLED_PATH}: ${projectCompaction}`);
+        }
     }
     const memory = isRecord(project.memory) ? project.memory.enabled : undefined;
     if (typeof memory === "boolean" && memory !== shared.memoryEnabled) {

@@ -343,23 +343,23 @@ export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
  * `detectConflicts` and `fixConflicts` skip unparseable files, so these repair targets are checked before any write. commentlint: allow(JUDGE)
  * Only the effective member of each project `.jsonc`/`.json` pair is listed,
  * matching the file OpenCode loads, so a stale shadowed sibling cannot block setup.
- * OMO files count only when the fixer can reach them: an OMO plugin entry
- * drives the conflict pass, and the first-time branch edits the user OMO config.
+ * OMO files count only when a conflict repair can reach them; the caller
+ * decides that from the enabled mode, the OMO plugin entry, and the
+ * first-time branch.
  */
 export function preflightConfigPaths(
     paths: ConfigPaths,
     directory: string,
-    options: { firstTimeOmoRepair: boolean },
+    options: { omoRepairReachable: boolean },
 ): string[] {
     const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
-    const omoReachable = hasOmoPlugin(directory) || options.firstTimeOmoRepair;
     return [
         paths.opencodeConfig,
         paths.eidnaraConfig,
         paths.tuiConfig,
         existsSync(dotOcJsonc) ? dotOcJsonc : dotOcJson,
         existsSync(rootJsonc) ? rootJsonc : rootJson,
-        ...(omoReachable ? collectOmoConfigPaths(directory) : []),
+        ...(options.omoRepairReachable ? collectOmoConfigPaths(directory) : []),
     ];
 }
 
@@ -443,11 +443,12 @@ export async function runSetup(dryRun = false): Promise<number> {
     const compactionEnabled = modes.compactionEnabled;
     const omoConfigs = collectOmoConfigPaths(process.cwd());
     const firstTimeOmoRepair = modes.enabled && omoConfigs.length > 0 && !hadExistingSetup;
+    const omoRepairReachable = modes.enabled && (hasOmoPlugin(process.cwd()) || firstTimeOmoRepair);
 
     // The preflight is read-only, so a dry run performs it too and predicts the refusal a real run would make.
     try {
         assertJsoncConfigsParseable(
-            preflightConfigPaths(paths, process.cwd(), { firstTimeOmoRepair }),
+            preflightConfigPaths(paths, process.cwd(), { omoRepairReachable }),
         );
         assertPluginListShape([paths.opencodeConfig, paths.tuiConfig]);
     } catch (error) {
