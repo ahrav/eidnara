@@ -70,6 +70,8 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     { prefix: "github-copilot/claude-haiku-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
     // For gpt-5.x, `o200k_base` matches system prompts, but overcounts tools by ~16%.
     { prefix: "openai/gpt-5", systemRatio: 1.0, toolsRatio: 0.84 },
+    { prefix: "openrouter/openai/gpt-5", systemRatio: 1.0, toolsRatio: 0.84 },
+    { prefix: "github-copilot/gpt-5", systemRatio: 1.0, toolsRatio: 0.84 },
     // xAI Grok — ai-tokenizer overcounts (uses p50k_base which doesn't match Grok exactly).
     { prefix: "xai/grok-4", systemRatio: 0.82, toolsRatio: 0.88 },
     { prefix: "xai/grok-code-fast", systemRatio: 0.82, toolsRatio: 0.89 },

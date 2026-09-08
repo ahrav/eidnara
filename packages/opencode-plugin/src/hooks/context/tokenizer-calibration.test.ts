@@ -49,6 +49,18 @@ describe("resolveModelCalibration", () => {
         }
     });
 
+    it("mirrors the GPT-5.x direct-provider ratios for OpenRouter and GitHub Copilot aliases", () => {
+        for (const model of ["gpt-5.4", "gpt-5.3-codex", "gpt-5.5"]) {
+            const direct = resolveModelCalibration("openai", model);
+            for (const provider of ["openrouter/openai", "github-copilot"]) {
+                const routed = resolveModelCalibration(provider, model);
+                expect(routed.systemRatio).toBe(direct.systemRatio);
+                expect(routed.toolsRatio).toBe(direct.toolsRatio);
+                expect(routed.toolsRatio).not.toBe(NEUTRAL.toolsRatio);
+            }
+        }
+    });
+
     it("is case-insensitive", () => {
         const lower = resolveModelCalibration("anthropic", "claude-opus-4-7");
         const upper = resolveModelCalibration("Anthropic", "Claude-Opus-4-7");
