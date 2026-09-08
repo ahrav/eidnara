@@ -95,14 +95,15 @@ export class PiTestHarness {
             requireSuccessfulResponse(promptResponse);
             const agentEndEvent = await agentEnd;
             const state = await this.getState();
+            const status = this.rpc.processStatus();
             return {
                 sessionId: typeof state.sessionId === "string" ? state.sessionId : null,
                 assistantText: finalAssistantText(agentEndEvent),
                 events: events as Array<Record<string, unknown>>,
                 stdout: events.map((event) => JSON.stringify(event)).join("\n"),
                 stderr: this.rpc.getStderr(),
-                exitCode: null,
-                signalCode: null,
+                exitCode: status.exitCode,
+                signalCode: status.signalCode,
             };
         } catch (error) {
             void agentEnd.catch(() => undefined);

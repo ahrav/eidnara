@@ -38,6 +38,7 @@ describe.skipIf(!piPrereqs.ok)("pi smoke", () => {
 
         const turn = await h.sendPrompt("hello from pi smoke", { timeoutMs: 60_000 });
         expect(turn.exitCode).toBeNull();
+        expect(turn.signalCode).toBeNull();
         expect(turn.stderr).not.toContain("Failed to load extension");
         expect(turn.sessionId).toBeTruthy();
         expect(turn.assistantText).toBe("pi smoke ok");

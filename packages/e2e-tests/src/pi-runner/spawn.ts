@@ -140,6 +140,7 @@ export interface PiRunResult {
     events: Array<Record<string, unknown>>;
     stdout: string;
     stderr: string;
+    /** The child's status when the turn's result was assembled; both `null` means Pi was still running. */
     exitCode: number | null;
     signalCode: NodeJS.Signals | null;
 }

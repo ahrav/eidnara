@@ -326,6 +326,14 @@ export class PiRpcClient {
         return this.stderr;
     }
 
+    /** Both fields are `null` while the child is alive; either one is set once it has exited. */
+    processStatus(): { exitCode: number | null; signalCode: NodeJS.Signals | null } {
+        return {
+            exitCode: this.process?.exitCode ?? null,
+            signalCode: this.process?.signalCode ?? null,
+        };
+    }
+
     private processExitError(code: number | null, signal: NodeJS.Signals | null): Error {
         return new Error(
             `Pi RPC process exited with code ${code ?? "null"} signal ${signal ?? "null"}\n${this.stderr}`,
