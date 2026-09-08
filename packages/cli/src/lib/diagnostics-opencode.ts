@@ -330,7 +330,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value),
         eidnaraConfig: {
             exists: existsSync(configPaths.eidnaraConfig),
-            ...(eidnaraConfig.error ? { parseError: eidnaraConfig.error } : {}),
+            ...(eidnaraConfig.error ? { parseError: sanitizeString(eidnaraConfig.error) } : {}),
             flags: (sanitizeValue(eidnaraConfig.value ?? {}) as Record<string, unknown>) ?? {},
         },
         conflicts: {
@@ -377,18 +377,25 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
               ]
             : [];
 
+    // A dump's parse error is a filesystem or parser message that can name the dump's path.
+    const sanitizeDumps = (dumps: HistorianDumpSummary[]): HistorianDumpSummary[] =>
+        dumps.map((dump) =>
+            dump.parseError === undefined
+                ? dump
+                : { ...dump, parseError: sanitizeString(dump.parseError) },
+        );
     const historianDumps = {
         byProject: report.historianDumps.byProject.map((bucket) => ({
             directory: sanitizeString(bucket.directory),
             primarySessionId: bucket.primarySessionId,
             sessionIds: bucket.sessionIds,
             count: bucket.count,
-            recent: bucket.recent,
+            recent: sanitizeDumps(bucket.recent),
         })),
         legacyDumps: {
             dir: sanitizeString(report.historianDumps.legacyDumps.dir),
             count: report.historianDumps.legacyDumps.count,
-            recent: report.historianDumps.legacyDumps.recent,
+            recent: sanitizeDumps(report.historianDumps.legacyDumps.recent),
         },
     };
 
@@ -407,7 +414,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${report.opencodeVersion})` : ""}`,
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
-        `- eidnara.jsonc parse error: ${report.eidnaraConfig.parseError ?? "none"}`,
+        `- eidnara.jsonc parse error: ${report.eidnaraConfig.parseError === undefined ? "none" : sanitizeString(report.eidnaraConfig.parseError)}`,
         `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}`,
         `- Eidnara compaction mode: ${report.conflicts.compactionEnabled ? "on" : "off"}`,
         `- Native compaction: auto=${report.conflicts.nativeCompaction?.auto ?? "unknown"}, prune=${report.conflicts.nativeCompaction?.prune ?? "unknown"}`,

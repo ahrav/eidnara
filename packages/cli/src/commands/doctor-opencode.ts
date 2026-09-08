@@ -143,6 +143,8 @@ async function runIssueFlow(): Promise<number> {
 
         s.start("Bundling issue report");
         const bundled = await bundleIssueReport(report, description, title, sessionFilter);
+        // The bundle already sanitizes its copy; the same text goes to `gh` and the browser URL.
+        const publicTitle = sanitizeDiagnosticText(title);
         s.stop(`Report written to ${bundled.path}`);
 
         const shouldSubmit = await confirm("Submit this issue on GitHub now?", true);
@@ -155,7 +157,7 @@ async function runIssueFlow(): Promise<number> {
                     "-R",
                     "ahrav/eidnara",
                     "--title",
-                    sanitizeDiagnosticText(title),
+                    publicTitle,
                     "--body-file",
                     bundled.path,
                 ],
@@ -173,7 +175,7 @@ async function runIssueFlow(): Promise<number> {
             log.warn("gh CLI not found — falling back to browser");
         }
 
-        const url = `https://github.com/ahrav/eidnara/issues/new?title=${encodeURIComponent(title)}&template=bug_report.yml`;
+        const url = `https://github.com/ahrav/eidnara/issues/new?title=${encodeURIComponent(publicTitle)}&template=bug_report.yml`;
         log.info(
             `Open this URL and paste the contents of ${bundled.path} into the Diagnostics field:`,
         );

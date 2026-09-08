@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
     getAvailableModels,
     getPiCommandInvocation,
     getPiVersion,
+    isEidnaraPiPackageEntry,
     parseModelListOutput,
 } from "./pi-helpers";
 
@@ -104,5 +106,41 @@ describe("getAvailableModels", () => {
     it("returns [] when pi output parses to no models (no static fallback)", () => {
         const piPath = process.platform === "win32" ? "where" : "true";
         expect(getAvailableModels(piPath)).toEqual([]);
+    });
+});
+
+describe("isEidnaraPiPackageEntry", () => {
+    function checkoutOf(name: string): { root: string; dir: string } {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-entry-"));
+        tempDirs.push(root);
+        const dir = join(root, "checkout");
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "package.json"), JSON.stringify({ name }));
+        return { root, dir };
+    }
+
+    it("matches the bare and pinned npm specs and the object form", () => {
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi", "/base")).toBe(true);
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi@0.36.0", "/base")).toBe(true);
+        expect(isEidnaraPiPackageEntry({ source: "npm:@eidnara/pi" }, "/base")).toBe(true);
+        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi-theme", "/base")).toBe(false);
+        expect(isEidnaraPiPackageEntry("npm:other-pi-extension", "/base")).toBe(false);
+    });
+
+    it("matches a local checkout by its package name, resolving relative paths against the base", () => {
+        const { root, dir } = checkoutOf("@eidnara/pi");
+        expect(isEidnaraPiPackageEntry(dir, "/elsewhere")).toBe(true);
+        expect(isEidnaraPiPackageEntry("./checkout", root)).toBe(true);
+        expect(isEidnaraPiPackageEntry(pathToFileURL(dir).href, "/elsewhere")).toBe(true);
+        expect(isEidnaraPiPackageEntry({ source: dir }, "/elsewhere")).toBe(true);
+    });
+
+    it("rejects local checkouts of other packages, git sources, and unknown shapes", () => {
+        const { dir } = checkoutOf("eidnara-theme");
+        expect(isEidnaraPiPackageEntry(dir, "/elsewhere")).toBe(false);
+        expect(isEidnaraPiPackageEntry(join(dir, "missing"), "/elsewhere")).toBe(false);
+        expect(isEidnaraPiPackageEntry("git:github.com/ahrav/eidnara", "/base")).toBe(false);
+        expect(isEidnaraPiPackageEntry(42, "/base")).toBe(false);
+        expect(isEidnaraPiPackageEntry({ name: "@eidnara/pi" }, "/base")).toBe(false);
     });
 });

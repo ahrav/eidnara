@@ -456,6 +456,60 @@ describe("Pi doctor", () => {
         expect(output).toContain("Last plugin log line: final line marker");
     });
 
+    it("treats a local checkout of @eidnara/pi as registered and does not add the npm entry", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const checkout = join(root, "eidnara-pi-checkout");
+        mkdirSync(checkout, { recursive: true });
+        writeFileSync(join(checkout, "package.json"), JSON.stringify({ name: "@eidnara/pi" }));
+        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [checkout] }));
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({ ...baseOptions(root, cwd, prompts), force: true });
+
+        expect(code).toBe(0);
+        const settings = parseJsonc(readFileSync(join(agentDir, "settings.json"), "utf-8")) as {
+            packages?: unknown[];
+        };
+        expect(settings.packages).toEqual([checkout]);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("PASS npm:@eidnara/pi is registered in packages[]");
+        expect(output).toContain("PASS No conflicting Eidnara entries in Pi packages[]");
+        expect(output).not.toContain("Added npm:@eidnara/pi");
+    });
+
+    it("fails when both a local checkout and the npm entry are registered", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const checkout = join(root, "eidnara-pi-checkout");
+        mkdirSync(checkout, { recursive: true });
+        writeFileSync(join(checkout, "package.json"), JSON.stringify({ name: "@eidnara/pi" }));
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: [checkout, "npm:@eidnara/pi"] }),
+        );
+        const prompts = new MockPrompts();
+        const originalConsoleError = console.error;
+        const stderr: string[] = [];
+        console.error = (...args: unknown[]) => {
+            stderr.push(args.map(String).join(" "));
+        };
+
+        let code: number;
+        try {
+            code = await runDoctor(baseOptions(root, cwd, prompts));
+        } finally {
+            console.error = originalConsoleError;
+        }
+
+        expect(code).toBe(1);
+        expect(stderr.join("\n")).toContain("Multiple Eidnara entries in Pi packages[]");
+    });
+
     it("exits non-zero when --force cannot write the default user config", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");

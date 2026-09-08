@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
@@ -306,6 +306,113 @@ describe("OMP doctor", () => {
 
         expect(code).toBe(1);
         expect(prompts.messages.join("\n")).toContain("Invalid Eidnara project config");
+    });
+
+    it("reports an uninstalled plugin with the install command and does not try to repair it", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-uninstalled-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(join(root, ".config", "eidnara"), { recursive: true });
+        writeFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const calls: string[][] = [];
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: (_path, args) => {
+                    calls.push(args);
+                    return { ok: true, stdout: agentDir, stderr: "" };
+                },
+            },
+        });
+
+        expect(code).toBe(1);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("is not installed in OMP. Run `omp plugin install @eidnara/pi`");
+        expect(output).not.toContain("Failed to configure OMP");
+        expect(calls.some((args) => args[0] === "plugin")).toBe(false);
+    });
+
+    it("fails when the installed plugin declares an empty extension manifest", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-empty-manifest-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(join(root, ".config", "eidnara"), { recursive: true });
+        writeFileSync(join(pluginDir, "package.json"), JSON.stringify({ omp: { extensions: [] } }));
+        writeFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    { name: "@eidnara/pi", version: "0.33.0", enabled: true, path: pluginDir },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(1);
+        expect(prompts.messages.join("\n")).toContain(
+            "Installed plugin has no OMP/Pi extension manifest",
+        );
+    });
+
+    it("caps the issue body at GitHub's limit before writing it", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-cap-"));
+        roots.push(root);
+        process.env.HOME = root;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        class LongPrompts extends MockPrompts {
+            override async text(): Promise<string> {
+                return "x".repeat(100_000);
+            }
+        }
+        const prompts = new LongPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            issue: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => null,
+                now: () => new Date("2026-04-28T12:34:56Z"),
+                execFileSync: (() => {
+                    throw new Error("gh unavailable");
+                }) as never,
+            },
+        });
+
+        expect(code).toBe(0);
+        const reportPath = join(root, "eidnara-omp-issue-20260428T123456Z.md");
+        expect(existsSync(reportPath)).toBe(true);
+        expect(statSync(reportPath).size).toBeLessThanOrEqual(60_000 + 1);
     });
 
     it("sanitizes the issue title before passing it to gh issue create", async () => {

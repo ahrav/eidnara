@@ -40,6 +40,25 @@ describe("CLI hardening helpers", () => {
         expect(paths.opencodeConfigFormat).toBe("none");
     });
 
+    it("reports an existing eidnara.json as the Eidnara config instead of the absent .jsonc", () => {
+        const root = tempRoot();
+        process.env.OPENCODE_CONFIG_DIR = root;
+        const originalConfigHome = process.env.XDG_CONFIG_HOME;
+        process.env.XDG_CONFIG_HOME = join(root, "xdg");
+        try {
+            const configDir = join(root, "xdg", "eidnara");
+            mkdirSync(configDir, { recursive: true });
+            expect(detectConfigPaths().eidnaraConfig).toBe(join(configDir, "eidnara.jsonc"));
+            writeFileSync(join(configDir, "eidnara.json"), "{}");
+            expect(detectConfigPaths().eidnaraConfig).toBe(join(configDir, "eidnara.json"));
+            writeFileSync(join(configDir, "eidnara.jsonc"), "{}");
+            expect(detectConfigPaths().eidnaraConfig).toBe(join(configDir, "eidnara.jsonc"));
+        } finally {
+            if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = originalConfigHome;
+        }
+    });
+
     it("accepts only local development paths with the exact package name", () => {
         const root = tempRoot();
         const plugin = join(root, "plugin");

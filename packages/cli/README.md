@@ -52,8 +52,10 @@ it repairs depends on the harness:
   missing `eidnara.jsonc` are reported; run `setup` to write them.
 - Pi: adds the missing `npm:@eidnara/pi` package entry and writes a missing
   default `eidnara.jsonc`.
-- OMP: installs the missing plugin, writes a missing default `eidnara.jsonc`,
-  and turns off `compaction.enabled` and `memory.backend`.
+- OMP: enables the plugin when OMP has it installed but disabled, writes a
+  missing default `eidnara.jsonc`, and turns off `compaction.enabled` and
+  `memory.backend`. A plugin that is not installed is reported; install it
+  with `omp plugin install @eidnara/pi`.
 
 `doctor --issue` writes `eidnara-issue-*.md`,
 `eidnara-pi-issue-*.md`, or `eidnara-omp-issue-*.md` in the current directory

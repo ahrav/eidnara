@@ -13,6 +13,7 @@ import { loadPiConfig } from "@eidnara/pi/config";
 import { stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { capBodyToGithubLimit } from "../lib/issue-body";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import {
     detectOmpBinary,
@@ -130,7 +131,11 @@ function pluginDeclaresOmp(path: string | undefined): boolean | null {
             omp?: { extensions?: unknown };
             pi?: { extensions?: unknown };
         };
-        return Array.isArray(pkg.omp?.extensions) || Array.isArray(pkg.pi?.extensions);
+        const declares = (extensions: unknown) =>
+            Array.isArray(extensions) &&
+            extensions.length > 0 &&
+            extensions.every((entry) => typeof entry === "string" && entry.trim().length > 0);
+        return declares(pkg.omp?.extensions) || declares(pkg.pi?.extensions);
     } catch {
         return null;
     }
@@ -165,8 +170,12 @@ async function runHealthChecks(options: {
         } else {
             const plugin = plugins.find((entry) => entry.name === OMP_PLUGIN_PACKAGE);
             if (!plugin) {
-                add(results, "fail", `${OMP_PLUGIN_PACKAGE} is not installed in OMP`);
-                repairPlan.installPlugin = true;
+                // Installing fetches from npm; `--force` repairs configuration only.
+                add(
+                    results,
+                    "fail",
+                    `${OMP_PLUGIN_PACKAGE} is not installed in OMP. Run \`omp plugin install ${OMP_PLUGIN_PACKAGE}\`, then re-run doctor.`,
+                );
             } else if (!plugin.enabled) {
                 add(results, "fail", `${OMP_PLUGIN_PACKAGE} is installed but disabled in OMP`);
                 repairPlan.installPlugin = true;
@@ -372,7 +381,7 @@ async function runIssueFlow(options: {
         ),
     ].join("\n");
     const path = join(options.cwd, `eidnara-omp-issue-${timestamp(options.deps.now())}.md`);
-    writeFileAtomic(path, `${body}\n`);
+    writeFileAtomic(path, `${capBodyToGithubLimit(body)}\n`);
     options.prompts.log.success(`Sanitized report written to ${path}`);
     try {
         options.deps.execFileSync("gh", ["--version"], { stdio: "ignore" });

@@ -1,6 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { extname, join } from "node:path";
+import { extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { findOnPath, isExecutableFile } from "./find-on-path";
 
 export interface PiBinaryInfo {
@@ -8,7 +10,54 @@ export interface PiBinaryInfo {
     source: "path" | "home";
 }
 
-export const PI_PACKAGE_SOURCE = "npm:@eidnara/pi";
+export const PI_PACKAGE_NAME = "@eidnara/pi";
+export const PI_PACKAGE_SOURCE = `npm:${PI_PACKAGE_NAME}`;
+
+/** The `source` string of a Pi `packages[]` entry, or `null` for an unrecognized shape. */
+export function piPackageEntrySource(entry: unknown): string | null {
+    if (typeof entry === "string") return entry;
+    if (
+        entry &&
+        typeof entry === "object" &&
+        typeof (entry as { source?: unknown }).source === "string"
+    ) {
+        return (entry as { source: string }).source;
+    }
+    return null;
+}
+
+/** Pi treats sources without these prefixes as filesystem paths. */
+const NON_LOCAL_SOURCE_PREFIXES = ["npm:", "git:", "github:", "http:", "https:", "ssh:"];
+
+/** Pi expands `~`, accepts `file://` URLs, and resolves relative paths against the scope directory. */
+function resolveLocalPackagePath(source: string, baseDir: string): string {
+    const trimmed = source.trim();
+    if (trimmed === "~") return homedir();
+    if (trimmed.startsWith("~/")) return join(homedir(), trimmed.slice(2));
+    if (/^file:\/\//.test(trimmed)) return fileURLToPath(trimmed);
+    return resolve(baseDir, trimmed);
+}
+
+/** Treats versioned npm specs and local checkouts of `@eidnara/pi` as the same package to prevent duplicate plugin loads. */
+export function isEidnaraPiPackageEntry(entry: unknown, baseDir: string): boolean {
+    const source = piPackageEntrySource(entry);
+    if (source === null) return false;
+    const trimmed = source.trim();
+    if (trimmed.startsWith("npm:")) {
+        const spec = trimmed.slice("npm:".length).trim();
+        const name = /^(@?[^@]+(?:\/[^@]+)?)(?:@.+)?$/.exec(spec)?.[1];
+        return name === PI_PACKAGE_NAME;
+    }
+    if (NON_LOCAL_SOURCE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return false;
+    try {
+        const manifest = JSON.parse(
+            readFileSync(join(resolveLocalPackagePath(trimmed, baseDir), "package.json"), "utf-8"),
+        ) as { name?: unknown };
+        return manifest.name === PI_PACKAGE_NAME;
+    } catch {
+        return false;
+    }
+}
 
 export interface PiCommandInvocation {
     command: string;

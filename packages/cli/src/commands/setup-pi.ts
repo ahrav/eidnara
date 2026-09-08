@@ -11,6 +11,7 @@ import {
     detectPiBinary,
     getAvailableModels,
     getPiVersion,
+    isEidnaraPiPackageEntry,
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
 import type { PromptIO } from "../lib/prompts";
@@ -165,7 +166,14 @@ export function writePiSettingsPackage(
     }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
-    const hasPackage = packages.some((entry) => entry === packageSource);
+    // A local checkout or pinned spec of the same package counts as present;
+    // adding the npm entry beside it would load the plugin twice.
+    const hasPackage = packages.some(
+        (entry) =>
+            entry === packageSource ||
+            (packageSource === PI_PACKAGE_SOURCE &&
+                isEidnaraPiPackageEntry(entry, dirname(settingsPath))),
+    );
 
     if (!hasPackage) packages.push(packageSource);
     settings.packages = packages;

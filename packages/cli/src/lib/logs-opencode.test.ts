@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DiagnosticReport } from "./diagnostics-opencode";
@@ -491,4 +491,104 @@ describe("bundleIssueReport secret redaction", () => {
             process.chdir(originalCwd);
         }
     });
+
+    it("sanitizes config and historian-dump parse errors in the rendered diagnostics", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-parse-error-"));
+        tempDirs.push(root);
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const report = baseReport(root);
+            report.eidnaraConfig.parseError =
+                "EACCES: permission denied, open '/Users/alice/.config/eidnara/eidnara.jsonc'";
+            report.historianDumps.legacyDumps = {
+                dir: "/Users/alice/dumps",
+                count: 1,
+                recent: [
+                    {
+                        name: "dump.xml",
+                        ageMinutes: 1,
+                        sizeKb: 1,
+                        parseError:
+                            "ENOENT: no such file or directory, open '/Users/alice/dumps/dump.xml'",
+                    },
+                ],
+            };
+
+            const bundled = await bundleIssueReport(report, "desc", "title");
+            const body = readFileSync(bundled.path, "utf-8");
+
+            expect(body).toContain(
+                "eidnara.jsonc parse error: EACCES: permission denied, open '/Users/<USER>/.config/eidnara/eidnara.jsonc'",
+            );
+            expect(body).toContain("open '/Users/<USER>/dumps/dump.xml'");
+            expect(body).not.toContain("alice");
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
+
+    it("reads only the tail of a large log", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-log-tail-"));
+        tempDirs.push(root);
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const logPath = join(root, "eidnara.log");
+            // 5,000 lines of 2 KiB each is ~10 MiB, larger than the 4 MiB tail window.
+            const filler = Array.from(
+                { length: 5000 },
+                (_, i) => `[2026-05-11T12:00:00.000Z] filler ${i} ${"x".repeat(2000)}`,
+            );
+            writeFileSync(logPath, `early only line\n${filler.join("\n")}\nfinal tail line\n`);
+            const report = baseReport(root);
+            report.logFile = { path: logPath, exists: true, sizeKb: 10_000 };
+
+            const bundled = await bundleIssueReport(report, "desc", "title");
+            const body = readFileSync(bundled.path, "utf-8");
+
+            expect(body).toContain("final tail line");
+            expect(body).not.toContain("early only line");
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
 });
+
+function baseReport(root: string): DiagnosticReport {
+    return {
+        timestamp: "2026-05-11T12:00:00.000Z",
+        platform: "darwin",
+        arch: "arm64",
+        nodeVersion: "v24.0.0",
+        pluginVersion: "0.18.0",
+        opencodeInstalled: true,
+        opencodeVersion: "1.0.0",
+        opencodeInstallKind: "cli",
+        opencodeInstallations: [],
+        configPaths: {
+            configDir: "/Users/alice/.config/opencode",
+            opencodeConfig: "/Users/alice/.config/opencode/opencode.jsonc",
+            opencodeConfigFormat: "jsonc",
+            eidnaraConfig: "/Users/alice/.config/eidnara/eidnara.jsonc",
+            tuiConfig: "/Users/alice/.config/opencode/tui.jsonc",
+            tuiConfigFormat: "jsonc",
+            omoConfig: null,
+        },
+        opencodeConfigHasPlugin: true,
+        tuiConfigHasPlugin: true,
+        eidnaraConfig: { exists: true, flags: {} },
+        conflicts: {
+            hasConflict: false,
+            reasons: [],
+            compactionEnabled: true,
+            nativeCompaction: { auto: false, prune: false },
+        },
+        logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
+        recentSessions: [],
+        historianDumps: {
+            byProject: [],
+            legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+        },
+    };
+}

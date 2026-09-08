@@ -17,10 +17,11 @@ import { collectDiagnostics, sanitizeString } from "../lib/diagnostics-pi";
 import { readFileTail } from "../lib/fs-utils";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import { bundleIssueReport } from "../lib/logs-pi";
-import { getEidnaraLogPath, getPiUserExtensionsPath } from "../lib/paths";
+import { getEidnaraLogPath, getPiAgentDir, getPiUserExtensionsPath } from "../lib/paths";
 import {
     detectPiBinary,
     getPiVersion,
+    isEidnaraPiPackageEntry,
     PI_PACKAGE_SOURCE,
     type PiBinaryInfo,
 } from "../lib/pi-helpers";
@@ -161,8 +162,9 @@ function packagesFrom(settings: Record<string, unknown>): unknown[] {
     return Array.isArray(settings.packages) ? settings.packages : [];
 }
 
+// Pi resolves a relative `packages[]` path against the settings file's directory.
 function isPiEidnaraPackageEntry(entry: unknown): boolean {
-    return entry === PI_PACKAGE_SOURCE;
+    return isEidnaraPiPackageEntry(entry, getPiAgentDir());
 }
 
 function describePackageEntry(entry: unknown): string {

@@ -1,7 +1,8 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
+import { readFileTail } from "./fs-utils";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
 
 /**
@@ -73,6 +74,8 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     });
 }
 
+const ISSUE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
+
 export async function bundleIssueReport(
     report: DiagnosticReport,
     description: string,
@@ -81,7 +84,7 @@ export async function bundleIssueReport(
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
     const allLogLines = report.logFile.exists
-        ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
+        ? readFileTail(report.logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/)
         : [];
     const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
