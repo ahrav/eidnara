@@ -95,6 +95,8 @@ describe("scanSourceSpans", () => {
             `x = (function(){}) / 2`,
             `return function(){} / 2`,
             `const c = class {} / 2; const d = class X extends Y {} / 3`,
+            `const n = class X extends Base.Member {} / (get = cap.httpGet) / 1`,
+            `const n = class X extends Base[key] {} / (get = cap.httpGet) / 1`,
             `const n = class X extends (class {}) {} / (get = cap.httpGet) / 1`,
             `const m = class extends (mixin(Base)) {} / 2`,
         ]) {

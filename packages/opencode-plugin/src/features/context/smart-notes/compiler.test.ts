@@ -533,6 +533,25 @@ describe("bindDeclaredRequests", () => {
             ),
         ).rejects.toThrow(/internal address/);
     });
+
+    test("rejects a terminal network failure instead of storing it for a dry-run waiver", async () => {
+        const code = `function check(cap) { cap.httpGet("https://large.example/"); return { met: true }; }`;
+        await expect(
+            bindDeclaredRequests(
+                code,
+                () => ({
+                    ...fakeCap,
+                    httpGet: async () => {
+                        throw new SmartNoteNetworkError(
+                            "SMART_NOTE_NETWORK: response body too large",
+                            { terminal: true },
+                        );
+                    },
+                }),
+                signal(),
+            ),
+        ).rejects.toThrow(/cannot succeed.*response body too large/);
+    });
 });
 
 describe("smart-note compiler runtime boundary", () => {
@@ -641,6 +660,7 @@ describe("smart-note compiler output bounds", () => {
             "0 9-17 * * 1-5",
             "0,30 */2 1,15 * 0",
             "5/10 * * * 7",
+            "*/18446744073709551615 * * * *",
             "0 0 * * *",
         ]) {
             expect(isValidSmartNoteCron(cron)).toBe(true);
@@ -656,6 +676,7 @@ describe("smart-note compiler output bounds", () => {
             "* * * 13 *",
             "* * * * 8",
             "*/0 * * * *",
+            "*/18446744073709551616 * * * *",
             "5-1 * * * *",
             "1-2-3 * * * *",
             "1/2/3 * * * *",
@@ -666,6 +687,20 @@ describe("smart-note compiler output bounds", () => {
             expect(isValidSmartNoteCron(cron)).toBe(false);
             expect(() => normalizeCron(cron)).toThrow(/valid 5-field/);
         }
+    });
+
+    test("keeps manifest summaries well-formed at the scalar limit", () => {
+        const summary = `${"a".repeat(159)}😀tail`;
+        const normalized = normalizeManifest({ capabilities: [], summary });
+        expect(normalized.summary).toBe(`${"a".repeat(159)}😀`);
+        expect(JSON.parse(JSON.stringify(normalized))).toEqual(normalized);
+
+        const response = JSON.stringify({
+            compiled_check: `function check(cap) { return { met: true }; }`,
+            manifest: { capabilities: [], summary: "\ud83d" },
+            check_cron: "0 * * * *",
+        });
+        expect(() => parseCompilerOutput(response)).toThrow(/unpaired surrogate/);
     });
 
     test("treats backtick fences inside the JSON as data, not as a response fence", () => {
@@ -750,15 +785,23 @@ describe("smart-note compiler output bounds", () => {
             ],
             [
                 `function check(cap) { cap.httpGet("https://a/0"); return { met: true }; } function check(x) { return { met: true }; }`,
-                /define check exactly once/,
+                /must not reference check outside its declaration/,
             ],
             [
                 `function check(cap) { return { met: true }; } check = function (x) { return { met: true }; };`,
-                /must not reassign check/,
+                /must not reference check outside its declaration/,
             ],
             [
                 `function check(cap) { return { met: true }; } var check = (x) => ({ met: true });`,
-                /must not reassign check/,
+                /must not reference check outside its declaration/,
+            ],
+            [
+                `function check(cap) { return { met: true }; } check &&= function (x) { return { met: true }; };`,
+                /must not reference check outside its declaration/,
+            ],
+            [
+                `function check(cap) { return { met: __mcCap.gitTag() !== null }; }`,
+                /identifiers beginning with __/,
             ],
             [
                 `function check(cap) {
@@ -788,6 +831,10 @@ describe("smart-note compiler output bounds", () => {
             ],
             [
                 `function check(cap) { let get; const n = class X extends (class {}) {} / (get = cap.httpGet) / 1; return { met: true }; }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { let get; const n = class X extends Base.Member {} / (get = cap.httpGet) / 1; return { met: true }; }`,
                 /only be called directly/,
             ],
             [

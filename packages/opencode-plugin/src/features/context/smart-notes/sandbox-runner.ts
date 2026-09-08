@@ -425,8 +425,6 @@ function disableAmbientDynamicCode(context: QuickJSAsyncContext): void {
 async function evalCheck(context: QuickJSAsyncContext, compiledCheck: string): Promise<unknown> {
     const wrapped = `
 "use strict";
-const module = { exports: {} };
-const exports = module.exports;
 const __mcCap = (() => {
   const hostCap = __eidnaraHostCap;
   delete globalThis.__eidnaraHostCap;
@@ -441,9 +439,14 @@ const __mcCap = (() => {
     gitLog(opts) { return JSON.parse(hostCap.__gitLog(JSON.stringify(opts || {}))); },
   });
 })();
+const __check = (() => {
+  const module = { exports: {} };
+  const exports = module.exports;
 ${compiledCheck}
-const __check = typeof check === "function" ? check : module.exports.check;
-if (typeof __check !== "function") throw new Error("compiled check must define check(cap)");
+  const selected = typeof check === "function" ? check : module.exports.check;
+  if (typeof selected !== "function") throw new Error("compiled check must define check(cap)");
+  return selected;
+})();
 const __result = __check(__mcCap);
 if (!__result || typeof __result.met !== "boolean") throw new Error("check() must return { met: boolean }");
 JSON.stringify({ met: __result.met });`;

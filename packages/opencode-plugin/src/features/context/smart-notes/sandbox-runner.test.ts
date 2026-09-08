@@ -25,6 +25,15 @@ describe("compiled smart-note QuickJS runner", () => {
         expect(result).toEqual({ ok: true, result: { met: true } });
     });
 
+    test("keeps the selected check binding out of the global object", async () => {
+        const result = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check(cap) { return { met: true }; }
+                globalThis["check"] = function (x) { return { met: false }; };`,
+            capabilities: fakeCap,
+        });
+        expect(result).toEqual({ ok: true, result: { met: true } });
+    });
+
     test("rejects malformed return values", async () => {
         const result = await runCompiledSmartNoteCheck({
             compiledCheck: `function check() { return { reason: "nope" }; }`,
