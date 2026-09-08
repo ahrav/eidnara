@@ -2,13 +2,15 @@
  *
  * The script measures drift between local ai-tokenizer estimates and provider input-token counts.
  * The script uses the production system prompt and tool definitions.
- * The script sends requests directly to each provider using credentials from `~/.local/share/opencode/auth.json`.
- * The script does not depend on OpenCode.
+ * The script sends requests directly to each provider using credentials from `<XDG_DATA_HOME>/opencode/auth.json`.
+ * The script does not depend on a running OpenCode process.
  *
  * The script sends a system-only request containing the production system prompt and a minimal user message.
  * The script sends a tools-only request containing the production tools array and a minimal user message.
  * The script reads the provider's input-token count from its usage field.
+ * The providers subtract a minimal-user baseline request so `api` counts cover only the system prompt or the tools.
  * The script counts identical content with ai-tokenizer in raw mode and SDK mode with model calibration.
+ * SDK mode subtracts the SDK count of the same minimal-user baseline so `local_sdk` and `api` measure the same component.
  *
  * The script emits per-model raw and SDK ratios for system prompts and tools.
  *
@@ -18,8 +20,8 @@
  *   bun run packages/opencode-plugin/scripts/calibrate-tokenizer/index.ts --providers anthropic,openai
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Tokenizer, { models as aiTokenizerModels } from "ai-tokenizer";
 import * as cl100kEncoding from "ai-tokenizer/encoding/cl100k_base";
 import * as claudeEncoding from "ai-tokenizer/encoding/claude";
@@ -27,6 +29,7 @@ import * as o200kEncoding from "ai-tokenizer/encoding/o200k_base";
 import * as p50kEncoding from "ai-tokenizer/encoding/p50k_base";
 import { count as sdkCount } from "ai-tokenizer/sdk";
 
+import { getDataDir } from "../../src/shared/data-path";
 import { measureAnthropic } from "./providers/anthropic";
 import { measureOpenAICodex } from "./providers/openai-codex";
 import { measureOpenAICompatible } from "./providers/openai-compatible";
@@ -108,6 +111,9 @@ function pickEncoding(tokenizerKey: string | null): unknown {
     return enc ?? claudeEncoding;
 }
 
+/** Baseline request whose SDK count is subtracted to isolate the system and tools token counts. */
+const BASELINE_USER_MESSAGE = { role: "user" as const, content: "x" };
+
 function localCounts(
     systemText: string,
     toolsArray: unknown[],
@@ -128,35 +134,46 @@ function localCounts(
 
     if (tokenizerKey && ALL_MODELS[tokenizerKey]) {
         const m = ALL_MODELS[tokenizerKey];
+        // biome-ignore lint/suspicious/noExplicitAny: ai-tokenizer's SDK `Tokenizer` type does not accept the encoding-constructed instance
+        const sdkTokenizer = tk as any;
+        let baselineSdk: number | null = null;
         try {
-            const sysResult = sdkCount({
-                tokenizer: tk as any,
+            baselineSdk = sdkCount({
+                tokenizer: sdkTokenizer,
                 model: m,
-                messages: [
-                    { role: "system", content: systemText },
-                    { role: "user", content: "x" },
-                ],
-            });
-            systemSdk = sysResult.total;
+                messages: [BASELINE_USER_MESSAGE],
+            }).total;
         } catch {
-            systemSdk = null;
+            baselineSdk = null;
         }
-        try {
-            const tools = (toolsArray as Array<Record<string, unknown>>).map((t) => ({
-                type: "function" as const,
-                name: t.name as string,
-                description: t.description as string,
-                inputSchema: t.input_schema as Record<string, unknown>,
-            }));
-            const toolsResult = sdkCount({
-                tokenizer: tk as any,
-                model: m,
-                messages: [{ role: "user", content: "x" }],
-                tools,
-            });
-            toolsSdk = toolsResult.total;
-        } catch {
-            toolsSdk = null;
+        if (baselineSdk != null) {
+            try {
+                const sysResult = sdkCount({
+                    tokenizer: sdkTokenizer,
+                    model: m,
+                    messages: [{ role: "system", content: systemText }, BASELINE_USER_MESSAGE],
+                });
+                systemSdk = Math.max(0, sysResult.total - baselineSdk);
+            } catch {
+                systemSdk = null;
+            }
+            try {
+                const tools = (toolsArray as Array<Record<string, unknown>>).map((t) => ({
+                    type: "function" as const,
+                    name: t.name as string,
+                    description: t.description as string,
+                    inputSchema: t.input_schema as Record<string, unknown>,
+                }));
+                const toolsResult = sdkCount({
+                    tokenizer: sdkTokenizer,
+                    model: m,
+                    messages: [BASELINE_USER_MESSAGE],
+                    tools,
+                });
+                toolsSdk = Math.max(0, toolsResult.total - baselineSdk);
+            } catch {
+                toolsSdk = null;
+            }
         }
     }
 
@@ -251,14 +268,14 @@ function parseArgs(): { only: string | null; providers: string[] | null } {
 
 async function main(): Promise<void> {
     const { only, providers } = parseArgs();
-    const here = new URL(".", import.meta.url).pathname;
+    const here = fileURLToPath(new URL(".", import.meta.url));
     const systemText = readFileSync(join(here, "fixture-system.txt"), "utf-8");
     const toolsArray = JSON.parse(
         readFileSync(join(here, "fixture-tools.json"), "utf-8"),
     ) as unknown[];
     const testSet = JSON.parse(readFileSync(join(here, "models.json"), "utf-8")) as ModelTestSet;
     const auth = JSON.parse(
-        readFileSync(join(homedir(), ".local/share/opencode/auth.json"), "utf-8"),
+        readFileSync(join(getDataDir(), "opencode", "auth.json"), "utf-8"),
     ) as AuthFile;
 
     let tests = testSet.tests;
@@ -315,6 +332,12 @@ async function main(): Promise<void> {
             " | ",
             (r.toolsTokens.ratio_sdk ?? "—").toString().padStart(13, " "),
         );
+    }
+
+    const failed = results.filter((r) => r.error !== null).length;
+    if (failed > 0) {
+        console.error(`\n${failed} of ${results.length} measurements failed; see results.json`);
+        process.exitCode = 1;
     }
 }
 

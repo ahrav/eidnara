@@ -6,17 +6,17 @@
     "tokenizerKey": "openai/gpt-5",
     "systemTokens": {
       "local_raw": 14528,
-      "local_sdk": 14544,
+      "local_sdk": 14533,
       "api": 14528,
       "ratio_raw": 1,
-      "ratio_sdk": 0.999
+      "ratio_sdk": 1
     },
     "toolsTokens": {
       "local_raw": 20403,
-      "local_sdk": 13205,
+      "local_sdk": 13194,
       "api": 17205,
       "ratio_raw": 0.843,
-      "ratio_sdk": 1.303
+      "ratio_sdk": 1.304
     },
     "error": null,
     "durationMs": 6183
@@ -28,17 +28,17 @@
     "tokenizerKey": "openai/gpt-5",
     "systemTokens": {
       "local_raw": 14528,
-      "local_sdk": 14544,
+      "local_sdk": 14533,
       "api": 14528,
       "ratio_raw": 1,
-      "ratio_sdk": 0.999
+      "ratio_sdk": 1
     },
     "toolsTokens": {
       "local_raw": 20403,
-      "local_sdk": 13205,
+      "local_sdk": 13194,
       "api": 17205,
       "ratio_raw": 0.843,
-      "ratio_sdk": 1.303
+      "ratio_sdk": 1.304
     },
     "error": null,
     "durationMs": 5865
@@ -50,17 +50,17 @@
     "tokenizerKey": "openai/gpt-5",
     "systemTokens": {
       "local_raw": 14528,
-      "local_sdk": 14544,
+      "local_sdk": 14533,
       "api": 14528,
       "ratio_raw": 1,
-      "ratio_sdk": 0.999
+      "ratio_sdk": 1
     },
     "toolsTokens": {
       "local_raw": 20403,
-      "local_sdk": 13205,
+      "local_sdk": 13194,
       "api": 17205,
       "ratio_raw": 0.843,
-      "ratio_sdk": 1.303
+      "ratio_sdk": 1.304
     },
     "error": null,
     "durationMs": 5836

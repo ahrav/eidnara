@@ -2,9 +2,10 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { getDataDir } from "../src/shared/data-path";
 import { Database } from "../src/shared/sqlite";
 
-const opencodeDbPath = join(homedir(), ".local", "share", "opencode", "opencode.db");
+const opencodeDbPath = join(getDataDir(), "opencode", "opencode.db");
 const piSessionsDir = join(homedir(), ".pi", "agent", "sessions");
 
 function inspectOpenCode(): void {
@@ -65,12 +66,22 @@ function inspectPi(): void {
     for (const file of files) {
         const lines = readFileSync(file, "utf-8").trim().split("\n").filter(Boolean);
         const types = new Set<string>();
+        let malformed = 0;
         for (const line of lines) {
-            const parsed = JSON.parse(line) as { type?: string };
+            // A live session may still be appending its last line, and one damaged
+            // entry must not stop the inspection of the remaining files.
+            let parsed: { type?: string };
+            try {
+                parsed = JSON.parse(line) as { type?: string };
+            } catch {
+                malformed++;
+                continue;
+            }
             types.add(parsed.type ?? "<missing>");
         }
         console.log(`\n${file}`);
         console.log(`Entry types: ${[...types].join(", ")}`);
+        if (malformed > 0) console.log(`Skipped ${malformed} malformed line(s)`);
         for (const line of lines.slice(0, 5)) console.log(line.slice(0, 1000));
     }
 }
