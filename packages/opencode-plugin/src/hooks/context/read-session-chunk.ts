@@ -1,10 +1,6 @@
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import { removeSystemReminders } from "../../shared/system-directive";
-import {
-    getRawSessionMessageCountFromDb,
-    openCodeDbExists,
-    withReadOnlySessionDb,
-} from "./read-session-db";
+import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
 import {
     type ChunkBlock,
     compactRole,
@@ -129,6 +125,7 @@ export function setRawMessageProvider(sessionId: string, provider: RawMessagePro
     const stack = sessionProviders.get(sessionId) ?? [];
     stack.push(provider);
     sessionProviders.set(sessionId, stack);
+    dropCachedSession(sessionId);
     return () => {
         const current = sessionProviders.get(sessionId);
         if (!current) return;
@@ -136,7 +133,14 @@ export function setRawMessageProvider(sessionId: string, provider: RawMessagePro
         if (index < 0) return;
         current.splice(index, 1);
         if (current.length === 0) sessionProviders.delete(sessionId);
+        dropCachedSession(sessionId);
     };
+}
+
+/** Cached rows and counts belong to the source active when they were read, so a provider change invalidates them. */
+function dropCachedSession(sessionId: string): void {
+    activeRawMessageCache?.delete(sessionId);
+    activeAbsoluteCountCache?.delete(sessionId);
 }
 
 /**
@@ -204,13 +208,21 @@ export interface SessionChunk {
     completedToolArcs: Array<{ start: number; end: number }>;
 }
 
+/** Open scopes share one cache, which is cleared when the last of them settles. */
+let rawMessageCacheScopeDepth = 0;
+
 export function withRawSessionMessageCache<T>(fn: () => T): T {
-    if (activeRawMessageCache) return fn();
-    activeRawMessageCache = new Map();
-    activeAbsoluteCountCache = new Map();
+    if (rawMessageCacheScopeDepth === 0) {
+        activeRawMessageCache = new Map();
+        activeAbsoluteCountCache = new Map();
+    }
+    rawMessageCacheScopeDepth += 1;
     return withScopedCleanup(fn, () => {
-        activeRawMessageCache = null;
-        activeAbsoluteCountCache = null;
+        rawMessageCacheScopeDepth -= 1;
+        if (rawMessageCacheScopeDepth === 0) {
+            activeRawMessageCache = null;
+            activeAbsoluteCountCache = null;
+        }
     });
 }
 
@@ -446,14 +458,9 @@ function readRawSessionMessagesFromSource(sessionId: string): RawMessage[] {
     return withReadOnlySessionDb((db) => readRawSessionMessagesFromDb(db, sessionId));
 }
 
+/** Counts raw messages that consume an ordinal: compaction summaries excluded, malformed rows included. */
 export function getRawSessionMessageCount(sessionId: string): number {
-    const provider = activeRawMessageProvider(sessionId);
-    if (provider) {
-        if (provider.getMessageCount) return provider.getMessageCount();
-        return provider.readMessages().length;
-    }
-    if (!openCodeDbExists()) return 0;
-    return withReadOnlySessionDb((db) => getRawSessionMessageCountFromDb(db, sessionId));
+    return getRawSessionMessageOrdinalCount(sessionId);
 }
 
 /**

@@ -8,6 +8,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     getProtectedTailStartOrdinal,
+    getRawSessionMessageCount,
     getRawSessionMessageIdsThrough,
     primeTailRawMessageCache,
     readRawSessionMessageOrdinalPage,
@@ -296,6 +297,67 @@ describe("readSessionChunk", () => {
             2,
         );
         expect(readRawSessionMessages("ses-async-reject")).toHaveLength(2);
+    });
+
+    it("keeps the raw-message cache alive until every overlapping async scope settles", async () => {
+        useTempDataHome("read-session-overlap-cache-scope-");
+        createOpenCodeDbWithMessages("ses-overlap-cache", [
+            { id: "m-1", role: "user", part: { type: "text", text: "turn 1" } },
+        ]);
+
+        let releaseFirst!: () => void;
+        const firstSettled = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        let releaseSecond!: () => void;
+        const secondSettled = new Promise<void>((resolve) => {
+            releaseSecond = resolve;
+        });
+
+        const first = withRawSessionMessageCache(async () => {
+            readRawSessionMessages("ses-overlap-cache");
+            await firstSettled;
+        });
+        const second = withRawSessionMessageCache(async () => {
+            const beforeFirstSettles = readRawSessionMessages("ses-overlap-cache");
+            await secondSettled;
+            const afterFirstSettles = readRawSessionMessages("ses-overlap-cache");
+            return { beforeFirstSettles, afterFirstSettles };
+        });
+
+        releaseFirst();
+        await first;
+        appendOpenCodeMessage(
+            "ses-overlap-cache",
+            { id: "m-2", role: "assistant", part: { type: "text", text: "turn 2" } },
+            2,
+        );
+        releaseSecond();
+        const reads = await second;
+
+        expect(reads.afterFirstSettles).toBe(reads.beforeFirstSettles);
+        expect(reads.afterFirstSettles).toHaveLength(1);
+        expect(readRawSessionMessages("ses-overlap-cache")).toHaveLength(2);
+    });
+
+    it("drops a session's cached rows when a provider is registered or released", () => {
+        useTempDataHome("read-session-provider-cache-");
+        createOpenCodeDbWithMessages("ses-provider-cache", [
+            { id: "db-1", role: "user", part: { type: "text", text: "from the database" } },
+        ]);
+        const provider = { readMessages: () => [providerMessage("provider-1", 1, 1)] };
+
+        withRawSessionMessageCache(() => {
+            expect(readRawSessionMessages("ses-provider-cache").map((m) => m.id)).toEqual(["db-1"]);
+
+            withRawMessageProvider("ses-provider-cache", provider, () => {
+                expect(readRawSessionMessages("ses-provider-cache").map((m) => m.id)).toEqual([
+                    "provider-1",
+                ]);
+            });
+
+            expect(readRawSessionMessages("ses-provider-cache").map((m) => m.id)).toEqual(["db-1"]);
+        });
     });
 
     it("restores the outer provider when a nested provider scope ends", () => {
@@ -643,6 +705,19 @@ describe("readSessionChunk", () => {
                 expect(next.messageCount).toBe(0);
                 expect(next.hasMore).toBe(false);
             });
+        });
+
+        it("counts raw messages from a database that holds a malformed row", () => {
+            //#given
+            useTempDataHome("read-session-malformed-count-");
+            createOpenCodeDbWithMessages("ses-malformed-count", [
+                { id: "m-1", role: "user", part: { type: "text", text: "hello" } },
+                { id: "m-2", role: "assistant", part: { type: "text", text: "hi" } },
+            ]);
+            appendMalformedOpenCodeMessage("ses-malformed-count", "m-3", 3);
+
+            //#then
+            expect(getRawSessionMessageCount("ses-malformed-count")).toBe(3);
         });
     });
 });
