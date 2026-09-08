@@ -22,13 +22,14 @@
   ],
   "scripts": {
     "build": "tsc --emitDeclarationOnly",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "bun test",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@eidnara/retina-local-fs": "0.1.0",
     "@eidnara/shm-native": "0.1.0",
     "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
     "@opencode-ai/plugin": "^1.17.11",
