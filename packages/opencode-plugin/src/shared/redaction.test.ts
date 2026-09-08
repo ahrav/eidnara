@@ -75,7 +75,7 @@ describe("redactSecretText — unquoted colon assignments and quoted env values"
     test("redacts `key: value` with an unquoted key", () => {
         expect(redactSecretText("token: abc123")).toBe("token: <REDACTED:token>");
         expect(redactSecretText("set api_key: sk-live-abc in the env")).toBe(
-            "set api_key: <REDACTED:api_key> in the env",
+            "set api_key: <REDACTED:api_key>",
         );
         expect(redactSecretText('password: "hunter two"')).toBe('password: "<REDACTED:password>"');
     });
@@ -321,5 +321,71 @@ describe("sanitizeConfigValue unqualified password keys", () => {
             cache_key: "sessions-v2",
             injection_budget_tokens: 12,
         });
+    });
+});
+
+describe("redactSecretText — passphrases and CLI arguments", () => {
+    test("consumes an unquoted multiword colon value", () => {
+        expect(redactSecretText("password: correct horse battery staple")).toBe(
+            "password: <REDACTED:password>",
+        );
+        expect(redactSecretText("token: abc123 def, temperature: 0.2")).toBe(
+            "token: <REDACTED:token>, temperature: 0.2",
+        );
+    });
+
+    test("redacts the value of secret-bearing CLI flags", () => {
+        expect(redactSecretText("tool --api-key abc123secret --verbose")).toBe(
+            "tool --api-key <REDACTED:api_key> --verbose",
+        );
+        expect(redactSecretText("curl --token abc123secret https://x")).toBe(
+            "curl --token <REDACTED:token> https://x",
+        );
+        expect(redactSecretText("cmd --password correct-horse")).toBe(
+            "cmd --password <REDACTED:password>",
+        );
+        // A following flag is not a value, and non-secret flags are untouched.
+        expect(redactSecretText("cmd --password --verbose")).toBe("cmd --password --verbose");
+        expect(redactSecretText("cmd --author alice")).toBe("cmd --author alice");
+    });
+});
+
+describe("sanitizeConfigValue primitives under secret keys", () => {
+    test("redacts numeric secrets but keeps null, booleans, and non-secret numbers", () => {
+        expect(
+            sanitizeConfigValue({
+                password: 123456,
+                api_key: 42,
+                is_secret: true,
+                secret: null,
+                max_tokens: 4096,
+                execute_threshold_tokens: 200000,
+            }),
+        ).toEqual({
+            password: "<REDACTED:password>",
+            api_key: "<REDACTED:api_key>",
+            is_secret: true,
+            secret: null,
+            max_tokens: 4096,
+            execute_threshold_tokens: 200000,
+        });
+    });
+});
+
+describe("sanitizePathString without a home directory", () => {
+    test("falls back to path patterns when homedir() throws", () => {
+        const spy = spyOn(os, "homedir").mockImplementation(() => {
+            throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
+                code: "ERR_SYSTEM_ERROR",
+            });
+        });
+        try {
+            expect(sanitizePathString("/home/alice/project/eidnara.log")).toBe(
+                "/home/<USER>/project/eidnara.log",
+            );
+            expect(spy).toHaveBeenCalled();
+        } finally {
+            spy.mockRestore();
+        }
     });
 });

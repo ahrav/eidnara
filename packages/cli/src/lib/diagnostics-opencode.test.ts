@@ -303,3 +303,26 @@ describe("collectDiagnostics recent sessions", () => {
         expect(report.recentSessions).toHaveLength(1);
     });
 });
+
+describe("collectDiagnostics log file", () => {
+    it("reports a missing log as absent instead of throwing", async () => {
+        const { cwd } = isolatedRoot();
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.logFile.exists).toBe(false);
+        expect(report.logFile.sizeKb).toBe(0);
+    });
+
+    it("reports the size of an existing log", async () => {
+        const { cwd } = isolatedRoot();
+        const report0 = await collectDiagnostics(cwd);
+        mkdirSync(join(report0.logFile.path, ".."), { recursive: true });
+        writeFileSync(report0.logFile.path, "x".repeat(2048));
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.logFile.exists).toBe(true);
+        expect(report.logFile.sizeKb).toBe(2);
+    });
+});

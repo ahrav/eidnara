@@ -355,7 +355,13 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
     const projectConfig = readEidnaraConfigTier(eidnaraProjectConfigBasePath(cwd));
 
     const logPath = getEidnaraLogPath("opencode");
-    const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
+    // The log can be rotated or removed between the existence check and the stat; a vanished log is reported as absent.
+    let logFileSize: number | null = null;
+    try {
+        logFileSize = statSync(logPath).size;
+    } catch {
+        logFileSize = null;
+    }
 
     let compactionEnabled = false;
     try {
@@ -404,8 +410,8 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         },
         logFile: {
             path: logPath,
-            exists: existsSync(logPath),
-            sizeKb: Math.round(logFileSize / 1024),
+            exists: logFileSize !== null,
+            sizeKb: Math.round((logFileSize ?? 0) / 1024),
         },
         recentSessions,
         historianDumps: collectHistorianDumps(recentSessions),

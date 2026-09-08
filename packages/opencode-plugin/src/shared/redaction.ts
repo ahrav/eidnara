@@ -138,8 +138,17 @@ function currentUsername(): string | null {
     }
 }
 
+// `homedir()` throws the same way when `HOME` is unset and the UID has no passwd entry.
+function currentHomeDir(): string | null {
+    try {
+        return os.homedir() || null;
+    } catch {
+        return null;
+    }
+}
+
 export function sanitizePathString(value: string): string {
-    const home = os.homedir();
+    const home = currentHomeDir();
     const username = currentUsername();
     let sanitized = value;
     if (home) {
@@ -241,7 +250,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     // `[ \t]*` around the colon keeps a bare `key:` at end of line from consuming the next line's first word.
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s'"`,;}\])]+))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s'"`,;}\])][^\r\n,;}\])]*))/gi,
         replacement: (
             full: string,
             key: string,
@@ -274,6 +283,16 @@ const SECRET_TEXT_PATTERNS: Array<{
             }
             const q = quote ?? "";
             return `${key}=${q}<REDACTED:${redactionTypeForKey(key)}>${q}`;
+        },
+    },
+    // `--api-key abc` / `-p hunter2` style arguments; a value beginning with `-` is the next flag.
+    {
+        pattern:
+            /(^|\s)(--?[A-Za-z0-9-]*(?:key|token|secret|password|passwd|pwd|auth|credential)[A-Za-z0-9-]*)(\s+)([^\s-]\S*)/gi,
+        replacement: (full: string, lead: string, flag: string, space: string, value: string) => {
+            const key = flag.replace(/^--?/, "");
+            if (!hasSecretKeySegment(key) || isNonSecretScalarValue(value)) return full;
+            return `${lead}${flag}${space}<REDACTED:${redactionTypeForKey(key)}>`;
         },
     },
 ];
@@ -325,9 +344,12 @@ export function hasShareabilitySensitiveText(text: string): boolean {
 }
 
 export function sanitizeConfigValue(value: unknown, keyPath: string[] = []): unknown {
-    if (value === null || typeof value === "number" || typeof value === "boolean") return value;
     const key = keyPath.at(-1) ?? "";
-    if (key && isSecretKey(key)) {
+    const secretKey = Boolean(key) && isSecretKey(key);
+    // A number under a secret key can be a PIN or numeric token; null and booleans carry no credential.
+    if (value === null || typeof value === "boolean") return value;
+    if (typeof value === "number" && !secretKey) return value;
+    if (secretKey) {
         return `<REDACTED:${redactionTypeForKey(key)}>`;
     }
     if (typeof value === "string") return sanitizeDiagnosticText(value);
