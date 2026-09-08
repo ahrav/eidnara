@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { HostCallError } from "../../shared/host-client";
 import {
     ConnectionIdentityChangedError,
     isAvailable,
@@ -147,6 +148,17 @@ describe("createKernelTransport store lifecycle translation", () => {
 
     test("a managed daemon whose store is unavailable reads as unavailable:store_unavailable", async () => {
         const result = await client(createKernelTransport(storageTransport("unavailable"))).read({
+            surface: "auto_inject",
+        });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "store_unavailable" });
+    });
+
+    test("the daemon's terminal store_unavailable answer while its store opens reads as unavailable:store_unavailable", async () => {
+        const module = managedTransport();
+        module.call = async () => {
+            throw new HostCallError("terminal", "store is opening", "store_unavailable");
+        };
+        const result = await client(createKernelTransport(module)).read({
             surface: "auto_inject",
         });
         expect(result.state).toEqual({ kind: "unavailable", reason: "store_unavailable" });
@@ -428,6 +440,38 @@ describe("shared-path connection identity", () => {
         expect(generationsSeen).toEqual([0, 1]);
     });
 
+    test("evicting a state with a call in flight defers the disconnect until that call settles", async () => {
+        const config = { subc: { connection_file: connectionFile } };
+        const kernel = createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
+        const shared = sharedStateForTest(config);
+        if (!shared) throw new Error("the resolved client must have a shared transport");
+        const { module } = shared;
+        let settle: ((value: unknown) => void) | undefined;
+        module.call = () => new Promise((resolve) => (settle = resolve));
+
+        const pending = kernel.read({ surface: "auto_inject" });
+        await Bun.sleep(0);
+        expect(settle).toBeDefined();
+
+        for (let index = 0; index < MAX_CONNECTION_FILE_STATES; index += 1) {
+            createKernelClient({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                config: {
+                    subc: { connection_file: `/tmp/kernel-transport-test-missing-${index}.json` },
+                },
+            });
+        }
+        expect(sharedStateForTest(config)).toBeUndefined();
+        // Evicted from the map, but the in-flight call still owns the connection.
+        expect(module.generation).toBe(0);
+
+        settle?.({ state: { kind: "available" }, known_as_of: 1, tip: 1, gated: false, rows: [] });
+        const result = await pending;
+        expect(result.state).toEqual({ kind: "available" });
+        expect(module.generation).toBe(1);
+    });
+
     test("a view's identity changes when its state is evicted and replaced, so a body built before the eviction is refused", async () => {
         const config = { subc: { connection_file: connectionFile } };
         createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
@@ -584,23 +628,5 @@ describe("createKernelClient token-cache scoping", () => {
         });
         expect(tokens.get(roots[0], "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 1 });
         expect(tokens.get(roots[1], "mem_b")).toBeUndefined();
-    });
-
-    test("explicit tokens bypass the shared cache's eviction order", () => {
-        const shared = createKernelClient({
-            sessionId: SESSION,
-            projectRoot: PROJECT,
-            config: {},
-        }).tokens;
-        shared.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 1 }], 1);
-        for (let index = 0; index <= MAX_TOKEN_CACHE_PROJECTS; index += 1) {
-            createKernelClient({
-                sessionId: SESSION,
-                projectRoot: `/repo/isolated-${index}`,
-                config: {},
-                tokens: new TokenCache(),
-            });
-        }
-        expect(shared.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 1 });
     });
 });
