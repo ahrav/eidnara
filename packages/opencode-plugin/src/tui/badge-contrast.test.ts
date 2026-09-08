@@ -56,6 +56,11 @@ describe("readableTextColorOn", () => {
         expect(readableTextColorOn({ r: 0, g: 1, b: 0 })).toBe("#000000");
     });
 
+    test("medium-light gray gets black text (white is only ~2.1:1)", () => {
+        // Luminance ~0.448: white contrast ~2.1:1 fails the 3:1 bar; black contrast ~10:1.
+        expect(readableTextColorOn({ r: 0.7, g: 0.7, b: 0.7 })).toBe("#000000");
+    });
+
     test("pure blue is treated as dark (low luma weight)", () => {
         // Blue's low perceived brightness requires light text.
         expect(readableTextColorOn({ r: 0, g: 0, b: 1 })).toBe("#ffffff");

@@ -43,6 +43,36 @@ test("renders raw input-versus-model usage rather than threshold-relative fill",
     expect(value).not.toBe("Context: 63.1% · native compaction");
 });
 
+test("uses the native-window percentage, not inputTokens over the reserved contextLimit", () => {
+    // 40k tokens: 100k native window → 40%; the 80k output-reserved limit would read 50%.
+    const value = nativeCompactionContextLabel(
+        snapshot({
+            inputTokens: 40_000,
+            contextLimit: 80_000,
+            native_context_usage_percentage: 40,
+        }),
+    );
+
+    expect(value).toBe("Context: 40.0% · native compaction");
+});
+
+test("falls back to inputTokens over contextLimit when the native percentage is absent", () => {
+    const value = nativeCompactionContextLabel(
+        snapshot({
+            inputTokens: 40_000,
+            contextLimit: 80_000,
+            native_context_usage_percentage: undefined,
+        }),
+    );
+
+    expect(value).toBe("Context: 50.0% · native compaction");
+    expect(
+        nativeCompactionContextLabel(
+            snapshot({ contextLimit: 0, native_context_usage_percentage: undefined }),
+        ),
+    ).toBe("Context: unknown · native compaction");
+});
+
 test("keeps historical compartments as a static archived row", () => {
     const initialRows = compactionOffSidebarRows(snapshot());
     const activeCountChangedRows = compactionOffSidebarRows(snapshot({ compartmentCount: 99 }));

@@ -5,9 +5,12 @@ export interface CompactionOffSidebarRow {
     value: string;
 }
 
-/**
- */
+/** Prefers `native_context_usage_percentage`, measured against the unreserved model window; `contextLimit` subtracts the output reservation. commentlint: allow(JUDGE) */
 export function nativeCompactionContextLabel(snapshot: SidebarSnapshot): string {
+    const native = snapshot.native_context_usage_percentage;
+    if (typeof native === "number" && Number.isFinite(native)) {
+        return `Context: ${native.toFixed(1)}% · native compaction`;
+    }
     if (snapshot.contextLimit <= 0) return "Context: unknown · native compaction";
     const percentage = (snapshot.inputTokens / snapshot.contextLimit) * 100;
     return `Context: ${percentage.toFixed(1)}% · native compaction`;
