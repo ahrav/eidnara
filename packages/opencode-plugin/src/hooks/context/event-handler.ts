@@ -1,4 +1,6 @@
 import { detectOverflow } from "../../features/context/overflow-detection";
+import { clearWorkMetricsCarry, clearWorkMetricsCarryIfFolded } from "../../plugin/rpc-handlers";
+import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsAfterAuthOnce } from "../../shared/models-dev-cache";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
@@ -20,6 +22,10 @@ export interface ContextUsageEntry {
     updatedAt: number;
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
+    /** The model whose window `usage` was measured against; readers must not pair it with another model's limit. */
+    model?: { providerID: string; modelID: string };
+    /** The assistant message `usage` came from, so removing that message can discard the entry. */
+    messageID?: string;
 }
 
 export interface EventHandlerDeps {
@@ -149,6 +155,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             const now = Date.now();
+            // An update to a row the work-metrics carry has already folded invalidates the carry.
+            if (info.messageID) clearWorkMetricsCarryIfFolded(info.sessionID, info.messageID);
             const usageTokens = [
                 info.tokens?.input,
                 info.tokens?.cache?.read,
@@ -195,6 +203,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     updatedAt: now,
                     lastResponseTime: now,
                     hasUsageTokens: true,
+                    model:
+                        info.providerID && info.modelID
+                            ? { providerID: info.providerID, modelID: info.modelID }
+                            : undefined,
+                    messageID: info.messageID,
                 });
             } catch (error) {
                 sessionLog(info.sessionID, "event message.updated usage tracking failed:", error);
@@ -234,6 +247,13 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     messageId: info.messageID,
                     reason: "message.removed",
                 });
+                // The removed row may sit below the work-metrics watermark; the next poll re-reads the session.
+                clearWorkMetricsCarry(info.sessionID);
+                // Live usage describes one assistant response; once that response is gone, so is the usage, and the sticky snapshot must not restore it. commentlint: allow(JUDGE)
+                if (deps.contextUsageMap.get(info.sessionID)?.messageID === info.messageID) {
+                    deps.contextUsageMap.delete(info.sessionID);
+                    clearSidebarSnapshotCache(info.sessionID);
+                }
 
                 deps.onSessionCacheInvalidated?.(info.sessionID);
                 sessionLog(
@@ -259,6 +279,9 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 sessionLog(sessionId, "event session.compacted marker cleanup failed:", error);
             }
             invalidateTrueRawTokenCache({ sessionId, reason: "session.compacted" });
+            // Compaction replaces the context the live usage measured, so the pre-compaction count must not carry over.
+            deps.contextUsageMap.delete(sessionId);
+            clearSidebarSnapshotCache(sessionId);
             deps.onSessionCacheInvalidated?.(sessionId);
             return;
         }

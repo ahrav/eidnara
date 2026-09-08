@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
+import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
 import { __ignoredNotificationTest } from "../hooks/context/send-session-notification";
 import type { ConflictResult } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
@@ -9,6 +10,8 @@ import {
     __resetNotificationStateForTests,
     registerNotificationSink,
 } from "../shared/rpc-notifications";
+import { Database } from "../shared/sqlite";
+import { closeQuietly } from "../shared/sqlite-helpers";
 import { cleanupConflictWarnings, sendConflictWarning } from "./conflict-warning-hook";
 
 const SESSION_ID = "ses_conflict_hook_test";
@@ -123,6 +126,34 @@ describe.if(platform() === "linux")(
             expect(sessionIds).toEqual([SESSION_ID, "ses_conflict_hook_reopened"]);
         });
 
+        it("does not persist a second warning while one is already in the session", async () => {
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const prompt = mock(async () => ({}));
+            const client = {
+                session: {
+                    prompt,
+                    get: mock(async () => ({ title: REAL_TITLE })),
+                    messages: mock(async () => [
+                        {
+                            info: { id: "msg_warning", role: "user" },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: formatConflictShort(CONFLICT),
+                                    ignored: true,
+                                },
+                            ],
+                        },
+                    ]),
+                },
+            };
+
+            await sendConflictWarning(client, directory, CONFLICT);
+
+            expect(prompt).not.toHaveBeenCalled();
+        });
+
         it("persists the conflict warning even when a TUI is connected", async () => {
             // cleanupConflictWarnings deletes the persisted warning row when
             // the conflict is resolved; a toast would leave nothing to clean
@@ -232,6 +263,89 @@ describe.if(platform() === "linux")(
                 expect(prompt).toHaveBeenCalledTimes(1);
             } finally {
                 fetchSpy.mockRestore();
+            }
+        });
+
+        it("finds a warning buried under more than the SDK window through OpenCode's database", async () => {
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const warningText = formatConflictShort(CONFLICT);
+            const dataHome = mkdtempSync(join(tmpdir(), "conflict-hook-data-"));
+            const originalXdgDataHome = process.env.XDG_DATA_HOME;
+            const dbPath = join(dataHome, "opencode", "opencode.db");
+            mkdirSync(join(dataHome, "opencode"), { recursive: true });
+            const db = new Database(dbPath);
+            db.exec(`
+                CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+                CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, message_id TEXT NOT NULL, data TEXT NOT NULL);
+            `);
+            const insertMessage = db.prepare(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            );
+            const insertPart = db.prepare(
+                "INSERT INTO part (id, session_id, message_id, data) VALUES (?, ?, ?, ?)",
+            );
+            insertMessage.run("msg_warning", SESSION_ID, 1, JSON.stringify({ role: "user" }));
+            insertPart.run(
+                "prt_warning",
+                SESSION_ID,
+                "msg_warning",
+                JSON.stringify({ type: "text", text: warningText, ignored: true }),
+            );
+            // A real user message that merely mentions the marker text keeps a non-ignored part and must survive.
+            insertMessage.run("msg_quote", SESSION_ID, 2, JSON.stringify({ role: "user" }));
+            insertPart.run(
+                "prt_quote",
+                SESSION_ID,
+                "msg_quote",
+                JSON.stringify({ type: "text", text: warningText }),
+            );
+            for (let index = 0; index < 60; index += 1) {
+                insertMessage.run(
+                    `msg_later_${index}`,
+                    SESSION_ID,
+                    10 + index,
+                    JSON.stringify({ role: index % 2 === 0 ? "user" : "assistant" }),
+                );
+                insertPart.run(
+                    `prt_later_${index}`,
+                    SESSION_ID,
+                    `msg_later_${index}`,
+                    JSON.stringify({ type: "text", text: `turn ${index}` }),
+                );
+            }
+            closeQuietly(db);
+            process.env.XDG_DATA_HOME = dataHome;
+
+            const deletedUrls: string[] = [];
+            const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+                input: string | URL | Request,
+            ) => {
+                deletedUrls.push(String(input));
+                return new Response("{}", { status: 200 });
+            }) as unknown as typeof fetch);
+            const messages = mock(async () => []);
+            try {
+                const client = {
+                    session: {
+                        prompt: mock(async () => ({})),
+                        get: mock(async () => ({ title: REAL_TITLE })),
+                        messages,
+                    },
+                };
+
+                await cleanupConflictWarnings(client, directory, "http://127.0.0.1:1");
+
+                // The SDK mock returns no messages, so only the database scan can have found the warning.
+                expect(deletedUrls).toEqual([
+                    `http://127.0.0.1:1/session/${SESSION_ID}/message/msg_warning`,
+                ]);
+            } finally {
+                fetchSpy.mockRestore();
+                closeReadOnlySessionDb();
+                if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+                else process.env.XDG_DATA_HOME = originalXdgDataHome;
+                rmSync(dataHome, { recursive: true, force: true });
             }
         });
 

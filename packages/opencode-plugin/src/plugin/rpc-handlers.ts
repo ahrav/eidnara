@@ -9,6 +9,7 @@ import {
     emptyWorkMetricsCarry,
     type WorkMetricsCarry,
 } from "../features/context/work-metrics";
+import type { ContextUsageEntry } from "../hooks/context/event-handler";
 import {
     DEFAULT_CACHE_TTL_MS,
     parseCacheTtlMs,
@@ -56,6 +57,14 @@ const POLL_CACHE_MAX_ENTRIES = 32;
 
 export function clearWorkMetricsCarry(sessionId: string): void {
     workMetricsCarryBySession.delete(sessionId);
+}
+
+/** A row at or below the watermark is already folded in, and the incremental read never revisits it. OpenCode message ids are time-ordered, so id order tracks the `(time_created, id)` fold order. commentlint: allow(JUDGE) */
+export function clearWorkMetricsCarryIfFolded(sessionId: string, messageId: string): void {
+    const carry = workMetricsCarryBySession.peek(sessionId);
+    if (carry && carry.lastId !== "" && messageId <= carry.lastId) {
+        workMetricsCarryBySession.delete(sessionId);
+    }
 }
 
 /**
@@ -127,6 +136,7 @@ const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
 );
+const rustStatusInFlight = new Map<string, Promise<RustSessionStatus>>();
 
 /**
  * When OpenCode's DB is unavailable or unreadable, the sidebar reports zero work metrics.
@@ -162,6 +172,22 @@ async function loadRustSessionStatus(
     if (cached !== undefined) {
         return cached;
     }
+    // Polls that miss the cache while a request is in flight share it. The module transport serializes calls per session, so one status request queued behind a long wrapup must not become one queued request per poll. commentlint: allow(JUDGE)
+    const inFlight = rustStatusInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
+    const request = fetchRustSessionStatus(client, sessionId, directory, cacheKey).finally(() => {
+        rustStatusInFlight.delete(cacheKey);
+    });
+    rustStatusInFlight.set(cacheKey, request);
+    return request;
+}
+
+async function fetchRustSessionStatus(
+    client: RustModeModuleClient,
+    sessionId: string,
+    directory: string,
+    cacheKey: string,
+): Promise<RustSessionStatus> {
     const response = await client.call({
         sessionId,
         projectRoot: directory,
@@ -219,6 +245,16 @@ function modelKeyOf(model: ActiveModel | undefined): string | undefined {
     return model ? `${model.providerID}/${model.modelID}` : undefined;
 }
 
+/** The live usage entry for `sessionId`, only when it was measured against `modelKey`; after a model switch the previous model's tokens and response timing must not be read against the new model. commentlint: allow(JUDGE) */
+function liveUsageEntryFor(
+    liveSessionState: LiveSessionState | undefined,
+    sessionId: string,
+    modelKey: string | undefined,
+): ContextUsageEntry | undefined {
+    const entry = liveSessionState?.contextUsageBySession.get(sessionId);
+    return entry?.model && modelKeyOf(entry.model) === modelKey ? entry : undefined;
+}
+
 /**
  * A model named by the request wins over live state. The live lookup still runs so a missing model or
  * agent is recovered from OpenCode's SQLite database and cached for later polls and hooks.
@@ -265,11 +301,16 @@ export function buildSidebarSnapshot(
     try {
         const projectIdentity = resolveProjectIdentity(directory);
 
+        const activeModel = resolveActiveModel(sessionId, liveSessionState, requestedModelKey);
+        const activeProviderID = activeModel?.providerID;
+        const activeModelID = activeModel?.modelID;
+        const modelKey = modelKeyOf(activeModel);
+
         const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
         // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
-        const liveUsage = liveSessionState?.contextUsageBySession.get(sessionId)?.usage;
+        const liveUsage = liveUsageEntryFor(liveSessionState, sessionId, modelKey)?.usage;
         const effectiveInputTokens =
             typeof moduleInputTokens === "number" && moduleInputTokens > 0
                 ? moduleInputTokens
@@ -301,11 +342,6 @@ export function buildSidebarSnapshot(
             : 0;
         const memoryTruncated = memory?.truncated === true;
         const memoryState = memory ? stateKey(memory.state) : null;
-
-        const activeModel = resolveActiveModel(sessionId, liveSessionState, requestedModelKey);
-        const activeProviderID = activeModel?.providerID;
-        const activeModelID = activeModel?.modelID;
-        const modelKey = modelKeyOf(activeModel);
 
         const contextLimit =
             typeof moduleContextLimit === "number" && moduleContextLimit > 0
@@ -471,7 +507,7 @@ export function buildStatusDetail(
     // The daemon counts every minted tag and publishes no per-tag state, so only the total is known here.
     const totalTags = typeof moduleStatus?.tag_count === "number" ? moduleStatus.tag_count : 0;
     const lastResponseTime =
-        liveSessionState?.contextUsageBySession.get(sessionId)?.lastResponseTime ?? 0;
+        liveUsageEntryFor(liveSessionState, sessionId, effectiveModelKey)?.lastResponseTime ?? 0;
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
@@ -578,9 +614,10 @@ export function buildStatusDetail(
             detail.historyBlockTokens = histTokens;
 
             if (detail.contextLimit > 0) {
+                // Mirrors `resolveHistoryBudgetTokens`: the runtime budget applies the effective threshold with no extra cap.
                 const budget = Math.floor(
                     detail.contextLimit *
-                        (Math.min(detail.executeThreshold, 80) / 100) *
+                        (detail.executeThreshold / 100) *
                         detail.historyBudgetPercentage,
                 );
                 detail.compressionBudget = budget;

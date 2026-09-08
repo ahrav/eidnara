@@ -9,7 +9,12 @@ import {
     generateMessageId,
     injectCompactionMarker,
 } from "../../features/context/compaction-marker";
+import {
+    applyStickySnapshotCache,
+    resetSidebarSnapshotCache,
+} from "../../plugin/sidebar-snapshot-cache";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
+import type { SidebarSnapshot } from "../../shared/rpc-types";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeCompactionMarkerConnection, MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
@@ -18,6 +23,41 @@ import { DEFAULT_CONTEXT_LIMIT, resolveContextLimit } from "./event-resolvers";
 
 const SESSION = "ses-1";
 const RETAINED_ID = generateMessageId(1_002, 0n, "retained");
+
+const ZERO_SNAPSHOT: SidebarSnapshot = {
+    sessionId: SESSION,
+    usagePercentage: 0,
+    inputTokens: 0,
+    contextLimit: 0,
+    systemPromptTokens: 0,
+    compartmentCount: 0,
+    memoryCount: 0,
+    memoryBlockCount: 0,
+    pendingOpsCount: 0,
+    historianRunning: false,
+    compartmentInProgress: false,
+    sessionNoteCount: 0,
+    readySmartNoteCount: 0,
+    cacheTtl: "5m",
+    lastTransformError: null,
+    lastDreamerRunAt: null,
+    projectIdentity: null,
+    compartmentTokens: 0,
+    factTokens: 0,
+    memoryTokens: 0,
+    docsTokens: 0,
+    profileTokens: 0,
+    conversationTokens: 0,
+    toolCallTokens: 0,
+    toolDefinitionTokens: 0,
+    executeThreshold: 65,
+    executeThresholdClamped: false,
+    newWorkTokens: 0,
+    totalInputTokens: 0,
+    recompProgress: null,
+    memoryState: null,
+    compaction_enabled: true,
+};
 
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 let dataHome: string;
@@ -118,6 +158,7 @@ beforeEach(() => {
 afterEach(() => {
     closeCompactionMarkerConnection();
     _resetHarnessForTesting();
+    resetSidebarSnapshotCache();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
     rmSync(dataHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
@@ -202,6 +243,29 @@ describe("createEventHandler — message.removed", () => {
         expect(calls.cache).toEqual([SESSION]);
         expect(rowCounts()).toEqual({ messages: 2, parts: 0 });
     });
+
+    it("drops the live usage and sticky snapshot only when the response they came from is removed", async () => {
+        const { deps, handle } = buildHarness();
+        await handle("message.updated", assistantUpdated({ input: 1_000 }));
+        expect(deps.contextUsageMap.get(SESSION)?.messageID).toBe("msg-1");
+        const scope = { sessionId: SESSION, directory: "/repo", modelKey: "p/m" };
+        applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, inputTokens: 1_000 });
+
+        // Removing some other message, such as a plugin notification row, leaves both intact.
+        await handle("message.removed", { sessionID: SESSION, messageID: "msg-other" });
+        expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(1_000);
+        expect(
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+                .inputTokens,
+        ).toBe(1_000);
+
+        await handle("message.removed", { sessionID: SESSION, messageID: "msg-1" });
+        expect(deps.contextUsageMap.has(SESSION)).toBe(false);
+        expect(
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+                .inputTokens,
+        ).toBe(0);
+    });
 });
 
 describe("createEventHandler — session.compacted", () => {
@@ -213,6 +277,21 @@ describe("createEventHandler — session.compacted", () => {
 
         expect(calls.cache).toEqual([SESSION]);
         expect(rowCounts()).toEqual({ messages: 2, parts: 0 });
+    });
+
+    it("drops the pre-compaction live usage and sticky snapshot", async () => {
+        const { deps, handle } = buildHarness();
+        await handle("message.updated", assistantUpdated({ input: 90_000 }));
+        const scope = { sessionId: SESSION, directory: "/repo", modelKey: "p/m" };
+        applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, inputTokens: 90_000 });
+
+        await handle("session.compacted", { sessionID: SESSION });
+
+        expect(deps.contextUsageMap.has(SESSION)).toBe(false);
+        expect(
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+                .inputTokens,
+        ).toBe(0);
     });
 });
 
