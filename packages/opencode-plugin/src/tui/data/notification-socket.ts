@@ -25,8 +25,9 @@ interface NotificationSocketOptions {
     /** The callback returns `true` only after the notification is fully consumed and can be acknowledged.
      * Dialog handlers await, so `onNotification` may return a Promise. */
     onNotification: (notification: SocketNotification) => boolean | Promise<boolean>;
-    /** Runs on every socket open, so RPC-backed preferences can be (re)loaded once the server is reachable. */
-    onConnected?: () => void;
+    /** Runs on every socket open, so RPC-backed preferences can be (re)loaded once the server is reachable.
+     * Notifications from that connection, the hello backlog included, are handled only after the returned promise settles. */
+    onConnected?: () => void | Promise<void>;
 }
 
 const RECONNECT_BASE_MS = 500;
@@ -197,8 +198,14 @@ async function connect(): Promise<void> {
             return;
         }
         reconnectAttempt = 0;
+        // Queued ahead of the hello so the backlog the server answers with is handled after the refresh settles.
+        const connected = opts?.onConnected;
+        if (connected) {
+            notificationHandlingChain = notificationHandlingChain
+                .then(() => connected())
+                .catch(() => {});
+        }
         sendHello(ws, endpoint.token);
-        opts?.onConnected?.();
     });
 
     ws.addEventListener("message", (event) => {

@@ -1121,8 +1121,9 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     startNotificationSocket({
         getSessionId: () => getSessionId(api),
         onNotification: handleNotification,
-        // The socket opens only once the server is reachable, so the configured duration loads then and again after each reconnect.
-        onConnected: () => void refreshToastDurationMs(),
+        // The socket opens only once the server is reachable, so the configured duration loads then and
+        // again after each reconnect; the socket holds that connection's backlog until the load settles.
+        onConnected: refreshToastDurationMs,
     });
 
     api.lifecycle.onDispose(() => {
