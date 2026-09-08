@@ -16,28 +16,47 @@ interface CachedSnapshot {
 const MAX_CACHED_SESSIONS = 100;
 const STALE_SNAPSHOT_AGE_MS = 5 * 60 * 1000; // 5 minutes
 
-const cache = new BoundedSessionMap<CachedSnapshot>(MAX_CACHED_SESSIONS);
+// The daemon scopes session state by project root, so a session polled under two roots needs one sticky snapshot per root. The outer map bounds session entries.
+const cache = new BoundedSessionMap<Map<string, CachedSnapshot>>(MAX_CACHED_SESSIONS);
+
+function peekCached(sessionId: string, directory: string): CachedSnapshot | undefined {
+    return cache.peek(sessionId)?.get(directory);
+}
+
+function storeCached(sessionId: string, directory: string, entry: CachedSnapshot): void {
+    const byRoot = cache.get(sessionId) ?? new Map<string, CachedSnapshot>();
+    byRoot.set(directory, entry);
+    cache.set(sessionId, byRoot);
+}
+
+function dropCached(sessionId: string, directory: string): void {
+    const byRoot = cache.peek(sessionId);
+    if (!byRoot) return;
+    byRoot.delete(directory);
+    if (byRoot.size === 0) cache.delete(sessionId);
+}
 
 /**
  *
  */
 export function applyStickySnapshotCache(
     sessionId: string,
+    directory: string,
     fresh: SidebarSnapshot,
 ): SidebarSnapshot {
     const now = Date.now();
 
     if (fresh.inputTokens > 0) {
-        cache.set(sessionId, { snapshot: fresh, cachedAt: now });
+        storeCached(sessionId, directory, { snapshot: fresh, cachedAt: now });
         return fresh;
     }
 
-    const cached = cache.peek(sessionId);
+    const cached = peekCached(sessionId, directory);
     if (!cached) {
         return fresh;
     }
     if (now - cached.cachedAt > STALE_SNAPSHOT_AGE_MS) {
-        cache.delete(sessionId);
+        dropCached(sessionId, directory);
         return fresh;
     }
     //
@@ -46,7 +65,7 @@ export function applyStickySnapshotCache(
         fresh.compartmentCount >= cached.snapshot.compartmentCount &&
         fresh.memoryCount >= cached.snapshot.memoryCount;
     if (!hasInFlightEvidence(fresh) && !stateSurvived) {
-        cache.delete(sessionId);
+        dropCached(sessionId, directory);
         return fresh;
     }
 

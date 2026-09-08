@@ -163,6 +163,56 @@ describe("registerRpcHandlers", () => {
         expect(roots).toEqual([rootA, rootB]);
     });
 
+    test("a zero-token answer from a second root does not inherit the first root's sticky totals", async () => {
+        const sessionId = "ses-handler-sticky-roots";
+        const rootA = process.cwd();
+        const rootB = join(process.cwd(), "src");
+        // Root B keeps root A's compartment count so a session-keyed sticky cache would substitute A's totals.
+        const statusByRoot = new Map<string, RustSessionStatus>([
+            [rootA, DAEMON_STATUS],
+            [
+                rootB,
+                {
+                    usage: { current_total_input_tokens: 0, context_limit_tokens: 100_000 },
+                    compartment_count: DAEMON_STATUS.compartment_count,
+                },
+            ],
+        ]);
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: rootA,
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: null,
+            liveSessionState: createLiveSessionState(),
+            rustModeModuleClient: {
+                async call(args) {
+                    return { ok: true, result: statusByRoot.get(args.projectRoot) ?? {} };
+                },
+            },
+        });
+
+        const first = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+            directory: rootA,
+        })) as unknown as SidebarSnapshot;
+        expect(first.inputTokens).toBe(42_000);
+
+        const second = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+            directory: rootB,
+        })) as unknown as SidebarSnapshot;
+        expect(second.inputTokens).toBe(0);
+        expect(second.usagePercentage).toBe(0);
+    });
+
     test("a daemon that cannot answer fails the poll instead of returning a zero snapshot", async () => {
         const { handlers, calls } = register({}, new Error("route closed"));
         const sessionId = "ses-handler-daemon-down";

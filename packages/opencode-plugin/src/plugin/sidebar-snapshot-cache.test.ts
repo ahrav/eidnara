@@ -10,6 +10,8 @@ afterEach(() => {
     resetSidebarSnapshotCache();
 });
 
+const ROOT = "/repo";
+
 function makeSnapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot {
     return {
         sessionId: "ses_test",
@@ -50,19 +52,20 @@ describe("applyStickySnapshotCache", () => {
             compartmentCount: 5,
             memoryCount: 10,
         });
-        const result = applyStickySnapshotCache("ses_test", fresh);
+        const result = applyStickySnapshotCache("ses_test", ROOT, fresh);
         expect(result).toEqual(fresh);
     });
 
     test("passes through zero snapshot when no prior cached value (true new session)", () => {
         const fresh = makeSnapshot({ inputTokens: 0 });
-        const result = applyStickySnapshotCache("ses_test", fresh);
+        const result = applyStickySnapshotCache("ses_test", ROOT, fresh);
         expect(result.inputTokens).toBe(0);
     });
 
     test("returns hybrid (cached tokens + fresh counts) when inputTokens drops to 0 mid-turn", () => {
         applyStickySnapshotCache(
             "ses_test",
+            ROOT,
             makeSnapshot({
                 inputTokens: 350_000,
                 usagePercentage: 35,
@@ -84,7 +87,7 @@ describe("applyStickySnapshotCache", () => {
             historianRunning: true,
             pendingOpsCount: 12,
         });
-        const result = applyStickySnapshotCache("ses_test", flickered);
+        const result = applyStickySnapshotCache("ses_test", ROOT, flickered);
 
         // Token-breakdown values come from the cached snapshot.
         expect(result.inputTokens).toBe(350_000);
@@ -107,6 +110,7 @@ describe("applyStickySnapshotCache", () => {
     test("clears cached tokens when zero snapshot drops counts too (real reset)", () => {
         applyStickySnapshotCache(
             "ses_test",
+            ROOT,
             makeSnapshot({
                 inputTokens: 100_000,
                 compartmentCount: 5,
@@ -117,6 +121,7 @@ describe("applyStickySnapshotCache", () => {
         // The cache treats inputTokens, compartmentCount, and memoryCount of 0 with no in-flight signal as a reset.
         const reset = applyStickySnapshotCache(
             "ses_test",
+            ROOT,
             makeSnapshot({
                 inputTokens: 0,
                 compartmentCount: 0,
@@ -130,6 +135,7 @@ describe("applyStickySnapshotCache", () => {
         // The reset removes the cached entry, so later in-flight signals cannot restore tokens.
         const later = applyStickySnapshotCache(
             "ses_test",
+            ROOT,
             makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
         );
         expect(later.inputTokens).toBe(0);
@@ -139,6 +145,7 @@ describe("applyStickySnapshotCache", () => {
         // The cache preserves cached tokens when inputTokens is 0, counts match the cached snapshot, and no in-flight signals are set.
         applyStickySnapshotCache(
             "ses_test",
+            ROOT,
             makeSnapshot({
                 inputTokens: 350_000,
                 usagePercentage: 35,
@@ -159,7 +166,7 @@ describe("applyStickySnapshotCache", () => {
             compartmentCount: 392,
             memoryCount: 486,
         });
-        const result = applyStickySnapshotCache("ses_test", firstPromptFlicker);
+        const result = applyStickySnapshotCache("ses_test", ROOT, firstPromptFlicker);
 
         expect(result.inputTokens).toBe(350_000);
         expect(result.compartmentTokens).toBe(128_000);
@@ -168,28 +175,35 @@ describe("applyStickySnapshotCache", () => {
     });
 
     test("sticks when compartment work is explicitly in progress", () => {
-        applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
+        applyStickySnapshotCache("ses_test", ROOT, makeSnapshot({ inputTokens: 100_000 }));
         const result = applyStickySnapshotCache(
             "ses_test",
+            ROOT,
             makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
         );
         expect(result.inputTokens).toBe(100_000);
     });
 
     test("does not stick after fresh non-zero overwrites the cached zero state", () => {
-        applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
+        applyStickySnapshotCache("ses_test", ROOT, makeSnapshot({ inputTokens: 100_000 }));
         // The cache preserves token breakdowns during a mid-turn flicker.
         const stuck = applyStickySnapshotCache(
             "ses_test",
+            ROOT,
             makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
         );
         expect(stuck.inputTokens).toBe(100_000);
         // A nonzero inputTokens snapshot replaces the cached snapshot.
-        const fresh = applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 200_000 }));
+        const fresh = applyStickySnapshotCache(
+            "ses_test",
+            ROOT,
+            makeSnapshot({ inputTokens: 200_000 }),
+        );
         expect(fresh.inputTokens).toBe(200_000);
         // A later zero-inputTokens snapshot uses the replacement.
         const stuck2 = applyStickySnapshotCache(
             "ses_test",
+            ROOT,
             makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
         );
         expect(stuck2.inputTokens).toBe(200_000);
@@ -198,20 +212,56 @@ describe("applyStickySnapshotCache", () => {
     test("does not bleed across sessions", () => {
         applyStickySnapshotCache(
             "ses_a",
+            ROOT,
             makeSnapshot({ sessionId: "ses_a", inputTokens: 100_000 }),
         );
         const result = applyStickySnapshotCache(
             "ses_b",
+            ROOT,
             makeSnapshot({ sessionId: "ses_b", inputTokens: 0 }),
         );
         expect(result.inputTokens).toBe(0);
         expect(result.sessionId).toBe("ses_b");
     });
 
-    test("clearSidebarSnapshotCache removes cached entry for a session", () => {
-        applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
+    test("does not bleed across project roots for one session", () => {
+        applyStickySnapshotCache("ses_test", "/repo-a", makeSnapshot({ inputTokens: 100_000 }));
+        const otherRoot = applyStickySnapshotCache(
+            "ses_test",
+            "/repo-b",
+            makeSnapshot({ inputTokens: 0 }),
+        );
+        expect(otherRoot.inputTokens).toBe(0);
+        const sameRoot = applyStickySnapshotCache(
+            "ses_test",
+            "/repo-a",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        expect(sameRoot.inputTokens).toBe(100_000);
+    });
+
+    test("clearSidebarSnapshotCache drops every root cached for the session", () => {
+        applyStickySnapshotCache("ses_test", "/repo-a", makeSnapshot({ inputTokens: 100_000 }));
+        applyStickySnapshotCache("ses_test", "/repo-b", makeSnapshot({ inputTokens: 200_000 }));
         clearSidebarSnapshotCache("ses_test");
-        const result = applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 0 }));
+        const stuckA = applyStickySnapshotCache(
+            "ses_test",
+            "/repo-a",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        const stuckB = applyStickySnapshotCache(
+            "ses_test",
+            "/repo-b",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        expect(stuckA.inputTokens).toBe(0);
+        expect(stuckB.inputTokens).toBe(0);
+    });
+
+    test("clearSidebarSnapshotCache removes cached entry for a session", () => {
+        applyStickySnapshotCache("ses_test", ROOT, makeSnapshot({ inputTokens: 100_000 }));
+        clearSidebarSnapshotCache("ses_test");
+        const result = applyStickySnapshotCache("ses_test", ROOT, makeSnapshot({ inputTokens: 0 }));
         // Without a cached snapshot, zero inputTokens passes through unchanged.
         expect(result.inputTokens).toBe(0);
     });
@@ -221,11 +271,11 @@ describe("applyStickySnapshotCache", () => {
         const realNow = Date.now;
         const t0 = 1_000_000_000_000;
         Date.now = () => t0;
-        applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
+        applyStickySnapshotCache("ses_test", ROOT, makeSnapshot({ inputTokens: 100_000 }));
 
         // Snapshots older than 5 minutes do not restore zero-token readings.
         Date.now = () => t0 + 6 * 60 * 1000;
-        const result = applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 0 }));
+        const result = applyStickySnapshotCache("ses_test", ROOT, makeSnapshot({ inputTokens: 0 }));
         expect(result.inputTokens).toBe(0);
 
         Date.now = realNow;

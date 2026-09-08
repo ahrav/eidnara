@@ -383,7 +383,7 @@ export function buildSidebarSnapshot(
             recompProgress: null,
         };
         // The breakdown retains its last nonzero value when inputTokens is 0 to prevent bar flicker.
-        return applyStickySnapshotCache(sessionId, fresh);
+        return applyStickySnapshotCache(sessionId, directory, fresh);
     } catch (err) {
         log("[rpc] sidebar-snapshot error:", err);
         throw err;
