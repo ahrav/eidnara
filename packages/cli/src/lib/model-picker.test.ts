@@ -32,4 +32,10 @@ describe("validateModelId", () => {
         expect(validateModelId("open ai/gpt-5")).toMatch(/without spaces/);
         expect(validateModelId("openai/gpt\t5")).toMatch(/without spaces/);
     });
+
+    it("rejects a provider or model segment that starts with a dash", () => {
+        expect(validateModelId("-openai/gpt-5")).toMatch(/start with '-'/);
+        expect(validateModelId("openai/-gpt-5")).toMatch(/start with '-'/);
+        expect(validateModelId("openai/gpt-5-mini")).toBeUndefined();
+    });
 });

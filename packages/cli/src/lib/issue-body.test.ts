@@ -274,6 +274,26 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
     });
 
+    it("truncates an oversized newest entry even when the log ends with a newline", () => {
+        const newest = `NEWEST: ${"y".repeat(70_000)}`;
+        const body = [
+            "## Description",
+            "d",
+            "",
+            "## Log (last 3 lines, sanitized)",
+            "```",
+            `older 1\nolder 2\n${newest}\n`,
+            "```",
+        ].join("\n");
+        const capped = capBodyToGithubLimit(body, 60_000);
+
+        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(60_000);
+        expect(Buffer.byteLength(capped, "utf8")).toBeGreaterThan(50_000);
+        expect(capped).toContain("NEWEST: yyyy");
+        expect(capped).not.toContain("older 1");
+        expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
+    });
+
     it("preserves the Description and Environment sections", () => {
         const body = makeBody({ logLineCount: 5000, lineSize: 200 });
         const capped = capBodyToGithubLimit(body, 60_000);

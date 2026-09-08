@@ -48,6 +48,9 @@ export function validateModelId(value: string): string | undefined {
     if (slash <= 0 || slash === trimmed.length - 1 || /\s/.test(trimmed)) {
         return "Use the canonical provider/model form without spaces (e.g. anthropic/claude-haiku-4-5)";
     }
+    if (trimmed.startsWith("-") || trimmed.startsWith("-", slash + 1)) {
+        return "Neither the provider nor the model may start with '-'";
+    }
     return undefined;
 }
 

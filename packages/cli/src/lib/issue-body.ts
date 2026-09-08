@@ -89,7 +89,9 @@ export function capBodyToGithubLimit(
         return enforceFinalBodyLimit(capped, maxBytes);
     }
 
-    const lines = log.split("\n");
+    // A trailing blank line would otherwise remain as the sole kept element,
+    // dropping an oversized newest entry instead of truncating it.
+    const lines = log.replace(/\n+$/, "").split("\n");
     let keepLines = lines;
     let kept = keepLines.join("\n");
     while (Buffer.byteLength(kept, "utf8") > logBudget && keepLines.length > 1) {
