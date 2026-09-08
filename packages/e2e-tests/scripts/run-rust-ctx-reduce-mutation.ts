@@ -59,7 +59,12 @@ if (observedFailure.exit_status === 0) {
         "CTX_REDUCE_UNKNOWN_TARGET: mutation did not redden the queued-ledger assertion",
     );
 }
-if (!observedFailure.output.includes("toBeGreaterThan")) {
+// The drill has several `toBeGreaterThan` assertions; only the queued-ledger one carries this message.
+if (
+    !observedFailure.output.includes(
+        "error: queued ctx_reduce drop must be pending before the bust",
+    )
+) {
     throw new Error("CTX_REDUCE_UNKNOWN_TARGET: failure did not reach the queued-ledger assertion");
 }
 if (revertedRerun.exit_status !== 0) {

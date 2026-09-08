@@ -19,17 +19,21 @@ import { rustPrereqs } from "../src/rust-scenario-support";
 const GREEN_TEST_TIMEOUT_MS = 300_000;
 const GREEN_CASE_TIMEOUT_MS = GREEN_TEST_TIMEOUT_MS - 60_000;
 
-const RUST_GREEN_VARIANT_IDS = [
-    "var-parity-a1-pure-defer-stability",
-    "var-parity-a3-ctx-reduce-survival",
-] as const;
-
 // History, registry, and digests validate at import so a catalog defect fails even where the
 // runtime cannot run a case.
 const historyFiles = loadHistorySnapshot(INCIDENTS_DIR, "working");
 const history = validateIncidentHistory(historyFiles);
 const registry = builtinIncidentCaseRegistry();
 validateRegistryCatalogCorrespondence(registry, history.catalog);
+
+// Every executable green variant in the catalog gets a wrapper, so a new variant cannot merge without running here.
+const RUST_GREEN_VARIANT_IDS = history.catalog.families
+    .flatMap((family) => family.variants)
+    .filter((variant) => variant.lane === "green" && variant.applicability?.harness === "rust")
+    .map((variant) => variant.id);
+if (RUST_GREEN_VARIANT_IDS.length === 0) {
+    throw new Error("the catalog declares no executable rust green variants to wrap");
+}
 const implementationDigests = new Map(
     [...registry].map(([variantId, registered]) => [
         variantId,

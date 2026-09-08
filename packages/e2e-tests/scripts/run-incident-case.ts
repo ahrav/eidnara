@@ -89,12 +89,24 @@ async function main(envelopePath: string): Promise<void> {
 
     if (precondition.satisfied) {
         const checks = registered.verifier(observation);
-        // A verifier must emit every normative check before the case can pass.
-        const emitted = new Set(checks.map((entry) => entry.id));
+        // The emitted check ids must equal the declared normative set: an omitted check hides a failure, and an extra or duplicated one changes verifier semantics outside a semantic revision.
+        const emittedIds = checks.map((entry) => entry.id);
+        const emitted = new Set(emittedIds);
+        if (emitted.size !== emittedIds.length) {
+            throw new Error(`verifier for ${variantId} emitted a duplicate check id`);
+        }
         for (const required of variant.normative_checks) {
             if (!emitted.has(required)) {
                 throw new Error(
                     `verifier for ${variantId} omitted declared normative check ${required}`,
+                );
+            }
+        }
+        const declared = new Set(variant.normative_checks);
+        for (const id of emittedIds) {
+            if (!declared.has(id)) {
+                throw new Error(
+                    `verifier for ${variantId} emitted undeclared check ${id}; register a semantic revision`,
                 );
             }
         }

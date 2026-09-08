@@ -13,6 +13,8 @@ const BUN_FAILURE = [
     "Received: 0",
     "",
     "      at <anonymous> (/local/home/someone/scratch/eidnara/packages/e2e-tests/tests/rust-ctx-reduce-roundtrip.test.ts:133:26)",
+    "error: failed to open /home/runner/.local/share/opencode/log/2026.log: ENOENT",
+    "error: queued ctx_reduce drop must be pending before the bust",
     "[eidnara] session ses_01H8 failed: Error: boom at /home/someone/.local/share/opencode/log/2026.log",
     "(fail) rust ctx_reduce round trip > queues the reduce row [412.43ms]",
     "",
@@ -51,6 +53,7 @@ describe("mutation evidence output", () => {
                 "error: expect(received).toBeGreaterThan(expected)",
                 "Expected: > 0",
                 "Received: 0",
+                "error: queued ctx_reduce drop must be pending before the bust",
                 "(fail) rust ctx_reduce round trip > queues the reduce row [412.43ms]",
                 " 0 pass",
                 " 1 fail",
@@ -61,6 +64,7 @@ describe("mutation evidence output", () => {
         expect(kept).not.toContain("/local/home");
         expect(kept).not.toContain("/home/");
         expect(kept).not.toContain("ses_01H8");
+        expect(kept).not.toContain("failed to open");
         expect(kept).not.toMatch(/^\d+ \|/m);
     });
 

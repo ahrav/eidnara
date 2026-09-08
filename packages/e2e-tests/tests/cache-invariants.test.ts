@@ -18,6 +18,7 @@ import {
     failedCheckIds,
     verifyAgedCtxReduceSurvival,
     verifyFirstRenderPureDeferStability,
+    wireCarriesTagOverlay,
 } from "../src/incident-pool/scenarios/source-linked-regressions";
 import type { MockUsage } from "../src/mock-provider/server";
 import { RustTestHarness } from "../src/rust-harness";
@@ -108,8 +109,20 @@ describe.skipIf(!rustPrereqs.ok)("cache invariants — replay class", () => {
 
                 // `analyzePasses` evaluates only the post-execute DEFER window.
                 // Turns 4 through 8 are five main requests: the execute baseline plus four defer passes; a filtered request would hide a transition.
-                const deferRequests = mainAgentRequests(h.mock.requests().slice(firstDeferIndex));
+                const allRequests = h.mock.requests();
+                const deferRequests = mainAgentRequests(allRequests.slice(firstDeferIndex));
                 expect(deferRequests.length).toBe(5);
+                // The pass log is per session, not per request, so the execute is confirmed on the measured wire: turn 4's request must carry the tag overlay and bust the prefix that turn 3's request cached.
+                for (const request of deferRequests) {
+                    expect(wireCarriesTagOverlay(request.body)).toBe(true);
+                }
+                const executeBaseline = mainAgentRequests(allRequests.slice(0, firstDeferIndex)).at(
+                    -1,
+                );
+                expect(executeBaseline).toBeDefined();
+                const executeTransition = analyzePasses([executeBaseline!, deferRequests[0]!])[1]!;
+                expect(executeTransition.prevHadBreakpoint).toBe(true);
+                expect(executeTransition.verdict).toBe("BUST");
                 const comparisons = analyzePasses(deferRequests);
                 expect(comparisons.slice(1).every((c) => c.prevHadBreakpoint)).toBe(true);
                 const busts = comparisons.filter((c) => c.verdict === "BUST");

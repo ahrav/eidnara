@@ -20,7 +20,7 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a1-4",
+                        "id": "rev-parity-a1-5",
                         "fingerprint": "63cd229a7b2afb945cd40bb71c92827f3a18b09a009ecebf2da4d795f769102c"
                     },
                     "normative_checks": [
@@ -40,7 +40,8 @@
                             "crafted raw-served or missing rust pass is rejected (source-linked-regressions.test.ts)"
                         ],
                         "oracle_dependencies": [
-                            "src/cache-analysis.ts"
+                            "src/cache-analysis.ts",
+                            "src/scripted-tool-call.ts"
                         ]
                     },
                     "blocked_by": [],
@@ -57,7 +58,7 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a3-7",
+                        "id": "rev-parity-a3-8",
                         "fingerprint": "59259a3afa6e7784d082e5f7d0f835e7f59455da56858d46f4b1889ae54b3465"
                     },
                     "normative_checks": [
@@ -80,7 +81,8 @@
                             "crafted below-floor request count is rejected (source-linked-regressions.test.ts)"
                         ],
                         "oracle_dependencies": [
-                            "src/cache-analysis.ts"
+                            "src/cache-analysis.ts",
+                            "src/scripted-tool-call.ts"
                         ]
                     },
                     "blocked_by": [],

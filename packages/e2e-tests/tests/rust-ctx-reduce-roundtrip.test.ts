@@ -91,7 +91,11 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: ctx_reduce round-trip", () => 
             h.env.workdir,
             "session.status",
         )) as ModuleStatus;
-        expect(queued.pending_drop_count ?? 0).toBeGreaterThan(0);
+        // The mutation runner matches this message in Bun's `error:` line, so it names this assertion alone.
+        expect(
+            queued.pending_drop_count ?? 0,
+            "queued ctx_reduce drop must be pending before the bust",
+        ).toBeGreaterThan(0);
 
         // The next turn exceeds the execute threshold, so the bust drains the pending drop.
         for (let i = 5; i <= 10; i += 1) {
