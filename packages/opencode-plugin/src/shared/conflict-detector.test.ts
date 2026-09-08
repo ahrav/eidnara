@@ -8,6 +8,7 @@ import {
     detectConflicts,
     hasOmoPlugin,
     projectOpenCodeConfigPaths,
+    projectPluginEntries,
     resolveCompactionForBoot,
 } from "./conflict-detector";
 
@@ -96,6 +97,19 @@ describe("detectConflicts", () => {
         it("reads the .json sibling when no .jsonc exists", () => {
             writeProjectConfig(["oh-my-opencode"]);
             expect(hasOmoPlugin(projectDir)).toBe(true);
+        });
+
+        it("exposes the raw project plugin entries from both project locations", () => {
+            mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+            writeFileSync(
+                join(projectDir, ".opencode", "opencode.json"),
+                JSON.stringify({ plugin: [["file:///dev/eidnara", { dev: true }]] }),
+            );
+            writeProjectConfig(["other"]);
+            expect(projectPluginEntries(projectDir)).toEqual([
+                ["file:///dev/eidnara", { dev: true }],
+                "other",
+            ]);
         });
     });
 

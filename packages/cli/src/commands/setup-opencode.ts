@@ -7,6 +7,7 @@ import {
     detectConflicts,
     hasOmoPlugin,
     projectOpenCodeConfigPaths,
+    projectPluginEntries,
 } from "@eidnara/opencode/shared/conflict-detector";
 import { collectOmoConfigPaths, fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import {
@@ -74,13 +75,25 @@ export function addPluginToOpenCodeConfig(
      * When compactionEnabled is false, the writer does not change compaction fields.
      */
     compactionEnabled = true,
+    /** Plugin entries already effective from other config layers, such as a project config's dev path; an Eidnara entry among them suppresses the global one so OpenCode does not load the plugin twice. commentlint: allow(JUDGE) */
+    effectiveElsewhere: readonly unknown[] = [],
 ): void {
     const existsAtCommit = existsSync(configPath);
     const existing = existsAtCommit ? readJsoncConfigForUpdate(configPath) : {};
     assertPluginListValue(configPath, existing.plugin);
+    const registeredElsewhere = effectiveElsewhere.some(
+        (plugin) => matchesPluginEntry(plugin, PLUGIN_NAME) || isDevPathPluginEntry(plugin),
+    );
+    if (registeredElsewhere) {
+        log.info(
+            "Eidnara is already registered by a project OpenCode config; not adding it globally.",
+        );
+    }
     if (!existsAtCommit) {
         ensureDir(dirname(configPath));
-        const created: Record<string, unknown> = { plugin: [PLUGIN_NAME] };
+        const created: Record<string, unknown> = registeredElsewhere
+            ? {}
+            : { plugin: [PLUGIN_NAME] };
         if (compactionEnabled) {
             created.compaction = { auto: false, prune: false };
         }
@@ -123,11 +136,11 @@ export function addPluginToOpenCodeConfig(
             matchesPluginEntry(plugin, PLUGIN_NAME),
         );
         const hasDevEntry = retainedPlugins.some((plugin) => isDevPathPluginEntry(plugin));
-        if (!hasNpmEntry && !hasDevEntry) {
+        if (!hasNpmEntry && !hasDevEntry && !registeredElsewhere) {
             text = appendJsoncArrayValues(text, ["plugin"], [PLUGIN_NAME]);
             changed = true;
         }
-    } else {
+    } else if (!registeredElsewhere) {
         text = setJsoncValue(text, ["plugin"], [PLUGIN_NAME]);
         changed = true;
     }
@@ -557,12 +570,14 @@ export async function runSetup(dryRun = false): Promise<number> {
     }
 
     const disableNativeCompaction = compactionEnabled && !keepNativeCompaction;
+    let repairIncomplete = false;
     if (!dryRun) {
         addPluginToOpenCodeConfig(
             paths.opencodeConfig,
             paths.opencodeConfigFormat,
             removeDcp,
             disableNativeCompaction,
+            projectPluginEntries(process.cwd()),
         );
         log.success(`Plugin added to ${paths.opencodeConfig}`);
         if (removeDcp) log.success("Removed opencode-dcp from plugin list");
@@ -585,6 +600,19 @@ export async function runSetup(dryRun = false): Promise<number> {
                 for (const action of actions) log.success(action);
             } else {
                 log.info("No additional conflict changes were needed");
+            }
+            // The fixer edits only files that exist, so an accepted repair can leave a conflict in place
+            // (an OMO plugin entry with no OMO config file, for example); re-detect and say so.
+            const remaining = detectConflicts(process.cwd(), { compactionEnabled });
+            if (remaining.hasConflict) {
+                repairIncomplete = true;
+                log.warn(
+                    "Conflicts remain after the automatic fixes; Eidnara stays disabled until they are resolved:",
+                );
+                for (const reason of remaining.reasons) log.message(`  • ${reason}`);
+                log.message(
+                    "For oh-my-opencode without a config file, add `disabled_hooks` (context-window-monitor, preemptive-compaction, anthropic-context-window-limit-recovery) to its config, then rerun setup.",
+                );
             }
         }
 
@@ -641,6 +669,12 @@ export async function runSetup(dryRun = false): Promise<number> {
         return 0;
     }
 
+    if (repairIncomplete) {
+        outro(
+            "Setup finished with warnings — resolve the remaining conflicts, then run 'opencode'.",
+        );
+        return 1;
+    }
     outro("Run 'opencode' to start!");
 
     return 0;

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
     type ConflictResult,
     DCP_CONFLICT_REASON,
@@ -249,6 +250,35 @@ describe("setup-opencode config safety", () => {
 
         addPluginToOpenCodeConfig(path, "jsonc");
         expect(readFileSync(path, "utf-8")).toBe(afterFirst);
+    });
+
+    it("does not add the global entry when a project config already registers Eidnara", () => {
+        const root = tempDir();
+        const path = join(root, "opencode.jsonc");
+        writeFileSync(path, `{"plugin":["other"]}`);
+        const devPlugin = join(root, "plugin");
+        mkdirSync(devPlugin, { recursive: true });
+        writeFileSync(
+            join(devPlugin, "package.json"),
+            JSON.stringify({ name: "@eidnara/opencode" }),
+        );
+
+        addPluginToOpenCodeConfig(path, "jsonc", false, true, [pathToFileURL(devPlugin).href]);
+        expect(parseJsonc(readFileSync(path, "utf-8"))).toMatchObject({
+            plugin: ["other"],
+            compaction: { auto: false, prune: false },
+        });
+
+        addPluginToOpenCodeConfig(path, "jsonc", false, true, ["@eidnara/opencode@latest"]);
+        expect((parseJsonc(readFileSync(path, "utf-8")) as { plugin: string[] }).plugin).toEqual([
+            "other",
+        ]);
+
+        const fresh = join(root, "fresh", "opencode.jsonc");
+        addPluginToOpenCodeConfig(fresh, "none", false, true, ["@eidnara/opencode"]);
+        expect(parseJsonc(readFileSync(fresh, "utf-8"))).toEqual({
+            compaction: { auto: false, prune: false },
+        });
     });
 
     it("re-detects targets created after discovery and merges them", () => {

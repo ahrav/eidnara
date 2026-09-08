@@ -339,6 +339,15 @@ export function extractPluginName(entry: unknown): string | null {
     return null;
 }
 
+/** Raw plugin entries from the effective project-level OpenCode configs under `directory`. */
+export function projectPluginEntries(directory: string): Array<string | [string, unknown]> {
+    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
+    return [
+        ...(readEffectiveConfig(dotOcJsonc, dotOcJson)?.plugin ?? []),
+        ...(readEffectiveConfig(rootJsonc, rootJson)?.plugin ?? []),
+    ];
+}
+
 function collectPluginEntries(directory: string): string[] {
     const plugins: string[] = [];
 
@@ -350,10 +359,7 @@ function collectPluginEntries(directory: string): string[] {
         }
     };
 
-    // Project-level configs
-    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
-    pushFrom(readEffectiveConfig(dotOcJsonc, dotOcJson)?.plugin);
-    pushFrom(readEffectiveConfig(rootJsonc, rootJson)?.plugin);
+    pushFrom(projectPluginEntries(directory));
 
     // User-level config
     try {
