@@ -2,16 +2,24 @@ import { z } from "zod";
 
 const PermissionValueSchema = z.enum(["ask", "allow", "deny"]);
 
+// A rule is either one action or a map from glob pattern to action.
+const PermissionRuleSchema = z.union([
+    PermissionValueSchema,
+    z.record(z.string(), PermissionValueSchema),
+]);
+
+// `z.object` strips unknown keys by default, which would silently drop a
+// restriction on any permission not named here (`read`, `task`, `websearch`,
+// an MCP tool name, `*`). The catch-all validates those keys instead.
 const PermissionSchema = z
     .object({
         edit: PermissionValueSchema.optional(),
-        bash: z
-            .union([PermissionValueSchema, z.record(z.string(), PermissionValueSchema)])
-            .optional(),
+        bash: PermissionRuleSchema.optional(),
         webfetch: PermissionValueSchema.optional(),
         doom_loop: PermissionValueSchema.optional(),
         external_directory: PermissionValueSchema.optional(),
     })
+    .catchall(PermissionRuleSchema)
     .optional();
 
 export const AgentOverrideConfigSchema = z.object({
