@@ -53,7 +53,7 @@ function harness(kernel = new FakeKernel(), enabled = true) {
 }
 
 function parseJson<T>(text: string): T {
-    expect(text.startsWith("Error:")).toBeFalse();
+    expect(text).not.toStartWith("Error:");
     return JSON.parse(text) as T;
 }
 
