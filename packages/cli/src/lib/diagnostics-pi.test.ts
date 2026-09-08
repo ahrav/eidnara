@@ -119,7 +119,22 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString("https://opaque-private-token@example.test/repo")).toBe(
             "https://<REDACTED>@example.test/repo",
         );
-        expect(sanitizeString("d:/users/alice/project")).toBe("C:\\Users\\<USER>\\project");
+        expect(sanitizeString("d:/users/alice/project")).toBe("C:\\Users\\<USER>/project");
+        expect(sanitizeString("profile at d:/users/alice")).toBe("profile at C:\\Users\\<USER>");
+        expect(sanitizeString("home /home/alice and /Users/alice end")).toBe(
+            "home /home/<USER> and /Users/<USER> end",
+        );
+    });
+
+    it("redacts every Authorization scheme", () => {
+        process.env.HOME = "/nonexistent/home";
+        // Assembled at runtime so the fixture never appears as a credential in source.
+        const basic = `Basic ${Buffer.from("alice:not-a-real-password").toString("base64")}`;
+        expect(sanitizeString(`Authorization: ${basic}`)).toBe("Authorization: <REDACTED>");
+        expect(sanitizeString("authorization=Token abc.def")).toBe("authorization=<REDACTED>");
+        expect(sanitizeString("the Authorization header is missing")).toBe(
+            "the Authorization header is missing",
+        );
     });
 });
 
@@ -149,7 +164,7 @@ describe("renderDiagnosticsMarkdown", () => {
             },
             projectConfig: { path: "/x/p.jsonc", exists: false, flags: {} },
             loadedConfigPaths: [],
-            loadWarnings: ["model key\n## Log (last\nunknown"],
+            loadWarnings: ["model key\n## Log (last\nunknown", "lone\r## Log (last"],
             conflicts: { knownConflicts: [], otherPiExtensions: [] },
             logFile: { path: "/x/eidnara.log", exists: false, sizeKb: 0 },
             recentSessions: [],
@@ -163,7 +178,8 @@ describe("renderDiagnosticsMarkdown", () => {
 
         expect(markdown).toContain("- User config parse error: bad ## Log (last");
         expect(markdown).toContain("- model key ## Log (last unknown");
-        expect(markdown.match(/^## Log \(last/gm)).toBeNull();
+        expect(markdown).toContain("- lone ## Log (last");
+        expect(markdown.match(/(^|\r)## Log \(last/gm)).toBeNull();
         expect(markdown).toContain("- Pi installed: true");
     });
 });

@@ -146,6 +146,7 @@ function redactSecretString(value: string): string {
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
     return redactSecretText(value)
         .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1<REDACTED>@")
+        .replace(/(\bAuthorization\s*[:=]\s*)\S+(?:[ \t]+\S+)?/gi, "$1<REDACTED>")
         .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
         .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>")
         .replace(/api[_-]?key=([^\s&]+)/gi, "api_key=<REDACTED>")
@@ -163,9 +164,9 @@ export function sanitizeString(value: string): string {
     if (home && parse(home).root !== home) {
         sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "<HOME>");
     }
-    sanitized = sanitized.replace(/\/Users\/[^/]+\//gi, "/Users/<USER>/");
-    sanitized = sanitized.replace(/\/home\/[^/]+\//gi, "/home/<USER>/");
-    sanitized = sanitized.replace(/[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]/gi, "C:\\Users\\<USER>\\");
+    sanitized = sanitized.replace(/(\/Users\/)[^/\s"'`]+/gi, "$1<USER>");
+    sanitized = sanitized.replace(/(\/home\/)[^/\s"'`]+/gi, "$1<USER>");
+    sanitized = sanitized.replace(/[A-Za-z]:[\\/]Users[\\/][^\\/\s"'`]+/gi, "C:\\Users\\<USER>");
     if (username) {
         sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
     }
@@ -342,8 +343,6 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
     for (const session of recentSessions) {
         const dir = session.directory;
         if (!dir) continue;
-        const projectHistorianDir = getProjectEidnaraHistorianDir(dir);
-        const listing = listDumpsInDir(projectHistorianDir, 5);
         const existing = buckets.get(dir);
         if (existing) {
             if (!existing.sessionIds.includes(session.sessionId)) {
@@ -351,6 +350,7 @@ function collectPiHistorianDumps(recentSessions: PiRecentSessionSummary[]): PiHi
             }
             continue;
         }
+        const listing = listDumpsInDir(getProjectEidnaraHistorianDir(dir), 5);
         if (listing.count === 0) continue;
         buckets.set(dir, {
             directory: dir,
@@ -450,7 +450,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
  * a config key or parser message cannot inject a Markdown heading.
  */
 function oneLine(value: string): string {
-    return value.replace(/\s*\r?\n\s*/g, " ");
+    return value.replace(/\s*[\r\n]+\s*/g, " ");
 }
 
 export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
