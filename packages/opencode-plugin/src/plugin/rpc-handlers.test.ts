@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { EidnaraConfigSchema } from "../config/schema/eidnara";
 import { createEventHandler } from "../hooks/context/event-handler";
+import { createEventHook } from "../hooks/context/hook-handlers";
 import { resetKernelClientsForTest } from "../hooks/context/kernel-transport";
 import { createLiveSessionState } from "../hooks/context/live-session-state";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
@@ -356,6 +357,52 @@ describe("registerRpcHandlers", () => {
         expect(calls).toBe(1);
         expect(snapshot.compartmentCount).toBe(4);
         expect(detail.compartmentCount).toBe(4);
+    });
+
+    test("an assistant message.updated drops the cached status so the refresh it triggers reads the daemon", async () => {
+        const sessionId = "ses-handler-status-turn";
+        const live = createLiveSessionState();
+        const { handlers, calls } = register({}, DAEMON_STATUS, live);
+        const eventHook = createEventHook({
+            eventHandler: createEventHandler({ contextUsageMap: live.contextUsageBySession }),
+            contextUsageMap: live.contextUsageBySession,
+            liveModelBySession: live.liveModelBySession,
+            variantBySession: live.variantBySession,
+            agentBySession: live.agentBySession,
+            sessionDirectoryBySession: live.sessionDirectoryBySession,
+            historyRefreshSessions: live.historyRefreshSessions,
+            deferredHistoryRefreshSessions: live.deferredHistoryRefreshSessions,
+            systemPromptRefreshSessions: live.systemPromptRefreshSessions,
+            pendingMaterializationSessions: live.pendingMaterializationSessions,
+            deferredMaterializationSessions: live.deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map(),
+            client: undefined as never,
+            protectedTags: 5,
+        });
+
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        // Within the TTL the second poll reuses the cache.
+        expect(calls).toEqual(["session.status"]);
+
+        await eventHook({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        sessionID: sessionId,
+                        id: "msg-turn",
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        finish: "stop",
+                        tokens: { input: 1_000, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toEqual(["session.status", "session.status"]);
     });
 
     test("clearRustSessionStatus forgets the cached status and fences a request in flight", async () => {

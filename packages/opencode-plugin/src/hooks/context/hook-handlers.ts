@@ -163,6 +163,8 @@ export function createEventHook(args: {
 
         if (input.event.type === "message.updated") {
             const assistantInfo = getMessageUpdatedAssistantInfo(input.event.properties);
+            // The turn's transform and tool calls changed daemon state after the last poll; the sidebar refresh this event triggers must read the daemon, not a status cached before them.
+            if (assistantInfo) clearRustSessionStatus(assistantInfo.sessionID);
             // An edit of an older response must not move the live model off the newest response.
             if (
                 assistantInfo?.providerID &&
