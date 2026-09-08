@@ -150,11 +150,24 @@ function getSelfVersion(): string {
  * null stay, a number may be a PIN. A bare `key=` names a secret the way the shared text
  * redactor reads it, while `key:` keeps the prose carve-out (`press any key: continue`).
  */
+/** A JSON string escape such as `\u0070` spells a character the key vocabulary must see decoded. */
+function decodeQuotedKey(raw: string, quote: string): string {
+    if (quote === '"') {
+        try {
+            return JSON.parse(`"${raw}"`) as string;
+        } catch {
+            return raw;
+        }
+    }
+    return raw.replace(/\\(.)/g, "$1");
+}
+
 function redactKeyedText(value: string): string {
     // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
-    // A quoted key may hold spaces or slashes (`"api key"`); a bare key is an identifier.
+    // A quoted key may hold spaces, slashes, or escapes (`"api key"`, `"\u0070assword"`);
+    // a bare key is an identifier.
     return value.replace(
-        /(?:"([^"\\\r\n]+)"|'([^'\\\r\n]+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,}\]]+)/g,
+        /(?:"((?:[^"\\\r\n]|\\.)+)"|'((?:[^'\\\r\n]|\\.)+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,}\]]+)/g,
         (
             full,
             doubleQuoted: string | undefined,
@@ -164,7 +177,8 @@ function redactKeyedText(value: string): string {
             secret: string,
         ) => {
             const quote = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : "";
-            const key = doubleQuoted ?? singleQuoted ?? bare ?? "";
+            const rawKey = doubleQuoted ?? singleQuoted ?? bare ?? "";
+            const key = quote ? decodeQuotedKey(rawKey, quote) : rawKey;
             const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
             if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
                 return full;
@@ -172,7 +186,7 @@ function redactKeyedText(value: string): string {
             // A quoted key marks a JSON literal, where a quoted placeholder keeps the document
             // well-formed and stops the shared redactor from reading past the value.
             const placeholder = quote ? `${quote}<REDACTED>${quote}` : "<REDACTED>";
-            return `${quote}${key}${quote}${separator}${placeholder}`;
+            return `${quote}${rawKey}${quote}${separator}${placeholder}`;
         },
     );
 }
@@ -287,12 +301,12 @@ function loadPiConfigUnlessBlocking(cwd: string): {
 } {
     const userBase = eidnaraUserConfigBasePath();
     const projectBase = eidnaraProjectConfigBasePath(cwd);
-    const candidates = [
-        ...(userBase === undefined ? [] : [`${userBase}.jsonc`, `${userBase}.json`]),
-        `${projectBase}.jsonc`,
-        `${projectBase}.json`,
-    ];
-    const blocking = candidates.filter((path) => {
+    // The loader opens only the first existing path of each tier, `.jsonc` before `.json`.
+    const selected = [userBase, projectBase]
+        .filter((base): base is string => base !== undefined)
+        .map((base) => [`${base}.jsonc`, `${base}.json`].find((path) => existsSync(path)))
+        .filter((path): path is string => path !== undefined);
+    const blocking = selected.filter((path) => {
         try {
             const entry = statSync(path, { throwIfNoEntry: false });
             return entry !== undefined && !entry.isFile();

@@ -96,6 +96,7 @@ export class OmpAdapter implements HarnessAdapter {
                 return this.errorResult(
                     configPath,
                     `${problem}; removing it again failed (${uninstall.stderr || uninstall.stdout || "omp exited with an error"}). Run \`omp plugin uninstall ${OMP_PLUGIN_PACKAGE}\` by hand if Eidnara must stay off.`,
+                    { pluginMayBeActive: true },
                 );
             }
             return this.errorResult(configPath, `${problem}; removed it again.`);
@@ -130,6 +131,7 @@ export class OmpAdapter implements HarnessAdapter {
             return this.errorResult(
                 configPath,
                 `${problem}; the prior enable state could not be read from ${configPath}, so it was left as is. Check \`omp plugin list\` and run \`omp plugin disable ${OMP_PLUGIN_PACKAGE}\` if Eidnara must stay off.`,
+                { pluginMayBeActive: true },
             );
         }
         const restoreAction = originalRuntimeEnabled ? "enable" : "disable";
@@ -142,6 +144,7 @@ export class OmpAdapter implements HarnessAdapter {
             return this.errorResult(
                 configPath,
                 `${problem}; restoring the prior plugin state failed (${restore.stderr || restore.stdout || "omp exited with an error"}). Run \`omp plugin ${restoreAction} ${OMP_PLUGIN_PACKAGE}\` by hand.`,
+                { pluginMayBeActive: true },
             );
         }
         return this.errorResult(configPath, `${problem}; restored the prior plugin state.`);
@@ -163,12 +166,17 @@ export class OmpAdapter implements HarnessAdapter {
         }
     }
 
-    private errorResult(configPath: string, message: string): PluginEntryResult {
+    private errorResult(
+        configPath: string,
+        message: string,
+        options: { pluginMayBeActive?: boolean } = {},
+    ): PluginEntryResult {
         return {
             ok: false,
             action: "error",
             message: `Failed to configure OMP: ${message}`,
             configPath,
+            ...(options.pluginMayBeActive ? { pluginMayBeActive: true } : {}),
         };
     }
 }

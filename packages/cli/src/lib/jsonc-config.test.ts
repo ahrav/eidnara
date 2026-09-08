@@ -81,7 +81,12 @@ describe("readJsoncConfigForUpdate", () => {
         const path = join(directory, "big.json");
 
         try {
-            for (const literal of ["9007199254740993", "0.123456789012345678901", "1e-400"]) {
+            for (const literal of [
+                "9007199254740993",
+                "0.123456789012345678901",
+                "1e-400",
+                "1e-100000000",
+            ]) {
                 writeFileSync(path, `{"n": ${literal}, "plugin": []}`);
                 expect(() => readJsoncConfigForUpdate(path)).toThrow("parser rounded");
                 // Reading for diagnostics still works; only the rewrite is refused.
@@ -90,10 +95,21 @@ describe("readJsoncConfigForUpdate", () => {
             // An overflowing literal is already invalid JSON to the shared parser.
             writeFileSync(path, `{"n": 1e400, "plugin": []}`);
             expect(() => readJsoncConfigForUpdate(path)).toThrow();
-            for (const literal of ["9007199254740991", "1.0", "1e3", "-0.5", "2.5E-3", "0"]) {
+            for (const literal of [
+                "9007199254740991",
+                "1.0",
+                "1e3",
+                "-0.5",
+                "2.5E-3",
+                "0",
+                "0.0e5",
+            ]) {
                 writeFileSync(path, `{"n": ${literal}, "plugin": []}`);
                 expect(readJsoncConfigForUpdate(path)).toMatchObject({ n: Number(literal) });
             }
+            // A leading BOM must not shift the literal slices.
+            writeFileSync(path, `\uFEFF{"n": 42, "plugin": []}`);
+            expect(readJsoncConfigForUpdate(path)).toMatchObject({ n: 42 });
         } finally {
             rmSync(directory, { recursive: true, force: true });
         }

@@ -439,6 +439,18 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         }
     } catch (error) {
         prompts.log.error(error instanceof Error ? error.message : String(error));
+        if (registration && !registration.ok && registration.pluginMayBeActive) {
+            // The host's registration could not be undone or verified, so its native settings
+            // stay as configured for Eidnara; restoring them could run two context managers.
+            prompts.log.warn(
+                `Left ${host.displayName} native settings as configured for Eidnara: ` +
+                    `the Eidnara plugin may still be registered, and restoring them now could run two context managers at once.`,
+            );
+            prompts.outro(
+                `Setup stopped — check the ${host.displayName} plugin state by hand, then rerun setup.`,
+            );
+            return 1;
+        }
         if (registration?.ok && host.rollbackPluginEntry) {
             try {
                 await host.rollbackPluginEntry(registration);

@@ -898,6 +898,15 @@ describe("redactSecretText — authorization assignments", () => {
         expect(redactSecretText("token=Basic dXNlcjpwYXNz")).toBe("token=Basic <REDACTED:basic>");
     });
 
+    test("a quoted header value is replaced inside its quotes", () => {
+        expect(redactSecretText('Authorization: "Bearer abc-secret"')).toBe(
+            'Authorization: "<REDACTED:authorization>"',
+        );
+        expect(redactSecretText("headers:\n  Authorization: 'Basic YTpi'\n  Host: x")).toBe(
+            "headers:\n  Authorization: '<REDACTED:authorization>'\n  Host: x",
+        );
+    });
+
     test("an assignment value without a known scheme ends at whitespace or its closing quote", () => {
         expect(redactSecretText("Authorization=abc123 OTHER=value")).toBe(
             "Authorization=<REDACTED:authorization> OTHER=value",

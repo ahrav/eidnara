@@ -319,6 +319,18 @@ function authorizationReplacement(
         : `${prefix}<REDACTED:authorization>`;
 }
 
+function quotedAwareAuthorizationReplacement(
+    full: string,
+    prefix: string,
+    scheme: string | undefined,
+    space: string | undefined,
+    quote: string | undefined,
+): string {
+    return quote !== undefined
+        ? `${prefix}${quote}<REDACTED:authorization>${quote}`
+        : authorizationReplacement(full, prefix, scheme, space);
+}
+
 const SECRET_TEXT_PATTERNS: Array<{
     pattern: RegExp;
     replacement: string | ((match: string, ...groups: string[]) => string);
@@ -372,11 +384,13 @@ const SECRET_TEXT_PATTERNS: Array<{
         // has no minimum length once the header names it: `Basic YTpi` encodes `a:b`. The gap
         // after the scheme stays on the header line so the next header's name is not consumed.
         // A lone value that is not a scheme name and ends the line is a credential with no scheme.
+        // A quoted value (`Authorization: "Bearer x"` in YAML or JSON-like text) is replaced whole
+        // inside its quotes.
         pattern: new RegExp(
-            `\\b(Authorization\\s*:\\s*)(?:(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(?!${AUTH_SCHEME_NAMES}(?![A-Za-z0-9]))[A-Za-z0-9._~+/=-]+(?=[ \\t]*(?:$|[\\r\\n])))`,
+            `\\b(Authorization\\s*:\\s*)(?:(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(["'])(?:${DOUBLE_QUOTED_BODY}|[^'\\n]*)\\4|(?!${AUTH_SCHEME_NAMES}(?![A-Za-z0-9]))[A-Za-z0-9._~+/=-]+(?=[ \\t]*(?:$|[\\r\\n])))`,
             "gi",
         ),
-        replacement: authorizationReplacement,
+        replacement: quotedAwareAuthorizationReplacement,
     },
     {
         // Assignment form (`Authorization=Bearer x` in an environment dump). Only a known scheme
@@ -386,16 +400,7 @@ const SECRET_TEXT_PATTERNS: Array<{
             `\\b(Authorization\\s*=\\s*)(?:(${AUTH_SCHEME_NAMES})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(["'])(?:${DOUBLE_QUOTED_BODY}|[^'\\n]*)\\4|[^\\s]+)`,
             "gi",
         ),
-        replacement: (
-            _full: string,
-            prefix: string,
-            scheme: string | undefined,
-            space: string | undefined,
-            quote: string | undefined,
-        ) =>
-            quote !== undefined
-                ? `${prefix}${quote}<REDACTED:authorization>${quote}`
-                : authorizationReplacement(_full, prefix, scheme, space),
+        replacement: quotedAwareAuthorizationReplacement,
     },
     {
         // `Cookie` carries `name=value` pairs and every value is a credential; `Set-Cookie`

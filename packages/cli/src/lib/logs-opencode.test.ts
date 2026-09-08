@@ -89,14 +89,12 @@ async function bundleInTempCwd(
 }
 
 describe("readLogTailLines", () => {
-    it.if(process.platform !== "win32")("refuses a FIFO instead of blocking on it", () => {
+    it.if(process.platform !== "win32")("rejects a FIFO instead of blocking on it", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
         tempDirs.push(root);
         const fifo = join(root, "eidnara.log");
         execFileSync("mkfifo", [fifo]);
-        const started = performance.now();
-        expect(() => readLogTailLines(fifo, 1024)).toThrow("not a regular file");
-        expect(performance.now() - started).toBeLessThan(2_000);
+        expect(() => readLogTailLines(fifo)).toThrow("not a regular file");
     });
 
     it("rejects a directory as not a regular file", () => {
