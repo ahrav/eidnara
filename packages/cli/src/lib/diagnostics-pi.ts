@@ -28,6 +28,7 @@ import {
     getPiAgentDir,
     getPiSessionsRoot,
     getPiUserExtensionsPath,
+    hasPiAgentDir,
 } from "./paths";
 import { detectPiBinary, getPiVersion, isEidnaraPiPackageEntry } from "./pi-helpers";
 import { standaloneVersion } from "./semver";
@@ -53,14 +54,16 @@ export interface PiDiagnosticReport {
     piPath: string | null;
     piVersion: string | null;
     settings: {
-        path: string;
+        /** `null` when neither a home directory nor `PI_CODING_AGENT_DIR` locates the agent dir. */
+        path: string | null;
         exists: boolean;
         parseError?: string;
         hasEidnaraPackage: boolean;
         packages: unknown[];
     };
     configPaths: {
-        agentDir: string;
+        /** `null` when neither a home directory nor `PI_CODING_AGENT_DIR` locates it. */
+        agentDir: string | null;
         /** `null` when the environment provides no absolute home, so no user tier exists. */
         userConfig: string | null;
         projectConfig: string;
@@ -148,13 +151,18 @@ function getSelfVersion(): string {
  * redactor reads it, while `key:` keeps the prose carve-out (`press any key: continue`).
  */
 function redactKeyedText(value: string): string {
+    // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
     return value.replace(
-        /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,]+)/g,
-        (full, key: string, separator: string, secret: string) => {
+        /(["']?)\b([A-Za-z][A-Za-z0-9_.-]*)\1(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,}\]]+)/g,
+        (full, quote: string, key: string, separator: string, secret: string) => {
             const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
-            return (isSecretKey(key) || bareKeyAssignment) && !/^(?:true|false|null)$/i.test(secret)
-                ? `${key}${separator}<REDACTED>`
-                : full;
+            if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
+                return full;
+            }
+            // A quoted key marks a JSON literal, where a quoted placeholder keeps the document
+            // well-formed and stops the shared redactor from reading past the value.
+            const placeholder = quote ? `${quote}<REDACTED>${quote}` : "<REDACTED>";
+            return `${quote}${key}${quote}${separator}${placeholder}`;
         },
     );
 }
@@ -484,17 +492,23 @@ function statLogFile(path: string): PiDiagnosticReport["logFile"] {
 
 export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnosticReport> {
     const pi = detectPiBinary();
-    const settingsPath = getPiUserExtensionsPath();
-    const settingsParsed = readJsoncLenient(settingsPath);
+    // Without an agent dir the user-level paths have no base, so the settings, session, and
+    // package fields report absence rather than a working-directory-relative guess.
+    const agentDir = hasPiAgentDir() ? getPiAgentDir() : null;
+    const settingsPath = agentDir === null ? null : getPiUserExtensionsPath();
+    const settingsParsed = settingsPath === null ? { value: {} } : readJsoncLenient(settingsPath);
     const packages = packageEntries(settingsParsed.value);
     const userConfigPath = getUserConfigPath();
     const projectConfigPath = getProjectConfigPath(cwd);
     const loaded = loadPiConfig({ cwd });
     const logFile = statLogFile(getEidnaraLogPath("pi"));
     const otherPiExtensions = packages
-        .filter((entry) => !isEidnaraPiPackageEntry(entry, getPiAgentDir()))
+        .filter((entry) => agentDir === null || !isEidnaraPiPackageEntry(entry, agentDir))
         .map(describePackageEntry);
-    const discovery = collectPiRecentSessions();
+    const discovery: PiSessionDiscovery =
+        agentDir === null
+            ? { status: "unavailable", sessions: [] }
+            : collectPiRecentSessions(getPiSessionsRoot());
     const recentSessions = discovery.sessions;
     const historianDumps = collectPiHistorianDumps(recentSessions);
 
@@ -511,17 +525,17 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         piVersion: pi ? standaloneVersion(getPiVersion(pi.path)) : null,
         settings: {
             path: settingsPath,
-            exists: existsSync(settingsPath),
+            exists: settingsPath !== null && existsSync(settingsPath),
             ...(settingsParsed.parseError
                 ? { parseError: sanitizeString(settingsParsed.parseError) }
                 : {}),
-            hasEidnaraPackage: packages.some((entry) =>
-                isEidnaraPiPackageEntry(entry, getPiAgentDir()),
-            ),
+            hasEidnaraPackage:
+                agentDir !== null &&
+                packages.some((entry) => isEidnaraPiPackageEntry(entry, agentDir)),
             packages: sanitizeValue(packages) as unknown[],
         },
         configPaths: {
-            agentDir: getPiAgentDir(),
+            agentDir,
             userConfig: userConfigPath,
             projectConfig: projectConfigPath,
         },

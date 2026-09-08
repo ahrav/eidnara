@@ -308,6 +308,17 @@ export function sanitizePathString(value: string): string {
     return sanitized;
 }
 
+function authorizationReplacement(
+    _full: string,
+    prefix: string,
+    scheme: string | undefined,
+    space: string | undefined,
+): string {
+    return scheme !== undefined && space !== undefined
+        ? `${prefix}${scheme}${space}<REDACTED:${scheme.toLowerCase()}>`
+        : `${prefix}<REDACTED:authorization>`;
+}
+
 const SECRET_TEXT_PATTERNS: Array<{
     pattern: RegExp;
     replacement: string | ((match: string, ...groups: string[]) => string);
@@ -356,15 +367,23 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<STRIPE_KEY_REDACTED>",
     },
     {
-        // The scheme is kept and the credential after it is replaced, whether it is one
-        // opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
+        // Header form. The scheme is kept and the credential after it is replaced, whether it is
+        // one opaque token (`Bearer`, `Basic`) or a `name=value` list (`Digest`). The credential
         // has no minimum length once the header names it: `Basic YTpi` encodes `a:b`. The gap
         // after the scheme stays on the header line so the next header's name is not consumed.
-        // The `=` form (`Authorization=Bearer x` in an environment dump) is the same header
-        // written as an assignment. A lone value that is not a scheme name and ends the line is
-        // a credential with no scheme and is redacted under the header name.
+        // A lone value that is not a scheme name and ends the line is a credential with no scheme.
         pattern: new RegExp(
-            `\\b(Authorization\\s*[:=]\\s*)(?:(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(?!${AUTH_SCHEME_NAMES}(?![A-Za-z0-9]))[A-Za-z0-9._~+/=-]+(?=[ \\t]*(?:$|[\\r\\n])))`,
+            `\\b(Authorization\\s*:\\s*)(?:(${HTTP_TOKEN})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(?!${AUTH_SCHEME_NAMES}(?![A-Za-z0-9]))[A-Za-z0-9._~+/=-]+(?=[ \\t]*(?:$|[\\r\\n])))`,
+            "gi",
+        ),
+        replacement: authorizationReplacement,
+    },
+    {
+        // Assignment form (`Authorization=Bearer x` in an environment dump). Only a known scheme
+        // takes the following token or parameter list as its credential; any other first token is
+        // the credential itself and ends at whitespace, so `Authorization=abc123 OTHER=v` keeps `OTHER=v`.
+        pattern: new RegExp(
+            `\\b(Authorization\\s*=\\s*)(?:(${AUTH_SCHEME_NAMES})([ \\t]+)(?:${AUTH_PARAM}(?:\\s*,\\s*${AUTH_PARAM})*|[A-Za-z0-9._~+/=-]+)|(["'])(?:${DOUBLE_QUOTED_BODY}|[^'\\n]*)\\4|[^\\s]+)`,
             "gi",
         ),
         replacement: (
@@ -372,10 +391,11 @@ const SECRET_TEXT_PATTERNS: Array<{
             prefix: string,
             scheme: string | undefined,
             space: string | undefined,
+            quote: string | undefined,
         ) =>
-            scheme !== undefined && space !== undefined
-                ? `${prefix}${scheme}${space}<REDACTED:${scheme.toLowerCase()}>`
-                : `${prefix}<REDACTED:authorization>`,
+            quote !== undefined
+                ? `${prefix}${quote}<REDACTED:authorization>${quote}`
+                : authorizationReplacement(_full, prefix, scheme, space),
     },
     {
         // `Cookie` carries `name=value` pairs and every value is a credential; `Set-Cookie`

@@ -11,7 +11,10 @@ interface FileSnapshot {
     content: string | null;
 }
 
-/** Paths are deduplicated; a path that cannot be read is recorded as absent. */
+/**
+ * Paths are deduplicated. Throws when an existing target cannot be read: recording it as absent
+ * would make `restoreFiles` delete it, so the caller stops before any write instead.
+ */
 export function snapshotFiles(paths: Iterable<string>): FileSnapshot[] {
     const seen = new Set<string>();
     const snapshots: FileSnapshot[] = [];
@@ -19,15 +22,19 @@ export function snapshotFiles(paths: Iterable<string>): FileSnapshot[] {
         if (seen.has(path)) continue;
         seen.add(path);
         let target = path;
+        // Resolving the link preserves a dangling link: restore removes its target, not the link.
+        if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
+            target = resolveLinkTarget(path);
+        }
         let content: string | null = null;
-        try {
-            // Resolving the link preserves a dangling link: restore removes its target, not the link.
-            if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
-                target = resolveLinkTarget(path);
+        if (existsSync(target)) {
+            try {
+                content = readFileSync(target, "utf-8");
+            } catch (error) {
+                throw new Error(`Cannot read ${target} to record it for rollback`, {
+                    cause: error,
+                });
             }
-            content = existsSync(target) ? readFileSync(target, "utf-8") : null;
-        } catch {
-            content = null;
         }
         snapshots.push({ path, target, content });
     }

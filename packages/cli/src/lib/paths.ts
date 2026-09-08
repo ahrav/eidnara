@@ -117,20 +117,21 @@ export function detectConfigPaths(): ConfigPaths {
 
 /**
  * The home the harnesses themselves resolve: `os.homedir()` on Windows (which reads `USERPROFILE`),
- * `HOME` first elsewhere. `os.homedir()` throws for a UID without a passwd entry; an empty string
- * then yields no home-relative paths instead of aborting detection.
+ * `HOME` first elsewhere. Throws when neither yields a directory (a UID with no passwd entry and
+ * no `HOME`): every caller builds config or binary paths from the result, and a cwd-relative
+ * `.pi/bin/pi` would let a checkout supply the binary setup runs.
  */
 export function envFirstHomeDir(): string {
-    const osHome = () => {
-        try {
-            return os.homedir();
-        } catch {
-            return "";
-        }
-    };
-    if (process.platform === "win32") return osHome();
-    const home = process.env.HOME?.trim();
-    return home || osHome();
+    const home = process.platform === "win32" ? undefined : process.env.HOME?.trim();
+    if (home) return home;
+    try {
+        return os.homedir();
+    } catch (error) {
+        throw new Error(
+            "No home directory: set HOME to an absolute path so harness paths can be resolved.",
+            { cause: error },
+        );
+    }
 }
 
 /* */
@@ -140,9 +141,22 @@ export function getPiAgentDir(): string {
     return join(envFirstHomeDir(), ".pi", "agent");
 }
 
-/** Without a home directory or `PI_CODING_AGENT_DIR`, `getPiAgentDir()` is a working-directory-relative fallback a doctor must not inspect or write. */
+/**
+ * Whether `envFirstHomeDir()` can resolve a home. Doctors probe this before building user-level
+ * paths so a missing home degrades to a reported failure instead of aborting the run.
+ */
+export function hasHomeDir(): boolean {
+    try {
+        envFirstHomeDir();
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** Without a home directory or `PI_CODING_AGENT_DIR`, `getPiAgentDir()` has no base a doctor may inspect or write. */
 export function hasPiAgentDir(): boolean {
-    return Boolean(process.env.PI_CODING_AGENT_DIR?.trim()) || envFirstHomeDir() !== "";
+    return Boolean(process.env.PI_CODING_AGENT_DIR?.trim()) || hasHomeDir();
 }
 
 /** Pi session JSONL root (`<agentDir>/sessions`). */

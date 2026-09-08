@@ -50,11 +50,20 @@ export interface DetectDeps {
     realpath?: (path: string) => string;
 }
 
+/** Without a home there are no home-relative installs to probe; every probe below requires an absolute path. */
+function detectorHome(): string {
+    try {
+        return envFirstHomeDir();
+    } catch {
+        return "";
+    }
+}
+
 function defaultDeps(): DetectDeps {
     return {
         exists: existsSync,
         isExecutable: isExecutableFile,
-        home: envFirstHomeDir(),
+        home: detectorHome(),
         platform: process.platform,
         env: process.env,
         onPath: findOnPath,

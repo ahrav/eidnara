@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import os, { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { envFirstHomeDir, resolveOmpPaths } from "./paths";
 
@@ -50,6 +50,21 @@ describe("envFirstHomeDir", () => {
         setEnv("HOME", "C:\\msys64\\home\\fox");
         expect(envFirstHomeDir()).toBe(homedir());
     });
+
+    it.if(process.platform !== "win32")(
+        "throws instead of yielding cwd-relative paths without a home",
+        () => {
+            setEnv("HOME", undefined);
+            const spy = spyOn(os, "homedir").mockImplementation(() => {
+                throw Object.assign(new Error("uv_os_homedir returned ENOENT"), { code: "ENOENT" });
+            });
+            try {
+                expect(() => envFirstHomeDir()).toThrow("No home directory");
+            } finally {
+                spy.mockRestore();
+            }
+        },
+    );
 });
 
 describe("resolveOmpPaths", () => {

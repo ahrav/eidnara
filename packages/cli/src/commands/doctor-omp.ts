@@ -31,7 +31,6 @@ import {
     runOmpCommand,
 } from "../lib/omp-helpers";
 import {
-    envFirstHomeDir,
     getEidnaraLogPath,
     getOmpAgentDir,
     getOmpConfigPath,
@@ -40,6 +39,7 @@ import {
     getOmpPluginsLockPath,
     getOmpSessionsRoot,
     getSharedUserConfigPath,
+    hasHomeDir,
 } from "../lib/paths";
 import { type PromptIO, promptIO } from "../lib/prompts";
 import { compareVersionStrings } from "../lib/version";
@@ -315,7 +315,7 @@ async function runHealthChecks(options: {
 
     // OMP's config root hangs off the home directory; without one the derived paths would be
     // relative to the working directory, so they are neither reported nor scanned.
-    const ompPathsAvailable = envFirstHomeDir() !== "";
+    const ompPathsAvailable = hasHomeDir();
     if (!ompPathsAvailable) {
         add(results, "fail", "OMP user-level paths are unavailable: HOME is unset or not absolute");
     } else {

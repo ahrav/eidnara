@@ -1,10 +1,8 @@
 // A static `import { Database } from "bun:sqlite"` crashes the Node CLI before `try/catch` can run.
 // Node's ESM loader rejects `bun:` specifiers during resolution.
 // If the DB cannot be read, the report still includes all other diagnostics.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import {
     eidnaraProjectConfigBasePath,
@@ -13,9 +11,10 @@ import {
 import {
     type ConflictResult,
     detectConflicts,
+    projectConfigDisabled,
     projectOpenCodeConfigPaths,
 } from "@eidnara/opencode/shared/conflict-detector";
-import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
+import { getDataDir, getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { resolveOpenCodeDatabasePath } from "@eidnara/opencode/shared/opencode-database-path";
 import {
@@ -23,6 +22,7 @@ import {
     sanitizeConfigValue,
     sanitizeDiagnosticText,
 } from "@eidnara/opencode/shared/redaction";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse as parseJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { compactionEnabledFor } from "./eidnara-modes";
@@ -207,10 +207,16 @@ export function describeProbeText(text: string): string {
         .trim();
 }
 
+/** A FIFO or directory at a config path is a parse error rather than a blocking read. */
 function readConfig(path: string): { value: Record<string, unknown> | null; error?: string } {
-    if (!existsSync(path)) return { value: null };
+    let raw: string;
     try {
-        const raw = readFileSync(path, "utf-8");
+        raw = readRegularFileSync(path);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return { value: null };
+        return { value: null, error: error instanceof Error ? error.message : String(error) };
+    }
+    try {
         const value = parseJsonc(raw) as Record<string, unknown>;
         return { value };
     } catch (error) {
@@ -238,9 +244,13 @@ function configHasPluginEntry(config: Record<string, unknown> | null, baseDir: s
     );
 }
 
-/** The host merges every project file that exists, `.json` and `.jsonc` alike, so each one is inspected. */
+/**
+ * The host merges every project file that exists, `.json` and `.jsonc` alike, so each one is
+ * inspected; under `OPENCODE_DISABLE_PROJECT_CONFIG` it loads none of them.
+ */
 export function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
     const report: ProjectOpenCodeConfigReport = { paths: [], hasPlugin: false, parseErrors: [] };
+    if (projectConfigDisabled()) return report;
     for (const path of projectOpenCodeConfigPaths(cwd)) {
         if (!existsSync(path)) continue;
         report.paths.push(path);
@@ -307,14 +317,12 @@ type SessionDiscovery =
 
 async function collectRecentSessions(): Promise<SessionDiscovery> {
     const unavailable: SessionDiscovery = { status: "unavailable", sessions: [] };
-    // Runtime `XDG_DATA_HOME` or `HOME` overrides determine the database path.
-    // Node's `homedir()` honors runtime `HOME` overrides; Bun's does not.
-    // `homedir()` throws for a UID without a passwd entry when `HOME` is unset.
+    // `getDataDir` applies the daemon's rules: a relative `XDG_DATA_HOME` is ignored and an
+    // absolute `HOME` is required, so a checkout cannot redirect the lookup. Without a data
+    // directory or a database there are no sessions to report.
     let opencodeDbPath: string;
     try {
-        const dataHome =
-            process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), ".local", "share");
-        opencodeDbPath = resolveOpenCodeDatabasePath(dataHome);
+        opencodeDbPath = resolveOpenCodeDatabasePath(getDataDir());
     } catch {
         return unavailable;
     }

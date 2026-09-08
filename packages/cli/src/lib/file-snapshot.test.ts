@@ -88,6 +88,21 @@ describe("snapshotFiles / restoreFiles", () => {
         },
     );
 
+    it.if(process.platform !== "win32" && process.getuid?.() !== 0)(
+        "refuses to snapshot an existing file it cannot read",
+        () => {
+            const root = tempRoot();
+            const locked = join(root, "locked.json");
+            writeFileSync(locked, "{}\n");
+            chmodSync(locked, 0o000);
+            try {
+                expect(() => snapshotFiles([locked])).toThrow(`Cannot read ${locked}`);
+            } finally {
+                chmodSync(locked, 0o644);
+            }
+        },
+    );
+
     it("restores a file that was deleted after the snapshot", () => {
         const root = tempRoot();
         const path = join(root, "sub", "c.json");

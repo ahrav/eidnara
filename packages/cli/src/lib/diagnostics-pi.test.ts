@@ -234,6 +234,10 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString('client_secret: "prefix\\" LIVE suffix" done')).toBe(
             "client_secret: <REDACTED>",
         );
+        // A quoted key inside a JSON literal is still a key.
+        expect(sanitizeString('{"password":123456,"timeout_ms":30000}')).toBe(
+            '{"password":"<REDACTED>","timeout_ms":30000}',
+        );
         // A bare `key=` is an assignment, so its value goes even when numeric; `key:` stays prose.
         expect(sanitizeString("key=123456 and press any key: continue")).toBe(
             "key=<REDACTED> and press any key: continue",

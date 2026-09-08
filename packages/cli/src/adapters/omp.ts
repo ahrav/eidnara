@@ -81,12 +81,24 @@ export class OmpAdapter implements HarnessAdapter {
                     configPath,
                 };
             }
-            return this.errorResult(
-                configPath,
+            // An error result never reaches the caller's `added` rollback, so the install is
+            // undone here; otherwise the plugin would stay enabled beside restored native settings.
+            const problem =
                 after === null
-                    ? `could not verify the plugin state after \`omp ${install.join(" ")}\` (\`omp plugin list --json\` failed). Check \`omp plugin list\` and run \`omp plugin uninstall ${OMP_PLUGIN_PACKAGE}\` if Eidnara must stay off.`
-                    : `${OMP_PLUGIN_PACKAGE} is not enabled after \`omp ${install.join(" ")}\`. Run \`omp plugin enable ${OMP_PLUGIN_PACKAGE}\`, or \`omp plugin uninstall ${OMP_PLUGIN_PACKAGE}\` if Eidnara must stay off.`,
+                    ? `could not verify the plugin state after \`omp ${install.join(" ")}\` (\`omp plugin list --json\` failed)`
+                    : `${OMP_PLUGIN_PACKAGE} is not enabled after \`omp ${install.join(" ")}\``;
+            const uninstall = runOmpCommand(
+                omp.path,
+                ["plugin", "uninstall", OMP_PLUGIN_PACKAGE],
+                INSTALL_TIMEOUT_MS,
             );
+            if (!uninstall.ok) {
+                return this.errorResult(
+                    configPath,
+                    `${problem}; removing it again failed (${uninstall.stderr || uninstall.stdout || "omp exited with an error"}). Run \`omp plugin uninstall ${OMP_PLUGIN_PACKAGE}\` by hand if Eidnara must stay off.`,
+                );
+            }
+            return this.errorResult(configPath, `${problem}; removed it again.`);
         }
         const originalRuntimeEnabled = this.readRuntimeEnabled(configPath);
 

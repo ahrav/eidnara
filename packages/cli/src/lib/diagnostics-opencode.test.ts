@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,7 @@ const ENV_KEYS = [
     "XDG_CACHE_HOME",
     "OPENCODE_CONFIG_DIR",
     "OPENCODE_DB_PATH",
+    "OPENCODE_DISABLE_PROJECT_CONFIG",
     "EIDNARA_LOG_PATH",
 ] as const;
 const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -169,6 +171,36 @@ describe("collectDiagnostics plugin registration", () => {
         expect(report.projectOpencodeConfig.hasPlugin).toBe(true);
     });
 
+    it("reports no project registration when OpenCode disables project config", async () => {
+        const { cwd } = isolatedRoot();
+        writeFileSync(
+            join(cwd, "opencode.json"),
+            JSON.stringify({ plugin: ["@eidnara/opencode"] }),
+        );
+        process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.projectOpencodeConfig.paths).toEqual([]);
+        expect(report.projectOpencodeConfig.hasPlugin).toBe(false);
+    });
+
+    it.if(process.platform !== "win32")(
+        "reports a FIFO at a config path as a parse error instead of blocking",
+        async () => {
+            const { cwd } = isolatedRoot();
+            execFileSync("mkfifo", [join(cwd, "opencode.json")]);
+
+            const report = await collectDiagnostics(cwd);
+
+            expect(report.projectOpencodeConfig.paths).toEqual([join(cwd, "opencode.json")]);
+            expect(report.projectOpencodeConfig.hasPlugin).toBe(false);
+            expect(report.projectOpencodeConfig.parseErrors.join("\n")).toContain(
+                "not a regular file",
+            );
+        },
+    );
+
     it("says so when the project has no opencode config", async () => {
         const { cwd } = isolatedRoot();
 
@@ -295,6 +327,21 @@ describe("collectDiagnostics recent sessions", () => {
         expect(report.recentSessions.map((session) => session.sessionId)).toEqual([
             "ses_channel01",
         ]);
+    });
+
+    it("ignores a relative XDG_DATA_HOME instead of reading a database under the working directory", async () => {
+        const { root, cwd } = isolatedRoot();
+        // A checkout could plant `data/opencode/opencode.db` and point a relative XDG root at it.
+        seedSessionDb(join(cwd, "data", "opencode", "opencode.db"), join(root, "project"));
+        process.env.XDG_DATA_HOME = "data";
+        const originalCwd = process.cwd();
+        process.chdir(cwd);
+        try {
+            const report = await collectDiagnostics(cwd);
+            expect(report.recentSessions).toEqual([]);
+        } finally {
+            process.chdir(originalCwd);
+        }
     });
 
     it("honors OPENCODE_DB_PATH", async () => {

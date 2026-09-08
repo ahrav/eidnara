@@ -384,13 +384,12 @@ export function preflightConfigPaths(
     directory: string,
     options: { omoRepairReachable: boolean },
 ): string[] {
-    const [dotOcJsonc, dotOcJson, rootJsonc, rootJson] = projectOpenCodeConfigPaths(directory);
+    // The host loads every project file that exists, `.json` and `.jsonc` alike, so each one is checked.
     return [
         paths.opencodeConfig,
         paths.eidnaraConfig,
         paths.tuiConfig,
-        existsSync(dotOcJsonc) ? dotOcJsonc : dotOcJson,
-        existsSync(rootJsonc) ? rootJsonc : rootJson,
+        ...projectOpenCodeConfigPaths(directory).filter((path) => existsSync(path)),
         ...(options.omoRepairReachable ? collectOmoConfigPaths(directory) : []),
     ];
 }
@@ -598,10 +597,17 @@ export async function runSetup(dryRun = false): Promise<number> {
         // Every file a later step may write is captured first, so a failure part-way (a read-only
         // directory, for example) restores the OpenCode registration and compaction flags instead
         // of leaving the plugin active without its config.
-        const snapshot = snapshotFiles([
-            ...preflightConfigPaths(paths, process.cwd(), { omoRepairReachable }),
-            ...openCodeConfigLayerPaths(process.cwd()),
-        ]);
+        let snapshot: ReturnType<typeof snapshotFiles>;
+        try {
+            snapshot = snapshotFiles([
+                ...preflightConfigPaths(paths, process.cwd(), { omoRepairReachable }),
+                ...openCodeConfigLayerPaths(process.cwd()),
+            ]);
+        } catch (error) {
+            log.error(error instanceof Error ? error.message : String(error));
+            outro("Setup stopped before writing — make the file readable, then rerun setup.");
+            return 1;
+        }
         try {
             addPluginToOpenCodeConfig(
                 paths.opencodeConfig,

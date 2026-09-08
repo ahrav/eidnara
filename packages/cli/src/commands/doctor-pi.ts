@@ -216,7 +216,6 @@ async function runHealthChecks(options: {
         add(results, "info", "Eidnara for Pi CLI version unknown");
     }
 
-    const settingsPath = getPiUserExtensionsPath();
     let packages: unknown[] = [];
     if (!hasPiAgentDir()) {
         add(
@@ -224,10 +223,11 @@ async function runHealthChecks(options: {
             "fail",
             "Pi user-level paths are unavailable: HOME is unset or not absolute and PI_CODING_AGENT_DIR is not set",
         );
-    } else if (!existsSync(settingsPath)) {
-        add(results, "fail", `Pi settings not found at ${settingsPath}`);
+    } else if (!existsSync(getPiUserExtensionsPath())) {
+        add(results, "fail", `Pi settings not found at ${getPiUserExtensionsPath()}`);
         repairPlan.addPackageEntry = true;
     } else {
+        const settingsPath = getPiUserExtensionsPath();
         const parsed = readJsoncLenient(settingsPath);
         if (parsed.parseError) {
             add(

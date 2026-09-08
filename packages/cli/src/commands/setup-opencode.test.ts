@@ -365,7 +365,7 @@ describe("hasExistingOpenCodeSetup", () => {
 });
 
 describe("setup-opencode preflight targets", () => {
-    it("checks only the effective member of each project config pair", () => {
+    it("checks every existing project config file, since the host loads both siblings", () => {
         const root = tempDir();
         mkdirSync(join(root, ".opencode"), { recursive: true });
         writeFileSync(join(root, ".opencode", "opencode.jsonc"), "{}");
@@ -384,14 +384,16 @@ describe("setup-opencode preflight targets", () => {
         const targets = preflightConfigPaths(userPaths, root, { omoRepairReachable: false });
 
         expect(targets).toContain(join(root, ".opencode", "opencode.jsonc"));
-        expect(targets).not.toContain(join(root, ".opencode", "opencode.json"));
+        expect(targets).toContain(join(root, ".opencode", "opencode.json"));
         expect(targets).toContain(join(root, "opencode.json"));
+        expect(targets).not.toContain(join(root, "opencode.jsonc"));
         expect(targets.slice(0, 3)).toEqual([
             userPaths.opencodeConfig,
             userPaths.eidnaraConfig,
             userPaths.tuiConfig,
         ]);
-        expect(() => assertJsoncConfigsParseable(targets)).not.toThrow();
+        // The malformed `.json` sibling is a loaded layer, so the preflight refuses it.
+        expect(() => assertJsoncConfigsParseable(targets)).toThrow(/opencode\.json/);
     });
 
     it("includes OMO configs only when the fixer can reach them", () => {

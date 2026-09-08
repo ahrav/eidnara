@@ -898,6 +898,21 @@ describe("redactSecretText — authorization assignments", () => {
         expect(redactSecretText("token=Basic dXNlcjpwYXNz")).toBe("token=Basic <REDACTED:basic>");
     });
 
+    test("an assignment value without a known scheme ends at whitespace or its closing quote", () => {
+        expect(redactSecretText("Authorization=abc123 OTHER=value")).toBe(
+            "Authorization=<REDACTED:authorization> OTHER=value",
+        );
+        expect(redactSecretText('Authorization="Bearer abc" OTHER=1')).toBe(
+            'Authorization="<REDACTED:authorization>" OTHER=1',
+        );
+        // The header form keeps an unknown scheme and redacts its parameter list whole.
+        expect(
+            redactSecretText(
+                "Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, SignedHeaders=host, Signature=abc",
+            ),
+        ).toBe("Authorization: AWS4-HMAC-SHA256 <REDACTED:aws4-hmac-sha256>");
+    });
+
     test("redacts a scheme-less authorization value and leaves a lone scheme alone", () => {
         expect(redactSecretText("authorization: abc123")).toBe(
             "authorization: <REDACTED:authorization>",
