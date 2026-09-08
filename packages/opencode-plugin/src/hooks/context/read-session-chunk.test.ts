@@ -511,9 +511,12 @@ describe("readSessionChunk", () => {
             providerShapeVersion: "pi-folded-v1" as const,
         };
         withRawMessageProvider("ses-pi-shape", piShaped, () => {
-            expect(readSessionChunk("ses-pi-shape", 100_000, 1).completedToolArcs).toEqual([
-                { start: 1, end: 2 },
-            ]);
+            const chunk = readSessionChunk("ses-pi-shape", 100_000, 1);
+            expect(chunk.completedToolArcs).toEqual([{ start: 1, end: 2 }]);
+            // A narrative-free exchange still reaches the historian as tool summaries, so `endIndex` advances.
+            expect(chunk.text).toContain("TC: read");
+            expect(chunk.endIndex).toBe(2);
+            expect(chunk.toolOnlyRanges).toEqual([{ start: 1, end: 2 }]);
         });
 
         // Without a declared shape the OpenCode rules apply, and they do not recognize Pi parts.

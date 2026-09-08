@@ -134,14 +134,15 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         .prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?")
         .all(sessionId, latestAssistant.id) as PartDataRow[];
 
+    // A synthetic tool part is the daemon's own bookkeeping, not a local call still in flight.
     return partRows.some((row) => {
-        if (typeof row.data !== "string" || row.data.length === 0) return false;
-        try {
-            const part = JSON.parse(row.data) as Record<string, unknown>;
-            return part.type === "tool" && !isProviderExecuted(part);
-        } catch {
-            return false;
-        }
+        const part = parsePart(row);
+        return (
+            part !== null &&
+            part.type === "tool" &&
+            !isProviderExecuted(part) &&
+            !isMachineAuthoredPart(part)
+        );
     });
 }
 

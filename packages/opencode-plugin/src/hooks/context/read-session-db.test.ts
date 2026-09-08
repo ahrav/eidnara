@@ -302,6 +302,19 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
+    it("is not mid-turn when the only tool part is the daemon's synthetic todo marker", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
+        insertPart(db, "session-1", "assistant-1", "part-1", {
+            type: "tool",
+            tool: "todowrite",
+            syntheticTodoMarker: true,
+            state: { status: "completed", input: {}, output: "[]" },
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
     it("is not mid-turn when the latest assistant has no tool parts", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });

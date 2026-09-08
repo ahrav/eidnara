@@ -123,14 +123,26 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
-        if (p.type !== "tool") continue;
-        const toolName = resolveToolName(p);
-        if (toolName === null) continue;
         // A synthetic tool part is the daemon's own bookkeeping, not a call the model made.
         if (isMachineAuthoredPart(p)) continue;
 
+        // A folded Pi result names its tool but carries no input; the daemon summarizes it by name.
+        if (p.role === "toolResult") {
+            const resultTool = resolveToolName(p);
+            if (resultTool !== null) summaries.push(`TC: ${resultTool}`);
+            continue;
+        }
+
+        if (p.type !== "tool" && p.type !== "toolCall") continue;
+        const toolName = resolveToolName(p);
+        if (toolName === null) continue;
+
         const state = asRecord(p.state);
-        const input = asRecord(state?.input) ?? asRecord(p.input) ?? asRecord(p.args);
+        const input =
+            asRecord(state?.input) ??
+            asRecord(p.input) ??
+            asRecord(p.args) ??
+            asRecord(p.arguments);
         const metadata = asRecord(state?.metadata);
 
         const description =
