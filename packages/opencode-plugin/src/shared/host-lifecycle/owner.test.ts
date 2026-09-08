@@ -307,6 +307,29 @@ describe("managed lifecycle owner", () => {
         expect(existsSync(f.dataRoot)).toBe(false);
     });
 
+    test("a lone surrogate escape is rejected as serde rejects it", () => {
+        const f = fixture();
+        // The bytes are ASCII, so the strict UTF-8 decoder passes them; `JSON.parse` yields an ill-formed string where serde_json fails.
+        writeFileSync(
+            f.manifestPath,
+            f.manifestText.replace('"synapse": "qualified"', '"synapse": "\\ud800"'),
+        );
+        expect(() => prepare(f, true)).toThrow(/lone surrogate/);
+
+        writeFileSync(
+            f.manifestPath,
+            f.manifestText.replace('"glibc": "2.34"', '"glibc": "2.34", "\\udc00": 1'),
+        );
+        expect(() => prepare(f, true)).toThrow(/lone surrogate/);
+
+        // A paired escape decodes to one astral code point and is well formed.
+        writeFileSync(
+            f.manifestPath,
+            f.manifestText.replace('"synapse": "qualified"', '"synapse": "\\ud83d\\ude00"'),
+        );
+        expect(prepare(f, true)?.kind).toBe("retained-fd");
+    });
+
     test("umask-stripped source modes are accepted; extra permission bits are not", () => {
         const f = fixture();
         const launcherPath = join(f.packageDir, "payload", "bin", "eidnara-host");

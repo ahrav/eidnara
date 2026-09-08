@@ -12,6 +12,8 @@ import {
 import { managedSubtreePath } from "./paths";
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
+/** A high surrogate not followed by a low one, or a low surrogate not preceded by a high one; `u` flag matching by code point pairs the valid ones. */
+const LONE_SURROGATE_RE = /\p{Surrogate}/u;
 const MAX_METADATA_BYTES = 1024 * 1024;
 /** `MAX_PATH_BYTES` and `MAX_PATH_COMPONENTS` must match the limits enforced by `validate_rel_path` in `crates/host-runtime/src/generation.rs`. */
 const MAX_PATH_BYTES = 4096;
@@ -184,7 +186,7 @@ function readNoFollowBytes(path: string, label: string): Buffer {
 /**
  * Input `JSON.parse` accepts that `serde_json::from_slice::<TrustedPayloadManifest>` rejects. `text` has already passed `JSON.parse`, so the scan assumes well-formed input. commentlint: allow(JUDGE)
  *
- * A repeated key: `JSON.parse` keeps the last, serde fails on the duplicate. A number outside f64: `JSON.parse` yields `Infinity`, serde fails. A `size` with a fraction or exponent: `JSON.parse` yields the plain integer, serde's `u64` rejects a float. commentlint: allow(JUDGE)
+ * A repeated key: `JSON.parse` keeps the last, serde fails on the duplicate. A number outside f64: `JSON.parse` yields `Infinity`, serde fails. A `size` with a fraction or exponent: `JSON.parse` yields the plain integer, serde's `u64` rejects a float. A lone surrogate escape such as `\ud800`: `JSON.parse` yields an ill-formed string, serde fails because the value is not UTF-8. commentlint: allow(JUDGE)
  */
 function serdeRejection(text: string): string | null {
     // One frame per open container: a key set for an object, `null` for an array.
@@ -196,12 +198,13 @@ function serdeRejection(text: string): string | null {
         if (ch === '"') {
             const start = i;
             for (i++; text[i] !== '"'; i++) if (text[i] === "\\") i++;
+            const literal = JSON.parse(text.slice(start, i + 1)) as string;
+            if (LONE_SURROGATE_RE.test(literal)) return "holds a lone surrogate escape";
             const frame = frames.at(-1);
             if (expectKey && frame) {
-                const key = JSON.parse(text.slice(start, i + 1)) as string;
-                if (frame.has(key)) return "repeats a key";
-                frame.add(key);
-                lastKey = key;
+                if (frame.has(literal)) return "repeats a key";
+                frame.add(literal);
+                lastKey = literal;
                 expectKey = false;
             }
         } else if (ch === "-" || (ch >= "0" && ch <= "9")) {
