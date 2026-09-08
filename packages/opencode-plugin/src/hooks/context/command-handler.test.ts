@@ -12,6 +12,7 @@ import type { RustModeModuleClient } from "./rust-mode-transform";
 
 interface RecordedCall {
     method: string;
+    projectRoot: string;
     body: Record<string, unknown>;
     timeoutMs?: number;
 }
@@ -28,6 +29,7 @@ function setup(
         call: async (request) => {
             const call: RecordedCall = {
                 method: request.method,
+                projectRoot: request.projectRoot,
                 body: request.body as Record<string, unknown>,
                 timeoutMs: (request as { timeoutMs?: number }).timeoutMs,
             };
@@ -167,6 +169,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(calls).toEqual([
                 {
                     method: "session.flush",
+                    projectRoot: process.cwd(),
                     body: { method: "session.flush", v: 1, session_id: "ses-flush" },
                     timeoutMs: undefined,
                 },
@@ -223,6 +226,18 @@ describe("createEidnaraCommandHandler", () => {
     });
 
     describe("ctx-status", () => {
+        it("routes the daemon call by the session's resolved directory", async () => {
+            const resolveProjectRoot = mock(async (sessionId: string) => `/repos/${sessionId}`);
+            const { run, calls } = setup(() => STATUS_RESPONSE, { resolveProjectRoot });
+
+            await expectSentinel(run("ctx-status", "ses-routed"), "ctx-status");
+
+            expect(resolveProjectRoot).toHaveBeenCalledWith("ses-routed");
+            expect(calls.map((call) => [call.method, call.projectRoot])).toEqual([
+                ["session.status", "/repos/ses-routed"],
+            ]);
+        });
+
         it("sends session.status and renders the daemon text", async () => {
             const { run, calls, texts } = setup(() => STATUS_RESPONSE);
 
@@ -231,6 +246,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(calls).toEqual([
                 {
                     method: "session.status",
+                    projectRoot: process.cwd(),
                     body: { method: "session.status", v: 1, session_id: "ses-status" },
                     timeoutMs: undefined,
                 },
@@ -541,7 +557,7 @@ describe("createEidnaraCommandHandler", () => {
                 sidekick: {
                     config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
-                    sessionDirectory: "/repo/project",
+                    resolveSessionDirectory: () => "/repo/project",
                     client: sidekickClient as never,
                 },
             });
@@ -602,7 +618,7 @@ describe("createEidnaraCommandHandler", () => {
                 sidekick: {
                     config: { timeout_ms: 5_000 },
                     projectPath: "/repo/project",
-                    sessionDirectory: "/repo/project",
+                    resolveSessionDirectory: () => "/repo/project",
                     client: sidekickClient as never,
                 },
             });
