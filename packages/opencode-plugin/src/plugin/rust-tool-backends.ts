@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
 
 export type RustAuthorityDomain = "memories" | "notes";
@@ -40,6 +41,15 @@ export function toolCallIdFromContext(context: unknown): string | undefined {
         if (typeof value === "string" && value.trim()) return value.trim();
     }
     return undefined;
+}
+
+/** The daemon rejects facade and agent-drop command ids above this many bytes. */
+const MAX_COMMAND_ID_BYTES = 128;
+
+/** A deterministic hash gives retries the same bounded id. */
+export function boundedCommandId(id: string): string {
+    if (Buffer.byteLength(id) <= MAX_COMMAND_ID_BYTES) return id;
+    return `oc-${createHash("sha256").update(id).digest("hex")}`;
 }
 
 export interface RustToolBackends {

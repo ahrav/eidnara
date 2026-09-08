@@ -22,6 +22,15 @@ export function parseRangeString(input: string): number[] {
 
     const segments = trimmed.split(",");
     const numbers = new Set<number>();
+    // `numbers` holds at most `maxRangeElements + 1` entries before rejecting input.
+    const add = (n: number): void => {
+        numbers.add(n);
+        if (numbers.size > maxRangeElements) {
+            throw new Error(
+                `Total range size exceeds maximum of ${maxRangeElements} elements (got ${numbers.size})`,
+            );
+        }
+    };
 
     for (const segment of segments) {
         const part = segment.trim();
@@ -48,17 +57,11 @@ export function parseRangeString(input: string): number[] {
             }
 
             for (let i = start; i <= end; i++) {
-                numbers.add(i);
+                add(i);
             }
         } else {
-            numbers.add(parseInteger(part));
+            add(parseInteger(part));
         }
-    }
-
-    if (numbers.size > maxRangeElements) {
-        throw new Error(
-            `Total range size exceeds maximum of ${maxRangeElements} elements (got ${numbers.size})`,
-        );
     }
 
     return Array.from(numbers).sort((a, b) => a - b);
@@ -71,7 +74,9 @@ function parseInteger(str: string): number {
 
     const n = parseInt(str, 10);
 
-    if (!Number.isFinite(n) || n < 0) {
+    // Above `Number.MAX_SAFE_INTEGER`, `i++` cannot advance `i`, so the range
+    // loop would never reach `end`.
+    if (!Number.isSafeInteger(n)) {
         throw new Error(`Invalid integer: "${str}"`);
     }
 

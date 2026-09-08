@@ -54,6 +54,55 @@ describe("createEventHandler — instance dispose cleanup", () => {
         ).resolves.toBeUndefined();
     });
 
+    test("runs onInstanceDisposed when the eidnara handler rejects and keeps that rejection", async () => {
+        const calls: string[] = [];
+        const boom = new Error("event boom");
+        const handler = createEventHandler({
+            eidnara: {
+                event: async () => {
+                    throw boom;
+                },
+            },
+            onInstanceDisposed: (dir) => {
+                calls.push(dir);
+            },
+        });
+
+        await expect(
+            handler({
+                event: {
+                    type: "server.instance.disposed",
+                    properties: { directory: "/proj/c" },
+                } as any,
+            }),
+        ).rejects.toBe(boom);
+
+        expect(calls).toEqual(["/proj/c"]);
+    });
+
+    test("a throwing cleanup does not mask the eidnara handler's rejection", async () => {
+        const boom = new Error("event boom");
+        const handler = createEventHandler({
+            eidnara: {
+                event: async () => {
+                    throw boom;
+                },
+            },
+            onInstanceDisposed: () => {
+                throw new Error("cleanup boom");
+            },
+        });
+
+        await expect(
+            handler({
+                event: {
+                    type: "server.instance.disposed",
+                    properties: { directory: "/proj/d" },
+                } as any,
+            }),
+        ).rejects.toBe(boom);
+    });
+
     test("still runs the eidnara handler for every event", async () => {
         const seen: string[] = [];
         const handler = createEventHandler({

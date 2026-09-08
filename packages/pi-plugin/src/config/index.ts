@@ -16,6 +16,7 @@ import {
     EidnaraConfigSchema,
     REMOVED_CONFIG_KEYS,
 } from "@eidnara/opencode/config/schema/eidnara";
+import { redactConfigIssuePath } from "@eidnara/opencode/config/schema/issue-path";
 import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
 import { isPrototypePollutionKey, parseConfigJsonc } from "@eidnara/opencode/shared/jsonc-parser";
 import { setOutputReserveConfig } from "@eidnara/opencode/shared/models-dev-cache";
@@ -288,7 +289,12 @@ function parsePiConfig(
                 const result = pruneNestedConfigLeaf(prunedBlock, relative);
                 if (result) {
                     prunedBlock = result.block;
-                    prunedLeaves.push(result.removed);
+                    // The rendered leaf omits `key`, which the warning names separately.
+                    prunedLeaves.push(
+                        redactConfigIssuePath([key, ...result.removed])
+                            .slice(1)
+                            .join("."),
+                    );
                     continue;
                 }
                 // A missing required leaf has nothing to prune, so the whole block goes.

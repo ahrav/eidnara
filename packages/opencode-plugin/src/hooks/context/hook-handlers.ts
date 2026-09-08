@@ -1,7 +1,8 @@
-import { clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
+import { clearRustSessionStatus, clearWorkMetricsCarry } from "../../plugin/rpc-handlers";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import {
     cachedToolPermissionDenied,
     resolveTodowriteAvailability,
@@ -190,6 +191,7 @@ export function createEventHook(args: {
             clearIgnoredMessages(sessionId);
             clearSidebarSnapshotCache(sessionId);
             clearWorkMetricsCarry(sessionId);
+            clearRustSessionStatus(sessionId);
         }
 
         if (input.event.type !== "session.deleted") {
@@ -258,12 +260,16 @@ export function createToolExecuteAfterHook(args: {
         if (args.client) {
             try {
                 if (
-                    await todowritePermissionDenied(args.client, typedInput.sessionID, activeAgent)
+                    await withTimeout(
+                        todowritePermissionDenied(args.client, typedInput.sessionID, activeAgent),
+                        HOST_SDK_READ_TIMEOUT_MS,
+                        "todowrite permission read timed out",
+                    )
                 ) {
                     return;
                 }
             } catch (error) {
-                // The permission check preserves a prior live deny across a transient SDK read.
+                // The permission check preserves a prior live deny across a transient or slow SDK read.
                 // TODO: Prevent SDK read failures from resuming stale capture.
                 if (cachedToolPermissionDenied(typedInput.sessionID, "todowrite")) {
                     return;

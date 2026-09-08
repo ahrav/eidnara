@@ -9,6 +9,7 @@ import {
     emptyWorkMetricsCarry,
     type WorkMetricsCarry,
 } from "../features/context/work-metrics";
+import type { ContextUsageEntry } from "../hooks/context/event-handler";
 import {
     DEFAULT_CACHE_TTL_MS,
     parseCacheTtlMs,
@@ -21,6 +22,7 @@ import { kernelClientResolver } from "../hooks/context/kernel-transport";
 import type { LiveSessionState } from "../hooks/context/live-session-state";
 import {
     findLastAssistantModelFromOpenCodeDb,
+    findLastAssistantUsageFromOpenCodeDb,
     openCodeDbExists,
     withReadOnlySessionDb,
 } from "../hooks/context/read-session-db";
@@ -56,6 +58,14 @@ const POLL_CACHE_MAX_ENTRIES = 32;
 
 export function clearWorkMetricsCarry(sessionId: string): void {
     workMetricsCarryBySession.delete(sessionId);
+}
+
+/** A row at or below the watermark is already folded in, and the incremental read never revisits it. OpenCode message ids are time-ordered, so id order tracks the `(time_created, id)` fold order. commentlint: allow(JUDGE) */
+export function clearWorkMetricsCarryIfFolded(sessionId: string, messageId: string): void {
+    const carry = workMetricsCarryBySession.peek(sessionId);
+    if (carry && carry.lastId !== "" && messageId <= carry.lastId) {
+        workMetricsCarryBySession.delete(sessionId);
+    }
 }
 
 /**
@@ -103,6 +113,12 @@ export class BoundedTtlCache<V> {
         this.entries.set(key, { value, cachedAt: nowMs });
     }
 
+    deleteWhere(predicate: (key: string) => boolean): void {
+        for (const key of this.entries.keys()) {
+            if (predicate(key)) this.entries.delete(key);
+        }
+    }
+
     get size(): number {
         return this.entries.size;
     }
@@ -127,6 +143,16 @@ const rustStatusCache = new BoundedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
 );
+const rustStatusInFlight = new Map<string, Promise<RustSessionStatus>>();
+
+/** Forgets a deleted session's cached daemon status under every root. An in-flight request is dropped from the map, and `fetchRustSessionStatus` caches only while it still holds the map slot, so a late answer cannot resurrect the session. commentlint: allow(JUDGE) */
+export function clearRustSessionStatus(sessionId: string): void {
+    const prefix = pollCacheKey(sessionId, "");
+    rustStatusCache.deleteWhere((key) => key.startsWith(prefix));
+    for (const key of rustStatusInFlight.keys()) {
+        if (key.startsWith(prefix)) rustStatusInFlight.delete(key);
+    }
+}
 
 /**
  * When OpenCode's DB is unavailable or unreadable, the sidebar reports zero work metrics.
@@ -162,6 +188,36 @@ async function loadRustSessionStatus(
     if (cached !== undefined) {
         return cached;
     }
+    // Polls that miss the cache while a request is in flight share it. The module transport serializes calls per session, so one status request queued behind a long wrapup must not become one queued request per poll. commentlint: allow(JUDGE)
+    const inFlight = rustStatusInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
+    const request: Promise<RustSessionStatus> = fetchRustSessionStatus(
+        client,
+        sessionId,
+        directory,
+    ).then((status) => {
+        // `clearRustSessionStatus` removes the slot when the session is deleted mid-request; the answer is then stale for the cache and for the poll that is still waiting on it.
+        if (rustStatusInFlight.get(cacheKey) !== request) {
+            throw new Error(
+                `session.status answer for ${sessionId} discarded: session invalidated`,
+            );
+        }
+        rustStatusCache.set(cacheKey, status);
+        return status;
+    });
+    rustStatusInFlight.set(cacheKey, request);
+    const releaseSlot = () => {
+        if (rustStatusInFlight.get(cacheKey) === request) rustStatusInFlight.delete(cacheKey);
+    };
+    request.then(releaseSlot, releaseSlot);
+    return request;
+}
+
+async function fetchRustSessionStatus(
+    client: RustModeModuleClient,
+    sessionId: string,
+    directory: string,
+): Promise<RustSessionStatus> {
     const response = await client.call({
         sessionId,
         projectRoot: directory,
@@ -183,9 +239,7 @@ async function loadRustSessionStatus(
             `session.status returned ${String(detail?.code ?? detail?.message ?? value.error ?? "ok=false")}`,
         );
     }
-    const status = value as RustSessionStatus;
-    rustStatusCache.set(cacheKey, status);
-    return status;
+    return value as RustSessionStatus;
 }
 
 function resolveConfiguredCacheTtl(
@@ -217,6 +271,36 @@ function parseModelKey(modelKey: string | undefined): ActiveModel | undefined {
 
 function modelKeyOf(model: ActiveModel | undefined): string | undefined {
     return model ? `${model.providerID}/${model.modelID}` : undefined;
+}
+
+/** The live usage entry for `sessionId`, only when it was measured against `modelKey`; after a model switch the previous model's tokens and response timing must not be read against the new model. commentlint: allow(JUDGE) */
+function liveUsageEntryFor(
+    liveSessionState: LiveSessionState | undefined,
+    sessionId: string,
+    modelKey: string | undefined,
+): ContextUsageEntry | undefined {
+    if (!liveSessionState) return undefined;
+    let entry = liveSessionState.contextUsageBySession.get(sessionId);
+    if (!entry) {
+        // A restart or the idle sweep empties the map while the session's last response is still in OpenCode's database. Recovering it here keeps later polls off the database until the next response overwrites it. commentlint: allow(JUDGE)
+        const persisted = findLastAssistantUsageFromOpenCodeDb(sessionId);
+        if (persisted) {
+            const contextLimit = resolveContextLimit(persisted.providerID, persisted.modelID);
+            entry = {
+                usage: {
+                    percentage: contextLimit > 0 ? (persisted.inputTokens / contextLimit) * 100 : 0,
+                    inputTokens: persisted.inputTokens,
+                },
+                updatedAt: Date.now(),
+                lastResponseTime: persisted.respondedAt,
+                hasUsageTokens: true,
+                model: { providerID: persisted.providerID, modelID: persisted.modelID },
+                messageID: persisted.messageID,
+            };
+            liveSessionState.contextUsageBySession.set(sessionId, entry);
+        }
+    }
+    return entry?.model && modelKeyOf(entry.model) === modelKey ? entry : undefined;
 }
 
 /**
@@ -265,11 +349,16 @@ export function buildSidebarSnapshot(
     try {
         const projectIdentity = resolveProjectIdentity(directory);
 
+        const activeModel = resolveActiveModel(sessionId, liveSessionState, requestedModelKey);
+        const activeProviderID = activeModel?.providerID;
+        const activeModelID = activeModel?.modelID;
+        const modelKey = modelKeyOf(activeModel);
+
         const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
         // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
-        const liveUsage = liveSessionState?.contextUsageBySession.get(sessionId)?.usage;
+        const liveUsage = liveUsageEntryFor(liveSessionState, sessionId, modelKey)?.usage;
         const effectiveInputTokens =
             typeof moduleInputTokens === "number" && moduleInputTokens > 0
                 ? moduleInputTokens
@@ -301,11 +390,6 @@ export function buildSidebarSnapshot(
             : 0;
         const memoryTruncated = memory?.truncated === true;
         const memoryState = memory ? stateKey(memory.state) : null;
-
-        const activeModel = resolveActiveModel(sessionId, liveSessionState, requestedModelKey);
-        const activeProviderID = activeModel?.providerID;
-        const activeModelID = activeModel?.modelID;
-        const modelKey = modelKeyOf(activeModel);
 
         const contextLimit =
             typeof moduleContextLimit === "number" && moduleContextLimit > 0
@@ -471,7 +555,7 @@ export function buildStatusDetail(
     // The daemon counts every minted tag and publishes no per-tag state, so only the total is known here.
     const totalTags = typeof moduleStatus?.tag_count === "number" ? moduleStatus.tag_count : 0;
     const lastResponseTime =
-        liveSessionState?.contextUsageBySession.get(sessionId)?.lastResponseTime ?? 0;
+        liveUsageEntryFor(liveSessionState, sessionId, effectiveModelKey)?.lastResponseTime ?? 0;
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
@@ -578,9 +662,10 @@ export function buildStatusDetail(
             detail.historyBlockTokens = histTokens;
 
             if (detail.contextLimit > 0) {
+                // Mirrors `resolveHistoryBudgetTokens`: the runtime budget applies the effective threshold with no extra cap.
                 const budget = Math.floor(
                     detail.contextLimit *
-                        (Math.min(detail.executeThreshold, 80) / 100) *
+                        (detail.executeThreshold / 100) *
                         detail.historyBudgetPercentage,
                 );
                 detail.compressionBudget = budget;

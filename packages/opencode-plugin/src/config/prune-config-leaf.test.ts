@@ -8,7 +8,7 @@ describe("pruneNestedConfigLeaf", () => {
         const result = pruneNestedConfigLeaf(block, ["injection_budget_tokens"]);
         expect(result).not.toBeNull();
         expect(result?.block).toEqual({ enabled: false });
-        expect(result?.removed).toBe("injection_budget_tokens");
+        expect(result?.removed).toEqual(["injection_budget_tokens"]);
         // original untouched
         expect(block).toEqual({ enabled: false, injection_budget_tokens: 4000 });
     });
@@ -24,7 +24,7 @@ describe("pruneNestedConfigLeaf", () => {
             enabled: true,
             git_commit_indexing: { enabled: false },
         });
-        expect(result?.removed).toBe("git_commit_indexing.since_days");
+        expect(result?.removed).toEqual(["git_commit_indexing", "since_days"]);
         expect(block.git_commit_indexing).toEqual({ enabled: false, since_days: 99999 });
     });
 
@@ -32,7 +32,7 @@ describe("pruneNestedConfigLeaf", () => {
         const block = { git_commit_indexing: true, keep_me: { enabled: false } };
         const result = pruneNestedConfigLeaf(block, ["git_commit_indexing", "since_days"]);
         expect(result).not.toBeNull();
-        expect(result?.removed).toBe("git_commit_indexing");
+        expect(result?.removed).toEqual(["git_commit_indexing"]);
         expect(result?.block).toEqual({ keep_me: { enabled: false } });
     });
 
@@ -46,7 +46,7 @@ describe("pruneNestedConfigLeaf", () => {
             0,
         ]);
         expect(result).not.toBeNull();
-        expect(result?.removed).toBe("system_prompt_injection.skip_signatures");
+        expect(result?.removed).toEqual(["system_prompt_injection", "skip_signatures"]);
         expect(result?.block).toEqual({ system_prompt_injection: { enabled: true } });
     });
 

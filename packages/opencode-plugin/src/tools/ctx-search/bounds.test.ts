@@ -34,9 +34,27 @@ describe("countQueryAtoms", () => {
         expect(countQueryAtoms("dup dup dup")).toBe(3);
         expect(countQueryAtoms("  spaced\tout\nwords  ")).toBe(3);
     });
+
+    it("counts punctuation-delimited operands the way the memory ranker splits them", () => {
+        expect(countQueryAtoms("aa,bb,cc")).toBe(3);
+        expect(countQueryAtoms("a.b-c/d")).toBe(4);
+        expect(countQueryAtoms("snake_case keeps_underscores")).toBe(2);
+        expect(countQueryAtoms("naïve café 東京")).toBe(3);
+        expect(countQueryAtoms("?!,.")).toBe(0);
+    });
 });
 
 describe("prepareExplicitQuery", () => {
+    it("rejects a punctuation-joined term list that exceeds the atom cap without any whitespace", () => {
+        const raw = Array.from({ length: MAX_QUERY_ATOMS + 1 }, (_, index) =>
+            index.toString(36).padStart(2, "0"),
+        ).join(",");
+        expect(estimateTokens(raw)).toBeLessThanOrEqual(MAX_QUERY_TOKENS);
+        const outcome = rejection(raw);
+        expect(outcome.violation).toBe("atoms");
+        expect(outcome.actual).toBe(MAX_QUERY_ATOMS + 1);
+    });
+
     it("admits a query at exactly the byte cap through byte preflight", () => {
         const raw = "a".repeat(MAX_QUERY_BYTES);
         const outcome = prepareExplicitQuery(raw);

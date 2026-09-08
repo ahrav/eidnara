@@ -235,3 +235,86 @@ export function findLastAssistantModelFromOpenCodeDb(
         return null;
     }
 }
+
+export interface PersistedAssistantUsage {
+    messageID: string;
+    providerID: string;
+    modelID: string;
+    /** Prompt tokens: `input + cache.read + cache.write`. */
+    inputTokens: number;
+    /** `time.completed` when the row has one, else `time_created`. */
+    respondedAt: number;
+}
+
+/** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary are skipped, so a compacted session reports no usage until a post-compaction response lands. commentlint: allow(JUDGE) */
+export function findLastAssistantUsageFromOpenCodeDb(
+    sessionId: string,
+): PersistedAssistantUsage | null {
+    if (!openCodeDbExists()) return null;
+    try {
+        return withReadOnlySessionDb((db) => {
+            const row = db
+                .prepare(
+                    `SELECT id,
+                            json_extract(data, '$.providerID') as providerID,
+                            json_extract(data, '$.modelID') as modelID,
+                            COALESCE(json_extract(data, '$.tokens.input'), 0)
+                              + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
+                              + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) as inputTokens,
+                            json_extract(data, '$.time.completed') as completedAt,
+                            time_created as timeCreated
+                     FROM message
+                     WHERE session_id = ?1
+                       AND json_extract(data, '$.role') = 'assistant'
+                       AND COALESCE(json_extract(data, '$.summary'), 0) <> 1
+                       AND time_created > (
+                         SELECT COALESCE(MAX(time_created), -1)
+                         FROM message
+                         WHERE session_id = ?1
+                           AND COALESCE(json_extract(data, '$.summary'), 0) = 1
+                       )
+                       AND json_extract(data, '$.providerID') IS NOT NULL
+                       AND json_extract(data, '$.modelID') IS NOT NULL
+                       AND COALESCE(json_extract(data, '$.tokens.input'), 0)
+                         + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
+                         + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) > 0
+                     ORDER BY time_created DESC, id DESC
+                     LIMIT 1`,
+                )
+                .get(sessionId) as {
+                id?: unknown;
+                providerID?: unknown;
+                modelID?: unknown;
+                inputTokens?: unknown;
+                completedAt?: unknown;
+                timeCreated?: unknown;
+            } | null;
+            if (
+                !row ||
+                typeof row.id !== "string" ||
+                typeof row.providerID !== "string" ||
+                typeof row.modelID !== "string" ||
+                typeof row.inputTokens !== "number" ||
+                row.inputTokens <= 0
+            ) {
+                return null;
+            }
+            const respondedAt =
+                typeof row.completedAt === "number"
+                    ? row.completedAt
+                    : typeof row.timeCreated === "number"
+                      ? row.timeCreated
+                      : 0;
+            return {
+                messageID: row.id,
+                providerID: row.providerID,
+                modelID: row.modelID,
+                inputTokens: row.inputTokens,
+                respondedAt,
+            };
+        });
+    } catch (error) {
+        log("[eidnara] failed to recover assistant usage from OpenCode DB:", error);
+        return null;
+    }
+}

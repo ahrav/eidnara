@@ -57,6 +57,12 @@ export function isSmartNoteNetworkError(error: unknown): boolean {
     );
 }
 
+export function smartNoteAbortError(signal: AbortSignal): SmartNoteNetworkError {
+    return signal.reason instanceof SmartNoteNetworkError
+        ? signal.reason
+        : new SmartNoteNetworkError("SMART_NOTE_NETWORK: aborted");
+}
+
 export function isTerminalSmartNoteNetworkError(error: unknown): error is SmartNoteNetworkError {
     return error instanceof SmartNoteNetworkError && error.terminal;
 }
@@ -66,8 +72,10 @@ export function parseSmartNoteManifest(json: string | null): SmartNoteCheckManif
     try {
         const parsed = JSON.parse(json) as Partial<SmartNoteCheckManifest>;
         const capabilities = Array.isArray(parsed.capabilities)
-            ? parsed.capabilities.filter((c): c is SmartNoteCapabilityName =>
-                  ["readFile", "gitHeadSha", "gitTag", "gitLog", "httpGet"].includes(String(c)),
+            ? parsed.capabilities.filter(
+                  (c): c is SmartNoteCapabilityName =>
+                      typeof c === "string" &&
+                      ["readFile", "gitHeadSha", "gitTag", "gitLog", "httpGet"].includes(c),
               )
             : [];
         return {

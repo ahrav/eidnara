@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
-import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
@@ -12,7 +11,7 @@ import {
 } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
-import { withTimeout } from "../../shared/with-timeout";
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import {
     cachedToolPermissionDenied,
     resolveCtxReduceAvailability,
@@ -42,14 +41,14 @@ import {
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
 import {
-    HOST_SDK_READ_TIMEOUT_MS,
     knownSessionDirectory,
     resolveSessionDirectory,
+    type SessionDirectoryDeps,
 } from "./session-directory";
 import type { MessageLike } from "./tag-content-primitives";
 import { logTransformTiming } from "./transform-stage-logger";
 
-export interface RustModeTransformDeps {
+export interface RustModeTransformDeps extends SessionDirectoryDeps {
     contextUsageMap: Map<string, ContextUsageEntry>;
     protectedTags?: number;
     clearReasoningAge: number;
@@ -62,9 +61,6 @@ export interface RustModeTransformDeps {
     autoSearch?: { enabled: boolean; scoreThreshold: number; minPromptChars: number };
     cacheTtl: string | Record<string, string>;
     compactionOff?: boolean;
-    client?: PluginContext["client"];
-    directory?: string;
-    sessionDirectoryBySession?: Map<string, string>;
     isSubagentSession: (sessionId: string) => boolean;
     systemPromptHashFor: (sessionId: string) => string;
 }
@@ -857,6 +853,13 @@ export function createRustModeTransform(
     const callModule = (args: Parameters<RustModeModuleClient["call"]>[0]): Promise<unknown> =>
         options.moduleClient.call(args);
 
+    /** Thrown before a send when `clearSession` ran during this pass's preflight; the pass serves its input unchanged without counting a failure. */
+    class SessionClearedDuringPass extends Error {
+        constructor(sessionId: string) {
+            super(`rust session ${sessionId} was cleared during the pass`);
+        }
+    }
+
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
         state.consecutiveFailures += 1;
         state.failureCount += 1;
@@ -916,6 +919,8 @@ export function createRustModeTransform(
         let rowVersion = 0;
         let appliedAt: number | undefined;
         const passUsageSnapshot = loadContextUsage(deps, sessionId);
+        // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
+        const directory = await resolveSessionDirectory(deps, sessionId);
         const isSubagent = deps.isSubagentSession(sessionId);
         const systemPromptHash = deps.systemPromptHashFor(sessionId);
         let preflightError: unknown;
@@ -1049,7 +1054,6 @@ export function createRustModeTransform(
         );
         try {
             if (preflightError) throw preflightError;
-            const directory = await resolveSessionDirectory(deps, sessionId);
             const usage = passUsageSnapshot;
             const contextLimit =
                 resolvedContextLimit && resolvedContextLimit > 0
@@ -1356,6 +1360,9 @@ export function createRustModeTransform(
                 );
                 let response: Record<string, unknown> | undefined;
                 for (const [index, { page, bytes }] of pages.entries()) {
+                    // A `session.deleted` that landed during preflight or an earlier page has already queued the daemon-side delete; sending now would recreate the session's durable state.
+                    if (states.get(sessionId) !== state)
+                        throw new SessionClearedDuringPass(sessionId);
                     const transportStartedAt = performance.now();
                     let moduleResponse: unknown;
                     try {
@@ -1612,9 +1619,14 @@ export function createRustModeTransform(
             finishPass(true);
         } catch (error) {
             servedFrom = "raw";
-            if (decision.toLowerCase() !== "need_full_sync") decision = "error";
             materializeReason = "none";
-            markFailure(sessionId, state, error);
+            if (error instanceof SessionClearedDuringPass) {
+                decision = "cleared";
+                sessionLog(sessionId, error.message);
+            } else {
+                if (decision.toLowerCase() !== "need_full_sync") decision = "error";
+                markFailure(sessionId, state, error);
+            }
             replaceMessagesInPlace(output, messages);
             finishPass(false);
             return;

@@ -8,12 +8,15 @@
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import {
     isAvailable,
-    MAX_READ_OBJECT_IDS,
     type MemoryState,
     type ReadRow,
     renderToolStateText,
 } from "../../shared/kernel-client";
-import { describeQueryBoundsViolation, normalizeSearchResultLimit } from "./bounds";
+import {
+    boundDynamicField,
+    describeQueryBoundsViolation,
+    normalizeSearchResultLimit,
+} from "./bounds";
 import {
     type KernelMemorySearchResult,
     parseObjectIdQuery,
@@ -45,7 +48,10 @@ function normalizeSources(sources?: string[]): CtxSearchSource[] | undefined {
     return result;
 }
 
-/** The wrappers fall back to raw arguments when schema parsing fails, so `sources` is validated as an array of supported names before any iteration: a non-array would throw an unhandled TypeError, and a misspelled name silently dropped would search nothing and report a misleading "no results". Answers the error text or `null` when valid. commentlint: allow(JUDGE) */
+/** Unknown source names echoed back in the validation error; the rest are counted. */
+const MAX_ECHOED_UNKNOWN_SOURCES = 3;
+
+/** The wrappers fall back to raw arguments when schema parsing fails, so `sources` is validated as an array of supported names before any iteration: a non-array would throw an unhandled TypeError, and a misspelled name silently dropped would search nothing and report a misleading "no results". The raw array is caller-controlled, so the error names at most `MAX_ECHOED_UNKNOWN_SOURCES` field-bounded values and counts the rest rather than repeating arbitrarily long input. Answers the error text or `null` when valid. commentlint: allow(JUDGE) */
 function invalidSourcesError(sources: unknown): string | null {
     if (sources === undefined) return null;
     if (!Array.isArray(sources)) {
@@ -55,7 +61,16 @@ function invalidSourcesError(sources: unknown): string | null {
         (source) => typeof source !== "string" || !VALID_SOURCES.has(source as CtxSearchSource),
     );
     if (unknown.length > 0) {
-        return `Error: unknown source${unknown.length === 1 ? "" : "s"}: ${unknown.map((source) => JSON.stringify(source)).join(", ")}. Supported sources: ${[...VALID_SOURCES].join(", ")}.`;
+        const echoed = unknown
+            .slice(0, MAX_ECHOED_UNKNOWN_SOURCES)
+            .map((source) =>
+                typeof source === "string"
+                    ? JSON.stringify(boundDynamicField(source))
+                    : boundDynamicField(JSON.stringify(source) ?? String(source)),
+            );
+        const elided = unknown.length - echoed.length;
+        const more = elided > 0 ? `, and ${elided} more` : "";
+        return `Error: unknown source${unknown.length === 1 ? "" : "s"}: ${echoed.join(", ")}${more}. Supported sources: ${[...VALID_SOURCES].join(", ")}.`;
     }
     return null;
 }
@@ -113,10 +128,10 @@ export async function executeCtxSearch(
         results: KernelMemorySearchResult[],
         memoryNote?: string,
     ): CtxSearchExecution => {
-        const packed = packSearchResults(query, results);
+        const packed = packSearchResults(query, results, memoryNote);
         return {
             status: "complete",
-            text: memoryNote ? `${memoryNote}\n\n${packed.text}` : packed.text,
+            text: packed.text,
             prePack: results,
             delivered: packed.delivered,
             tokenCount: packed.tokenCount,
@@ -138,19 +153,18 @@ export async function executeCtxSearch(
         sessionId: toolContext.sessionID,
         projectRoot,
     });
-    // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits on byte-budget truncation so every named id resolves or is reported unresolved by name. A pasted list over the filter bound falls back to the unfiltered snapshot instead of failing the search. commentlint: allow(JUDGE)
+    // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name. commentlint: allow(JUDGE)
     const idQuery = parseObjectIdQuery(query);
-    const filteredIds = idQuery && idQuery.length <= MAX_READ_OBJECT_IDS ? idQuery : null;
     let memoryRows: ReadRow[] = [];
     let memoryState: MemoryState | null = null;
     let memoryTruncated = false;
     let unresolvedObjectIds: string[] = [];
-    if (filteredIds) {
+    if (idQuery) {
         const read = await readObjectRowsChunked({
             client,
             surface: "explicit_search",
             gated: true,
-            objectIds: filteredIds,
+            objectIds: idQuery,
             ...(toolContext.abort ? { signal: toolContext.abort } : {}),
         });
         if (read.ok) {

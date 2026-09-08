@@ -9,15 +9,57 @@ import {
     generateMessageId,
     injectCompactionMarker,
 } from "../../features/context/compaction-marker";
+import {
+    applyStickySnapshotCache,
+    resetSidebarSnapshotCache,
+} from "../../plugin/sidebar-snapshot-cache";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
+import type { SidebarSnapshot } from "../../shared/rpc-types";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeCompactionMarkerConnection, MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { type ContextUsageEntry, createEventHandler, type EventHandlerDeps } from "./event-handler";
 import { DEFAULT_CONTEXT_LIMIT, resolveContextLimit } from "./event-resolvers";
+import type { RawMessage } from "./read-session-raw";
+import { buildTrueRawTokenIndex } from "./read-session-true-raw-tokens";
 
 const SESSION = "ses-1";
 const RETAINED_ID = generateMessageId(1_002, 0n, "retained");
+
+const ZERO_SNAPSHOT: SidebarSnapshot = {
+    sessionId: SESSION,
+    usagePercentage: 0,
+    inputTokens: 0,
+    contextLimit: 0,
+    systemPromptTokens: 0,
+    compartmentCount: 0,
+    memoryCount: 0,
+    memoryBlockCount: 0,
+    pendingOpsCount: 0,
+    historianRunning: false,
+    compartmentInProgress: false,
+    sessionNoteCount: 0,
+    readySmartNoteCount: 0,
+    cacheTtl: "5m",
+    lastTransformError: null,
+    lastDreamerRunAt: null,
+    projectIdentity: null,
+    compartmentTokens: 0,
+    factTokens: 0,
+    memoryTokens: 0,
+    docsTokens: 0,
+    profileTokens: 0,
+    conversationTokens: 0,
+    toolCallTokens: 0,
+    toolDefinitionTokens: 0,
+    executeThreshold: 65,
+    executeThresholdClamped: false,
+    newWorkTokens: 0,
+    totalInputTokens: 0,
+    recompProgress: null,
+    memoryState: null,
+    compaction_enabled: true,
+};
 
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 let dataHome: string;
@@ -118,6 +160,7 @@ beforeEach(() => {
 afterEach(() => {
     closeCompactionMarkerConnection();
     _resetHarnessForTesting();
+    resetSidebarSnapshotCache();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
     rmSync(dataHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
@@ -146,9 +189,58 @@ describe("createEventHandler — session.created", () => {
         expect(deps.subagentSessions?.size).toBe(0);
         expect(deps.internalChildSessions?.size).toBe(0);
     });
+
+    it("keeps only the newest 1000 children in each set", async () => {
+        const { deps, handle } = buildHarness();
+        await handle("session.created", sessionCreated("child-0", "parent-1", "eidnara-0"));
+        for (let i = 1; i <= 1000; i++) {
+            await handle(
+                "session.created",
+                sessionCreated(`child-${i}`, "parent-1", `eidnara-${i}`),
+            );
+        }
+
+        expect(deps.subagentSessions?.size).toBe(1000);
+        expect(deps.internalChildSessions?.size).toBe(1000);
+        expect(deps.subagentSessions?.has("child-0")).toBe(false);
+        expect(deps.internalChildSessions?.has("child-0")).toBe(false);
+        expect(deps.subagentSessions?.has("child-1")).toBe(true);
+        expect(deps.subagentSessions?.has("child-1000")).toBe(true);
+    });
 });
 
 describe("createEventHandler — message.updated", () => {
+    it("drops a user message's cached token estimate so a same-length edit is re-counted", async () => {
+        const { handle } = buildHarness();
+        const before = "hello hello hello hello hello hello hello hello";
+        const after = "h3ll0 w0rld xyzq !!@@ ##$$ %%^^ &&** (())[]{}<>";
+        expect(after.length).toBe(before.length);
+        const options = {
+            providerShapeVersion: "opencode-v1" as const,
+            cacheNamespace: `${SESSION}:event-handler-test`,
+        };
+        const message = (text: string): RawMessage => ({
+            id: "msg-user-1",
+            role: "user",
+            parts: [{ type: "text", text }],
+            ordinal: 1,
+        });
+
+        const first = buildTrueRawTokenIndex(SESSION, [message(before)], options).tokenForOrdinal(
+            1,
+        );
+        const recounted = buildTrueRawTokenIndex(SESSION, [message(after)], options);
+        // The cache key fingerprints part type and byte length only, so the edit is invisible to it.
+        expect(recounted.tokenForOrdinal(1)).toBe(first);
+
+        await handle("message.updated", {
+            info: { role: "user", id: "msg-user-1", sessionID: SESSION },
+        });
+
+        const fresh = buildTrueRawTokenIndex(SESSION, [message(after)], options).tokenForOrdinal(1);
+        expect(fresh).not.toBe(first);
+    });
+
     it("records inputTokens and a percentage against the resolved context limit", async () => {
         const { deps, handle } = buildHarness();
         await handle(
@@ -170,6 +262,24 @@ describe("createEventHandler — message.updated", () => {
         await handle("message.updated", assistantUpdated({ input: 0 }));
 
         expect(deps.contextUsageMap.has(SESSION)).toBe(false);
+    });
+
+    it("keeps the newest response's usage when an older response is updated", async () => {
+        const { deps, handle } = buildHarness();
+        const updated = assistantUpdated({ input: 40_000 });
+        updated.info.id = "msg-9";
+        await handle("message.updated", updated);
+
+        const older = assistantUpdated({ input: 5_000 });
+        older.info.id = "msg-3";
+        await handle("message.updated", older);
+        expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(40_000);
+        expect(deps.contextUsageMap.get(SESSION)?.messageID).toBe("msg-9");
+
+        const newer = assistantUpdated({ input: 41_000 });
+        newer.info.id = "msg-9";
+        await handle("message.updated", newer);
+        expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(41_000);
     });
 
     it("evicts usage entries older than the TTL on the next event", async () => {
@@ -202,6 +312,29 @@ describe("createEventHandler — message.removed", () => {
         expect(calls.cache).toEqual([SESSION]);
         expect(rowCounts()).toEqual({ messages: 2, parts: 0 });
     });
+
+    it("drops the live usage and sticky snapshot only when the response they came from is removed", async () => {
+        const { deps, handle } = buildHarness();
+        await handle("message.updated", assistantUpdated({ input: 1_000 }));
+        expect(deps.contextUsageMap.get(SESSION)?.messageID).toBe("msg-1");
+        const scope = { sessionId: SESSION, directory: "/repo", modelKey: "p/m" };
+        applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, inputTokens: 1_000 });
+
+        // Removing some other message, such as a plugin notification row, leaves both intact.
+        await handle("message.removed", { sessionID: SESSION, messageID: "msg-other" });
+        expect(deps.contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(1_000);
+        expect(
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+                .inputTokens,
+        ).toBe(1_000);
+
+        await handle("message.removed", { sessionID: SESSION, messageID: "msg-1" });
+        expect(deps.contextUsageMap.has(SESSION)).toBe(false);
+        expect(
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+                .inputTokens,
+        ).toBe(0);
+    });
 });
 
 describe("createEventHandler — session.compacted", () => {
@@ -213,6 +346,21 @@ describe("createEventHandler — session.compacted", () => {
 
         expect(calls.cache).toEqual([SESSION]);
         expect(rowCounts()).toEqual({ messages: 2, parts: 0 });
+    });
+
+    it("drops the pre-compaction live usage and sticky snapshot", async () => {
+        const { deps, handle } = buildHarness();
+        await handle("message.updated", assistantUpdated({ input: 90_000 }));
+        const scope = { sessionId: SESSION, directory: "/repo", modelKey: "p/m" };
+        applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, inputTokens: 90_000 });
+
+        await handle("session.compacted", { sessionID: SESSION });
+
+        expect(deps.contextUsageMap.has(SESSION)).toBe(false);
+        expect(
+            applyStickySnapshotCache(scope, { ...ZERO_SNAPSHOT, compartmentInProgress: true })
+                .inputTokens,
+        ).toBe(0);
     });
 });
 

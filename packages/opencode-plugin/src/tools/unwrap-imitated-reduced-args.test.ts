@@ -153,6 +153,31 @@ describe("imitated reduced object and nested array fields", () => {
         expect(unwrapImitatedReducedArgs(outer, OBJECT_PRIMARY, OBJECT_SCHEMA)).toBe(outer);
     });
 
+    // An inherited function has no `type`, so the array rule is the branch that would accept an
+    // empty array; every summary here is written as a string so `__proto__` becomes an own key.
+    for (const [name, summary, primary, schema] of [
+        ["top-level constructor", '{"constructor":[]}', ["query"], { query: "string" }],
+        ["top-level toString", '{"toString":[]}', ["query"], { query: "string" }],
+        ["top-level __proto__", '{"__proto__":[]}', ["query"], { query: "string" }],
+        [
+            "nested optional constructor",
+            '{"opts":{"constructor":[]}}',
+            ["opts"],
+            { opts: { type: "object", fields: {}, optionalFields: { note: "string" } } },
+        ],
+        [
+            "nested optional __proto__",
+            '{"opts":{"__proto__":[]}}',
+            ["opts"],
+            { opts: { type: "object", fields: {}, optionalFields: { note: "string" } } },
+        ],
+    ] as Array<[string, string, string[], ImitatedArgsSchema]>) {
+        test(`rejects an inherited-name field with an empty array value: ${name}`, () => {
+            const outer = { reduced: true, summary };
+            expect(unwrapImitatedReducedArgs(outer, primary, schema)).toBe(outer);
+        });
+    }
+
     for (const [name, accepted] of [
         ["single mutation token", { action: "revise", mutationToken: token() }],
         [

@@ -24,6 +24,8 @@ export {
     type ReadArgs,
     type ReadResult,
     type SourceKind,
+    StoreLifecycleError,
+    type StoreLifecycleReason,
     type Surface,
     sha256Hex,
 } from "./client";

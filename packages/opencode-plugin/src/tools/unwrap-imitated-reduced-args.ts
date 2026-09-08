@@ -52,6 +52,8 @@ function validObjectField(
     }
     return Object.keys(record).every((field) => {
         if (Object.hasOwn(fields, field)) return true;
+        // `optionalFields[field]` would read inherited properties such as `constructor` without this guard.
+        if (!Object.hasOwn(optionalFields, field)) return false;
         const rule = optionalFields[field];
         if (rule === undefined) return false;
         return record[field] === null || validField(record[field], rule);
@@ -94,6 +96,8 @@ function validDecodedArgs(value: Record<string, unknown>, schema: ImitatedArgsSc
             }
             continue;
         }
+        // `schema[field]` would read inherited properties such as `constructor` without this guard.
+        if (!Object.hasOwn(schema, field)) return false;
         const rule = schema[field];
         if (!rule || !validField(fieldValue, rule)) return false;
     }

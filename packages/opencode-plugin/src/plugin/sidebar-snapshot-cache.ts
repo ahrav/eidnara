@@ -70,17 +70,21 @@ export function applyStickySnapshotCache(
         dropCached(scope);
         return fresh;
     }
-    //
-    //
+    // A memory count is evidence of a reset only when the read behind it is complete:
+    // a non-`available` state carries no rows, and a truncated read is a lower bound,
+    // so a decrease in either case does not prove state was deleted.
+    const memoryCountIsEvidence =
+        fresh.memoryState === "available" && fresh.memoryTruncated !== true;
     const stateSurvived =
         fresh.compartmentCount >= cached.snapshot.compartmentCount &&
-        fresh.memoryCount >= cached.snapshot.memoryCount;
+        (!memoryCountIsEvidence || fresh.memoryCount >= cached.snapshot.memoryCount);
     if (!hasInFlightEvidence(fresh) && !stateSurvived) {
         dropCached(scope);
         return fresh;
     }
 
-    // stale counts.
+    // Cached token fields restore one internally consistent token breakdown while
+    // live state, counts, and cumulative work metrics remain fresh.
     return {
         ...fresh,
         usagePercentage: cached.snapshot.usagePercentage,
@@ -90,6 +94,8 @@ export function applyStickySnapshotCache(
         compartmentTokens: cached.snapshot.compartmentTokens,
         factTokens: cached.snapshot.factTokens,
         memoryTokens: cached.snapshot.memoryTokens,
+        docsTokens: cached.snapshot.docsTokens,
+        profileTokens: cached.snapshot.profileTokens,
         conversationTokens: cached.snapshot.conversationTokens,
         toolCallTokens: cached.snapshot.toolCallTokens,
         toolDefinitionTokens: cached.snapshot.toolDefinitionTokens,
