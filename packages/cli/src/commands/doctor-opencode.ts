@@ -1,12 +1,17 @@
 import { execSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
+import { basename } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
-import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
+import {
+    eidnaraProjectConfigBasePath,
+    eidnaraUserConfigBasePath,
+} from "@eidnara/opencode/config/config-paths";
 import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
+import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { parse } from "comment-json";
 
 import {
@@ -163,7 +168,10 @@ async function runIssueFlow(): Promise<number> {
             `Open this URL and paste the contents of ${bundled.path} into the Diagnostics field:`,
         );
         log.info(url);
-        openBrowser(url);
+        // A declined submission leaves the report on disk without launching anything.
+        if (shouldSubmit) {
+            openBrowser(url);
+        }
         outro("Issue report ready");
         return 0;
     } catch (error) {
@@ -301,16 +309,24 @@ export async function runDoctor(
     }
 
     // Both loader tiers are checked; a project-only config is a supported layout.
-    const eidnaraConfigTiers = [
-        { label: "user", path: paths.eidnaraConfig, isProjectConfig: false },
-        { label: "project", path: resolveEidnaraProjectConfigPath(cwd), isProjectConfig: true },
-    ].filter((tier) => existsSync(tier.path));
+    const eidnaraConfigTiers = (
+        [
+            { label: "user", base: eidnaraUserConfigBasePath(), isProjectConfig: false },
+            { label: "project", base: eidnaraProjectConfigBasePath(cwd), isProjectConfig: true },
+        ] as const
+    ).flatMap((tier) => {
+        const detected = detectConfigFile(tier.base);
+        return detected.format === "none"
+            ? []
+            : [{ label: tier.label, path: detected.path, isProjectConfig: tier.isProjectConfig }];
+    });
 
     if (eidnaraConfigTiers.length === 0) {
         warn(`No eidnara.jsonc found — using defaults`);
         log.info("  Run 'setup' to create one with model recommendations");
     }
     for (const tier of eidnaraConfigTiers) {
+        const fileName = basename(tier.path);
         pass(`Eidnara ${tier.label} config: ${tier.path}`);
         try {
             const raw = readFileSync(tier.path, "utf-8");
@@ -320,10 +336,10 @@ export async function runDoctor(
                 isProjectConfig: tier.isProjectConfig,
             }).text;
             parse(substituted);
-            pass(`Eidnara ${tier.label} eidnara.jsonc parses as valid JSONC`);
+            pass(`Eidnara ${tier.label} ${fileName} parses as valid JSONC`);
         } catch (err) {
             fail(
-                `Eidnara ${tier.label} eidnara.jsonc parse failed: ${err instanceof Error ? err.message : String(err)}`,
+                `Eidnara ${tier.label} ${fileName} parse failed: ${err instanceof Error ? err.message : String(err)}`,
             );
         }
     }

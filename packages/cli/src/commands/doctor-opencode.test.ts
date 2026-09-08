@@ -273,13 +273,17 @@ describe("doctor OpenCode read-only checks", () => {
         }
     });
 
-    it("fails on a malformed project-only eidnara.jsonc", async () => {
+    it.each([
+        "eidnara.jsonc",
+        "eidnara.json",
+    ])("fails on a malformed project-only %s", async (fileName) => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeJsonc(opencodeConfigPath, REGISTERED_PLUGIN);
         writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
         const cwd = makeTempDir("eidnara-doctor-project-");
         mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), '{ "historian": { \n');
+        const projectConfigPath = join(cwd, ".eidnara", fileName);
+        writeFileSync(projectConfigPath, '{ "historian": { \n');
         const { errors, successes, restore } = captureDoctorLog();
 
         try {
@@ -288,12 +292,10 @@ describe("doctor OpenCode read-only checks", () => {
             expect(code).toBe(1);
             expect(
                 errors.some((message) =>
-                    message.startsWith("Eidnara project eidnara.jsonc parse failed:"),
+                    message.startsWith(`Eidnara project ${fileName} parse failed:`),
                 ),
             ).toBe(true);
-            expect(successes).toContain(
-                `Eidnara project config: ${join(cwd, ".eidnara", "eidnara.jsonc")}`,
-            );
+            expect(successes).toContain(`Eidnara project config: ${projectConfigPath}`);
         } finally {
             restore();
         }
