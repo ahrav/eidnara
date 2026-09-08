@@ -44,6 +44,17 @@ const OMP_HOST: PiCompatibleSetupHost = {
     modelRefToCanonical: ompModelRefToCanonical,
     ensurePluginEntry: async () => new OmpAdapter().ensurePluginEntry(),
     beforeWrite: async ({ binaryPath, cwd, prompts, dryRun, configureHost, eidnara }) => {
+        // Global settings are unobservable when project or overlay config is
+        // active, so setup refuses to trust either OMP probe.
+        const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
+        if (nonGlobalSources.length > 0) {
+            prompts.log.error(
+                "OMP effective settings come from project/overlay config; refusing to mutate the global config or enable Eidnara beside unobserved global settings.\n" +
+                    nonGlobalSources.map((path) => `- ${path}`).join("\n") +
+                    "\nRun setup from a directory without a project OMP config and with PI_CONFIG_FILES unset.",
+            );
+            return false;
+        }
         if (!configureHost) {
             const plugins = listOmpPlugins(binaryPath);
             if (plugins === null) {
@@ -56,18 +67,6 @@ const OMP_HOST: PiCompatibleSetupHost = {
                 (plugin) => plugin.name === OMP_PLUGIN_PACKAGE && plugin.enabled,
             );
             if (!pluginActive) return async () => {};
-        }
-        // Project and overlay config decide the effective values `omp config get`
-        // reports, so the global values Eidnara will run beside outside this
-        // directory are unobservable here. Refuse before any change is planned.
-        const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
-        if (nonGlobalSources.length > 0) {
-            prompts.log.error(
-                "OMP effective settings come from project/overlay config; refusing to mutate the global config or enable Eidnara beside unobserved global settings.\n" +
-                    nonGlobalSources.map((path) => `- ${path}`).join("\n") +
-                    "\nRun setup from a directory without a project OMP config and with PI_CONFIG_FILES unset.",
-            );
-            return false;
         }
         const compaction = getOmpSetting(binaryPath, "compaction.enabled");
         const memoryBackend = getOmpSetting(binaryPath, "memory.backend");

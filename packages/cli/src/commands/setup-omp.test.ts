@@ -175,6 +175,33 @@ describe("OMP setup transaction", () => {
         expect(prompts.messages.join("\n")).toContain(join(cwd, ".omp", "config.yml"));
     });
 
+    it("refuses project/overlay config before trusting an inactive plugin probe", async () => {
+        const { binary, state } = makeFakeOmp();
+        const cwd = mkdtempSync(join(tmpdir(), "eidnara-omp-project-"));
+        roots.push(cwd);
+        mkdirSync(join(cwd, ".omp"), { recursive: true });
+        writeFileSync(join(cwd, ".omp", "config.yml"), "plugins:\n  '@eidnara/pi': false\n");
+        const prompts = new MockPrompts([]);
+
+        // The fake reports no plugins, which the project-effective probe would
+        // also report for a globally enabled plugin the project disables.
+        const result = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd,
+            prompts,
+            dryRun: false,
+            configureHost: false,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
+        });
+
+        expect(result).toBe(false);
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: true,
+            memory: "mnemopi",
+        });
+        expect(prompts.messages.join("\n")).toContain("refusing to mutate the global config");
+    });
+
     it("fails closed when registration is skipped and the plugin probe fails", async () => {
         const { root, binary, state } = makeFakeOmp({ failPluginList: true });
         const prompts = new MockPrompts([]);
