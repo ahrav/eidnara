@@ -1620,6 +1620,84 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("a restart that committed no effects does not invalidate a pending probe", async () => {
+        const root = tempDir("eidnara-policy-probe-restart-no-effects-");
+        const invocationLog = path.join(root, "no-effects-invocations.log");
+        const binary = path.join(root, "no-effects-eidnara-host.sh");
+        // `restart` fails before touching the daemon and says so in its effects.
+        const failedRestart = JSON.stringify({
+            ...JSON.parse(startResultJson("restart")),
+            ok: false,
+            reason: "authentication_failed",
+            remediation: "inspect_daemon_process",
+            effects: { stop_committed: false, start_committed: false },
+            versions: { ...JSON.parse(startResultJson("restart")).versions, proof: null },
+        });
+        writeFileSync(
+            binary,
+            `#!/bin/sh\necho "$1" >> ${invocationLog}\n` +
+                `if [ "$1" = "restart" ]; then echo '${failedRestart}'; exit 1; fi\n` +
+                `echo '${startResultJson("start")}'\nexit 0\n`,
+        );
+        chmodSync(binary, 0o700);
+        let release: () => void = () => {};
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                compatibilityProbe: () =>
+                    new Promise((resolve) => {
+                        release = () => resolve(compatibleObservation());
+                    }),
+            });
+            const demand = policy.demandStart({ origin: "managed-default", capability: "context" });
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const restarted = await policy.restart();
+            expect(restarted.reason).toBe("authentication_failed");
+            expect(restarted.effects).toEqual({ stop_committed: false, start_committed: false });
+
+            release();
+            const outcome = await demand;
+            expect(outcome.result.ok).toBe(true);
+            expect(outcome.result.reason).toBe("started");
+            expect(invocations(invocationLog)).toEqual(["start", "restart"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a fallback lookup that exhausts the budget after a found payload is a timeout", async () => {
+        const root = tempDir("eidnara-policy-fallback-exhausts-");
+        const invocationLog = path.join(root, "exhaust-invocations.log");
+        const binary = path.join(root, "exhaust-eidnara-host.sh");
+        writeFileSync(
+            binary,
+            `#!/bin/sh\necho "$*" >> ${invocationLog}\necho '${missingPayloadResultJson()}'\nexit 1\n`,
+        );
+        chmodSync(binary, 0o700);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 500,
+                payloadDirFallback: () => {
+                    const until = Date.now() + 700;
+                    while (Date.now() < until) {
+                        // spin
+                    }
+                    return "/qualified/package";
+                },
+            });
+            const result = await policy.start();
+            // The found payload disproves `native_payload_missing`, but no retry budget remains.
+            expect(result.reason).toBe("startup_timeout");
+            expect(result.effects).toBeNull();
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("a deadline spent before spawn reports known effects, not unknown ones", async () => {
         const root = tempDir("eidnara-policy-pre-spawn-timeout-");
         const { binary, invocationLog } = fakeBinary(root);
@@ -2150,6 +2228,122 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             });
             expect(outcome.result.reason).toBe("startup_timeout");
             expect(outcome.result.ok).toBe(false);
+            expect(invocations(invocationLog)).toEqual([]);
+            expect(policy.inflightStartCount).toBe(0);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("the shared start is bounded by what the demand's aggregate has left", async () => {
+        const root = tempDir("eidnara-policy-start-within-aggregate-");
+        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 600,
+            });
+            // Key serialization consumes 300 ms of the demand's 600 ms aggregate; the start receives a fresh aggregate.
+            let serialized = false;
+            const slowEnvelope = {
+                toJSON() {
+                    if (!serialized) {
+                        serialized = true;
+                        const until = performance.now() + 300;
+                        while (performance.now() < until) {
+                            // spin
+                        }
+                    }
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            const startedAt = performance.now();
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+                startupEnvelope: slowEnvelope,
+            });
+            // The demand answers at its own aggregate, not after the start's.
+            expect(performance.now() - startedAt).toBeLessThan(600 + 250);
+            expect(outcome.result.reason).toBe("startup_timeout");
+            // The start launched despite the demand timeout.
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a stateful envelope serializer cannot coalesce demands that would launch differently", async () => {
+        const root = tempDir("eidnara-policy-stateful-envelope-");
+        const stdinLog = path.join(root, "stdin.log");
+        const binary = path.join(root, "stateful-eidnara-host.sh");
+        writeFileSync(
+            binary,
+            `#!/bin/sh\ncat >> ${stdinLog}\necho >> ${stdinLog}\nsleep 1\necho '${startResultJson("start")}'\nexit 0\n`,
+        );
+        chmodSync(binary, 0o700);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: async () => "ready",
+            });
+            // `shifty` returns one credential set on its first serialization and another on later serializations.
+            const shifty = (first: string, later: string) => {
+                let calls = 0;
+                return {
+                    toJSON() {
+                        calls += 1;
+                        return { schema: 1, credentials: { KEY: calls === 1 ? first : later } };
+                    },
+                } as unknown as NativeStartupEnvelope;
+            };
+            const [a, b] = await Promise.all([
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: shifty("same", "alpha"),
+                }),
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: shifty("same", "beta"),
+                }),
+            ]);
+            expect(a.result.reason).toBe("started");
+            expect(b.result.reason).toBe("started");
+            // The two demands use their first serialization as the coalescing key, and the child receives that snapshot rather than a second serialization.
+            const received = readFileSync(stdinLog, "utf8").trim().split("\n");
+            expect(received).toEqual([JSON.stringify({ schema: 1, credentials: { KEY: "same" } })]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("an envelope serializer that aborts the caller never spawns a start", async () => {
+        const root = tempDir("eidnara-policy-envelope-aborts-");
+        const { binary, invocationLog } = fakeBinary(root);
+        const controller = new AbortController();
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+            });
+            const abortingEnvelope = {
+                toJSON() {
+                    controller.abort();
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            await expect(
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    signal: controller.signal,
+                    startupEnvelope: abortingEnvelope,
+                }),
+            ).rejects.toMatchObject({ name: "WaiterDetachedError", cause_kind: "aborted" });
             expect(invocations(invocationLog)).toEqual([]);
             expect(policy.inflightStartCount).toBe(0);
         } finally {

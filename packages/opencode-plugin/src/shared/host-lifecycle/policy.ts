@@ -142,6 +142,13 @@ const DAEMON_AS_FOUND_REASONS: ReadonlySet<DaemonReason> = new Set([
     "harness_unavailable",
 ]);
 
+/** A restart that reports both effects uncommitted also left the daemon as found, whatever its reason. commentlint: allow(JUDGE) */
+function daemonAsFound(native: DaemonResultV1): boolean {
+    if (DAEMON_AS_FOUND_REASONS.has(native.reason)) return true;
+    const effects = native.effects;
+    return effects !== null && !effects.stop_committed && !effects.start_committed;
+}
+
 export class WaiterDetachedError extends Error {
     /**
      * `ETIMEDOUT` for a deadline detach, so callers that classify retryability on `code`
@@ -293,13 +300,28 @@ function unprovenCompatibility(result: DaemonResultV1): DaemonResultV1 {
 }
 
 /**
+ * JSON round-trip evaluates `toJSON` and getters once before deriving both the coalescing key and launch payload. commentlint: allow(JUDGE)
+ * An envelope with no JSON form is passed through unchanged so the launcher reports its typed usage error. commentlint: allow(JUDGE)
+ */
+function normalizedEnvelope(
+    envelope: NativeStartupEnvelope | undefined,
+): NativeStartupEnvelope | undefined {
+    if (envelope === undefined) return undefined;
+    let wire: string | undefined;
+    try {
+        wire = JSON.stringify(envelope);
+    } catch {
+        return envelope;
+    }
+    return wire === undefined ? envelope : (JSON.parse(wire) as NativeStartupEnvelope);
+}
+
+/**
  * Native `start` answers `harness_unavailable` for a changed harness or credential set on a running daemon, so demands with different envelopes are different requests and must not share one result. commentlint: allow(JUDGE)
- * The identity is the JSON the child receives with keys normalized, so wire-identical envelopes coalesce however their callers built the object. commentlint: allow(JUDGE)
+ * Keys are normalized so wire-identical envelopes coalesce however their callers built the object. commentlint: allow(JUDGE)
  */
 function envelopeIdentity(envelope: NativeStartupEnvelope | undefined): string {
-    if (envelope === undefined) return "";
-    const wire = JSON.stringify(envelope);
-    return wire === undefined ? "" : stableStringify(JSON.parse(wire));
+    return envelope === undefined ? "" : stableStringify(envelope);
 }
 
 export interface DemandStartRequest {
@@ -443,10 +465,13 @@ export class HostLifecyclePolicy {
         // would launch a second native start that only collides with the
         // first on the transaction lock.
         const rootKey = rootResolution.ok ? rootResolution.root : "\u0000no-root";
-        const startupEnvelope = request.startupEnvelope ?? this.defaultStartupEnvelope;
+        // One serialized snapshot is both the coalescing key and the native start's input, so a stateful `toJSON` cannot make coalesced demands launch with different envelopes. commentlint: allow(JUDGE)
+        const startupEnvelope = normalizedEnvelope(
+            request.startupEnvelope ?? this.defaultStartupEnvelope,
+        );
         const key = `${rootKey}\u0000${envelopeIdentity(startupEnvelope)}`;
-        // Serializing the envelope ran caller-supplied code and may have spent
-        // the caller's deadline or the policy aggregate; neither may then spawn.
+        // Serialization ran caller-supplied code that can exhaust the caller deadline or aggregate budget, or abort the signal; none may then spawn. commentlint: allow(JUDGE)
+        if (request.signal?.aborted) throw new WaiterDetachedError("aborted");
         if (callerDeadlineAt !== undefined && monotonicNow() >= callerDeadlineAt) {
             throw new WaiterDetachedError("deadline");
         }
@@ -465,7 +490,27 @@ export class HostLifecyclePolicy {
                     if (this.inflightStarts.get(key) === shared) this.inflightStarts.delete(key);
                 });
         }
-        const result = await this.raceDetached(shared, request.signal, callerDeadlineAt);
+        let result: DaemonResultV1;
+        if (rootResolution.ok) {
+            // The shared start ran on its own full aggregate; this demand waits only for its remaining aggregate time. commentlint: allow(JUDGE)
+            try {
+                result = await this.raceWithinPolicy(
+                    shared,
+                    request.signal,
+                    callerDeadlineAt,
+                    aggregateDeadlineAt,
+                );
+            } catch (error) {
+                if (error instanceof WaiterDetachedError) throw error;
+                // The child may still be running for other waiters, so its effects are unknown to this demand. commentlint: allow(JUDGE)
+                return {
+                    result: timeoutResult("start", rootResolution.root, false),
+                    storage: null,
+                };
+            }
+        } else {
+            result = await this.raceDetached(shared, request.signal, callerDeadlineAt);
+        }
         if (!result.ok) {
             return { result, storage: null };
         }
@@ -820,16 +865,19 @@ export class HostLifecyclePolicy {
                 const fallback = this.payloadDirFallback();
                 if (fallback !== null) {
                     const retryBudget = remaining();
-                    // With no budget left the retry cannot be attempted, and the
-                    // first launch already answered. Reporting its real result
-                    // beats replacing a completed observation with a synthetic
-                    // timeout.
-                    if (retryBudget > 0) native = await invoke(fallback, retryBudget);
+                    // A found payload contradicts the first launch's answer, and with no budget left to retry the command timed out; nothing new committed. commentlint: allow(JUDGE)
+                    if (retryBudget <= 0) {
+                        return {
+                            result: timeoutResult(command, preflight.root, true),
+                            daemonMayHaveChanged: false,
+                        };
+                    }
+                    native = await invoke(fallback, retryBudget);
                 }
             }
             return {
                 result: this.relabel(native, command, command),
-                daemonMayHaveChanged: !DAEMON_AS_FOUND_REASONS.has(native.reason),
+                daemonMayHaveChanged: !daemonAsFound(native),
             };
         } catch (error) {
             return {
