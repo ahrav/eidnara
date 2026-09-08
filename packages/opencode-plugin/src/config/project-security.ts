@@ -27,7 +27,7 @@ const HISTORIAN_USER_ONLY_FIELDS = [
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
 /** The project tier replaces these caps, so a project value could raise a bound the user set to limit cost or runaway tool loops. */
-const AGENT_COST_CAP_FIELDS = ["maxSteps", "maxTokens"] as const;
+const AGENT_COST_CAP_FIELDS = ["maxSteps", "maxTokens", "timeout_ms"] as const;
 /**
  * Every block below has at least one leaf that only user config may set. The leaf sanitizers
  * skip non-object blocks, so a project `null`, string, or array here would survive to the merge
@@ -317,7 +317,8 @@ function bareBaseline<T extends number | undefined>(
  * Only user config may set `historian.two_pass` because the second editor pass adds a model call to every historian run.
  * Only user config may set `system_prompt_injection`: a project `enabled: true` or a replaced `skip_signatures` array would undo the user's injection opt-outs.
  * Only user config may set `commit_cluster_trigger`: a project `enabled: true` or a lower `min_clusters` would make the historian fire after fewer commits.
- * Only user config may set hidden-agent `maxSteps` and `maxTokens`: the project tier replaces the leaf, so a project value could raise a cost bound the user set.
+ * Only user config may set hidden-agent `maxSteps`, `maxTokens`, and `timeout_ms`, and top-level `historian_timeout_ms`: the project tier replaces the leaf, so a project value could raise a cost bound the user set.
+ * Only user config may set top-level `enabled`: a project `true` would reactivate a plugin the user disabled, and a project `false` would switch off the user's context-window management, which the `compaction.enabled` rule already reserves for user config.
  * Only user config may set `mural.model` so repositories cannot select a provider for project memory.
  * Project config must not set `pi.subagent_extensions` because it controls extensions loaded by Pi child processes.
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
@@ -336,6 +337,20 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
                 `Ignoring ${key} from project config (security: a repository cannot replace a block that carries user-only settings; a non-object value would discard the user's ${key} configuration).`,
             );
         }
+    }
+
+    if ("enabled" in projectRaw) {
+        delete projectRaw.enabled;
+        warnings.push(
+            "Ignoring enabled from project config (security: only user-level config may turn Eidnara on or off; a repository cannot reactivate a plugin the user disabled or switch off the user's context-window management).",
+        );
+    }
+
+    if ("historian_timeout_ms" in projectRaw) {
+        delete projectRaw.historian_timeout_ms;
+        warnings.push(
+            "Ignoring historian_timeout_ms from project config (security: the historian timeout is a user-level cost bound; a repository cannot raise it).",
+        );
     }
 
     if ("fail_closed_blocking" in projectRaw) {
@@ -516,7 +531,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
         if (removedCaps.length > 0) {
             warnings.push(
-                `Ignoring ${agentKey}.${removedCaps.join("/")} from project config (security: step and output-token caps are user-level only; a repository cannot raise a bound the user set on hidden-agent cost).`,
+                `Ignoring ${agentKey}.${removedCaps.join("/")} from project config (security: step, output-token, and timeout caps are user-level only; a repository cannot raise a bound the user set on hidden-agent cost).`,
             );
         }
     }

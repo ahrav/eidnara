@@ -180,7 +180,7 @@ describe("stripUnsafeProjectConfigFields", () => {
     it("strips hidden-agent maxSteps and maxTokens so a project cannot raise a user cost cap", () => {
         const raw: Record<string, unknown> = {
             historian: { maxSteps: 500, maxTokens: 100_000, temperature: 0.2 },
-            sidekick: { maxSteps: 500, model: "x" },
+            sidekick: { maxSteps: 500, timeout_ms: 3_600_000, model: "x" },
         };
 
         const warnings = stripUnsafeProjectConfigFields(raw);
@@ -189,8 +189,26 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(raw.sidekick).toEqual({ model: "x" });
         expect(warnings).toEqual([
             expect.stringContaining("historian.maxSteps/maxTokens"),
-            expect.stringContaining("sidekick.maxSteps"),
+            expect.stringContaining("sidekick.maxSteps/timeout_ms"),
         ]);
+    });
+
+    it("strips top-level enabled and historian_timeout_ms from project config", () => {
+        for (const enabled of [true, false]) {
+            const raw: Record<string, unknown> = {
+                enabled,
+                historian_timeout_ms: 3_600_000,
+                sidekick: { model: "x" },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw).toEqual({ sidekick: { model: "x" } });
+            expect(warnings).toEqual([
+                expect.stringContaining("Ignoring enabled from project config"),
+                expect.stringContaining("historian_timeout_ms"),
+            ]);
+        }
     });
 
     it("strips mural.model from project config but keeps the feature switch", () => {
@@ -336,12 +354,12 @@ describe("stripUnsafeProjectConfigFields", () => {
             sidekick: false,
             mural: null,
             experimental: null,
-            enabled: true,
+            transform_mode: "ts",
         };
 
         const warnings = stripUnsafeProjectConfigFields(raw);
 
-        expect(raw).toEqual({ enabled: true });
+        expect(raw).toEqual({ transform_mode: "ts" });
         expect(warnings).toHaveLength(9);
         for (const key of [
             "compaction",
