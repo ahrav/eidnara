@@ -83,9 +83,14 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
             isProjectConfig: scope === "project",
         });
         const rejectedKeyPaths: string[] = [];
-        const config = parseConfigJsonc<Record<string, unknown>>(substituted.text, {
+        const parsed = parseConfigJsonc<unknown>(substituted.text, {
             onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
         });
+        // Reject non-object roots because `removedKeyWarnings` and the raw merge index them by key.
+        if (!isPlainObject(parsed)) {
+            throw new Error(`config root must be a JSON object, got ${redactConfigValue(parsed)}`);
+        }
+        const config = parsed;
         const unsafeKeyWarnings = rejectedKeyPaths.map(
             (keyPath) =>
                 `Ignored unsafe config key "${keyPath}" (security: prototype-pollution keys are not allowed).`,
@@ -179,9 +184,15 @@ function removedKeyWarnings(raw: Record<string, unknown>): string[] {
     );
 }
 
+interface ParsePiConfigOptions {
+    recoveredTopLevelKeys?: string[];
+    /** The parsed user-tier config; agent-block recovery falls back to its `historian`/`sidekick`. */
+    trustedBaseConfig?: EidnaraConfig;
+}
+
 function parsePiConfig(
     rawConfig: Record<string, unknown>,
-    recoveredTopLevelKeys: string[] = [],
+    { recoveredTopLevelKeys = [], trustedBaseConfig }: ParsePiConfigOptions = {},
 ): {
     config: EidnaraConfig;
     warnings: string[];
@@ -217,6 +228,15 @@ function parsePiConfig(
         const isAgentConfig = key === "historian" || key === "sidekick";
 
         if (isAgentConfig) {
+            // Keep the user agent block when merging project config makes it invalid.
+            const trustedBlock = trustedBaseConfig?.[key];
+            if (trustedBlock !== undefined) {
+                patched[key] = trustedBlock;
+                warnings.push(
+                    `"${key}": invalid agent configuration after merging the project config, keeping the user config's ${key} settings. Check the project's eidnara.jsonc.`,
+                );
+                continue;
+            }
             delete patched[key];
             warnings.push(
                 `"${key}": invalid agent configuration, ignoring. Check your eidnara.jsonc.`,
@@ -325,7 +345,7 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
         }
     }
 
-    const parsed = parsePiConfig(rawConfig);
+    const parsed = parsePiConfig(rawConfig, { trustedBaseConfig });
     setOutputReserveConfig(parsed.config.output_reserve);
     setWindowOverlayPath(parsed.config.models?.window_overlay_path);
     warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
@@ -382,7 +402,9 @@ function combinedOutcome(args: {
     const sourceOutcomes = Object.values(args.sources);
     if (sourceOutcomes.includes("project-file-parse-error")) return "project-file-parse-error";
     if (sourceOutcomes.includes("project-file-io-error")) return "project-file-io-error";
-    if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
+    if (args.recoveredTopLevelKeys.length > 0 || sourceOutcomes.includes("schema-recovery")) {
+        return "schema-recovery";
+    }
     if (args.substitutionFailures.length > 0) return "substitution-failure";
     return "ok";
 }
@@ -439,7 +461,7 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     }
 
     const recoveredTopLevelKeys: string[] = [];
-    const parsed = parsePiConfig(rawConfig, recoveredTopLevelKeys);
+    const parsed = parsePiConfig(rawConfig, { recoveredTopLevelKeys, trustedBaseConfig });
     setOutputReserveConfig(parsed.config.output_reserve);
     setWindowOverlayPath(parsed.config.models?.window_overlay_path);
     warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
