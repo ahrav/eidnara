@@ -13,7 +13,6 @@ import {
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import {
-    __clearProjectIdentityResolutionCacheForTests,
     __clearProjectIdentityTransientCooldownForTests,
     __resetProjectIdentityForTests,
     __setProjectIdentityTestHooks,
@@ -130,14 +129,21 @@ describe("project identity", () => {
         expect(error.rawDirectory).toBe(directory);
     });
 
-    it("resolveProjectIdentityStrict caches git identities across calls", () => {
+    it("keeps a cached git identity when timed revalidation cannot inspect the directory", () => {
         const repo = makeRepoWithGitMetadata("project-identity-cache-");
-        __setProjectIdentityTestHooks({ execFileSync: returningRootCommit(FIRST_ROOT_COMMIT) });
+        let now = 1_000;
+        const execMock = mock(returningRootCommit(FIRST_ROOT_COMMIT));
+        __setProjectIdentityTestHooks({
+            execFileSync: execMock as unknown as typeof execFileSync,
+            nowMs: () => now,
+        });
         const first = resolveProjectIdentityStrict(repo);
 
         chmodSync(repo, 0o000);
         try {
+            now += 5 * 60 * 1000 + 1;
             expect(resolveProjectIdentityStrict(repo)).toBe(first);
+            expect(execMock).toHaveBeenCalledTimes(1);
         } finally {
             chmodSync(repo, 0o755);
         }
@@ -225,6 +231,41 @@ describe("project identity", () => {
         expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(target));
     });
 
+    it("re-resolves a cached directory fallback when a symlink is retargeted", () => {
+        const firstTarget = makeTempDir("project-identity-retarget-first-");
+        const secondTarget = makeTempDir("project-identity-retarget-second-");
+        const linkParent = makeTempDir("project-identity-retarget-parent-");
+        const link = join(linkParent, "alias");
+        try {
+            symlinkSync(firstTarget, link, "dir");
+        } catch (error) {
+            if ((error as { code?: unknown }).code === "EPERM") return;
+            throw error;
+        }
+
+        expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(firstTarget));
+        rmSync(link);
+        symlinkSync(secondTarget, link, "dir");
+
+        expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(secondTarget));
+    });
+
+    it("re-resolves a fallback path after the path is created", () => {
+        const target = makeTempDir("project-identity-created-target-");
+        const linkParent = makeTempDir("project-identity-created-parent-");
+        const link = join(linkParent, "not-created");
+
+        expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(link));
+        try {
+            symlinkSync(target, link, "dir");
+        } catch (error) {
+            if ((error as { code?: unknown }).code === "EPERM") return;
+            throw error;
+        }
+
+        expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(target));
+    });
+
     it("re-resolves a cached subdirectory once it becomes its own repository", () => {
         const outer = makeRepoWithGitMetadata("project-identity-outer-then-nested-");
         const nested = join(outer, "packages", "child");
@@ -301,8 +342,8 @@ describe("project identity", () => {
         });
 
         expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
-        __clearProjectIdentityResolutionCacheForTests(directory);
         mode = "timeout";
+        now += 5 * 60 * 1000 + 1;
 
         expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
         expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
@@ -312,6 +353,73 @@ describe("project identity", () => {
         now += 5 * 60 * 1000 + 1;
         expect(resolveProjectIdentity(directory)).toBe(`git:${SECOND_ROOT_COMMIT}`);
         expect(execMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("revalidates a successful git identity after the bounded cache window", () => {
+        const directory = makeRepoWithGitMetadata("project-identity-revalidate-");
+        let now = 1_000;
+        let rootCommit = FIRST_ROOT_COMMIT;
+        const execMock = mock(() => `${rootCommit}\n`);
+        __setProjectIdentityTestHooks({
+            execFileSync: execMock as unknown as typeof execFileSync,
+            nowMs: () => now,
+        });
+
+        expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        rootCommit = SECOND_ROOT_COMMIT;
+        expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(execMock).toHaveBeenCalledTimes(1);
+
+        now += 5 * 60 * 1000 + 1;
+        expect(resolveProjectIdentity(directory)).toBe(`git:${SECOND_ROOT_COMMIT}`);
+        expect(execMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps the last git identity when a timed revalidation cannot spawn git", () => {
+        const directory = makeRepoWithGitMetadata("project-identity-revalidate-eacces-");
+        let now = 1_000;
+        let denyGit = false;
+        const execMock = mock(() => {
+            if (denyGit) throw makeGitFailure({ code: "EACCES" });
+            return `${FIRST_ROOT_COMMIT}\n`;
+        });
+        __setProjectIdentityTestHooks({
+            execFileSync: execMock as unknown as typeof execFileSync,
+            nowMs: () => now,
+        });
+
+        expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        denyGit = true;
+        now += 5 * 60 * 1000 + 1;
+
+        expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(execMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("drops the cached git identity when revalidation finds an empty repository", () => {
+        const directory = makeRepoWithGitMetadata("project-identity-revalidate-empty-");
+        let now = 1_000;
+        let empty = false;
+        const execMock = mock(() => {
+            if (empty) {
+                throw makeGitFailure({
+                    stderr: "fatal: your current branch does not have any commits yet",
+                });
+            }
+            return `${FIRST_ROOT_COMMIT}\n`;
+        });
+        __setProjectIdentityTestHooks({
+            execFileSync: execMock as unknown as typeof execFileSync,
+            nowMs: () => now,
+        });
+
+        expect(resolveProjectIdentity(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        empty = true;
+        now += 5 * 60 * 1000 + 1;
+
+        expect(resolveProjectIdentity(directory)).toBe(expectedDirIdentity(directory));
+        expect(execMock).toHaveBeenCalledTimes(2);
     });
 
     it("classifies dubious ownership and falls back until the cooldown expires", () => {

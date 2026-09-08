@@ -6,7 +6,10 @@ import {
     recordHookInitFailure,
 } from "../../features/context/fail-closed-block";
 import { resolveProjectIdentityForSession } from "../../features/context/project-identity";
-import type { RustToolBackends } from "../../plugin/rust-tool-backends";
+import {
+    type RustToolBackends,
+    RustToolSessionDeletedError,
+} from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
 import { log } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
@@ -135,13 +138,37 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     };
     const sessionDirectoryFor = (sessionId: string): Promise<string> =>
         resolveSessionDirectory(sessionDirectoryDeps, sessionId);
-    // The directory read is also what classifies a restored child, so a gate that reads the sets waits for it first.
-    const isSubagentSession = async (sessionId: string): Promise<boolean> => {
-        await sessionDirectoryFor(sessionId);
-        return subagentSessions.has(sessionId);
-    };
     // Sessions deleted in this process; a detached write that resolves after the deletion must not recreate daemon state for them.
     const deletedSessions = new Set<string>();
+    const clearDeletedSessionRoutingState = (sessionId: string): void => {
+        sessionDirectoryBySession.delete(sessionId);
+        sessionMetadataReadStateBySession.delete(sessionId);
+        internalChildSessions.delete(sessionId);
+        subagentSessions.delete(sessionId);
+    };
+    // isSubagentSession waits for sessionDirectoryFor because the directory read classifies restored child sessions.
+    const isSubagentSession = async (sessionId: string): Promise<boolean> => {
+        await sessionDirectoryFor(sessionId);
+        if (deletedSessions.has(sessionId)) {
+            clearDeletedSessionRoutingState(sessionId);
+            return false;
+        }
+        return subagentSessions.has(sessionId);
+    };
+    const projectRootForLiveSession = async (sessionId: string): Promise<string> => {
+        if (deletedSessions.has(sessionId)) throw new RustToolSessionDeletedError();
+        const projectRoot = await sessionDirectoryFor(sessionId);
+        if (deletedSessions.has(sessionId)) {
+            clearDeletedSessionRoutingState(sessionId);
+            throw new RustToolSessionDeletedError();
+        }
+        return projectRoot;
+    };
+    const projectRootForCommand = async (sessionId: string): Promise<string> => {
+        const projectRoot = await sessionDirectoryFor(sessionId);
+        if (deletedSessions.has(sessionId)) clearDeletedSessionRoutingState(sessionId);
+        return projectRoot;
+    };
 
     /**
      * `resolveLiveModel` prefers entries in `liveModelBySession` populated by chat and event hooks.
@@ -181,8 +208,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
 
     const rustToolBackends: RustToolBackends | undefined = rustMode
         ? {
-              reduce: ({ sessionId, projectRoot, drop, commandId }) =>
-                  moduleClient.call({
+              reduce: async ({ sessionId, drop, commandId }) => {
+                  const projectRoot = await projectRootForLiveSession(sessionId);
+                  return moduleClient.call({
                       sessionId,
                       projectRoot,
                       method: "agent_drops.append",
@@ -193,12 +221,11 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                           drop,
                           command_id: commandId,
                       },
-                  }),
-              note: ({
+                  });
+              },
+              note: async ({
                   commandId,
                   sessionId,
-                  projectRoot,
-                  memoryProject,
                   action,
                   content,
                   surfaceCondition,
@@ -210,8 +237,16 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                   limit,
                   offset,
                   noteId,
-              }) =>
-                  moduleClient.call({
+              }) => {
+                  const projectRoot = await projectRootForLiveSession(sessionId);
+                  const memoryProject = resolveProjectIdentityForSession(
+                      projectRoot,
+                      deps.config.allow_home_project,
+                  );
+                  if (memoryProject === undefined) {
+                      throw new Error("Could not resolve project identity for ctx_note.");
+                  }
+                  return moduleClient.call({
                       sessionId,
                       projectRoot,
                       method: "ctx_note",
@@ -237,7 +272,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                               note_id: noteId,
                           },
                       },
-                  }),
+                  });
+              },
               // No `noteEvaluationAvailable`: conditioned notes require a live `note.evaluation.register` heartbeat.
           }
         : undefined;
@@ -300,7 +336,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
               if (deletedSessions.has(sessionId)) return;
               // Hidden `eidnara-` children run Eidnara's own prompts and receive no project context; the directory read classifies a child restored after a restart.
               await sessionDirectoryFor(sessionId);
-              if (deletedSessions.has(sessionId)) return;
+              if (deletedSessions.has(sessionId)) {
+                  clearDeletedSessionRoutingState(sessionId);
+                  return;
+              }
               if (internalChildSessions.has(sessionId)) return;
               await rustTransform.run(sessionId, messages, output);
           }
@@ -334,16 +373,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             variantBySession.delete(sessionId);
             liveModelBySession.delete(sessionId);
             agentBySession.delete(sessionId);
-            sessionDirectoryBySession.delete(sessionId);
-            sessionMetadataReadStateBySession.delete(sessionId);
-            internalChildSessions.delete(sessionId);
+            clearDeletedSessionRoutingState(sessionId);
         },
     });
 
     const commandHandler = createEidnaraCommandHandler({
         moduleClient,
         compactionOff,
-        resolveProjectRoot: sessionDirectoryFor,
+        resolveProjectRoot: projectRootForCommand,
         isSessionDeleted: (sessionId) => deletedSessions.has(sessionId),
         isSubagentSession,
         // The DB fallback gives /ctx-status the model-specific threshold before the first hook after a restart.
@@ -426,7 +463,11 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                       }
                       const projectRoot = await sessionDirectoryFor(sessionId);
                       // Session deletion and child classification may complete during the directory read.
-                      if (deletedSessions.has(sessionId) || subagentSessions.has(sessionId)) {
+                      if (deletedSessions.has(sessionId)) {
+                          clearDeletedSessionRoutingState(sessionId);
+                          return undefined;
+                      }
+                      if (subagentSessions.has(sessionId)) {
                           return undefined;
                       }
                       return moduleClient.call({
