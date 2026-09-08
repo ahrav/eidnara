@@ -257,6 +257,25 @@ describe("loadPluginConfig — secret redaction", () => {
         expect(combined).not.toContain("key-secret-that-must-not-leak");
     });
 
+    it("withholds substituted record keys from nested-recovery warnings", () => {
+        const config = JSON.stringify({
+            prompt_surface: { tool_descriptions: { "{env:EIDNARA_TEST_RECORD_KEY}": 1 } },
+            historian: { tools: { "{env:EIDNARA_TEST_RECORD_KEY}": "yes" }, disable: true },
+        });
+
+        const result = loadWithUserConfig(config, {
+            EIDNARA_TEST_RECORD_KEY: "record-key-secret-that-must-not-leak",
+        });
+        const combined = (result.configWarnings ?? []).join("\n");
+
+        expect(combined).toContain(
+            '"prompt_surface": invalid nested field(s) "tool_descriptions.<key>"',
+        );
+        expect(combined).toContain('"historian": invalid nested field(s) "tools.<key>"');
+        expect(combined).not.toContain("record-key-secret-that-must-not-leak");
+        expect(result.historian?.disable).toBe(true);
+    });
+
     it("preserves sidekick.enabled=false migration after nested-field recovery", () => {
         const config = JSON.stringify({
             sidekick: { enabled: false },
@@ -505,6 +524,39 @@ describe("loadPluginConfigDetailed — combined outcome", () => {
         expect(result.sources.userConfig).toBe("schema-recovery");
         expect(result.recoveredTopLevelKeys).toEqual(["smart_drops"]);
         expect(result.config.configWarnings).toHaveLength(1);
+    });
+
+    it("attributes a merged recovery caused by a project value to the project source", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ enabled: true }),
+            JSON.stringify({ smart_drops: "invalid" }),
+        );
+
+        expect(result.sources.userConfig).toBe("ok");
+        expect(result.sources.projectConfig).toBe("schema-recovery");
+        expect(result.loadOutcome).toBe("schema-recovery");
+        expect(result.recoveredTopLevelKeys).toEqual(["smart_drops"]);
+    });
+
+    it("attributes a nested project leaf recovery to the project, not to a user block it merged into", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ memory: { auto_search: { enabled: false } } }),
+            JSON.stringify({ memory: { git_commit_indexing: { since_days: "x" } } }),
+        );
+
+        expect(result.sources.userConfig).toBe("ok");
+        expect(result.sources.projectConfig).toBe("schema-recovery");
+        expect(result.config.memory.auto_search.enabled).toBe(false);
+    });
+
+    it("does not blame the project for a user-only recovery inside a block the project also touches", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ memory: { git_commit_indexing: { since_days: "x" } } }),
+            JSON.stringify({ memory: { auto_search: { enabled: false } } }),
+        );
+
+        expect(result.sources.userConfig).toBe("schema-recovery");
+        expect(result.sources.projectConfig).toBe("ok");
     });
 });
 
@@ -799,6 +851,49 @@ describe("loadPluginConfig — project compaction trust boundary", () => {
         expect(result.sidekick?.disable).toBe(true);
         expect(result.configWarnings?.join("\n")).toContain(
             "Ignoring sidekick.enabled from project config",
+        );
+    });
+
+    it("keeps user hidden-agent cost limits when the project raises them", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({
+                historian: { maxTokens: 2_000, maxSteps: 4 },
+                sidekick: { maxSteps: 2 },
+            }),
+            JSON.stringify({
+                historian: { maxTokens: 900_000, maxSteps: 40, thinking_level: "max" },
+                sidekick: { maxSteps: 8, variant: "high" },
+            }),
+        );
+
+        expect(result.historian?.maxTokens).toBe(2_000);
+        expect(result.historian?.maxSteps).toBe(4);
+        expect(result.historian?.thinking_level).toBeUndefined();
+        expect(result.sidekick?.maxSteps).toBe(2);
+        expect(result.sidekick?.variant).toBeUndefined();
+    });
+
+    it("keeps the user's commit_cluster_trigger when the project lowers it", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ commit_cluster_trigger: { enabled: false, min_clusters: 10 } }),
+            JSON.stringify({ commit_cluster_trigger: { enabled: true, min_clusters: 1 } }),
+        );
+
+        expect(result.commit_cluster_trigger).toEqual({ enabled: false, min_clusters: 10 });
+        expect(result.configWarnings?.join("\n")).toContain(
+            "Ignoring commit_cluster_trigger from project config",
+        );
+    });
+
+    it("keeps user disabled_hooks when the project value is not an array", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ disabled_hooks: ["hook-a"] }),
+            JSON.stringify({ disabled_hooks: null }),
+        );
+
+        expect(result.disabled_hooks).toEqual(["hook-a"]);
+        expect(result.configWarnings?.join("\n")).toContain(
+            "Ignoring disabled_hooks from project config",
         );
     });
 });

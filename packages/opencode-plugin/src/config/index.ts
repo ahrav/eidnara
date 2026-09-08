@@ -18,6 +18,7 @@ import {
 } from "./project-security";
 import { pruneNestedConfigLeaf } from "./prune-config-leaf";
 import { type EidnaraConfig, EidnaraConfigSchema, REMOVED_CONFIG_KEYS } from "./schema/eidnara";
+import { redactConfigIssuePath } from "./schema/issue-path";
 import { resolveTransformMode } from "./transform-mode";
 import { substituteConfigVariables } from "./variable";
 
@@ -234,9 +235,15 @@ function redactConfigValue(value: unknown): string {
     return typeof value;
 }
 
+/** Records a top-level key changed by schema recovery and its triggering Zod issue paths. */
+interface ConfigRecovery {
+    key: string;
+    issuePaths: readonly PropertyKey[][];
+}
+
 function parsePluginConfig(
     rawConfig: Record<string, unknown>,
-    recoveredTopLevelKeys: string[] = [],
+    recoveries: ConfigRecovery[] = [],
 ): EidnaraPluginConfig & { configWarnings?: string[] } {
     // The loader migrates legacy `<agent>.enabled` keys before Zod parsing so opt-outs become `disable: true` without running `doctor`.
     const preMigrationWarnings: string[] = [];
@@ -288,14 +295,14 @@ function parsePluginConfig(
 
     const patched: Record<string, unknown> = { ...rawConfig };
     for (const key of errorPaths) {
-        recoveredTopLevelKeys.push(key);
+        const issuePaths = issuePathsByKey.get(key) ?? [];
+        recoveries.push({ key, issuePaths });
 
         // Recovery prunes invalid nested leaves from object-valued keys and preserves valid siblings.
         // Preserving valid siblings retains `memory.auto_search` and `memory.git_commit_indexing` settings.
         // For `historian` and `sidekick`, pruning the invalid leaf keeps the user's `disable` and `model`;
         // discarding the whole block would let a project reset them by supplying one invalid leaf.
         // The recovery code deletes the whole key when the issue targets that key or its value is not a prunable object.
-        const issuePaths = issuePathsByKey.get(key) ?? [];
         const rawValue = rawConfig[key];
         const allNested =
             issuePaths.length > 0 &&
@@ -317,7 +324,12 @@ function parsePluginConfig(
                 const result = pruneNestedConfigLeaf(prunedBlock, relative);
                 if (result) {
                     prunedBlock = result.block;
-                    prunedLeaves.push(result.removed);
+                    // The rendered leaf omits `key`, which the warning names separately.
+                    prunedLeaves.push(
+                        redactConfigIssuePath([key, ...result.removed])
+                            .slice(1)
+                            .join("."),
+                    );
                 }
             }
             patched[key] = prunedBlock;
@@ -416,9 +428,30 @@ function removedKeyWarnings(raw: Record<string, unknown>): string[] {
     );
 }
 
-function withSchemaRecovery(outcome: LoadOutcome, recoveredKeys: readonly string[]): LoadOutcome {
-    if (recoveredKeys.length === 0) return outcome;
+function withSchemaRecovery(outcome: LoadOutcome, recovered: boolean): LoadOutcome {
+    if (!recovered) return outcome;
     return outcome === "ok" || outcome === "substitution-failure" ? "schema-recovery" : outcome;
+}
+
+function hasOwnPath(value: unknown, path: readonly PropertyKey[]): boolean {
+    let cursor: unknown = value;
+    for (const segment of path) {
+        if (cursor === null || typeof cursor !== "object" || !Object.hasOwn(cursor, segment)) {
+            return false;
+        }
+        cursor = (cursor as Record<PropertyKey, unknown>)[segment];
+    }
+    return true;
+}
+
+/** The raw merge takes the project's leaf wherever the project supplies one, so that leaf's issue is the project's. */
+function projectCausedRecovery(
+    recoveries: readonly ConfigRecovery[],
+    projectRaw: Record<string, unknown>,
+): boolean {
+    return recoveries.some((recovery) =>
+        recovery.issuePaths.some((path) => hasOwnPath(projectRaw, path)),
+    );
 }
 
 function combinedOutcome(args: {
@@ -450,11 +483,8 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
 
     const allWarnings: string[] = [];
     let mergedRaw: Record<string, unknown> = {};
-    const userRecoveredTopLevelKeys: string[] = [];
-    const trustedBaseConfig = parsePluginConfig(
-        userLoaded?.config ?? {},
-        userRecoveredTopLevelKeys,
-    );
+    const userRecoveries: ConfigRecovery[] = [];
+    const trustedBaseConfig = parsePluginConfig(userLoaded?.config ?? {}, userRecoveries);
 
     if (userLoaded) {
         allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
@@ -462,12 +492,13 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         mergedRaw = deepMergeRawConfig(mergedRaw, userLoaded.config);
     }
 
+    let projectRaw: Record<string, unknown> = {};
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
         allWarnings.push(
             ...removedKeyWarnings(projectLoaded.config).map((w) => `[project config] ${w}`),
         );
-        const projectRaw = { ...projectLoaded.config };
+        projectRaw = { ...projectLoaded.config };
         for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
             allWarnings.push(`[project config] ${warning}`);
         }
@@ -481,8 +512,8 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         }
     }
 
-    const mergedRecoveredTopLevelKeys: string[] = [];
-    const config = parsePluginConfig(mergedRaw, mergedRecoveredTopLevelKeys);
+    const mergedRecoveries: ConfigRecovery[] = [];
+    const config = parsePluginConfig(mergedRaw, mergedRecoveries);
     setOutputReserveConfig(config.output_reserve);
     setWindowOverlayPath(config.models?.window_overlay_path);
     if (userLoaded && projectLoaded) {
@@ -524,12 +555,17 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     ];
     const sources: LoadResultDetailed["sources"] = {
         userConfig: userLoaded
-            ? withSchemaRecovery(userLoaded.outcome, userRecoveredTopLevelKeys)
+            ? withSchemaRecovery(userLoaded.outcome, userRecoveries.length > 0)
             : "ok",
-        projectConfig: projectLoaded?.outcome ?? "ok",
+        projectConfig: projectLoaded
+            ? withSchemaRecovery(
+                  projectLoaded.outcome,
+                  projectCausedRecovery(mergedRecoveries, projectRaw),
+              )
+            : "ok",
     };
     const recoveredTopLevelKeys = [
-        ...new Set([...userRecoveredTopLevelKeys, ...mergedRecoveredTopLevelKeys]),
+        ...new Set([...userRecoveries, ...mergedRecoveries].map((recovery) => recovery.key)),
     ];
 
     return {

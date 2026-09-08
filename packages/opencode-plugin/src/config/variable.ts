@@ -91,6 +91,9 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
     // Strip JSONC comments before substitution to prevent tokens in comments from triggering environment or file reads.
     text = stripJsonComments(text);
 
+    // `{file:}` tokens captured before `{env:}` expansion keep their literal `{env:NAME}` text.
+    const literalFileTokens = Array.from(text.matchAll(FILE_PATTERN), (match) => match[0]);
+
     text = text.replace(ENV_PATTERN, (_, rawName: string) => {
         const varName = rawName.trim();
         const value = varName ? process.env[varName] : undefined;
@@ -110,11 +113,13 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
     }
 
     const configDir = input.configPath ? dirname(input.configPath) : process.cwd();
+    // When `{env:}` expansion changes the token count, no expanded token can be paired with its literal form.
+    const tokensAligned = literalFileTokens.length === fileMatches.length;
 
     let output = "";
     let cursor = 0;
 
-    for (const match of fileMatches) {
+    for (const [matchIndex, match] of fileMatches.entries()) {
         const token = match[0];
         const rawPath = match[1] ?? "";
         const index = match.index ?? 0;
@@ -136,19 +141,25 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             filePath = resolve(configDir, filePath);
         }
 
-        // Inlining a sensitive file exposes its contents in the substituted config.
+        // A token that `{env:}` expansion rewrote can carry an environment value in its path, so
+        // warnings show the literal token and withhold the resolved path.
+        const literalToken = tokensAligned ? literalFileTokens[matchIndex] : undefined;
+        const expanded = literalToken === undefined || literalToken !== token;
+        const shownToken = expanded ? (literalToken ?? "{file:...}") : token;
+        const shownPath = expanded ? "path withheld: it contains an {env:} expansion" : filePath;
+
         // Inlining a sensitive file exposes its contents in the substituted config.
         const sensitiveReason = sensitiveFilePathReason(filePath);
         if (sensitiveReason) {
             warnings.push(
-                `${token} resolves to a sensitive path (${sensitiveReason}: ${filePath}); ` +
+                `${shownToken} resolves to a sensitive path (${sensitiveReason}: ${shownPath}); ` +
                     "inlining its contents into config — make sure this is intentional.",
             );
         }
 
         if (!existsSync(filePath)) {
             warnings.push(
-                `File not found for ${token} (resolved to ${filePath}); using empty string`,
+                `File not found for ${shownToken} (resolved to ${shownPath}); using empty string`,
             );
             continue;
         }
@@ -157,15 +168,21 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         try {
             contents = readFileSync(filePath, "utf-8").trim();
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            // Node embeds the path in `error.message`; an expanded token keeps only `error.code`.
+            const code = (error as NodeJS.ErrnoException | undefined)?.code;
+            const message = expanded
+                ? (code ?? "read error")
+                : error instanceof Error
+                  ? error.message
+                  : String(error);
             warnings.push(
-                `Failed to read file for ${token} (${filePath}): ${message}; using empty string`,
+                `Failed to read file for ${shownToken} (${shownPath}): ${message}; using empty string`,
             );
             continue;
         }
 
         if (contents === "") {
-            warnings.push(`File for ${token} (${filePath}) is empty; using empty string`);
+            warnings.push(`File for ${shownToken} (${shownPath}) is empty; using empty string`);
             continue;
         }
 

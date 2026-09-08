@@ -304,6 +304,34 @@ describe("substituteConfigVariables", () => {
 
             expect(result.text).toBe(`{ "api_key": "indirect-value" }`);
         });
+
+        it("withholds an env-expanded file path from the missing-file warning", () => {
+            process.env.EIDNARA_SECRET_DIR = join(tmpDir, "hunter2-secret-dir");
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_SECRET_DIR}/missing.txt}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "" }`);
+            expect(result.warnings).toHaveLength(1);
+            expect(result.warnings[0]).toContain("not found");
+            expect(result.warnings[0]).toContain("{file:{env:EIDNARA_SECRET_DIR}");
+            expect(result.warnings[0]).toContain("path withheld");
+            expect(result.warnings[0]).not.toContain("hunter2-secret-dir");
+            delete process.env.EIDNARA_SECRET_DIR;
+        });
+
+        it("still names the resolved path for a literal file token next to an expanded one", () => {
+            process.env.EIDNARA_SECRET_DIR = join(tmpDir, "hunter2-secret-dir");
+            const literalMissing = join(tmpDir, "literal-missing.txt");
+
+            const input = `{ "a": "{file:{env:EIDNARA_SECRET_DIR}/x.txt}", "b": "{file:${literalMissing}}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.warnings).toHaveLength(2);
+            expect(result.warnings[0]).not.toContain("hunter2-secret-dir");
+            expect(result.warnings[1]).toContain(literalMissing);
+            delete process.env.EIDNARA_SECRET_DIR;
+        });
     });
 
     describe("no-op cases", () => {

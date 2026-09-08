@@ -57,6 +57,8 @@ const USER_ONLY_LEAF_PARENTS = [
  * Historian model selection is user-only, and project compaction thresholds can only increase, preventing cloned repositories from forcing earlier compaction or extra Historian spending.
  */
 const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools", "system_prompt"] as const;
+/** Per-run spend bounds and reasoning-mode selectors; `buildHiddenAgentConfig` clamps steps only to the built-in cap. */
+const AGENT_COST_FIELDS = ["maxTokens", "maxSteps", "variant", "thinking_level"] as const;
 const PERCENTAGE_THRESHOLD_REASON =
     "security: a repository may only raise compaction thresholds above the user's effective value; it cannot force earlier historian work or cloned-repo cost escalation.";
 const TOKEN_THRESHOLD_REASON =
@@ -320,7 +322,10 @@ function bareBaseline<T extends number | undefined>(
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
  * A repository may select a reviewed `prompt_surface` preset but may not inject arbitrary guidance or tool-description text.
  * Project config must not set hidden-agent `prompt`, `permission`, or `tools`.
+ * Only user config may set hidden-agent `maxTokens`, `maxSteps`, `variant`, and `thinking_level`: each raises the spend of a run the user did not ask for, and the step clamp only enforces the built-in cap.
  * Only user config may set hidden-agent `disable` or its legacy spelling `enabled`: the project tier replaces the trusted leaf, so a project `disable: false` or `enabled: true` would reactivate an agent the user turned off, and disabling the historian would bypass the user-only `compaction.enabled` rule.
+ * Only user config may set `commit_cluster_trigger`: a project `enabled: true` or a lower `min_clusters` would run the historian after fewer commits than the user allowed.
+ * A project may add `disabled_hooks` entries but may not replace the list: a non-array value would discard the user's disabled hooks in the merge.
  * A project may not replace a block that carries user-only leaves with a non-object value: the merge would substitute the whole block for the trusted one, schema recovery would drop the invalid value, and the user's settings would fall back to defaults without any leaf ever being stripped.
  */
 export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknown>): string[] {
@@ -333,6 +338,20 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
                 `Ignoring ${key} from project config (security: a repository cannot replace a block that carries user-only settings; a non-object value would discard the user's ${key} configuration).`,
             );
         }
+    }
+
+    if ("disabled_hooks" in projectRaw && !Array.isArray(projectRaw.disabled_hooks)) {
+        delete projectRaw.disabled_hooks;
+        warnings.push(
+            "Ignoring disabled_hooks from project config (security: a repository may only add hook IDs; a non-array value would replace the user's disabled hooks and re-enable them).",
+        );
+    }
+
+    if ("commit_cluster_trigger" in projectRaw) {
+        delete projectRaw.commit_cluster_trigger;
+        warnings.push(
+            "Ignoring commit_cluster_trigger from project config (security: only user-level config may enable the commit-cluster trigger or lower min_clusters; a repository cannot make the historian run after fewer commits).",
+        );
     }
 
     if ("fail_closed_blocking" in projectRaw) {
@@ -489,6 +508,19 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
             warnings.push(
                 `Ignoring ${agentKey}.${removed.join("/")} from project config ` +
                     "(security: a repository cannot reprogram or re-permission hidden agents).",
+            );
+        }
+        const removedCostFields: string[] = [];
+        for (const field of AGENT_COST_FIELDS) {
+            if (field in block) {
+                delete block[field];
+                removedCostFields.push(field);
+            }
+        }
+        if (removedCostFields.length > 0) {
+            warnings.push(
+                `Ignoring ${agentKey}.${removedCostFields.join("/")} from project config ` +
+                    "(security: hidden-agent token, step, and reasoning limits are user-level only; a repository cannot raise the cost of a run).",
             );
         }
         // A project `enabled: true` would replace the user's legacy `enabled: false` in the raw

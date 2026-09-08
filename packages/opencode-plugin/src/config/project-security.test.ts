@@ -258,6 +258,57 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
+    it("strips hidden-agent cost limits and reasoning selectors so a project cannot raise run cost", () => {
+        const raw: Record<string, unknown> = {
+            historian: {
+                maxTokens: 900_000,
+                maxSteps: 40,
+                thinking_level: "max",
+                temperature: 0.2,
+            },
+            sidekick: { maxSteps: 8, variant: "high", model: "x" },
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect(raw.historian).toEqual({ temperature: 0.2 });
+        expect(raw.sidekick).toEqual({ model: "x" });
+        expect(warnings).toEqual([
+            expect.stringContaining("historian.maxTokens/maxSteps/thinking_level"),
+            expect.stringContaining("sidekick.maxSteps/variant"),
+        ]);
+    });
+
+    it("strips commit_cluster_trigger so a project cannot run the historian after fewer commits", () => {
+        const raw: Record<string, unknown> = {
+            commit_cluster_trigger: { enabled: true, min_clusters: 1 },
+            enabled: true,
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect(raw).toEqual({ enabled: true });
+        expect(warnings).toEqual([expect.stringContaining("Ignoring commit_cluster_trigger")]);
+    });
+
+    it("strips a non-array disabled_hooks so a project cannot replace the user's list", () => {
+        for (const value of [null, "hook", 1, { hook: true }]) {
+            const raw: Record<string, unknown> = { disabled_hooks: value, enabled: true };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw).toEqual({ enabled: true });
+            expect(warnings).toEqual([expect.stringContaining("Ignoring disabled_hooks")]);
+        }
+    });
+
+    it("keeps an array disabled_hooks so a project can add hook IDs", () => {
+        const raw: Record<string, unknown> = { disabled_hooks: ["a", "b"] };
+
+        expect(stripUnsafeProjectConfigFields(raw)).toEqual([]);
+        expect(raw.disabled_hooks).toEqual(["a", "b"]);
+    });
+
     it("strips compaction.enabled from project config (only-key case)", () => {
         const raw: Record<string, unknown> = {
             compaction: { enabled: false },
