@@ -9,7 +9,7 @@ import { Deadline, isConnectTransient, isHostCallError, type MonotonicClock } fr
 import { isRecord } from "../record-type-guard";
 import { stableStringify } from "../stable-json";
 import { cancelled, conflict, disabled, invalid, type MemoryState, unavailable } from "./state";
-import { TokenCache } from "./token";
+import { TokenCache, type TokenStore } from "./token";
 import {
     type CommitPayload,
     MAX_COMMIT_OPERATIONS,
@@ -31,6 +31,8 @@ export interface KernelTransportCall {
     body: unknown;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** The `KernelTransport.connectionIdentity()` the body was built under; a transport whose identity has moved refuses to send it. */
+    connectionIdentity?: string;
 }
 
 /** The bounds a rebind runs under: the same signal and remaining budget the failed request carried. */
@@ -40,9 +42,31 @@ export type KernelRebind = Omit<KernelTransportCall, "method" | "body">;
 export interface KernelTransport {
     /** False marks the daemon unreachable; a transport that starts the daemon during `call` answers true with no connection file. commentlint: allow(JUDGE) */
     connectionFileExists(): boolean;
+    /** An opaque token that changes whenever the connection `call` would send on changes, so the daemon behind it may differ. Tokens and `as_of` positions are only valid against the daemon they were read from, so a body built under one identity must not be sent under another. commentlint: allow(JUDGE) */
+    connectionIdentity?(): string;
+    /** Resolves the daemon's raw response. Rejects with `StoreLifecycleError` when the daemon is reachable but its store is not ready to serve, with `ConnectionIdentityChangedError` when the body's `connectionIdentity` no longer matches and nothing was sent; any other rejection is a transport failure. commentlint: allow(JUDGE) */
     call(args: KernelTransportCall): Promise<unknown>;
     /** Rebinds the session route after the daemon reports `route_unbound`. The transport settles within `timeoutMs` and on `signal` exactly as `call` does, so a stalled rebind cannot hold a read or commit past the caller's deadline. commentlint: allow(JUDGE) */
     ensureRoute(args: KernelRebind): Promise<void>;
+}
+
+/** The store lifecycle states a transport can observe before any request reaches a kernel route. */
+export type StoreLifecycleReason = "store_starting" | "store_unavailable";
+
+/** Thrown by a transport whose daemon reports the store as not ready before the request is sent; the client maps `reason` to the same-named `unavailable` state instead of `invalid:internal`. commentlint: allow(JUDGE) */
+export class StoreLifecycleError extends Error {
+    constructor(readonly reason: StoreLifecycleReason) {
+        super(`daemon store is ${reason === "store_starting" ? "starting" : "unavailable"}`);
+        this.name = "StoreLifecycleError";
+    }
+}
+
+/** Thrown by a transport that refused to send a body built under a previous connection identity. Nothing reached a daemon, so the client treats the outcome as `snapshot_diverged`: its tokens are dropped and the caller's read-then-retry path rebuilds the request against the daemon now behind the transport. commentlint: allow(JUDGE) */
+export class ConnectionIdentityChangedError extends Error {
+    constructor() {
+        super("daemon connection changed before the request was sent");
+        this.name = "ConnectionIdentityChangedError";
+    }
 }
 
 export type Surface = "auto_inject" | "auto_search" | "explicit_search";
@@ -158,7 +182,7 @@ export interface KernelClientOptions {
     projectRoot: string;
     /** `intent.producer` on every write; part of the `(producer, operation_key)` identity. */
     producer?: string;
-    tokens?: TokenCache;
+    tokens?: TokenStore;
     /** Bounds a call whose caller passes no `deadlineMs`. */
     defaultDeadlineMs?: number;
     /** Monotonic source every call deadline is measured against. Injectable for deterministic tests. */
@@ -227,7 +251,10 @@ export function deriveOperationKey(parts: {
     return sha256Hex(joinKeyFields([parts.producer, parts.actor, parts.operationId]));
 }
 
-type Invoked = { ok: true; raw: unknown } | { ok: false; state: NonAvailableState };
+/** A successful invocation carries the connection identity its body was sent under, so the tokens in the response are recorded against the connection that minted them. commentlint: allow(JUDGE) */
+type Invoked =
+    | { ok: true; raw: unknown; connectionIdentity?: string }
+    | { ok: false; state: NonAvailableState };
 
 interface InvokeOptions {
     signal?: AbortSignal;
@@ -279,7 +306,7 @@ export class KernelClient {
     private readonly producer: string;
     private readonly defaultDeadlineMs: number;
     private readonly clock: MonotonicClock | undefined;
-    readonly tokens: TokenCache;
+    readonly tokens: TokenStore;
 
     constructor(options: KernelClientOptions) {
         this.transport = options.transport;
@@ -339,6 +366,8 @@ export class KernelClient {
                     : nonAvailable(state),
         });
         const absent = (): Invoked => failed(unavailable("daemon_absent"));
+        // The identity is read once, so every attempt — the first send, a reissue, a rebound route — carries the identity the call began under; a transport whose connection moved refuses it instead of delivering another daemon's tokens. commentlint: allow(JUDGE)
+        const connectionIdentity = this.transport.connectionIdentity?.();
         // The caller's signal or the deadline ended the attempt. After a reissued unknown outcome on a write, or when the interrupted attempt itself threw one, the request may still be applied; a plain cancellation would invite a retry under a fresh identity. commentlint: allow(JUDGE)
         const interrupted = (unknownOutcome = false): Invoked => ({
             ok: false,
@@ -360,14 +389,23 @@ export class KernelClient {
                     method,
                     body: bodyFor(),
                     ...bounds(),
+                    ...(connectionIdentity === undefined ? {} : { connectionIdentity }),
                 });
-                return { ok: true, raw };
+                return {
+                    ok: true,
+                    raw,
+                    ...(connectionIdentity === undefined ? {} : { connectionIdentity }),
+                };
             } catch (error) {
+                // A refused identity means the tokens this body carried belong to a daemon that is gone; they are dropped before any exit, including a cancellation, so the caller's next body is not built from them. commentlint: allow(JUDGE)
+                const identityChanged = error instanceof ConnectionIdentityChangedError;
+                if (identityChanged) this.tokens.dropProject(this.projectRoot);
                 // An `outcome_unknown` thrown from a write while cancellation or the deadline fires must keep its classification: the daemon may have committed, and reporting an ordinary cancellation would claim a definitively unapplied request. commentlint: allow(JUDGE)
                 const unknownOutcome = isHostCallError(error) && error.kind === "outcome_unknown";
                 if (options.signal?.aborted || options.deadline.isExpired()) {
                     return interrupted(unknownOutcome);
                 }
+                if (identityChanged) return failed(unavailable("snapshot_diverged"));
                 if (isHostCallError(error)) {
                     if (error.kind === "not_sent") return absent();
                     if (error.kind === "outcome_unknown") {
@@ -406,6 +444,7 @@ export class KernelClient {
                     return failed(invalid("internal"));
                 }
                 if (isDaemonAbsent(error)) return absent();
+                if (error instanceof StoreLifecycleError) return failed(unavailable(error.reason));
                 return failed(invalid("internal"));
             }
         }
@@ -416,9 +455,13 @@ export class KernelClient {
         bodyFor: () => Record<string, unknown>,
         options: InvokeOptions,
         parse: (raw: unknown) => Parsed<P>,
-    ): Promise<KernelResult<P>> {
+    ): Promise<{ result: KernelResult<P>; connectionIdentity?: string }> {
         const invoked = await this.invoke(method, bodyFor, options);
-        if (!invoked.ok) return { state: invoked.state };
+        if (!invoked.ok) return { result: { state: invoked.state } };
+        const identity =
+            invoked.connectionIdentity === undefined
+                ? {}
+                : { connectionIdentity: invoked.connectionIdentity };
         const parsed = parse(invoked.raw);
         if (parsed.state.kind !== "available" || parsed.payload === null) {
             // A daemon-produced negative state proves a mutating request was not applied, but an undecodable response does not: the commit may have succeeded and only its receipt was lost to a malformed or version-skewed payload, so a definitive-looking error would invite a fresh-identity retry. commentlint: allow(JUDGE)
@@ -426,11 +469,11 @@ export class KernelClient {
                 (parsed.state.kind === "invalid" && parsed.state.reason === "unrecognized_state") ||
                 (parsed.state.kind === "available" && parsed.payload === null);
             if (undecodable && options.mutating) {
-                return { state: nonAvailable(unavailable("outcome_unknown")) };
+                return { result: { state: nonAvailable(unavailable("outcome_unknown")) } };
             }
-            return { state: nonAvailable(parsed.state) };
+            return { result: { state: nonAvailable(parsed.state) }, ...identity };
         }
-        return { state: parsed.state, ...parsed.payload };
+        return { result: { state: parsed.state, ...parsed.payload }, ...identity };
     }
 
     private async readAt(
@@ -444,7 +487,7 @@ export class KernelClient {
             gated: args.gated ?? false,
             ...(args.objectIds === undefined ? {} : { object_ids: [...args.objectIds] }),
         });
-        const result = await this.call(
+        const { result, connectionIdentity } = await this.call(
             "kernel.read",
             () => body,
             // Reads have no side effects, so an ambiguous transport outcome reissues once instead of answering daemon_absent for a transient drop. commentlint: allow(JUDGE)
@@ -452,7 +495,12 @@ export class KernelClient {
             parseReadResponse,
         );
         if (isAvailable(result)) {
-            this.tokens.remember(this.projectRoot, result.rows, result.known_as_of);
+            this.tokens.remember(
+                this.projectRoot,
+                result.rows,
+                result.known_as_of,
+                connectionIdentity,
+            );
         }
         return result;
     }
@@ -529,10 +577,12 @@ export class KernelClient {
 
     private collectTokens(args: CommitArgs): { tokens: MutationToken[]; missing: string[] } {
         if (args.tokens !== undefined) return { tokens: [...args.tokens], missing: [] };
+        // Reads name the transport's current identity so the store drops tokens minted under a previous connection before they can enter this body. commentlint: allow(JUDGE)
+        const connectionIdentity = this.transport.connectionIdentity?.();
         const tokens: MutationToken[] = [];
         const missing: string[] = [];
         for (const objectId of this.targetIds(args.operations)) {
-            const cached = this.tokens.get(this.projectRoot, objectId);
+            const cached = this.tokens.get(this.projectRoot, objectId, connectionIdentity);
             if (cached) tokens.push(cached);
             else missing.push(objectId);
         }
@@ -590,14 +640,19 @@ export class KernelClient {
             ({ tokens, missing } = this.collectTokens(args));
             if (missing.length > 0) return { state: nonAvailable(conflict("retracted")) };
         }
-        const result = await this.call(
+        const { result, connectionIdentity } = await this.call(
             "kernel.commit",
             () => this.commitBody(args, tokens, deadline),
             { signal: args.signal, deadline, reissuable: true, mutating: true },
             parseCommitResponse,
         );
         if (isAvailable(result)) {
-            this.tokens.rememberTokens(this.projectRoot, result.tokens, result.known_as_of);
+            this.tokens.rememberTokens(
+                this.projectRoot,
+                result.tokens,
+                result.known_as_of,
+                connectionIdentity,
+            );
         }
         return result;
     }

@@ -264,6 +264,12 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # actions/setup-node v7.0.0
+      # The smart-note parity suite requires Node within @eidnara/opencode's engines.node range.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
       - name: Install TypeScript tooling
         if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
         run: bun install --frozen-lockfile

@@ -4,6 +4,7 @@ export {
     type CommitArgs,
     type CommitOperation,
     type CommitResult,
+    ConnectionIdentityChangedError,
     type DecisionSpecInput,
     deriveObjectId,
     deriveOperationKey,
@@ -27,6 +28,8 @@ export {
     type ReadResult,
     type RequestDigestInput,
     type SourceKind,
+    StoreLifecycleError,
+    type StoreLifecycleReason,
     type Surface,
     sha256Hex,
 } from "./client";
@@ -55,7 +58,7 @@ export {
     type UnavailableReason,
     unavailable,
 } from "./state";
-export { TokenCache } from "./token";
+export { TokenCache, type TokenStore } from "./token";
 export {
     type CommitPayload,
     type DecisionPayload,

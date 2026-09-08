@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ConnectionFileError } from "../host-client/connection-file";
 import { HostCallError } from "../host-client/errors";
 import {
+    ConnectionIdentityChangedError,
     type DecisionSpecInput,
     deriveObjectId,
     deriveOperationKey,
@@ -13,6 +14,7 @@ import {
     type KernelTransport,
     type KernelTransportCall,
     kernelMemorySnapshotFrom,
+    StoreLifecycleError,
 } from "./client";
 import { MAX_COMMIT_OPERATIONS, MAX_COMMIT_TOKENS, MAX_READ_OBJECT_IDS } from "./wire";
 
@@ -26,6 +28,7 @@ class FakeTransport implements KernelTransport {
     rebinds = 0;
     rebindArgs: KernelRebind[] = [];
     fileExists = true;
+    identity = "";
     private replies: Reply[] = [];
     rebindError: Error | null = null;
     onRebind: ((args: KernelRebind) => void) | null = null;
@@ -37,6 +40,10 @@ class FakeTransport implements KernelTransport {
 
     connectionFileExists(): boolean {
         return this.fileExists;
+    }
+
+    connectionIdentity(): string {
+        return this.identity;
     }
 
     async call(args: KernelTransportCall): Promise<unknown> {
@@ -439,6 +446,144 @@ describe("KernelClient transport mapping", () => {
             const result = await client(transport).read({ surface: "auto_inject" });
             expect(result.state).toEqual({ kind: "invalid", reason: "internal" });
         }
+    });
+
+    test("a store lifecycle error from the transport is the same-named unavailable state", async () => {
+        for (const reason of ["store_starting", "store_unavailable"] as const) {
+            const transport = new FakeTransport().queue(new StoreLifecycleError(reason));
+            const result = await client(transport).read({ surface: "auto_inject" });
+            expect(result.state).toEqual({ kind: "unavailable", reason });
+            expect(transport.calls).toHaveLength(1);
+        }
+    });
+
+    test("every attempt of one request carries the connection identity captured before the first send", async () => {
+        const transport = new FakeTransport().queue(
+            new HostCallError("outcome_unknown", "dropped", "connection_dropped"),
+            new HostCallError("terminal", "no binding", "route_unbound"),
+            readReply(1),
+        );
+        transport.identity = "gen-3";
+        const result = await client(transport).read({ surface: "auto_inject" });
+        expect(result.state).toEqual({ kind: "available" });
+        expect(transport.calls.map((call) => call.connectionIdentity)).toEqual([
+            "gen-3",
+            "gen-3",
+            "gen-3",
+        ]);
+    });
+
+    test("a connection identity refusal is snapshot_diverged: tokens drop and the caller's retry rebuilds against the new daemon", async () => {
+        const transport = new FakeTransport().queue(
+            readReply(5, "mem_a"),
+            new ConnectionIdentityChangedError(),
+            readReply(2, "mem_a"),
+            commitReply(3, false, "mem_a"),
+        );
+        const kernel = client(transport);
+        await kernel.read({ surface: "auto_inject" });
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 5 });
+
+        const result = await kernel.revise("mem_a", spec, intent);
+        expect(result.state).toEqual({ kind: "available" });
+        const commits = transport.bodies("kernel.commit");
+        // The first commit carried the stale token and was refused before any send; the retry read first and rebuilt.
+        expect(commits).toHaveLength(2);
+        expect(commits[0]?.tokens).toEqual([{ object_id: "mem_a", known_as_of: 5 }]);
+        expect(commits[1]?.tokens).toEqual([{ object_id: "mem_a", known_as_of: 2 }]);
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 3 });
+    });
+
+    test("a connection identity refusal after a reissued write stays outcome_unknown", async () => {
+        const transport = new FakeTransport().queue(
+            new HostCallError("outcome_unknown", "dropped", "connection_dropped"),
+            new ConnectionIdentityChangedError(),
+        );
+        const result = await client(transport).create(spec, intent);
+        expect(result.state).toEqual({ kind: "unavailable", reason: "outcome_unknown" });
+        expect(transport.calls).toHaveLength(2);
+    });
+
+    test("a connection identity refusal that races a cancellation still drops the stale tokens", async () => {
+        const controller = new AbortController();
+        const transport = new FakeTransport().queue(readReply(5, "mem_a"), () => {
+            controller.abort();
+            return new ConnectionIdentityChangedError();
+        });
+        const kernel = client(transport);
+        await kernel.read({ surface: "auto_inject" });
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toBeDefined();
+
+        const result = await kernel.read({ surface: "auto_inject", signal: controller.signal });
+        expect(result.state).toEqual({ kind: "cancelled" });
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toBeUndefined();
+    });
+
+    test("tokens cached under one connection identity are not collected into a body once the transport reports another", async () => {
+        const transport = new FakeTransport().queue(
+            readReply(5, "mem_a"),
+            readReply(2, "mem_a"),
+            commitReply(3, false, "mem_a"),
+        );
+        transport.identity = "daemon-a";
+        const kernel = client(transport);
+        await kernel.read({ surface: "auto_inject" });
+        expect(kernel.tokens.get(PROJECT, "mem_a")).toEqual({ object_id: "mem_a", known_as_of: 5 });
+
+        // The daemon behind the transport changes before the next mutation; nothing in flight observes it.
+        transport.identity = "daemon-b";
+        const result = await kernel.revise("mem_a", spec, intent);
+        expect(result.state).toEqual({ kind: "available" });
+        // The stale token was dropped at collection, so the commit read first and carried daemon-b's token.
+        expect(transport.calls.map((call) => call.method)).toEqual([
+            "kernel.read",
+            "kernel.read",
+            "kernel.commit",
+        ]);
+        expect(transport.bodies("kernel.commit")[0]?.tokens).toEqual([
+            { object_id: "mem_a", known_as_of: 2 },
+        ]);
+    });
+
+    test("a commit with caller-supplied tokens is not retried after a connection identity refusal", async () => {
+        const transport = new FakeTransport().queue(new ConnectionIdentityChangedError());
+        const result = await client(transport).commit({
+            ...intent,
+            operations: [{ op: "supersede_decision", replaced_object_id: "mem_a", spec }],
+            tokens: [{ object_id: "mem_a", known_as_of: 5 }],
+        });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "snapshot_diverged" });
+        expect(transport.bodies("kernel.commit")).toHaveLength(1);
+    });
+
+    test("the connection identity a response was served under accompanies the token write", async () => {
+        const writes: Array<string | undefined> = [];
+        const transport = new FakeTransport().queue(
+            readReply(2, "mem_a"),
+            commitReply(3, false, "mem_a"),
+        );
+        transport.identity = "gen-7";
+        const kernel = new KernelClient({
+            transport,
+            enabled: true,
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            tokens: {
+                remember: (_root, _rows, _knownAsOf, identity) => {
+                    writes.push(identity);
+                },
+                rememberTokens: (_root, _tokens, _knownAsOf, identity) => {
+                    writes.push(identity);
+                },
+                get: () => ({ object_id: "mem_a", known_as_of: 2 }),
+                knownAsOfFor: () => 2,
+                dropProject: () => {},
+                size: () => 1,
+            },
+        });
+        await kernel.read({ surface: "auto_inject" });
+        await kernel.revise("mem_a", spec, intent);
+        expect(writes).toEqual(["gen-7", "gen-7"]);
     });
 
     test("a daemon invalid_params rejection is invalid_input, not an internal error", async () => {

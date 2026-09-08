@@ -346,7 +346,7 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
  * These `route.open` rejection codes indicate transient target unavailability, so a later `route.open` may succeed.
  * `route_gone` is the client's own classification of a route the host closed before its opener resumed.
  */
-function isRetryableRouteOpenCode(code: string | undefined): boolean {
+export function isRetryableRouteOpenCode(code: string | undefined): boolean {
     return (
         code === "unknown_module" ||
         code === "module_reloading" ||
@@ -507,18 +507,22 @@ export class HostClient {
     /**
      * routeOpen makes one attempt under one bounded deadline and returns a connection-bound immutable handle.
      * Retry policy belongs to callers; managed call() owns an allowlisted retry loop.
+     * `credentialSource` fixes the environment used to derive credential fingerprints; absent, the
+     * client's own source is read at bind time.
      */
     async routeOpen(
         target: RouteTarget,
         identity: BindIdentity,
-        options: Pick<RequestOptions, "expectedDaemonId"> = {},
+        options: Pick<RequestOptions, "expectedDaemonId"> & {
+            credentialSource?: Record<string, string | undefined>;
+        } = {},
     ): Promise<RouteHandle> {
         const deadline = Deadline.start(this.routeOpenDeadlineMs, this.clock);
         const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         return this.controlRouteOpen(
             active,
             target,
-            this.identityForConnection(active, identity),
+            this.identityForConnection(active, identity, options.credentialSource),
             this.envConsumerIdentity(),
             deadline,
         );
@@ -1482,9 +1486,13 @@ export class HostClient {
      * Managed harnesses derive `credential_fingerprints` solely from `active.snapshot.key`; the host rejects values
      * retained from a prior key, so an empty derivation removes a caller-supplied claim instead of forwarding it.
      */
-    private identityForConnection(active: ActiveConnection, identity: BindIdentity): BindIdentity {
+    private identityForConnection(
+        active: ActiveConnection,
+        identity: BindIdentity,
+        credentialSource: Record<string, string | undefined> | undefined = this.credentialSource,
+    ): BindIdentity {
         if (
-            this.credentialSource === undefined ||
+            credentialSource === undefined ||
             (identity.harness !== "opencode" && identity.harness !== "pi")
         ) {
             return identity;
@@ -1492,7 +1500,7 @@ export class HostClient {
         const fingerprints = credentialFingerprints(
             active.snapshot.key,
             identity.harness,
-            this.credentialSource,
+            credentialSource,
         );
         const { credential_fingerprints: _supplied, ...base } = identity;
         return Object.keys(fingerprints).length === 0

@@ -1,6 +1,13 @@
 import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 
-import { getNodeValue, type Node, type ParseError, parseTree, visit } from "jsonc-parser";
+import {
+    createScanner,
+    getNodeValue,
+    type Node,
+    type ParseError,
+    parseTree,
+    visit,
+} from "jsonc-parser";
 import { isRecord } from "./record-type-guard";
 
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -58,6 +65,10 @@ export function sanitizeParsedJson<T>(
         ) as T;
     }
     if (value === null || typeof value !== "object") return value;
+    // `comment-json` boxes a scalar top level as `Number`, `String`, or `Boolean`; the boxed prototype is not a prototype override.
+    if (value instanceof Number || value instanceof String || value instanceof Boolean) {
+        return value.valueOf() as T;
+    }
 
     const source = value as Record<string, unknown>;
     const sourcePrototype = Object.getPrototypeOf(source);
@@ -102,6 +113,36 @@ function assertScalarsWellFormed(node: Node): void {
     }
     for (const child of node.children ?? []) {
         assertScalarsWellFormed(child);
+    }
+}
+
+/**
+ * Isolated modules cannot reference jsonc-parser's const-enum SyntaxKind.
+ * These are the `SyntaxKind` values for the comment trivia and end of file.
+ */
+const TOKEN_LINE_COMMENT = 12;
+const TOKEN_BLOCK_COMMENT = 13;
+const TOKEN_EOF = 17;
+
+/**
+ * Removes JSONC comments with the package scanner, preserving comment markers inside strings.
+ * Replaces a block comment with a space to prevent `1/*c*&#47;2` becoming `12`.
+ */
+export function stripJsoncComments(content: string): string {
+    const scanner = createScanner(content, false);
+    let result = "";
+    for (;;) {
+        const kind = scanner.scan();
+        if (kind === TOKEN_EOF) return result;
+        if (kind === TOKEN_LINE_COMMENT) continue;
+        if (kind === TOKEN_BLOCK_COMMENT) {
+            result += " ";
+            continue;
+        }
+        result += content.slice(
+            scanner.getTokenOffset(),
+            scanner.getTokenOffset() + scanner.getTokenLength(),
+        );
     }
 }
 
