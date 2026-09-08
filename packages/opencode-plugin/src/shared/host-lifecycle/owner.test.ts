@@ -10,7 +10,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { BootstrapError } from "./bootstrap";
 import { prepareManagedLaunchTarget, resolveManagedPayloadDir } from "./owner";
 
@@ -259,6 +259,69 @@ describe("managed lifecycle owner", () => {
         bytes[at] = 0xff;
         writeFileSync(f.manifestPath, bytes);
         expect(() => prepare(f, true)).toThrow(/malformed/);
+    });
+
+    test("a manifest that repeats a key is rejected as serde would reject it", () => {
+        const f = fixture();
+        // `JSON.parse` keeps the last `mode`, so the parsed value is identical to the fixture's.
+        const dup = f.manifestText.replace(
+            '"mode": "production",',
+            '"mode": "production",\n  "mode": "production",',
+        );
+        expect(dup).not.toBe(f.manifestText);
+        writeFileSync(f.manifestPath, dup);
+        expect(() => prepare(f, true)).toThrow(/repeats a key/);
+
+        // `siz\u0065` decodes to `size`, so the scan must compare keys after unescaping.
+        const files = f.manifest.files as Record<string, unknown>[];
+        const entryText = JSON.stringify(files[1], null, 2).replace(
+            '"size":',
+            '"siz\\u0065": 1,\n  "size":',
+        );
+        const manifestText = writeManifest(f, { ...f.manifest, files: [files[0], {}] }).replace(
+            "{}",
+            entryText,
+        );
+        writeFileSync(f.manifestPath, manifestText);
+        expect(() => prepare(f, true)).toThrow(/repeats a key/);
+    });
+
+    test("umask-stripped source modes are accepted; extra permission bits are not", () => {
+        const f = fixture();
+        const launcherPath = join(f.packageDir, "payload", "bin", "eidnara-host");
+        const modelPath = join(f.packageDir, "payload", "model", "model.onnx");
+        // An `umask` of `077` strips group and other permission bits from installed payload files.
+        chmodSync(launcherPath, 0o700);
+        chmodSync(modelPath, 0o600);
+        expect(prepare(f, true)?.kind).toBe("retained-fd");
+
+        chmodSync(modelPath, 0o664);
+        expect(() => prepare(f, true)).toThrow(/metadata does not match/);
+    });
+
+    test("a payload path deeper than the daemon's staging limit is invalid", () => {
+        const f = fixture();
+        const files = f.manifest.files as Record<string, unknown>[];
+        const deep = `payload/${Array(127).fill("d").join("/")}/leaf`;
+        expect(deep.split("/").length).toBe(129);
+        writeManifest(f, {
+            ...f.manifest,
+            files: [...files, { ...files[1], path: deep }],
+        });
+        expect(() => prepare(f, true)).toThrow(/file entry is invalid/);
+    });
+
+    test("a relative declaring root yields an absolute payload directory", () => {
+        const f = fixture();
+        const cwd = process.cwd();
+        process.chdir(f.root);
+        try {
+            const target = prepare(f, true, "parent");
+            expect(target?.payloadDir).toBe(f.packageDir);
+            expect(isAbsolute(target?.payloadDir ?? "")).toBe(true);
+        } finally {
+            process.chdir(cwd);
+        }
     });
 
     test("a launcher entry without mode 755 fails closed without staging", () => {

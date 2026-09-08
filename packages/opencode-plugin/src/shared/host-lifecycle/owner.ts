@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import {
     BootstrapError,
@@ -13,6 +13,9 @@ import { managedSubtreePath } from "./paths";
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const MAX_METADATA_BYTES = 1024 * 1024;
+/** `MAX_PATH_BYTES` and `MAX_PATH_COMPONENTS` must match the limits enforced by `validate_rel_path` in `crates/host-runtime/src/generation.rs`. */
+const MAX_PATH_BYTES = 4096;
+const MAX_PATH_COMPONENTS = 128;
 const LAUNCHER_REL_PATH = "payload/bin/eidnara-host";
 /** The manifest schema `eidnara-host` accepts in trusted mode. */
 const PAYLOAD_MANIFEST_SCHEMA = "eidnara.payload-manifest/v1";
@@ -90,6 +93,8 @@ function verifyManifestFile(packageDir: string, raw: unknown, previous: string |
     if (
         typeof path !== "string" ||
         !path.startsWith("payload/") ||
+        Buffer.byteLength(path) > MAX_PATH_BYTES ||
+        path.split("/").length > MAX_PATH_COMPONENTS ||
         path.split("/").some((part) => part.length === 0 || part === "." || part === "..") ||
         (previous !== null && compareManifestPaths(previous, path) >= 0) ||
         entry.type !== "file" ||
@@ -112,10 +117,12 @@ function verifyManifestFile(packageDir: string, raw: unknown, previous: string |
     }
     try {
         const before = fstatSync(fd);
+        // The installer's umask clears archive permission bits (644 lands as 600 under umask 077). The on-disk file may omit declared bits but cannot add any.
+        const declaredMode = Number.parseInt(entry.mode, 8);
         if (
             !before.isFile() ||
             before.size !== entry.size ||
-            (before.mode & 0o777) !== Number.parseInt(entry.mode, 8)
+            (before.mode & 0o777 & ~declaredMode) !== 0
         ) {
             fail("payload file metadata does not match its manifest");
         }
@@ -174,12 +181,54 @@ function readNoFollowBytes(path: string, label: string): Buffer {
     }
 }
 
+/**
+ * `JSON.parse` keeps the last of two equal keys; serde's derived deserializer
+ * reports `duplicate field`. Runs on text `JSON.parse` has already accepted,
+ * so the scan handles well-formed input only.
+ */
+function hasDuplicateKey(text: string): boolean {
+    // One frame per open container: a key set for an object, `null` for an array.
+    const frames: (Set<string> | null)[] = [];
+    let expectKey = false;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '"') {
+            const start = i;
+            for (i++; text[i] !== '"'; i++) if (text[i] === "\\") i++;
+            const frame = frames.at(-1);
+            if (expectKey && frame) {
+                const key = JSON.parse(text.slice(start, i + 1)) as string;
+                if (frame.has(key)) return true;
+                frame.add(key);
+                expectKey = false;
+            }
+        } else if (ch === "{") {
+            frames.push(new Set());
+            expectKey = true;
+        } else if (ch === "[") {
+            frames.push(null);
+            expectKey = false;
+        } else if (ch === "}" || ch === "]") {
+            frames.pop();
+            expectKey = false;
+        } else if (ch === ",") {
+            expectKey = frames.at(-1) instanceof Set;
+        }
+    }
+    return false;
+}
+
 function parseJson(bytes: Buffer, label: string): unknown {
+    let text: string;
+    let value: unknown;
     try {
-        return JSON.parse(STRICT_UTF8.decode(bytes)) as unknown;
+        text = STRICT_UTF8.decode(bytes);
+        value = JSON.parse(text) as unknown;
     } catch {
         fail(`${label} is malformed`);
     }
+    if (hasDuplicateKey(text)) fail(`${label} repeats a key`);
+    return value;
 }
 
 function readNoFollowJson(path: string, label: string): unknown {
@@ -314,13 +363,14 @@ function payloadPackageFor(target: PayloadTarget): string {
     return name;
 }
 
+/** `runNativeLifecycle` rejects a relative `--payload-dir`; the daemon it spawns runs with `cwd: "/"`. */
 function resolveVerifiedPayload(options: ResolveManagedPayloadDirOptions): VerifiedPayload {
     const resolution = resolvePayloadPackageDir({
-        declaringParentRoot: options.declaringParentRoot,
+        declaringParentRoot: resolve(options.declaringParentRoot),
         packageName: payloadPackageFor(options.target),
         ...(options.explicitExternalRoot === undefined
             ? {}
-            : { explicitExternalRoot: options.explicitExternalRoot }),
+            : { explicitExternalRoot: resolve(options.explicitExternalRoot) }),
     });
     if (!resolution.ok) throw new BootstrapError(resolution.reason, resolution.detail);
     return verifyPackage(resolution.packageDir, options.target);
