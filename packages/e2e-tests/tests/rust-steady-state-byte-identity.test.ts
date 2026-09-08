@@ -52,10 +52,9 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: steady-state byte identity", (
         for (let pass = 1; pass < perPassMessages.length; pass += 1) {
             const earlier = perPassMessages[pass - 1]!;
             const later = perPassMessages[pass]!;
-            // The earlier pass's newest message is its live user message, not retained.
-            const retained = earlier.length - 1;
-            expect(retained).toBeGreaterThan(0);
-            for (let index = 0; index < retained; index += 1) {
+            expect(earlier.length).toBeGreaterThan(0);
+            expect(later.length).toBeGreaterThanOrEqual(earlier.length);
+            for (let index = 0; index < earlier.length; index += 1) {
                 expect(later[index]).toBe(earlier[index]);
             }
         }

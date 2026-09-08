@@ -67,7 +67,6 @@ export interface RustPassLine {
     moduleElapsedMs: number;
     adapterElapsedMs: number;
     prefixGuardMs: number;
-    stateSyncMs: number;
     wireBuildMs: number;
     wireMessages: number;
     transportMs: number;
@@ -75,6 +74,36 @@ export interface RustPassLine {
     transportBytes: number;
     rowVersion: number;
     raw: string;
+}
+
+const RUST_PASS_MARKER = "rust pass: ";
+
+/** Top-level fields use `key=value`; stage timings follow `stages=` as `key:value` pairs. */
+export function parseRustPassLine(line: string): RustPassLine | null {
+    const idx = line.indexOf(RUST_PASS_MARKER);
+    if (idx < 0) return null;
+    const body = line.slice(idx + RUST_PASS_MARKER.length);
+    const elapsedMs = Number(field(body, "elapsed") || "0");
+    const moduleElapsedMs = Number(field(body, "module") || "0");
+    return {
+        decision: field(body, "decision"),
+        reason: field(body, "reason"),
+        servedFrom: field(body, "served_from"),
+        inputCount: Number(field(body, "in") || "0"),
+        outputCount: Number(field(body, "out") || "0"),
+        applied: field(body, "applied") === "true",
+        elapsedMs,
+        moduleElapsedMs,
+        adapterElapsedMs: Math.max(0, elapsedMs - moduleElapsedMs),
+        prefixGuardMs: Number(stageField(body, "prefix_guard") || "0"),
+        wireBuildMs: Number(stageField(body, "wire_build") || "0"),
+        wireMessages: Number(stageField(body, "wire_messages") || "0"),
+        transportMs: Number(stageField(body, "transport") || "0"),
+        transportPages: Number(stageField(body, "transport_pages") || "0"),
+        transportBytes: Number(stageField(body, "transport_bytes") || "0"),
+        rowVersion: Number(field(body, "row_version") || "0"),
+        raw: line,
+    };
 }
 
 export class RustTestHarness {
@@ -423,31 +452,8 @@ export class RustTestHarness {
         const lines = readFileSync(this.logPath, "utf8").split("\n");
         const parsed: RustPassLine[] = [];
         for (const line of lines) {
-            const idx = line.indexOf("rust pass: ");
-            if (idx < 0) continue;
-            const body = line.slice(idx + "rust pass: ".length);
-            const elapsedMs = Number(field(body, "elapsed") || "0");
-            const moduleElapsedMs = Number(field(body, "module") || "0");
-            parsed.push({
-                decision: field(body, "decision"),
-                reason: field(body, "reason"),
-                servedFrom: field(body, "served_from"),
-                inputCount: Number(field(body, "in") || "0"),
-                outputCount: Number(field(body, "out") || "0"),
-                applied: field(body, "applied") === "true",
-                elapsedMs,
-                moduleElapsedMs,
-                adapterElapsedMs: Math.max(0, elapsedMs - moduleElapsedMs),
-                prefixGuardMs: Number(stageField(body, "prefix_guard") || "0"),
-                stateSyncMs: Number(stageField(body, "state_sync") || "0"),
-                wireBuildMs: Number(stageField(body, "wire_build") || "0"),
-                wireMessages: Number(stageField(body, "wire_messages") || "0"),
-                transportMs: Number(stageField(body, "transport") || "0"),
-                transportPages: Number(stageField(body, "transport_pages") || "0"),
-                transportBytes: Number(stageField(body, "transport_bytes") || "0"),
-                rowVersion: Number(field(body, "row_version") || "0"),
-                raw: line,
-            });
+            const pass = parseRustPassLine(line);
+            if (pass) parsed.push(pass);
         }
         return parsed;
     }
@@ -474,12 +480,17 @@ export class RustTestHarness {
     }
 
     async dispose(): Promise<void> {
+        let survivingOpencode: unknown;
         try {
             await this.opencodeInstance.kill();
-        } catch {
-            // ignore
+        } catch (error) {
+            survivingOpencode = error;
         }
-        await RustTestHarness.teardownStack(this.mock, this.host, this.env);
+        await RustTestHarness.teardownStack(this.mock, this.host, this.env, {
+            preserveState: survivingOpencode !== undefined,
+        });
+        // No later run can reclaim a surviving OpenCode process, so its state stays on disk and the test fails.
+        if (survivingOpencode !== undefined) throw survivingOpencode;
     }
 
     /**
@@ -490,6 +501,7 @@ export class RustTestHarness {
         mock: MockProvider,
         host: HermeticHostStack | undefined,
         env: IsolatedEnv,
+        options: { preserveState?: boolean } = {},
     ): Promise<void> {
         try {
             await host?.stop();
@@ -501,6 +513,7 @@ export class RustTestHarness {
         } catch {
             // ignore
         }
+        if (options.preserveState) return;
         // A successful host teardown removes `dataDir` itself, so its presence marks a leaked fixture whose PID record must survive.
         if (existsSync(env.dataDir)) return;
         try {
@@ -533,7 +546,7 @@ function field(body: string, key: string): string {
 }
 
 function stageField(body: string, key: string): string {
-    const match = body.match(new RegExp(`(?:^|\\s)${key}:([^\\s]+)`));
+    const match = body.match(new RegExp(`(?:^|\\s|=)${key}:([^\\s]+)`));
     return match ? match[1]! : "";
 }
 

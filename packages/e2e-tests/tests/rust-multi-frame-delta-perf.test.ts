@@ -7,7 +7,6 @@ const formatTiming = (pass: RustPassLine) => ({
     adapter_ms: pass.adapterElapsedMs,
     module_ms: pass.moduleElapsedMs,
     prefix_guard_ms: pass.prefixGuardMs,
-    state_sync_ms: pass.stateSyncMs,
     wire_build_ms: pass.wireBuildMs,
     wire_messages: pass.wireMessages,
     transport_ms: pass.transportMs,
@@ -102,7 +101,6 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
 
         expect(smallDeltas.every((pass) => pass.applied)).toBe(true);
         expect(smallDelta.prefixGuardMs).toBeLessThan(10);
-        expect(smallDelta.stateSyncMs).toBeLessThan(15);
         expect(smallDelta.wireBuildMs).toBeLessThan(10);
         if (process.env.EIDNARA_RUST_E2E_STRICT_PERF === "1") {
             expect(smallDelta.transportMs).toBeLessThan(30);
