@@ -1,6 +1,9 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
 import { KernelClient } from "../../shared/kernel-client";
-import { ClaimOperationInputError } from "../../shared/kernel-client/anti-memory";
+import {
+    ClaimOperationInputError,
+    renderAntiMemoryContent,
+} from "../../shared/kernel-client/anti-memory";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import { CTX_MEMORY_RESPONSE_BUDGET_BYTES } from "./constants";
 import { CTX_MEMORY_ACTOR, type CtxMemoryWriteIdentity, executeCtxMemory } from "./execute";
@@ -425,5 +428,46 @@ describe("executeCtxMemory", () => {
         expect(reply.missingObjectIds.length).toBeGreaterThan(0);
         expect(reply.missingObjectIds.length + (reply.elidedRequestedIdCount ?? 0)).toBe(20);
         expect(reply.elidedRequestedIdCount).toBeGreaterThan(0);
+    });
+});
+
+describe("executeCtxMemory get expiry", () => {
+    test("get reads an expired anti-memory as missing, like list and search do", async () => {
+        const { kernel, client } = harness();
+        try {
+            setSystemTime(new Date("2026-03-01T12:00:00Z"));
+            const expired = renderAntiMemoryContent({
+                ...ANTI_MEMORY,
+                expiresAt: Date.parse("2026-02-01T00:00:00Z"),
+            });
+            const live = renderAntiMemoryContent({
+                ...ANTI_MEMORY,
+                expiresAt: Date.parse("2026-04-01T00:00:00Z"),
+            });
+            kernel.seedDecision({
+                object_id: "mem_expired",
+                decision_kind: "REJECTED_APPROACH",
+                summary: expired,
+            });
+            kernel.seedDecision({
+                object_id: "mem_live",
+                decision_kind: "REJECTED_APPROACH",
+                summary: live,
+            });
+            const text = await run(
+                client,
+                "get",
+                { objectIds: ["mem_expired", "mem_live"] },
+                "call-get-expired",
+            );
+            const reply = JSON.parse(text) as {
+                memories: Array<{ objectId: string }>;
+                missingObjectIds: string[];
+            };
+            expect(reply.memories.map((view) => view.objectId)).toEqual(["mem_live"]);
+            expect(reply.missingObjectIds).toEqual(["mem_expired"]);
+        } finally {
+            setSystemTime();
+        }
     });
 });

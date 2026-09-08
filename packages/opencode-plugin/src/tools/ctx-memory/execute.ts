@@ -11,6 +11,7 @@ import {
     deriveObjectId,
     isAvailable,
     isMemoryDecisionRow,
+    isServedMemoryDecisionRow,
     type KernelClient,
     MEMORY_DOMAIN_ID,
     type MemoryState,
@@ -577,7 +578,11 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         }
         const read = await readMemoryRows(client, signal, wanted);
         if (!read.ok) return renderCtxMemoryStateText(read.state, []);
-        const found = read.rows.filter((row) => wanted.includes(row.object.object_id));
+        // An expired anti-memory reads as missing, the same served-row rule list, search, and status apply, so `get` cannot resurface a rejected strategy past its horizon. commentlint: allow(JUDGE)
+        const nowMs = Date.now();
+        const found = read.rows.filter(
+            (row) => wanted.includes(row.object.object_id) && isServedMemoryDecisionRow(row, nowMs),
+        );
         const foundIds = new Set(found.map((row) => row.object.object_id));
         // Each named id serializes complete when it fits; ids past the response byte budget are elided by name so the caller can re-request them in smaller batches. commentlint: allow(JUDGE)
         const packed = packMemoryViews(found, memoryView);
