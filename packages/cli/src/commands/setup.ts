@@ -43,7 +43,18 @@ export async function runSetup(argv: string[]): Promise<number> {
     for (const adapter of adapters) {
         log.step(`Configuring ${adapter.displayName} (${adapter.pluginPackageName})…`);
 
-        const code = await dispatchSetup(adapter, dryRun);
+        let code: number;
+        try {
+            code = await dispatchSetup(adapter, dryRun);
+        } catch (error) {
+            if (isPromptCancelledError(error)) {
+                outro("Setup cancelled — nothing further was changed.");
+                return 1;
+            }
+            log.error(error instanceof Error ? error.message : String(error));
+            anyFailure = true;
+            continue;
+        }
         if (code !== 0) {
             anyFailure = true;
             continue;
@@ -59,15 +70,26 @@ export async function runSetup(argv: string[]): Promise<number> {
     return 0;
 }
 
-/** A `--`-prefixed harness value stays unconsumed so the harness parser reports its missing-value error. */
+/**
+ * A `--`-prefixed harness value stays unconsumed so the harness parser reports its missing-value error.
+ * A second `--harness` is reported as unknown: setup configures one harness, and `parseHarnessFlag` reads only the first.
+ */
 export function unknownSetupArguments(argv: readonly string[]): string[] {
     const unknown: string[] = [];
+    let harnessSeen = false;
     for (let index = 0; index < argv.length; index++) {
         const argument = argv[index];
         if (argument === "--dry-run") continue;
         if (argument === "--harness") {
             const value = argv[index + 1];
-            if (value !== undefined && !value.startsWith("--")) index++;
+            const hasValue = value !== undefined && !value.startsWith("--");
+            if (harnessSeen) {
+                unknown.push(
+                    hasValue ? `${argument} ${value} (repeated)` : `${argument} (repeated)`,
+                );
+            }
+            harnessSeen = true;
+            if (hasValue) index++;
             continue;
         }
         unknown.push(argument);

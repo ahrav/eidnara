@@ -22,8 +22,12 @@ import {
 } from "../adapters/opencode";
 import { type AgentBlockKind, pruneInvalidAgentFields } from "../lib/agent-config";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
-import { assertJsoncConfigsParseable, readJsoncConfigForUpdate } from "../lib/jsonc-config";
+import { type EidnaraModes, projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import {
+    assertJsoncConfigsParseable,
+    readJsoncConfigForUpdate,
+    readJsoncLenient,
+} from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
@@ -34,7 +38,7 @@ const PLUGIN_NAME = "@eidnara/opencode";
 const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 
 /** With `enabled: false` the plugin skips every hook at startup, so native compaction must stay on. commentlint: allow(JUDGE) */
-function resolveCompactionEnabledForWriter(sharedConfigPath: string, directory: string): boolean {
+function resolveWriterModes(sharedConfigPath: string, directory: string): EidnaraModes {
     const modes = readEidnaraModes(sharedConfigPath);
     if (!modes.enabled) {
         log.warn(
@@ -48,7 +52,7 @@ function resolveCompactionEnabledForWriter(sharedConfigPath: string, directory: 
             `Project config ${projectConfigPath} overrides ${overrides.join(", ")}; OpenCode's native settings follow the shared config, so this project may run both Eidnara and native compaction, or neither. Adjust one of the configs if that is not intended.`,
         );
     }
-    return modes.compactionEnabled;
+    return modes;
 }
 
 function ensureDir(dir: string): void {
@@ -358,6 +362,22 @@ export function preflightConfigPaths(
     ];
 }
 
+/**
+ * The plugin writers append to an array and would replace any other `plugin`
+ * value wholesale, so a hand-written scalar or object entry is refused up
+ * front rather than silently discarded.
+ */
+export function assertPluginListShape(configPaths: readonly string[]): void {
+    for (const configPath of configPaths) {
+        const plugin = readJsoncLenient(configPath).value.plugin;
+        if (plugin !== undefined && !Array.isArray(plugin)) {
+            throw new Error(
+                `Refusing to overwrite ${configPath}: "plugin" must be an array of plugin entries, found ${JSON.stringify(plugin)}`,
+            );
+        }
+    }
+}
+
 export async function runSetup(dryRun = false): Promise<number> {
     intro("Eidnara — Setup");
     if (dryRun) {
@@ -407,26 +427,29 @@ export async function runSetup(dryRun = false): Promise<number> {
         paths.opencodeConfigFormat !== "none" ||
         paths.tuiConfigFormat !== "none" ||
         projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
+    // With Eidnara disabled nothing conflicts, so no conflict repair is offered in that mode.
+    const modes = resolveWriterModes(paths.eidnaraConfig, process.cwd());
+    const compactionEnabled = modes.compactionEnabled;
     const omoConfigs = collectOmoConfigPaths(process.cwd());
-    const firstTimeOmoRepair = omoConfigs.length > 0 && !hadExistingSetup;
+    const firstTimeOmoRepair = modes.enabled && omoConfigs.length > 0 && !hadExistingSetup;
 
     // The preflight is read-only, so a dry run performs it too and predicts the refusal a real run would make.
     try {
         assertJsoncConfigsParseable(
             preflightConfigPaths(paths, process.cwd(), { firstTimeOmoRepair }),
         );
+        assertPluginListShape([paths.opencodeConfig, paths.tuiConfig]);
     } catch (error) {
         log.error(error instanceof Error ? error.message : String(error));
         outro("Setup stopped — fix the malformed config and rerun setup.");
         return 1;
     }
 
-    const dcpDecision: DcpDecision = dryRun
-        ? "absent"
-        : await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
+    const dcpDecision: DcpDecision =
+        dryRun || !modes.enabled
+            ? "absent"
+            : await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
     const removeDcp = dcpDecision === "remove";
-
-    const compactionEnabled = resolveCompactionEnabledForWriter(paths.eidnaraConfig, process.cwd());
 
     if (dryRun) {
         log.message(
@@ -439,7 +462,7 @@ export async function runSetup(dryRun = false): Promise<number> {
     let conflictFix: Parameters<typeof fixConflicts>[1] | null = null;
     // A declined fix covers the native compaction flags too; the writer must not apply them anyway.
     let keepNativeCompaction = false;
-    if (hadExistingSetup) {
+    if (hadExistingSetup && modes.enabled) {
         const detected = detectConflicts(process.cwd(), {
             compactionEnabled,
         });
