@@ -51,7 +51,7 @@ export interface SdkClient extends SdkClientCore {
         revert: (opts: {
             path: { id: string };
             body: { messageID: string; partID?: string };
-        }) => Promise<{ data?: unknown }>;
+        }) => Promise<{ data?: unknown; error?: unknown; response?: { status?: number } }>;
     };
 }
 
@@ -347,12 +347,20 @@ export class RustTestHarness {
         return result;
     }
 
-    /** `session.revert` removes the selected message and every later message. */
+    /**
+     * `session.revert` removes the selected message and every later message. The SDK reports a
+     * rejected request through `error` instead of throwing, so that field is checked here.
+     */
     async revertMessage(sessionId: string, messageId: string): Promise<void> {
-        await this.clientInstance.session.revert({
+        const res = await this.clientInstance.session.revert({
             path: { id: sessionId },
             body: { messageID: messageId },
         });
+        if (res.error !== undefined || res.data === undefined) {
+            throw new Error(
+                `session.revert(${messageId}) failed with status ${res.response?.status ?? "unknown"}: ${JSON.stringify(res.error ?? null)}`,
+            );
+        }
     }
 
     async listMessages(

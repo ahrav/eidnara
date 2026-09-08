@@ -40,10 +40,27 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: removal self-heal", 
             )
             .map((info) => info.id);
         expect(userIds.length).toBeGreaterThanOrEqual(3);
-        const midUserId = userIds[Math.floor(userIds.length / 2)]!;
+        const midIndex = Math.floor(userIds.length / 2);
+        const midUserId = userIds[midIndex]!;
+        const survivingUserIds = userIds.slice(0, midIndex);
+        const removedUserIds = userIds.slice(midIndex);
 
         await h.revertMessage(sessionId, midUserId);
-        await Bun.sleep(2_000);
+        const deadline = Date.now() + 20_000;
+        let remainingIds = new Set<string>();
+        for (;;) {
+            remainingIds = new Set(
+                (await h.listMessages(sessionId)).flatMap((m) => (m.info?.id ? [m.info.id] : [])),
+            );
+            if (removedUserIds.every((id) => !remainingIds.has(id))) break;
+            if (Date.now() >= deadline) {
+                throw new Error(
+                    `revert left ${removedUserIds.filter((id) => remainingIds.has(id)).join(", ")} in the session`,
+                );
+            }
+            await Bun.sleep(100);
+        }
+        for (const id of survivingUserIds) expect(remainingIds.has(id)).toBe(true);
 
         const passCountBeforeNext = h.readRustPasses().length;
 

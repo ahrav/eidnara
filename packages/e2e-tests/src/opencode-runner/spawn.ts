@@ -49,6 +49,8 @@ export interface IsolatedEnv {
  */
 export type ServeHostname = "0.0.0.0" | "127.0.0.1";
 
+export const DEFAULT_SERVE_HOSTNAME: ServeHostname = "127.0.0.1";
+
 export interface SpawnedOpencode {
     url: string;
     port: number;
@@ -83,11 +85,8 @@ export interface SpawnOptions {
      */
     extraEnv?: Record<string, string>;
     /**
-     * hostname defaults to "0.0.0.0".
-     * Bind to `0.0.0.0` so readiness polling can reach the server.
-     * The serve HTTP API is unauthenticated.
-     * Spawns with real child-environment credentials must use "127.0.0.1".
-     * Using "127.0.0.1" keeps the unauthenticated API off non-loopback interfaces.
+     * The unauthenticated serve HTTP API defaults to loopback; use `0.0.0.0` to allow remote
+     * access.
      */
     hostname?: ServeHostname;
     /**
@@ -476,8 +475,7 @@ function isInheritableEnvKey(key: string): boolean {
  * `writeConfigs` applies `assertConfigHasNoCredentials` to that channel instead.
  *
  * `Pick<SpawnOptions>` permits forwarding `extraEnv` without `hostname`.
- * Omitting `hostname` uses the all-interfaces default.
- * `extraEnv` secrets reach the unauthenticated serve API when `hostname` falls back to `0.0.0.0`.
+ * `extraEnv` secrets reach the unauthenticated serve API only when a caller opts into `0.0.0.0`.
  *
  * `assertSecretsBoundToLoopback` runs before provisioning to avoid creating Rust resources for rejected spawns.
  * `isSensitiveEnvKey` matches names because fake credentials cannot be distinguished from real credentials by value.
@@ -499,7 +497,7 @@ async function spawnOpencodeWithProvision(
     opts: SpawnOptions,
     provision: () => Promise<RustSpawnResources>,
 ): Promise<SpawnedOpencode> {
-    const hostname = opts.hostname ?? "0.0.0.0";
+    const hostname = opts.hostname ?? DEFAULT_SERVE_HOSTNAME;
     assertSecretsBoundToLoopback(opts, hostname);
     /** Canonicalized and scanned before provisioning, for the same reason the loopback gate runs first: a rejected spawn must not have created a hermetic Rust stack to tear down. `canonicalizeSpawnConfigs` snapshots `extraEnv` ahead of any `toJSON()` and returns that snapshot, so the map the scan read is the map the child is given — re-reading `opts.extraEnv` later would forward whatever a hook left behind, and a hook that replaces the map is never seen by the scan at all. A hook serializes config; it does not get a say in the child's environment. */
     const canonicalOpts: SpawnOptions = canonicalizeSpawnConfigs(opts);

@@ -5,7 +5,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { HermeticHostStack } from "../rust-runner/hermetic-host";
-import { __spawnOpencodeTest, type IsolatedEnv, userEidnaraConfigPath } from "./spawn";
+import {
+    __spawnOpencodeTest,
+    DEFAULT_SERVE_HOSTNAME,
+    type IsolatedEnv,
+    userEidnaraConfigPath,
+} from "./spawn";
 
 class FakeChild extends EventEmitter {
     readonly pid = 42;
@@ -362,6 +367,21 @@ describe("opencode child lifecycle", () => {
         );
     });
 
+    it("binds the unauthenticated serve API to loopback unless a caller opts out", () => {
+        expect(DEFAULT_SERVE_HOSTNAME).toBe("127.0.0.1");
+        // Secrets pass the loopback gate at the default binding and are refused off loopback.
+        const secretOpts = {
+            mockProviderURL: "http://127.0.0.1:4321",
+            extraEnv: { ANTHROPIC_API_KEY: "sk-ant-abcdefghijklmnopqrstuv" },
+        };
+        expect(() =>
+            __spawnOpencodeTest.assertSecretsBoundToLoopback(secretOpts, DEFAULT_SERVE_HOSTNAME),
+        ).not.toThrow();
+        expect(() =>
+            __spawnOpencodeTest.assertSecretsBoundToLoopback(secretOpts, "0.0.0.0"),
+        ).toThrow(/refusing to bind the unauthenticated serve API/);
+    });
+
     it("withholds parent OpenCode control variables and the Broca-child guard from the child", () => {
         const { isInheritableEnvKey } = __spawnOpencodeTest;
         for (const key of [
@@ -428,6 +448,7 @@ describe("opencode child lifecycle", () => {
                     {
                         mockProviderURL: "http://127.0.0.1:1",
                         port: 1,
+                        hostname: "0.0.0.0",
                         extraEnv,
                         openCodeConfigExtra: mutating,
                     },
