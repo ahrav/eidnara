@@ -81,6 +81,30 @@ describe("todowrite tool rendering", () => {
             "Todos — 3 active",
         );
     });
+    it("rejects a list in which two todos share an id", async () => {
+        const tool = createTodowriteTool();
+        const todos = [
+            { id: "x", content: "First", status: "completed" },
+            { id: "y", content: "Other", status: "pending" },
+            { id: "x", content: "Second", status: "pending" },
+        ];
+        await expect(
+            tool.execute("call-dup", { todos } as never, undefined, undefined, {} as never),
+        ).rejects.toThrow(/id "x" is used by more than one todo/);
+        const unique = [
+            { id: "x", content: "First", status: "completed" },
+            { content: "No id", status: "pending" },
+            { content: "Also no id", status: "pending" },
+        ];
+        const result = await tool.execute(
+            "call-unique",
+            { todos: unique } as never,
+            undefined,
+            undefined,
+            {} as never,
+        );
+        expect(result.content).toEqual([{ type: "text", text: JSON.stringify(unique, null, 2) }]);
+    });
     it("uses cached todos when the transcript component was created with empty args", () => {
         const tool = createTodowriteTool();
         const renderCall = tool.renderCall;

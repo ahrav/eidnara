@@ -25,7 +25,11 @@ const TodoItem = Type.Object({
     content: Type.String({ description: "Brief description of the task" }),
     status: Type.Union(TODO_STATUSES.map((v) => Type.Literal(v))),
     priority: Type.Optional(Type.Union(TODO_PRIORITIES.map((v) => Type.Literal(v)))),
-    id: Type.Optional(Type.String({ description: "Optional stable id for the todo" })),
+    id: Type.Optional(
+        Type.String({
+            description: "Optional stable id for the todo; must be unique within the list",
+        }),
+    ),
 });
 
 const TodowriteParams = Type.Object({
@@ -46,6 +50,16 @@ const PROMPT_GUIDELINES = [
     "Never mark a todo completed if verification is failing, implementation is partial, or an unresolved blocker remains. Keep it `in_progress` and add or update a todo for the blocker instead.",
 ];
 
+function firstDuplicateId(todos: readonly { id?: string }[]): string | undefined {
+    const seen = new Set<string>();
+    for (const todo of todos) {
+        if (todo.id === undefined) continue;
+        if (seen.has(todo.id)) return todo.id;
+        seen.add(todo.id);
+    }
+    return undefined;
+}
+
 export function createTodowriteTool(): ToolDefinition<typeof TodowriteParams> {
     return {
         name: TODO_TOOL_NAME,
@@ -56,6 +70,14 @@ export function createTodowriteTool(): ToolDefinition<typeof TodowriteParams> {
         parameters: TodowriteParams,
         async execute(_toolCallId, params: TodowriteParamsT, _signal, _onUpdate, _ctx) {
             const todos = params.todos ?? [];
+            // The overlay identifies tasks by id; duplicate ids make tasks
+            // indistinguishable. Throwing is how a Pi tool marks its result as an error.
+            const duplicateId = firstDuplicateId(todos);
+            if (duplicateId !== undefined) {
+                throw new Error(
+                    `todowrite: id "${duplicateId}" is used by more than one todo; give each todo a unique id or omit the id`,
+                );
+            }
             // `message_end` captures the tool arguments in `session_meta.last_todo_state`.
             const active = todos.filter((todo) => !TITLE_DONE_STATUSES.has(todo.status)).length;
             return {
