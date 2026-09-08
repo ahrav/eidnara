@@ -279,6 +279,25 @@ describe("tool arcs", () => {
         expect(arcs[0].callId).not.toBe(arcs[1].callId);
         expect(arcs.every((arc) => arc.invOrdinal === 7 && arc.resOrdinal === null)).toBe(true);
     });
+
+    it("recognizes a Pi toolCall block as an open invocation with its arguments as input", () => {
+        const message: RawMessage = {
+            id: "pi-call",
+            role: "assistant",
+            parts: [
+                { type: "toolCall", id: "tc1", name: "bash", arguments: { cmd: "ls -la /tmp" } },
+            ],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([
+            { callId: "tc1", invOrdinal: 1, resOrdinal: null },
+        ]);
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolInput).toBeGreaterThan(0);
+        expect(breakdown.other).toBe(0);
+    });
 });
 
 describe("tool token accounting", () => {
@@ -304,6 +323,52 @@ describe("tool token accounting", () => {
             estimateTrueRawMessageTokens(message({ type: "thinking", thinking: "hmm" }), options)
                 .reasoning,
         ).toBeGreaterThan(0);
+    });
+
+    it("counts a redacted reasoning payload as reasoning and fingerprints it", () => {
+        const message = (signature: string): RawMessage => ({
+            id: "r",
+            role: "assistant",
+            parts: [
+                { type: "thinking", thinking: "", thinkingSignature: signature, redacted: true },
+            ],
+            ordinal: 1,
+        });
+        const options = { providerShapeVersion: "pi-folded-v1" as const };
+        expect(
+            estimateTrueRawMessageTokens(message("R".repeat(2000)), options).reasoning,
+        ).toBeGreaterThan(100);
+        expect(computeRawRangeFingerprint([message("A".repeat(100))], 1, 2)).not.toBe(
+            computeRawRangeFingerprint([message("B".repeat(3000))], 1, 2),
+        );
+        expect(
+            estimateTrueRawMessageTokens(
+                {
+                    id: "anthropic",
+                    role: "assistant",
+                    parts: [{ type: "redacted_thinking", data: "D".repeat(1000) }],
+                    ordinal: 1,
+                },
+                { providerShapeVersion: "opencode-v1" },
+            ).reasoning,
+        ).toBeGreaterThan(100);
+    });
+
+    it("skips OpenCode bookkeeping parts", () => {
+        const message: RawMessage = {
+            id: "bookkeeping",
+            role: "assistant",
+            parts: [
+                { type: "snapshot", snapshot: "x".repeat(5000) },
+                { type: "patch", hash: "abc", files: ["a", "b", "c"] },
+                { type: "agent", name: "coder" },
+                { type: "retry", attempt: 3 },
+            ],
+            ordinal: 1,
+        };
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
     });
 
     it("counts an empty text block in a tool result as empty output", () => {

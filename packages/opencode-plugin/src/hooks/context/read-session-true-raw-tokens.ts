@@ -405,15 +405,18 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
         };
     }
 
-    if (type === "tool_use") {
-        const hasInput = hasOwn(part, "input");
+    if (type === "tool_use" || type === "toolCall") {
+        const inputKey = firstOwnKey(
+            part,
+            type === "toolCall" ? ["arguments", "input"] : ["input"],
+        );
         return {
             callId,
             toolName,
-            hasInput,
+            hasInput: inputKey !== null,
             hasOutput: false,
             providerExecuted: false,
-            inputText: hasInput ? stringValue(part.input) : "",
+            inputText: inputKey ? stringValue(part[inputKey]) : "",
             outputText: "",
             outputMedia: [],
             metadataDescription: "",
@@ -516,13 +519,19 @@ type NonToolPartContent =
  * function. A second classifier lets the fingerprint miss content the tokenizer counts.
  * commentlint: allow(JUDGE)
  */
+/** OpenCode bookkeeping parts the daemon decoder discards; they occupy no context. */
+const SKIPPED_PART_TYPES = new Set([
+    "step-start",
+    "step-finish",
+    "snapshot",
+    "patch",
+    "agent",
+    "retry",
+]);
+
 function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent {
     const type = partType(part);
-    if (
-        type === "step-start" ||
-        type === "step-finish" ||
-        (type === "meta" && Object.keys(part).length <= 1)
-    ) {
+    if (SKIPPED_PART_TYPES.has(type) || (type === "meta" && Object.keys(part).length <= 1)) {
         return { kind: "skip" };
     }
     if (type === "text") {
@@ -530,7 +539,11 @@ function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent 
         return text ? { kind: "text", text } : { kind: "skip" };
     }
     if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
-        const text = firstStringFieldAllowEmpty(part, ["thinking", "text", "content", "reasoning"]);
+        const redacted = type === "redacted_thinking" || part.redacted === true;
+        const fields = redacted
+            ? ["thinkingSignature", "data", "thinking", "text"]
+            : ["thinking", "text", "content", "reasoning"];
+        const text = firstStringFieldAllowEmpty(part, fields);
         return text !== null ? { kind: "reasoning", text } : { kind: "structured" };
     }
     if (type.length === 0) {
