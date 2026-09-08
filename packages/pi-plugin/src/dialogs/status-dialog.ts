@@ -120,7 +120,7 @@ export async function showStatusDialog(
     pi: ExtensionAPI,
     ctx: ExtensionCommandContext,
     deps: StatusDialogDeps,
-    daemonStatus: RustSessionStatus | null = null,
+    daemon: DaemonStatusSource | null = null,
 ): Promise<void> {
     const sessionId = resolveSessionId(ctx);
     if (!sessionId) throw new Error("No active Pi session is available.");
@@ -132,7 +132,7 @@ export async function showStatusDialog(
                 pi,
                 ctx,
                 deps,
-                daemonStatus,
+                daemon,
                 sessionId,
                 memory,
                 theme,
@@ -146,11 +146,18 @@ export async function showStatusDialog(
     );
 }
 
+/** Initial daemon status and the reader that refreshes it. */
+export interface DaemonStatusSource {
+    initial: RustSessionStatus;
+    /** Rejects when the daemon cannot answer; the dialog then keeps the previous snapshot. commentlint: allow(JUDGE) */
+    read: () => Promise<RustSessionStatus>;
+}
+
 interface StatusDialogProps {
     pi: ExtensionAPI;
     ctx: ExtensionCommandContext;
     deps: StatusDialogDeps;
-    daemonStatus: RustSessionStatus | null;
+    daemon: DaemonStatusSource | null;
     sessionId: string;
     /** The memory read taken before the dialog opened; refresh ticks re-read. */
     memory: KernelMemorySnapshot;
@@ -181,19 +188,21 @@ export async function readStatusMemory(
 class StatusDialogComponent implements Component {
     private readonly props: StatusDialogProps;
     private detail: StatusDialogDetail;
+    private daemonStatus: RustSessionStatus | null;
     private refreshTimer: ReturnType<typeof setInterval> | null = null;
     private closed = false;
     private refreshing = false;
 
     constructor(props: StatusDialogProps) {
         this.props = props;
+        this.daemonStatus = props.daemon?.initial ?? null;
         this.detail = buildPiStatusDetail(
             props.pi,
             props.ctx,
             props.deps,
             props.sessionId,
             props.memory,
-            props.daemonStatus,
+            this.daemonStatus,
         );
         this.refreshTimer = setInterval(() => {
             void this.refresh();
@@ -205,25 +214,34 @@ class StatusDialogComponent implements Component {
         if (this.closed || this.refreshing) return;
         this.refreshing = true;
         try {
-            const memory = await readStatusMemory(
-                this.props.deps,
-                this.props.sessionId,
-                this.props.ctx.cwd,
-            );
+            const [memory, daemonStatus] = await Promise.all([
+                readStatusMemory(this.props.deps, this.props.sessionId, this.props.ctx.cwd),
+                this.readDaemonStatus(),
+            ]);
             if (this.closed) return;
+            this.daemonStatus = daemonStatus;
             this.detail = buildPiStatusDetail(
                 this.props.pi,
                 this.props.ctx,
                 this.props.deps,
                 this.props.sessionId,
                 memory,
-                this.props.daemonStatus,
+                daemonStatus,
             );
             this.props.tui.requestRender();
         } catch {
             // On refresh failure, retain the previous detail.
         } finally {
             this.refreshing = false;
+        }
+    }
+
+    private async readDaemonStatus(): Promise<RustSessionStatus | null> {
+        if (!this.props.daemon) return null;
+        try {
+            return await this.props.daemon.read();
+        } catch {
+            return this.daemonStatus;
         }
     }
 

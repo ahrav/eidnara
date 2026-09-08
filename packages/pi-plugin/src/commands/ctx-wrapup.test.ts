@@ -34,7 +34,7 @@ function wrapupHarness(respond: (call: RecordedCall) => unknown, compactionOff =
             entries.push(data);
         },
     } as unknown as ExtensionAPI;
-    registerCtxWrapupCommand(pi, { moduleClient, projectRoot: "/proj", compactionOff });
+    registerCtxWrapupCommand(pi, { moduleClient, compactionOff });
     const run = async (args = "") => {
         const command = fake.commands.get("ctx-wrapup") as {
             handler: (args: string, ctx: unknown) => Promise<void>;

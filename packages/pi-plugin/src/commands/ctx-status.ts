@@ -34,22 +34,30 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
                 return;
             }
 
-            let daemonStatus: RustSessionStatus | null = null;
-            let statusError: string | undefined;
-            try {
-                daemonStatus = (await callDaemonSession(deps, "session.status", {
+            const readDaemonStatus = async () =>
+                (await callDaemonSession(deps, ctx, "session.status", {
                     method: "session.status",
                     v: 1,
                     session_id: sessionId,
                 })) as RustSessionStatus;
+
+            let daemonStatus: RustSessionStatus | null = null;
+            let statusError: string | undefined;
+            try {
+                daemonStatus = await readDaemonStatus();
             } catch (error) {
                 sessionLog(sessionId, "rust session.status failed:", error);
                 statusError = error instanceof Error ? error.message : String(error);
             }
 
             try {
-                if (ctx.hasUI) {
-                    await showStatusDialog(pi, ctx, deps, daemonStatus);
+                // The dialog renders a missing daemon answer as zero counts and cannot render
+                // compaction-off status, so both cases use the text path.
+                if (ctx.hasUI && daemonStatus && !deps.compactionOff) {
+                    await showStatusDialog(pi, ctx, deps, {
+                        initial: daemonStatus,
+                        read: readDaemonStatus,
+                    });
                     return;
                 }
 
