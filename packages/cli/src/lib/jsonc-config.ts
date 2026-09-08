@@ -61,15 +61,23 @@ type JsoncDocumentResult =
     | { kind: "parse-error"; error: ConfigParseError };
 
 /**
- * Splits a JSON number literal into an integer significand and a power of ten,
- * so two literals compare exactly without going through a double.
+ * Splits a JSON number literal into a significand with no trailing zeros and a
+ * power of ten, so two literals denote the same rational value exactly when
+ * both parts are equal. Zero is `0 × 10^0`. No exponentiation happens, so a
+ * literal such as `1e-100000000` costs only its own digit count.
  */
-function decimalParts(literal: string): { digits: bigint; exponent: number } | null {
+function normalizedDecimal(literal: string): { digits: bigint; exponent: number } | null {
     const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(literal);
     if (!match) return null;
     const [, sign, whole, fraction = "", exponent = "0"] = match;
-    const digits = BigInt(`${sign}${whole}${fraction}`);
-    return { digits, exponent: Number(exponent) - fraction.length };
+    let digits = BigInt(`${sign}${whole}${fraction}`);
+    if (digits === 0n) return { digits: 0n, exponent: 0 };
+    let scale = Number(exponent) - fraction.length;
+    while (digits % 10n === 0n) {
+        digits /= 10n;
+        scale += 1;
+    }
+    return { digits, exponent: scale };
 }
 
 /**
@@ -80,15 +88,13 @@ function decimalParts(literal: string): { digits: bigint; exponent: number } | n
  */
 function isLossyNumberLiteral(literal: string, value: number): boolean {
     if (!Number.isFinite(value)) return true;
-    const source = decimalParts(literal);
-    const parsed = decimalParts(String(value)) ?? decimalParts(value.toFixed(0));
+    const source = normalizedDecimal(literal);
+    const parsed = normalizedDecimal(String(value)) ?? normalizedDecimal(value.toFixed(0));
     if (source === null || parsed === null) return true;
-    const shift = source.exponent - parsed.exponent;
-    return shift >= 0
-        ? source.digits * 10n ** BigInt(shift) !== parsed.digits
-        : source.digits !== parsed.digits * 10n ** BigInt(-shift);
+    return source.digits !== parsed.digits || source.exponent !== parsed.exponent;
 }
 
+/** `content` must be the text the tree was parsed from, so node offsets line up. */
 function containsLossyNumber(content: string, node: Node): boolean {
     if (node.type === "number") {
         const literal = content.slice(node.offset, node.offset + node.length);
@@ -117,11 +123,14 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
         return { kind: "parse-error", error: new ConfigParseError(path, "", error) };
     }
     try {
+        // The shared parser strips a leading BOM before it assigns node offsets, so the same
+        // stripped text feeds both parsers and the offset-based literal slices.
+        const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
         // `comment-json` runs first because its syntax errors carry a line and column; the shared
         // parser then rejects what `comment-json` accepts but the daemon's reader does not, such
         // as an unpaired surrogate escape inside a string.
-        const tree = parseCommentJson(content);
-        const root = parseJsoncTree(content);
+        const tree = parseCommentJson(text);
+        const root = parseJsoncTree(text);
         const rejectedKeyPaths: string[] = [];
         const plain = sanitizeParsedJson(tree, {
             onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
@@ -137,7 +146,7 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
             kind: "parsed",
             tree,
             plain: plain as Record<string, unknown>,
-            lossyNumber: containsLossyNumber(content, root),
+            lossyNumber: containsLossyNumber(text, root),
         };
     } catch (error) {
         return { kind: "parse-error", error: new ConfigParseError(path, content, error) };
