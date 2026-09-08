@@ -348,11 +348,24 @@ describe("collectDiagnostics Pi path resolution", () => {
 
         const report = await collectDiagnostics(cwd);
 
-        expect(report.userConfig.path).toBe(userJson);
-        expect(report.userConfig.exists).toBe(true);
-        expect(report.userConfig.parseError).toContain("<HOME>/.config/eidnara/eidnara.json");
-        expect(report.userConfig.parseError).not.toContain(home);
+        expect(report.userConfig?.path).toBe(userJson);
+        expect(report.userConfig?.exists).toBe(true);
+        expect(report.userConfig?.parseError).toContain("<HOME>/.config/eidnara/eidnara.json");
+        expect(report.userConfig?.parseError).not.toContain(home);
         expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
         expect(report.projectConfig.exists).toBe(false);
+    });
+
+    it("recognizes a version-pinned Eidnara package and lists only the other extensions", async () => {
+        const { cwd, agentDir } = isolateEnv();
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: ["npm:@eidnara/pi@0.1.0", "npm:@eidnara/pi-extras"] }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.settings.hasEidnaraPackage).toBe(true);
+        expect(report.conflicts.otherPiExtensions).toEqual(["npm:@eidnara/pi-extras"]);
     });
 });

@@ -24,7 +24,7 @@ import {
     getPiSessionsRoot,
     getPiUserExtensionsPath,
 } from "./paths";
-import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
+import { detectPiBinary, getPiVersion, matchesPiPackageSource } from "./pi-helpers";
 
 /** Pi-named aliases of the shared historian-dump shapes. */
 export type PiHistorianDumpMeta = HistorianDumpMeta;
@@ -434,7 +434,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const loaded = loadPiConfig({ cwd });
     const logFile = statLogFile(getEidnaraLogPath("pi"));
     const otherPiExtensions = packages
-        .filter((entry) => entry !== PI_PACKAGE_SOURCE)
+        .filter((entry) => !matchesPiPackageSource(entry))
         .map(describePackageEntry);
     const recentSessions = collectPiRecentSessions();
     const historianDumps = collectPiHistorianDumps(recentSessions);
@@ -454,7 +454,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             ...(settingsParsed.parseError
                 ? { parseError: sanitizeString(settingsParsed.parseError) }
                 : {}),
-            hasEidnaraPackage: packages.some((entry) => entry === PI_PACKAGE_SOURCE),
+            hasEidnaraPackage: packages.some(matchesPiPackageSource),
             packages: sanitizeValue(packages) as unknown[],
         },
         configPaths: {
