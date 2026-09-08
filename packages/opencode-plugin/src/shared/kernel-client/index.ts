@@ -54,7 +54,7 @@ export {
     type UnavailableReason,
     unavailable,
 } from "./state";
-export { TokenCache } from "./token";
+export { TokenCache, type TokenStore } from "./token";
 export {
     type CommitPayload,
     type DecisionPayload,

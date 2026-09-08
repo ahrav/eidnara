@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { stripJsonComments } from "../shared/jsonc-parser";
 
@@ -32,6 +32,12 @@ export interface SubstituteResult {
 const ENV_PATTERN = /\{env:([^}]+)\}/g;
 const FILE_PATTERN = /\{file:([^}]+)\}/g;
 
+/** `path.relative` applies the platform's separator and case rules, so a descendant is detected on Windows as well as POSIX. commentlint: allow(JUDGE) */
+function isWithinDirectory(dir: string, candidate: string): boolean {
+    const rel = relative(dir, candidate);
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
 /**
  * User-level configs warn, rather than block, when `{file:}` resolves under these directories.
  */
@@ -44,7 +50,7 @@ function sensitiveFilePathReason(resolvedPath: string): string | null {
         { dir: resolve(home, ".config", "gh"), label: "GitHub CLI auth" },
     ];
     for (const { dir, label } of sensitiveDirs) {
-        if (resolvedPath === dir || resolvedPath.startsWith(`${dir}/`)) {
+        if (isWithinDirectory(dir, resolvedPath)) {
             return label;
         }
     }
@@ -91,7 +97,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
     // Strip JSONC comments before substitution to prevent tokens in comments from triggering environment or file reads.
     text = stripJsonComments(text);
 
-    text = text.replace(ENV_PATTERN, (_, rawName: string) => {
+    text = text.replace(ENV_PATTERN, (_, rawName: string, offset: number, source: string) => {
         const varName = rawName.trim();
         const value = varName ? process.env[varName] : undefined;
         if (value === undefined || value === "") {
@@ -100,6 +106,12 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             );
             return "";
         }
+
+        // Inside a still-open `{file:` token the value is a path fragment the file pass reads verbatim, so JSON escaping there would turn a `"` or `\` in a directory name into a path that does not exist. commentlint: allow(JUDGE)
+        const fileTokenStart = source.lastIndexOf("{file:", offset);
+        const insideFileToken =
+            fileTokenStart !== -1 && !source.slice(fileTokenStart, offset).includes("}");
+        if (insideFileToken) return value;
 
         return JSON.stringify(value).slice(1, -1);
     });

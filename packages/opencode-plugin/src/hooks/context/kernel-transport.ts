@@ -12,6 +12,7 @@ import {
     StoreLifecycleError,
     type StoreLifecycleReason,
     TokenCache,
+    type TokenStore,
 } from "../../shared/kernel-client";
 import { isRecord } from "../../shared/record-type-guard";
 import { HostModuleTransport } from "./module-transport";
@@ -86,9 +87,10 @@ export interface KernelClientConfig {
 interface SharedKernelState {
     module: HostModuleTransport;
     adapter: KernelTransport;
-    /** What clients hold: resolves to the live state's adapter on every call, so a client that outlives this state's eviction follows the map to its replacement instead of redialing the evicted `module`. commentlint: allow(JUDGE) */
-    transport: KernelTransport;
     tokens: TokenCache;
+    /** What clients hold: views that resolve to the live state for this connection file on every use, so a client that outlives this state's eviction follows the map to its replacement — its transport never redials the evicted `module`, and its tokens are never carried from one daemon to the next. commentlint: allow(JUDGE) */
+    transport: KernelTransport;
+    tokenStore: TokenStore;
     /** The set orders project roots from least to most recently resolved and bounds per-project token buckets. */
     tokenProjectOrder: Set<string>;
 }
@@ -96,7 +98,7 @@ interface SharedKernelState {
 /** Cap on project roots whose token buckets the shared cache retains per connection file; resolving a client past the cap evicts the least-recently-resolved root's tokens. commentlint: allow(JUDGE) */
 export const MAX_TOKEN_CACHE_PROJECTS = 32;
 
-/** Cap on connection files whose shared transports the process retains: a long-lived host that `/cd`s across projects with distinct `connection_file` values would otherwise accumulate one live transport — socket, token cache, route cache — per daemon configuration forever. Eviction disconnects the transport, so a call in flight on it fails as a transport failure; a client resolved before the eviction reaches the replacement state through its indirect transport on its next call, and the cap holds because that replacement is created through the same map. commentlint: allow(JUDGE) */
+/** Cap on connection files whose shared transports the process retains: a long-lived host that `/cd`s across projects with distinct `connection_file` values would otherwise accumulate one live transport — socket, token cache, route cache — per daemon configuration forever. Eviction disconnects the transport, so a call in flight on it fails as a transport failure; a client resolved before the eviction reaches the replacement state through its views on its next use, and the cap holds because that replacement is created through the same map. commentlint: allow(JUDGE) */
 export const MAX_CONNECTION_FILE_STATES = 8;
 
 /** Every kernel operation resolves a client for its project root first; client resolution order therefore tracks token-cache access order. commentlint: allow(JUDGE) */
@@ -118,26 +120,32 @@ function connectionFileKey(connectionFile: string | undefined): string {
     return connectionFile === undefined ? "managed-default" : `explicit:${connectionFile}`;
 }
 
-function indirectTransport(
-    connectionFile: string | undefined,
-    adapter: KernelTransport,
-): KernelTransport {
-    const live = (): KernelTransport =>
-        sharedByConnectionFile.get(connectionFileKey(connectionFile))?.adapter === adapter
-            ? adapter
-            : sharedState(connectionFile).adapter;
+/** The live state for a connection file, created if its previous state was evicted; a hit does not count as a resolution, so recency still tracks `createKernelClient`. commentlint: allow(JUDGE) */
+function liveState(connectionFile: string | undefined): SharedKernelState {
+    return (
+        sharedByConnectionFile.get(connectionFileKey(connectionFile)) ?? sharedState(connectionFile)
+    );
+}
+
+function liveTransport(connectionFile: string | undefined): KernelTransport {
     return {
-        connectionFileExists: () => live().connectionFileExists(),
-        call: (args) => live().call(args),
-        ensureRoute: (args) => live().ensureRoute(args),
+        connectionFileExists: () => liveState(connectionFile).adapter.connectionFileExists(),
+        call: (args) => liveState(connectionFile).adapter.call(args),
+        ensureRoute: (args) => liveState(connectionFile).adapter.ensureRoute(args),
     };
 }
 
-/** A token's `known_as_of` is a position in the evicted transport's daemon sequence, so the cache a retained client still holds must not carry those tokens to the replacement state's daemon; the client's next read refills it from that daemon. commentlint: allow(JUDGE) */
-function evictSharedState(evicted: SharedKernelState): void {
-    evicted.module.disconnect();
-    for (const projectRoot of evicted.tokenProjectOrder) evicted.tokens.dropProject(projectRoot);
-    evicted.tokenProjectOrder.clear();
+function liveTokenStore(connectionFile: string | undefined): TokenStore {
+    return {
+        remember: (root, rows, knownAsOf) =>
+            liveState(connectionFile).tokens.remember(root, rows, knownAsOf),
+        rememberTokens: (root, tokens, knownAsOf) =>
+            liveState(connectionFile).tokens.rememberTokens(root, tokens, knownAsOf),
+        get: (root, objectId) => liveState(connectionFile).tokens.get(root, objectId),
+        knownAsOfFor: (root) => liveState(connectionFile).tokens.knownAsOfFor(root),
+        dropProject: (root) => liveState(connectionFile).tokens.dropProject(root),
+        size: (root) => liveState(connectionFile).tokens.size(root),
+    };
 }
 
 function sharedState(connectionFile: string | undefined): SharedKernelState {
@@ -150,12 +158,12 @@ function sharedState(connectionFile: string | undefined): SharedKernelState {
         return shared;
     }
     const module = new HostModuleTransport(connectionFile);
-    const adapter = createKernelTransport(module);
     shared = {
         module,
-        adapter,
-        transport: indirectTransport(connectionFile, adapter),
+        adapter: createKernelTransport(module),
         tokens: new TokenCache(),
+        transport: liveTransport(connectionFile),
+        tokenStore: liveTokenStore(connectionFile),
         tokenProjectOrder: new Set(),
     };
     sharedByConnectionFile.set(key, shared);
@@ -164,10 +172,17 @@ function sharedState(connectionFile: string | undefined): SharedKernelState {
         if (oldestKey === undefined) break;
         const evicted = sharedByConnectionFile.get(oldestKey);
         sharedByConnectionFile.delete(oldestKey);
-        if (evicted) evictSharedState(evicted);
+        evicted?.module.disconnect();
     }
     return shared;
 }
+
+/** A disabled client's `gate` answers `disabled` before any transport use, so it must not occupy a shared-state slot and evict a live transport. commentlint: allow(JUDGE) */
+const DISABLED_TRANSPORT: KernelTransport = {
+    connectionFileExists: () => false,
+    call: () => Promise.reject(new Error("kernel transport unavailable: memory is disabled")),
+    ensureRoute: async () => {},
+};
 
 export interface CreateKernelClientArgs {
     sessionId: string;
@@ -178,17 +193,19 @@ export interface CreateKernelClientArgs {
     tokens?: TokenCache;
 }
 
-/** Applies `memory.enabled` to every client. Clients for the same connection file share a transport (one dial, one route cache) and a token cache (tokens are keyed by project, not session). Shared-path clients take the root the transport canonicalizes, so a symlinked and a resolved spelling of one project derive the same operation keys and token bucket as the route they are bound to. commentlint: allow(JUDGE) */
+/** Applies `memory.enabled` to every client. Enabled clients for the same connection file share a transport (one dial, one route cache) and a token cache (tokens are keyed by project, not session), and take the root the transport canonicalizes, so a symlinked and a resolved spelling of one project derive the same operation keys and token bucket as the route they are bound to. commentlint: allow(JUDGE) */
 export function createKernelClient(args: CreateKernelClientArgs): KernelClient {
-    const shared = args.transport ? null : sharedState(args.config.subc?.connection_file);
+    const enabled = args.config.memory?.enabled !== false;
+    const shared =
+        args.transport || !enabled ? null : sharedState(args.config.subc?.connection_file);
     const projectRoot = shared ? shared.module.canonicalRoot(args.projectRoot) : args.projectRoot;
     if (shared && args.tokens === undefined) {
         touchTokenProject(shared, projectRoot);
     }
     return new KernelClient({
-        transport: args.transport ?? (shared as SharedKernelState).transport,
-        tokens: args.tokens ?? shared?.tokens ?? new TokenCache(),
-        enabled: args.config.memory?.enabled !== false,
+        transport: args.transport ?? shared?.transport ?? DISABLED_TRANSPORT,
+        tokens: args.tokens ?? shared?.tokenStore ?? new TokenCache(),
+        enabled,
         sessionId: args.sessionId,
         projectRoot,
     });
@@ -201,7 +218,7 @@ export function kernelClientResolver(config: KernelClientConfig): KernelClientRe
 
 /** Disconnects every shared transport and drops the shared token caches between test cases; a test that dialed would otherwise leave its socket and route cache to the next one. commentlint: allow(JUDGE) */
 export function resetKernelClientsForTest(): void {
-    for (const shared of sharedByConnectionFile.values()) evictSharedState(shared);
+    for (const shared of sharedByConnectionFile.values()) shared.module.disconnect();
     sharedByConnectionFile.clear();
 }
 

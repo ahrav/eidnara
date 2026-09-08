@@ -1,5 +1,11 @@
 import type { MutationToken, ReadRow } from "./wire";
 
+/** The token operations `KernelClient` performs. `TokenCache` holds them directly; a caller may hand the client a view whose methods resolve to whichever cache currently belongs with the client's transport. commentlint: allow(JUDGE) */
+export type TokenStore = Pick<
+    TokenCache,
+    "remember" | "rememberTokens" | "get" | "knownAsOfFor" | "dropProject" | "size"
+>;
+
 /**
  * Mutation tokens keyed by `(project_root, object_id)`. A token is the
  * `known_as_of` the object was last read at; `kernel.commit` rejects a token

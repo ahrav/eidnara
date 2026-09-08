@@ -9,7 +9,7 @@ import { Deadline, isConsumerReconnectTransient, isHostCallError } from "../host
 import { isRecord } from "../record-type-guard";
 import { stableStringify } from "../stable-json";
 import { cancelled, conflict, disabled, invalid, type MemoryState, unavailable } from "./state";
-import { TokenCache } from "./token";
+import { TokenCache, type TokenStore } from "./token";
 import {
     type CommitPayload,
     MAX_READ_OBJECT_IDS,
@@ -165,7 +165,7 @@ export interface KernelClientOptions {
     projectRoot: string;
     /** `intent.producer` on every write; part of the `(producer, operation_key)` identity. */
     producer?: string;
-    tokens?: TokenCache;
+    tokens?: TokenStore;
     /** Bounds a call whose caller passes no `deadlineMs`. */
     defaultDeadlineMs?: number;
 }
@@ -256,7 +256,7 @@ export class KernelClient {
     private readonly projectRoot: string;
     private readonly producer: string;
     private readonly defaultDeadlineMs: number;
-    readonly tokens: TokenCache;
+    readonly tokens: TokenStore;
 
     constructor(options: KernelClientOptions) {
         this.transport = options.transport;

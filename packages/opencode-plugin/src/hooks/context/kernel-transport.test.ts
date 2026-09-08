@@ -181,7 +181,7 @@ describe("shared transport eviction", () => {
         );
     });
 
-    test("eviction drops the tokens a retained client still holds, since they were minted against the evicted transport's daemon", () => {
+    test("a retained client's token view follows every replacement state, so no token crosses from one daemon to the next", async () => {
         const stale = createKernelClient({
             sessionId: SESSION,
             projectRoot: PROJECT,
@@ -190,11 +190,30 @@ describe("shared transport eviction", () => {
         stale.tokens.rememberTokens(PROJECT, [{ object_id: "mem_a", known_as_of: 1 }], 1);
         expect(stale.tokens.get(PROJECT, "mem_a")).toBeDefined();
 
+        // First eviction: the retained client sees the replacement state's empty cache.
         for (const file of files.slice(1)) {
             createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: config(file) });
         }
-
         expect(stale.tokens.get(PROJECT, "mem_a")).toBeUndefined();
+
+        // The retained client's use recreates its state; a fresh client for the same file shares that cache.
+        stale.tokens.rememberTokens(PROJECT, [{ object_id: "mem_b", known_as_of: 2 }], 2);
+        const fresh = createKernelClient({
+            sessionId: "session-b",
+            projectRoot: PROJECT,
+            config: config(files[0] as string),
+        });
+        expect(fresh.tokens.get(PROJECT, "mem_b")).toEqual({ object_id: "mem_b", known_as_of: 2 });
+
+        // Second eviction of the same connection file: the retained client still holds nothing from the evicted daemon.
+        for (const file of files.slice(1)) {
+            createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: config(file) });
+        }
+        expect(sharedConnectionFilesForTest()).not.toContain(keyOf(files[0] as string));
+        expect(stale.tokens.get(PROJECT, "mem_b")).toBeUndefined();
+        expect(fresh.tokens.get(PROJECT, "mem_b")).toBeUndefined();
+        const result = await stale.read({ surface: "auto_inject" });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "daemon_absent" });
     });
 
     test("the managed default and an explicit empty path never share a state", () => {
@@ -205,6 +224,37 @@ describe("shared transport eviction", () => {
             config: { subc: { connection_file: "" } },
         });
         expect(sharedConnectionFilesForTest()).toEqual(["managed-default", "explicit:"]);
+    });
+
+    test("disabled clients occupy no shared-state slot and answer disabled", async () => {
+        const live = createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: config(files[0] as string),
+        });
+        for (const file of files.slice(1)) {
+            createKernelClient({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                config: { ...config(file), memory: { enabled: false } },
+            });
+        }
+        expect(sharedConnectionFilesForTest()).toEqual([keyOf(files[0] as string)]);
+        expect(live.tokens).toBe(
+            createKernelClient({
+                sessionId: "session-b",
+                projectRoot: PROJECT,
+                config: config(files[0] as string),
+            }).tokens,
+        );
+
+        const disabled = createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: { ...config(files[1] as string), memory: { enabled: false } },
+        });
+        const result = await disabled.read({ surface: "auto_inject" });
+        expect(result.state).toEqual({ kind: "disabled" });
     });
 });
 

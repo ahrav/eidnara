@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 
@@ -304,6 +304,22 @@ describe("substituteConfigVariables", () => {
 
             expect(result.text).toBe(`{ "api_key": "indirect-value" }`);
         });
+
+        it("env values inside {file:} stay raw paths even when the directory name needs JSON escaping", () => {
+            const quotedDir = join(tmpDir, 'a"b\\c');
+            mkdirSync(quotedDir);
+            writeFileSync(join(quotedDir, "secret.txt"), "quoted-dir-value");
+            process.env.EIDNARA_FILE_DIR = quotedDir;
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_FILE_DIR}/secret.txt}", "dir": "{env:EIDNARA_FILE_DIR}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            // The file token read the directory verbatim; the standalone env token is still JSON-escaped for the string literal.
+            expect(result.text).toBe(
+                `{ "api_key": "quoted-dir-value", "dir": "${JSON.stringify(quotedDir).slice(1, -1)}" }`,
+            );
+            expect(result.warnings).toHaveLength(0);
+        });
     });
 
     describe("no-op cases", () => {
@@ -385,6 +401,18 @@ describe("substituteConfigVariables", () => {
             const input = `{ "prompt": "{file:~/notes/context.md}" }`;
             const result = substituteConfigVariables({ text: input });
             expect(result.warnings.some((w) => w.includes("sensitive path"))).toBe(false);
+        });
+
+        it("does NOT warn for a sibling whose name merely extends a sensitive directory", () => {
+            const input = `{ "prompt": "{file:~/.ssh-backup/notes.md}" }`;
+            const result = substituteConfigVariables({ text: input });
+            expect(result.warnings.some((w) => w.includes("sensitive path"))).toBe(false);
+        });
+
+        it("warns when the path reaches a sensitive directory through a parent segment", () => {
+            const input = `{ "key": "{file:~/notes/../.aws/credentials}" }`;
+            const result = substituteConfigVariables({ text: input });
+            expect(result.warnings.some((w) => w.includes("AWS credentials"))).toBe(true);
         });
     });
 });
