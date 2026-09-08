@@ -100,6 +100,36 @@ describe("createCtxReduceTools", () => {
             );
         });
 
+        it("acknowledges only the tags the daemon accepted when some were unknown", async () => {
+            const { reduce } = recordingReduce({ ok: true, queued: 1, unknown: [99] });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "1,99" }, toolContext());
+
+            expect(result).toBe("Queued: drop §1§. Tags 99 not found.");
+            expect(result).not.toContain("§99§");
+        });
+
+        it("keeps range tokens and names unknown members separately", async () => {
+            const { reduce } = recordingReduce({ ok: true, queued: 2, unknown: [4, 5, 99] });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "1-5, §99§, 7" }, toolContext());
+
+            expect(result).toBe("Queued: drop 1-5, §7§. Tags 4, 5, 99 not found.");
+        });
+
+        it("reports unknown tags when every accepted tag was already queued", async () => {
+            const { reduce } = recordingReduce({ ok: true, queued: 0, unknown: [99] });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "1,99" }, toolContext());
+
+            expect(result).toBe(
+                "All known requested tags were already queued or processed. No new action is needed. Tags 99 not found.",
+            );
+        });
+
         it("returns the unavailable error when no reduce backend is registered", async () => {
             const tools = createCtxReduceTools({ rustToolBackends: {} });
 

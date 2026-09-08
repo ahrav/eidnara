@@ -31,12 +31,27 @@ export interface CtxNoteToolDeps {
     rustToolBackends: RustToolBackends;
 }
 
+/**
+ * The refusal preserves action, note_id, surface_condition, and content so a
+ * retry keeps its mutation semantics: an update stays an update and a
+ * conditioned write stays conditioned.
+ */
 function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["action"]): string {
     const readiness = "Rust notes authority is not ready.";
-    if ((action === "write" || action === "update") && typeof args.content === "string") {
-        return `Error: ${readiness} Write REFUSED and NOT saved; RESEND after authority is ready.\nContent to resend:\n${args.content}`;
+    if (action === "read") {
+        return `Error: ${readiness} Request REFUSED and NOT applied; RESEND after authority is ready.`;
     }
-    return `Error: ${readiness} Request REFUSED and NOT applied; RESEND after authority is ready.`;
+    const verb = action === "write" ? "Write" : action === "update" ? "Update" : "Dismiss";
+    const outcome = action === "write" ? "NOT saved" : "NOT applied";
+    const preserved = [`action=${action}`];
+    if (typeof args.note_id === "number") preserved.push(`note_id=${args.note_id}`);
+    const condition = args.surface_condition?.trim();
+    if (condition) preserved.push(`surface_condition=${JSON.stringify(condition)}`);
+    const content =
+        (action === "write" || action === "update") && typeof args.content === "string"
+            ? `\nContent to resend:\n${args.content}`
+            : "";
+    return `Error: ${readiness} ${verb} REFUSED and ${outcome}; RESEND the same ctx_note call (${preserved.join(", ")}) after authority is ready.${content}`;
 }
 
 function moduleNoteText(
@@ -139,11 +154,15 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             const sessionId = toolContext.sessionID;
             // A string-only check would classify empty content as write and reject it.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
+            // When `wakePlaneStatus()` returns `"present"`, scheduled wakes evaluate `surface_condition`.
             const wakePlaneActive =
-                action === "write" &&
+                (action === "write" || action === "update") &&
                 Boolean(args.surface_condition?.trim()) &&
                 (await wakePlaneStatus()) === "present";
             const surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
+            if (wakePlaneActive && action === "update" && !args.content?.trim()) {
+                return "Error: wake plane active — scheduled wakes own condition evaluation; create a scheduled wake instead. Note not updated.";
+            }
 
             // The tool resolves toolContext.directory on every call.
             const projectIdentity = deps.resolveProjectPath?.(toolContext.directory);
@@ -205,7 +224,9 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 }
                 if (text.startsWith("Error:")) return text;
                 if (wakePlaneActive) {
-                    return `${text}\nwake plane active — create a scheduled wake instead; stored as a plain note.`;
+                    const outcome =
+                        action === "write" ? "stored as a plain note" : "condition not applied";
+                    return `${text}\nwake plane active — create a scheduled wake instead; ${outcome}.`;
                 }
                 if (compilation) return text + conditionCompileReplySuffix(compilation);
                 return text;

@@ -70,7 +70,7 @@ describe("createCtxNoteTools", () => {
             sessionId: "ses-note",
         });
         expect(preparingResult).toBe(
-            "Error: Rust notes authority is not ready. Write REFUSED and NOT saved; RESEND after authority is ready.\nContent to resend:\nnot yet",
+            "Error: Rust notes authority is not ready. Write REFUSED and NOT saved; RESEND the same ctx_note call (action=write) after authority is ready.\nContent to resend:\nnot yet",
         );
     });
 
@@ -196,6 +196,68 @@ describe("createCtxNoteTools", () => {
         expect(result).not.toContain("read-only content must not echo");
     });
 
+    it("preserves update arguments in the transition refusal so a retry stays an update", async () => {
+        const { requests, note } = recordingNote();
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "PREPARING", note },
+        });
+
+        const result = await tools.ctx_note.execute(
+            {
+                action: "update",
+                note_id: 7,
+                content: "edited body",
+                surface_condition: "when release v2 exists",
+            },
+            toolContext(),
+        );
+
+        expect(requests).toHaveLength(0);
+        expect(result).toBe(
+            'Error: Rust notes authority is not ready. Update REFUSED and NOT applied; RESEND the same ctx_note call (action=update, note_id=7, surface_condition="when release v2 exists") after authority is ready.\nContent to resend:\nedited body',
+        );
+        expect(result).not.toContain("Write REFUSED");
+    });
+
+    it("preserves the condition of a refused conditioned write", async () => {
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: {
+                authorityState: async () => "MODULE",
+                noteEvaluationAvailable: () => true,
+                note: async () => ({
+                    error: { code: "authority_draining", message: "authority is draining" },
+                }),
+            },
+        });
+
+        const result = await tools.ctx_note.execute(
+            { action: "write", content: "wait for tag", surface_condition: "when tag v9 exists" },
+            toolContext(),
+        );
+
+        expect(result).toContain("Write REFUSED and NOT saved");
+        expect(result).toContain('(action=write, surface_condition="when tag v9 exists")');
+        expect(result).toContain("Content to resend:\nwait for tag");
+    });
+
+    it("names the dismissed note in a transition refusal", async () => {
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "DRAINING" },
+        });
+
+        const result = await tools.ctx_note.execute(
+            { action: "dismiss", note_id: 3 },
+            toolContext(),
+        );
+
+        expect(result).toBe(
+            "Error: Rust notes authority is not ready. Dismiss REFUSED and NOT applied; RESEND the same ctx_note call (action=dismiss, note_id=3) after authority is ready.",
+        );
+    });
+
     it("downgrades module-authority smart authoring to a regular note when wake plane is present", async () => {
         __wakePlaneTest.setCatalogProbe(async () => [
             { module_id: "scheduled-wakes", roles: [], control_ops: [WAKE_PLANE_CAPABILITY] },
@@ -224,6 +286,88 @@ describe("createCtxNoteTools", () => {
         expect(result).toBe(
             "Saved session note #1.\nwake plane active — create a scheduled wake instead; stored as a plain note.",
         );
+    });
+
+    it("withholds a conditioned update's condition when the wake plane is present", async () => {
+        __wakePlaneTest.setCatalogProbe(async () => [
+            { module_id: "scheduled-wakes", roles: [], control_ops: [WAKE_PLANE_CAPABILITY] },
+        ]);
+        const { requests, note } = recordingNote("Updated note #4: new body");
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: {
+                authorityState: async () => "MODULE",
+                noteEvaluationAvailable: () => true,
+                note,
+            },
+        });
+
+        const result = await tools.ctx_note.execute(
+            {
+                action: "update",
+                note_id: 4,
+                content: "new body",
+                surface_condition: "When the scheduled operation completes",
+            },
+            toolContext(),
+        );
+
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({ action: "update", noteId: 4, content: "new body" });
+        expect(requests[0]?.surfaceCondition).toBeUndefined();
+        expect(requests[0]?.compileStatus).toBeUndefined();
+        expect(result).toBe(
+            "Updated note #4: new body\nwake plane active — create a scheduled wake instead; condition not applied.",
+        );
+    });
+
+    it("refuses a condition-only update without reaching the backend when the wake plane is present", async () => {
+        __wakePlaneTest.setCatalogProbe(async () => [
+            { module_id: "scheduled-wakes", roles: [], control_ops: [WAKE_PLANE_CAPABILITY] },
+        ]);
+        const { requests, note } = recordingNote("must not be called");
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: {
+                authorityState: async () => "MODULE",
+                noteEvaluationAvailable: () => true,
+                note,
+            },
+        });
+
+        const result = await tools.ctx_note.execute(
+            { action: "update", note_id: 4, surface_condition: "when release exists" },
+            toolContext(),
+        );
+
+        expect(requests).toHaveLength(0);
+        expect(result).toBe(
+            "Error: wake plane active — scheduled wakes own condition evaluation; create a scheduled wake instead. Note not updated.",
+        );
+    });
+
+    it("forwards a conditioned update to the module backend when the wake plane is absent", async () => {
+        __wakePlaneTest.setCatalogProbe(async () => [
+            { module_id: "other-module", roles: [], control_ops: ["other.operation"] },
+        ]);
+        const { requests, note } = recordingNote("Updated note #4: body");
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: {
+                authorityState: async () => "MODULE",
+                noteEvaluationAvailable: () => true,
+                note,
+            },
+        });
+
+        await tools.ctx_note.execute(
+            { action: "update", note_id: 4, surface_condition: "when release exists" },
+            toolContext(),
+        );
+
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.surfaceCondition).toBe("when release exists");
+        expect(requests[0]?.compileStatus).toBeDefined();
     });
 
     it("passes the unchanged condition to the module backend when the wake plane is absent", async () => {

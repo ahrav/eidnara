@@ -12,15 +12,21 @@ export interface CtxReduceToolDeps {
     rustToolBackends: RustToolBackends;
 }
 
-function formatRawDropForAck(rawDrop: string): string {
+function formatRawDropForAck(rawDrop: string, unknown: readonly number[] = []): string {
+    const unknownTokens = new Set(unknown.map(String));
     return rawDrop
         .trim()
         .split(",")
-        .map((token) => {
-            const trimmed = token.trim();
-            return /^\d+$/.test(trimmed) ? `§${trimmed}§` : trimmed;
-        })
+        .map((token) => token.trim())
+        .filter((token) => !unknownTokens.has(token.replace(/§/g, "")))
+        .map((token) => (/^\d+$/.test(token) ? `§${token}§` : token))
         .join(", ");
+}
+
+function unknownTagNumbers(record: Record<string, unknown>): number[] {
+    return Array.isArray(record.unknown)
+        ? record.unknown.filter((value): value is number => typeof value === "number")
+        : [];
 }
 
 const ctxReduceArgsShape = {
@@ -107,10 +113,15 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     return `Error: Failed to queue ctx_reduce operations. ${message}`;
                 }
                 const queued = typeof record.queued === "number" ? record.queued : 0;
+                const unknown = unknownTagNumbers(record);
+                const unknownDetail =
+                    unknown.length > 0 ? ` Tags ${unknown.join(", ")} not found.` : "";
                 if (queued <= 0) {
-                    return "All requested tags were already queued or processed. No new action is needed.";
+                    return unknown.length > 0
+                        ? `All known requested tags were already queued or processed. No new action is needed.${unknownDetail}`
+                        : "All requested tags were already queued or processed. No new action is needed.";
                 }
-                return `Queued: drop ${formatRawDropForAck(args.drop)}.`;
+                return `Queued: drop ${formatRawDropForAck(args.drop, unknown)}.${unknownDetail}`;
             } catch (error) {
                 return `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`;
             }

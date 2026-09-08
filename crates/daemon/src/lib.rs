@@ -5685,6 +5685,9 @@ impl Handler {
                 if let Some(disposition) = &outcome.disposition {
                     resp["disposition"] = json!(disposition);
                 }
+                if !unknown_numbers.is_empty() {
+                    resp["unknown"] = json!(unknown_numbers);
+                }
                 respond(resp)
             }
             Err(error) => PreparedOutcome::Error {
@@ -25512,7 +25515,10 @@ mod tests {
                 "command_id": "mixed-delivery",
             }),
         );
-        assert_eq!(tool_body(delivered), json!({ "ok": true, "queued": 2 }));
+        assert_eq!(
+            tool_body(delivered),
+            json!({ "ok": true, "queued": 2, "unknown": [99, 100] })
+        );
         let pending_after_delivery = store.load_pending_agent_drops("ses").unwrap();
         let retry = handler.handle_agent_drops_value(
             test_route(7),
@@ -27930,7 +27936,10 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(response, json!({ "ok": true, "queued": 2 }));
+        assert_eq!(
+            response,
+            json!({ "ok": true, "queued": 2, "unknown": [99] })
+        );
         let pending = store.load_pending_agent_drops("ses").unwrap();
         assert_eq!(pending.len(), 2);
 
@@ -27992,7 +28001,7 @@ mod tests {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(first, json!({ "ok": true, "queued": 1 }));
+        assert_eq!(first, json!({ "ok": true, "queued": 1, "unknown": [2, 3] }));
 
         let retry = match handler.handle_agent_drops_value(
             test_route(7),
