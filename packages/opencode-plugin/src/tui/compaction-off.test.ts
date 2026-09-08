@@ -14,6 +14,7 @@ function snapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot {
         compartmentCount: 12,
         archivedCompartmentCount: 3,
         memoryCount: 5,
+        memoryState: "available",
         memoryBlockCount: 2,
         pendingOpsCount: 4,
         historianRunning: true,
@@ -21,6 +22,7 @@ function snapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot {
         sessionNoteCount: 2,
         readySmartNoteCount: 1,
         cacheTtl: "5m",
+        lastTransformError: null,
         lastDreamerRunAt: null,
         projectIdentity: null,
         compartmentTokens: 0,
@@ -83,4 +85,12 @@ test("keeps historical compartments as a static archived row", () => {
         { label: "Archived compartments", value: "3" },
     ]);
     expect(activeCountChangedRows).toEqual(initialRows);
+});
+
+test("hides the Notes and Archived rows when their counts are zero or absent", () => {
+    const rows = compactionOffSidebarRows(
+        snapshot({ sessionNoteCount: 0, archivedCompartmentCount: undefined }),
+    );
+
+    expect(rows).toEqual([{ label: "Memories", value: "5" }]);
 });

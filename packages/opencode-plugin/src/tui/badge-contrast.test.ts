@@ -10,7 +10,7 @@ describe("badgeTextColor (AFT parity with #186 safety net)", () => {
     });
 
     test("light theme: background is used verbatim too (near-white label inverse)", () => {
-        const background = { r: 0.97, g: 0.97, b: 0.95, a: 1 };
+        const background = { r: 1, g: 1, b: 1, a: 1 }; // ~3.2:1 against the accent
         expect(badgeTextColor(accent, background)).toBe(background);
     });
 
@@ -25,6 +25,15 @@ describe("badgeTextColor (AFT parity with #186 safety net)", () => {
         const sameAsAccent = { r: 0.6, g: 0.5, b: 0.9, a: 1 };
         const result = badgeTextColor(accent, sameAsAccent);
         expect(result).toBe(readableTextColorOn(accent));
+    });
+
+    test("opaque background below 3:1 against the accent falls back even when channels differ", () => {
+        // Channels differ by 0.07 but contrast is only ~1.3:1; white on the accent is ~12.6:1.
+        const darkAccent = { r: 0.2, g: 0.2, b: 0.2, a: 1 };
+        const nearbyBackground = { r: 0.27, g: 0.27, b: 0.27, a: 1 };
+        const result = badgeTextColor(darkAccent, nearbyBackground);
+        expect(result).not.toBe(nearbyBackground);
+        expect(result).toBe("#ffffff");
     });
 
     test("missing alpha is treated as opaque", () => {
