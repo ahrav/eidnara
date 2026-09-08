@@ -11,11 +11,15 @@ import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
-import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
+import { type ConflictResult, detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { resolveOpenCodeDatabasePath } from "@eidnara/opencode/shared/opencode-database-path";
-import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import {
+    describeProseLength,
+    sanitizeConfigValue,
+    sanitizeDiagnosticText,
+} from "@eidnara/opencode/shared/redaction";
 import { parse as parseJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
@@ -89,6 +93,8 @@ export interface DiagnosticReport {
             auto: boolean;
             prune: boolean;
         };
+        /** Set when conflict detection itself failed; `hasConflict` is then `false` by default, not by evidence. */
+        detectionError?: string;
     };
     logFile: {
         path: string;
@@ -418,7 +424,20 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
                 `(${error instanceof Error ? error.message : String(error)})`,
         );
     }
-    const conflictResult = detectConflicts(cwd, { compactionEnabled });
+    // `detectConflicts` reads the `.omo` config through an unguarded home lookup; a host without a
+    // home directory must still get the rest of the report.
+    let conflictResult: Pick<ConflictResult, "hasConflict" | "reasons" | "nativeCompaction">;
+    let conflictsError: string | undefined;
+    try {
+        conflictResult = detectConflicts(cwd, { compactionEnabled });
+    } catch (error) {
+        conflictsError = error instanceof Error ? error.message : String(error);
+        conflictResult = {
+            hasConflict: false,
+            reasons: [],
+            nativeCompaction: { auto: false, prune: false },
+        };
+    }
     const recentSessions = await collectRecentSessions();
     const opencodeInstallations = describeOpenCodeInstallations(detectOpenCodeInstallations());
     const activeInstallation = opencodeInstallations[0];
@@ -453,6 +472,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
             reasons: conflictResult.reasons,
             compactionEnabled,
             nativeCompaction: conflictResult.nativeCompaction,
+            ...(conflictsError ? { detectionError: conflictsError } : {}),
         },
         logFile: {
             path: logPath,
@@ -515,9 +535,10 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         },
     };
 
+    // Titles are user prose (often the first prompt); the picker keeps them, the shareable report does not.
     const recentSessions = report.recentSessions.map((session) => ({
         sessionId: session.sessionId,
-        title: sanitizeDiagnosticText(session.title),
+        title: session.title ? describeProseLength(session.title) : "",
         directory: sanitizeString(session.directory),
         lastActiveAt: session.lastActiveAt,
     }));
@@ -572,7 +593,11 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- User config parse error: ${describeParseError(report.eidnaraConfig.parseError)}`,
         `- Project config: ${describeConfigTier(report.projectConfig)}`,
         `- Project config parse error: ${describeParseError(report.projectConfig.parseError)}`,
-        `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}`,
+        `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}${
+            report.conflicts.detectionError
+                ? ` (detection failed: ${sanitizeDiagnosticText(report.conflicts.detectionError)})`
+                : ""
+        }`,
         `- Eidnara compaction mode: ${report.conflicts.compactionEnabled ? "on" : "off"}`,
         `- Native compaction: auto=${report.conflicts.nativeCompaction?.auto ?? "unknown"}, prune=${report.conflicts.nativeCompaction?.prune ?? "unknown"}`,
         ...openCodeInstallationTable,

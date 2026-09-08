@@ -7,11 +7,19 @@ function listDatabaseFiles(dirPath: string, filePrefix: string): string[] {
         return [];
     }
 
+    // A candidate removed between the directory read and its stat drops only itself.
     const files = readdirSync(dirPath)
         .filter((file) => file.endsWith(".db") && file.startsWith(filePrefix))
-        .map((file) => join(dirPath, file));
+        .flatMap((file) => {
+            const path = join(dirPath, file);
+            try {
+                return [{ path, mtimeMs: statSync(path).mtimeMs }];
+            } catch {
+                return [];
+            }
+        });
 
-    return files.sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+    return files.sort((left, right) => right.mtimeMs - left.mtimeMs).map((file) => file.path);
 }
 
 /** `OPENCODE_DB_PATH` takes precedence over the default database, channel-specific databases, and storage databases. */

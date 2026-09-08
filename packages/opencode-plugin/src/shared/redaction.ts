@@ -437,8 +437,15 @@ export function hasShareabilitySensitiveText(text: string): boolean {
 const PROMPT_KEY_PATTERN =
     /^(?:prompt|system_prompt|description|tool_descriptions|skip_signatures)$/;
 
+const PROSE_MARKER_PATTERN = /^<REDACTED \d+ chars>$/;
+
+/** Idempotent: a value already reduced to its marker keeps the original length. */
+export function describeProseLength(text: string): string {
+    return PROSE_MARKER_PATTERN.test(text) ? text : `<REDACTED ${text.length} chars>`;
+}
+
 function redactProse(value: unknown): unknown {
-    if (typeof value === "string") return `<REDACTED ${value.length} chars>`;
+    if (typeof value === "string") return describeProseLength(value);
     if (Array.isArray(value)) return value.map(redactProse);
     if (value && typeof value === "object") {
         return Object.fromEntries(

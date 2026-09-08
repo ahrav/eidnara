@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveOpenCodeDatabasePath } from "./opencode-database-path";
@@ -47,6 +47,15 @@ describe("resolveOpenCodeDatabasePath", () => {
         utimesSync(older, new Date(1_000_000), new Date(1_000_000));
         utimesSync(newer, new Date(2_000_000), new Date(2_000_000));
         expect(resolveOpenCodeDatabasePath(root)).toBe(newer);
+    });
+
+    test("skips a candidate that vanishes before it is statted", () => {
+        const root = dataDir();
+        const valid = join(root, "opencode", "opencode-dev.db");
+        writeFileSync(valid, "");
+        // A dangling symlink is listed by readdir but fails stat, like a database rotated mid-walk.
+        symlinkSync(join(root, "gone.db"), join(root, "opencode", "opencode-beta.db"));
+        expect(resolveOpenCodeDatabasePath(root)).toBe(valid);
     });
 
     test("falls back to a storage database and otherwise throws", () => {

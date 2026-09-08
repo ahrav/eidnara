@@ -60,6 +60,13 @@ describe("detectOpenCode", () => {
         expect(detectOpenCode(d).kind).toBe("none");
     });
 
+    it("accepts a hit from a relative PATH entry by resolving it first", () => {
+        const relativeHit = join("bin", "opencode");
+        const resolved = join(process.cwd(), relativeHit);
+        const d = deps(new Set([resolved]), "linux", () => relativeHit);
+        expect(detectOpenCode(d)).toEqual({ kind: "cli", binary: resolved });
+    });
+
     it("reports cli when a bare opencode is on PATH", () => {
         const pathBinary = "/somewhere/opencode";
         const result = detectOpenCode(deps(new Set([pathBinary]), "linux", () => pathBinary));

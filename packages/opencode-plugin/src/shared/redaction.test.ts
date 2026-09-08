@@ -5,6 +5,7 @@ import os from "node:os";
 
 import vocabulary from "./fixtures/redaction-vocabulary-v1.json";
 import {
+    describeProseLength,
     hasShareabilitySensitiveText,
     redactSecretText,
     SECRET_QUALIFIERS,
@@ -569,6 +570,16 @@ describe("sanitizeConfigValue prompt-bearing fields", () => {
             prompt_surface: { tool_descriptions: { bash: "<REDACTED 6 chars>" } },
             skip_signatures: ["<REDACTED 7 chars>", "<REDACTED 7 chars>"],
             model: "anthropic/claude",
+        });
+    });
+});
+
+describe("describeProseLength", () => {
+    test("is idempotent so a second sanitization pass keeps the original length", () => {
+        expect(describeProseLength("x".repeat(47))).toBe("<REDACTED 47 chars>");
+        expect(describeProseLength("<REDACTED 47 chars>")).toBe("<REDACTED 47 chars>");
+        expect(sanitizeConfigValue(sanitizeConfigValue({ prompt: "x".repeat(47) }))).toEqual({
+            prompt: "<REDACTED 47 chars>",
         });
     });
 });

@@ -370,9 +370,10 @@ describe("bundleIssueReport session filter", () => {
             }),
             "ses_keepme0001",
         );
-        expect(body).toContain("Selected session title");
+        expect(body).toContain("<REDACTED 22 chars>");
         expect(body).toContain("project-a");
         expect(body).not.toContain("Unrelated session title");
+        expect(body).not.toContain("Selected session title");
         expect(body).not.toContain("project-b");
         expect(body).not.toContain("ses_other00002");
         expect(body).not.toContain("ses_other00003");
@@ -394,7 +395,29 @@ describe("bundleIssueReport session filter", () => {
                 ],
             }),
         );
-        expect(body).toContain("Unrelated session title");
+        expect(body).toContain("<REDACTED 23 chars>");
+        expect(body).not.toContain("Unrelated session title");
+    });
+});
+
+describe("renderDiagnosticsMarkdown conflict detection failure", () => {
+    it("reports a detection error alongside the default no-conflict verdict", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-render-conflicts-"));
+        tempDirs.push(root);
+        const markdown = renderDiagnosticsMarkdown(
+            makeReport(root, {
+                conflicts: {
+                    hasConflict: false,
+                    reasons: [],
+                    compactionEnabled: true,
+                    nativeCompaction: { auto: false, prune: false },
+                    detectionError: "uv_os_homedir returned ENOENT at /home/alice/.omo",
+                },
+            }),
+        );
+        expect(markdown).toContain(
+            "- Conflicts detected: none (detection failed: uv_os_homedir returned ENOENT at /home/<USER>/.omo)",
+        );
     });
 });
 
@@ -965,9 +988,9 @@ describe("bundleIssueReport secret redaction", () => {
             expect(body).toContain(
                 "- Project config parse error: EACCES: permission denied, open '/Users/<USER>/project/.eidnara/eidnara.json'",
             );
-            expect(body).toContain(
-                '"title": "Problem at /Users/<USER>/private token=<REDACTED:token>"',
-            );
+            // Session titles are user prose; only their length is shared.
+            expect(body).toContain('"title": "<REDACTED 44 chars>"');
+            expect(body).not.toContain("Problem at");
             expect(body).toContain("### OpenCode installations");
             expect(body).toContain(
                 "| [active] | `/Users/<USER>/.opencode/bin/opencode` | 1.18.0 | PATH |",
