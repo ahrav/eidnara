@@ -644,6 +644,57 @@ describe("constrainProjectThresholdOverrides", () => {
         expect(tokenWarnings[0]).toContain("cannot introduce");
     });
 
+    it("reads a slash-bearing project key as a possible bare model ID as well", () => {
+        // `google/foo/bar` resolves bare `foo/bar` before `google/*`, so a project `foo/bar`
+        // must also clear every trusted provider wildcard.
+        const trusted = { default: 65, "google/*": 85 };
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { ...trusted, "foo/bar": 80 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { "foo/bar": 80 } },
+            trustedBaseConfig: { execute_threshold_percentage: trusted },
+        });
+        expect(mergedRaw.execute_threshold_percentage).toEqual(trusted);
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage.foo/bar")]);
+
+        const accepted: Record<string, unknown> = {
+            execute_threshold_percentage: { ...trusted, "foo/bar": 85 },
+        };
+        const acceptedWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: accepted,
+            projectRaw: { execute_threshold_percentage: { "foo/bar": 85 } },
+            trustedBaseConfig: { execute_threshold_percentage: trusted },
+        });
+        expect(accepted.execute_threshold_percentage).toEqual(trusted);
+        expect(acceptedWarnings).toHaveLength(1);
+
+        const raised: Record<string, unknown> = {
+            execute_threshold_percentage: { ...trusted, "foo/bar": 90 },
+        };
+        const raisedWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: raised,
+            projectRaw: { execute_threshold_percentage: { "foo/bar": 90 } },
+            trustedBaseConfig: { execute_threshold_percentage: trusted },
+        });
+        expect(raised.execute_threshold_percentage).toEqual({ ...trusted, "foo/bar": 90 });
+        expect(raisedWarnings).toHaveLength(0);
+
+        // Tokens: without a default, the bare reading of `foo/bar` is uncovered even when the
+        // qualified reading hits `foo/*`, so the override would introduce a threshold elsewhere.
+        const tokens: Record<string, unknown> = {
+            execute_threshold_tokens: { "foo/*": 20_000, "foo/bar": 30_000 },
+        };
+        const tokenWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: tokens,
+            projectRaw: { execute_threshold_tokens: { "foo/bar": 30_000 } },
+            trustedBaseConfig: { execute_threshold_tokens: { "foo/*": 20_000 } },
+        });
+        expect(tokens.execute_threshold_tokens).toEqual({ "foo/*": 20_000 });
+        expect(tokenWarnings[0]).toContain("cannot introduce");
+    });
+
     it("preserves a trusted __proto__ model key when serializing the merged thresholds", () => {
         const trustedPercentage = JSON.parse('{"default":65,"__proto__":90}') as Record<
             string,

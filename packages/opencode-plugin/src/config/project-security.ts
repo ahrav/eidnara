@@ -228,10 +228,12 @@ function isDashPrefix(candidate: string, key: string): boolean {
 
 /**
  * Returns the trusted threshold that a project per-model key would shadow at runtime.
- * Qualified keys use `modelKeyLookupOrder`; bare keys can be reached from any provider.
- * A bare key must therefore exceed every matching trusted wildcard and dash-prefix.
- * Without a trusted default, a bare key is covered only by a trusted bare dash-prefix, because
- * qualified keys and wildcards reach a single provider and the bare key reaches every provider.
+ *
+ * The qualified reading follows `modelKeyLookupOrder`.
+ * The bare reading applies under every provider and competes with each trusted wildcard and bare dash-prefix.
+ * A key with a slash keeps the bare reading because model IDs may contain slashes: `openrouter/foo/bar` resolves bare `foo/bar` before `openrouter/*`.
+ * The project override must exceed both trusted baselines.
+ * Without a trusted default, only a trusted bare dash-prefix covers the bare reading; an uncovered reading is an introduction.
  */
 function resolveTrustedThreshold<T extends number | undefined>(
     base: { defaultValue: T; overrides: Map<string, number> },
@@ -240,24 +242,44 @@ function resolveTrustedThreshold<T extends number | undefined>(
     const exact = base.overrides.get(projectKey);
     if (exact !== undefined) return exact;
 
-    if (projectKey.includes("/")) {
-        const isWildcard = projectKey.endsWith("/*");
-        for (const candidate of modelKeyLookupOrder(projectKey)) {
-            // Skip the bare `*` candidate for provider wildcards: it is never a real model ID.
-            if (isWildcard && candidate.source === "bare") continue;
-            const value = base.overrides.get(candidate.key);
-            if (value !== undefined) return value;
-        }
-        return base.defaultValue;
+    const bare = bareBaseline(base, projectKey);
+    if (!projectKey.includes("/")) {
+        return bare.covered ? bare.effective : base.defaultValue;
     }
 
+    const qualified = qualifiedBaseline(base, projectKey);
+    if (projectKey.endsWith("/*")) return qualified;
+    if (!bare.covered) return base.defaultValue;
+    if (qualified === undefined) return bare.effective;
+    if (bare.effective === undefined) return qualified;
+    return Math.max(qualified, bare.effective);
+}
+
+function qualifiedBaseline<T extends number | undefined>(
+    base: { defaultValue: T; overrides: Map<string, number> },
+    projectKey: string,
+): T | number {
+    const isWildcard = projectKey.endsWith("/*");
+    for (const candidate of modelKeyLookupOrder(projectKey)) {
+        // Skip the bare `*` candidate for provider wildcards: it is never a real model ID.
+        if (isWildcard && candidate.source === "bare") continue;
+        const value = base.overrides.get(candidate.key);
+        if (value !== undefined) return value;
+    }
+    return base.defaultValue;
+}
+
+function bareBaseline<T extends number | undefined>(
+    base: { defaultValue: T; overrides: Map<string, number> },
+    projectKey: string,
+): { effective: T | number; covered: boolean } {
     let effective: T | number = base.defaultValue;
-    let coveredEverywhere = base.defaultValue !== undefined;
+    let covered = base.defaultValue !== undefined;
     for (const [key, value] of base.overrides) {
         const slash = key.indexOf("/");
         if (slash < 0) {
             if (!isDashPrefix(key, projectKey)) continue;
-            coveredEverywhere = true;
+            covered = true;
         } else {
             const modelPart = key.slice(slash + 1);
             // `provider/<bare>` precedes the bare key in the walk, so the bare key cannot shadow it.
@@ -266,7 +288,7 @@ function resolveTrustedThreshold<T extends number | undefined>(
         }
         if (effective === undefined || value > effective) effective = value;
     }
-    return coveredEverywhere ? effective : base.defaultValue;
+    return { effective, covered };
 }
 
 /**
