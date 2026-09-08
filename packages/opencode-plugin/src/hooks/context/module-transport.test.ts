@@ -13,6 +13,7 @@ import { join } from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import productionInputs from "../../../../../release/production-inputs.lock.json";
 import {
+    BROCA_CREDENTIAL_NAMES,
     Deadline,
     HostCallError,
     type HostClient,
@@ -38,6 +39,7 @@ type TransportInternals = {
     routes: Map<string, { route: RouteHandle; generation: number }>;
     clientOptions(deadline?: Deadline): HostClientOptions;
     canonicalRoot(root: string): string;
+    invalidateConnection(client?: HostClient | null): Promise<void>;
     ensureConnected(
         deadline: Deadline,
         signal?: AbortSignal,
@@ -49,6 +51,7 @@ type TransportInternals = {
         signal?: AbortSignal,
     ): Promise<unknown>;
     call: HostModuleTransport["call"];
+    closeSession: HostModuleTransport["closeSession"];
 };
 
 function internals(transport: HostModuleTransport): TransportInternals {
@@ -272,6 +275,302 @@ describe("route keys follow the filesystem", () => {
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
+    });
+});
+
+describe("transient route-open rejections retry inside the deadline", () => {
+    test("an allowlisted terminal code is retried and a later success is returned", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const route = { channel: 4, epoch: 1 } as unknown as RouteHandle;
+        let attempts = 0;
+        const client = {
+            routeOpen: async () => {
+                attempts += 1;
+                if (attempts < 3) {
+                    throw new HostCallError("terminal", "module is reloading", "module_reloading");
+                }
+                return route;
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const ensured = await transport.ensureRoute("s", "/tmp", Deadline.start(5_000));
+        expect(ensured).toMatchObject({ route });
+        expect(attempts).toBe(3);
+    });
+
+    test("a non-allowlisted terminal code is not retried", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let attempts = 0;
+        const client = {
+            routeOpen: async () => {
+                attempts += 1;
+                throw new HostCallError("terminal", "no such target", "unknown_target");
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        await expect(
+            transport.ensureRoute("s", "/tmp", Deadline.start(5_000)),
+        ).rejects.toMatchObject({ code: "unknown_target" });
+        expect(attempts).toBe(1);
+    });
+});
+
+describe("a local close wins over recovery", () => {
+    test("a body is not replayed after closeSession fenced the in-flight opening", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let opens = 0;
+        let finishOpen: ((route: RouteHandle) => void) | undefined;
+        const client = {
+            routeOpen: () =>
+                new Promise<RouteHandle>((resolve) => {
+                    opens += 1;
+                    finishOpen = resolve;
+                }),
+            closeRoute: async () => {},
+            request: async () => ({ ok: true }),
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const call = transport.call({
+            sessionId: "s",
+            projectRoot: "/tmp",
+            method: "session.status",
+            body: {},
+        });
+        await Bun.sleep(0);
+        expect(opens).toBe(1);
+        transport.closeSession("s");
+        finishOpen?.({ channel: 9, epoch: 1 } as unknown as RouteHandle);
+
+        await expect(call).rejects.toMatchObject({ code: "session_closed" });
+        expect(opens).toBe(1);
+    });
+
+    test("a close during connection setup stops the body before it is written", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let requests = 0;
+        const route = { channel: 9, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            request: async () => {
+                requests += 1;
+                return { ok: true };
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        let finishSetup: (() => void) | undefined;
+        transport.ensureRoute = async (sessionId) => {
+            await new Promise<void>((resolve) => {
+                finishSetup = resolve;
+            });
+            return { client, route, routeKey: `${sessionId}\0/tmp`, generation: 0 };
+        };
+
+        const call = transport.call({
+            sessionId: "s",
+            projectRoot: "/tmp",
+            method: "session.delete",
+            body: {},
+        });
+        await Bun.sleep(0);
+        transport.closeSession("s");
+        finishSetup?.();
+
+        await expect(call).rejects.toMatchObject({ code: "session_closed" });
+        expect(requests).toBe(0);
+    });
+});
+
+describe("credential rotation during a route bind", () => {
+    test("a route bound while credentials changed is closed and bound again", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const credentialName = BROCA_CREDENTIAL_NAMES[0] as string;
+        const previous = process.env[credentialName];
+        const opened: RouteHandle[] = [];
+        const closed: RouteHandle[] = [];
+        const client = {
+            routeOpen: async () => {
+                const route = { channel: opened.length + 1, epoch: 1 } as unknown as RouteHandle;
+                opened.push(route);
+                if (opened.length === 1) process.env[credentialName] = `${previous ?? ""}rotated`;
+                return route;
+            },
+            closeRoute: async (route: RouteHandle) => {
+                closed.push(route);
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+        try {
+            const ensured = await transport.ensureRoute("s", "/tmp", Deadline.start(5_000));
+            expect(opened).toHaveLength(2);
+            expect(ensured).toMatchObject({ route: opened[1] });
+            await Bun.sleep(0);
+            expect(closed).toEqual([opened[0]]);
+            const again = await transport.ensureRoute("s", "/tmp", Deadline.start(5_000));
+            expect(again).toMatchObject({ route: opened[1] });
+            expect(opened).toHaveLength(2);
+        } finally {
+            if (previous === undefined) delete process.env[credentialName];
+            else process.env[credentialName] = previous;
+        }
+    });
+});
+
+describe("route opening observes the caller's abort", () => {
+    test("an abort while routeOpen is pending settles the caller and lets the open finish into the cache", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let finishOpen: ((route: RouteHandle) => void) | undefined;
+        const route = { channel: 3, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            routeOpen: () =>
+                new Promise<RouteHandle>((resolve) => {
+                    finishOpen = resolve;
+                }),
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const controller = new AbortController();
+        const reason = new Error("caller gave up");
+        const waiting = transport.ensureRoute(
+            "s",
+            "/tmp",
+            Deadline.start(10_000),
+            controller.signal,
+        );
+        controller.abort(reason);
+        await expect(waiting).rejects.toBe(reason);
+
+        expect(finishOpen).toBeDefined();
+        finishOpen?.(route);
+        await Bun.sleep(0);
+        const cached = await transport.ensureRoute("s", "/tmp", Deadline.start(10_000));
+        expect(cached).toMatchObject({ route });
+    });
+
+    test("a joiner of a shared opening times out on its own deadline", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const client = {
+            routeOpen: () => new Promise<RouteHandle>(() => {}),
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const controller = new AbortController();
+        const first = transport.ensureRoute("s", "/tmp", Deadline.start(30_000), controller.signal);
+        controller.abort(new Error("first gave up"));
+        await first.catch(() => undefined);
+
+        const joined = await Promise.race([
+            transport.ensureRoute("s", "/tmp", Deadline.start(20)).catch((error: unknown) => error),
+            Bun.sleep(500).then(() => "still_waiting"),
+        ]);
+        expect(joined).toMatchObject({ code: "ETIMEDOUT" });
+    });
+
+    test("an opening bound under older credentials is fenced, not joined", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const opens: Array<(route: RouteHandle) => void> = [];
+        const closed: RouteHandle[] = [];
+        const client = {
+            routeOpen: () =>
+                new Promise<RouteHandle>((resolve) => {
+                    opens.push(resolve);
+                }),
+            closeRoute: async (route: RouteHandle) => {
+                closed.push(route);
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+        const credentialName = BROCA_CREDENTIAL_NAMES[0] as string;
+        const previous = process.env[credentialName];
+        try {
+            const controller = new AbortController();
+            const first = transport.ensureRoute(
+                "s",
+                "/tmp",
+                Deadline.start(10_000),
+                controller.signal,
+            );
+            controller.abort(new Error("first gave up"));
+            await first.catch(() => undefined);
+            expect(opens).toHaveLength(1);
+
+            process.env[credentialName] = `${previous ?? ""}rotated`;
+            const second = transport.ensureRoute("s", "/tmp", Deadline.start(10_000));
+            await Bun.sleep(0);
+            expect(opens).toHaveLength(2);
+
+            const staleRoute = { channel: 1, epoch: 1 } as unknown as RouteHandle;
+            const freshRoute = { channel: 2, epoch: 1 } as unknown as RouteHandle;
+            opens[0]?.(staleRoute);
+            opens[1]?.(freshRoute);
+            expect(await second).toMatchObject({ route: freshRoute });
+            await Bun.sleep(0);
+            expect(closed).toEqual([staleRoute]);
+        } finally {
+            if (previous === undefined) delete process.env[credentialName];
+            else process.env[credentialName] = previous;
+        }
+    });
+});
+
+describe("possibly sent bodies fence the session lane", () => {
+    test("the lane stays held until the superseded connection's teardown settles", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let releaseTeardown: (() => void) | undefined;
+        const teardown = new Promise<void>((resolve) => {
+            releaseTeardown = resolve;
+        });
+        transport.invalidateConnection = () => teardown;
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            request: () =>
+                Promise.reject(
+                    new HostCallError("outcome_unknown", "deadline after send", "request_deadline"),
+                ),
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureRoute = async () => ({
+            client,
+            route,
+            routeKey: "s\0/tmp",
+            generation: 0,
+        });
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: {},
+            }),
+        ).rejects.toMatchObject({ kind: "outcome_unknown" });
+
+        let secondSettled = false;
+        const second = transport
+            .call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: {},
+                timeoutMs: 200,
+            })
+            .catch((error: unknown) => error)
+            .finally(() => {
+                secondSettled = true;
+            });
+        await Bun.sleep(20);
+        expect(secondSettled).toBe(false);
+        releaseTeardown?.();
+        await second;
+        expect(secondSettled).toBe(true);
     });
 });
 

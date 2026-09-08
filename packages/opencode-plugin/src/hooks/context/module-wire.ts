@@ -14,6 +14,13 @@ export const MODULE_ITEM_CONTINUATION_CHUNK_BYTES = 64 * 1024;
 export const MODULE_ITEM_CONTINUATION_KEY = "__shadow_item_continuation";
 export const MODULE_ORDINAL_PAGE_SIZE = 500;
 
+/** Matches the daemon's marker check in `assemble_transform_page_field`. */
+function looksLikeContinuationMarker(value: unknown): boolean {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    const marker = (value as Record<string, unknown>)[MODULE_ITEM_CONTINUATION_KEY];
+    return marker !== null && typeof marker === "object" && !Array.isArray(marker);
+}
+
 export interface ModuleNormalizationRecord {
     kind: "tag_prefix" | "ctx_search_hint" | "summary_message";
     message_id: string | null;
@@ -154,7 +161,12 @@ function getMessageId(message: MessageLike): string | null {
 
 /** An explicit absolute ordinal the daemon reads with `Value::as_u64`; zero is a valid value. */
 function wireOrdinal(value: unknown): number | undefined {
-    return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+    return typeof value === "number" &&
+        Number.isInteger(value) &&
+        value >= 0 &&
+        wireIntegerText(value) !== undefined
+        ? value
+        : undefined;
 }
 
 /** The daemon's `media_kind` classification of a MIME type. */
@@ -201,6 +213,24 @@ function mediaBlockFromPart(part: Record<string, unknown>): Record<string, unkno
 
 /** The daemon's `opaque_block` source for OpenCode-origin blocks. */
 const OPAQUE_SOURCE = { type: "harness", harness: "opencode" } as const;
+
+/** The daemon's `opencode_origin`: provider and model ids from a nested `model` or the value itself. */
+function opencodeOrigin(
+    value: Record<string, unknown>,
+): { api: string; provider: string; model: string } | undefined {
+    const model =
+        value.model !== null && typeof value.model === "object"
+            ? (value.model as Record<string, unknown>)
+            : value;
+    const provider = [model.providerID, model.provider, value.providerID, value.provider].find(
+        (candidate) => typeof candidate === "string",
+    );
+    const modelId = [model.modelID, model.model, value.modelID, value.model].find(
+        (candidate) => typeof candidate === "string",
+    );
+    if (typeof provider !== "string" || typeof modelId !== "string") return undefined;
+    return { api: provider, provider, model: modelId };
+}
 
 /** The daemon's `opaque_arc`: an approval arc for a part carrying a string `approvalId`. */
 function opaqueArc(
@@ -725,7 +755,10 @@ export function buildPagedModuleTransformPayloads(
         };
 
         for (const item of items) {
-            if (appendUnit(item.field, item.value)) continue;
+            // The daemon reads any object-valued reserved key as a marker, so an item that carries one itself travels as a continuation; its JSON text reassembles to the original value.
+            if (!looksLikeContinuationMarker(item.value) && appendUnit(item.field, item.value)) {
+                continue;
+            }
             const serialized = JSON.stringify(item.value) ?? "null";
             const bytes = Buffer.from(serialized, "utf8");
             const chunks: string[] = [];
@@ -815,11 +848,19 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                 ? (raw.info as Record<string, unknown>)
                 : raw;
         const id =
-            (typeof info.id === "string" && info.id.length > 0 && info.id) ||
-            `opencode-${crypto.createHash("sha256").update(JSON.stringify(message)).digest("hex").slice(0, 24)}`;
+            typeof info.id === "string"
+                ? info.id
+                : typeof raw.id === "string"
+                  ? raw.id
+                  : `opencode-hash-${stableHashPrefix(message, 24)}`;
         const ordinal =
             wireOrdinal(raw.absolute_ordinal) ?? wireOrdinal(info.absolute_ordinal) ?? index + 1;
-        const role = typeof info.role === "string" ? info.role : "user";
+        const role =
+            typeof info.role === "string"
+                ? info.role
+                : typeof raw.role === "string"
+                  ? raw.role
+                  : "user";
         const parts = Array.isArray(raw.parts) ? raw.parts : [];
         const synthetic = isSyntheticMessageParts(parts);
         const content: Record<string, unknown>[] = [];
@@ -885,10 +926,13 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                             ? part.args
                             : {};
                 const callId =
-                    (typeof part.callID === "string" && part.callID) ||
-                    (typeof part.callId === "string" && part.callId) ||
-                    (typeof part.id === "string" && part.id) ||
-                    `synth-tool-${ordinal}-${partIndex}-${toolName}-${stableHashPrefix(input, 12)}`;
+                    typeof part.callID === "string"
+                        ? part.callID
+                        : typeof part.callId === "string"
+                          ? part.callId
+                          : typeof part.id === "string"
+                            ? part.id
+                            : `synth-tool-${ordinal}-${partIndex}-${toolName}-${stableHashPrefix(input, 12)}`;
                 const metadata =
                     part.metadata !== null && typeof part.metadata === "object"
                         ? (part.metadata as Record<string, unknown>)
@@ -949,12 +993,14 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                 });
             }
         }
+        const origin = opencodeOrigin(info) ?? (info === raw ? undefined : opencodeOrigin(raw));
         return {
             mid: id,
             ordinal,
             ck: {
                 role,
                 content,
+                ...(origin !== undefined ? { origin } : {}),
                 meta: {
                     harness_id: id,
                     ordinal,

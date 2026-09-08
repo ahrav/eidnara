@@ -7,6 +7,7 @@ import {
     __moduleWireTest,
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
+    MODULE_ITEM_CONTINUATION_KEY,
     MODULE_PAGE_MAX_BYTES,
     resolveOrdinalsForModule,
 } from "./module-wire";
@@ -40,6 +41,24 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
     });
 
+    it("preserves an explicitly empty tool-call id as the daemon does", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_empty_call", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "",
+                        id: "part_1",
+                        state: { status: "pending" },
+                    },
+                ],
+            },
+        ]);
+        expect((encoded.ck.content as Array<{ kind: { id: string } }>)[0]?.kind.id).toBe("");
+    });
+
     it("preserves an explicit zero absolute ordinal", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
@@ -51,6 +70,18 @@ describe("encodeOpenCodeMessagesToCk", () => {
 
         expect(encoded.ordinal).toBe(0);
         expect(encoded.ck.meta).toMatchObject({ ordinal: 0, synthetic: true });
+    });
+
+    it("ignores explicit ordinals the daemon cannot read as u64", () => {
+        const ordinals = encodeOpenCodeMessagesToCk([
+            { info: { id: "o1", role: "user" }, parts: [], absolute_ordinal: 1e21 },
+            { info: { id: "o2", role: "user" }, parts: [], absolute_ordinal: 2 ** 64 },
+            { info: { id: "o3", role: "user" }, parts: [], absolute_ordinal: -1 },
+            { info: { id: "o4", role: "user" }, parts: [], absolute_ordinal: 1.5 },
+            { info: { id: "o5", role: "user" }, parts: [], absolute_ordinal: 2 ** 63 },
+        ]).map((message) => message.ordinal);
+        // The first four fall back to `index + 1`; 2^63 survives because its wire text fits u64.
+        expect(ordinals).toEqual([1, 2, 3, 4, 2 ** 63]);
     });
 
     it("propagates provider-executed metadata to the call and result blocks", () => {
@@ -393,6 +424,59 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
         expect(kinds[2]).not.toHaveProperty("arc");
         expect(kinds[3]).not.toHaveProperty("arc");
+    });
+
+    it("falls back to the daemon's message id chain and stable hash", () => {
+        const [topLevel, hashed] = encodeOpenCodeMessagesToCk([
+            { info: { role: "user" }, id: "top-level-id", parts: [] },
+            {
+                info: { role: "user", time: { created: 1700000000000 } },
+                parts: [{ type: "text", text: "hi" }],
+                absolute_ordinal: 3,
+            },
+        ]);
+        expect(topLevel.mid).toBe("top-level-id");
+        // `opencode-hash-` plus `stable_hash_prefix(raw_message, 24)` from the daemon.
+        expect(hashed.mid).toBe("opencode-hash-8f8b01a55552065a9c8c32bd");
+        expect(hashed.ck.meta).toMatchObject({ harness_id: hashed.mid });
+    });
+
+    it("falls back to the top-level role before defaulting to user", () => {
+        const [fromInfo, fromRaw, defaulted] = encodeOpenCodeMessagesToCk([
+            { info: { id: "r1", role: "assistant" }, role: "user", parts: [] },
+            { info: { id: "r2" }, role: "assistant", parts: [] },
+            { info: { id: "r3" }, parts: [] },
+        ]);
+        expect([fromInfo.ck.role, fromRaw.ck.role, defaulted.ck.role]).toEqual([
+            "assistant",
+            "assistant",
+            "user",
+        ]);
+    });
+
+    it("carries the daemon's message origin from provider and model ids", () => {
+        const [nested, flat, none] = encodeOpenCodeMessagesToCk([
+            {
+                info: {
+                    id: "m1",
+                    role: "assistant",
+                    model: { providerID: "anthropic", modelID: "claude" },
+                },
+                parts: [],
+            },
+            {
+                info: { id: "m2", role: "assistant", providerID: "openai", modelID: "gpt" },
+                parts: [],
+            },
+            { info: { id: "m3", role: "user" }, parts: [] },
+        ]);
+        expect(nested.ck.origin).toEqual({
+            api: "anthropic",
+            provider: "anthropic",
+            model: "claude",
+        });
+        expect(flat.ck.origin).toEqual({ api: "openai", provider: "openai", model: "gpt" });
+        expect(none.ck).not.toHaveProperty("origin");
     });
 
     it("encodes file and image parts as media blocks", () => {
@@ -1051,6 +1135,37 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         expect(pages).toHaveLength(1);
         expect(pages[0]?.page).toBe(body);
         expect(pages[0]?.bytes).toBe(Buffer.byteLength(JSON.stringify(body)));
+    });
+
+    it("sends an item carrying the reserved continuation key as a continuation", () => {
+        const carrier = {
+            mid: "carrier",
+            ordinal: 1,
+            [MODULE_ITEM_CONTINUATION_KEY]: {
+                field: "input",
+                item_index: 9,
+                chunk_index: 0,
+                chunk_total: 1,
+            },
+        };
+        const body = {
+            method: "transform",
+            session_id: "ses-reserved",
+            input: [
+                carrier,
+                ...Array.from({ length: 80 }, (_, index) => ({
+                    mid: `m${index}`,
+                    ordinal: index + 2,
+                    ck: { text: "x".repeat(8_000) },
+                })),
+            ],
+        };
+        const pages = buildPagedModuleTransformPayloads(body);
+        const units = pages.flatMap(({ page }) => page.input as Array<Record<string, unknown>>);
+        expect(units.filter((unit) => unit.mid === "carrier")).toHaveLength(0);
+        const marker = units[0]?.[MODULE_ITEM_CONTINUATION_KEY] as Record<string, unknown>;
+        expect(marker).toEqual({ field: "input", item_index: 0, chunk_index: 0, chunk_total: 1 });
+        expect(JSON.parse(units[0]?.chunk as string)).toEqual(carrier);
     });
 
     it("returns paging sizes that match a later stringify of each page", () => {
