@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { stringify as stringifyJsonc } from "comment-json";
 import { resolveLinkTarget, writeFileAtomic } from "../lib/atomic-write";
 import { ensureParentDir } from "../lib/fs-utils";
@@ -173,7 +174,7 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
         while (localPath !== root) {
             const packagePath = resolve(localPath, "package.json");
             if (existsSync(packagePath)) {
-                const pkg = JSON.parse(readFileSync(packagePath, "utf8")) as { name?: unknown };
+                const pkg = JSON.parse(readRegularFileSync(packagePath)) as { name?: unknown };
                 return pkg.name === PLUGIN_NAME;
             }
             localPath = dirname(localPath);

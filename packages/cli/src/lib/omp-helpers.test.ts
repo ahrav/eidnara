@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -56,6 +57,20 @@ describe("OMP binary discovery", () => {
             source: "package",
         });
     });
+
+    it.if(process.platform !== "win32")(
+        "skips a package root whose manifest is a FIFO without blocking",
+        () => {
+            const { root, binDir } = makePackageRoot();
+            rmSync(join(root, "pkg", "package.json"));
+            execFileSync("mkfifo", [join(root, "pkg", "package.json")]);
+            process.env.PATH = binDir;
+
+            const started = performance.now();
+            expect(detectOmpBinary()).toBeNull();
+            expect(performance.now() - started).toBeLessThan(5_000);
+        },
+    );
 
     it("ignores the package root when no Bun runtime can execute the CLI script", () => {
         const { root } = makePackageRoot();
@@ -146,6 +161,13 @@ describe.if(process.platform !== "win32")("OMP fallback launchers", () => {
 });
 
 describe("OMP fallback discovery", () => {
+    it("emits only system launchers when no absolute home is known", () => {
+        expect(getOmpFallbackCandidates("linux", undefined)).toEqual([
+            "/usr/local/bin/omp",
+            "/opt/homebrew/bin/omp",
+        ]);
+    });
+
     it("covers standard Windows npm and Bun install directories", () => {
         const home = "C:\\Users\\fox";
         const appData = "C:\\Users\\fox\\AppData\\Roaming";

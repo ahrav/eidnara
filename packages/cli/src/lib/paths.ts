@@ -129,6 +129,12 @@ export function envFirstHomeDir(): string {
     }
 }
 
+/** The home for executable probes; a relative home would make the working directory a search root, so none is returned instead. */
+export function absoluteHomeDir(): string | undefined {
+    const home = envFirstHomeDir();
+    return isAbsolute(home) ? home : undefined;
+}
+
 /* */
 export function getPiAgentDir(): string {
     const envDir = process.env.PI_CODING_AGENT_DIR?.trim();

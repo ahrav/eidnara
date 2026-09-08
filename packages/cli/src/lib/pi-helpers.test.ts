@@ -101,6 +101,14 @@ describe("Pi fallback discovery", () => {
         ]);
     });
 
+    it("emits only system launchers when no absolute home is known", () => {
+        expect(getPiFallbackCandidates("linux", undefined)).toEqual([
+            "/usr/local/bin/pi",
+            "/opt/homebrew/bin/pi",
+        ]);
+        expect(getPiFallbackCandidates("win32", undefined)).toEqual([]);
+    });
+
     it("probes the installer directory, then npm and Bun launchers on Windows", () => {
         const home = "C:\\Users\\fox";
         const appData = "C:\\Users\\fox\\AppData\\Roaming";

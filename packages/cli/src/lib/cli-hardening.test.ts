@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -79,4 +80,18 @@ describe("CLI hardening helpers", () => {
         expect(isDevPathPluginEntry(pathToFileURL(plugin).href)).toBe(true);
         expect(isDevPathPluginEntry(pathToFileURL(theme).href)).toBe(false);
     });
+
+    it.if(process.platform !== "win32")(
+        "rejects a development path whose manifest is a FIFO without blocking",
+        () => {
+            const root = tempRoot();
+            const plugin = join(root, "plugin");
+            mkdirSync(plugin, { recursive: true });
+            execFileSync("mkfifo", [join(plugin, "package.json")]);
+
+            const started = performance.now();
+            expect(isDevPathPluginEntry(pathToFileURL(plugin).href)).toBe(false);
+            expect(performance.now() - started).toBeLessThan(5_000);
+        },
+    );
 });

@@ -56,7 +56,7 @@ type JsoncDocumentResult =
           tree: Record<string, unknown>;
           plain: Record<string, unknown>;
           /** `true` when a number lost precision in parsing, so serializing `tree` would alter it. */
-          lossyNumber: boolean;
+          rewriteHazard: string | null;
       }
     | { kind: "parse-error"; error: ConfigParseError };
 
@@ -97,13 +97,34 @@ function isLossyNumberLiteral(literal: string, value: number): boolean {
     return source.digits !== parsed.digits || source.exponent !== parsed.exponent;
 }
 
-/** `content` must be the text the tree was parsed from, so node offsets line up. */
-function containsLossyNumber(content: string, node: Node): boolean {
+/**
+ * The first document feature that a `comment-json` round trip would not
+ * preserve, or null. `content` must be the text the tree was parsed from, so
+ * node offsets line up.
+ */
+function rewriteHazard(content: string, node: Node): string | null {
     if (node.type === "number") {
         const literal = content.slice(node.offset, node.offset + node.length);
-        return typeof node.value === "number" && isLossyNumberLiteral(literal, node.value);
+        return typeof node.value === "number" && isLossyNumberLiteral(literal, node.value)
+            ? "a numeric literal the parser rounded"
+            : null;
     }
-    return (node.children ?? []).some((child) => containsLossyNumber(content, child));
+    if (node.type === "object") {
+        // Materializing into a JavaScript object keeps one value per key.
+        const seen = new Set<string>();
+        for (const property of node.children ?? []) {
+            const key = property.children?.[0]?.value;
+            if (typeof key !== "string") continue;
+            if (seen.has(key))
+                return `a duplicate ${JSON.stringify(key)} property the parser dropped`;
+            seen.add(key);
+        }
+    }
+    for (const child of node.children ?? []) {
+        const hazard = rewriteHazard(content, child);
+        if (hazard !== null) return hazard;
+    }
+    return null;
 }
 
 /**
@@ -148,7 +169,7 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
             kind: "parsed",
             tree,
             plain: plain as Record<string, unknown>,
-            lossyNumber: containsLossyNumber(text, root),
+            rewriteHazard: rewriteHazard(text, root),
         };
     } catch (error) {
         return { kind: "parse-error", error: new ConfigParseError(path, content, error) };
@@ -166,19 +187,19 @@ export function readJsoncConfig(path: string): JsoncReadResult {
 /**
  * Returns the comment-json tree so a mutated config serializes with its
  * comments intact. A missing file yields an empty object; an unparseable or
- * unsafe one throws instead of being overwritten. A file holding an integer
- * that parsing rounded also throws, because serializing the tree would write
- * the rounded value back over the user's literal.
+ * unsafe one throws instead of being overwritten. A file whose round trip
+ * would change it also throws: a numeric literal that parsing rounded, or a
+ * duplicate property of which only one value survives.
  */
 export function readJsoncConfigForUpdate(path: string): Record<string, unknown> {
     const result = readJsoncDocument(path);
     if (result.kind === "missing") return {};
     if (result.kind === "parse-error") throw result.error;
-    if (result.lossyNumber) {
+    if (result.rewriteHazard !== null) {
         throw new ConfigParseError(
             path,
             "",
-            new Error("a numeric literal the parser rounded would not survive a rewrite"),
+            new Error(`${result.rewriteHazard} would not survive a rewrite`),
         );
     }
     return result.tree;

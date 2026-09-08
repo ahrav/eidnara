@@ -182,6 +182,18 @@ describe("packageManagerBinCandidates", () => {
         expect(candidates[1]).toBe(join("C:\\Users\\fox", "AppData", "Roaming", "npm", "pi.exe"));
     });
 
+    it("emits no home-derived candidates when no absolute home is known", () => {
+        expect(packageManagerBinCandidates("pi", "linux", undefined)).toEqual([
+            "/usr/local/bin/pi",
+            "/opt/homebrew/bin/pi",
+        ]);
+        expect(packageManagerBinCandidates("pi", "win32", undefined)).toEqual([]);
+        expect(packageManagerBinCandidates("pi", "win32", undefined, "D:\\Roaming")).toEqual([
+            join("D:\\Roaming", "npm", "pi.cmd"),
+            join("D:\\Roaming", "npm", "pi.exe"),
+        ]);
+    });
+
     it("prefers APPDATA when set", () => {
         const candidates = packageManagerBinCandidates(
             "pi",
