@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Database } from "../src/shared/sqlite";
 import { resolveOpenCodeDatabasePath } from "./context-dump/database-paths";
 
@@ -34,6 +34,18 @@ function shapeOf(value: unknown, depth = 0): unknown {
     }
 }
 
+/** `JSON.parse` accepts `null` and scalars, which have no `type`; those count as malformed alongside parse errors. */
+function parseEntry(raw: string): { type?: string } | undefined {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return undefined;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as { type?: string };
+}
+
 function printSamples(samples: Map<string, unknown>): void {
     for (const [type, sample] of samples) {
         console.log(`\n[${type}] ${JSON.stringify(shapeOf(sample)).slice(0, 1000)}`);
@@ -50,7 +62,7 @@ function inspectOpenCode(): void {
         );
         return;
     }
-    console.log(`OpenCode DB: ${opencodeDbPath}`);
+    console.log(`OpenCode DB: ${basename(opencodeDbPath)}`);
 
     const db = new Database(opencodeDbPath, { readonly: true });
     // The largest sessions carry the most part variety; the most recently updated carry
@@ -124,12 +136,8 @@ function inspectOpenCode(): void {
         }>;
         scanned += rows.length;
         for (const row of rows) {
-            let parsed: { type?: string };
-            try {
-                parsed = JSON.parse(row.data) as { type?: string };
-            } catch {
-                continue;
-            }
+            const parsed = parseEntry(row.data);
+            if (!parsed) continue;
             const type = parsed.type ?? "<missing>";
             if (!samples.has(type)) samples.set(type, parsed);
         }
@@ -172,15 +180,24 @@ function inspectPi(): void {
             return stat ? [{ path, mtimeMs: stat.mtimeMs }] : [];
         })
         .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    const files = all.slice(0, PI_FILE_LIMIT).map((f) => f.path);
+    const files = all.slice(0, PI_FILE_LIMIT);
     console.log(
         `Pi JSONL files (${files.length} most recent of ${all.length}${all.length > files.length ? "; older files not inspected" : ""}):`,
     );
-    console.table(files.map((path) => ({ path })));
-    for (const file of files) {
+    // Session directories under `~/.pi/agent/sessions` are named after project paths, so only the
+    // file name and modification time are printed.
+    console.table(
+        files.map((f, index) => ({
+            file: `#${index + 1}`,
+            name: basename(f.path),
+            modified: new Date(f.mtimeMs).toISOString(),
+        })),
+    );
+    for (const [index, { path: file }] of files.entries()) {
+        const label = `#${index + 1} ${basename(file)}`;
         const contents = ignoringVanished(() => readFileSync(file, "utf-8"));
         if (contents === undefined) {
-            console.log(`\n${file}\nRemoved before it could be read; skipped`);
+            console.log(`\n${label}\nRemoved before it could be read; skipped`);
             continue;
         }
         const lines = contents.trim().split("\n").filter(Boolean);
@@ -190,10 +207,8 @@ function inspectPi(): void {
         for (const line of lines) {
             // A live session may still be appending its last line, and one damaged
             // entry must not stop the inspection of the remaining files.
-            let parsed: { type?: string };
-            try {
-                parsed = JSON.parse(line) as { type?: string };
-            } catch {
+            const parsed = parseEntry(line);
+            if (!parsed) {
                 malformed++;
                 continue;
             }
@@ -201,7 +216,7 @@ function inspectPi(): void {
             counts.set(type, (counts.get(type) ?? 0) + 1);
             if (!samples.has(type)) samples.set(type, parsed);
         }
-        console.log(`\n${file}`);
+        console.log(`\n${label}`);
         console.log(
             `Entry types: ${[...counts.entries()].map(([type, count]) => `${type} (${count})`).join(", ")}`,
         );

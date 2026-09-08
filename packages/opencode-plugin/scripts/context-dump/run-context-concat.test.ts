@@ -1,7 +1,17 @@
-import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Tokenizer from "ai-tokenizer";
 import * as claude from "ai-tokenizer/encoding/claude";
-import { concatSessionMessages } from "./run-context-concat";
+import {
+    concatSessionMessages,
+    formatAnchor,
+    indexAfterAnchor,
+    parseAnchor,
+    runContextConcat,
+} from "./run-context-concat";
 import type { DumpMessage } from "./types";
 
 const tokenizer = new Tokenizer(claude);
@@ -190,5 +200,102 @@ describe("concatSessionMessages", () => {
         expect(page.endIndex).toBe(0);
         expect(page.messagesWithContent).toBe(0);
         expect(page.hasMore).toBe(false);
+    });
+});
+
+describe("message anchors", () => {
+    function anchored(timeCreated: number, id: string, body: string): DumpMessage {
+        return {
+            info: { role: "user", id, timeCreated },
+            parts: [{ type: "text", text: body }],
+        };
+    }
+
+    test("indexAfterAnchor orders by (timeCreated, id) and skips a deleted anchor", () => {
+        const messages = [
+            anchored(10, "a", "one"),
+            anchored(20, "b", "two"),
+            anchored(20, "c", "three"),
+            anchored(30, "d", "four"),
+        ];
+        expect(indexAfterAnchor(messages, { timeCreated: 20, id: "b" })).toBe(2);
+        expect(indexAfterAnchor(messages, { timeCreated: 20, id: "c" })).toBe(3);
+        expect(indexAfterAnchor(messages, { timeCreated: 30, id: "d" })).toBe(4);
+        // The anchor itself was deleted; resumption lands on the next surviving message.
+        expect(indexAfterAnchor(messages, { timeCreated: 15, id: "gone" })).toBe(1);
+        expect(indexAfterAnchor(messages, { timeCreated: 0, id: "" })).toBe(0);
+    });
+
+    test("formatAnchor and parseAnchor round-trip and reject malformed input", () => {
+        const anchor = { timeCreated: 1788847243651, id: "msg_abc:with:colons" };
+        expect(parseAnchor(formatAnchor(anchor))).toEqual(anchor);
+        expect(() => parseAnchor("nope")).toThrow(/--after expects/);
+        expect(() => parseAnchor("12:")).toThrow(/--after expects/);
+    });
+});
+
+describe("runContextConcat", () => {
+    const savedDbPath = process.env.OPENCODE_DB_PATH;
+    let dir: string | undefined;
+
+    afterEach(() => {
+        if (savedDbPath === undefined) delete process.env.OPENCODE_DB_PATH;
+        else process.env.OPENCODE_DB_PATH = savedDbPath;
+        if (dir) rmSync(dir, { recursive: true, force: true });
+        dir = undefined;
+    });
+
+    function seedDatabase(): { path: string; db: Database } {
+        dir = mkdtempSync(join(tmpdir(), "eidnara-concat-"));
+        const path = join(dir, "opencode.db");
+        const db = new Database(path);
+        db.exec(`
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+        `);
+        const insertMessage = db.prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, 'ses', ?, ?, ?)",
+        );
+        const insertPart = db.prepare(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, 'ses', ?, ?, ?)",
+        );
+        for (const [i, body] of ["one", "two", "three", "four"].entries()) {
+            const id = `m${i}`;
+            const t = 100 + i;
+            insertMessage.run(
+                id,
+                t,
+                t,
+                JSON.stringify({ role: "user", time: { created: t, completed: t } }),
+            );
+            insertPart.run(`p${i}`, id, t, t, JSON.stringify({ type: "text", text: body }));
+        }
+        process.env.OPENCODE_DB_PATH = path;
+        return { path, db };
+    }
+
+    test("endAnchor resumes after deletions of earlier messages", () => {
+        const { db } = seedDatabase();
+        const first = runContextConcat("ses", 13);
+        expect(first.output).toBe("[0] User: one\n[1] User: two");
+        expect(first.hasMore).toBe(true);
+        expect(first.endAnchor).toEqual({ timeCreated: 101, id: "m1" });
+
+        // A compaction cleanup removes the first message before the next page is read.
+        db.prepare("DELETE FROM part WHERE message_id = 'm0'").run();
+        db.prepare("DELETE FROM message WHERE id = 'm0'").run();
+
+        const second = runContextConcat("ses", 1000, first.endAnchor);
+        expect(second.output).toBe("[1] User: three\n[2] User: four");
+        expect(second.hasMore).toBe(false);
+        expect(second.endAnchor).toEqual({ timeCreated: 103, id: "m3" });
+    });
+
+    test("endAnchor is null when the page consumed nothing", () => {
+        seedDatabase();
+        const page = runContextConcat("ses", 1000, { timeCreated: 103, id: "m3" });
+        expect(page.output).toBe("");
+        expect(page.hasMore).toBe(false);
+        expect(page.endAnchor).toBeNull();
     });
 });
