@@ -6,6 +6,7 @@ import {
     sanitizeString,
 } from "./diagnostics-pi";
 import { writeNewFile } from "./fs-utils";
+import { scopeDumpBucketsToSession } from "./historian-dumps";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
 import { readLogTailLines } from "./log-tail";
@@ -71,6 +72,25 @@ function escapeFenceOpeners(lines: string[]): string[] {
     return lines.map((line) => line.replace(/(^|\r)( {0,3})(`{3,})/g, "$1$2\\$3"));
 }
 
+/**
+ * With a session selected, the configuration and log sections describe that session only, so
+ * the session list and the per-project dump metadata are narrowed to match.
+ */
+function scopeReportToSession(
+    report: PiDiagnosticReport,
+    sessionId: string | null,
+): PiDiagnosticReport {
+    if (!sessionId) return report;
+    return {
+        ...report,
+        recentSessions: report.recentSessions.filter((session) => session.sessionId === sessionId),
+        historianDumps: {
+            ...report.historianDumps,
+            byProject: scopeDumpBucketsToSession(report.historianDumps.byProject, sessionId),
+        },
+    };
+}
+
 export async function bundleIssueReport(
     report: PiDiagnosticReport,
     description: string,
@@ -110,7 +130,7 @@ export async function bundleIssueReport(
         `- Node: ${report.nodeVersion}`,
         "",
         "## Diagnostics",
-        renderDiagnosticsMarkdown(report),
+        renderDiagnosticsMarkdown(scopeReportToSession(report, options.sessionFilter ?? null)),
         "",
         "## Recent errors (last 20, sanitized)",
         recentErrorLines.length === 0

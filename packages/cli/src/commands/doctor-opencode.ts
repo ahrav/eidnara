@@ -19,7 +19,11 @@ import {
     isLocalPathPluginEntry,
     matchesPluginEntry,
 } from "../adapters/opencode";
-import { collectDiagnostics, resolveUserLevelPaths } from "../lib/diagnostics-opencode";
+import {
+    collectDiagnostics,
+    readProjectOpenCodeConfigs,
+    resolveUserLevelPaths,
+} from "../lib/diagnostics-opencode";
 import { compactionEnabledFor } from "../lib/eidnara-modes";
 import { parseJsoncObject } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
@@ -280,7 +284,12 @@ export async function runDoctor(
     };
 
     // The doctor only reports plugin entries; `setup` owns every write to these files.
-    const reportPluginEntry = (configPath: string, configName: string, what: string): boolean => {
+    const reportPluginEntry = (
+        configPath: string,
+        configName: string,
+        what: string,
+        registeredInProject = false,
+    ): boolean => {
         let config: Record<string, unknown>;
         try {
             config = parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
@@ -301,6 +310,10 @@ export async function runDoctor(
                 matchesPluginEntry(candidate, PLUGIN_NAME) || isDevPathPluginEntry(candidate),
         );
         if (entry === undefined) {
+            if (registeredInProject) {
+                pass(`${what} registered in a project opencode config (not in ${configName})`);
+                return true;
+            }
             fail(`${what} ${PLUGIN_NAME} is not registered in ${configName}`);
             log.info(`  Run 'setup' to register the ${what}`);
             return false;
@@ -443,11 +456,27 @@ export async function runDoctor(
         }
     }
 
+    // OpenCode merges the project's `opencode.json(c)` over the user config, so a plugin
+    // registered only there is loaded as well; setup honors the same layout.
+    const projectOpencode = readProjectOpenCodeConfigs(cwd);
+    for (const parseError of projectOpencode.parseErrors) {
+        fail(`Could not parse a project opencode config: ${parseError}`);
+    }
     let serverPluginRegistered = false;
     if (paths.opencodeConfigFormat !== "none") {
         const configName =
             paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
-        serverPluginRegistered = reportPluginEntry(paths.opencodeConfig, configName, "Plugin");
+        serverPluginRegistered = reportPluginEntry(
+            paths.opencodeConfig,
+            configName,
+            "Plugin",
+            projectOpencode.hasPlugin,
+        );
+    } else if (projectOpencode.hasPlugin) {
+        pass(
+            `Plugin registered in a project opencode config (${projectOpencode.paths.join(", ")})`,
+        );
+        serverPluginRegistered = true;
     }
 
     const modes = resolveEidnaraModesForDoctor(cwd);

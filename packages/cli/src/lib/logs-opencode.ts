@@ -6,6 +6,7 @@ import {
     renderDiagnosticsMarkdown,
 } from "./diagnostics-opencode";
 import { writeNewFile } from "./fs-utils";
+import { scopeDumpBucketsToSession } from "./historian-dumps";
 import { capBodyToGithubLimit, codeFenceFor, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
 import { readLogTailLines } from "./log-tail";
@@ -103,13 +104,7 @@ function scopeReportToSession(
         recentSessions: report.recentSessions.filter((session) => session.sessionId === sessionId),
         historianDumps: {
             ...report.historianDumps,
-            byProject: report.historianDumps.byProject
-                .filter((bucket) => bucket.sessionIds.includes(sessionId))
-                .map((bucket) => ({
-                    ...bucket,
-                    primarySessionId: sessionId,
-                    sessionIds: [sessionId],
-                })),
+            byProject: scopeDumpBucketsToSession(report.historianDumps.byProject, sessionId),
         },
     };
 }

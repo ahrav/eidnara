@@ -31,6 +31,7 @@ import {
     runOmpCommand,
 } from "../lib/omp-helpers";
 import {
+    envFirstHomeDir,
     getEidnaraLogPath,
     getOmpAgentDir,
     getOmpConfigPath,
@@ -312,9 +313,16 @@ async function runHealthChecks(options: {
         add(results, "pass", "Eidnara runtime config loads successfully");
     else for (const warning of loaded.warnings.slice(0, 5)) add(results, "warn", warning);
 
-    add(results, "info", `OMP config: ${getOmpConfigPath()}`);
-    add(results, "info", `OMP plugin lock: ${getOmpPluginsLockPath()}`);
-    add(results, "info", `OMP sessions: ${getOmpSessionsRoot()}`);
+    // OMP's config root hangs off the home directory; without one the derived paths would be
+    // relative to the working directory, so they are neither reported nor scanned.
+    const ompPathsAvailable = envFirstHomeDir() !== "";
+    if (!ompPathsAvailable) {
+        add(results, "fail", "OMP user-level paths are unavailable: HOME is unset or not absolute");
+    } else {
+        add(results, "info", `OMP config: ${getOmpConfigPath()}`);
+        add(results, "info", `OMP plugin lock: ${getOmpPluginsLockPath()}`);
+        add(results, "info", `OMP sessions: ${getOmpSessionsRoot()}`);
+    }
     const packageDir = getOmpPackageDir();
     if (packageDir) add(results, "info", `OMP package override: ${packageDir}`);
     for (const source of getOmpNonGlobalConfigSources(options.cwd)) {
@@ -327,16 +335,18 @@ async function runHealthChecks(options: {
         `Pi-compatible runtime log: ${logPath}${existsSync(logPath) ? "" : " (not created yet)"}`,
     );
 
-    const sessions = collectPiRecentSessions(getOmpSessionsRoot());
-    if (sessions.status !== "ok") {
-        add(
-            results,
-            "warn",
-            `Some OMP session directories under ${getOmpSessionsRoot()} could not be read`,
-        );
-    }
-    for (const line of describeHistorianDumps(collectPiHistorianDumps(sessions.sessions))) {
-        add(results, line.status, line.message);
+    if (ompPathsAvailable) {
+        const sessions = collectPiRecentSessions(getOmpSessionsRoot());
+        if (sessions.status !== "ok") {
+            add(
+                results,
+                "warn",
+                `Some OMP session directories under ${getOmpSessionsRoot()} could not be read`,
+            );
+        }
+        for (const line of describeHistorianDumps(collectPiHistorianDumps(sessions.sessions))) {
+            add(results, line.status, line.message);
+        }
     }
 
     if (!options.quiet) for (const result of results) printResult(options.prompts, result);

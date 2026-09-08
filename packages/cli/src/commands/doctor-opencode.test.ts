@@ -205,6 +205,33 @@ describe("doctor OpenCode conflict repair", () => {
         }
     });
 
+    it("counts a project-only plugin registration and lets --force repair the conflict", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, { plugin: [], compaction: { auto: true } });
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        mkdirSync(join(cwd, ".opencode"), { recursive: true });
+        writeJsonc(join(cwd, ".opencode", "opencode.json"), { plugin: ["@eidnara/opencode"] });
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ force: true, cwd });
+
+            expect(code).toBe(0);
+            expect(
+                successes.some((message) =>
+                    message.startsWith("Plugin registered in a project opencode config"),
+                ),
+            ).toBe(true);
+            expect(successes).toContain("Fixed: Disabled auto-compaction");
+            expect(
+                errors.some((message) => message.startsWith("Leaving conflicts in place:")),
+            ).toBe(false);
+        } finally {
+            restore();
+        }
+    });
+
     it("returns 1 when --force repairs a conflict but another failure remains", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);

@@ -19,7 +19,12 @@ import { readJsoncLenient } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
 import { readLogTailLines } from "../lib/log-tail";
 import { bundleIssueReport } from "../lib/logs-pi";
-import { getEidnaraLogPath, getPiAgentDir, getPiUserExtensionsPath } from "../lib/paths";
+import {
+    getEidnaraLogPath,
+    getPiAgentDir,
+    getPiUserExtensionsPath,
+    hasPiAgentDir,
+} from "../lib/paths";
 import {
     detectPiBinary,
     getPiVersion,
@@ -30,6 +35,7 @@ import {
 } from "../lib/pi-helpers";
 import { isPromptCancelledError, type PromptIO, promptIO } from "../lib/prompts";
 import { standaloneVersion } from "../lib/semver";
+import { printableBlock } from "../lib/terminal-text";
 import { compareVersionStrings } from "../lib/version";
 import { writePiSettingsPackage } from "./setup-pi";
 
@@ -212,7 +218,13 @@ async function runHealthChecks(options: {
 
     const settingsPath = getPiUserExtensionsPath();
     let packages: unknown[] = [];
-    if (!existsSync(settingsPath)) {
+    if (!hasPiAgentDir()) {
+        add(
+            results,
+            "fail",
+            "Pi user-level paths are unavailable: HOME is unset or not absolute and PI_CODING_AGENT_DIR is not set",
+        );
+    } else if (!existsSync(settingsPath)) {
         add(results, "fail", `Pi settings not found at ${settingsPath}`);
         repairPlan.addPackageEntry = true;
     } else {
@@ -548,7 +560,8 @@ async function runIssueFlow(options: {
             );
         }
 
-        console.log(bundled.bodyMarkdown);
+        // The file keeps the log bytes; the terminal copy cannot move the cursor or forge lines.
+        console.log(printableBlock(bundled.bodyMarkdown));
         options.prompts.log.info(
             `Open https://github.com/ahrav/eidnara/issues/new and attach ${bundled.path}`,
         );

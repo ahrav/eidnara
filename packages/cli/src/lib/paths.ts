@@ -140,6 +140,11 @@ export function getPiAgentDir(): string {
     return join(envFirstHomeDir(), ".pi", "agent");
 }
 
+/** Without a home directory or `PI_CODING_AGENT_DIR`, `getPiAgentDir()` is a working-directory-relative fallback a doctor must not inspect or write. */
+export function hasPiAgentDir(): boolean {
+    return Boolean(process.env.PI_CODING_AGENT_DIR?.trim()) || envFirstHomeDir() !== "";
+}
+
 /** Pi session JSONL root (`<agentDir>/sessions`). */
 export function getPiSessionsRoot(): string {
     return join(getPiAgentDir(), "sessions");

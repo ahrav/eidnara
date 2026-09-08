@@ -20,7 +20,8 @@ afterEach(() => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("OmpAdapter", () => {
+// The fixture is an extensionless `#!/bin/sh` script, which `findOnPath` does not accept on Windows.
+describe.if(process.platform !== "win32")("OmpAdapter", () => {
     it("detects an enabled Eidnara plugin from omp plugin list", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-adapter-"));
         roots.push(root);
@@ -84,6 +85,59 @@ fi
         delete process.env.XDG_DATA_HOME;
         return { root, commandLog };
     }
+
+    /** The fake reports no Eidnara plugin until `plugin install` runs, then reports it enabled. */
+    function makeInstallFake(options: { installFails: boolean }): { commandLog: string } {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-adapter-"));
+        roots.push(root);
+        const bin = join(root, "bin");
+        mkdirSync(bin, { recursive: true });
+        const commandLog = join(root, "commands.log");
+        const installed = join(root, "installed");
+        writeFileSync(
+            join(bin, "omp"),
+            `#!/bin/sh
+if [ "$1 $2 $3" = "plugin list --json" ]; then
+  if [ -f "${installed}" ]; then
+    printf '%s' '{"npm":[{"name":"@eidnara/pi","version":"0.33.0","enabled":true}],"marketplace":[]}'
+  else
+    printf '%s' '{"npm":[],"marketplace":[]}'
+  fi
+elif [ "$1" = "plugin" ]; then
+  echo "$1 $2 $3" >> "${commandLog}"
+  if [ "$2" = "install" ]; then
+    if ${options.installFails ? "true" : "false"}; then echo "registry unreachable" >&2; exit 1; fi
+    : > "${installed}"
+  fi
+fi
+`,
+            { mode: 0o755 },
+        );
+        process.env.PATH = bin;
+        process.env.HOME = root;
+        delete process.env.XDG_DATA_HOME;
+        return { commandLog };
+    }
+
+    it("installs a missing plugin and reports it as added", async () => {
+        const { commandLog } = makeInstallFake({ installFails: false });
+
+        const result = await new OmpAdapter().ensurePluginEntry();
+
+        expect(result.ok).toBe(true);
+        expect(result.action).toBe("added");
+        expect(readFileSync(commandLog, "utf-8").trim()).toBe("plugin install @eidnara/pi");
+    });
+
+    it("reports a failed install without running enable", async () => {
+        const { commandLog } = makeInstallFake({ installFails: true });
+
+        const result = await new OmpAdapter().ensurePluginEntry();
+
+        expect(result.ok).toBe(false);
+        expect(result.message).toContain("registry unreachable");
+        expect(readFileSync(commandLog, "utf-8").trim()).toBe("plugin install @eidnara/pi");
+    });
 
     it("restores the recorded prior state when enablement cannot be verified", async () => {
         const { root, commandLog } = makeUncertainEnableFake({ failDisable: false });
