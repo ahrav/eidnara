@@ -13,6 +13,7 @@ interface AssistantMidTurnRow {
     id?: string;
     finish?: string | null;
     timeCreated?: number;
+    timeCompleted?: number | null;
 }
 
 interface ExistenceRow {
@@ -81,12 +82,14 @@ export function getRawSessionMessageCountFromDb(db: Database, sessionId: string)
     return typeof row?.count === "number" ? row.count : 0;
 }
 
+/** Treat errors reading an existing database as mid-turn; a missing database is idle. */
 export function isMidTurn(_deps: unknown, sessionId: string): boolean {
+    if (!openCodeDbExists()) return false;
     try {
         return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
     } catch (error) {
-        log("[eidnara] failed to inspect OpenCode mid-turn state:", error);
-        return false;
+        log("[eidnara] failed to inspect OpenCode mid-turn state; treating as mid-turn:", error);
+        return true;
     }
 }
 
@@ -95,6 +98,7 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         .prepare(
             `SELECT id,
                     json_extract(data, '$.finish') as finish,
+                    json_extract(data, '$.time.completed') as timeCompleted,
                     time_created as timeCreated
              FROM message
              WHERE session_id = ?
@@ -104,8 +108,10 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         )
         .get(sessionId) as AssistantMidTurnRow | null;
 
+    if (hasNewerRealUserMessage(db, sessionId, latestAssistant?.timeCreated ?? -1)) return true;
     if (typeof latestAssistant?.id !== "string") return false;
-    if (hasNewerRealUserMessage(db, sessionId, latestAssistant.timeCreated)) return false;
+    // A missing `time.completed` marks an assistant message that is still being produced.
+    if (typeof latestAssistant.timeCompleted !== "number") return true;
     if (latestAssistant.finish === "tool-calls") return true;
 
     const partRows = db
@@ -123,12 +129,15 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
     });
 }
 
+/**
+ * A real user message newer than the latest assistant row is a turn whose assistant row has
+ * not been created yet. Pass `-1` when the session has no assistant row.
+ */
 function hasNewerRealUserMessage(
     db: Database,
     sessionId: string,
-    latestAssistantTimeCreated: unknown,
+    sinceTimeCreated: number,
 ): boolean {
-    if (typeof latestAssistantTimeCreated !== "number") return false;
     const row = db
         .prepare(
             `SELECT 1 as one
@@ -148,7 +157,7 @@ function hasNewerRealUserMessage(
                )
              LIMIT 1`,
         )
-        .get(sessionId, latestAssistantTimeCreated) as ExistenceRow | null;
+        .get(sessionId, sinceTimeCreated) as ExistenceRow | null;
     // Parts with synthetic=true, metadata.marker.kind, or an ignored flag do not make a user message real.
     // A user message with at least one non-synthetic, unmarked, non-ignored part counts as real.
     // A partless user message counts as real.
