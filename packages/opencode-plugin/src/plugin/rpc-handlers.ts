@@ -27,6 +27,10 @@ import {
     withReadOnlySessionDb,
 } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
+import {
+    resolveSessionDirectory,
+    type SessionDirectoryDeps,
+} from "../hooks/context/session-directory";
 import { calibrateBuckets, resolveModelCalibration } from "../hooks/context/tokenizer-calibration";
 import { BoundedSessionMap } from "../shared/bounded-session-map";
 import {
@@ -44,6 +48,7 @@ import {
     type WireTailHygieneBaseline,
 } from "../shared/tail-hygiene-status";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
+import type { PluginContext } from "./types";
 
 /** Sessions whose work-metrics carry stays resident. Matches the sticky sidebar cache's session cap, since both hold one entry per polled session. commentlint: allow(JUDGE) */
 const WORK_METRICS_CARRY_MAX_SESSIONS = 100;
@@ -695,13 +700,22 @@ export function registerRpcHandlers(
     args: {
         directory: string;
         config: EidnaraConfig;
-        client: unknown;
+        client: PluginContext["client"] | null;
         liveSessionState: LiveSessionState;
         rustModeModuleClient?: RustModeModuleClient;
     },
 ): void {
     const { directory, config, liveSessionState, rustModeModuleClient } = args;
     const compactionEnabled = isCompactionEnabled(config);
+    // The same maps the hooks share, so a metadata read here pins the route root and records child classification for them too. commentlint: allow(JUDGE)
+    const sessionDirectoryDeps: SessionDirectoryDeps = {
+        client: args.client ?? undefined,
+        directory,
+        sessionDirectoryBySession: liveSessionState.sessionDirectoryBySession,
+        sessionMetadataReadStateBySession: liveSessionState.sessionMetadataReadStateBySession,
+        subagentSessions: liveSessionState.subagentSessions,
+        internalChildSessions: liveSessionState.internalChildSessions,
+    };
 
     // RPC results serialize to JSON, so handler-map values use the JSON-object envelope.
     const rawConfig = config as unknown as Record<string, unknown>;
@@ -770,6 +784,8 @@ export function registerRpcHandlers(
         const dir = String(params.directory ?? directory);
         const modelKey = params.modelKey ? String(params.modelKey) : undefined;
         if (!sessionId) return { error: "unavailable" };
+        // After a restart the child sets are empty; the host read that classifies a restored child runs before `isSubagent` is read.
+        await resolveSessionDirectory(sessionDirectoryDeps, sessionId);
         const inputs = await loadPollInputs(sessionId, dir);
         if (!inputs) return { error: "status detail unavailable" };
         return buildStatusDetail(

@@ -233,6 +233,56 @@ describe("registerRpcHandlers", () => {
         expect(calls).toEqual(["session.status", "session.status"]);
     });
 
+    test("status-detail classifies a restored child from host metadata before reporting isSubagent", async () => {
+        const sessionId = "ses-restored-child";
+        const liveSessionState = createLiveSessionState();
+        const reads: string[] = [];
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: process.cwd(),
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: {
+                session: {
+                    async get(args: { path: { id: string } }) {
+                        reads.push(args.path.id);
+                        return {
+                            data: {
+                                id: args.path.id,
+                                parentID: "ses-parent",
+                                directory: process.cwd(),
+                            },
+                        };
+                    },
+                },
+            } as unknown as NonNullable<Parameters<typeof registerRpcHandlers>[1]["client"]>,
+            liveSessionState,
+            rustModeModuleClient: {
+                async call() {
+                    return { ok: true, result: DAEMON_STATUS };
+                },
+            },
+        });
+        expect(liveSessionState.subagentSessions.has(sessionId)).toBe(false);
+
+        const detail = (await handlers.get("status-detail")?.({
+            sessionId,
+        })) as unknown as StatusDetail;
+        expect(detail.isSubagent).toBe(true);
+        expect(liveSessionState.subagentSessions.has(sessionId)).toBe(true);
+
+        // The completed read is memoized; a second request does not read the host again.
+        await handlers.get("status-detail")?.({ sessionId });
+        expect(reads).toEqual([sessionId]);
+    });
+
     test("a daemon error response fails the poll the same way", async () => {
         const handlers = new Map<string, Handler>();
         const server = {
