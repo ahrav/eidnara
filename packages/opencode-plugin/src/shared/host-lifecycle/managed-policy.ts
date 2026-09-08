@@ -26,6 +26,7 @@ import {
     monotonicNow,
     type ObservationalHealth,
     ReadinessProbeControlError,
+    STORAGE_HARD_BUDGET_MS,
 } from "./policy";
 
 const MAX_PARENT_WALK = 8;
@@ -145,6 +146,7 @@ async function probeManagedStorage(
     root: string,
     budgetMs: number,
     expectedDaemonId?: Uint8Array,
+    signal?: AbortSignal,
 ): Promise<"ready" | "starting" | "unavailable"> {
     const deadline = monotonicNow() + budgetMs;
     const options: HostClientOptions = {
@@ -163,13 +165,23 @@ async function probeManagedStorage(
             });
             assertStorageProbePeer(client, expectedDaemonId);
             const state = storageState(snapshot.metrics);
-            if (state !== "starting" || monotonicNow() >= deadline) return state;
-            await new Promise((resolve) =>
-                setTimeout(
+            // An abort means no waiter remains; the observation is left indeterminate rather than polled to the deadline. commentlint: allow(JUDGE)
+            if (state !== "starting" || monotonicNow() >= deadline || signal?.aborted) return state;
+            await new Promise<void>((resolve) => {
+                const timer = setTimeout(
                     resolve,
                     Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
-                ),
-            );
+                );
+                signal?.addEventListener(
+                    "abort",
+                    () => {
+                        clearTimeout(timer);
+                        resolve();
+                    },
+                    { once: true },
+                );
+            });
+            if (signal?.aborted) return "starting";
         }
     } catch (error) {
         if (error instanceof StorageProbeDaemonMismatchError) throw error;
@@ -374,7 +386,11 @@ type StorageReadinessState = "ready" | "starting" | "unavailable";
 
 export interface ManagedProbeIo {
     compatibility(budgetMs: number, signal?: AbortSignal): Promise<CompatibilityProbeResult>;
-    storage(budgetMs: number, expectedDaemonId?: Uint8Array): Promise<StorageReadinessState>;
+    storage(
+        budgetMs: number,
+        expectedDaemonId?: Uint8Array,
+        signal?: AbortSignal,
+    ): Promise<StorageReadinessState>;
 }
 
 export interface ManagedProbes {
@@ -386,16 +402,61 @@ function daemonKey(daemonId: Uint8Array): string {
     return Buffer.from(daemonId).toString("hex");
 }
 
+interface SharedStoragePoll {
+    result: Promise<StorageReadinessState>;
+    controller: AbortController;
+    waiters: number;
+}
+
+/**
+ * A waiter that outlives its own budget answers `starting`, the state a private poll of that length would have returned; the shared poll keeps running for the waiters still entitled to wait. `onIdle` fires when the last waiter leaves a poll that has not settled. commentlint: allow(JUDGE)
+ */
+function joinStoragePoll(
+    poll: SharedStoragePoll,
+    budgetMs: number,
+    onIdle: () => void,
+): Promise<StorageReadinessState> {
+    poll.waiters += 1;
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const leave = (): void => {
+            if (settled) return;
+            settled = true;
+            if (timer !== null) clearTimeout(timer);
+            poll.waiters -= 1;
+            if (poll.waiters === 0) onIdle();
+        };
+        timer = setTimeout(
+            () => {
+                leave();
+                resolve("starting");
+            },
+            Math.max(1, budgetMs),
+        );
+        poll.result.then(
+            (state) => {
+                leave();
+                resolve(state);
+            },
+            (error: unknown) => {
+                leave();
+                reject(error);
+            },
+        );
+    });
+}
+
 /**
  * The compatibility probe records the storage state with the reporting daemon ID. A storage probe expecting that daemon answers a terminal `ready` or `unavailable` from the record, so readiness and compatibility describe one observation and the storage probe opens no connection of its own; a `starting` record still polls within the storage budget. commentlint: allow(JUDGE)
  *
  * The record is not consumed on read. The policy shares one compatibility probe across concurrent demands and each of them runs its own storage probe, so a one-shot slot would hand the observation to the first waiter and send every other waiter to open a connection. Each later compatibility probe replaces the record, and a storage probe always follows the compatibility probe of its own demand, so no demand reads a record older than its own observation. commentlint: allow(JUDGE)
  *
- * Polls for the same daemon coalesce for the same reason: each connection attaches and prefaults a shared-memory ring, so a burst of demands during startup would otherwise spend admission on redundant probes. commentlint: allow(JUDGE)
+ * Polls for the same daemon coalesce for the same reason: each connection attaches and prefaults a shared-memory ring, so a burst of demands during startup would otherwise spend admission on redundant probes. The shared poll runs on the hard storage budget rather than the first waiter's remaining budget, so a nearly expired waiter arriving first cannot mint a poll too short for the waiters that join it; each waiter bounds its own wait, and the poll is aborted once no waiter remains. commentlint: allow(JUDGE)
  */
 export function managedProbes(io: ManagedProbeIo): ManagedProbes {
     let observed: { daemonId: Uint8Array; state: StorageReadinessState } | null = null;
-    const polling = new Map<string, Promise<StorageReadinessState>>();
+    const polling = new Map<string, SharedStoragePoll>();
     return {
         async compatibilityProbe(budgetMs, signal) {
             const probe = await io.compatibility(budgetMs, signal);
@@ -419,15 +480,26 @@ export function managedProbes(io: ManagedProbeIo): ManagedProbes {
                 return Promise.resolve(record.state);
             }
             const key = daemonKey(expectedDaemonId);
-            const inflight = polling.get(key);
-            if (inflight !== undefined) return inflight;
-            const shared = io.storage(budgetMs, expectedDaemonId);
-            polling.set(key, shared);
-            const evict = (): void => {
-                if (polling.get(key) === shared) polling.delete(key);
-            };
-            void shared.then(evict, evict);
-            return shared;
+            let poll = polling.get(key);
+            if (poll === undefined) {
+                const controller = new AbortController();
+                const created: SharedStoragePoll = {
+                    result: io.storage(STORAGE_HARD_BUDGET_MS, expectedDaemonId, controller.signal),
+                    controller,
+                    waiters: 0,
+                };
+                poll = created;
+                polling.set(key, created);
+                const evict = (): void => {
+                    if (polling.get(key) === created) polling.delete(key);
+                };
+                void created.result.then(evict, evict);
+            }
+            const current = poll;
+            return joinStoragePoll(current, budgetMs, () => {
+                current.controller.abort();
+                if (polling.get(key) === current) polling.delete(key);
+            });
         },
     };
 }
@@ -520,8 +592,8 @@ export function createManagedLifecyclePolicy(
         const probes = managedProbes({
             compatibility: (budgetMs, signal) =>
                 probeManagedCompatibility(root.root, budgetMs, signal),
-            storage: (budgetMs, expectedDaemonId) =>
-                probeManagedStorage(root.root, budgetMs, expectedDaemonId),
+            storage: (budgetMs, expectedDaemonId, signal) =>
+                probeManagedStorage(root.root, budgetMs, expectedDaemonId, signal),
         });
         return new HostLifecyclePolicy({
             ...options,

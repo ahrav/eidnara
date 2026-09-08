@@ -16,6 +16,7 @@ import {
     readCompatibilitySnapshot,
     synapseReadiness,
 } from "./managed-policy";
+import { STORAGE_HARD_BUDGET_MS } from "./policy";
 
 function entry(moduleId: string, moduleVersion = "0.1.0"): CatalogEntry {
     return {
@@ -452,11 +453,13 @@ describe("managed probes", () => {
 
     test("a starting observation polls once for concurrent waiters", async () => {
         let polls = 0;
+        const budgets: number[] = [];
         let release: (state: "ready") => void = () => {};
         const probes = managedProbes({
             compatibility: async () => result(daemon(7), "starting"),
-            storage: () => {
+            storage: (budgetMs) => {
                 polls += 1;
+                budgets.push(budgetMs);
                 return new Promise((resolve) => {
                     release = resolve;
                 });
@@ -468,6 +471,8 @@ describe("managed probes", () => {
             probes.storageProbe(100, daemon(7)),
         ]);
         expect(polls).toBe(1);
+        // The shared poll runs on the hard budget, not the first waiter's.
+        expect(budgets).toEqual([STORAGE_HARD_BUDGET_MS]);
         release("ready");
         expect(await waiting).toEqual(["ready", "ready"]);
         // The settled poll is evicted, so the next storage probe opens a fresh one.
@@ -475,6 +480,49 @@ describe("managed probes", () => {
         expect(polls).toBe(2);
         release("ready");
         expect(await fresh).toBe("ready");
+    });
+
+    test("a waiter that outlives its budget answers starting while longer waiters keep polling", async () => {
+        let release: (state: "ready") => void = () => {};
+        let aborted = false;
+        const probes = managedProbes({
+            compatibility: async () => result(daemon(7), "starting"),
+            storage: (_budget, _expected, signal) => {
+                signal?.addEventListener("abort", () => {
+                    aborted = true;
+                });
+                return new Promise((resolve) => {
+                    release = resolve;
+                });
+            },
+        });
+        await probes.compatibilityProbe(1_000);
+        const patient = probes.storageProbe(1_000, daemon(7));
+        expect(await probes.storageProbe(5, daemon(7))).toBe("starting");
+        // The impatient waiter left, but the patient one still holds the poll open.
+        expect(aborted).toBe(false);
+        release("ready");
+        expect(await patient).toBe("ready");
+    });
+
+    test("the shared poll is aborted and evicted when its last waiter leaves", async () => {
+        let polls = 0;
+        const signals: AbortSignal[] = [];
+        const probes = managedProbes({
+            compatibility: async () => result(daemon(7), "starting"),
+            storage: (_budget, _expected, signal) => {
+                polls += 1;
+                if (signal !== undefined) signals.push(signal);
+                return new Promise(() => {});
+            },
+        });
+        await probes.compatibilityProbe(1_000);
+        expect(await probes.storageProbe(5, daemon(7))).toBe("starting");
+        expect(signals[0]?.aborted).toBe(true);
+        // A later waiter must not join the abandoned poll.
+        const next = probes.storageProbe(5, daemon(7));
+        expect(polls).toBe(2);
+        expect(await next).toBe("starting");
     });
 
     test("an observation from another daemon is never reused", async () => {
