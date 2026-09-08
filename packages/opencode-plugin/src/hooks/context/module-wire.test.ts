@@ -318,6 +318,83 @@ describe("encodeOpenCodeMessagesToCk", () => {
         ]);
     });
 
+    it("carries part metadata as the daemon's provider extras", () => {
+        const reasoningMetadata = {
+            openai: { reasoningEncryptedContent: "enc", itemId: "rs_1", signature: "sig-oa" },
+        };
+        const textMetadata = { anthropic: { cache: true } };
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_metadata", role: "assistant" },
+                parts: [
+                    { type: "reasoning", text: "thinking", metadata: reasoningMetadata },
+                    { type: "text", text: "answer", metadata: textMetadata },
+                    { type: "text", text: "plain" },
+                ],
+            },
+        ]);
+
+        expect(encoded.ck.content).toEqual([
+            {
+                kind: { type: "reasoning", text: "thinking", signature: "sig-oa" },
+                provider_extras: { opencode: { metadata: reasoningMetadata } },
+            },
+            {
+                kind: { type: "text", text: "answer" },
+                provider_extras: { opencode: { metadata: textMetadata } },
+            },
+            { kind: { type: "text", text: "plain" } },
+        ]);
+    });
+
+    it("decodes an empty reasoning part with redacted data as redacted reasoning", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_redacted", role: "assistant" },
+                parts: [
+                    { type: "reasoning", text: "", metadata: { redacted: "blob-1" } },
+                    { type: "reasoning", text: "", redacted: "blob-2" },
+                    { type: "reasoning", text: "visible", metadata: { redacted: "ignored" } },
+                ],
+            },
+        ]);
+
+        const kinds = (encoded.ck.content as Array<{ kind: Record<string, unknown> }>).map(
+            (block) => block.kind,
+        );
+        expect(kinds[0]).toEqual({ type: "redacted_reasoning", data: "blob-1" });
+        expect(kinds[1]).toEqual({ type: "redacted_reasoning", data: "blob-2" });
+        expect(kinds[2]).toEqual({ type: "reasoning", text: "visible" });
+    });
+
+    it("attaches the daemon's approval arc to opaque parts with an approvalId", () => {
+        const request = { type: "permission", approvalId: "ap_1", text: "may I?" };
+        const response = { type: "permission-response", approvalId: "ap_1", granted: true };
+        const stepStart = { type: "step-start", approvalId: "ap_2" };
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_approval", role: "assistant" },
+                parts: [request, response, stepStart, { type: "unknown-kind", x: 1 }],
+            },
+        ]);
+
+        const kinds = (encoded.ck.content as Array<{ kind: Record<string, unknown> }>).map(
+            (block) => block.kind,
+        );
+        expect(kinds[0]).toMatchObject({
+            type: "opaque",
+            kind: "permission",
+            arc: { kind: "Approval", id: "ap_1", role: "Request" },
+        });
+        expect(kinds[1]).toMatchObject({
+            type: "opaque",
+            kind: "permission-response",
+            arc: { kind: "Approval", id: "ap_1", role: "Response" },
+        });
+        expect(kinds[2]).not.toHaveProperty("arc");
+        expect(kinds[3]).not.toHaveProperty("arc");
+    });
+
     it("encodes file and image parts as media blocks", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
@@ -592,27 +669,102 @@ describe("resolveOrdinalsForModule stored-count races", () => {
                 ],
                 memo: bundle,
             });
-            expect(raced).toEqual({ ok: false, reason: "mismatch" });
-            expect(memo.entries.get("m-1")).toBe(1);
-
-            const retried = await resolveOrdinalsForModule({
-                sessionId,
-                messages: [
-                    ...messages,
-                    {
-                        info: { id: "m-4", role: "user", sessionID: sessionId },
-                        parts: [{ type: "text", text: "m-4" }],
-                    } as MessageLike,
-                ],
-                memo: bundle,
-            });
-            expect(retried.ok).toBe(true);
-            if (!retried.ok) throw new Error(retried.reason);
+            // The count mismatch triggers a full rescan inside the same call.
+            expect(raced.ok).toBe(true);
+            if (!raced.ok) throw new Error(raced.reason);
             expect(
-                (retried.annotatedInput as Array<{ absolute_ordinal: number }>).map(
+                (raced.annotatedInput as Array<{ absolute_ordinal: number }>).map(
                     (message) => message.absolute_ordinal,
                 ),
             ).toEqual([1, 2, 3, 4]);
+            expect(memo.entries.get("m-1")).toBe(1);
+            expect(raced.memoStoredCount).toBe(4);
+            expect(raced.memoCanonicalCount).toBe(4);
+        } finally {
+            unregister();
+        }
+    });
+
+    it("rescans from the start when a row sorts at or before the anchor", async () => {
+        const sessionId = "module-wire-pre-anchor-row";
+        const rows = [
+            { id: "m-1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true },
+            { id: "m-2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true },
+        ];
+        const unregister = setRawMessageProvider(sessionId, {
+            readMessages: () => rows,
+            readMessageOrdinalPage: (after, limit) =>
+                rows
+                    .filter(
+                        (row) =>
+                            !after ||
+                            row.timeCreated > after.timeCreated ||
+                            (row.timeCreated === after.timeCreated && row.id > after.id),
+                    )
+                    .sort((a, b) => a.timeCreated - b.timeCreated || (a.id < b.id ? -1 : 1))
+                    .slice(0, limit),
+            getStoredMessageCount: () => rows.length,
+        });
+        const messages = ["m-1", "m-2"].map((id) => ({
+            info: { id, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: id }],
+        })) as MessageLike[];
+        const memo = {
+            generation: 1,
+            memoGeneration: 1,
+            entries: new Map<string, number>(),
+            anchor: null as { timeCreated: number; id: string } | null,
+            storedCount: null as number | null,
+            canonicalCount: 0,
+        };
+        try {
+            const primed = await resolveOrdinalsForModule({ sessionId, messages, memo });
+            expect(primed.ok).toBe(true);
+            if (!primed.ok) throw new Error(primed.reason);
+            const bundle = {
+                ...memo,
+                memoGeneration: primed.memoGeneration,
+                anchor: primed.memoAnchor,
+                storedCount: primed.memoStoredCount,
+                canonicalCount: primed.memoCanonicalCount,
+            };
+
+            // A row with the anchor's timestamp and a lexically smaller id is excluded by the
+            // keyset read but increases the stored count. It has no ordinal, so existing ordinals
+            // remain unchanged.
+            rows.push({
+                id: "m-1z",
+                timeCreated: 2,
+                contributesOrdinal: false,
+                hasValidInfo: true,
+            });
+            const summaryInserted = await resolveOrdinalsForModule({
+                sessionId,
+                messages,
+                memo: bundle,
+            });
+            expect(summaryInserted.ok).toBe(true);
+            if (!summaryInserted.ok) throw new Error(summaryInserted.reason);
+            expect(summaryInserted.memoStoredCount).toBe(3);
+            expect(summaryInserted.memoCanonicalCount).toBe(2);
+            expect(memo.entries.get("m-2")).toBe(2);
+            const shifted = {
+                ...bundle,
+                anchor: summaryInserted.memoAnchor,
+                storedCount: summaryInserted.memoStoredCount,
+                canonicalCount: summaryInserted.memoCanonicalCount,
+            };
+
+            // A contributing row before the anchor moves every later ordinal.
+            rows.push({ id: "m-0", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true });
+            const conflict = await resolveOrdinalsForModule({
+                sessionId,
+                messages,
+                memo: shifted,
+            });
+            expect(conflict).toEqual({ ok: false, reason: "mismatch", messageId: "m-1" });
+            expect(memo.entries.get("m-1")).toBe(1);
+            expect(memo.entries.get("m-2")).toBe(2);
         } finally {
             unregister();
         }

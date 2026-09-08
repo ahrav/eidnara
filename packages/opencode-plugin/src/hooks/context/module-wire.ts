@@ -202,6 +202,39 @@ function mediaBlockFromPart(part: Record<string, unknown>): Record<string, unkno
 /** The daemon's `opaque_block` source for OpenCode-origin blocks. */
 const OPAQUE_SOURCE = { type: "harness", harness: "opencode" } as const;
 
+/** The daemon's `opaque_arc`: an approval arc for a part carrying a string `approvalId`. */
+function opaqueArc(
+    part: Record<string, unknown>,
+    type: string,
+): Record<string, unknown> | undefined {
+    if (typeof part.approvalId !== "string") return undefined;
+    return {
+        kind: "Approval",
+        id: part.approvalId,
+        role: type.includes("response") ? "Response" : "Request",
+    };
+}
+
+/** The daemon's `block_with_metadata` extras, plus the adapter shape's `cache_control`. */
+function opencodeExtras(part: Record<string, unknown>): Record<string, unknown> {
+    const opencode: Record<string, unknown> = {};
+    if (part.metadata !== undefined) opencode.metadata = part.metadata;
+    if (part.cache_control !== undefined) opencode.cache_control = part.cache_control;
+    return Object.keys(opencode).length > 0 ? { provider_extras: { opencode } } : {};
+}
+
+/** The daemon's `redacted_reasoning_data`: `data`, then `redacted`, then `metadata.redacted`. */
+function redactedReasoningData(part: Record<string, unknown>): string | undefined {
+    if (typeof part.data === "string") return part.data;
+    if (typeof part.redacted === "string") return part.redacted;
+    const metadata = part.metadata;
+    if (metadata !== null && typeof metadata === "object") {
+        const redacted = (metadata as Record<string, unknown>).redacted;
+        if (typeof redacted === "string") return redacted;
+    }
+    return undefined;
+}
+
 /** `serde_json::to_string` of the value `JSON.stringify` would put on the wire. */
 function serdeJsonCompact(value: unknown): string {
     if (Array.isArray(value)) {
@@ -323,6 +356,33 @@ export interface ModuleOrdinalMemo {
     canonicalCount?: number;
 }
 
+/** Reads every ordinal row after `anchor`, then the stored count that must account for them. */
+async function scanOrdinalRows(
+    sessionId: string,
+    anchor: RawMessageOrdinalAnchor | null,
+): Promise<{
+    entries: ReturnType<typeof readRawSessionMessageOrdinalPage>;
+    anchor: RawMessageOrdinalAnchor | null;
+    storedCount: number;
+}> {
+    const entries: ReturnType<typeof readRawSessionMessageOrdinalPage> = [];
+    let pageAnchor = anchor;
+    while (true) {
+        const page = readRawSessionMessageOrdinalPage(
+            sessionId,
+            pageAnchor,
+            MODULE_ORDINAL_PAGE_SIZE,
+        );
+        if (page.length === 0) break;
+        entries.push(...page);
+        const last = page[page.length - 1];
+        pageAnchor = { timeCreated: last.timeCreated, id: last.id };
+        if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
+        await yieldToEventLoop();
+    }
+    return { entries, anchor: pageAnchor, storedCount: getRawSessionStoredMessageCount(sessionId) };
+}
+
 /**
  * Resolve OpenCode message ids to the absolute ordinals used by the module.
  */
@@ -357,46 +417,39 @@ export async function resolveOrdinalsForModule(args: {
     let anchor = generationChanged ? null : (args.memo.anchor ?? null);
     let storedCount = generationChanged ? null : (args.memo.storedCount ?? null);
     let canonicalCount = generationChanged ? 0 : (args.memo.canonicalCount ?? 0);
-    const priming = storedCount === null;
+    let priming = storedCount === null;
     if (priming) {
         memo.clear();
         anchor = null;
         canonicalCount = 0;
     }
 
-    const newEntries: Array<ReturnType<typeof readRawSessionMessageOrdinalPage>[number]> = [];
-    let pageAnchor = anchor;
-    while (true) {
-        const page = readRawSessionMessageOrdinalPage(
-            args.sessionId,
-            pageAnchor,
-            MODULE_ORDINAL_PAGE_SIZE,
-        );
-        if (page.length === 0) break;
-        newEntries.push(...page);
-        const last = page[page.length - 1];
-        pageAnchor = { timeCreated: last.timeCreated, id: last.id };
-        if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
-        await yieldToEventLoop();
+    let scan = await scanOrdinalRows(args.sessionId, anchor);
+    if (scan.storedCount !== (storedCount ?? 0) + scan.entries.length) {
+        // A row that sorts at or before `anchor` is unreachable from it. Restart without an
+        // anchor; `memo` is preserved until a scan is consistent.
+        scan = await scanOrdinalRows(args.sessionId, null);
+        if (scan.storedCount !== scan.entries.length) {
+            return { ok: false, reason: "mismatch" };
+        }
+        priming = true;
+        canonicalCount = 0;
     }
 
-    const currentStoredCount = getRawSessionStoredMessageCount(args.sessionId);
-    const expectedStoredCount = (storedCount ?? 0) + newEntries.length;
-    if (currentStoredCount !== expectedStoredCount) {
-        return { ok: false, reason: "mismatch" };
-    }
-
-    for (const entry of newEntries) {
+    const assigned = new Map<string, number>();
+    for (const entry of scan.entries) {
         if (!entry.contributesOrdinal) continue;
         canonicalCount += 1;
         const prior = memo.get(entry.id);
         if (prior !== undefined && prior !== canonicalCount) {
             return { ok: false, reason: "mismatch", messageId: entry.id };
         }
-        memo.set(entry.id, canonicalCount);
+        assigned.set(entry.id, canonicalCount);
     }
-    anchor = pageAnchor;
-    storedCount = currentStoredCount;
+    if (priming) memo.clear();
+    for (const [id, ordinal] of assigned) memo.set(id, ordinal);
+    anchor = scan.anchor;
+    storedCount = scan.storedCount;
 
     const normalizations: ModuleNormalizationRecord[] = [];
     const visibleIndexes: number[] = [];
@@ -777,29 +830,25 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
             if (type === "text" && part.ignored !== true) {
                 content.push({
                     kind: { type: "text", text: typeof part.text === "string" ? part.text : "" },
+                    ...opencodeExtras(part),
                 });
             } else if (type === "reasoning" || type === "thinking") {
+                const text =
+                    typeof part.text === "string"
+                        ? part.text
+                        : typeof part.thinking === "string"
+                          ? part.thinking
+                          : "";
+                const redacted = text === "" ? redactedReasoningData(part) : undefined;
                 const signature =
                     findSignature(part.metadata) ??
                     (typeof part.signature === "string" ? part.signature : undefined);
                 content.push({
-                    kind: {
-                        type: "reasoning",
-                        text:
-                            typeof part.text === "string"
-                                ? part.text
-                                : typeof part.thinking === "string"
-                                  ? part.thinking
-                                  : "",
-                        ...(signature ? { signature } : {}),
-                    },
-                    ...(part.cache_control !== undefined
-                        ? {
-                              provider_extras: {
-                                  opencode: { cache_control: part.cache_control },
-                              },
-                          }
-                        : {}),
+                    kind:
+                        redacted !== undefined
+                            ? { type: "redacted_reasoning", data: redacted }
+                            : { type: "reasoning", text, ...(signature ? { signature } : {}) },
+                    ...opencodeExtras(part),
                 });
             } else if (type === "redacted_thinking") {
                 content.push({
@@ -812,13 +861,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                                   ? part.redacted
                                   : "",
                     },
-                    ...(part.cache_control !== undefined
-                        ? {
-                              provider_extras: {
-                                  opencode: { cache_control: part.cache_control },
-                              },
-                          }
-                        : {}),
+                    ...opencodeExtras(part),
                 });
             } else if (type === "tool") {
                 const state =
@@ -892,12 +935,16 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
             } else if (type === "file" || type === "image") {
                 content.push({ kind: { type: "media", ...mediaBlockFromPart(part) } });
             } else if (!["compaction", "snapshot", "patch", "agent", "retry"].includes(type)) {
+                const arc = ["step-start", "step-finish", "subtask"].includes(type)
+                    ? undefined
+                    : opaqueArc(part, type);
                 content.push({
                     kind: {
                         type: "opaque",
                         source: OPAQUE_SOURCE,
                         kind: type,
                         raw: part,
+                        ...(arc !== undefined ? { arc } : {}),
                     },
                 });
             }

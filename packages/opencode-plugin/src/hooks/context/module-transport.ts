@@ -76,7 +76,6 @@ export interface HostModuleTransportOptions {
     connectionFile?: string;
     moduleId?: string;
     requestTimeoutMs?: number;
-    routeSessionPrefix?: string;
     demandStart?: ManagedDemandStart;
 }
 
@@ -305,6 +304,16 @@ function isStaleOrDeadRouteFailure(error: unknown): boolean {
     });
 }
 
+/** Request-local `not_sent` codes; they do not invalidate the connection or route. */
+const LOCAL_NOT_SENT_CODES = new Set([
+    "memory_cap",
+    "ring_full",
+    "deadline_expired",
+    "aborted",
+    "control_body_too_large",
+    "invalid_max_stream_items",
+]);
+
 function isConnectionFailure(error: unknown): boolean {
     // One caller's own deadline or abort is not a connection failure. It carries ETIMEDOUT so
     // callers classifying retryability on `code` see a timeout, but treating it as a
@@ -312,6 +321,13 @@ function isConnectionFailure(error: unknown): boolean {
     // which evicts the still-connecting owner's candidate — one waiter's deadline would
     // abort the connect for every waiter. The backoff path already excludes this class.
     if (error instanceof WaiterDetachedError) {
+        return false;
+    }
+    if (
+        isHostCallError(error) &&
+        error.kind === "not_sent" &&
+        LOCAL_NOT_SENT_CODES.has(error.code ?? "")
+    ) {
         return false;
     }
     if (
@@ -453,7 +469,6 @@ export class HostModuleTransport {
     private readonly demandStart: ManagedDemandStart | undefined;
     private readonly moduleId: string;
     private readonly requestTimeoutMs: number;
-    private readonly routeSessionPrefix: string;
     private client: HostClient | null = null;
     private clientCacheOptions: HostClientOptions | null = null;
     private routes = new Map<string, CachedRoute>();
@@ -481,7 +496,6 @@ export class HostModuleTransport {
         connectionFileOrOptions?: string | HostModuleTransportOptions,
         moduleId = DEFAULT_MODULE_ID,
         requestTimeoutMs = MODULE_SEND_TIMEOUT_MS,
-        routeSessionPrefix = "",
     ) {
         const options =
             typeof connectionFileOrOptions === "object"
@@ -490,13 +504,11 @@ export class HostModuleTransport {
                       connectionFile: connectionFileOrOptions,
                       moduleId,
                       requestTimeoutMs,
-                      routeSessionPrefix,
                   };
         this.connectionOrigin = resolveConnectionOrigin({ connectionFile: options.connectionFile });
         this.connectionFile = options.connectionFile ?? getDefaultConnectionFile();
         this.moduleId = options.moduleId ?? DEFAULT_MODULE_ID;
         this.requestTimeoutMs = options.requestTimeoutMs ?? MODULE_SEND_TIMEOUT_MS;
-        this.routeSessionPrefix = options.routeSessionPrefix ?? "";
         this.demandStart = options.demandStart ?? configuredManagedDemandStart;
     }
 
@@ -768,10 +780,12 @@ export class HostModuleTransport {
                     const replayEligible = unknownChannel || provenNotSent;
                     const previousGeneration =
                         ensuredRoute?.generation ?? this.connectionGeneration;
+                    let turnedOver = false;
                     if (unknownChannel || isStaleRouteHandleFailure(error)) {
                         // Route-level proof evicts the dead route while retaining the connection; the facade reconnects internally when its generation retires.
                         if (ensuredRoute) {
                             this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
+                            turnedOver = true;
                         }
                     } else if (cleanupTicket === null && isConnectionFailure(error)) {
                         // A possible send invalidates the route without resending the body.
@@ -783,14 +797,19 @@ export class HostModuleTransport {
                         } else {
                             this.invalidateConnection();
                         }
+                        turnedOver = true;
                     }
                     if (replayEligible && args.generationSensitive && !callerAborted) {
                         // Recovery does not cross a route or connection generation.
-                        return {
-                            transport_status: "connection_generation_changed",
-                            previous_generation: previousGeneration,
-                            current_generation: this.connectionGeneration,
-                        } satisfies ModuleTransportGenerationChangedResult;
+                        if (turnedOver || previousGeneration !== this.connectionGeneration) {
+                            return {
+                                transport_status: "connection_generation_changed",
+                                previous_generation: previousGeneration,
+                                current_generation: this.connectionGeneration,
+                            } satisfies ModuleTransportGenerationChangedResult;
+                        }
+                        // A pre-send refusal with no route or connection turnover is the caller's real failure.
+                        throw error;
                     }
                     if (replayEligible && !replaySpent && !callerAborted && !deadline.isExpired()) {
                         replaySpent = true;
@@ -875,7 +894,8 @@ export class HostModuleTransport {
             this.routes.delete(routeKey);
             const closeRoute = (client as Partial<HostClient>).closeRoute;
             if (typeof closeRoute === "function") {
-                await closeRoute.call(client, existing.route).catch(() => undefined);
+                // `closeRoute` flushes under the facade's own shutdown deadline; awaiting it would add up to that budget to the caller's operation deadline.
+                void closeRoute.call(client, existing.route).catch(() => undefined);
             }
         }
         const opening = this.routeOpenings.get(routeKey);
@@ -889,7 +909,7 @@ export class HostModuleTransport {
             const identity: BindIdentity = {
                 project_root: projectRoot,
                 harness: getHarness(),
-                session: `${this.routeSessionPrefix}${sessionId}`,
+                session: sessionId,
             };
             const route = await this.beforeDeadline(
                 client.routeOpen(target, identity, fence),
@@ -970,22 +990,15 @@ export class HostModuleTransport {
         this.routes.delete(routeKey);
     }
 
-    /** Per-instance memoization resolves symlinks; missing paths retain their input spelling.
-     * Canonicalization preserves the input spelling when the path is gone, so a missing path does not fail the request.
-     * Public so a client built over this transport can key its own state by the same root the route is bound to. commentlint: allow(JUDGE) */
+    /** `canonicalRoot` resolves symlinks on every call so a retargeted link keys its new target. Missing roots retain their last resolution, or the input spelling, to avoid request failure or route-key rebinding. The method is public so clients built over this transport can key state by the same root bound to the route. commentlint: allow(JUDGE) */
     canonicalRoot(root: string): string {
-        const cached = this.canonicalRootCache.get(root);
-        if (cached !== undefined) {
-            this.canonicalRootCache.delete(root);
-            this.canonicalRootCache.set(root, cached);
-            return cached;
-        }
-        let resolved = root;
+        let resolved: string;
         try {
             resolved = realpathSync.native(root);
         } catch {
-            // Gone or unreadable roots keep their observed spelling.
+            resolved = this.canonicalRootCache.get(root) ?? root;
         }
+        this.canonicalRootCache.delete(root);
         this.canonicalRootCache.set(root, resolved);
         while (this.canonicalRootCache.size > CANONICAL_ROOT_CACHE_MAX_ENTRIES) {
             const oldestRoot = this.canonicalRootCache.keys().next().value as string | undefined;

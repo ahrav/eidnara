@@ -1,13 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import {
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    symlinkSync,
+    unlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import productionInputs from "../../../../../release/production-inputs.lock.json";
 import {
     Deadline,
+    HostCallError,
     type HostClient,
     type HostClientOptions,
     RouteHandle,
+    StaleRouteHandleError,
     sameDaemonId,
 } from "../../shared/host-client";
 import { WaiterDetachedError } from "../../shared/host-lifecycle/policy";
@@ -26,6 +37,7 @@ type TransportInternals = {
     connectionCertification: { expectedDaemonId?: Uint8Array } | null;
     routes: Map<string, { route: RouteHandle; generation: number }>;
     clientOptions(deadline?: Deadline): HostClientOptions;
+    canonicalRoot(root: string): string;
     ensureConnected(
         deadline: Deadline,
         signal?: AbortSignal,
@@ -232,6 +244,82 @@ describe("module identity and send deadline", () => {
         );
         expect(observed.get("longer")).toBeGreaterThan(4_000);
         expect(observed.get("shorter")).toBeLessThanOrEqual(1_000);
+    });
+});
+
+describe("route keys follow the filesystem", () => {
+    test("a retargeted symlink root keys its new target, and a missing root keeps its last one", () => {
+        const base = mkdtempSync(join(tmpdir(), "eidnara-transport-root-"));
+        try {
+            const projectA = join(base, "a");
+            const projectB = join(base, "b");
+            const current = join(base, "current");
+            mkdirSync(projectA);
+            mkdirSync(projectB);
+            symlinkSync(projectA, current);
+            const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+            expect(transport.canonicalRoot(current)).toBe(realpathSync.native(projectA));
+
+            unlinkSync(current);
+            symlinkSync(projectB, current);
+            expect(transport.canonicalRoot(current)).toBe(realpathSync.native(projectB));
+
+            unlinkSync(current);
+            expect(transport.canonicalRoot(current)).toBe(realpathSync.native(projectB));
+            expect(transport.canonicalRoot(join(base, "never-existed"))).toBe(
+                join(base, "never-existed"),
+            );
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("generation-sensitive not-sent outcomes", () => {
+    function fakeRoute(transport: TransportInternals, request: () => Promise<unknown>) {
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        const client = { request } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureRoute = async () => ({
+            client,
+            route,
+            routeKey: "s\0/tmp",
+            generation: 0,
+        });
+        return { client, route };
+    }
+
+    test("a pre-send refusal without route or connection turnover propagates", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const refusal = new HostCallError("not_sent", "admission refused", "memory_cap");
+        fakeRoute(transport, () => Promise.reject(refusal));
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: {},
+                generationSensitive: true,
+            }),
+        ).rejects.toBe(refusal);
+    });
+
+    test("a stale route handle reports a generation change", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let route: RouteHandle | undefined;
+        fakeRoute(transport, () => Promise.reject(new StaleRouteHandleError(route as RouteHandle)));
+        route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: {},
+                generationSensitive: true,
+            }),
+        ).resolves.toMatchObject({ transport_status: "connection_generation_changed" });
     });
 });
 
