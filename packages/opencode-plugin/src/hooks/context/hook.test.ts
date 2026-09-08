@@ -126,12 +126,8 @@ describe("eidnara hook", () => {
         }
         expect("tool.definition" in hook).toBe(false);
         expect("config" in hook).toBe(false);
-        expect(Object.keys(hook.rustToolBackends).sort()).toEqual([
-            "note",
-            "noteEvaluationAvailable",
-            "reduce",
-        ]);
-        expect(hook.rustToolBackends.noteEvaluationAvailable?.("any-project")).toBe(true);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+        expect("noteEvaluationAvailable" in hook.rustToolBackends).toBe(false);
     });
 
     it("attaches the daemon tool backends in ts mode and leaves the messages transform a no-op", async () => {
@@ -147,11 +143,7 @@ describe("eidnara hook", () => {
         );
 
         expect(Object.keys(hook).sort()).toEqual(HOOK_KEYS);
-        expect(Object.keys(hook.rustToolBackends).sort()).toEqual([
-            "note",
-            "noteEvaluationAvailable",
-            "reduce",
-        ]);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
 
         await hook.rustToolBackends.reduce?.({
             sessionId: "ses-ts",

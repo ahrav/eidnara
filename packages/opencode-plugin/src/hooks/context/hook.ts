@@ -216,8 +216,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                     },
                 },
             }),
-        // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note.
-        noteEvaluationAvailable: () => true,
     };
 
     const systemPromptHash = createSystemPromptHashHandler({
