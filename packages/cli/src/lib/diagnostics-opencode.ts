@@ -11,7 +11,11 @@ import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
-import { type ConflictResult, detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
+import {
+    type ConflictResult,
+    detectConflicts,
+    projectOpenCodeConfigPaths,
+} from "@eidnara/opencode/shared/conflict-detector";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { resolveOpenCodeDatabasePath } from "@eidnara/opencode/shared/opencode-database-path";
@@ -226,15 +230,13 @@ function configHasPluginEntry(config: Record<string, unknown> | null, baseDir: s
     );
 }
 
-/** `detectConfigFile` prefers `.jsonc` over `.json` at each location, matching `collectPluginEntries` in the conflict detector. */
+/** The host merges every project file that exists, `.json` and `.jsonc` alike, so each one is inspected. */
 function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
-    const locations = [join(cwd, ".opencode", "opencode"), join(cwd, "opencode")];
     const report: ProjectOpenCodeConfigReport = { paths: [], hasPlugin: false, parseErrors: [] };
-    for (const basePath of locations) {
-        const detected = detectConfigFile(basePath);
-        if (detected.format === "none") continue;
-        report.paths.push(detected.path);
-        const parsed = readConfig(detected.path);
+    for (const path of projectOpenCodeConfigPaths(cwd)) {
+        if (!existsSync(path)) continue;
+        report.paths.push(path);
+        const parsed = readConfig(path);
         if (parsed.error) report.parseErrors.push(parsed.error);
         if (configHasPluginEntry(parsed.value, cwd)) report.hasPlugin = true;
     }

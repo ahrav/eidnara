@@ -15,6 +15,7 @@ import {
     assertPluginListShape,
     findDcpPluginIndexes,
     hasAnthropicModel,
+    hasExistingOpenCodeSetup,
     preflightConfigPaths,
     withClaudeMaxCacheTtl,
     withoutDcpConflict,
@@ -327,6 +328,39 @@ describe("setup-opencode config safety", () => {
         });
         expect(merged.plugin).toContain("other");
         expect(merged.plugin).not.toContain("@tarquinen/opencode-dcp@latest");
+    });
+});
+
+describe("hasExistingOpenCodeSetup", () => {
+    const none = { opencodeConfigFormat: "none" as const, tuiConfigFormat: "none" as const };
+
+    it("counts a custom or inline config layer as an existing setup", () => {
+        const root = tempDir();
+        const savedConfig = process.env.OPENCODE_CONFIG;
+        const savedContent = process.env.OPENCODE_CONFIG_CONTENT;
+        const savedXdg = process.env.XDG_CONFIG_HOME;
+        try {
+            process.env.XDG_CONFIG_HOME = join(root, "xdg");
+            delete process.env.OPENCODE_CONFIG;
+            delete process.env.OPENCODE_CONFIG_CONTENT;
+            expect(hasExistingOpenCodeSetup(none, root)).toBe(false);
+
+            const custom = join(root, "custom.json");
+            writeFileSync(custom, `{ "plugin": ["opencode-dcp"] }`);
+            process.env.OPENCODE_CONFIG = custom;
+            expect(hasExistingOpenCodeSetup(none, root)).toBe(true);
+
+            delete process.env.OPENCODE_CONFIG;
+            process.env.OPENCODE_CONFIG_CONTENT = `{ "plugin": ["opencode-dcp"] }`;
+            expect(hasExistingOpenCodeSetup(none, root)).toBe(true);
+        } finally {
+            if (savedConfig === undefined) delete process.env.OPENCODE_CONFIG;
+            else process.env.OPENCODE_CONFIG = savedConfig;
+            if (savedContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+            else process.env.OPENCODE_CONFIG_CONTENT = savedContent;
+            if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = savedXdg;
+        }
     });
 });
 
