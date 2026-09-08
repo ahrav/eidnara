@@ -117,6 +117,7 @@ export interface RustModeModuleClient {
     }): Promise<unknown>;
     deleteSession?(sessionId: string, projectRoot: string): Promise<void>;
     closeSession?(sessionId: string): void;
+    hasSessionRoute?(sessionId: string): boolean;
 }
 
 type ContentSnapshotField = string | number | boolean | symbol;
@@ -1440,6 +1441,47 @@ export function createRustModeTransform(
             };
             let response = await sendTransformSeriesWithSingleRestart(body);
             captureResponseTelemetry(response);
+            const allDeliveryPassIds = new Set(noteDeliveryPassIds(response));
+            const sendNoteDeliveryDisposition = async (
+                method: "transform.ack" | "transform.nack",
+                transformPassIds: ReadonlySet<string>,
+            ): Promise<void> => {
+                const errors: unknown[] = [];
+                for (const transformPassId of transformPassIds) {
+                    try {
+                        await callModule({
+                            sessionId,
+                            projectRoot,
+                            method,
+                            body: {
+                                method,
+                                v: 1,
+                                session_id: sessionId,
+                                transform_pass_id: transformPassId,
+                            },
+                        });
+                    } catch (error) {
+                        errors.push(error);
+                    }
+                }
+                if (errors.length > 0) {
+                    throw new AggregateError(
+                        errors,
+                        `${method} failed for ${errors.length} note delivery disposition(s)`,
+                    );
+                }
+            };
+            const nackPendingRetryDeliveries = async (): Promise<void> => {
+                try {
+                    await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
+                } catch (nackError) {
+                    sessionLog(
+                        sessionId,
+                        "rust retry note delivery nack failed (ignored):",
+                        nackError,
+                    );
+                }
+            };
             const needFullSync = isNeedFullSync(response);
             const nativeContentOmitted = !hasNativeResponseContent(response);
             if (needFullSync || nativeContentOmitted) {
@@ -1474,6 +1516,7 @@ export function createRustModeTransform(
                         });
                     }
                     if (!retryResolved.ok) {
+                        await nackPendingRetryDeliveries();
                         throw new Error(`rust ordinal ${retryResolved.reason} during full retry`);
                     }
                     state.idOrdinalMemoGeneration = retryResolved.memoGeneration;
@@ -1521,33 +1564,31 @@ export function createRustModeTransform(
                         "retry=full",
                     );
                 }
-                response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
+                try {
+                    response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
+                } catch (error) {
+                    await nackPendingRetryDeliveries();
+                    throw error;
+                }
                 captureResponseTelemetry(response);
+                for (const transformPassId of noteDeliveryPassIds(response)) {
+                    allDeliveryPassIds.add(transformPassId);
+                }
                 if (isNeedFullSync(response)) {
+                    await nackPendingRetryDeliveries();
                     throw new Error("rust module still requires full sync after a full-array send");
                 }
                 if (!hasNativeResponseContent(response)) {
+                    await nackPendingRetryDeliveries();
                     throw new Error("rust module omitted native content after a full-array retry");
                 }
             }
-            const deliveryPassIds = noteDeliveryPassIds(response);
-            const sendNoteDeliveryDisposition = async (
-                method: "transform.ack" | "transform.nack",
-            ) => {
-                for (const transformPassId of deliveryPassIds) {
-                    await callModule({
-                        sessionId,
-                        projectRoot,
-                        method,
-                        body: {
-                            method,
-                            v: 1,
-                            session_id: sessionId,
-                            transform_pass_id: transformPassId,
-                        },
-                    });
-                }
-            };
+            const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
+            const discardedDeliveryPassIds = new Set(
+                [...allDeliveryPassIds].filter(
+                    (transformPassId) => !appliedDeliveryPassIds.has(transformPassId),
+                ),
+            );
             let appliedMessages: unknown[];
             const applyStartedAt = performance.now();
             try {
@@ -1573,15 +1614,26 @@ export function createRustModeTransform(
             } catch (error) {
                 logStage(sessionId, "apply", applyStartedAt, timings, "failed=true");
                 try {
-                    await sendNoteDeliveryDisposition("transform.nack");
+                    await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
                 } catch (nackError) {
                     sessionLog(sessionId, "rust note delivery nack failed (ignored):", nackError);
                 }
                 throw error;
             }
-            if (deliveryPassIds.length > 0) {
+            if (discardedDeliveryPassIds.size > 0) {
                 try {
-                    await sendNoteDeliveryDisposition("transform.ack");
+                    await sendNoteDeliveryDisposition("transform.nack", discardedDeliveryPassIds);
+                } catch (nackError) {
+                    sessionLog(
+                        sessionId,
+                        "rust discarded note delivery nack failed (will retry):",
+                        nackError,
+                    );
+                }
+            }
+            if (appliedDeliveryPassIds.size > 0) {
+                try {
+                    await sendNoteDeliveryDisposition("transform.ack", appliedDeliveryPassIds);
                 } catch (ackError) {
                     sessionLog(sessionId, "rust note delivery ack failed (will retry):", ackError);
                 }

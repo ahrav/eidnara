@@ -59,19 +59,23 @@ function injectPluginMarker(): void {
 
 interface Harness {
     deps: EventHandlerDeps;
-    calls: Record<"cache" | "wire" | "deleted", string[]>;
+    calls: {
+        cache: string[];
+        wire: string[];
+        deleted: Array<{ sessionId: string; directory?: string }>;
+    };
     handle: (type: string, properties?: unknown) => Promise<void>;
 }
 
 function buildHarness(): Harness {
-    const calls = { cache: [] as string[], wire: [] as string[], deleted: [] as string[] };
+    const calls: Harness["calls"] = { cache: [], wire: [], deleted: [] };
     const deps: EventHandlerDeps = {
         contextUsageMap: new Map<string, ContextUsageEntry>(),
         internalChildSessions: new Set<string>(),
         subagentSessions: new Set<string>(),
         onSessionCacheInvalidated: (id) => calls.cache.push(id),
         onRustWireInvalidated: (id) => calls.wire.push(id),
-        onSessionDeleted: (id) => calls.deleted.push(id),
+        onSessionDeleted: (sessionId, directory) => calls.deleted.push({ sessionId, directory }),
     };
     const handler = createEventHandler(deps);
     return {
@@ -278,9 +282,9 @@ describe("createEventHandler — session.deleted", () => {
         deps.subagentSessions?.add(SESSION);
         deps.internalChildSessions?.add(SESSION);
 
-        await handle("session.deleted", { info: { id: SESSION } });
+        await handle("session.deleted", { info: { id: SESSION, directory: "/actual/project" } });
 
-        expect(calls.deleted).toEqual([SESSION]);
+        expect(calls.deleted).toEqual([{ sessionId: SESSION, directory: "/actual/project" }]);
         expect(calls.cache).toEqual([SESSION]);
         expect(deps.contextUsageMap.has(SESSION)).toBe(false);
         expect(deps.subagentSessions?.has(SESSION)).toBe(false);

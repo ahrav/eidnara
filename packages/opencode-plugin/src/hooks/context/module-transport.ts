@@ -920,6 +920,14 @@ export class HostModuleTransport {
         });
     }
 
+    hasSessionRoute(sessionId: string): boolean {
+        const prefix = `${sessionId}\0`;
+        return (
+            [...this.routes.keys()].some((key) => key.startsWith(prefix)) ||
+            [...this.routeOpenings.keys()].some((key) => key.startsWith(prefix))
+        );
+    }
+
     closeSession(sessionId: string): void {
         const client = this.client;
         const prefix = `${sessionId}\0`;

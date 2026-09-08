@@ -28,7 +28,7 @@ export interface EventHandlerDeps {
     contextUsageMap: Map<string, ContextUsageEntry>;
     onSessionCacheInvalidated?: (sessionId: string) => void;
     onRustWireInvalidated?: (sessionId: string) => void;
-    onSessionDeleted?: (sessionId: string) => void;
+    onSessionDeleted?: (sessionId: string, directory?: string) => void;
     /** The in-process client OpenCode hands the plugin; the post-auth model-limit re-warm reads provider metadata through it. */
     client?: unknown;
     /**
@@ -262,6 +262,14 @@ export function createEventHandler(deps: EventHandlerDeps) {
             if (!sessionId) {
                 return;
             }
+            const eventDirectory =
+                typeof properties?.info === "object" &&
+                properties.info !== null &&
+                "directory" in properties.info &&
+                typeof properties.info.directory === "string" &&
+                properties.info.directory.length > 0
+                    ? properties.info.directory
+                    : undefined;
 
             try {
                 removeCompactionMarkerForSession(sessionId);
@@ -269,7 +277,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 sessionLog(sessionId, "event session.deleted marker cleanup failed:", error);
             }
             deps.onSessionCacheInvalidated?.(sessionId);
-            deps.onSessionDeleted?.(sessionId);
+            deps.onSessionDeleted?.(sessionId, eventDirectory);
             deps.contextUsageMap.delete(sessionId);
             deps.subagentSessions?.delete(sessionId);
             deps.internalChildSessions?.delete(sessionId);

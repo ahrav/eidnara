@@ -316,9 +316,16 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             rustTransform.invalidateWireState(sessionId);
         },
         // Deletion prunes per-session state so entries do not outlive the session.
-        onSessionDeleted: (sessionId: string) => {
+        onSessionDeleted: (sessionId: string, directory?: string) => {
             addBoundedSession(deletedSessions, sessionId);
-            rustTransform.clearSession(sessionId);
+            if (directory && !sessionDirectoryBySession.has(sessionId)) {
+                sessionDirectoryBySession.set(sessionId, directory);
+            }
+            if (rustMode || moduleClient.hasSessionRoute?.(sessionId)) {
+                rustTransform.clearSession(sessionId);
+            } else {
+                moduleClient.closeSession?.(sessionId);
+            }
             systemPromptHash.clearSession(sessionId);
             lastHeuristicsTurnId.delete(sessionId);
             clearToolPermissionDenied(sessionId);
@@ -412,8 +419,11 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             transformMode: deps.config.transform_mode,
             todoStateSet: rustMode
                 ? async ({ sessionId, stateJson, ownerMessageId }) => {
+                      if (deletedSessions.has(sessionId) || subagentSessions.has(sessionId)) {
+                          return undefined;
+                      }
                       const projectRoot = await sessionDirectoryFor(sessionId);
-                      // Session deletion and child classification may complete during the directory read, so both gates follow it.
+                      // Session deletion and child classification may complete during the directory read.
                       if (deletedSessions.has(sessionId) || subagentSessions.has(sessionId)) {
                           return undefined;
                       }

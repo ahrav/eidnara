@@ -16,71 +16,52 @@ describe("sendIgnoredMessage", () => {
     });
 
     it("returns skipped and does not post when the session never gets a real title", async () => {
-        const originalSetTimeout = globalThis.setTimeout;
-        globalThis.setTimeout = ((
-            handler: Parameters<typeof setTimeout>[0],
-            _timeout?: number,
-            ...args: unknown[]
-        ) => {
-            if (typeof handler === "function") handler(...args);
-            return 0 as never;
-        }) as typeof setTimeout;
+        __ignoredNotificationTest.setSafeTargetOptions({ attempts: 4, delayMs: 1 });
+        const prompt = mock(async () => ({}));
+        const get = mock(async () => {
+            await null;
+            return { title: DEFAULT_TITLE };
+        });
+        const result = await sendIgnoredMessage(
+            { session: { get, prompt } },
+            "ses-never-titled",
+            "persistent notification",
+            {},
+        );
 
-        try {
-            const prompt = mock(async () => ({}));
-            const get = mock(async () => ({ title: DEFAULT_TITLE }));
-            const result = await sendIgnoredMessage(
-                { session: { get, prompt } },
-                "ses-never-titled",
-                "persistent notification",
-                {},
-            );
-
-            expect(result).toBe("skipped");
-            expect(get).toHaveBeenCalledTimes(4);
-            expect(prompt).not.toHaveBeenCalled();
-        } finally {
-            globalThis.setTimeout = originalSetTimeout;
-        }
+        expect(result).toBe("skipped");
+        expect(get).toHaveBeenCalledTimes(4);
+        expect(prompt).not.toHaveBeenCalled();
     });
 
     it("retains a forced command result until the session gets a real title", async () => {
-        const originalSetTimeout = globalThis.setTimeout;
-        globalThis.setTimeout = ((
-            handler: Parameters<typeof setTimeout>[0],
-            _timeout?: number,
-            ...args: unknown[]
-        ) => {
-            if (typeof handler === "function") handler(...args);
-            return 0 as never;
-        }) as typeof setTimeout;
-        try {
-            let title = DEFAULT_TITLE;
-            const prompt = mock(async () => ({}));
-            const get = mock(async () => ({ title }));
-            const client = { session: { get, prompt } };
+        __ignoredNotificationTest.setSafeTargetOptions({ attempts: 4, delayMs: 1 });
+        let title = DEFAULT_TITLE;
+        const prompt = mock(async () => ({}));
+        const get = mock(async () => {
+            await null;
+            return { title };
+        });
+        const client = { session: { get, prompt } };
 
-            const result = await sendIgnoredMessage(
-                client,
-                "ses-command-result",
-                "full command result",
-                {},
-                true,
-            );
-            expect(result).toBe("queued");
-            expect(get).toHaveBeenCalledTimes(1);
-            expect(prompt).not.toHaveBeenCalled();
-            expect(__ignoredNotificationTest.pendingTexts("ses-command-result")).toEqual([
-                "full command result",
-            ]);
+        const result = await sendIgnoredMessage(
+            client,
+            "ses-command-result",
+            "full command result",
+            {},
+            true,
+        );
+        expect(result).toBe("queued");
+        expect(get).toHaveBeenCalledTimes(1);
+        expect(prompt).not.toHaveBeenCalled();
+        expect(__ignoredNotificationTest.pendingTexts("ses-command-result")).toEqual([
+            "full command result",
+        ]);
 
-            title = "Real title";
-            await flushIgnoredMessages("ses-command-result");
-            expect(prompt).toHaveBeenCalledTimes(1);
-            expect(__ignoredNotificationTest.pendingTexts("ses-command-result")).toEqual([]);
-        } finally {
-            globalThis.setTimeout = originalSetTimeout;
-        }
+        title = "Real title";
+        await flushIgnoredMessages("ses-command-result");
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(__ignoredNotificationTest.pendingTexts("ses-command-result")).toEqual([]);
     });
 
     it("uses one title read per retry for a forced result that remains untitled", async () => {
@@ -102,32 +83,28 @@ describe("sendIgnoredMessage", () => {
     });
 
     it("retains forced results and skips ordinary notices when the title read times out", async () => {
-        const originalSetTimeout = globalThis.setTimeout;
-        globalThis.setTimeout = ((handler: Parameters<typeof setTimeout>[0]) => {
-            if (typeof handler === "function") handler();
-            return 0 as never;
-        }) as typeof setTimeout;
-        try {
-            const client = {
-                session: {
-                    get: () => new Promise<never>(() => {}),
-                    prompt: mock(async () => ({})),
-                },
-            };
+        __ignoredNotificationTest.setSafeTargetOptions({
+            attempts: 4,
+            delayMs: 1,
+            readTimeoutMs: 10,
+        });
+        const client = {
+            session: {
+                get: () => new Promise<never>(() => {}),
+                prompt: mock(async () => ({})),
+            },
+        };
 
-            expect(
-                await sendIgnoredMessage(client, "ses-timeout-forced", "command result", {}, true),
-            ).toBe("queued");
-            expect(__ignoredNotificationTest.pendingTexts("ses-timeout-forced")).toEqual([
-                "command result",
-            ]);
-            expect(
-                await sendIgnoredMessage(client, "ses-timeout-ordinary", "ordinary notice", {}),
-            ).toBe("skipped");
-            expect(client.session.prompt).not.toHaveBeenCalled();
-        } finally {
-            globalThis.setTimeout = originalSetTimeout;
-        }
+        expect(
+            await sendIgnoredMessage(client, "ses-timeout-forced", "command result", {}, true),
+        ).toBe("queued");
+        expect(__ignoredNotificationTest.pendingTexts("ses-timeout-forced")).toEqual([
+            "command result",
+        ]);
+        expect(
+            await sendIgnoredMessage(client, "ses-timeout-ordinary", "ordinary notice", {}),
+        ).toBe("skipped");
+        expect(client.session.prompt).not.toHaveBeenCalled();
     });
 
     // `messages` supplies the last assistant turn to `resolvePromptContext`.
@@ -167,17 +144,44 @@ describe("sendIgnoredMessage", () => {
         expect(__ignoredNotificationTest.pendingTexts("ses-active")).toEqual(["background status"]);
     });
 
-    it("reports failed and releases the flush when the prompt endpoint never settles", async () => {
+    it("reports an unknown outcome and aborts when the prompt endpoint never settles", async () => {
         const session = titledClientWithLastTurn();
-        session.prompt = mock(() => new Promise<never>(() => {}));
+        let signal: AbortSignal | undefined;
+        session.prompt = mock((input: unknown) => {
+            signal = (input as { signal?: AbortSignal }).signal;
+            return new Promise<never>(() => {});
+        });
         __ignoredNotificationTest.setMidTurnDetector(() => false);
         __ignoredNotificationTest.setSendTimeoutMs(20);
 
         const result = await sendIgnoredMessage({ session }, "ses-hung-prompt", "status", {});
 
-        expect(result).toBe("failed");
+        expect(result).toBe("unknown");
         expect(session.prompt).toHaveBeenCalledTimes(1);
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal?.aborted).toBe(true);
         expect(__ignoredNotificationTest.pendingTexts("ses-hung-prompt")).toEqual([]);
+    });
+
+    it("does not retry or requeue a deferred notification whose send times out", async () => {
+        const session = titledClientWithLastTurn();
+        let active = true;
+        let signal: AbortSignal | undefined;
+        session.prompt = mock((input: unknown) => {
+            signal = (input as { signal?: AbortSignal }).signal;
+            return new Promise<never>(() => {});
+        });
+        __ignoredNotificationTest.setMidTurnDetector(() => active);
+        __ignoredNotificationTest.setSendTimeoutMs(20);
+
+        await sendIgnoredMessage({ session }, "ses-timeout-flush", "status", {});
+        active = false;
+        await flushIgnoredMessages("ses-timeout-flush");
+        await flushIgnoredMessages("ses-timeout-flush");
+
+        expect(session.prompt).toHaveBeenCalledTimes(1);
+        expect(signal?.aborted).toBe(true);
+        expect(__ignoredNotificationTest.pendingTexts("ses-timeout-flush")).toEqual([]);
     });
 
     it("flushes queued notices in order after the session becomes idle", async () => {
@@ -409,6 +413,50 @@ describe("sendIgnoredMessage", () => {
         expect(body.noReply).toBe(true);
     });
 
+    it("queues when prompt context cannot be read instead of sending unset context", async () => {
+        const session = titledClientWithLastTurn();
+        session.messages.mockImplementation(async () => {
+            throw new Error("message read failed");
+        });
+
+        const result = await sendIgnoredMessage({ session }, "ses-context-error", "status", {});
+
+        expect(result).toBe("queued");
+        expect(session.prompt).not.toHaveBeenCalled();
+        expect(__ignoredNotificationTest.pendingTexts("ses-context-error")).toEqual(["status"]);
+    });
+
+    it("drops a queued notification after repeated unavailable context reads", async () => {
+        const session = titledClientWithLastTurn();
+        session.messages.mockImplementation(async () => {
+            throw new Error("message read failed");
+        });
+
+        await sendIgnoredMessage({ session }, "ses-context-unavailable", "status", {});
+        for (let attempt = 0; attempt < MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS; attempt++) {
+            await flushIgnoredMessages("ses-context-unavailable");
+        }
+
+        expect(session.prompt).not.toHaveBeenCalled();
+        expect(session.messages).toHaveBeenCalledTimes(
+            MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS + 1,
+        );
+        expect(__ignoredNotificationTest.pendingTexts("ses-context-unavailable")).toEqual([]);
+    });
+
+    it("sends unset context only after a successful empty context read", async () => {
+        const session = titledClientWithLastTurn();
+        session.messages.mockImplementation(async () => ({ data: [] }));
+
+        const result = await sendIgnoredMessage({ session }, "ses-empty-context", "status", {});
+
+        expect(result).toBe("sent");
+        const body = lastPromptBody(session.prompt);
+        expect(body.agent).toBeUndefined();
+        expect(body.model).toBeUndefined();
+        expect(body.variant).toBeUndefined();
+    });
+
     it("passes noReply to promptAsync as well as prompt", async () => {
         const promptAsync = mock(async () => ({}));
         const get = mock(async () => ({ title: "Real title" }));
@@ -433,6 +481,7 @@ describe("sendIgnoredMessage", () => {
 
         const input = promptAsync.mock.calls[0]?.[0] as { body?: Record<string, unknown> };
         expect(input.body?.noReply).toBe(true);
+        expect((input as { signal?: AbortSignal }).signal).toBeInstanceOf(AbortSignal);
     });
 
     it("pins the session's last turn for a startup config warning too (no pinContext opt-out)", async () => {

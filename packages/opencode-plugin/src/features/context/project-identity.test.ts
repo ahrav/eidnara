@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     __resetProjectIdentityForTests,
@@ -96,15 +96,29 @@ describe("resolveProjectRootDirectory", () => {
 
 describe("resolveProjectIdentity directory fallback", () => {
     test("refuses the exact canonical home directory unless the user opts in", () => {
-        expect(resolveProjectIdentityForSession(homedir())).toBeUndefined();
-        expect(resolveProjectIdentityForSession(join(homedir(), "a-project"))).not.toBeUndefined();
+        const fakeHome = tempDir();
+        try {
+            __setProjectIdentityTestHooks({ homeDirectory: () => fakeHome });
+            expect(resolveProjectIdentityForSession(fakeHome)).toBeUndefined();
+            expect(
+                resolveProjectIdentityForSession(join(fakeHome, "a-project")),
+            ).not.toBeUndefined();
+        } finally {
+            rmSync(fakeHome, { recursive: true, force: true });
+        }
     });
 
     test("uses the canonical home directory's stable dir identity when opted in", () => {
-        const canonicalHome = realpathSync.native(homedir());
-        const expected = `dir:${createHash("md5").update(canonicalHome, "utf8").digest("hex").slice(0, 12)}`;
+        const fakeHome = tempDir();
+        try {
+            __setProjectIdentityTestHooks({ homeDirectory: () => fakeHome });
+            const canonicalHome = realpathSync.native(fakeHome);
+            const expected = `dir:${createHash("md5").update(canonicalHome, "utf8").digest("hex").slice(0, 12)}`;
 
-        expect(resolveProjectIdentityForSession(homedir(), true)).toBe(expected);
+            expect(resolveProjectIdentityForSession(fakeHome, true)).toBe(expected);
+        } finally {
+            rmSync(fakeHome, { recursive: true, force: true });
+        }
     });
 
     test("resolves a project identity when sandbox policy denies realpath for the home directory", () => {
@@ -141,18 +155,23 @@ describe("resolveProjectIdentity directory fallback", () => {
     });
 
     test("keeps a contained repository distinct from the home identity", () => {
-        const contained = mkdtempSync(join(homedir(), "eidnara-home-identity-"));
+        const fakeHome = tempDir();
+        const contained = join(fakeHome, "contained");
         try {
+            mkdirSync(contained);
             mkdirSync(join(contained, ".git"));
-            __setProjectIdentityTestHooks({ execFileSync: returningRootCommit("abc1234") });
-            const homeIdentity = resolveProjectIdentityForSession(homedir(), true);
+            __setProjectIdentityTestHooks({
+                execFileSync: returningRootCommit("abc1234"),
+                homeDirectory: () => fakeHome,
+            });
+            const homeIdentity = resolveProjectIdentityForSession(fakeHome, true);
             const containedIdentity = resolveProjectIdentityForSession(contained, true);
 
             expect(homeIdentity).toBeDefined();
             expect(containedIdentity).toBe("git:abc1234");
             expect(containedIdentity).not.toBe(homeIdentity);
         } finally {
-            rmSync(contained, { recursive: true, force: true });
+            rmSync(fakeHome, { recursive: true, force: true });
         }
     });
 

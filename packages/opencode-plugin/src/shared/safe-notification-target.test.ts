@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { isDefaultSessionTitle, waitForSafeNotificationTarget } from "./safe-notification-target";
+import { HOST_SDK_READ_TIMEOUT_MS } from "./with-timeout";
+
+const TEST_READ_TIMEOUT_MS = HOST_SDK_READ_TIMEOUT_MS / 100;
 
 function clientWithTitle(title: string | undefined, calls?: { count: number }) {
     return {
@@ -93,6 +96,8 @@ describe("waitForSafeNotificationTarget", () => {
     });
 
     it("returns skip when title reads time out", async () => {
+        expect(TEST_READ_TIMEOUT_MS).toBeGreaterThan(0);
+        expect(TEST_READ_TIMEOUT_MS).toBeLessThan(HOST_SDK_READ_TIMEOUT_MS);
         let calls = 0;
         const hanging = {
             session: {
@@ -107,7 +112,7 @@ describe("waitForSafeNotificationTarget", () => {
             await waitForSafeNotificationTarget(hanging, "ses-title-timeout", {
                 attempts: 4,
                 delayMs: 1,
-                readTimeoutMs: 10,
+                readTimeoutMs: TEST_READ_TIMEOUT_MS,
             }),
         ).toBe("skip");
         expect(calls).toBe(1);
