@@ -356,7 +356,6 @@ function isConnectionFailure(error: unknown): boolean {
                 "deadline_exceeded_no_drop_observed",
                 "connection_dropped",
                 DAEMON_GENERATION_CHANGED_CODE,
-                "EIDNARA_HOST_CONNECTION_BACKOFF",
             ].includes(code) ||
             /\bclient closed\b|\bconnection closed\b|\bclosed the connection\b/i.test(message)
         );
@@ -712,6 +711,12 @@ export class HostModuleTransport {
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
     }): Promise<unknown> {
+        // Deadline and wrapup policy key off `args.method`, so the body the daemon reads must name the same method.
+        if (!isRecord(args.body) || args.body.method !== args.method) {
+            throw new TypeError(
+                `module transport body must carry method ${JSON.stringify(args.method)}`,
+            );
+        }
         const wrapupInFlight = (this.wrapupSessions.get(args.sessionId) ?? 0) > 0;
         // The transform cap is a hard ceiling: a caller-supplied `timeoutMs` shortens it but never lifts it, because the transform runs on the prompt path and its send must settle within one bounded budget.
         const operationTimeoutMs =

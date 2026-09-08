@@ -37,6 +37,8 @@ type TransportInternals = {
     connectionPromise: Promise<unknown> | null;
     connectionCertification: { expectedDaemonId?: Uint8Array } | null;
     routes: Map<string, { route: RouteHandle; generation: number }>;
+    connectionGeneration: number;
+    nextProbeMs: number;
     clientOptions(deadline?: Deadline): HostClientOptions;
     canonicalRoot(root: string): string;
     invalidateConnection(client?: HostClient | null): Promise<void>;
@@ -236,7 +238,13 @@ describe("module identity and send deadline", () => {
         };
         const call = (sessionId: string, timeoutMs: number) =>
             transport
-                .call({ sessionId, projectRoot: "/tmp", method: "transform", body: {}, timeoutMs })
+                .call({
+                    sessionId,
+                    projectRoot: "/tmp",
+                    method: "transform",
+                    body: { method: "transform" },
+                    timeoutMs,
+                })
                 .catch(() => undefined);
 
         await call("longer", 15_000);
@@ -340,7 +348,7 @@ describe("a local close wins over recovery", () => {
             sessionId: "s",
             projectRoot: "/tmp",
             method: "session.status",
-            body: {},
+            body: { method: "session.status" },
         });
         await Bun.sleep(0);
         expect(opens).toBe(1);
@@ -374,7 +382,7 @@ describe("a local close wins over recovery", () => {
             sessionId: "s",
             projectRoot: "/tmp",
             method: "session.delete",
-            body: {},
+            body: { method: "session.delete" },
         });
         await Bun.sleep(0);
         transport.closeSession("s");
@@ -406,12 +414,22 @@ describe("a local close wins over recovery", () => {
         });
 
         const first = transport
-            .call({ sessionId: "s", projectRoot: "/tmp", method: "session.status", body: {} })
+            .call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+            })
             .catch((error: unknown) => error);
         await Bun.sleep(0);
         expect(requests).toBe(1);
         const queued = transport
-            .call({ sessionId: "s", projectRoot: "/tmp", method: "session.delete", body: {} })
+            .call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.delete",
+                body: { method: "session.delete" },
+            })
             .catch((error: unknown) => error);
         await Bun.sleep(0);
         transport.closeSession("s");
@@ -588,7 +606,7 @@ describe("possibly sent bodies fence the session lane", () => {
                 sessionId: "s",
                 projectRoot: "/tmp",
                 method: "session.status",
-                body: {},
+                body: { method: "session.status" },
             }),
         ).rejects.toMatchObject({ kind: "outcome_unknown" });
 
@@ -598,7 +616,7 @@ describe("possibly sent bodies fence the session lane", () => {
                 sessionId: "s",
                 projectRoot: "/tmp",
                 method: "session.status",
-                body: {},
+                body: { method: "session.status" },
                 timeoutMs: 200,
             })
             .catch((error: unknown) => error)
@@ -610,6 +628,47 @@ describe("possibly sent bodies fence the session lane", () => {
         releaseTeardown?.();
         await second;
         expect(secondSettled).toBe(true);
+    });
+});
+
+describe("call policy is keyed off the body it forwards", () => {
+    test("a body naming a different method is rejected before any deadline is chosen", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let ensured = 0;
+        transport.ensureRoute = async () => {
+            ensured += 1;
+            throw new Error("must not be reached");
+        };
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.wrapup",
+                body: { method: "transform" },
+            }),
+        ).rejects.toBeInstanceOf(TypeError);
+        await expect(
+            transport.call({ sessionId: "s", projectRoot: "/tmp", method: "transform", body: "x" }),
+        ).rejects.toBeInstanceOf(TypeError);
+        expect(ensured).toBe(0);
+    });
+});
+
+describe("connection backoff is not a connection failure", () => {
+    test("an active backoff propagates without a generation change", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        transport.nextProbeMs = performance.now() + 60_000;
+        const before = transport.connectionGeneration;
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).rejects.toMatchObject({ code: "EIDNARA_HOST_CONNECTION_BACKOFF" });
+        expect(transport.connectionGeneration).toBe(before);
     });
 });
 
@@ -637,7 +696,7 @@ describe("generation-sensitive not-sent outcomes", () => {
                 sessionId: "s",
                 projectRoot: "/tmp",
                 method: "session.status",
-                body: {},
+                body: { method: "session.status" },
                 generationSensitive: true,
             }),
         ).rejects.toBe(refusal);
@@ -654,7 +713,7 @@ describe("generation-sensitive not-sent outcomes", () => {
                 sessionId: "s",
                 projectRoot: "/tmp",
                 method: "session.status",
-                body: {},
+                body: { method: "session.status" },
                 generationSensitive: true,
             }),
         ).resolves.toMatchObject({ transport_status: "connection_generation_changed" });
@@ -673,7 +732,7 @@ describe("generation-sensitive not-sent outcomes", () => {
                 sessionId: "s",
                 projectRoot: "/tmp",
                 method: "session.status",
-                body: {},
+                body: { method: "session.status" },
                 generationSensitive: true,
                 expectedGeneration: 3,
             }),
@@ -689,7 +748,7 @@ describe("generation-sensitive not-sent outcomes", () => {
                 sessionId: "s",
                 projectRoot: "/tmp",
                 method: "session.status",
-                body: {},
+                body: { method: "session.status" },
                 generationSensitive: true,
                 expectedGeneration: 0,
             }),
