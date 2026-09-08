@@ -33,6 +33,11 @@ export interface SidebarSnapshot {
      * The status-detail payload uses snake_case field names.
      */
     compaction_enabled?: boolean;
+    /**
+     * native_compaction_active is set when compaction_enabled is false: whether OpenCode's own
+     * compaction.auto or compaction.prune owns the window. Absent when the host's setting is unknown.
+     */
+    native_compaction_active?: boolean;
     systemPromptTokens: number;
     compartmentCount: number;
     /** Historical compartment rows retained while native compaction owns the window. */

@@ -5,15 +5,23 @@ export interface CompactionOffSidebarRow {
     value: string;
 }
 
+/** Disabling Eidnara compaction does not enable the host's; the suffix says which owner, if any, the host reported. */
+function compactionOwnerSuffix(snapshot: SidebarSnapshot): string {
+    return snapshot.native_compaction_active === false
+        ? "no active compaction"
+        : "native compaction";
+}
+
 /** Prefers `native_context_usage_percentage`, measured against the unreserved model window; `contextLimit` subtracts the output reservation. commentlint: allow(JUDGE) */
 export function nativeCompactionContextLabel(snapshot: SidebarSnapshot): string {
+    const owner = compactionOwnerSuffix(snapshot);
     const native = snapshot.native_context_usage_percentage;
     if (typeof native === "number" && Number.isFinite(native)) {
-        return `Context: ${native.toFixed(1)}% · native compaction`;
+        return `Context: ${native.toFixed(1)}% · ${owner}`;
     }
-    if (snapshot.contextLimit <= 0) return "Context: unknown · native compaction";
+    if (snapshot.contextLimit <= 0) return `Context: unknown · ${owner}`;
     const percentage = (snapshot.inputTokens / snapshot.contextLimit) * 100;
-    return `Context: ${percentage.toFixed(1)}% · native compaction`;
+    return `Context: ${percentage.toFixed(1)}% · ${owner}`;
 }
 
 /** Recovers the unreserved window from `inputTokens / percentage`, falling back to the reserved `contextLimit`. commentlint: allow(JUDGE) */

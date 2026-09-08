@@ -521,17 +521,6 @@ describe("createEventHandler — session.compacted", () => {
         expect(rowCounts()).toEqual({ messages: 2, parts: 0 });
     });
 
-    it("marks the daemon's usage stale until a transform forwards a new sample", async () => {
-        const { deps, handle } = buildHarness();
-        deps.staleDaemonUsageSessions = new Set<string>();
-
-        await handle("session.compacted", { sessionID: SESSION });
-        expect(deps.staleDaemonUsageSessions.has(SESSION)).toBe(true);
-
-        await handle("session.deleted", { sessionID: SESSION });
-        expect(deps.staleDaemonUsageSessions.has(SESSION)).toBe(false);
-    });
-
     it("drops the pre-compaction live usage and sticky snapshot", async () => {
         const { deps, handle } = buildHarness();
         await handle("message.updated", assistantUpdated({ input: 90_000 }));

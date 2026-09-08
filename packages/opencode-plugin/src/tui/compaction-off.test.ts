@@ -79,6 +79,28 @@ test("falls back to inputTokens over contextLimit when the native percentage is 
     ).toBe("Context: unknown · native compaction");
 });
 
+test("names no owner when the host reports neither compaction.auto nor compaction.prune", () => {
+    expect(nativeCompactionContextLabel(snapshot({ native_compaction_active: false }))).toBe(
+        "Context: 41.0% · no active compaction",
+    );
+    expect(
+        nativeCompactionContextLabel(
+            snapshot({
+                contextLimit: 0,
+                native_context_usage_percentage: undefined,
+                native_compaction_active: false,
+            }),
+        ),
+    ).toBe("Context: unknown · no active compaction");
+    // A producer that did not resolve the host setting keeps the native-compaction wording.
+    expect(nativeCompactionContextLabel(snapshot({ native_compaction_active: undefined }))).toBe(
+        "Context: 41.0% · native compaction",
+    );
+    expect(nativeCompactionContextLabel(snapshot({ native_compaction_active: true }))).toBe(
+        "Context: 41.0% · native compaction",
+    );
+});
+
 test("keeps historical compartments as a static archived row", () => {
     const initialRows = compactionOffSidebarRows(snapshot());
     const activeCountChangedRows = compactionOffSidebarRows(snapshot({ compartmentCount: 99 }));

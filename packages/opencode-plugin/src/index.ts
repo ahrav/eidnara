@@ -147,6 +147,7 @@ const server: Plugin = async (ctx) => {
             client: ctx.client,
             liveSessionState,
             rustModeModuleClient,
+            nativeCompaction: conflictResult?.nativeCompaction,
         });
         rpcServer.start().catch((err) => {
             log(`[eidnara] RPC server failed to start: ${err}`);

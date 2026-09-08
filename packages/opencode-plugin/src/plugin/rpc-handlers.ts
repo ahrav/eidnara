@@ -19,7 +19,7 @@ import {
     resolveExecuteThresholdDetail,
 } from "../hooks/context/event-resolvers";
 import { kernelClientResolver } from "../hooks/context/kernel-transport";
-import { addBoundedSession, type LiveSessionState } from "../hooks/context/live-session-state";
+import type { LiveSessionState } from "../hooks/context/live-session-state";
 import {
     findLastAssistantModelFromOpenCodeDb,
     findLastAssistantUsageFromOpenCodeDb,
@@ -294,7 +294,6 @@ function modelKeyOf(model: ActiveModel | undefined): string | undefined {
 function liveUsageEntryFor(
     liveSessionState: LiveSessionState | undefined,
     sessionId: string,
-    modelKey: string | undefined,
 ): ContextUsageEntry | undefined {
     if (!liveSessionState) return undefined;
     let entry = liveSessionState.contextUsageBySession.get(sessionId);
@@ -317,6 +316,14 @@ function liveUsageEntryFor(
             liveSessionState.contextUsageBySession.set(sessionId, entry);
         }
     }
+    return entry;
+}
+
+/** `usage` was measured against `entry.model`'s window, so it pairs only with that model's limit. */
+function usageForModel(
+    entry: ContextUsageEntry | undefined,
+    modelKey: string | undefined,
+): ContextUsageEntry | undefined {
     return entry?.model && modelKeyOf(entry.model) === modelKey ? entry : undefined;
 }
 
@@ -324,25 +331,6 @@ function liveUsageEntryFor(
  * A model named by the request wins over live state. The live lookup still runs so a missing model or
  * agent is recovered from OpenCode's SQLite database and cached for later polls and hooks.
  */
-/**
- * The in-memory mark is set by `session.compacted` and cleared by the transform that forwards new usage.
- * A restart empties it, so a session with a compaction summary and no later usage row is re-marked from the
- * database: any sample the daemon holds for it was forwarded before the compaction. Once a later usage row
- * exists the database cannot tell whether the daemon has received it, so only the mark applies. commentlint: allow(JUDGE)
- */
-function isDaemonUsageStale(
-    liveSessionState: LiveSessionState | undefined,
-    sessionId: string,
-): boolean {
-    if (!liveSessionState) return false;
-    if (liveSessionState.staleDaemonUsageSessions.has(sessionId)) return true;
-    if (liveSessionState.contextUsageBySession.has(sessionId)) return false;
-    if (findLastAssistantUsageFromOpenCodeDb(sessionId)) return false;
-    if (!sessionHasCompactionSummaryInOpenCodeDb(sessionId)) return false;
-    addBoundedSession(liveSessionState.staleDaemonUsageSessions, sessionId);
-    return true;
-}
-
 function resolveActiveModel(
     sessionId: string,
     liveSessionState: LiveSessionState | undefined,
@@ -370,6 +358,17 @@ function resolveActiveModel(
     return parseModelKey(requestedModelKey) ?? liveModel;
 }
 
+/**
+ * Resolved at boot. `nativeActive` is whether OpenCode's own `compaction.auto` or `compaction.prune`
+ * owns the window when Eidnara does not; `undefined` when the host's setting could not be read.
+ */
+export interface CompactionOwnership {
+    enabled: boolean;
+    nativeActive?: boolean;
+}
+
+const EIDNARA_COMPACTION: CompactionOwnership = { enabled: true };
+
 export function buildSidebarSnapshot(
     sessionId: string,
     directory: string,
@@ -379,7 +378,7 @@ export function buildSidebarSnapshot(
     // If the execute-threshold config is omitted, the snapshot uses the 65% runtime default.
     config?: Record<string, unknown>,
     moduleStatus?: RustSessionStatus,
-    compactionEnabled = true,
+    ownership: CompactionOwnership = EIDNARA_COMPACTION,
     requestedModelKey?: string,
 ): SidebarSnapshot {
     try {
@@ -390,19 +389,22 @@ export function buildSidebarSnapshot(
         const activeModelID = activeModel?.modelID;
         const modelKey = modelKeyOf(activeModel);
 
-        // After a host compaction the daemon's usage describes the replaced context until a transform forwards a new sample; the live usage is authoritative meanwhile. commentlint: allow(JUDGE)
-        const moduleUsage = isDaemonUsageStale(liveSessionState, sessionId)
-            ? undefined
-            : moduleStatus?.usage;
+        const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
-        // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
-        const liveUsage = liveUsageEntryFor(liveSessionState, sessionId, modelKey)?.usage;
+        // The live entry is the newest measured sample; the daemon's is the copy a transform forwarded earlier, so it fills in only when no live or persisted sample exists. A compacted session with no later response is zero, not the daemon's pre-compaction copy. commentlint: allow(JUDGE)
+        const usageEntry = liveUsageEntryFor(liveSessionState, sessionId);
+        const liveUsage = usageForModel(usageEntry, modelKey)?.usage;
+        const compactedWithoutResponse =
+            usageEntry === undefined && sessionHasCompactionSummaryInOpenCodeDb(sessionId);
+        const liveInputTokens = liveUsage && liveUsage.inputTokens > 0 ? liveUsage.inputTokens : 0;
         const effectiveInputTokens =
-            typeof moduleInputTokens === "number" && moduleInputTokens > 0
-                ? moduleInputTokens
-                : liveUsage && liveUsage.inputTokens > 0
-                  ? liveUsage.inputTokens
+            liveInputTokens > 0
+                ? liveInputTokens
+                : !compactedWithoutResponse &&
+                    typeof moduleInputTokens === "number" &&
+                    moduleInputTokens > 0
+                  ? moduleInputTokens
                   : 0;
         // The sidebar computes work metrics lazily and incrementally to keep computation off the transform hot path.
         const { newWorkTokens, totalInputTokens } = resolveSidebarWorkMetrics(sessionId);
@@ -430,12 +432,23 @@ export function buildSidebarSnapshot(
         const memoryTruncated = memory?.truncated === true;
         const memoryState = memory ? stateKey(memory.state) : null;
 
-        const contextLimit =
+        const modelContextLimit =
+            activeProviderID && activeModelID
+                ? resolveContextLimit(activeProviderID, activeModelID)
+                : 0;
+        const daemonContextLimit =
             typeof moduleContextLimit === "number" && moduleContextLimit > 0
                 ? moduleContextLimit
-                : activeProviderID && activeModelID
-                  ? resolveContextLimit(activeProviderID, activeModelID)
-                  : 0;
+                : 0;
+        // Each sample divides by the limit it was measured against: the live entry by the model's window, the daemon's copy by the limit sent with it; either falls back to the other when its own is unknown. commentlint: allow(JUDGE)
+        const contextLimit =
+            liveInputTokens > 0
+                ? modelContextLimit > 0
+                    ? modelContextLimit
+                    : daemonContextLimit
+                : daemonContextLimit > 0
+                  ? daemonContextLimit
+                  : modelContextLimit;
         // Usage divides by the same limit the snapshot reports, so a daemon that sent tokens without a limit still yields a percentage once the model supplies one.
         const effectiveUsagePercentage =
             contextLimit > 0 ? (effectiveInputTokens / contextLimit) * 100 : 0;
@@ -501,7 +514,10 @@ export function buildSidebarSnapshot(
             inputTokens: effectiveInputTokens,
             contextLimit,
             native_context_usage_percentage: nativeContextUsagePercentage,
-            compaction_enabled: compactionEnabled,
+            compaction_enabled: ownership.enabled,
+            ...(ownership.enabled || ownership.nativeActive === undefined
+                ? {}
+                : { native_compaction_active: ownership.nativeActive }),
             systemPromptTokens: calibrated.systemTokens,
             compartmentCount,
             memoryCount,
@@ -551,7 +567,7 @@ export function buildSidebarSnapshotRpcResponse(
     memory?: KernelMemorySnapshot,
     config?: Record<string, unknown>,
     moduleStatus?: RustSessionStatus,
-    compactionEnabled = true,
+    ownership: CompactionOwnership = EIDNARA_COMPACTION,
 ): Record<string, unknown> {
     try {
         // SAFETY: RPC results serialize to JSON; the handler map's value type is the JSON-object envelope.
@@ -562,7 +578,7 @@ export function buildSidebarSnapshotRpcResponse(
             memory,
             config,
             moduleStatus,
-            compactionEnabled,
+            ownership,
         ) as unknown as Record<string, unknown>;
     } catch {
         return { error: "sidebar snapshot unavailable" };
@@ -577,7 +593,7 @@ export function buildStatusDetail(
     liveSessionState?: LiveSessionState,
     memory?: KernelMemorySnapshot,
     moduleStatus?: RustSessionStatus,
-    compactionEnabled = true,
+    ownership: CompactionOwnership = EIDNARA_COMPACTION,
 ): StatusDetail {
     const base = buildSidebarSnapshot(
         sessionId,
@@ -586,7 +602,7 @@ export function buildStatusDetail(
         memory,
         config,
         moduleStatus,
-        compactionEnabled,
+        ownership,
         modelKey,
     );
     const activeModel = resolveActiveModel(sessionId, liveSessionState, modelKey);
@@ -594,7 +610,8 @@ export function buildStatusDetail(
     // The daemon counts every minted tag and publishes no per-tag state, so only the total is known here.
     const totalTags = typeof moduleStatus?.tag_count === "number" ? moduleStatus.tag_count : 0;
     const lastResponseTime =
-        liveUsageEntryFor(liveSessionState, sessionId, effectiveModelKey)?.lastResponseTime ?? 0;
+        usageForModel(liveUsageEntryFor(liveSessionState, sessionId), effectiveModelKey)
+            ?.lastResponseTime ?? 0;
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
@@ -726,10 +743,17 @@ export function registerRpcHandlers(
         client: PluginContext["client"] | null;
         liveSessionState: LiveSessionState;
         rustModeModuleClient?: RustModeModuleClient;
+        /** OpenCode's resolved compaction settings from boot conflict detection. */
+        nativeCompaction?: { auto: boolean; prune: boolean };
     },
 ): void {
     const { directory, config, liveSessionState, rustModeModuleClient } = args;
-    const compactionEnabled = isCompactionEnabled(config);
+    const ownership: CompactionOwnership = {
+        enabled: isCompactionEnabled(config),
+        nativeActive: args.nativeCompaction
+            ? args.nativeCompaction.auto || args.nativeCompaction.prune
+            : undefined,
+    };
     // The same maps the hooks share, so a metadata read here pins the route root and records child classification for them too. commentlint: allow(JUDGE)
     const sessionDirectoryDeps: Omit<SessionDirectoryDeps, "directory"> = {
         client: args.client ?? undefined,
@@ -803,7 +827,7 @@ export function registerRpcHandlers(
             inputs.memory,
             rawConfig,
             inputs.moduleStatus,
-            compactionEnabled,
+            ownership,
         );
     });
 
@@ -823,7 +847,7 @@ export function registerRpcHandlers(
             liveSessionState,
             inputs.memory,
             inputs.moduleStatus,
-            compactionEnabled,
+            ownership,
         ) as unknown as Record<string, unknown>;
     });
 

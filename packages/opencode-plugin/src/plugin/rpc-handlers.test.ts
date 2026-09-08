@@ -416,6 +416,61 @@ describe("registerRpcHandlers", () => {
         expect(calls).toBe(4);
     });
 
+    test("the snapshot carries the host's compaction ownership only while Eidnara compaction is off", async () => {
+        const build = (
+            configOverrides: Record<string, unknown>,
+            nativeCompaction?: { auto: boolean; prune: boolean },
+        ) => {
+            const handlers = new Map<string, Handler>();
+            const server = {
+                handle(method: string, handler: Handler) {
+                    handlers.set(method, handler);
+                },
+            } as unknown as EidnaraRpcServer;
+            registerRpcHandlers(server, {
+                directory: process.cwd(),
+                config: EidnaraConfigSchema.parse({
+                    transform_mode: "rust",
+                    subc: { connection_file: MISSING_CONNECTION_FILE },
+                    ...configOverrides,
+                }),
+                client: null,
+                liveSessionState: createLiveSessionState(),
+                rustModeModuleClient: {
+                    async call() {
+                        return { ok: true, result: DAEMON_STATUS };
+                    },
+                },
+                nativeCompaction,
+            });
+            return handlers;
+        };
+        const call = async (handlers: Map<string, Handler>) =>
+            (await handlers.get("sidebar-snapshot")?.({
+                sessionId: "ses-compaction-owner",
+            })) as unknown as SidebarSnapshot;
+
+        const neither = await call(
+            build({ compaction: { enabled: false } }, { auto: false, prune: false }),
+        );
+        expect(neither.compaction_enabled).toBe(false);
+        expect(neither.native_compaction_active).toBe(false);
+
+        const prune = await call(
+            build({ compaction: { enabled: false } }, { auto: false, prune: true }),
+        );
+        expect(prune.native_compaction_active).toBe(true);
+
+        // Without the host's resolved setting the field stays absent rather than guessing.
+        const unknown = await call(build({ compaction: { enabled: false } }));
+        expect(unknown.native_compaction_active).toBeUndefined();
+
+        // Eidnara owns the window: the host's setting is irrelevant and not reported.
+        const eidnara = await call(build({}, { auto: true, prune: true }));
+        expect(eidnara.compaction_enabled).toBe(true);
+        expect(eidnara.native_compaction_active).toBeUndefined();
+    });
+
     test("sidebar-snapshot reports disabled memory and rejects an empty session id", async () => {
         const { handlers } = register({ memory: { enabled: false } });
         const snapshot = (await handlers.get("sidebar-snapshot")?.({
@@ -425,24 +480,23 @@ describe("registerRpcHandlers", () => {
         expect(await handlers.get("sidebar-snapshot")?.({})).toEqual({ error: "unavailable" });
     });
 
-    test("a host compaction fences the daemon's usage until a transform forwards a new sample", async () => {
-        const sessionId = "ses-handler-compacted";
+    test("the live sample wins over the daemon's forwarded copy; the daemon fills in when no sample exists", async () => {
+        const sessionId = "ses-handler-live-first";
         const live = createLiveSessionState();
         live.liveModelBySession.set(sessionId, {
             providerID: "test-provider",
             modelID: "test-model",
         });
-        live.staleDaemonUsageSessions.add(sessionId);
         const { handlers } = register({}, DAEMON_STATUS, live);
 
-        // Right after compaction no response has landed, so the daemon's 42k must not show.
-        const emptied = (await handlers.get("sidebar-snapshot")?.({
+        // No live or persisted sample: the daemon's 42k is the only measurement.
+        const daemonOnly = (await handlers.get("sidebar-snapshot")?.({
             sessionId,
         })) as unknown as SidebarSnapshot;
-        expect(emptied.inputTokens).toBe(0);
-        expect(emptied.compartmentCount).toBe(DAEMON_STATUS.compartment_count);
+        expect(daemonOnly.inputTokens).toBe(42_000);
+        expect(daemonOnly.compartmentCount).toBe(DAEMON_STATUS.compartment_count);
 
-        // The first post-compaction response supplies live usage; it wins over the daemon's stale sample.
+        // A newer response measured 6.4k; the daemon still holds the sample a transform forwarded earlier.
         live.contextUsageBySession.set(sessionId, {
             usage: { percentage: 5, inputTokens: 6_400 },
             updatedAt: Date.now(),
@@ -451,18 +505,18 @@ describe("registerRpcHandlers", () => {
             model: { providerID: "test-provider", modelID: "test-model" },
         });
         clearRustSessionStatus(sessionId);
-        const fresh = (await handlers.get("sidebar-snapshot")?.({
+        const liveFirst = (await handlers.get("sidebar-snapshot")?.({
             sessionId,
         })) as unknown as SidebarSnapshot;
-        expect(fresh.inputTokens).toBe(6_400);
+        expect(liveFirst.inputTokens).toBe(6_400);
 
-        // Once the transform has forwarded usage, the daemon's sample is current again.
-        live.staleDaemonUsageSessions.delete(sessionId);
+        // A sample measured against another model does not pair with the active model; the daemon's copy fills in.
+        live.liveModelBySession.set(sessionId, { providerID: "other", modelID: "model" });
         clearRustSessionStatus(sessionId);
-        const daemon = (await handlers.get("sidebar-snapshot")?.({
+        const otherModel = (await handlers.get("sidebar-snapshot")?.({
             sessionId,
         })) as unknown as SidebarSnapshot;
-        expect(daemon.inputTokens).toBe(42_000);
+        expect(otherModel.inputTokens).toBe(42_000);
     });
 
     test("ts mode serves the live event usage without contacting the daemon", async () => {
@@ -575,9 +629,10 @@ describe("buildSidebarSnapshot — daemon status", () => {
             undefined,
             { execute_threshold_percentage: 65 },
             { usage: { current_total_input_tokens: 41_000, context_limit_tokens: 100_000 } },
-            false,
+            { enabled: false, nativeActive: false },
         );
         expect(snapshot.compaction_enabled).toBe(false);
+        expect(snapshot.native_compaction_active).toBe(false);
         expect(snapshot.native_context_usage_percentage).toBeUndefined();
         expect(snapshot.usagePercentage).toBe(41);
         expect(snapshot.cacheTtl).toBe("5m");
@@ -644,8 +699,8 @@ describe("buildSidebarSnapshot — daemon status", () => {
         expect(fromLive.usagePercentage).toBe(50);
         expect(fromLive.native_context_usage_percentage).toBe(50);
 
-        // Daemon usage wins when present.
-        const fromDaemon = buildSidebarSnapshot(
+        // Live usage takes precedence over daemon usage.
+        const withDaemon = buildSidebarSnapshot(
             sessionId,
             process.cwd(),
             live,
@@ -655,8 +710,9 @@ describe("buildSidebarSnapshot — daemon status", () => {
                 usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
             },
         );
-        expect(fromDaemon.inputTokens).toBe(42_000);
-        expect(fromDaemon.usagePercentage).toBe(42);
+        expect(withDaemon.inputTokens).toBe(64_000);
+        expect(withDaemon.contextLimit).toBe(128_000);
+        expect(withDaemon.usagePercentage).toBe(50);
     });
 
     test("live usage measured against a different model is not shown after a model switch", () => {
@@ -1152,26 +1208,36 @@ describe("clearWorkMetricsCarry", () => {
         expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(0);
         expect(live.contextUsageBySession.has(sessionId)).toBe(false);
 
-        // A restart empties the in-memory fence; the summary row with no later usage re-derives it, so the daemon's pre-compaction sample stays hidden.
-        const restarted = createLiveSessionState();
+        // The daemon still holds the pre-compaction sample a transform forwarded; a compacted session with no later response reports zero, not that copy.
         expect(
-            buildSidebarSnapshot(sessionId, process.cwd(), restarted, undefined, undefined, {
-                usage: { current_total_input_tokens: 90_000, context_limit_tokens: 100_000 },
-            }).inputTokens,
+            buildSidebarSnapshot(
+                sessionId,
+                process.cwd(),
+                createLiveSessionState(),
+                undefined,
+                undefined,
+                {
+                    usage: { current_total_input_tokens: 90_000, context_limit_tokens: 100_000 },
+                },
+            ).inputTokens,
         ).toBe(0);
-        expect(restarted.staleDaemonUsageSessions.has(sessionId)).toBe(true);
 
         insertAssistantRow(db, sessionId, "b", 3, 12_000);
         closeQuietly(db);
         expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(12_000);
-        // With a post-compaction usage row the database cannot tell whether the daemon received it, so an unmarked state trusts the daemon.
-        const later = createLiveSessionState();
+        // The persisted post-compaction sample wins over the daemon's copy even from a fresh process.
         expect(
-            buildSidebarSnapshot(sessionId, process.cwd(), later, undefined, undefined, {
-                usage: { current_total_input_tokens: 12_500, context_limit_tokens: 100_000 },
-            }).inputTokens,
-        ).toBe(12_500);
-        expect(later.staleDaemonUsageSessions.has(sessionId)).toBe(false);
+            buildSidebarSnapshot(
+                sessionId,
+                process.cwd(),
+                createLiveSessionState(),
+                undefined,
+                undefined,
+                {
+                    usage: { current_total_input_tokens: 90_000, context_limit_tokens: 100_000 },
+                },
+            ).inputTokens,
+        ).toBe(12_000);
     });
 
     test("recovery orders the compaction boundary by (time_created, id) and tolerates malformed rows", () => {

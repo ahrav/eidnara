@@ -15,7 +15,7 @@ import {
     getSessionProperties,
 } from "./event-payloads";
 import { resolveContextLimit, resolveSessionId } from "./event-resolvers";
-import { addBoundedSession, recordChildSession } from "./live-session-state";
+import { recordChildSession } from "./live-session-state";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 
@@ -65,8 +65,6 @@ export interface EventHandlerDeps {
     internalChildSessions?: Set<string>;
     /** `subagentSessions` records every session created with a non-empty `parentID`, in memory only. */
     subagentSessions?: Set<string>;
-    /** Sessions whose daemon usage predates a host compaction; the transform removes a session once it forwards new usage. */
-    staleDaemonUsageSessions?: Set<string>;
 }
 
 /** An overflow error means the host will rebuild the window, so the session's injection cache is stale. */
@@ -327,10 +325,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
             // Compaction replaces the context the live usage measured, so the pre-compaction count must not carry over.
             deps.contextUsageMap.delete(sessionId);
             clearSidebarSnapshotCache(sessionId);
-            // The daemon still holds the usage the last transform forwarded; it describes the replaced context.
-            if (deps.staleDaemonUsageSessions) {
-                addBoundedSession(deps.staleDaemonUsageSessions, sessionId);
-            }
             deps.onSessionCacheInvalidated?.(sessionId);
             return;
         }
@@ -359,7 +353,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
             deps.contextUsageMap.delete(sessionId);
             deps.subagentSessions?.delete(sessionId);
             deps.internalChildSessions?.delete(sessionId);
-            deps.staleDaemonUsageSessions?.delete(sessionId);
             invalidateTrueRawTokenCache({ sessionId, reason: "session.deleted" });
             return;
         }

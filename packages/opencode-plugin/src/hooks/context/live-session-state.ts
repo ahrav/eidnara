@@ -40,11 +40,6 @@ export interface LiveSessionState {
      * so hooks can skip main-session-only work without a persisted session record.
      */
     subagentSessions: Set<string>;
-    /**
-     * `staleDaemonUsageSessions` holds sessions the host compacted after the daemon last received
-     * usage; the sidebar reads live usage for them until a transform forwards a post-compaction sample.
-     */
-    staleDaemonUsageSessions: Set<string>;
 }
 
 /** Hidden Eidnara child sessions carry this title prefix at creation. */
@@ -94,6 +89,5 @@ export function createLiveSessionState(): LiveSessionState {
         sessionMetadataReadStateBySession: new Map(),
         internalChildSessions: new Set<string>(),
         subagentSessions: new Set<string>(),
-        staleDaemonUsageSessions: new Set<string>(),
     };
 }

@@ -134,8 +134,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         deps.liveSessionState?.sessionMetadataReadStateBySession ?? new Map();
     const internalChildSessions = deps.liveSessionState?.internalChildSessions ?? new Set<string>();
     const subagentSessions = deps.liveSessionState?.subagentSessions ?? new Set<string>();
-    const staleDaemonUsageSessions =
-        deps.liveSessionState?.staleDaemonUsageSessions ?? new Set<string>();
     // One resolver serves the transform, the commands, the todo snapshots, and the Sidekick child, so every daemon call for a session shares one route root.
     const sessionDirectoryDeps = {
         client: deps.client,
@@ -326,7 +324,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             cacheTtl: deps.config.cache_ttl,
             compactionOff,
             ...sessionDirectoryDeps,
-            staleDaemonUsageSessions,
             isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
             systemPromptHashFor: (sessionId) =>
                 systemPromptHash.promptStateFor(sessionId)?.systemPromptHash ?? "",
@@ -358,7 +355,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         client: deps.client,
         internalChildSessions,
         subagentSessions,
-        staleDaemonUsageSessions,
         onSessionCacheInvalidated: (sessionId: string) => {
             deps.onSessionCacheInvalidated?.(sessionId);
         },
