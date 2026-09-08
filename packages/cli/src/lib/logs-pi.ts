@@ -49,8 +49,6 @@ export function readLogTailLines(path: string, maxBytes = LOG_TAIL_MAX_BYTES): s
     }
 }
 
-/** Tags the plugin writes without a session id do not restrict session matching. */
-const GLOBAL_TAGS = new Set(["pi", "pi-status", "global"]);
 const TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/g;
 
 /** `log` opens every entry with `[<ISO timestamp>]`; an `Error` stack continues on bare lines. */
@@ -58,9 +56,8 @@ const ENTRY_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T[^\]]*\]/;
 
 /**
  * `sessionId` may end with `_<uuid>` because log tags contain bare UUIDs.
- * Entries with non-global tags are kept only when every tag matches
- * `sessionId`. Continuation lines retain the preceding entry's keep decision;
- * lines before the first entry are excluded.
+ * The filter keeps an entry only if every tag matches `sessionId`.
+ * Continuation lines retain the preceding entry's keep decision; lines before the first entry are excluded.
  */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
@@ -68,10 +65,8 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     let keep = false;
     return lines.filter((line) => {
         if (ENTRY_START_PATTERN.test(line)) {
-            const tags = [...line.matchAll(TAG_PATTERN)]
-                .map((match) => match[1] ?? "")
-                .filter((tag) => !GLOBAL_TAGS.has(tag));
-            keep = tags.length === 0 || tags.every(isWanted);
+            const tags = [...line.matchAll(TAG_PATTERN)].map((match) => match[1] ?? "");
+            keep = tags.every(isWanted);
         }
         return keep;
     });

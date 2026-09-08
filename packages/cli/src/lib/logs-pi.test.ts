@@ -76,7 +76,7 @@ describe("readLogTailLines", () => {
 });
 
 describe("bundleIssueReport session filtering", () => {
-    it("keeps the picked Pi session's tagged lines and untagged lines, and drops other sessions", async () => {
+    it("keeps the picked Pi session's entries and untagged entries, and drops every other tag", async () => {
         const root = makeTempRoot();
         const logPath = join(root, "eidnara.log");
         const wanted = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
@@ -84,8 +84,8 @@ describe("bundleIssueReport session filtering", () => {
         writeFileSync(
             logPath,
             [
-                "[2026-07-07T12:00:00.000Z] [eidnara][pi] extension loaded",
-                "[2026-07-07T12:00:00.500Z] [eidnara][global] kernel ready",
+                "[2026-07-07T12:00:00.000Z] [eidnara][pi] /ctx-aug: sidekick failed (timeout): stderr",
+                "[2026-07-07T12:00:00.500Z] [eidnara][pi-status] Status: rendered for a session",
                 `[2026-07-07T12:00:01.000Z] [eidnara][${wanted}] /ctx-status ran`,
                 `[2026-07-07T12:00:02.000Z] [eidnara][${other}] /ctx-status ran elsewhere`,
                 "[2026-07-07T12:00:02.500Z] [eidnara][pi-session-1a2b3c4d] /ctx-aug: project identity",
@@ -100,10 +100,10 @@ describe("bundleIssueReport session filtering", () => {
         });
 
         expect(bundled.bodyMarkdown).toContain(`[eidnara][${wanted}] /ctx-status ran`);
-        expect(bundled.bodyMarkdown).toContain("[eidnara][pi] extension loaded");
-        expect(bundled.bodyMarkdown).toContain("[eidnara][global] kernel ready");
         expect(bundled.bodyMarkdown).toContain("untagged line");
         expect(bundled.bodyMarkdown).not.toContain(other);
+        expect(bundled.bodyMarkdown).not.toContain("sidekick failed");
+        expect(bundled.bodyMarkdown).not.toContain("rendered for a session");
         expect(bundled.bodyMarkdown).not.toContain("pi-session-1a2b3c4d");
     });
 
