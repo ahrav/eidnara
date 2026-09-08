@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { join } from "node:path";
 
-import { exitStatus, soakInvocation } from "./run-shm-soak";
+import { exitStatus, soakInvocation, USAGE } from "./run-shm-soak";
 
 describe("shared-memory soak runner", () => {
     it("selects the checked short smoke without a duration override", () => {
@@ -48,6 +49,38 @@ describe("shared-memory soak runner", () => {
         expect(soakInvocation(["--hours", "0.001"]).environment).toEqual({
             EIDNARA_SHM_SOAK_SECONDS: "4",
         });
+    });
+
+    it("rejects unknown arguments instead of falling back to the long soak", () => {
+        for (const args of [["--help"], ["-h"], ["--hour", "5"], ["--smoke", "extra"]]) {
+            expect(() => soakInvocation(args)).toThrow(/unknown argument: .*\n.*Usage/);
+        }
+    });
+
+    it("rejects --smoke combined with --hours", () => {
+        expect(() => soakInvocation(["--smoke", "--hours", "5"])).toThrow(
+            "--smoke and --hours are mutually exclusive",
+        );
+    });
+
+    it("prints usage and exits 0 for --help without spawning cargo", () => {
+        const result = Bun.spawnSync({
+            cmd: [process.execPath, join(import.meta.dir, "run-shm-soak.ts"), "--help"],
+            stdout: "pipe",
+            stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.toString()).toContain(USAGE);
+    });
+
+    it("exits 2 with the parse error for an unknown argument", () => {
+        const result = Bun.spawnSync({
+            cmd: [process.execPath, join(import.meta.dir, "run-shm-soak.ts"), "--hour", "5"],
+            stdout: "pipe",
+            stderr: "pipe",
+        });
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr.toString()).toContain("unknown argument: --hour");
     });
 
     it("reports a signal-terminated soak as a failure", () => {

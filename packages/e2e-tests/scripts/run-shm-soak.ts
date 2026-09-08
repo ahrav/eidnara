@@ -18,19 +18,34 @@ export type SoakResult = {
     signalCode?: string | number | null;
 };
 
+export const USAGE = "Usage: run-shm-soak.ts [--smoke | --hours <n>]";
+
 export function soakInvocation(args: string[]): SoakInvocation {
-    const smoke = args.includes("--smoke");
-    const hoursAt = args.indexOf("--hours");
-    const hours = hoursAt >= 0 ? Number(args[hoursAt + 1]) : DEFAULT_HOURS;
-    if (!smoke) {
-        if (!Number.isFinite(hours) || hours <= 0) {
-            throw new Error("--hours must be a positive number");
+    let smoke = false;
+    let hours: number | null = null;
+    for (let index = 0; index < args.length; index += 1) {
+        const arg = args[index];
+        if (arg === "--smoke") {
+            smoke = true;
+        } else if (arg === "--hours") {
+            index += 1;
+            const value = index < args.length ? Number(args[index]) : Number.NaN;
+            if (!Number.isFinite(value) || value <= 0) {
+                throw new Error("--hours must be a positive number");
+            }
+            hours = value;
+        } else {
+            throw new Error(`unknown argument: ${arg}\n${USAGE}`);
         }
-        // `Math.round` maps values below 0.5 seconds to zero, which the test
-        // binary rejects.
-        if (Math.round(hours * 3600) < 1) {
-            throw new Error("--hours must resolve to at least one second");
-        }
+    }
+    if (smoke && hours !== null) {
+        throw new Error(`--smoke and --hours are mutually exclusive\n${USAGE}`);
+    }
+    hours ??= DEFAULT_HOURS;
+    // `Math.round` maps values below 0.5 seconds to zero, which the test
+    // binary rejects.
+    if (!smoke && Math.round(hours * 3600) < 1) {
+        throw new Error("--hours must resolve to at least one second");
     }
 
     // `--locked` keeps both soak variants on the committed dependency graph instead of resolving a new one.
@@ -67,9 +82,14 @@ export function exitStatus(result: SoakResult): number {
 }
 
 if (import.meta.main) {
+    const args = Bun.argv.slice(2);
+    if (args.includes("--help") || args.includes("-h")) {
+        console.log(USAGE);
+        process.exit(0);
+    }
     let invocation: SoakInvocation;
     try {
-        invocation = soakInvocation(Bun.argv.slice(2));
+        invocation = soakInvocation(args);
     } catch (error) {
         console.error(error instanceof Error ? error.message : String(error));
         process.exit(2);
