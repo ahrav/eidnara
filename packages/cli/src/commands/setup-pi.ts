@@ -1,12 +1,12 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { stringify as stringifyJsonc } from "comment-json";
 import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { type EidnaraModes, readEidnaraModes } from "../lib/eidnara-modes";
 import {
     assertJsoncConfigsParseable,
     readJsoncConfigForUpdate,
@@ -35,15 +35,6 @@ export interface SetupEnvironment {
 
 /** Throw when a restoration did not take effect so the caller reports a partial rollback. */
 export type SetupRollback = () => Promise<void>;
-
-/** Shared-config modes a host hook reads before disabling a native manager. */
-export interface EidnaraModes {
-    enabled: boolean;
-    /** False when Eidnara compaction is off or Eidnara is disabled. */
-    compactionEnabled: boolean;
-    /** False when Eidnara memory is off or Eidnara is disabled. */
-    memoryEnabled: boolean;
-}
 
 export interface PiCompatibleSetupHost {
     displayName: string;
@@ -284,20 +275,6 @@ async function pickCopilotThinkingLevel(
         { label: "high — best quality, slowest", value: "high" },
         { label: "off — no thinking, fastest (not recommended)", value: "off" },
     ]);
-}
-
-/**
- * The read is lenient because dry runs skip config validation; an unreadable
- * config resolves to the schema defaults (both enabled).
- */
-function readEidnaraModes(configPath: string): EidnaraModes {
-    const config = readJsoncLenient(configPath).value;
-    const enabled = config.enabled !== false;
-    return {
-        enabled,
-        compactionEnabled: enabled && isCompactionEnabled(config),
-        memoryEnabled: enabled && (!isRecord(config.memory) || config.memory.enabled !== false),
-    };
 }
 
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
