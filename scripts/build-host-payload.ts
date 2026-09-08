@@ -11,7 +11,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, extname, join } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 function fail(message: string): never {
@@ -40,6 +40,8 @@ export const PAYLOAD_TARGET = {
     package: "@eidnara/host-linux-x64-gnu",
     dir: "packages/host-linux-x64-gnu",
     target: "linux-x64-gnu",
+    /** `buildTarget()` string the addon must report; `packages/shm-native/index.ts` refuses any other value with `wrong_platform_binary`. commentlint: allow(JUDGE) */
+    nativeTarget: "linux-x86_64",
     os: ["linux"],
     cpu: ["x64"],
     libc: ["glibc"],
@@ -351,7 +353,21 @@ export function validatePayloadManifest(
     return manifest as unknown as PayloadManifest;
 }
 
+/** Whether a payload root exists at `dir/payload`. A symlink or non-directory there is rejected because every per-file stat below would follow it. commentlint: allow(JUDGE) */
+function payloadRootPresent(dir: string): boolean {
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+        stat = lstatSync(join(dir, "payload"));
+    } catch {
+        return false;
+    }
+    if (stat.isSymbolicLink()) fail("payload root must not be a symlink");
+    if (!stat.isDirectory()) fail("payload root must be a directory");
+    return true;
+}
+
 export function verifyPayloadDir(dir: string, manifest: PayloadManifest): void {
+    if (!payloadRootPresent(dir)) fail("missing payload directory");
     const listed = new Set(manifest.files.map((entry) => entry.path));
     for (const entry of manifest.files) {
         const path = join(dir, entry.path);
@@ -385,16 +401,23 @@ export function verifyPayloadDir(dir: string, manifest: PayloadManifest): void {
             }
         }
     };
-    if (existsSync(join(dir, "payload"))) walk("payload");
+    walk("payload");
 }
 
-/** `packages/shm-native/index.ts` performs the same probe at runtime and refuses `"debug"`. commentlint: allow(JUDGE) */
-export function probeAddonProfile(addonPath: string): string {
+/** `packages/shm-native/index.ts` performs the same two probes at runtime and refuses `"debug"` and any target other than `PAYLOAD_TARGET.nativeTarget`. Callers pass an absolute path: `require` resolves a relative one against this module's directory, not the working directory. commentlint: allow(JUDGE) */
+export function probeAddon(addonPath: string): { profile: string; target: string } {
     const module: unknown = createRequire(import.meta.url)(addonPath);
-    if (!isRecord(module) || typeof module.buildProfile !== "function") {
-        fail(`addon ${addonPath} exports no buildProfile function`);
+    if (
+        !isRecord(module) ||
+        typeof module.buildProfile !== "function" ||
+        typeof module.buildTarget !== "function"
+    ) {
+        fail(`addon ${addonPath} exports no buildProfile and buildTarget functions`);
     }
-    return String((module.buildProfile as () => unknown)());
+    return {
+        profile: String((module.buildProfile as () => unknown)()),
+        target: String((module.buildTarget as () => unknown)()),
+    };
 }
 
 function readSourceFile(path: string, what: string): Buffer {
@@ -404,8 +427,9 @@ function readSourceFile(path: string, what: string): Buffer {
     return bytes;
 }
 
+/** A development payload launches only through the daemon's unqualified path, which release builds refuse (`payload_sources` in `eidnara-host.rs`), so the debug launcher is preferred when both profiles exist. commentlint: allow(JUDGE) */
 function defaultLauncherPath(rootDir: string): string {
-    for (const profile of ["release", "debug"]) {
+    for (const profile of ["debug", "release"]) {
         const candidate = join(rootDir, "target", profile, "eidnara-host");
         if (existsSync(candidate)) return candidate;
     }
@@ -435,14 +459,15 @@ export function buildDevPayload(
     options: { outDir: string; launcherPath?: string; addonPath?: string },
 ): DevPayloadResult {
     const context = loadReleaseContext(rootDir);
-    const launcherPath = options.launcherPath ?? defaultLauncherPath(rootDir);
-    const addonPath = options.addonPath ?? defaultAddonPath(rootDir);
+    // Absolute paths keep `readSourceFile` (working-directory relative) and `probeAddon` (`require`, module-directory relative) reading the same file.
+    const launcherPath = resolve(options.launcherPath ?? defaultLauncherPath(rootDir));
+    const addonPath = resolve(options.addonPath ?? defaultAddonPath(rootDir));
     if (!existsSync(launcherPath)) fail(`launcher ${launcherPath} does not exist`);
     if (!existsSync(addonPath)) fail(`addon ${addonPath} does not exist`);
     const launcherBytes = readSourceFile(launcherPath, "launcher");
     const addonBytes = readSourceFile(addonPath, "addon");
 
-    const { outDir } = options;
+    const outDir = resolve(options.outDir);
     const payloadDir = join(outDir, "payload");
     const manifestPath = join(outDir, MANIFEST_FILE_NAME);
     // Removing the output tree prevents files absent from the manifest from surviving.
@@ -457,9 +482,15 @@ export function buildDevPayload(
         stageFile(addonPath, addonDest, 0o644);
         // Bun's `require` dispatches to the native-addon loader only for a `.node` extension, so a `.so` source is loaded through its staged copy. commentlint: allow(JUDGE)
         const probePath = extname(addonPath) === ".so" ? addonDest : addonPath;
-        const profile = probeAddonProfile(probePath);
+        const { profile, target } = probeAddon(probePath);
         if (profile !== "release") {
             fail(`dev payload requires a release-profile addon; ${addonPath} reports ${profile}`);
+        }
+        if (target !== PAYLOAD_TARGET.nativeTarget) {
+            fail(
+                `dev payload requires a ${PAYLOAD_TARGET.nativeTarget} addon; ` +
+                    `${addonPath} reports ${target}`,
+            );
         }
     } catch (error) {
         rmSync(payloadDir, { recursive: true, force: true });
@@ -555,7 +586,12 @@ export function validatePayloadPackageDir(rootDir: string): void {
         }
     }
     const manifestPath = join(packageDir, MANIFEST_FILE_NAME);
-    if (existsSync(manifestPath)) {
+    const manifestPresent = existsSync(manifestPath);
+    // npm packs `payload/` whether or not a manifest sits beside it, and `packages/shm-native/index.ts` refuses a package without one, so both must be present or both absent. commentlint: allow(JUDGE)
+    if (payloadRootPresent(packageDir) && !manifestPresent) {
+        fail(`${MANIFEST_FILE_NAME} is missing but a payload directory is staged`);
+    }
+    if (manifestPresent) {
         const manifest = validatePayloadManifest(
             readJson(rootDir, `${PAYLOAD_TARGET.dir}/${MANIFEST_FILE_NAME}`),
             context,

@@ -6,8 +6,10 @@ import {
     mkdirSync,
     mkdtempSync,
     readFileSync,
+    renameSync,
     rmSync,
     statSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -194,6 +196,37 @@ describe("build-host-payload", () => {
         ).toThrow(/release-profile addon/);
     });
 
+    test("an addon built for another native target is refused", () => {
+        const foreignAddon = join(tmp, "foreign-addon.cjs");
+        writeFileSync(
+            foreignAddon,
+            'module.exports = { buildProfile: () => "release", buildTarget: () => "darwin-arm64" };\n',
+        );
+        expect(() =>
+            buildDevPayload(rootDir, {
+                outDir: join(tmp, "out-foreign"),
+                launcherPath,
+                addonPath: foreignAddon,
+            }),
+        ).toThrow(/linux-x86_64 addon; .* reports darwin-arm64/);
+    });
+
+    test("relative launcher, addon, and out paths resolve against the working directory", () => {
+        const previousCwd = process.cwd();
+        process.chdir(tmp);
+        try {
+            const result = buildDevPayload(rootDir, {
+                outDir: "out-relative",
+                launcherPath: "./eidnara-host",
+                addonPath: "./release-addon.cjs",
+            });
+            expect(result.outDir).toBe(join(process.cwd(), "out-relative"));
+            expect(result.addonSha256).toBe(built.addonSha256);
+        } finally {
+            process.chdir(previousCwd);
+        }
+    });
+
     test("validatePayloadPackageDir accepts the committed package and rejects extra files", () => {
         expect(() => validatePayloadPackageDir(rootDir)).not.toThrow();
 
@@ -222,6 +255,59 @@ describe("build-host-payload", () => {
         expect(() => validatePayloadPackageDir(shadow)).not.toThrow();
         chmodSync(join(packageDir, LAUNCHER_PATH), 0o644);
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/mode drift/);
+    });
+
+    test("the default launcher prefers target/debug over target/release", () => {
+        const shadow = join(tmp, "shadow-launcher");
+        mkdirSync(join(shadow, "packages"), { recursive: true });
+        cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
+        cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
+            recursive: true,
+        });
+        for (const profile of ["debug", "release"]) {
+            mkdirSync(join(shadow, "target", profile), { recursive: true });
+            writeFileSync(
+                join(shadow, "target", profile, "eidnara-host"),
+                `#!/bin/sh\n# ${profile}\n`,
+            );
+        }
+        const result = buildDevPayload(shadow, {
+            outDir: join(tmp, "out-launcher"),
+            addonPath: releaseAddon,
+        });
+        expect(result.launcherSha256).toBe(
+            sha256(readFileSync(join(shadow, "target", "debug", "eidnara-host"))),
+        );
+    });
+
+    test("a staged payload tree without a manifest fails the package check", () => {
+        const shadow = join(tmp, "shadow-orphan");
+        mkdirSync(join(shadow, "packages"), { recursive: true });
+        cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
+        cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
+            recursive: true,
+        });
+        const packageDir = join(shadow, PAYLOAD_TARGET.dir);
+        buildDevPayload(shadow, { outDir: packageDir, launcherPath, addonPath: releaseAddon });
+        rmSync(join(packageDir, "payload-manifest.json"));
+        expect(() => validatePayloadPackageDir(shadow)).toThrow(/manifest.json is missing/);
+    });
+
+    test("a symlinked payload root fails the package check", () => {
+        const shadow = join(tmp, "shadow-symlink");
+        mkdirSync(join(shadow, "packages"), { recursive: true });
+        cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
+        cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
+            recursive: true,
+        });
+        const packageDir = join(shadow, PAYLOAD_TARGET.dir);
+        buildDevPayload(shadow, { outDir: packageDir, launcherPath, addonPath: releaseAddon });
+        const outside = join(tmp, "outside-payload");
+        renameSync(join(packageDir, "payload"), outside);
+        symlinkSync(outside, join(packageDir, "payload"));
+        expect(() => validatePayloadPackageDir(shadow)).toThrow(
+            /payload root must not be a symlink/,
+        );
     });
 
     test("payloadManifestDigest equals the digest of the written file minus its newline", () => {
