@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PiDiagnosticReport } from "./diagnostics-pi";
@@ -101,5 +101,49 @@ describe("bundleIssueReport session filtering", () => {
         expect(bundled.bodyMarkdown).toContain("[eidnara][pi] extension loaded");
         expect(bundled.bodyMarkdown).toContain("untagged line");
         expect(bundled.bodyMarkdown).not.toContain(other);
+    });
+
+    it("drops another session's error stack along with its tagged first line", async () => {
+        const root = makeTempRoot();
+        const logPath = join(root, "eidnara.log");
+        const wanted = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+        const other = "0190a1b2-c3d4-7e5f-8a9b-ffffffffffff";
+        writeFileSync(
+            logPath,
+            [
+                `[2026-07-07T12:00:01.000Z] [eidnara][${other}] rust session.status failed: boom`,
+                "Error: boom-other",
+                "    at otherFrame (file:///other.ts:1:1)",
+                `[2026-07-07T12:00:02.000Z] [eidnara][${wanted}] rust session.status failed: bang`,
+                "Error: bang-wanted",
+                "    at wantedFrame (file:///wanted.ts:2:2)",
+            ].join("\n"),
+        );
+
+        const bundled = await bundleIssueReport(reportWithLog(logPath), "desc", "title", {
+            cwd: root,
+            now: new Date("2026-07-07T12:00:00Z"),
+            sessionFilter: wanted,
+        });
+
+        expect(bundled.bodyMarkdown).toContain("Error: bang-wanted");
+        expect(bundled.bodyMarkdown).toContain("wantedFrame");
+        expect(bundled.bodyMarkdown).not.toContain("boom-other");
+        expect(bundled.bodyMarkdown).not.toContain("otherFrame");
+    });
+
+    it("reports an unreadable log instead of aborting the bundle", async () => {
+        const root = makeTempRoot();
+        const logDir = join(root, "eidnara.log");
+        mkdirSync(logDir);
+
+        const bundled = await bundleIssueReport(reportWithLog(logDir), "desc", "title", {
+            cwd: root,
+            now: new Date("2026-07-07T12:00:00Z"),
+        });
+
+        expect(bundled.bodyMarkdown).toContain("<log unreadable: ");
+        expect(bundled.bodyMarkdown).toContain("EISDIR");
+        expect(bundled.bodyMarkdown).toContain("## Diagnostics");
     });
 });

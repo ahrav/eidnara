@@ -53,14 +53,24 @@ export function readLogTailLines(path: string, maxBytes = LOG_TAIL_MAX_BYTES): s
 const SESSION_TAG_PATTERN =
     /\[eidnara\]\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/gi;
 
-/** `sessionId` is a Pi JSONL stem `<timestamp>_<uuid>` while log tags carry the bare UUID. */
+/** `log` opens every entry with `[<ISO timestamp>]`; an `Error` stack continues on bare lines. */
+const ENTRY_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T[^\]]*\]/;
+
+/**
+ * `sessionId` may end with `_<uuid>` because log tags contain bare UUIDs.
+ * Continuation lines inherit the preceding entry's decision; lines before the
+ * first entry start are excluded.
+ */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
     const isWanted = (tag: string) => tag === sessionId || sessionId.endsWith(`_${tag}`);
+    let keep = false;
     return lines.filter((line) => {
-        const tags = [...line.matchAll(SESSION_TAG_PATTERN)].map((match) => match[1] ?? "");
-        if (tags.length === 0) return true;
-        return tags.every(isWanted);
+        if (ENTRY_START_PATTERN.test(line)) {
+            const tags = [...line.matchAll(SESSION_TAG_PATTERN)].map((match) => match[1] ?? "");
+            keep = tags.length === 0 || tags.every(isWanted);
+        }
+        return keep;
     });
 }
 
@@ -71,7 +81,15 @@ export async function bundleIssueReport(
     options: { cwd?: string; now?: Date; sessionFilter?: string | null } = {},
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists ? readLogTailLines(report.logFile.path) : [];
+    let allLogLines: string[] = [];
+    let logReadError: string | null = null;
+    if (report.logFile.exists) {
+        try {
+            allLogLines = readLogTailLines(report.logFile.path);
+        } catch (error) {
+            logReadError = error instanceof Error ? error.message : String(error);
+        }
+    }
     const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
@@ -102,7 +120,9 @@ export async function bundleIssueReport(
         "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
         "```",
-        recentLog || "<no log output>",
+        logReadError
+            ? `<log unreadable: ${sanitizeLogContent(logReadError)}>`
+            : recentLog || "<no log output>",
         "```",
     ].join("\n");
 
