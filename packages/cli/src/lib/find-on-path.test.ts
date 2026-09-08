@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { findOnPath } from "./find-on-path";
+import { findOnPath, packageManagerBinCandidates } from "./find-on-path";
 
 /**
  * Tests use a staged PATH to avoid host-dependent results.
@@ -172,5 +172,23 @@ describe("findOnPath", () => {
 
         const found = findOnPath("opencode");
         expect(found).toBe(exePath);
+    });
+});
+
+describe("packageManagerBinCandidates", () => {
+    it("derives the npm launcher directory from the profile when APPDATA is absent", () => {
+        const candidates = packageManagerBinCandidates("pi", "win32", "C:\\Users\\fox");
+        expect(candidates[0]).toBe(join("C:\\Users\\fox", "AppData", "Roaming", "npm", "pi.cmd"));
+        expect(candidates[1]).toBe(join("C:\\Users\\fox", "AppData", "Roaming", "npm", "pi.exe"));
+    });
+
+    it("prefers APPDATA when set", () => {
+        const candidates = packageManagerBinCandidates(
+            "pi",
+            "win32",
+            "C:\\Users\\fox",
+            "D:\\Roaming",
+        );
+        expect(candidates[0]).toBe(join("D:\\Roaming", "npm", "pi.cmd"));
     });
 });
