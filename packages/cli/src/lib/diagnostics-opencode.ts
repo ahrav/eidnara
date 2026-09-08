@@ -15,11 +15,7 @@ import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { resolveOpenCodeDatabasePath } from "@eidnara/opencode/shared/opencode-database-path";
-import {
-    sanitizeConfigValue,
-    sanitizeDiagnosticText,
-    sanitizePathString,
-} from "@eidnara/opencode/shared/redaction";
+import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { parse as parseJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { type HistorianDumpSummary, listDumpsInDir } from "./historian-dumps";
@@ -172,8 +168,9 @@ function getSelfVersion(): string {
 
 // ── Sanitization ─────────────────────────────────────────────────────
 
+// Paths can carry secret material through environment overrides (`EIDNARA_LOG_PATH=/tmp/token=abc/...`).
 function sanitizeString(value: string): string {
-    return sanitizePathString(value);
+    return sanitizeDiagnosticText(value);
 }
 
 function sanitizeValue(value: unknown): unknown {
@@ -212,11 +209,12 @@ function readEidnaraConfigTier(basePath: string): EidnaraConfigTier {
     };
 }
 
-function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
+function configHasPluginEntry(config: Record<string, unknown> | null, baseDir: string): boolean {
     const plugins = Array.isArray(config?.plugin) ? config.plugin : [];
     // `ensurePluginEntry` treats a local checkout of this package as registered; diagnostics must agree.
     return plugins.some(
-        (entry) => matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) || isDevPathPluginEntry(entry),
+        (entry) =>
+            matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) || isDevPathPluginEntry(entry, baseDir),
     );
 }
 
@@ -230,7 +228,7 @@ function readProjectOpenCodeConfigs(cwd: string): ProjectOpenCodeConfigReport {
         report.paths.push(detected.path);
         const parsed = readConfig(detected.path);
         if (parsed.error) report.parseErrors.push(parsed.error);
-        if (configHasPluginEntry(parsed.value)) report.hasPlugin = true;
+        if (configHasPluginEntry(parsed.value, cwd)) report.hasPlugin = true;
     }
     return report;
 }
@@ -406,9 +404,9 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         opencodeInstallations,
         configPaths,
         projectDirectory: cwd,
-        opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value),
+        opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value, cwd),
         ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
-        tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value),
+        tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value, cwd),
         ...(tuiConfig.error ? { tuiConfigParseError: tuiConfig.error } : {}),
         projectOpencodeConfig: readProjectOpenCodeConfigs(cwd),
         eidnaraConfig,

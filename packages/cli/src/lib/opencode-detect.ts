@@ -48,11 +48,21 @@ export interface DetectDeps {
     realpath?: (path: string) => string;
 }
 
+// `homedir()` throws for a UID without a passwd entry when `HOME` is unset; detection then
+// simply finds no home-relative installation.
+function safeHomeDir(): string {
+    try {
+        return homedir();
+    } catch {
+        return "";
+    }
+}
+
 function defaultDeps(): DetectDeps {
     return {
         exists: existsSync,
         isExecutable: isExecutableFile,
-        home: process.env.HOME?.trim() || homedir(),
+        home: process.env.HOME?.trim() || safeHomeDir(),
         platform: process.platform,
         env: process.env,
         onPath: findOnPath,

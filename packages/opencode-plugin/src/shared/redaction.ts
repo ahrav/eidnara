@@ -20,7 +20,7 @@ export const SECRET_WORDS = [
     "credential",
 ];
 // Abbreviations the key matcher accepts in addition to the fixture-pinned `SECRET_WORDS`.
-const SECRET_WORD_ALIASES = ["passwd", "pwd"];
+const SECRET_WORD_ALIASES = ["passwd", "pwd", "cookie"];
 const SECRET_SEGMENT_PATTERN = new RegExp(
     `^(?:${[...SECRET_WORDS, ...SECRET_WORD_ALIASES].map((w) => `${w}s?`).join("|")})$`,
     "i",
@@ -42,9 +42,11 @@ function redactionTypeForKey(key: string): string {
     );
 }
 
-// `password`, `secret`, and `credential` identify secrets without a preceding qualifier.
-// Generic `token` and `key` segments require a preceding `SECRET_QUALIFIERS` segment.
-const UNQUALIFIED_SECRET_SEGMENT_PATTERN = /^(?:password|passwd|pwd|secret|credential)s?$/i;
+// `password`, `secret`, `credential`, and `cookie` identify secrets without a preceding qualifier
+// and redact even numeric values; `token` and `key` also count as a final segment (`oauth_token`,
+// `signing_key`) but keep numeric values so `injection_budget_tokens: 12` stays readable.
+const UNQUALIFIED_SECRET_SEGMENT_PATTERN = /^(?:password|passwd|pwd|secret|credential|cookie)s?$/i;
+const TRAILING_SECRET_SEGMENT_PATTERN = /^(?:token|key)s?$/i;
 
 // Do not redact numeric, boolean, null, or undefined values solely because their key contains a secret word.
 function isNonSecretScalarValue(value: string): boolean {
@@ -132,6 +134,7 @@ export function isSecretKey(key: string): boolean {
         if (!trailingOk) continue;
 
         if (UNQUALIFIED_SECRET_SEGMENT_PATTERN.test(seg)) return true;
+        if (TRAILING_SECRET_SEGMENT_PATTERN.test(seg)) return true;
 
         for (let k = i - 1; k >= 0; k--) {
             const lead = segments[k];
@@ -244,7 +247,7 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: (_full: string, prefix: string) => `${prefix}<REDACTED:authorization>`,
     },
     {
-        pattern: /\b((?:Set-)?Cookie\s*:\s*)(\S[^\r\n]*)/gi,
+        pattern: /\b((?:Set-)?Cookie\s*:\s*)(\S(?:[^\r\n}]*[^\s}])?)/gi,
         replacement: (_full: string, prefix: string) => `${prefix}<REDACTED:cookie>`,
     },
     // `scheme://user:pass@host` keeps the scheme and host so the endpoint stays identifiable.
@@ -258,7 +261,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         pattern:
-            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[^"']*)\1(\s*:\s*)(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|(-?\d+(?:\.\d+)?))/gi,
+            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential|cookie)[^"']*)\1(\s*:\s*)(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|(-?\d+(?:\.\d+)?|\[[^[\]\r\n]*\]|\{[^{}\r\n]*\}))/gi,
         replacement: (
             full: string,
             quote: string,
@@ -278,7 +281,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     // `[ \t]*` around the colon keeps a bare `key:` at end of line from consuming the next line's first word.
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s'"`,;}\])][^\r\n,;}\])]*))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential|cookie)[A-Za-z0-9_.-]*)([ \t]*:[ \t]*)(?!<|Bearer\b|Basic\b|Token\b|Negotiate\b|NTLM\b|Digest\b)(?:(["'`])((?:\\.|(?!\3)[^\\\r\n])*)\3|([^\s'"`,;}\])][^\r\n,;}\])]*))/gi,
         replacement: (
             full: string,
             key: string,
@@ -297,7 +300,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         pattern:
-            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])((?:\\.|(?!\2)[^\\\r\n])*)\2|([^\s'"`]+))/gi,
+            /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential|cookie)[A-Za-z0-9_.-]*)\s*=\s*(?:(["'`])((?:\\.|(?!\2)[^\\\r\n])*)\2|([^\s'"`]+))/gi,
         replacement: (
             full: string,
             key: string,
@@ -316,7 +319,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     // `--api-key abc` / `-p hunter2` style arguments; a value beginning with `-` is the next flag.
     {
         pattern:
-            /(^|\s)(--?[A-Za-z0-9-]*(?:key|token|secret|password|passwd|pwd|auth|credential)[A-Za-z0-9-]*)(\s+)(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|([^\s"'-]\S*))/gi,
+            /(^|\s)(--?[A-Za-z0-9-]*(?:key|token|secret|password|passwd|pwd|auth|credential|cookie)[A-Za-z0-9-]*)(\s+)(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|([^\s"'-]\S*))/gi,
         replacement: (
             full: string,
             lead: string,
@@ -384,9 +387,12 @@ export function hasShareabilitySensitiveText(text: string): boolean {
 export function sanitizeConfigValue(value: unknown, keyPath: string[] = []): unknown {
     const key = keyPath.at(-1) ?? "";
     const secretKey = Boolean(key) && isSecretKey(key);
-    // A number under a secret key can be a PIN or numeric token; null and booleans carry no credential.
+    // Null and booleans carry no credential. A number stays unless the key names a password-like
+    // secret, where it can be a PIN (`keepsScalarValue`); a string under a secret key is always redacted.
     if (value === null || typeof value === "boolean") return value;
-    if (typeof value === "number" && !secretKey) return value;
+    if (typeof value === "number" && (!secretKey || keepsScalarValue(key, String(value)))) {
+        return value;
+    }
     if (secretKey) {
         return `<REDACTED:${redactionTypeForKey(key)}>`;
     }

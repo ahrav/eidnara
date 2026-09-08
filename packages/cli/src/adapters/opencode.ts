@@ -159,7 +159,7 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
  * OpenCode Eidnara package. A basename substring is not sufficient: paths
  * such as `eidnara-theme` must not suppress the real plugin registration.
  */
-export function isDevPathPluginEntry(entry: unknown): boolean {
+export function isDevPathPluginEntry(entry: unknown, baseDir: string = process.cwd()): boolean {
     const candidate =
         typeof entry === "string"
             ? entry
@@ -173,7 +173,8 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
         if (candidate.startsWith("file://")) {
             localPath = fileURLToPath(candidate);
         } else {
-            localPath = resolve(candidate);
+            // A relative entry is relative to the project whose config declares it.
+            localPath = resolve(baseDir, candidate);
         }
 
         if (statSync(localPath).isFile()) localPath = dirname(localPath);

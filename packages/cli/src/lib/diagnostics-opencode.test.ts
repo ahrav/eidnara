@@ -348,3 +348,37 @@ describe("collectHistorianDumps entry failures", () => {
         expect(dumps.byProject[0]?.recent.map((dump) => dump.name)).toEqual(["dump-1.xml"]);
     });
 });
+
+describe("collectDiagnostics relative plugin entries", () => {
+    it("resolves a relative local checkout against the inspected project, not process.cwd()", async () => {
+        const { cwd } = isolatedRoot();
+        const checkout = join(cwd, "vendor", "opencode-plugin");
+        mkdirSync(checkout, { recursive: true });
+        writeFileSync(
+            join(checkout, "package.json"),
+            JSON.stringify({ name: "@eidnara/opencode" }),
+        );
+        writeFileSync(
+            join(cwd, "opencode.json"),
+            JSON.stringify({ plugin: ["./vendor/opencode-plugin"] }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.projectOpencodeConfig.hasPlugin).toBe(true);
+    });
+});
+
+describe("renderDiagnosticsMarkdown path sanitization", () => {
+    it("redacts secret material embedded in a reported path", async () => {
+        const { root, cwd } = isolatedRoot();
+        process.env.EIDNARA_LOG_PATH = join(root, "token=abc123", "eidnara.log");
+
+        const report = await collectDiagnostics(cwd);
+        const markdown = renderDiagnosticsMarkdown(report);
+
+        expect(markdown).toContain("- Path: ");
+        expect(markdown).not.toContain("abc123");
+        expect(markdown).toContain("token=<REDACTED:token>");
+    });
+});

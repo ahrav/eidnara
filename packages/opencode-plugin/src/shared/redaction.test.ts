@@ -308,9 +308,12 @@ describe("sanitizeConfigValue unqualified password keys", () => {
                 smtp_password: "hunter2",
                 webhook_secret: "hunter2",
                 ldap_credential: "hunter2",
+                oauth_token: "tok_live_abc",
+                signing_key: "k-abc",
                 token_budget: 4096,
                 cache_key: "sessions-v2",
                 injection_budget_tokens: 12,
+                pin_key_files: ["a.txt"],
             }),
         ).toEqual({
             db_password: "<REDACTED:password>",
@@ -318,9 +321,13 @@ describe("sanitizeConfigValue unqualified password keys", () => {
             smtp_password: "<REDACTED:password>",
             webhook_secret: "<REDACTED:secret>",
             ldap_credential: "<REDACTED:credential>",
+            oauth_token: "<REDACTED:token>",
+            signing_key: "<REDACTED:key>",
             token_budget: 4096,
-            cache_key: "sessions-v2",
+            // A trailing `key` segment is treated as a secret name; the value is not worth the risk.
+            cache_key: "<REDACTED:key>",
             injection_budget_tokens: 12,
+            pin_key_files: ["a.txt"],
         });
     });
 });
@@ -356,6 +363,8 @@ describe("sanitizeConfigValue primitives under secret keys", () => {
         expect(
             sanitizeConfigValue({
                 password: 123456,
+                pin_secret: 4242,
+                // Numbers under `token`/`key` names stay: `*_tokens` budgets are counts, not credentials.
                 api_key: 42,
                 is_secret: true,
                 secret: null,
@@ -364,7 +373,8 @@ describe("sanitizeConfigValue primitives under secret keys", () => {
             }),
         ).toEqual({
             password: "<REDACTED:password>",
-            api_key: "<REDACTED:api_key>",
+            pin_secret: "<REDACTED:secret>",
+            api_key: 42,
             is_secret: true,
             secret: null,
             max_tokens: 4096,
@@ -496,6 +506,32 @@ describe("redactSecretText — round-nine edge cases", () => {
         ].join("\n");
         expect(redactSecretText(`${block}\nnext log line`)).toBe(
             "<PRIVATE_KEY_REDACTED>\nnext log line",
+        );
+    });
+});
+
+describe("redactSecretText — round-ten edge cases", () => {
+    test("redacts cookies in serialized header objects and cookie-valued config", () => {
+        expect(redactSecretText('{"Cookie":"session=supersecret"}')).toBe(
+            '{"Cookie":"<REDACTED:cookie>"}',
+        );
+        expect(redactSecretText("headers: { Cookie: session=supersecret }")).toBe(
+            "headers: { Cookie: <REDACTED:cookie> }",
+        );
+        expect(sanitizeConfigValue({ headers: { Cookie: "session=supersecret" } })).toEqual({
+            headers: { Cookie: "<REDACTED:cookie>" },
+        });
+    });
+
+    test("redacts a flat array or object value under a secret key", () => {
+        expect(redactSecretText('{"passwords":["hunter2","second-secret"]}')).toBe(
+            '{"passwords":<REDACTED:passwords>}',
+        );
+        expect(redactSecretText('{"authorization":["Opaque abc123secret"]}')).toBe(
+            '{"authorization":<REDACTED:authorization>}',
+        );
+        expect(redactSecretText('{"api_key":{"value":"abc"}} tail')).toBe(
+            '{"api_key":<REDACTED:api_key>} tail',
         );
     });
 });
