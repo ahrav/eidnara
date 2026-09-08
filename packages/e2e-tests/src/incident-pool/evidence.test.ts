@@ -163,7 +163,24 @@ describe("mutation evidence normalization (R11)", () => {
         const view = committedView();
         for (const record of view.records) {
             expect(view.verifierDigests[record.verifierPath]).toMatch(/^[0-9a-f]{64}$/);
+            for (const fixture of record.fixturePaths) {
+                expect(view.verifierDigests[fixture]).toMatch(/^[0-9a-f]{64}$/);
+            }
         }
+        // The goldens test reads its expected wire from the fixture it compiles in, so the fixture is frozen with the test.
+        const golden = "crates/daemon/testdata/differential-golden.json";
+        expect(view.records.every((record) => record.fixturePaths.includes(golden))).toBe(true);
+        expect(
+            mutationRecordsBoundTo(view, golden)
+                .map((r) => r.evidenceId)
+                .sort(),
+        ).toEqual(["ev-dg-1-one-byte-input", "ev-dg-2-one-byte-input", "ev-dg-3-one-byte-input"]);
+        expect(
+            changedVerifiers(view.verifierDigests, {
+                ...view.verifierDigests,
+                [golden]: "0".repeat(64),
+            }),
+        ).toEqual([golden]);
         const byId = new Map(view.records.map((record) => [record.evidenceId, record] as const));
         for (const family of ["1", "2", "3"]) {
             expect(byId.get(`ev-dg-${family}-one-byte-input`)!.verifierPath).toBe(

@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bunTestEvidence } from "./mutation-evidence-output";
+import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
 
 type MutationCase = {
     name: string;
@@ -112,10 +113,11 @@ for (const mutation of mutations[drill]) {
         writeFileSync(mutation.source, before);
     }
 
+    // The reverted rerun runs before any verdict so `packages/opencode-plugin/dist` is rebuilt from the restored source even when the record is refused.
+    const revertedRerun = runBuildAndDrill(drill);
     if (observedFailure.exit_status === 0) {
         throw new Error(`${mutation.name}: mutation did not redden the drill`);
     }
-    const revertedRerun = runBuildAndDrill(drill);
     if (revertedRerun.exit_status !== 0) {
         throw new Error(`${mutation.name}: reverted rerun did not pass`);
     }
@@ -143,3 +145,4 @@ writeFileSync(
     `${JSON.stringify({ drill: `FM-OC-${drill}`, command, mutations: results }, null, 2)}\n`,
 );
 console.log(`wrote ${recordPath}`);
+reportMutationInventorySync(syncMutationInventory());

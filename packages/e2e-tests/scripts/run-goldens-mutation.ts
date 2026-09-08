@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { cargoTestEvidence } from "./mutation-evidence-output";
+import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
 
 type CommandResult = {
     exit_status: number;
@@ -109,3 +110,4 @@ const record = {
 const recordPath = resolve(e2eRoot, `mutations/goldens-dg-${drill}.json`);
 writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`);
 console.log(`wrote ${recordPath}`);
+reportMutationInventorySync(syncMutationInventory());

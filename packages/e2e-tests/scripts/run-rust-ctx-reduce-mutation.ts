@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bunTestEvidence } from "./mutation-evidence-output";
+import { reportMutationInventorySync, syncMutationInventory } from "./mutation-inventory";
 
 type CommandResult = { exit_status: number; output: string };
 
@@ -95,3 +96,4 @@ writeFileSync(
     `${JSON.stringify(record, null, 2)}\n`,
 );
 console.log("wrote mutations/rust-ctx-reduce-roundtrip.json");
+reportMutationInventorySync(syncMutationInventory());

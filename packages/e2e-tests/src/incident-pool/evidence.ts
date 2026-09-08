@@ -22,7 +22,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import * as ts from "typescript";
 import { validateCommittedMatrix } from "../../scripts/validate-shm-hardening-matrix";
 import type { IncidentCatalog, IncidentVariant, SourceInventory } from "./contract";
@@ -42,8 +42,8 @@ export const PARITY_A1_WORDING =
 export const PARITY_A3_WORDING =
     "parity A3: an aged real ctx_reduce tool-use and tool-result pair survives pure-defer growth past the protected window with zero prefix busts and stays on the final wire";
 
-function sha256(text: string): string {
-    return createHash("sha256").update(text, "utf8").digest("hex");
+function sha256(content: string | Uint8Array): string {
+    return createHash("sha256").update(content).digest("hex");
 }
 
 export function slugify(text: string): string {
@@ -68,6 +68,8 @@ export interface MutationEvidenceRecord {
     shape: "mutations" | "mutation_records";
     /** `verifierPath` is the repo-relative path of the challenged verifier. */
     verifierPath: string;
+    /** `fixturePaths` are the repo-relative files the verifier compiles in through `include_str!` or `include_bytes!`; they carry the oracle's expected values. */
+    fixturePaths: string[];
     /** `replayCommand` is the committed command that replays this mutation. */
     replayCommand: string;
     /** `recordDigest` detects drift in the raw record object. */
@@ -83,7 +85,7 @@ export interface MutationEvidenceArtifact {
 export interface EvidenceView {
     artifacts: MutationEvidenceArtifact[];
     records: MutationEvidenceRecord[];
-    /** `verifierDigests` maps each repo-relative verifier path to the SHA-256 digest of its current bytes. */
+    /** `verifierDigests` maps each repo-relative verifier and fixture path to the SHA-256 digest of its current bytes. */
     verifierDigests: Record<string, string>;
 }
 
@@ -206,6 +208,22 @@ function verifierFromMustFail(
     throw new Error(`${label}: no candidate test file contains must_fail id ${mustFail}`);
 }
 
+const RUST_INCLUDE_RE = /include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)/g;
+
+/** A Rust verifier's `include_str!`/`include_bytes!` arguments resolve relative to the source file's directory. */
+export function includedFixturePaths(repoRoot: string, verifierPath: string): string[] {
+    if (!verifierPath.endsWith(".rs")) return [];
+    const absolute = resolve(repoRoot, verifierPath);
+    if (!existsSync(absolute)) return [];
+    const source = readFileSync(absolute, "utf8");
+    const fixtures = new Set<string>();
+    for (const match of source.matchAll(RUST_INCLUDE_RE)) {
+        const included = resolve(dirname(absolute), match[1]!);
+        fixtures.add(relative(repoRoot, included).split(sep).join("/"));
+    }
+    return [...fixtures].sort();
+}
+
 export function loadMutationEvidence(
     e2eRoot: string = E2E_ROOT,
     repoRoot: string = REPO_ROOT,
@@ -254,6 +272,7 @@ export function loadMutationEvidence(
                     rawName: name,
                     shape: "mutations",
                     verifierPath: verifierFromCommand(repoRoot, command, label),
+                    fixturePaths: [],
                     replayCommand: command,
                     recordDigest: rowDigest(rawRecord),
                 });
@@ -277,6 +296,7 @@ export function loadMutationEvidence(
                     rawName: id,
                     shape: "mutation_records",
                     verifierPath: verifierFromMustFail(repoRoot, rerun, mustFail, label),
+                    fixturePaths: [],
                     replayCommand: rerun,
                     recordDigest: rowDigest(rawRecord),
                 });
@@ -308,14 +328,23 @@ export function loadMutationEvidence(
     const records = artifacts.flatMap((artifact) => artifact.records);
     const verifierDigests: Record<string, string> = {};
     for (const record of records) {
-        if (record.verifierPath in verifierDigests) continue;
         const path = resolve(repoRoot, record.verifierPath);
         if (!existsSync(path)) {
             throw new Error(
                 `evidence record ${record.evidenceId} links a missing verifier ${record.verifierPath}`,
             );
         }
-        verifierDigests[record.verifierPath] = sha256(readFileSync(path, "utf8"));
+        record.fixturePaths = includedFixturePaths(repoRoot, record.verifierPath);
+        for (const bound of [record.verifierPath, ...record.fixturePaths]) {
+            if (bound in verifierDigests) continue;
+            const absolute = resolve(repoRoot, bound);
+            if (!existsSync(absolute)) {
+                throw new Error(
+                    `evidence record ${record.evidenceId} verifier ${record.verifierPath} includes a missing fixture ${bound}`,
+                );
+            }
+            verifierDigests[bound] = sha256(readFileSync(absolute));
+        }
     }
     return { artifacts, records, verifierDigests };
 }
@@ -325,12 +354,14 @@ export function loadMutationEvidence(
 export function assertEvidenceSnapshot(view: EvidenceView): void {
     if (view.artifacts.length !== EXPECTED_MUTATION_ARTIFACTS) {
         throw new Error(
-            `expected ${EXPECTED_MUTATION_ARTIFACTS} mutation artifacts, found ${view.artifacts.length}`,
+            `expected ${EXPECTED_MUTATION_ARTIFACTS} mutation artifacts, found ${view.artifacts.length}; ` +
+                "a newly generated artifact needs a review that raises EXPECTED_MUTATION_ARTIFACTS",
         );
     }
     if (view.records.length !== EXPECTED_MUTATION_RECORDS) {
         throw new Error(
-            `expected ${EXPECTED_MUTATION_RECORDS} mutation records, found ${view.records.length}`,
+            `expected ${EXPECTED_MUTATION_RECORDS} mutation records, found ${view.records.length}; ` +
+                "a newly generated record needs a review that raises EXPECTED_MUTATION_RECORDS",
         );
     }
 }
@@ -631,7 +662,10 @@ export function mutationRecordsBoundTo(
     view: EvidenceView,
     verifierPath: string,
 ): MutationEvidenceRecord[] {
-    return view.records.filter((record) => record.verifierPath === verifierPath);
+    return view.records.filter(
+        (record) =>
+            record.verifierPath === verifierPath || record.fixturePaths.includes(verifierPath),
+    );
 }
 
 /**

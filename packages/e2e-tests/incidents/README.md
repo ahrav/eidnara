@@ -59,7 +59,10 @@ and rejects missing, all-zero, overridden, or non-ancestor bases.
 
 Mutation JSON remains committed source evidence. Inventory links normalize the
 current artifacts and records without rewriting them. Normal report runs check
-those links but do not replay mutations.
+those links but do not replay mutations. Each `mutation:*` command writes its
+artifact and rewrites the inventory's `src-mutation-*` rows from the live scan;
+the artifact and record counts pinned in `src/incident-pool/evidence.ts` move
+only through review.
 
 Changing an executable verifier requires serial replay of every mutation record
 bound to that verifier. Each crafted invalid state must still produce the
