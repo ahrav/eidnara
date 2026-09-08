@@ -5,6 +5,7 @@ import { extname, join } from "node:path";
 import { findOnPath, isExecutableFile } from "./find-on-path";
 import { getOmpPackageDir } from "./paths";
 import { getPiCommandInvocation } from "./pi-helpers";
+import { standaloneVersion } from "./semver";
 export interface OmpBinaryInfo {
     path: string;
     source: "path" | "home" | "package";
@@ -111,10 +112,9 @@ export function runOmpCommand(ompPath: string, args: string[], timeout = 30_000)
 export function getOmpVersion(ompPath: string): string | null {
     const result = runOmpCommand(ompPath, ["--version"], 10_000);
     if (!result.ok) return null;
-    const match = (result.stdout || result.stderr).match(
-        /(?:omp\/)?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/,
-    );
-    return match?.[1] ?? null;
+    // OMP prints `omp/X.Y.Z`; only a line that is nothing but that counts, so a
+    // wrapper warning quoting another tool's version cannot pass as OMP's.
+    return standaloneVersion(result.stdout || result.stderr, "omp/");
 }
 
 export function parseOmpModelsOutput(output: string): string[] {

@@ -15,6 +15,12 @@ describe("standaloneVersion", () => {
         );
     });
 
+    it("accepts an allowed prefix such as omp/", () => {
+        expect(standaloneVersion("omp/17.0.0", "omp/")).toBe("17.0.0");
+        expect(standaloneVersion("17.0.0", "omp/")).toBe("17.0.0");
+        expect(standaloneVersion("omp/17.0.0")).toBeNull();
+    });
+
     it("returns null when no line is a bare version", () => {
         expect(standaloneVersion(null)).toBeNull();
         expect(standaloneVersion("")).toBeNull();

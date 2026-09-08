@@ -300,6 +300,8 @@ function collectPiRecentSessions(): PiSessionDiscovery {
             mtime: number;
         }> = [];
 
+        // A per-directory permission error must not read as "no sessions".
+        let unreadable = 0;
         for (const slug of slugs) {
             const slugDirectory = reverseSlugToDirectory(slug);
             if (!slugDirectory) continue;
@@ -308,6 +310,7 @@ function collectPiRecentSessions(): PiSessionDiscovery {
             try {
                 files = readdirSync(slugDir).filter((name) => name.endsWith(".jsonl"));
             } catch {
+                unreadable += 1;
                 continue;
             }
             for (const file of files) {
@@ -316,8 +319,13 @@ function collectPiRecentSessions(): PiSessionDiscovery {
                     const mtime = statSync(path).mtimeMs;
                     const sessionId = piSessionIdFromFileName(file);
                     candidates.push({ sessionId, path, slugDirectory, mtime });
-                } catch {}
+                } catch {
+                    unreadable += 1;
+                }
             }
+        }
+        if (candidates.length === 0 && unreadable > 0) {
+            return { status: "unavailable", sessions: [] };
         }
 
         candidates.sort((a, b) => b.mtime - a.mtime);

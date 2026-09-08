@@ -45,16 +45,25 @@ const PLUGIN_NAME = "@eidnara/opencode";
 /**
  * On load failure, the helper returns false so native compaction fields are left untouched.
  */
-function resolveCompactionEnabledForDoctor(cwd: string): boolean {
+interface DoctorEidnaraModes {
+    enabled: boolean;
+    compactionEnabled: boolean;
+}
+
+function resolveEidnaraModesForDoctor(cwd: string): DoctorEidnaraModes {
     try {
-        return compactionEnabledFor(loadPluginConfig(cwd));
+        const config = loadPluginConfig(cwd);
+        return {
+            enabled: config.enabled !== false,
+            compactionEnabled: compactionEnabledFor(config),
+        };
     } catch (error) {
         console.warn(
             `[eidnara] Could not load Eidnara config to resolve compaction mode; ` +
                 `preserving existing native compaction fields. ` +
                 `(${error instanceof Error ? error.message : String(error)})`,
         );
-        return false;
+        return { enabled: true, compactionEnabled: false };
     }
 }
 
@@ -394,15 +403,22 @@ export async function runDoctor(
         serverPluginRegistered = reportPluginEntry(paths.opencodeConfig, configName, "Plugin");
     }
 
-    const compactionEnabled = resolveCompactionEnabledForDoctor(cwd);
-    const conflictResult = detectConflicts(cwd, { compactionEnabled });
+    const modes = resolveEidnaraModesForDoctor(cwd);
+    const compactionEnabled = modes.compactionEnabled;
+    // With `enabled: false` the plugin skips every hook, so nothing here would
+    // replace native compaction, DCP, or the OMO hooks; they are left in place.
+    const conflictResult = modes.enabled ? detectConflicts(cwd, { compactionEnabled }) : null;
 
     // Doctor uses the file-based compaction check because it has no OpenCode server handle.
     log.info(
         "Compaction check: file-based; the running server's resolved config may differ — `opencode debug config` is authoritative",
     );
 
-    if (conflictResult.hasConflict) {
+    if (conflictResult === null) {
+        pass(
+            "Eidnara is disabled (enabled: false); native compaction, DCP, and OMO hooks are left in place",
+        );
+    } else if (conflictResult.hasConflict) {
         for (const reason of conflictResult.reasons) {
             fail(`Conflict: ${reason}`);
         }

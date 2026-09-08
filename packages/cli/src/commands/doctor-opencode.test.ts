@@ -381,4 +381,36 @@ describe("doctor OpenCode read-only checks", () => {
             restore();
         }
     });
+
+    it("leaves DCP and OMO hooks in place under --force when Eidnara is disabled", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, {
+            plugin: ["@eidnara/opencode", "@tarquinen/opencode-dcp"],
+            compaction: { auto: true },
+        });
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const eidnaraDir = join(configDir, "..", "eidnara");
+        mkdirSync(eidnaraDir, { recursive: true });
+        writeJsonc(join(eidnaraDir, "eidnara.jsonc"), { enabled: false });
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ force: true });
+
+            expect(code).toBe(0);
+            expect(errors.some((message) => message.startsWith("Conflict:"))).toBe(false);
+            expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
+            expect(
+                successes.some((message) =>
+                    message.startsWith("Eidnara is disabled (enabled: false)"),
+                ),
+            ).toBe(true);
+            const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
+                plugin?: unknown[];
+            };
+            expect(untouched.plugin).toContain("@tarquinen/opencode-dcp");
+        } finally {
+            restore();
+        }
+    });
 });

@@ -7,6 +7,7 @@ import {
     getOmpCommandInvocation,
     getOmpFallbackCandidates,
     getOmpSetting,
+    getOmpVersion,
     listOmpPlugins,
     parseOmpModelsOutput,
     runOmpCommand,
@@ -166,6 +167,28 @@ describe("OMP plugin listing", () => {
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
+    });
+});
+
+describe("OMP version probe", () => {
+    it("reads only a line that is OMP's own version", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-version-"));
+        roots.push(root);
+        const prefixed = join(root, "omp-prefixed");
+        writeFileSync(
+            prefixed,
+            "#!/bin/sh\necho 'Node 24.15.0 is deprecated'\necho 'omp/17.0.0'\n",
+        );
+        chmodSync(prefixed, 0o755);
+        expect(getOmpVersion(prefixed)).toBe("17.0.0");
+        const bare = join(root, "omp-bare");
+        writeFileSync(bare, "#!/bin/sh\necho '17.1.7'\n");
+        chmodSync(bare, 0o755);
+        expect(getOmpVersion(bare)).toBe("17.1.7");
+        const noisy = join(root, "omp-noisy");
+        writeFileSync(noisy, "#!/bin/sh\necho 'Node 24.15.0 is deprecated'\n");
+        chmodSync(noisy, 0o755);
+        expect(getOmpVersion(noisy)).toBeNull();
     });
 });
 
