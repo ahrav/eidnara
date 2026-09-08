@@ -25,19 +25,27 @@ describe("incident verifier contributor gate", () => {
         ).not.toThrow();
     });
 
-    it("blocks changed, added, or removed bound verifiers without replay support", () => {
-        for (const [accepted, current] of [
-            [
+    it("blocks a changed bound verifier without replay support", () => {
+        expect(() =>
+            assertBoundVerifierBytesUnchanged(
                 { "tests/verifier.test.ts": "a".repeat(64) },
                 { "tests/verifier.test.ts": "b".repeat(64) },
-            ],
-            [{}, { "tests/verifier.test.ts": "b".repeat(64) }],
-            [{ "tests/verifier.test.ts": "a".repeat(64) }, {}],
-        ] as const) {
-            expect(() => assertBoundVerifierBytesUnchanged(accepted, current)).toThrow(
-                /changed without recorded mutation replay support/,
-            );
-        }
+            ),
+        ).toThrow(/changed without recorded mutation replay support/);
+    });
+
+    it("blocks dropping every record that bound an accepted verifier", () => {
+        // Otherwise deleting the record exempts the verifier from replay.
+        expect(() =>
+            assertBoundVerifierBytesUnchanged({ "tests/verifier.test.ts": "a".repeat(64) }, {}),
+        ).toThrow(/no longer bind accepted verifiers/);
+    });
+
+    it("accepts a verifier the accepted base never bound", () => {
+        // An unbound base has no recorded bytes to compare.
+        expect(() =>
+            assertBoundVerifierBytesUnchanged({}, { "tests/verifier.test.ts": "b".repeat(64) }),
+        ).not.toThrow();
     });
 });
 

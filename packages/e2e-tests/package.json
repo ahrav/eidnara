@@ -21,6 +21,7 @@
         "mutation:rust-historian": "bun run ensure:plugin-dist && bun scripts/run-rust-historian-producer-mutation.ts",
         "mutation:rust-ctx-reduce": "bun run ensure:plugin-dist && bun scripts/run-rust-ctx-reduce-mutation.ts",
         "mutation:rust-fm": "bun scripts/run-rust-fm-mutation.ts",
+        "mutation:goldens": "bun scripts/run-goldens-mutation.ts",
         "ensure:plugin-dist": "test -f ../opencode-plugin/dist/index.js || bun run --cwd ../opencode-plugin build"
     },
     "dependencies": {

@@ -577,6 +577,29 @@ describe("repository-baseline comparison", () => {
         expect(() => compareWithAcceptedSnapshot(accepted, snapshot(revised))).not.toThrow();
     });
 
+    it("rejects a provenance rewrite hidden behind a same-fingerprint baseline and a reused revision id", () => {
+        const accepted = snapshot(fixture());
+        const rewrite = (revisionId: string) => {
+            const data = fixture();
+            // The semantic fingerprint excludes `source_claims`, `evidence_refs`, and `semantic_revision.id`, so the appended baseline retains `FP_TWO`.
+            variants(data)[1] = variantFixture("var-green-two", {
+                source_claims: ["claim-green-one"],
+                evidence_refs: ["ev-forged"],
+                semantic_revision: { id: revisionId, fingerprint: FP_TWO },
+            });
+            data.events.push(
+                chainedGreenBaseline("adj-two-three", "var-green-two", 3, FP_TWO, {
+                    supersedes: "adj-two-two",
+                }),
+            );
+            return snapshot(data);
+        };
+        expect(() => compareWithAcceptedSnapshot(accepted, rewrite("rev-two-one"))).toThrow(
+            /accepted variant var-green-two edited while reusing semantic revision id rev-two-one/,
+        );
+        expect(() => compareWithAcceptedSnapshot(accepted, rewrite("rev-two-two"))).not.toThrow();
+    });
+
     it("allows a newly introduced identity to change until it is accepted", () => {
         const accepted = fixture();
         const withNew = fixture();

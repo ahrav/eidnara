@@ -27,55 +27,13 @@
             ]
         },
         {
-            "id": "src-mutation-fm-oc-2",
-            "source_path": "packages/e2e-tests/mutations/fm-oc-2.json",
-            "content_digest": "5270f353c9374e8163df39cc4f0c6a8e7d15f6c82c040832eb21f8844d5f9c12",
-            "claims": [
-                {
-                    "id": "claim-mutation-fm-oc-2-rung-deletion",
-                    "content_digest": "a6692eb221e0eeb9a0d8c8986d36be42c56ef6d19127bd3451c5b8cf9dbf14b5",
-                    "disposition": "verifier_evidence",
-                    "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
-                    "family_links": []
-                }
-            ]
-        },
-        {
-            "id": "src-mutation-fm-oc-3",
-            "source_path": "packages/e2e-tests/mutations/fm-oc-3.json",
-            "content_digest": "c121338e09b0b64b16e75ceefeca0bfee4a5fa47e4cd3df866ad9bd1dc39f62d",
-            "claims": [
-                {
-                    "id": "claim-mutation-fm-oc-3-rung-swap",
-                    "content_digest": "57effa25020db2f399c86f9d307d61650464527012a98a51ca8864df48e01025",
-                    "disposition": "verifier_evidence",
-                    "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
-                    "family_links": []
-                }
-            ]
-        },
-        {
-            "id": "src-mutation-fm-oc-5",
-            "source_path": "packages/e2e-tests/mutations/fm-oc-5.json",
-            "content_digest": "f6d20d2634eaa462b41dc9df51d65455071ee7d2686c24ea12ee4917d7ef93ec",
-            "claims": [
-                {
-                    "id": "claim-mutation-fm-oc-5-rung-swap",
-                    "content_digest": "bac3f7605c708ec886594836b0ada7a945b0c0ac0e76d489c3b69cbb2b96fa8b",
-                    "disposition": "verifier_evidence",
-                    "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
-                    "family_links": []
-                }
-            ]
-        },
-        {
             "id": "src-mutation-goldens-dg-1",
             "source_path": "packages/e2e-tests/mutations/goldens-dg-1.json",
-            "content_digest": "585e116ae5d550a1aa370190dfc4fb14c08a230ea42571f6716b0901a4448e27",
+            "content_digest": "b6a28a281cdd91120f4c8662098b6645a04981e00284c98b689d59c313571c0e",
             "claims": [
                 {
                     "id": "claim-mutation-dg-1-one-byte-input",
-                    "content_digest": "2f7436218faf421c5ccfd3112e3712f3b00f468a672b976335ea6bf8d8da77ac",
+                    "content_digest": "0a917bcfb6beafd531c8b565bf8bcfccb7d83021c140cd6432ed29ae60f2de6f",
                     "disposition": "verifier_evidence",
                     "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
                     "family_links": []
@@ -85,11 +43,11 @@
         {
             "id": "src-mutation-goldens-dg-2",
             "source_path": "packages/e2e-tests/mutations/goldens-dg-2.json",
-            "content_digest": "2a381ae4185c125aa974d84003a0921d74e6300be88c9ec049e442a25cbd19a9",
+            "content_digest": "0f92dbd115086d44845170ddf8a243d3b8dbf95988847efb6c543bfa357f1d40",
             "claims": [
                 {
                     "id": "claim-mutation-dg-2-one-byte-input",
-                    "content_digest": "f7f56de2348391d5cf0563952abd60ca258b8b2a910c97e7e9ebfa9720e5328c",
+                    "content_digest": "da3c1be3e9cc93746f35b24bca01f201bcaa1c925bb55fef61c73746673c9ef9",
                     "disposition": "verifier_evidence",
                     "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
                     "family_links": []
@@ -99,39 +57,11 @@
         {
             "id": "src-mutation-goldens-dg-3",
             "source_path": "packages/e2e-tests/mutations/goldens-dg-3.json",
-            "content_digest": "aaad358b788c91a9f7f98a0f56562a5000f518fbf04843a9f561ce52c7182249",
+            "content_digest": "7fd1bb97a50c9fc71ee44a8ea477c09df4d4a5b1217838ebc0acfdcd70adb3ba",
             "claims": [
                 {
                     "id": "claim-mutation-dg-3-one-byte-input",
-                    "content_digest": "d81c9d5f0bd080c341a8b8fa8b2ddcd94a34b91b2af32e0ef7eefbf9751e4a7b",
-                    "disposition": "verifier_evidence",
-                    "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
-                    "family_links": []
-                }
-            ]
-        },
-        {
-            "id": "src-mutation-rust-ctx-reduce-roundtrip",
-            "source_path": "packages/e2e-tests/mutations/rust-ctx-reduce-roundtrip.json",
-            "content_digest": "8d17a8b75028d1eabbf6abf4534811d83c9e38eefdd786b9043d9775ee1229bf",
-            "claims": [
-                {
-                    "id": "claim-mutation-ctx-reduce-unknown-target",
-                    "content_digest": "1214fa4f9727cb64f292272688005502474ae4ee54637c50a629c27385ad4bae",
-                    "disposition": "verifier_evidence",
-                    "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
-                    "family_links": []
-                }
-            ]
-        },
-        {
-            "id": "src-mutation-rust-historian-producer",
-            "source_path": "packages/e2e-tests/mutations/rust-historian-producer.json",
-            "content_digest": "9e6c9fa15faab540a053e58046970d2005912b2983aa91dbad1dc3738d7d9c98",
-            "claims": [
-                {
-                    "id": "claim-mutation-rust-historian-typed-failure",
-                    "content_digest": "e6f0f3adbdc77e6675d08af90a60706cac8cd11d796f5be691a5a1c2dbfdcd58",
+                    "content_digest": "c879c4bd37cb56651bd4a4dc586eae3eff631979e8d383cae96ffe26279d0f18",
                     "disposition": "verifier_evidence",
                     "rationale": "committed mutation record: crafted invalid state observed red and reverted rerun observed green against its bound verifier",
                     "family_links": []

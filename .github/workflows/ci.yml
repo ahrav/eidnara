@@ -191,6 +191,14 @@ jobs:
       - name: TypeScript
         run: bun run check:repo
 
+      - name: Incident history and verifier gates
+        # Both validators use the pull request base SHA or protected push `before` SHA.
+        # An unprotected push has no trusted base, so the step is skipped there.
+        if: github.event_name == 'pull_request' || github.ref_protected
+        run: |
+          bun run --cwd packages/e2e-tests validate:incident-history:ci
+          bun run --cwd packages/e2e-tests validate:incident-verifiers:ci
+
       - name: Rust toolchain
         run: rustup toolchain install 1.98 --profile minimal --component rustfmt
 

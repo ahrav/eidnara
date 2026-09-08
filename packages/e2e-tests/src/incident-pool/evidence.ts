@@ -4,7 +4,7 @@
  * The scanner normalizes `mutations[].name` and `mutation_records[].id` into one evidence view.
  * The scanner preserves the raw mutation artifacts.
  * Each mutation record identifies the verifier it challenged.
- * The live scan must produce exactly 8 artifacts and 8 records.
+ * The live scan must produce exactly 3 artifacts and 3 records.
  * The scanner extracts stable source-item and source-claim identities from the named incident sources.
  * Each extracted source item and claim includes a content digest.
  * Each extracted source identity must match exactly one committed inventory entry.
@@ -32,8 +32,8 @@ import { rowDigest } from "./history";
 export const E2E_ROOT = resolve(import.meta.dir, "..", "..");
 export const REPO_ROOT = resolve(E2E_ROOT, "..", "..");
 
-export const EXPECTED_MUTATION_ARTIFACTS = 8;
-export const EXPECTED_MUTATION_RECORDS = 8;
+export const EXPECTED_MUTATION_ARTIFACTS = 3;
+export const EXPECTED_MUTATION_RECORDS = 3;
 
 /** The parity findings are an external document; the inventory binds each finding by the digest of its claim wording, and the wording constants are the scanned source bytes. */
 export const PARITY_SOURCE_PATH = "parity-findings:s2";
@@ -104,6 +104,31 @@ function requireString(value: unknown, label: string): string {
         throw new Error(`${label} must be a non-empty string`);
     }
     return value;
+}
+
+/** Verifier evidence requires a failing mutated drill, a passing reverted rerun, and no adequacy finding. */
+function requireExecutedResults(rawRecord: Record<string, unknown>, label: string): void {
+    const observed = rawRecord.observed_failure;
+    if (!isRecord(observed) || !Number.isInteger(observed.exit_status)) {
+        throw new Error(`${label}.observed_failure must record the mutated drill's exit status`);
+    }
+    if (observed.exit_status === 0) {
+        throw new Error(
+            `${label}.observed_failure exit status 0: the mutation did not redden the drill`,
+        );
+    }
+    const reverted = rawRecord.reverted_rerun;
+    if (!isRecord(reverted) || !Number.isInteger(reverted.exit_status)) {
+        throw new Error(`${label}.reverted_rerun must record the reverted drill's exit status`);
+    }
+    if (reverted.exit_status !== 0 || reverted.status !== "pass") {
+        throw new Error(`${label}.reverted_rerun did not pass after the mutation was reverted`);
+    }
+    if (rawRecord.adequacy_finding !== null) {
+        throw new Error(
+            `${label}.adequacy_finding must be null: ${JSON.stringify(rawRecord.adequacy_finding)}`,
+        );
+    }
 }
 
 const E2E_TEST_PATH_RE = /(?:^|[\s'"])((?:tests|scripts)\/[\w./-]+\.ts)/;
@@ -217,6 +242,7 @@ export function loadMutationEvidence(
                     continue;
                 }
                 const name = requireString(rawRecord.name, `${label}.name`);
+                requireExecutedResults(rawRecord, label);
                 records.push({
                     evidenceId: `ev-${slugify(name)}`,
                     claimId: `claim-mutation-${slugify(name)}`,
@@ -239,6 +265,7 @@ export function loadMutationEvidence(
                     rawRecord.reverted_rerun_command,
                     `${label}.reverted_rerun_command`,
                 );
+                requireExecutedResults(rawRecord, label);
                 records.push({
                     evidenceId: `ev-${slugify(id)}`,
                     claimId: `claim-mutation-${slugify(id)}`,

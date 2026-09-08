@@ -41,6 +41,18 @@ function committedView(): EvidenceView {
     return loadMutationEvidence();
 }
 
+/** A record shaped like the runners' output: red under mutation, green once reverted. */
+function executedRecord(name: string, overrides: Record<string, unknown> = {}) {
+    return {
+        name,
+        applied_diff: { path: "x", before: "a", after: "b", changed: true },
+        observed_failure: { exit_status: 1, output: "FAILED" },
+        reverted_rerun: { exit_status: 0, output: "ok", status: "pass" },
+        adequacy_finding: null,
+        ...overrides,
+    };
+}
+
 function findClaim(inventory: SourceInventory, claimId: string) {
     for (const item of inventory.items) {
         const claim = item.claims.find((entry) => entry.id === claimId);
@@ -153,24 +165,11 @@ describe("mutation evidence normalization (R11)", () => {
             expect(view.verifierDigests[record.verifierPath]).toMatch(/^[0-9a-f]{64}$/);
         }
         const byId = new Map(view.records.map((record) => [record.evidenceId, record] as const));
-        expect(byId.get("ev-dg-1-one-byte-input")!.verifierPath).toBe(
-            "crates/daemon/src/differential_goldens.rs",
-        );
-        expect(byId.get("ev-fm-oc-2-rung-deletion")!.verifierPath).toBe(
-            "packages/e2e-tests/tests/rust-fm-oc-2.test.ts",
-        );
-        expect(byId.get("ev-fm-oc-3-rung-swap")!.verifierPath).toBe(
-            "packages/e2e-tests/tests/rust-fm-oc-3.test.ts",
-        );
-        expect(byId.get("ev-fm-oc-5-rung-swap")!.verifierPath).toBe(
-            "packages/e2e-tests/tests/rust-fm-oc-5.test.ts",
-        );
-        expect(byId.get("ev-ctx-reduce-unknown-target")!.verifierPath).toBe(
-            "packages/e2e-tests/tests/rust-ctx-reduce-roundtrip.test.ts",
-        );
-        expect(byId.get("ev-rust-historian-typed-failure")!.verifierPath).toBe(
-            "packages/e2e-tests/tests/rust-historian-producer.test.ts",
-        );
+        for (const family of ["1", "2", "3"]) {
+            expect(byId.get(`ev-dg-${family}-one-byte-input`)!.verifierPath).toBe(
+                "crates/daemon/src/differential_goldens.rs",
+            );
+        }
     });
 
     it("agrees with the committed inventory's mutation claims", () => {
@@ -183,17 +182,17 @@ describe("mutation evidence normalization (R11)", () => {
             cpSync(resolve(E2E_ROOT, "mutations"), join(temp, "mutations"), { recursive: true });
 
             const duplicated = JSON.parse(
-                readFileSync(join(temp, "mutations", "fm-oc-3.json"), "utf8"),
+                readFileSync(join(temp, "mutations", "goldens-dg-3.json"), "utf8"),
             ) as { mutations: unknown[] };
             duplicated.mutations.push(structuredClone(duplicated.mutations[0]));
-            writeFileSync(join(temp, "mutations", "fm-oc-3.json"), JSON.stringify(duplicated));
+            writeFileSync(join(temp, "mutations", "goldens-dg-3.json"), JSON.stringify(duplicated));
             expect(() => loadMutationEvidence(temp, REPO_ROOT)).toThrow(
-                /duplicate normalized evidence id ev-fm-oc-3-rung-swap/,
+                /duplicate normalized evidence id ev-dg-3-one-byte-input/,
             );
 
             cpSync(
-                resolve(E2E_ROOT, "mutations", "fm-oc-3.json"),
-                join(temp, "mutations", "fm-oc-3.json"),
+                resolve(E2E_ROOT, "mutations", "goldens-dg-3.json"),
+                join(temp, "mutations", "goldens-dg-3.json"),
             );
             writeFileSync(
                 join(temp, "mutations", "zz-unknown.json"),
@@ -218,12 +217,72 @@ describe("mutation evidence normalization (R11)", () => {
                 join(temp, "mutations", "zz-unknown.json"),
                 JSON.stringify({
                     command: "bun test tests/this-verifier-does-not-exist.test.ts",
-                    mutations: [{ name: "ZZ_ORPHAN" }],
+                    mutations: [executedRecord("ZZ_ORPHAN")],
                 }),
             );
             expect(() => loadMutationEvidence(temp, REPO_ROOT)).toThrow(
                 /links a missing verifier packages\/e2e-tests\/tests\/this-verifier-does-not-exist\.test\.ts/,
             );
+        } finally {
+            rmSync(temp, { recursive: true, force: true });
+        }
+    });
+
+    it("rejects records the runner never drove red and green", () => {
+        const temp = mkdtempSync(join(tmpdir(), "incident-evidence-"));
+        try {
+            cpSync(resolve(E2E_ROOT, "mutations"), join(temp, "mutations"), { recursive: true });
+            const artifact = join(temp, "mutations", "zz-unexecuted.json");
+            const write = (record: Record<string, unknown>) =>
+                writeFileSync(
+                    artifact,
+                    JSON.stringify({
+                        command: "bun test tests/rust-fm-oc-3.test.ts",
+                        mutations: [record],
+                    }),
+                );
+            const cases: Array<[Record<string, unknown>, RegExp]> = [
+                [
+                    executedRecord("ZZ", {
+                        observed_failure: null,
+                        reverted_rerun: null,
+                        adequacy_finding: "regenerate once the runtime can start the channel",
+                    }),
+                    /zz-unexecuted\.json\.mutations\[0\]\.observed_failure must record/,
+                ],
+                [
+                    executedRecord("ZZ", { observed_failure: { exit_status: 0, output: "ok" } }),
+                    /observed_failure exit status 0: the mutation did not redden the drill/,
+                ],
+                [executedRecord("ZZ", { reverted_rerun: null }), /reverted_rerun must record/],
+                [
+                    executedRecord("ZZ", {
+                        reverted_rerun: { exit_status: 1, output: "FAILED", status: "fail" },
+                    }),
+                    /reverted_rerun did not pass after the mutation was reverted/,
+                ],
+                [
+                    executedRecord("ZZ", {
+                        reverted_rerun: { exit_status: 0, output: "ok", status: "fail" },
+                    }),
+                    /reverted_rerun did not pass after the mutation was reverted/,
+                ],
+                [
+                    executedRecord("ZZ", {
+                        adequacy_finding:
+                            "mutation did not redden the drill; investigate drill adequacy",
+                    }),
+                    /adequacy_finding must be null: "mutation did not redden the drill/,
+                ],
+            ];
+            for (const [record, expected] of cases) {
+                write(record);
+                expect(() => loadMutationEvidence(temp, REPO_ROOT)).toThrow(expected);
+            }
+            write(executedRecord("ZZ"));
+            expect(
+                loadMutationEvidence(temp, REPO_ROOT).records.map((r) => r.evidenceId),
+            ).toContain("ev-zz");
         } finally {
             rmSync(temp, { recursive: true, force: true });
         }

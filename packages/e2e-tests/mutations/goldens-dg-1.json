@@ -1,6 +1,6 @@
 {
   "golden_family": "postprocess-gates",
-  "command": "cargo test -p daemon --lib dg_goldens_match_ts_wire_surface_and_gate_labels",
+  "command": "cargo test -p daemon --lib dg_goldens_match_ts_wire_surface_and_gate_labels --locked",
   "mutations": [
     {
       "name": "DG_1_ONE_BYTE_INPUT",
@@ -10,9 +10,16 @@
         "after": "cases[0].input.messages[0].content[0].kind.text='stable inputx'",
         "changed": true
       },
-      "observed_failure": null,
-      "reverted_rerun": null,
-      "adequacy_finding": "Golden mutation evidence must be regenerated against crates/daemon."
+      "observed_failure": {
+        "exit_status": 101,
+        "output": "test differential_goldens::dg_goldens_match_ts_wire_surface_and_gate_labels ... FAILED\nfailures:\nthread 'differential_goldens::dg_goldens_match_ts_wire_surface_and_gate_labels' (200638) panicked at crates/daemon/src/differential_goldens.rs:59:9:\nassertion `left == right` failed: wire drift in DG-1-bust-veto\n  left: [Object {\"content\": Array [Object {\"kind\": Object {\"text\": String(\"stable inputx\"), \"type\": String(\"text\")}}], \"meta\": Object {}, \"role\": String(\"user\")}]\n right: [Object {\"content\": Array [Object {\"kind\": Object {\"text\": String(\"stable input\"), \"type\": String(\"text\")}}], \"meta\": Object {}, \"role\": String(\"user\")}]\nfailures:\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 980 filtered out; finished in 0.00s"
+      },
+      "reverted_rerun": {
+        "exit_status": 0,
+        "output": "test differential_goldens::dg_goldens_match_ts_wire_surface_and_gate_labels ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 980 filtered out; finished in 0.00s",
+        "status": "pass"
+      },
+      "adequacy_finding": null
     }
   ]
 }

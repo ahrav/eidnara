@@ -6,7 +6,6 @@ import { join, resolve } from "node:path";
 import { parseIncidentCatalog } from "../src/incident-pool/contract";
 import {
     boundVerifierDigests,
-    changedVerifiers,
     loadMutationEvidence,
     REPO_ROOT,
 } from "../src/incident-pool/evidence";
@@ -33,11 +32,32 @@ function git(
     };
 }
 
+/** Accepted paths absent from the current tree are `unbound`; paths present in both with different bytes are `changed`. Paths only the current tree binds have no accepted bytes to drift from. */
+function digestDrift(
+    acceptedDigests: Record<string, string>,
+    currentDigests: Record<string, string>,
+): { changed: string[]; unbound: string[] } {
+    const changed: string[] = [];
+    const unbound: string[] = [];
+    for (const [path, accepted] of Object.entries(acceptedDigests)) {
+        const current = currentDigests[path];
+        if (current === undefined) unbound.push(path);
+        else if (current !== accepted) changed.push(path);
+    }
+    return { changed: changed.sort(), unbound: unbound.sort() };
+}
+
+/** Removing a record exempts its verifier from replay, so an accepted verifier that no current record binds is rejected. */
 export function assertBoundVerifierBytesUnchanged(
     acceptedDigests: Record<string, string>,
     currentDigests: Record<string, string>,
 ): void {
-    const changed = changedVerifiers(acceptedDigests, currentDigests);
+    const { changed, unbound } = digestDrift(acceptedDigests, currentDigests);
+    if (unbound.length > 0) {
+        throw new Error(
+            `mutation records no longer bind accepted verifiers: ${unbound.join(", ")}`,
+        );
+    }
     if (changed.length > 0) {
         throw new Error(
             `bound verifiers changed without recorded mutation replay support: ${changed.join(", ")}`,
@@ -54,21 +74,15 @@ export function assertCatalogBoundVerifierBytesUnchanged(
     acceptedDigests: Record<string, string>,
     currentDigests: Record<string, string>,
 ): void {
-    const changed: string[] = [];
-    const unbound: string[] = [];
-    for (const [path, accepted] of Object.entries(acceptedDigests)) {
-        const current = currentDigests[path];
-        if (current === undefined) unbound.push(path);
-        else if (current !== accepted) changed.push(path);
-    }
+    const { changed, unbound } = digestDrift(acceptedDigests, currentDigests);
     if (unbound.length > 0) {
         throw new Error(
-            `catalog no longer binds accepted executable verifiers: ${unbound.sort().join(", ")}`,
+            `catalog no longer binds accepted executable verifiers: ${unbound.join(", ")}`,
         );
     }
     if (changed.length > 0) {
         throw new Error(
-            `catalog-bound executable verifiers changed without recorded replay support: ${changed.sort().join(", ")}`,
+            `catalog-bound executable verifiers changed without recorded replay support: ${changed.join(", ")}`,
         );
     }
 }
@@ -116,10 +130,12 @@ function readVerifierState(worktree: string, repoRoot: string): TrustedVerifierS
               e2eRoot,
           )
         : {};
-    return {
-        mutationDigests: loadMutationEvidence(e2eRoot, repoRoot).verifierDigests,
-        catalogBoundDigests,
-    };
+    // Without mutations/, mutation records bind no verifiers.
+    // Deleting the current directory leaves every accepted mutation-bound verifier without a counterpart, which `assertBoundVerifierBytesUnchanged` rejects.
+    const mutationDigests = existsSync(resolve(e2eRoot, "mutations"))
+        ? loadMutationEvidence(e2eRoot, repoRoot).verifierDigests
+        : {};
+    return { mutationDigests, catalogBoundDigests };
 }
 
 function loadTrustedEvidence(baseCommit: string): TrustedVerifierState {

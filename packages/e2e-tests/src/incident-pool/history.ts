@@ -498,6 +498,7 @@ export function compareWithAcceptedSnapshot(
                 "family",
             );
             // A variant's semantic content may change only through an appended fingerprint-bound baseline adjudication or a redaction.
+            // An appended baseline authorizes an edit only when the semantic revision id advances.
             requireOrderedRow(
                 before.variants,
                 after.variants,
@@ -512,15 +513,22 @@ export function compareWithAcceptedSnapshot(
                             `variant ${variantBefore.id} changed its semantic fingerprint while reusing revision id ${variantBefore.semantic_revision.id}`,
                         );
                     }
-                    requireRowIntegrity(
-                        context,
-                        "variant",
-                        variantBefore.id,
-                        variantBefore,
-                        variantAfter,
-                        context.appendedBaselineIdentities,
-                        "variant",
-                    );
+                    if (canonicalJson(variantBefore) === canonicalJson(variantAfter)) return;
+                    if (
+                        context.authorizes("variant", variantBefore.id, variantBefore, variantAfter)
+                    ) {
+                        return;
+                    }
+                    if (!context.appendedBaselineIdentities.has(variantBefore.id)) {
+                        throw new Error(
+                            `accepted variant edited without an appended adjudication or emergency redaction: ${variantBefore.id}`,
+                        );
+                    }
+                    if (variantBefore.semantic_revision.id === variantAfter.semantic_revision.id) {
+                        throw new Error(
+                            `accepted variant ${variantBefore.id} edited while reusing semantic revision id ${variantBefore.semantic_revision.id}`,
+                        );
+                    }
                 },
             );
         },
