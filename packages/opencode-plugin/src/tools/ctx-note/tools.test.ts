@@ -544,3 +544,26 @@ describe("createCtxNoteTools", () => {
         expect(result).toBe("## Notes\n\nNo session notes or smart notes.");
     });
 });
+
+describe("ctx_note raw argument fallback", () => {
+    it("returns a tool error for a non-string content instead of throwing", async () => {
+        const { requests, note } = recordingNote();
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "MODULE", note },
+        });
+        const result = await tools.ctx_note.execute(
+            { action: "write", content: 123 } as never,
+            toolContext(),
+        );
+        expect(result).toBe("Error: 'content' must be a string.");
+        expect(requests).toHaveLength(0);
+
+        const conditionResult = await tools.ctx_note.execute(
+            { action: "write", content: "ok", surface_condition: { not: "a string" } } as never,
+            toolContext(),
+        );
+        expect(conditionResult).toBe("Error: 'surface_condition' must be a string.");
+        expect(requests).toHaveLength(0);
+    });
+});

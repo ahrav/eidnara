@@ -147,19 +147,19 @@ function packMemoryViews(
 function packEchoedIds(
     ids: readonly string[],
     remainingBytes: number,
-): { ids: string[]; elidedCount: number } {
+): { ids: string[]; elidedCount: number; usedBytes: number } {
     const echoed: string[] = [];
     let usedBytes = 0;
     for (const [index, id] of ids.entries()) {
         const bounded = boundedText(id, MAX_RENDER_FIELD_BYTES);
         const cost = Buffer.byteLength(JSON.stringify(bounded), "utf8") + 1;
         if (usedBytes + cost > remainingBytes) {
-            return { ids: echoed, elidedCount: ids.length - index };
+            return { ids: echoed, elidedCount: ids.length - index, usedBytes };
         }
         echoed.push(bounded);
         usedBytes += cost;
     }
-    return { ids: echoed, elidedCount: 0 };
+    return { ids: echoed, elidedCount: 0, usedBytes };
 }
 
 /** Tool text for a state other than `available`; a conflict names the object to re-read. */
@@ -580,6 +580,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         if (!read.ok) return renderCtxMemoryStateText(read.state, []);
         // An expired anti-memory reads as missing, the same served-row rule list, search, and status apply, so `get` cannot resurface a rejected strategy past its horizon. commentlint: allow(JUDGE)
         const nowMs = Date.now();
+        const returnedIds = new Set(read.rows.map((row) => row.object.object_id));
         const found = read.rows.filter(
             (row) => wanted.includes(row.object.object_id) && isServedMemoryDecisionRow(row, nowMs),
         );
@@ -588,12 +589,19 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         const packed = packMemoryViews(found, memoryView);
         const elidedObjectIds = packed.elidedRows.map((row) => row.object.object_id);
         // Ids the read did not serve echo back as the caller wrote them. They are caller input the packer never measures and the daemon caps their count but not their length, so the echo shares the response budget with the packed views: each id is field-bounded, and ids past the remaining budget are counted instead of named. commentlint: allow(JUDGE)
-        const notFound = packEchoedIds(
-            wanted.filter((id) => !foundIds.has(id)),
+        const notServed = wanted.filter((id) => !foundIds.has(id));
+        // A truncated read cannot prove an absent id is missing — it can live beyond the daemon's row cap — so such ids report as unresolved. An id the daemon did return and the served-row filter hid is known missing even on a truncated read. commentlint: allow(JUDGE)
+        const hidden = notServed.filter((id) => returnedIds.has(id));
+        const absent = notServed.filter((id) => !returnedIds.has(id));
+        let remainingBytes =
             CTX_MEMORY_RESPONSE_BUDGET_BYTES -
-                packed.views.reduce((total, view) => total + serializedBytes(view), 0),
-        );
-        // A truncated read cannot prove absent ids are missing — they can live beyond the daemon's row cap — so those ids report as unresolved rather than missing. commentlint: allow(JUDGE)
+            packed.views.reduce((total, view) => total + serializedBytes(view), 0);
+        const missing = packEchoedIds(read.truncated ? hidden : notServed, remainingBytes);
+        remainingBytes -= missing.usedBytes;
+        const unresolved = read.truncated
+            ? packEchoedIds(absent, remainingBytes)
+            : { ids: [], elidedCount: 0, usedBytes: 0 };
+        const elidedRequestedIdCount = missing.elidedCount + unresolved.elidedCount;
         return JSON.stringify({
             action,
             knownAsOf: read.knownAsOf,
@@ -604,18 +612,16 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
                       elisionNote: `response byte budget reached; re-request ${elidedObjectIds.length} elided id${elidedObjectIds.length === 1 ? "" : "s"} in smaller batches`,
                   }
                 : {}),
-            ...(read.truncated
-                ? { truncated: true, missingObjectIds: [], unresolvedObjectIds: notFound.ids }
-                : { missingObjectIds: notFound.ids }),
-            ...(notFound.elidedCount > 0
+            missingObjectIds: missing.ids,
+            ...(read.truncated ? { truncated: true, unresolvedObjectIds: unresolved.ids } : {}),
+            ...(elidedRequestedIdCount > 0
                 ? {
-                      elidedRequestedIdCount: notFound.elidedCount,
-                      elidedRequestedIdNote: `${notFound.elidedCount} requested id${notFound.elidedCount === 1 ? "" : "s"} not served and too long to echo within the response budget`,
+                      elidedRequestedIdCount,
+                      elidedRequestedIdNote: `${elidedRequestedIdCount} requested id${elidedRequestedIdCount === 1 ? "" : "s"} not served and too long to echo within the response budget`,
                   }
                 : {}),
         });
     }
-
     if (action === "create") {
         // The executor is the last check before the kernel commits: the generic client accepts any decision kind, so taxonomy membership and positive/anti-memory exclusivity are enforced here regardless of which harness wrapper called. commentlint: allow(JUDGE)
         assertCtxMemoryWriteShape({ ...args, action: "create" });

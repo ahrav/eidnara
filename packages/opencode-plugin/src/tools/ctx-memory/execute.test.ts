@@ -471,3 +471,40 @@ describe("executeCtxMemory get expiry", () => {
         }
     });
 });
+
+describe("executeCtxMemory get on a truncated read", () => {
+    test("an expired anti-memory the daemon returned reads as missing, not unresolved", async () => {
+        const { kernel, client } = harness();
+        try {
+            setSystemTime(new Date("2026-03-01T12:00:00Z"));
+            kernel.seedDecision({
+                object_id: "mem_expired",
+                decision_kind: "REJECTED_APPROACH",
+                summary: renderAntiMemoryContent({
+                    ...ANTI_MEMORY,
+                    expiresAt: Date.parse("2026-02-01T00:00:00Z"),
+                }),
+            });
+            kernel.seedDecision({ object_id: "mem_live", decision_kind: "NAMING", summary: "A." });
+            kernel.readTruncated = true;
+            const text = await run(
+                client,
+                "get",
+                { objectIds: ["mem_expired", "mem_live", "mem_absent"] },
+                "call-get-truncated-expired",
+            );
+            const reply = JSON.parse(text) as {
+                truncated?: boolean;
+                memories: Array<{ objectId: string }>;
+                missingObjectIds: string[];
+                unresolvedObjectIds: string[];
+            };
+            expect(reply.truncated).toBe(true);
+            expect(reply.memories.map((view) => view.objectId)).toEqual(["mem_live"]);
+            expect(reply.missingObjectIds).toEqual(["mem_expired"]);
+            expect(reply.unresolvedObjectIds).toEqual(["mem_absent"]);
+        } finally {
+            setSystemTime();
+        }
+    });
+});

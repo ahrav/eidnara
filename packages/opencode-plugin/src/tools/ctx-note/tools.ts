@@ -167,6 +167,13 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 },
             );
             const sessionId = toolContext.sessionID;
+            // The schema fallback keeps raw arguments, so a non-string `content` or `surface_condition` would throw at `.trim()` before the backend `try` can turn it into a tool error.
+            for (const field of ["content", "surface_condition"] as const) {
+                const value = (args as Record<string, unknown>)[field];
+                if (value !== undefined && value !== null && typeof value !== "string") {
+                    return `Error: '${field}' must be a string.`;
+                }
+            }
             // A string-only check would classify empty content as write and reject it.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
             // When `wakePlaneStatus()` returns `"present"`, scheduled wakes evaluate `surface_condition`.
