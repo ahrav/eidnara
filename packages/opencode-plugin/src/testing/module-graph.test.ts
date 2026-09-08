@@ -30,9 +30,11 @@ const NOT_PORTED =
 const AWAITING_CONSUMER = new Map<string, string>([
     ["config/load-outcome.ts", "type-only"],
     ["features/context/sidekick/index.ts", "ctx_memory tool (U3)"],
-    ["features/context/smart-notes/wake-plane.ts", "ctx_note tool (U3)"],
-    ["plugin/rust-tool-backends.ts", "ctx_* tools (U3)"],
     ["plugin/types.ts", "type-only"],
+    ["tools/ctx-note/index.ts", "tool registry (U4)"],
+    ["tools/ctx-note/types.ts", "type-only"],
+    ["tools/ctx-reduce/index.ts", "tool registry (U4)"],
+    ["tools/ctx-reduce/types.ts", "type-only"],
     ["shared/context-limit-provenance.ts", "type-only"],
     ["shared/opencode-config-dir-types.ts", "type-only"],
     ["shared/rpc-types.ts", "type-only"],
