@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { extname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import {
     type CommandInvocation,
     getCommandInvocation,
@@ -57,12 +57,14 @@ function detectOmpPackageCli(): string | null {
     }
 }
 export function getOmpCommandInvocation(ompPath: string, args: string[]): CommandInvocation {
-    if (extname(ompPath).toLowerCase() === ".js") {
-        const bun = findBunRuntime();
-        // A Bun found as an npm `.cmd` shim needs cmd.exe like any other shim.
-        if (bun) return getCommandInvocation(bun, [ompPath, ...args], BUN_BINARY_ENV);
+    const bun = findBunRuntime();
+    // A Bun found as an npm `.cmd` shim needs cmd.exe like any other shim.
+    if (bun && extname(ompPath).toLowerCase() === ".js") {
+        return getCommandInvocation(bun, [ompPath, ...args], BUN_BINARY_ENV);
     }
-    return getCommandInvocation(ompPath, args, OMP_BINARY_ENV);
+    // An extensionless launcher starts with `#!/usr/bin/env bun`, which resolves Bun through the child PATH.
+    const runtimeDirs = bun && extname(ompPath) === "" ? [dirname(bun)] : [];
+    return getCommandInvocation(ompPath, args, OMP_BINARY_ENV, runtimeDirs);
 }
 
 export function getOmpFallbackCandidates(

@@ -121,6 +121,29 @@ describe.if(process.platform !== "win32")("OMP fallback launchers", () => {
 
         expect(getOmpVersion(join(bunBin, "omp"))).toBe("1.2.3");
     });
+
+    it("puts a Bun found under the home directory on the child PATH of a launcher elsewhere", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-bun-"));
+        roots.push(root);
+        const bunBin = join(root, ".bun", "bin");
+        const launcherBin = join(root, "usr-local-bin");
+        mkdirSync(bunBin, { recursive: true });
+        mkdirSync(launcherBin, { recursive: true });
+        writeFileSync(join(bunBin, "bun"), '#!/bin/sh\nshift\necho "omp/1.2.3 $*"\n');
+        chmodSync(join(bunBin, "bun"), 0o755);
+        writeFileSync(join(launcherBin, "omp"), "#!/usr/bin/env bun\n");
+        chmodSync(join(launcherBin, "omp"), 0o755);
+        process.env.HOME = root;
+        process.env.PATH = join(root, "empty-bin");
+
+        const invocation = getOmpCommandInvocation(join(launcherBin, "omp"), ["--version"]);
+        expect(invocation.env?.PATH?.split(delimiter)).toEqual([
+            launcherBin,
+            bunBin,
+            join(root, "empty-bin"),
+        ]);
+        expect(getOmpVersion(join(launcherBin, "omp"))).toBe("1.2.3");
+    });
 });
 
 describe("OMP fallback discovery", () => {

@@ -210,6 +210,9 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString("{'\\u{70}assword': 123456}")).toBe(
             "{'\\u{70}assword': '<REDACTED>'}",
         );
+        // A backslash line continuation joins the key across lines.
+        expect(sanitizeString("{'pa\\\nssword':123456}")).toBe("{'pa\\\nssword':'<REDACTED>'}");
+        expect(sanitizeString('{"pa\\\r\nssword":123456}')).toBe('{"pa\\\r\nssword":"<REDACTED>"}');
         // A structured value under a secret key is redacted whole, even when numeric-only.
         expect(sanitizeString('{"credentials": { "value": "opaque-live-value" }}')).toBe(
             '{"credentials": "<REDACTED>"}',
@@ -221,6 +224,9 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString('{"credentials":{"pin":"}]"}, "retries": 3}')).toBe(
             '{"credentials":"<REDACTED>", "retries": 3}',
         );
+        expect(
+            sanitizeString('{"credentials":{"value": `}` ,"other":"opaque-live"}, "retries": 3}'),
+        ).toBe('{"credentials":"<REDACTED>", "retries": 3}');
         // A non-secret outer key still exposes its nested keys to classification.
         expect(sanitizeString('{"config": {"password": 123456, "retries": 3}}')).toBe(
             '{"config": {"password": "<REDACTED>", "retries": 3}}',

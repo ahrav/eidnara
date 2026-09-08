@@ -38,6 +38,15 @@ describe("childPathWithLauncherDir", () => {
         );
     });
 
+    it("adds runtime directories the parent PATH lacks, once", () => {
+        expect(childPathWithLauncherDir("/opt/omp/omp", "/usr/bin", ["/home/fox/.bun/bin"])).toBe(
+            ["/opt/omp", "/home/fox/.bun/bin", "/usr/bin"].join(delimiter),
+        );
+        expect(childPathWithLauncherDir("/opt/omp/omp", "/usr/bin", ["/usr/bin", "/opt/omp"])).toBe(
+            ["/opt/omp", "/usr/bin"].join(delimiter),
+        );
+    });
+
     it("uses the launcher's directory alone when the parent has no PATH", () => {
         expect(childPathWithLauncherDir("/home/fox/.bun/bin/omp", "")).toBe("/home/fox/.bun/bin");
     });

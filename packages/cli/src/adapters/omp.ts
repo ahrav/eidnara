@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import {
     detectOmpBinary,
     listOmpPlugins,
@@ -155,15 +155,7 @@ export class OmpAdapter implements HarnessAdapter {
     }
 
     private readRuntimeEnabled(configPath: string): boolean | undefined {
-        try {
-            const lock = JSON.parse(readFileSync(configPath, "utf-8")) as {
-                plugins?: Record<string, { enabled?: unknown }>;
-            };
-            const enabled = lock.plugins?.[OMP_PLUGIN_PACKAGE]?.enabled;
-            return typeof enabled === "boolean" ? enabled : undefined;
-        } catch {
-            return undefined;
-        }
+        return readOmpRuntimeEnabled(configPath);
     }
 
     private errorResult(
@@ -178,5 +170,18 @@ export class OmpAdapter implements HarnessAdapter {
             configPath,
             ...(options.pluginMayBeActive ? { pluginMayBeActive: true } : {}),
         };
+    }
+}
+
+/** The prior enable state from the plugins lock, or undefined when the lock is unreadable, non-regular, or silent. */
+export function readOmpRuntimeEnabled(lockPath: string): boolean | undefined {
+    try {
+        const lock = JSON.parse(readRegularFileSync(lockPath)) as {
+            plugins?: Record<string, { enabled?: unknown }>;
+        };
+        const enabled = lock.plugins?.[OMP_PLUGIN_PACKAGE]?.enabled;
+        return typeof enabled === "boolean" ? enabled : undefined;
+    } catch {
+        return undefined;
     }
 }

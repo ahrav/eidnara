@@ -60,11 +60,15 @@ describe("envFirstHomeDir", () => {
             const resolved = envFirstHomeDir();
             expect(isAbsolute(resolved)).toBe(true);
             expect(resolved).not.toBe("rel/home");
-            const spy = spyOn(os, "homedir").mockImplementation(() => "rel/home");
+            const userInfoSpy = spyOn(os, "userInfo").mockImplementation(() => {
+                throw new Error("no passwd entry");
+            });
+            const homedirSpy = spyOn(os, "homedir").mockImplementation(() => "rel/home");
             try {
                 expect(() => envFirstHomeDir()).toThrow("Relative home directory");
             } finally {
-                spy.mockRestore();
+                homedirSpy.mockRestore();
+                userInfoSpy.mockRestore();
             }
         },
     );
@@ -73,13 +77,17 @@ describe("envFirstHomeDir", () => {
         "throws instead of yielding cwd-relative paths without a home",
         () => {
             setEnv("HOME", undefined);
-            const spy = spyOn(os, "homedir").mockImplementation(() => {
+            const userInfoSpy = spyOn(os, "userInfo").mockImplementation(() => {
+                throw new Error("no passwd entry");
+            });
+            const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
                 throw Object.assign(new Error("uv_os_homedir returned ENOENT"), { code: "ENOENT" });
             });
             try {
                 expect(() => envFirstHomeDir()).toThrow("No home directory");
             } finally {
-                spy.mockRestore();
+                homedirSpy.mockRestore();
+                userInfoSpy.mockRestore();
             }
         },
     );

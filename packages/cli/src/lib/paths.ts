@@ -124,15 +124,20 @@ export function detectConfigPaths(): ConfigPaths {
 export function envFirstHomeDir(): string {
     const home = process.platform === "win32" ? undefined : process.env.HOME?.trim();
     if (home && isAbsolute(home)) return home;
-    // Bun's `os.homedir()` echoes a relative `HOME`, so the fallback is checked the same way.
+    // A relative `HOME` would resolve against the working directory, and Bun's `os.homedir()`
+    // echoes the same variable, so the passwd entry comes first and the result is checked.
     let fallback: string;
     try {
-        fallback = os.homedir();
-    } catch (error) {
-        throw new Error(
-            "No home directory: set HOME to an absolute path so harness paths can be resolved.",
-            { cause: error },
-        );
+        fallback = process.platform === "win32" ? os.homedir() : os.userInfo().homedir;
+    } catch {
+        try {
+            fallback = os.homedir();
+        } catch (error) {
+            throw new Error(
+                "No home directory: set HOME to an absolute path so harness paths can be resolved.",
+                { cause: error },
+            );
+        }
     }
     if (!isAbsolute(fallback)) {
         throw new Error(
