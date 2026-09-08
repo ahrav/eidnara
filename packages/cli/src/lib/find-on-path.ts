@@ -51,3 +51,23 @@ export function isExecutableFile(path: string, isWindows = process.platform === 
         return false;
     }
 }
+
+/** Global-install launcher locations for `bun` and `npm`. */
+export function packageManagerBinCandidates(
+    binary: string,
+    platform: NodeJS.Platform,
+    home: string,
+    appData?: string,
+): string[] {
+    if (platform !== "win32") {
+        return [join(home, ".bun", "bin", binary), join(home, ".local", "bin", binary)];
+    }
+    const npmRoot = appData?.trim();
+    return [
+        ...(npmRoot
+            ? [join(npmRoot, "npm", `${binary}.cmd`), join(npmRoot, "npm", `${binary}.exe`)]
+            : []),
+        join(home, ".bun", "bin", `${binary}.exe`),
+        join(home, ".bun", "bin", `${binary}.cmd`),
+    ];
+}

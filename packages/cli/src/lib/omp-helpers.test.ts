@@ -6,6 +6,7 @@ import {
     detectOmpBinary,
     getOmpCommandInvocation,
     getOmpFallbackCandidates,
+    getOmpSetting,
     parseOmpModelsOutput,
     runOmpCommand,
 } from "./omp-helpers";
@@ -137,5 +138,37 @@ describe("OMP command execution", () => {
         ]);
         expect(result.ok).toBe(true);
         expect(result.stdout.length).toBe(2 * 1024 * 1024);
+    });
+});
+
+describe.if(process.platform !== "win32")("getOmpSetting", () => {
+    function fakeOmp(valuesByKey: Record<string, string>): string {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-settings-"));
+        roots.push(root);
+        const omp = join(root, "omp");
+        const cases = Object.entries(valuesByKey)
+            .map(([key, json]) => `  ${key}) printf '%s' '${json}' ;;`)
+            .join("\n");
+        writeFileSync(omp, `#!/bin/sh\ncase "$3" in\n${cases}\nesac\n`);
+        chmodSync(omp, 0o755);
+        return omp;
+    }
+
+    it("returns only the type each key declares", () => {
+        const omp = fakeOmp({
+            "compaction.enabled": '{"value":false}',
+            "memory.backend": '{"value":"sqlite"}',
+        });
+        expect(getOmpSetting(omp, "compaction.enabled")).toBe(false);
+        expect(getOmpSetting(omp, "memory.backend")).toBe("sqlite");
+    });
+
+    it("rejects a value of the other primitive type", () => {
+        const omp = fakeOmp({
+            "compaction.enabled": '{"value":"false"}',
+            "memory.backend": '{"value":true}',
+        });
+        expect(getOmpSetting(omp, "compaction.enabled")).toBeNull();
+        expect(getOmpSetting(omp, "memory.backend")).toBeNull();
     });
 });

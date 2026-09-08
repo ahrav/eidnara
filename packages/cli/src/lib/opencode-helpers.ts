@@ -47,7 +47,8 @@ export const OPENCODE_VERSION_PROBE_TIMEOUT_MS = 2_000;
 export const OPENCODE_MODELS_PROBE_TIMEOUT_MS = 20_000;
 
 export function getOpenCodeVersion(binary?: string | null): string | null {
-    return runOpenCode(["--version"], binary, OPENCODE_VERSION_PROBE_TIMEOUT_MS);
+    const output = runOpenCode(["--version"], binary, OPENCODE_VERSION_PROBE_TIMEOUT_MS);
+    return output ? output : null;
 }
 
 export interface OpenCodeInstallationReport extends OpenCodeInstallation {

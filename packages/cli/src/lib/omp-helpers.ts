@@ -7,7 +7,7 @@ import {
     getCommandInvocation,
     invocationSpawnOptions,
 } from "./command-invocation";
-import { findOnPath, isExecutableFile } from "./find-on-path";
+import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
 import { getOmpPackageDir } from "./paths";
 export interface OmpBinaryInfo {
     path: string;
@@ -64,15 +64,7 @@ export function getOmpFallbackCandidates(
     home: string,
     appData?: string,
 ): string[] {
-    if (platform !== "win32") {
-        return [join(home, ".bun", "bin", "omp"), join(home, ".local", "bin", "omp")];
-    }
-    const npmRoot = appData?.trim();
-    return [
-        ...(npmRoot ? [join(npmRoot, "npm", "omp.cmd"), join(npmRoot, "npm", "omp.exe")] : []),
-        join(home, ".bun", "bin", "omp.exe"),
-        join(home, ".bun", "bin", "omp.cmd"),
-    ];
+    return packageManagerBinCandidates("omp", platform, home, appData);
 }
 
 export function detectOmpBinary(): OmpBinaryInfo | null {
@@ -187,9 +179,8 @@ export function getOmpSetting(
     if (!result.ok) return null;
     try {
         const parsed = JSON.parse(result.stdout) as { value?: unknown };
-        return typeof parsed.value === "boolean" || typeof parsed.value === "string"
-            ? parsed.value
-            : null;
+        const expected = key === "compaction.enabled" ? "boolean" : "string";
+        return typeof parsed.value === expected ? (parsed.value as boolean | string) : null;
     } catch {
         return null;
     }

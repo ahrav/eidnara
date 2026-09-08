@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
     getAvailableModels,
     getPiCommandInvocation,
+    getPiFallbackCandidates,
     getPiVersion,
     parseModelListOutput,
 } from "./pi-helpers";
@@ -51,6 +52,11 @@ describe("parseModelListOutput", () => {
         expect(parseModelListOutput(output)).toEqual(["openrouter/anthropic/claude-sonnet-4"]);
     });
 
+    it("allows scoped model ids that begin with @", () => {
+        const output = [HEADER, "modal @modal/qwen/model-v1 128K 32K no no"].join("\n");
+        expect(parseModelListOutput(output)).toEqual(["modal/@modal/qwen/model-v1"]);
+    });
+
     it("ignores headings, prose, and rows before a recognized header", () => {
         const output = [
             "Available models:",
@@ -79,6 +85,29 @@ describe("parseModelListOutput", () => {
             "anthropic claude-opus-4-8 1M 128K yes yes",
         ].join("\n");
         expect(parseModelListOutput(output)).toEqual(["anthropic/claude-opus-4-8"]);
+    });
+});
+
+describe("Pi fallback discovery", () => {
+    it("probes the installer directory, then Bun and ~/.local launchers on POSIX", () => {
+        const home = "/virt/home";
+        expect(getPiFallbackCandidates("linux", home)).toEqual([
+            join(home, ".pi", "bin", "pi"),
+            join(home, ".bun", "bin", "pi"),
+            join(home, ".local", "bin", "pi"),
+        ]);
+    });
+
+    it("probes the installer directory, then npm and Bun launchers on Windows", () => {
+        const home = "C:\\Users\\fox";
+        const appData = "C:\\Users\\fox\\AppData\\Roaming";
+        expect(getPiFallbackCandidates("win32", home, appData)).toEqual([
+            join(home, ".pi", "bin", "pi.cmd"),
+            join(appData, "npm", "pi.cmd"),
+            join(appData, "npm", "pi.exe"),
+            join(home, ".bun", "bin", "pi.exe"),
+            join(home, ".bun", "bin", "pi.cmd"),
+        ]);
     });
 });
 

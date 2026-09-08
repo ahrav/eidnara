@@ -124,6 +124,14 @@ describe.if(isPosix)("opencode helpers with a resolved binary path", () => {
         expect(getOpenCodeVersion(bin)).toBe("1.2.3");
     });
 
+    it("reports a clean exit with no version output as unknown", () => {
+        const bin = fakeOpencode("exit 0");
+        expect(getOpenCodeVersion(bin)).toBeNull();
+        expect(describeOpenCodeInstallations([{ path: bin, source: "PATH", kind: "cli" }])).toEqual(
+            [{ path: bin, source: "PATH", kind: "cli", version: "unknown", active: true }],
+        );
+    });
+
     it("enumerates versions for both installs and marks PATH as active", () => {
         const pathBin = fakeOpencode('echo "1.18.0"');
         const homeInstall = fakeHomeOpencode('echo "1.15.13"');

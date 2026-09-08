@@ -6,7 +6,7 @@ import {
     getCommandInvocation,
     invocationSpawnOptions,
 } from "./command-invocation";
-import { findOnPath, isExecutableFile } from "./find-on-path";
+import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
 
 export interface PiBinaryInfo {
     path: string;
@@ -21,18 +21,25 @@ export function getPiCommandInvocation(piPath: string, args: string[]): CommandI
     return getCommandInvocation(piPath, args, PI_BINARY_ENV);
 }
 
+/** The installer's `~/.pi/bin` comes first; the package-manager launchers follow. */
+export function getPiFallbackCandidates(
+    platform: NodeJS.Platform,
+    home: string,
+    appData?: string,
+): string[] {
+    const installerBinary =
+        platform === "win32" ? join(home, ".pi", "bin", "pi.cmd") : join(home, ".pi", "bin", "pi");
+    return [installerBinary, ...packageManagerBinCandidates("pi", platform, home, appData)];
+}
+
 export function detectPiBinary(): PiBinaryInfo | null {
     const fromPath = findOnPath("pi");
     if (fromPath) return { path: fromPath, source: "path" };
 
     const home = process.env.HOME?.trim() || homedir();
-    const homeCandidate =
-        process.platform === "win32"
-            ? join(home, ".pi", "bin", "pi.cmd")
-            : join(home, ".pi", "bin", "pi");
-    if (isExecutableFile(homeCandidate)) return { path: homeCandidate, source: "home" };
-
-    return null;
+    const candidates = getPiFallbackCandidates(process.platform, home, process.env.APPDATA);
+    const candidate = candidates.find((path) => isExecutableFile(path));
+    return candidate ? { path: candidate, source: "home" } : null;
 }
 
 export function getPiVersion(piPath: string, timeout = 10_000): string | null {
@@ -73,7 +80,8 @@ function stripAnsi(text: string): string {
 }
 
 const PROVIDER_TOKEN = /^[a-z0-9][a-z0-9._-]*$/i;
-const MODEL_TOKEN = /^[a-z0-9][a-z0-9._:/-]*$/i;
+// A leading `@` admits scoped model identifiers such as `@modal/qwen/model-v1`.
+const MODEL_TOKEN = /^[a-z0-9@][a-z0-9._:/@-]*$/i;
 const SIZE_TOKEN = /^(?:\d+(?:\.\d+)?[kmgt]?|-)$/i;
 const CAPABILITY_TOKEN = /^(?:yes|no|true|false|-)$/i;
 
