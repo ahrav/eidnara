@@ -184,15 +184,30 @@ function removedKeyWarnings(raw: Record<string, unknown>): string[] {
     );
 }
 
+/** Omitting keys absent from `userRaw` preserves per-leaf pruning during project-config recovery. */
+function userTierFallbackFor(
+    projectRaw: Record<string, unknown>,
+    userRaw: Record<string, unknown> | undefined,
+    trustedBaseConfig: EidnaraConfig,
+): Map<string, unknown> {
+    const trusted = trustedBaseConfig as unknown as Record<string, unknown>;
+    const fallback = new Map<string, unknown>();
+    if (userRaw === undefined) return fallback;
+    for (const key of Object.keys(projectRaw)) {
+        if (Object.hasOwn(userRaw, key)) fallback.set(key, trusted[key]);
+    }
+    return fallback;
+}
+
 interface ParsePiConfigOptions {
     recoveredTopLevelKeys?: string[];
-    /** The parsed user-tier config; agent-block recovery falls back to its `historian`/`sidekick`. */
-    trustedBaseConfig?: EidnaraConfig;
+    /** Stores user-tier values used instead of schema defaults when recovery rejects merged top-level keys. */
+    userTierFallback?: ReadonlyMap<string, unknown>;
 }
 
 function parsePiConfig(
     rawConfig: Record<string, unknown>,
-    { recoveredTopLevelKeys = [], trustedBaseConfig }: ParsePiConfigOptions = {},
+    { recoveredTopLevelKeys = [], userTierFallback }: ParsePiConfigOptions = {},
 ): {
     config: EidnaraConfig;
     warnings: string[];
@@ -227,16 +242,22 @@ function parsePiConfig(
         recoveredTopLevelKeys.push(key);
         const isAgentConfig = key === "historian" || key === "sidekick";
 
-        if (isAgentConfig) {
-            // Keep the user agent block when merging project config makes it invalid.
-            const trustedBlock = trustedBaseConfig?.[key];
-            if (trustedBlock !== undefined) {
-                patched[key] = trustedBlock;
-                warnings.push(
-                    `"${key}": invalid agent configuration after merging the project config, keeping the user config's ${key} settings. Check the project's eidnara.jsonc.`,
-                );
-                continue;
+        // A project config key with a user-tier fallback restores that fallback instead
+        // of forcing the schema default.
+        if (userTierFallback?.has(key)) {
+            const fallback = userTierFallback.get(key);
+            if (fallback === undefined) {
+                delete patched[key];
+            } else {
+                patched[key] = fallback;
             }
+            warnings.push(
+                `"${key}": invalid value (${redactConfigValue(rawConfig[key])}) after merging the project config, keeping the user config's ${key} settings. Check the project's eidnara.jsonc.`,
+            );
+            continue;
+        }
+
+        if (isAgentConfig) {
             delete patched[key];
             warnings.push(
                 `"${key}": invalid agent configuration, ignoring. Check your eidnara.jsonc.`,
@@ -256,7 +277,7 @@ function parsePiConfig(
             rawValue !== null &&
             !Array.isArray(rawValue);
         if (allNested) {
-            let prunedBlock: Record<string, unknown> = {
+            let prunedBlock: Record<string, unknown> | undefined = {
                 ...(rawValue as Record<string, unknown>),
             };
             const prunedLeaves: string[] = [];
@@ -268,13 +289,19 @@ function parsePiConfig(
                 if (result) {
                     prunedBlock = result.block;
                     prunedLeaves.push(result.removed);
+                    continue;
                 }
+                // A missing required leaf has nothing to prune, so the whole block goes.
+                prunedBlock = undefined;
+                break;
             }
-            patched[key] = prunedBlock;
-            warnings.push(
-                `"${key}": invalid nested field(s) ${prunedLeaves.map((l) => `"${l}"`).join(", ")}, using defaults for those.`,
-            );
-            continue;
+            if (prunedBlock !== undefined) {
+                patched[key] = prunedBlock;
+                warnings.push(
+                    `"${key}": invalid nested field(s) ${prunedLeaves.map((l) => `"${l}"`).join(", ")}, using defaults for those.`,
+                );
+                continue;
+            }
         }
 
         delete patched[key];
@@ -318,6 +345,7 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
     const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
     // The threshold trust boundary uses the effective USER/default config as its baseline.
     const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
+    let userTierFallback: Map<string, unknown> | undefined;
 
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
@@ -332,6 +360,7 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
             for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
                 warnings.push(`${prefix} ${warning}`);
             }
+            userTierFallback = userTierFallbackFor(projectRaw, userRaw, trustedBaseConfig);
             rawConfig = mergeRawConfigs(rawConfig, projectRaw);
             for (const warning of constrainProjectThresholdOverrides({
                 mergedRaw: rawConfig,
@@ -345,7 +374,7 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
         }
     }
 
-    const parsed = parsePiConfig(rawConfig, { trustedBaseConfig });
+    const parsed = parsePiConfig(rawConfig, { userTierFallback });
     setOutputReserveConfig(parsed.config.output_reserve);
     setWindowOverlayPath(parsed.config.models?.window_overlay_path);
     warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
@@ -434,6 +463,7 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
     // A cloned repository may delay compaction but must not lower thresholds enough to increase historian work for the user's account.
     const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
+    let userTierFallback: Map<string, unknown> | undefined;
 
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
@@ -447,6 +477,7 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
             for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
                 warnings.push(`${prefix} ${warning}`);
             }
+            userTierFallback = userTierFallbackFor(projectRaw, userRaw, trustedBaseConfig);
             rawConfig = mergeRawConfigs(rawConfig, projectRaw);
             for (const warning of constrainProjectThresholdOverrides({
                 mergedRaw: rawConfig,
@@ -461,7 +492,7 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     }
 
     const recoveredTopLevelKeys: string[] = [];
-    const parsed = parsePiConfig(rawConfig, { recoveredTopLevelKeys, trustedBaseConfig });
+    const parsed = parsePiConfig(rawConfig, { recoveredTopLevelKeys, userTierFallback });
     setOutputReserveConfig(parsed.config.output_reserve);
     setWindowOverlayPath(parsed.config.models?.window_overlay_path);
     warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
