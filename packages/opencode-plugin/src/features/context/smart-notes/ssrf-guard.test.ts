@@ -269,8 +269,14 @@ describe("guarded HTTPS request lifetime", () => {
     // A TLS record header that announces a 16 KiB body, followed by one byte every 20 ms,
     // keeps the client waiting for the rest of the record. A socket inactivity timeout never
     // fires against this stream; only a wall-clock deadline ends it.
-    async function listenDripping(): Promise<{ port: number; close: () => void }> {
+    async function listenDripping(): Promise<{
+        port: number;
+        connections: () => number;
+        close: () => void;
+    }> {
+        let accepted = 0;
         const server = net.createServer((socket) => {
+            accepted += 1;
             socket.on("error", () => {});
             socket.write(Buffer.from([0x16, 0x03, 0x03, 0x40, 0x00]));
             const drip = setInterval(() => socket.write(Buffer.from([0x00])), 20);
@@ -278,7 +284,7 @@ describe("guarded HTTPS request lifetime", () => {
         });
         await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
         const { port } = server.address() as net.AddressInfo;
-        return { port, close: () => server.close() };
+        return { port, connections: () => accepted, close: () => server.close() };
     }
 
     test("enforces a wall-clock deadline against a server that keeps the socket active", async () => {
@@ -294,8 +300,34 @@ describe("guarded HTTPS request lifetime", () => {
 
             expect(error).toBeInstanceOf(SmartNoteNetworkError);
             expect((error as SmartNoteNetworkError).message).toMatch(/timed out/);
-            expect((error as SmartNoteNetworkError).terminal).toBe(true);
+            expect((error as SmartNoteNetworkError).terminal).toBe(false);
             expect(elapsed).toBeLessThan(1500);
+        } finally {
+            server.close();
+        }
+    });
+
+    test("tries the next validated address after the first one stalls", async () => {
+        const server = await listenDripping();
+        try {
+            const error = await guardedSmartNoteHttpGet(`https://example.test:${server.port}/`, {
+                signal,
+                timeoutMs: 150,
+                resolver: resolver([
+                    { address: "93.184.216.34", family: 4 },
+                    { address: "1.1.1.1", family: 4 },
+                ]),
+                requestAddress: (candidateValidation, candidate, requestOptions) =>
+                    requestValidatedAddress(
+                        candidateValidation,
+                        { ...candidate, address: pinned.address },
+                        requestOptions,
+                    ),
+            }).catch((error) => error);
+
+            expect(error).toBeInstanceOf(SmartNoteNetworkError);
+            expect((error as SmartNoteNetworkError).message).toMatch(/timed out/);
+            expect(server.connections()).toBe(2);
         } finally {
             server.close();
         }

@@ -37,6 +37,7 @@ type SmartNoteAddressRequest = (
 export interface GuardedSmartNoteHttpGetOptions {
     signal: AbortSignal;
     resolver?: SmartNoteResolver;
+    /** Limits each address attempt; `signal` bounds the entire call. */
     timeoutMs?: number;
     bodyLimitBytes?: number;
     requestAddress?: SmartNoteAddressRequest;
@@ -291,11 +292,7 @@ export function requestValidatedAddress(
         // A wall-clock deadline bounds total request duration. The socket `timeout` option resets
         // on every byte of I/O, so periodic bytes from the server never trigger it.
         const deadline = setTimeout(() => {
-            reject(
-                new SmartNoteNetworkError("SMART_NOTE_NETWORK: request timed out", {
-                    terminal: true,
-                }),
-            );
+            reject(new SmartNoteNetworkError("SMART_NOTE_NETWORK: request timed out"));
             request.destroy();
         }, options.timeoutMs);
         release = () => {
