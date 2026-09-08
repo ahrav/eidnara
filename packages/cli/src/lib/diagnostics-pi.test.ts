@@ -163,6 +163,9 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString('client_secret: "correct horse battery staple" done')).toBe(
             "client_secret: <REDACTED> done",
         );
+        expect(sanitizeString('client_secret: "prefix\\" LIVE suffix" done')).toBe(
+            "client_secret: <REDACTED> done",
+        );
         expect(sanitizeString("bearer opaque-live-token and BEARER x.y")).toBe(
             "Bearer <REDACTED> and Bearer <REDACTED>",
         );
@@ -180,9 +183,13 @@ describe("sanitizeString home handling", () => {
         expect(
             sanitizeValue({
                 permission: { bash: { "curl -H 'X-API-Key: live' https://h": "allow" } },
+                prompt_surface: { tool_descriptions: { "X-API-Key: live": "desc" } },
             }),
         ).toEqual({
             permission: { bash: { "curl -H 'X-API-Key: <REDACTED>": "allow" } },
+            prompt_surface: {
+                tool_descriptions: { "X-API-Key: <REDACTED>": "<REDACTED 4 chars>" },
+            },
         });
     });
 });
