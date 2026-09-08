@@ -131,7 +131,8 @@ export function isSecretDeniedPath(repoRelativePath: string): boolean {
 
 export function normalizeRepoPath(repoRelativePath: string): string {
     // Leading and trailing whitespace are part of a valid name; only a blank input is rejected.
-    const slash = repoRelativePath.replace(/\\/g, "/");
+    // A backslash is a separator only where the host uses it as one; on POSIX it is an ordinary byte.
+    const slash = path.sep === "\\" ? repoRelativePath.replace(/\\/g, "/") : repoRelativePath;
     if (!slash.trim() || slash.startsWith("/") || /^[a-zA-Z]:\//.test(slash)) return "";
     const normalized = path.posix.normalize(slash);
     if (normalized === "." || normalized.startsWith("../") || normalized === "..") return "";
@@ -312,9 +313,32 @@ async function guardedGitLog(
         .filter((row) => row.sha.length > 0);
 }
 
-// Ordinary git failures (not a repository, unknown ref) resolve to "" so the guest sees `null`.
-// Abort, timeout, and a failure to run git at all reject so the runner reports a network-class failure
-// instead of a fabricated result.
+// Git reports every fatal condition with exit status 128, so the message is the only way to separate an
+// expected empty answer from an operational failure. `LC_ALL=C` in gitEnvironment keeps it in English.
+const EXPECTED_GIT_MISS = [
+    /^fatal: No names found/m,
+    /does not have any commits yet/,
+    /^fatal: ambiguous argument 'HEAD'/m,
+    /^fatal: bad revision 'HEAD'/m,
+];
+const NOT_A_REPOSITORY = /^fatal: not a git repository/m;
+
+// A directory that is not a repository yields empty answers. A `.git` entry git cannot read is
+// corruption, and git reports it with the same message.
+async function isExpectedGitMiss(projectRoot: string, stderr: string): Promise<boolean> {
+    if (NOT_A_REPOSITORY.test(stderr)) {
+        const gitEntry = await lstat(path.join(projectRoot, ".git")).then(
+            () => true,
+            () => false,
+        );
+        return !gitEntry;
+    }
+    return EXPECTED_GIT_MISS.some((pattern) => pattern.test(stderr));
+}
+
+// Expected misses (not a repository, no tags, no commits) resolve to "" so the guest sees `null`.
+// Abort, timeout, a git that cannot run, and any other git failure reject so the runner reports a
+// network-class failure instead of a fabricated result.
 async function runGit(projectRoot: string, args: string[], signal: AbortSignal): Promise<string> {
     throwIfAborted(signal);
     try {
@@ -330,7 +354,7 @@ async function runGit(projectRoot: string, args: string[], signal: AbortSignal):
         );
         return result.stdout;
     } catch (error) {
-        const failure = error as { code?: unknown; signal?: string | null };
+        const failure = error as { code?: unknown; signal?: string | null; stderr?: unknown };
         if (signal.aborted || failure.signal === "SIGTERM") {
             throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: git command timed out or aborted");
         }
@@ -339,12 +363,15 @@ async function runGit(projectRoot: string, args: string[], signal: AbortSignal):
         if (typeof failure.code === "string") {
             throw new SmartNoteNetworkError(`SMART_NOTE_NETWORK: git unavailable: ${failure.code}`);
         }
-        return "";
+        const stderr = typeof failure.stderr === "string" ? failure.stderr : "";
+        if (await isExpectedGitMiss(projectRoot, stderr)) return "";
+        const reason = stderr.split("\n")[0]?.trim() || `exit status ${String(failure.code)}`;
+        throw new SmartNoteNetworkError(`SMART_NOTE_NETWORK: git failed: ${reason}`);
     }
 }
 
 function gitEnvironment(): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...process.env };
+    const env: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C" };
     for (const name of GIT_ENV_DENYLIST) delete env[name];
     return env;
 }

@@ -137,10 +137,12 @@ function resolveCapabilitiesForRun(
     throw new Error("smart-note check requires capabilities");
 }
 
+function runAbortReason(signal: AbortSignal): unknown {
+    return signal.reason ?? new Error("smart-note check aborted");
+}
+
 function throwIfRunAborted(signal: AbortSignal): void {
-    if (signal.aborted) {
-        throw signal.reason ?? new Error("smart-note check aborted");
-    }
+    if (signal.aborted) throw runAbortReason(signal);
 }
 
 export async function runCompiledSmartNoteCheck(
@@ -206,7 +208,8 @@ async function runCompiledSmartNoteCheckLocked(
         // predicate is the only stop for that loop; a monotonic clock keeps a wall-clock step from
         // stretching the budget.
         const deadline = performance.now() + timeoutMs;
-        const quickjs = await getAsyncModule();
+        // The shared initialization keeps running and stays cached; only this run stops waiting for it.
+        const quickjs = await raceWithAbort(getAsyncModule(), controller.signal, runAbortReason);
         throwIfRunAborted(controller.signal);
         const context = quickjs.newContext();
         try {
@@ -319,11 +322,15 @@ async function guardHostCall<T>(
 
 // A host call that never settles would hold the asyncify suspension past the run budget.
 // Rejecting on abort resumes the guest with a network-class error; the orphaned promise is dropped.
-function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-    if (signal.aborted) return Promise.reject(smartNoteAbortError(signal));
+function raceWithAbort<T>(
+    promise: Promise<T>,
+    signal: AbortSignal,
+    abortReason: (signal: AbortSignal) => unknown = smartNoteAbortError,
+): Promise<T> {
+    if (signal.aborted) return Promise.reject(abortReason(signal));
     let onAbort: (() => void) | undefined;
     const abort = new Promise<never>((_, reject) => {
-        onAbort = () => reject(smartNoteAbortError(signal));
+        onAbort = () => reject(abortReason(signal));
         signal.addEventListener("abort", onAbort, { once: true });
     });
     return Promise.race([promise, abort]).finally(() => {

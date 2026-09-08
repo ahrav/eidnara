@@ -93,6 +93,21 @@ describe("smart-note readFile capability", () => {
         }
     });
 
+    test("treats a backslash as an ordinary byte where the host does not use it as a separator", async () => {
+        if (process.platform === "win32") return;
+        await withTempDir(async (dir) => {
+            await mkdir(path.join(dir, "a"));
+            await writeFile(path.join(dir, "a", "b"), "nested", "utf8");
+            await writeFile(path.join(dir, "a\\b"), "literal backslash", "utf8");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.readFile("a/b")).toBe("nested");
+            expect(await cap.readFile("a\\b")).toBe("literal backslash");
+        });
+    });
+
     test("accepts in-tree names whose first component begins with dots", async () => {
         await withTempDir(async (dir) => {
             await mkdir(path.join(dir, "..generated"));
@@ -232,6 +247,33 @@ describe("smart-note git capabilities", () => {
             expect(await cap.gitHeadSha()).toBeNull();
             expect(await cap.gitTag()).toBeNull();
             expect(await cap.gitLog()).toEqual([]);
+        });
+    });
+
+    test("a repository with no commits yields empty answers", async () => {
+        await withTempDir(async (dir) => {
+            await git(dir, "init", "--initial-branch=main");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitHeadSha()).toBeNull();
+            expect(await cap.gitTag()).toBeNull();
+            expect(await cap.gitLog()).toEqual([]);
+        });
+    });
+
+    test("a repository git cannot read rejects instead of answering empty", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            await writeFile(path.join(dir, ".git", "HEAD"), "garbage\n", "utf8");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            await expect(cap.gitHeadSha()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            await expect(cap.gitTag()).rejects.toBeInstanceOf(SmartNoteNetworkError);
+            await expect(cap.gitLog()).rejects.toBeInstanceOf(SmartNoteNetworkError);
         });
     });
 
