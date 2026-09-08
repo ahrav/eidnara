@@ -13,6 +13,11 @@ export type EidnaraEvent = {
     properties?: unknown;
 };
 
+export interface ContextUsage {
+    percentage: number;
+    inputTokens: number;
+}
+
 export interface SessionCreatedInfo {
     id: string;
     /** Child sessions set `parentID`; root sessions omit it. */
