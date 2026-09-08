@@ -76,6 +76,25 @@ describe("resolveModelCalibration", () => {
             expect(calib.toolsRatio).toBeCloseTo(1.57, 2);
         }
     });
+
+    it("mirrors the Claude 4.5/4.6 direct-provider ratios for OpenRouter and GitHub Copilot aliases", () => {
+        const models = [
+            "claude-sonnet-4.5",
+            "claude-sonnet-4.6",
+            "claude-opus-4.5",
+            "claude-opus-4.6",
+            "claude-haiku-4.5",
+        ];
+        for (const model of models) {
+            const direct = resolveModelCalibration("anthropic", model);
+            expect(direct.systemRatio).not.toBe(NEUTRAL.systemRatio);
+            for (const provider of ["openrouter/anthropic", "github-copilot"]) {
+                const routed = resolveModelCalibration(provider, model);
+                expect(routed.systemRatio).toBe(direct.systemRatio);
+                expect(routed.toolsRatio).toBe(direct.toolsRatio);
+            }
+        }
+    });
 });
 
 describe("calibrateBuckets", () => {

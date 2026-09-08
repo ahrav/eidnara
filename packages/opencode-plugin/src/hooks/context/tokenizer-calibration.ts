@@ -59,8 +59,13 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     { prefix: "github-copilot/claude-opus-4-7", systemRatio: 1.51, toolsRatio: 1.57 },
     { prefix: "github-copilot/claude-opus-4.7", systemRatio: 1.51, toolsRatio: 1.57 },
     { prefix: "openrouter/anthropic/claude-sonnet-4.6", systemRatio: 1.02, toolsRatio: 1.14 },
+    { prefix: "openrouter/anthropic/claude-sonnet-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
+    { prefix: "openrouter/anthropic/claude-opus-4.6", systemRatio: 1.02, toolsRatio: 1.16 },
+    { prefix: "openrouter/anthropic/claude-opus-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
+    { prefix: "openrouter/anthropic/claude-haiku-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "github-copilot/claude-sonnet-4.6", systemRatio: 1.02, toolsRatio: 1.14 },
     { prefix: "github-copilot/claude-sonnet-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
+    { prefix: "github-copilot/claude-opus-4.6", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "github-copilot/claude-opus-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "github-copilot/claude-haiku-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
     // For gpt-5.x, `o200k_base` matches system prompts, but overcounts tools by ~16%.

@@ -1,20 +1,76 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     clearCtxReduceAvailability,
     clearTodowriteAvailability,
     permissionDisabled,
     resetCtxReduceRegisteredGloballyForTest,
+    resolveCtxReduceAvailability,
     resolveCtxReduceAvailabilityFromMessages,
     resolveTodowriteAvailabilityFromMessages,
     resolveToolPermissionDenied,
     setCtxReduceRegisteredGlobally,
 } from "./ctx-reduce-availability";
+import { closeReadOnlySessionDb } from "./read-session-db";
 
 function userMsg(tools?: Record<string, unknown>) {
     return { info: { role: "user", ...(tools !== undefined ? { tools } : {}) } };
 }
+
+describe("ctx_reduce availability (OpenCode DB)", () => {
+    const originalXdgDataHome = process.env.XDG_DATA_HOME;
+    let dataHome: string | undefined;
+
+    afterEach(() => {
+        closeReadOnlySessionDb();
+        if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = originalXdgDataHome;
+        if (dataHome) rmSync(dataHome, { recursive: true, force: true });
+        dataHome = undefined;
+    });
+
+    function writeOpenCodeDbWithFirstUserTools(sessionId: string, tools: unknown): void {
+        if (!dataHome) throw new Error("dataHome is unset");
+        const dir = join(dataHome, "opencode");
+        mkdirSync(dir, { recursive: true });
+        const db = new Database(join(dir, "opencode.db"));
+        try {
+            db.exec(
+                "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
+            );
+            db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            ).run("msg-1", sessionId, 1, 1, JSON.stringify({ role: "user", tools }));
+        } finally {
+            closeQuietly(db);
+        }
+    }
+
+    it("keeps the frozen fail-open verdict when the database appears after the first read", () => {
+        dataHome = mkdtempSync(join(tmpdir(), "eidnara-ctx-reduce-db-"));
+        process.env.XDG_DATA_HOME = dataHome;
+        const sessionId = "ses-db-missing-then-present";
+        clearCtxReduceAvailability(sessionId);
+
+        const beforeDb = resolveCtxReduceAvailability(sessionId);
+        expect(beforeDb).toEqual({ callable: true, frozen: true });
+
+        writeOpenCodeDbWithFirstUserTools(sessionId, { ctx_reduce: false });
+
+        // The frozen verdict survives even though the first user message now denies the tool.
+        expect(resolveCtxReduceAvailability(sessionId)).toEqual({ callable: true, frozen: true });
+
+        // Control: a fresh session reads the deny from the database.
+        clearCtxReduceAvailability(sessionId);
+        expect(resolveCtxReduceAvailability(sessionId)).toEqual({ callable: false, frozen: true });
+    });
+});
 
 describe("ctx_reduce availability (spawn tools map)", () => {
     it("resolves false for an explicit allow-list without ctx_reduce", () => {
@@ -198,7 +254,6 @@ describe("OpenCode todowrite permission evaluator", () => {
             session: {
                 get: async () => ({
                     data: {
-                        agent: "build",
                         permission: {
                             todowrite: "deny",
                         },
@@ -207,8 +262,33 @@ describe("OpenCode todowrite permission evaluator", () => {
             },
         } as never;
         await expect(
-            resolveToolPermissionDenied(client, "ses-permission-overlay", "todowrite"),
+            resolveToolPermissionDenied(client, "ses-permission-overlay", "todowrite", "build"),
         ).resolves.toBe(true);
+    });
+
+    it("applies the supplied agent's whole-tool deny and skips agent rules when the agent is undefined", async () => {
+        const client = {
+            app: {
+                agents: async () => ({
+                    data: [
+                        {
+                            name: "plan",
+                            permission: { todowrite: "deny" },
+                        },
+                    ],
+                }),
+            },
+            session: {
+                get: async () => ({ data: { id: "ses-agent-deny", agent: "plan" } }),
+            },
+        } as never;
+        await expect(
+            resolveToolPermissionDenied(client, "ses-agent-deny", "todowrite", "plan"),
+        ).resolves.toBe(true);
+        // A stray `agent` field on the session payload does not substitute for the caller's agent.
+        await expect(
+            resolveToolPermissionDenied(client, "ses-agent-deny", "todowrite", undefined),
+        ).resolves.toBe(false);
     });
 });
 

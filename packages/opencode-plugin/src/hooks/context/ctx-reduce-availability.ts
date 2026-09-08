@@ -127,7 +127,11 @@ function resolveToolAvailability(sessionId: string, toolName: string): ToolAvail
     const cached = availabilityBySession.get(key);
     if (cached !== undefined) return { callable: cached, frozen: true };
     // The resolver freezes the fail-open verdict when no database exists so hash persistence can proceed.
-    if (!openCodeDbExists()) return { callable: true, frozen: true };
+    // Caching the verdict keeps it final: a database that appears later cannot replace a frozen verdict consumers have already persisted.
+    if (!openCodeDbExists()) {
+        availabilityBySession.set(key, true);
+        return { callable: true, frozen: true };
+    }
     try {
         const row = withReadOnlySessionDb(
             (db) =>
@@ -262,20 +266,17 @@ function permissionRules(value: unknown): PermissionRule[] {
     return result;
 }
 
-function activeAgentNameFromSession(value: unknown): string | undefined {
-    if (!isRecord(value)) return undefined;
-    const agent = value.agent;
-    return typeof agent === "string" && agent.length > 0 ? agent : undefined;
-}
-
 /**
  * Session rules follow agent rules, so later session rules override agent rules.
+ *
+ * The caller supplies the active agent for agent-rule lookup; the SDK `Session` payload carries no agent field.
+ * An `undefined` agent skips agent rules and evaluates session rules alone.
  */
 export async function resolveToolPermissionDenied(
     client: PluginContext["client"],
     sessionId: string,
     toolName: string,
-    activeAgent?: string,
+    activeAgent: string | undefined,
 ): Promise<boolean> {
     const sdk = client as unknown as {
         app?: { agents?: () => Promise<unknown> };
@@ -291,10 +292,10 @@ export async function resolveToolPermissionDenied(
     ]);
     const agents = responseData(agentsResponse);
     const session = responseData(sessionResponse);
-    const agentName = activeAgent ?? activeAgentNameFromSession(session);
-    const agent = Array.isArray(agents)
-        ? agents.find((candidate) => isRecord(candidate) && candidate.name === agentName)
-        : undefined;
+    const agent =
+        activeAgent !== undefined && Array.isArray(agents)
+            ? agents.find((candidate) => isRecord(candidate) && candidate.name === activeAgent)
+            : undefined;
     const agentRules = permissionRules(isRecord(agent) ? agent.permission : undefined);
     const sessionRules = permissionRules(
         isRecord(session) ? (session.permission ?? session.permissions) : undefined,
@@ -307,7 +308,7 @@ export async function resolveToolPermissionDenied(
 export function todowritePermissionDenied(
     client: PluginContext["client"],
     sessionId: string,
-    activeAgent?: string,
+    activeAgent: string | undefined,
 ): Promise<boolean> {
     return resolveToolPermissionDenied(client, sessionId, TODOWRITE_TOOL, activeAgent);
 }
