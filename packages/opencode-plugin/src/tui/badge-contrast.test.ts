@@ -45,6 +45,15 @@ describe("badgeTextColor (AFT parity with #186 safety net)", () => {
         expect(result).toBe(readableTextColorOn(grayAccent));
     });
 
+    test("translucent accent is judged after compositing onto the background", () => {
+        // A transparent accent renders the badge white, so white label text would vanish.
+        const transparentAccent = { r: 0, g: 0, b: 0, a: 0 };
+        const white = { r: 1, g: 1, b: 1, a: 1 };
+        const result = badgeTextColor(transparentAccent, white);
+        expect(result).not.toBe(white);
+        expect(result).toBe("#000000");
+    });
+
     test("missing alpha is treated as opaque", () => {
         const background = { r: 0.05, g: 0.05, b: 0.07 };
         expect(badgeTextColor(accent, background)).toBe(background);

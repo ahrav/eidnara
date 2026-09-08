@@ -40,14 +40,13 @@ export function readableTextColorOn(bg: Color): string {
 }
 
 /**
- * A translucent `background` is composited over `accent` before the contrast check; a fully transparent background has 1:1 contrast with `accent`.
+ * The badge renders as `accent` composited over `background`, and the label as `background` composited over that badge; both contrast checks use those rendered colors. A fully transparent accent or background therefore lands at 1:1 and falls back.
  */
 export function badgeTextColor<T extends Color>(accent: T, background: T): T | string {
-    const rendered = compositeOver(background, accent);
-    if (
-        contrastRatio(relativeLuminance(rendered), relativeLuminance(accent)) >= MIN_LABEL_CONTRAST
-    ) {
+    const badge = compositeOver(accent, background);
+    const label = compositeOver(background, badge);
+    if (contrastRatio(relativeLuminance(label), relativeLuminance(badge)) >= MIN_LABEL_CONTRAST) {
         return background;
     }
-    return readableTextColorOn(accent);
+    return readableTextColorOn(badge);
 }
