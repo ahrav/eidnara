@@ -50,14 +50,37 @@ export type NativeLaunchFailureCode =
     | "command_mismatch"
     | "usage_error";
 
+/**
+ * Whether a failure with this code can follow lifecycle work in the child.
+ * `usage_error` covers both local validation and an exit code of 2, which the
+ * binary returns from argument parsing before it dispatches any command.
+ * `timeout` is raised on both sides of the spawn, so that site states it explicitly.
+ */
+const CHILD_MAY_HAVE_ACTED_BY_CODE: Readonly<Record<NativeLaunchFailureCode, boolean>> = {
+    spawn_failed: false,
+    unsupported_platform: false,
+    usage_error: false,
+    timeout: true,
+    signal_exit: true,
+    output_cap_exceeded: true,
+    malformed_output: true,
+    exit_disagreement: true,
+    command_mismatch: true,
+};
+
 /** Typed launch failure. Never carries stdout/stderr bytes or raw paths. */
 export class NativeLaunchError extends Error {
+    /** True when a native child may have begun its command, so effects are unknown. */
+    readonly childMayHaveActed: boolean;
+
     constructor(
         readonly code: NativeLaunchFailureCode,
         message: string,
+        options: { childMayHaveActed?: boolean } = {},
     ) {
         super(message);
         this.name = "NativeLaunchError";
+        this.childMayHaveActed = options.childMayHaveActed ?? CHILD_MAY_HAVE_ACTED_BY_CODE[code];
     }
 }
 
@@ -167,12 +190,22 @@ function collectChild(child: ChildProcess, deadlineAt: number): Promise<Collecte
         // child's whole run; closing it early would make the next child-side
         // write take EPIPE/SIGPIPE and turn a healthy run into a signal exit.
         child.stderr?.resume();
+        // `error` also fires when a later `kill` cannot be delivered; by then a
+        // process exists and may have begun its command.
+        let spawned = false;
+        child.once("spawn", () => {
+            spawned = true;
+        });
         child.on("error", (error) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
             if (stdioGrace !== null) clearTimeout(stdioGrace);
-            reject(new NativeLaunchError("spawn_failed", `native spawn failed: ${error.name}`));
+            reject(
+                new NativeLaunchError("spawn_failed", `native spawn failed: ${error.name}`, {
+                    childMayHaveActed: spawned,
+                }),
+            );
         });
         // The `exit` handler waits STDIO_FLUSH_GRACE_MS before destroying the
         // pipes so inherited descriptors cannot delay `close` indefinitely. The
@@ -317,6 +350,7 @@ export async function runNativeLifecycle(
         throw new NativeLaunchError(
             "timeout",
             "native lifecycle deadline expired before the child was spawned",
+            { childMayHaveActed: false },
         );
     }
     try {

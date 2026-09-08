@@ -259,6 +259,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
             error = caught as NativeLaunchError;
         }
         expect(error?.code).toBe("timeout");
+        expect(error?.childMayHaveActed).toBe(true);
         // An uncapped 250ms stdio grace after the kill would land near 750ms.
         expect(performance.now() - started).toBeLessThan(deadlineMs + 150);
     }, 10_000);
@@ -288,6 +289,8 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         }
         expect(error?.code).toBe("timeout");
         expect(error?.message).toContain("before the child was spawned");
+        // No process existed, so the failure must not read as one that ran.
+        expect(error?.childMayHaveActed).toBe(false);
         expect(existsSync(sentinel)).toBe(false);
     }, 10_000);
 
@@ -434,6 +437,8 @@ describe("native launcher output handling (U3 scenario 17)", () => {
             error = caught as NativeLaunchError;
         }
         expect(error?.code).toBe("usage_error");
+        // Argument parsing fails before command dispatch, so no command can act.
+        expect(error?.childMayHaveActed).toBe(false);
     });
 
     test("the child receives the envelope on stdin and only the data root in its environment", async () => {

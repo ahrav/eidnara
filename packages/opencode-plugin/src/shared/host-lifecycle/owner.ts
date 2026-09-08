@@ -54,7 +54,8 @@ export interface PreparedManagedLaunchTarget {
 
 export interface PrepareManagedLaunchTargetOptions {
     dataRoot: string;
-    declaringParentRoot: string;
+    /** Start of the lexical `node_modules` walk; unused once `explicitExternalRoot` is set. */
+    declaringParentRoot?: string;
     target: PayloadTarget;
     /** Whether a missing or stale retained bootstrap may be staged from the package; observation never stages. */
     allowStaging: boolean;
@@ -383,8 +384,10 @@ function payloadPackageFor(target: PayloadTarget): string {
 /** `runNativeLifecycle` rejects a relative `--payload-dir`; the daemon it spawns runs with `cwd: "/"`. */
 function resolveVerifiedPayload(options: ResolveManagedPayloadDirOptions): VerifiedPayload {
     const resolution = resolvePayloadPackageDir({
-        declaringParentRoot: resolve(options.declaringParentRoot),
         packageName: payloadPackageFor(options.target),
+        ...(options.declaringParentRoot === undefined
+            ? {}
+            : { declaringParentRoot: resolve(options.declaringParentRoot) }),
         ...(options.explicitExternalRoot === undefined
             ? {}
             : { explicitExternalRoot: resolve(options.explicitExternalRoot) }),
