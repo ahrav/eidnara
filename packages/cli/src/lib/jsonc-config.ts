@@ -1,9 +1,9 @@
 import {
     isCommentJsonObjectRoot,
     parseJsoncTree,
+    readJsoncBytes,
     sanitizeParsedJson,
 } from "@eidnara/opencode/shared/jsonc-parser";
-import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse as parseCommentJson } from "comment-json";
 
 export type JsoncReadResult =
@@ -75,12 +75,14 @@ function containsLossyNumber(value: unknown): boolean {
  */
 function readJsoncDocument(path: string): JsoncDocumentResult {
     // The read stays inside the failure boundary: a path that exists but
-    // cannot be read (permissions, a FIFO or directory, deleted before the
-    // open) reports as parse-error instead of throwing, so lenient diagnostic
-    // callers can explain the bad file rather than abort.
+    // cannot be read (permissions, a FIFO or directory, malformed UTF-8,
+    // deleted before the open) reports as parse-error instead of throwing, so
+    // lenient diagnostic callers can explain the bad file rather than abort.
+    // A fatal decoder matters here because a rewrite would otherwise serialize
+    // U+FFFD over the user's original bytes.
     let content = "";
     try {
-        content = readRegularFileSync(path);
+        content = readJsoncBytes(path);
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
         return { kind: "parse-error", error: new ConfigParseError(path, "", error) };

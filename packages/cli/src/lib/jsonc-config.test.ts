@@ -60,6 +60,22 @@ describe("readJsoncConfigForUpdate", () => {
         }
     });
 
+    it("rejects malformed UTF-8 instead of rewriting it as U+FFFD", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-utf8-"));
+        const path = join(directory, "bad-utf8.json");
+        writeFileSync(
+            path,
+            Buffer.concat([Buffer.from('{"label": "'), Buffer.from([0xff]), Buffer.from('"}')]),
+        );
+
+        try {
+            expect(() => readJsoncConfigForUpdate(path)).toThrow();
+            expect(readJsoncConfig(path).kind).toBe("parse-error");
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
     it("refuses to rewrite a file whose integer literal parsing rounded", () => {
         const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-update-"));
         const path = join(directory, "big.json");
