@@ -115,6 +115,8 @@ export interface SidebarSnapshot {
         message?: string;
         note?: string;
     } | null;
+    dreamerProgress?: { task: string; processed: number; total: number } | null;
+    dreamerBacklog?: Record<string, { pending: number; total: number }>;
 }
 
 /** A `+` suffix marks a truncated read; the count is a lower bound. */

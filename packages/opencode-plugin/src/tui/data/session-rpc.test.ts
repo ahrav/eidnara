@@ -36,6 +36,7 @@ function snapshot(sessionId: string, inputTokens: number): SidebarSnapshot {
         systemPromptTokens: 0,
         compartmentCount: inputTokens > 0 ? 2 : 0,
         memoryCount: 0,
+        memoryState: null,
         memoryBlockCount: 0,
         pendingOpsCount: 0,
         historianRunning: false,
@@ -43,6 +44,7 @@ function snapshot(sessionId: string, inputTokens: number): SidebarSnapshot {
         sessionNoteCount: 0,
         readySmartNoteCount: 0,
         cacheTtl: "5m",
+        lastTransformError: null,
         lastDreamerRunAt: null,
         projectIdentity: null,
         compartmentTokens: 0,
@@ -91,5 +93,29 @@ describe("TUI context RPC data", () => {
         expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(0);
         response = { error: "database busy again" };
         expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(0);
+    });
+
+    test("a zero-token success replaces the sticky snapshot instead of dropping it", async () => {
+        const dataHome = makeDataHome();
+        const directory = "/repo-zero-token";
+        const sessionId = "ses_zero_token";
+        const zeroTokens: SidebarSnapshot = {
+            ...snapshot(sessionId, 0),
+            memoryCount: 7,
+            memoryState: "available",
+            projectIdentity: "git:proj",
+        };
+        let response: Record<string, unknown> = zeroTokens as unknown as Record<string, unknown>;
+        await startServer(dataHome, directory, () => response);
+        initRpcClient(directory);
+
+        expect((await loadSidebarSnapshot(sessionId, directory)).memoryCount).toBe(7);
+        response = { error: "database busy" };
+        const replayed = await loadSidebarSnapshot(sessionId, directory);
+
+        expect(replayed.inputTokens).toBe(0);
+        expect(replayed.memoryCount).toBe(7);
+        expect(replayed.memoryState).toBe("available");
+        expect(replayed.projectIdentity).toBe("git:proj");
     });
 });

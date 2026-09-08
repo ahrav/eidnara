@@ -27,19 +27,23 @@ function check(name: string, cond: boolean, detail?: string): void {
 }
 
 try {
-    // The production ESM/Node build settings make QuickJS use the production bundling transform.
+    // `splitting` matches the production `bun build --splitting` invocation, so the
+    // dynamically imported QuickJS modules land in separate chunks the way they do in `dist/`.
     const result = await Bun.build({
         entrypoints: [entry],
         outdir: outDir,
         target: "node",
         format: "esm",
+        splitting: true,
     });
     check("sandbox-runner bundles cleanly", result.success, result.logs.map(String).join("; "));
     if (!result.success) throw new Error("bundle failed");
 
-    const bundlePath = result.outputs.find((o) => o.path.endsWith(".js"))?.path;
-    check("bundle emitted a js file", Boolean(bundlePath));
+    const bundlePath = result.outputs.find((o) => o.kind === "entry-point")?.path;
+    check("bundle emitted an entry-point js file", Boolean(bundlePath));
     if (!bundlePath) throw new Error("no bundle output");
+    const chunkCount = result.outputs.filter((o) => o.kind === "chunk").length;
+    check("splitting emitted at least one chunk", chunkCount > 0, `${chunkCount} chunks`);
 
     // The bundle must not require a sibling `.wasm` file at runtime.
     // The `singlefile` variant inlines the WASM in the bundle.

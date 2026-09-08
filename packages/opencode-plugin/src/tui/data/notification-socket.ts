@@ -55,9 +55,18 @@ const LEGACY_INSTANCE_ID = "legacy";
 type NotificationProtocolMode = "legacy" | "v2";
 
 /**
+ * A legacy server announces no instance ID and restarts notification IDs at 1, so its port-file identity supplies the epoch: a restart changes `started_at`, a reconnect does not.
+ */
+function legacyInstanceId(endpoint: { port: number; startedAt: number }): string {
+    return `${LEGACY_INSTANCE_ID}:${endpoint.port}:${endpoint.startedAt}`;
+}
+
+/**
  * Notification IDs restart with each server instance, so cursor and deduplication keys include the instance epoch.
  */
 let activeInstanceId: string | null = null;
+/** The epoch a legacy `hello-ack` on the current socket resolves to. */
+let socketLegacyInstanceId: string = LEGACY_INSTANCE_ID;
 let notificationProtocolMode: NotificationProtocolMode | null = null;
 const bufferedNotifications: SocketNotification[] = [];
 const lastHandledIdByCursor = new Map<string, number>();
@@ -136,10 +145,16 @@ async function connect(): Promise<void> {
     const rpcGeneration = getRpcGeneration();
     inFlightAttemptId = attemptId;
     const endpoint = await client.resolveEndpoint();
-    if (closed || inFlightAttemptId !== attemptId || getRpcGeneration() !== rpcGeneration) {
+    // A stop, or a restart that launched a newer attempt, already owns `inFlightAttemptId`.
+    if (closed || inFlightAttemptId !== attemptId) {
         return;
     }
     inFlightAttemptId = null;
+    if (getRpcGeneration() !== rpcGeneration) {
+        // The endpoint belongs to a replaced client; the retry resolves it against the current one.
+        scheduleReconnect();
+        return;
+    }
     if (!endpoint) {
         scheduleReconnect();
         return;
@@ -164,7 +179,8 @@ async function connect(): Promise<void> {
     activeToken = endpoint.token;
     notificationProtocolMode = null;
     bufferedNotifications.length = 0;
-    switchNotificationEpoch(endpoint.instanceId ?? LEGACY_INSTANCE_ID);
+    socketLegacyInstanceId = legacyInstanceId(endpoint);
+    switchNotificationEpoch(endpoint.instanceId ?? socketLegacyInstanceId);
     socket = ws;
 
     ws.addEventListener("open", () => {
@@ -237,7 +253,7 @@ function handleSocketMessage(ws: WebSocket, raw: string, token: string | null): 
             // A hello-ack without an instance ID identifies the frozen v0.32 protocol.
             // server ignores exact-id acks, so cursors must remain gap-safe.
             notificationProtocolMode = "legacy";
-            switchNotificationEpoch(LEGACY_INSTANCE_ID);
+            switchNotificationEpoch(socketLegacyInstanceId);
         }
         flushBufferedNotifications(ws);
         return;
@@ -437,9 +453,19 @@ export function _resetNotificationSocketStateForTesting(): void {
 }
 
 /**
- * */
+ * When `getRpcGeneration()` changes, closing the stale socket runs its down handler, which reconnects using the current RPC client.
+ */
 function watchSession(): void {
-    if (closed || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (closed || !socket) return;
+    if (getRpcGeneration() !== connectGeneration) {
+        try {
+            socket.close();
+        } catch {
+            // best-effort
+        }
+        return;
+    }
+    if (socket.readyState !== WebSocket.OPEN) return;
     const current = opts?.getSessionId() ?? null;
     if (current === helloedSession) return;
     sendHello(socket, activeToken);

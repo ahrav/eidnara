@@ -90,11 +90,6 @@ const stickySidebarCache = new Map<string, CachedSnapshot>();
 
 function rememberSidebarSnapshot(snapshot: SidebarSnapshot): void {
     if (!snapshot.sessionId) return;
-    if (snapshot.inputTokens <= 0) {
-        // A non-positive-token snapshot deletes its cache entry so later RPC failures cannot return stale values.
-        stickySidebarCache.delete(snapshot.sessionId);
-        return;
-    }
     // The entry cap prevents unbounded growth across session switches.
     if (
         stickySidebarCache.size >= STICKY_MAX_ENTRIES &&
@@ -134,8 +129,7 @@ export async function loadSidebarSnapshot(
         if (isRpcError(result)) {
             return recallSidebarSnapshot(sessionId, empty);
         }
-        // A non-positive-token snapshot deletes its cache entry so later RPC failures cannot return stale values.
-        //
+        // Every successful snapshot, including a zero-token one, becomes the newest cached value so a later failure replays current memory counts rather than EMPTY_SNAPSHOT.
         rememberSidebarSnapshot(result);
         return result;
     } catch {

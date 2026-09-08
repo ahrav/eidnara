@@ -101,6 +101,12 @@ export function registerCtxAugCommand(
             );
             if (!projectIdentity) {
                 sessionLog(sessionLabel, "Error: Could not resolve project identity for sidekick.");
+                if (ctx.hasUI) {
+                    ctx.ui.notify(
+                        "/ctx-aug: this directory has no project identity (sessions started in the home directory are excluded unless user-level config sets `allow_home_project`). Run from a project directory, or send the prompt without /ctx-aug.",
+                        "warning",
+                    );
+                }
                 return;
             }
             sessionLog(sessionLabel, "/ctx-aug: project identity", projectIdentity);
@@ -123,10 +129,17 @@ export function registerCtxAugCommand(
             });
 
             if (!result.ok) {
+                if (result.reason === "abort") {
+                    // `ctx.signal` aborts when the user stops the agent; `sendUserMessage` here would start a new turn.
+                    sessionLog(sessionLabel, "/ctx-aug: sidekick aborted; prompt not sent");
+                    if (ctx.hasUI) {
+                        ctx.ui.notify("/ctx-aug: cancelled. Prompt not sent.", "info");
+                    }
+                    return;
+                }
+                // If the sidekick subprocess fails, Pi sends the original prompt unaugmented.
+                // only).
                 log(`[eidnara][pi] /ctx-aug: sidekick failed (${result.reason}): ${result.error}`);
-                // An abort is the user stopping this command; sending the prompt would start the very turn they cancelled.
-                if (result.reason === "abort") return;
-                // Any other sidekick failure sends the original prompt unaugmented.
                 if (ctx.hasUI) {
                     ctx.ui.notify(
                         `/ctx-aug: sidekick failed (${result.reason}). Sending prompt without augmentation.`,

@@ -191,6 +191,10 @@ jobs:
       - name: TypeScript
         run: bun run check:repo
 
+      # `bun test` resolves QuickJS and the TUI from source and node_modules, so only these smokes exercise the shipped bundles.
+      - name: Plugin bundle smokes
+        run: bun run --cwd packages/opencode-plugin smoke
+
       - name: Rust toolchain
         run: rustup toolchain install 1.98 --profile minimal --component rustfmt
 

@@ -1,5 +1,7 @@
 export interface DumpMessageInfo {
     id?: string;
+    /** The `message.time_created` column, which orders the session together with `id`. */
+    timeCreated?: number;
     role?: string;
     sessionID?: string;
     error?: MsgError;
