@@ -384,54 +384,43 @@ describe("a local close wins over recovery", () => {
         expect(requests).toBe(0);
     });
 
-    test("a close while a call waits behind the lane's owner fences the queued call too", async () => {
+    test("a call queued behind the lane when the session closes does not send", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         let requests = 0;
+        let finishFirst: ((value: unknown) => void) | undefined;
         const route = { channel: 9, epoch: 1 } as unknown as RouteHandle;
         const client = {
-            request: async () => {
+            request: () => {
                 requests += 1;
-                return { ok: true };
+                return new Promise<unknown>((resolve) => {
+                    finishFirst = resolve;
+                });
             },
         } as unknown as HostClient;
         transport.client = client;
-        let finishOwner: (() => void) | undefined;
-        let ensured = 0;
-        transport.ensureRoute = async (sessionId) => {
-            ensured += 1;
-            if (ensured === 1) {
-                await new Promise<void>((resolve) => {
-                    finishOwner = resolve;
-                });
-            }
-            return { client, route, routeKey: `${sessionId}\0/tmp`, generation: 0 };
-        };
+        transport.ensureRoute = async (sessionId) => ({
+            client,
+            route,
+            routeKey: `${sessionId}\0/tmp`,
+            generation: 0,
+        });
 
-        const owner = transport.call({
-            sessionId: "s",
-            projectRoot: "/tmp",
-            method: "session.status",
-            body: {},
-        });
+        const first = transport
+            .call({ sessionId: "s", projectRoot: "/tmp", method: "session.status", body: {} })
+            .catch((error: unknown) => error);
         await Bun.sleep(0);
-        const queued = transport.call({
-            sessionId: "s",
-            projectRoot: "/tmp",
-            method: "session.delete",
-            body: {},
-        });
+        expect(requests).toBe(1);
+        const queued = transport
+            .call({ sessionId: "s", projectRoot: "/tmp", method: "session.delete", body: {} })
+            .catch((error: unknown) => error);
         await Bun.sleep(0);
         transport.closeSession("s");
-        finishOwner?.();
+        finishFirst?.({ ok: true });
 
-        const outcomes = await Promise.allSettled([owner, queued]);
-        expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
-        for (const outcome of outcomes) {
-            if (outcome.status === "rejected") {
-                expect(outcome.reason).toMatchObject({ code: "session_closed" });
-            }
-        }
-        expect(requests).toBe(0);
+        // `closeSession` invalidates the connection under the in-flight call, so its late response is discarded too.
+        expect(await first).toMatchObject({ code: "session_closed" });
+        expect(await queued).toMatchObject({ code: "session_closed" });
+        expect(requests).toBe(1);
     });
 });
 

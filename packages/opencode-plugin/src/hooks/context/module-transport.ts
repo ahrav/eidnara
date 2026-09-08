@@ -739,7 +739,7 @@ export class HostModuleTransport {
             if (remaining > 0) this.wrapupSessions.set(args.sessionId, remaining);
             else this.wrapupSessions.delete(args.sessionId);
         };
-        // The close epoch is read before lane admission so a close that lands while this call waits behind the lane's owner still fences it; read afterwards, a queued call would see the already-advanced epoch and proceed past the close. commentlint: allow(JUDGE)
+        // The epoch is read before lane admission so a close that lands while this call is queued is observed.
         const closeEpoch = this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0;
         const sessionClosedSinceStart = (): boolean =>
             (this.sessionLanes.get(args.sessionId)?.closeEpoch ?? 0) !== closeEpoch;

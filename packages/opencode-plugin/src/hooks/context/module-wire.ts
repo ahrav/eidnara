@@ -285,11 +285,9 @@ function serdeJsonCompact(value: unknown): string {
 
 /** The daemon's `stable_hash_prefix`: leading hex of the SHA-256 of `serde_json::to_vec`. */
 function stableHashPrefix(value: unknown, chars: number): string {
-    return crypto
-        .createHash("sha256")
-        .update(serdeJsonCompact(value))
-        .digest("hex")
-        .slice(0, chars);
+    // The daemon hashes the parsed wire JSON, so `toJSON`, dropped function-valued keys, and other serialization effects apply first.
+    const wire: unknown = JSON.parse(JSON.stringify(value) ?? "null");
+    return crypto.createHash("sha256").update(serdeJsonCompact(wire)).digest("hex").slice(0, chars);
 }
 
 /** The daemon's `find_signature`: the first string `signature` key in a depth-first walk. */
@@ -639,9 +637,15 @@ export function buildPagedModuleTransformPayloads(
     const scalarFields = { ...body };
     for (const field of arrayFields) delete scalarFields[field];
     const transformPageId = crypto.randomUUID();
-    const items = arrayFields.flatMap((field) =>
-        (body[field] as unknown[]).map((value, itemIndex) => ({ field, value, itemIndex })),
-    );
+    // Iterating by index preserves sparse holes and their original `itemIndex` values.
+    const items = arrayFields.flatMap((field) => {
+        const values = body[field] as unknown[];
+        return Array.from({ length: values.length }, (_, itemIndex) => ({
+            field,
+            value: values[itemIndex],
+            itemIndex,
+        }));
+    });
     const emptyArrays = (): Record<string, unknown[]> =>
         Object.fromEntries(arrayFields.map((field) => [field, []]));
     const makePage = (args: {
@@ -888,7 +892,11 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                     kind:
                         redacted !== undefined
                             ? { type: "redacted_reasoning", data: redacted }
-                            : { type: "reasoning", text, ...(signature ? { signature } : {}) },
+                            : {
+                                  type: "reasoning",
+                                  text,
+                                  ...(signature !== undefined ? { signature } : {}),
+                              },
                     ...opencodeExtras(part),
                 });
             } else if (type === "redacted_thinking") {

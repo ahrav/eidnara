@@ -41,6 +41,31 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
     });
 
+    it("preserves an explicitly empty reasoning signature", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_empty_sig", role: "assistant" },
+                parts: [{ type: "reasoning", text: "t", metadata: { signature: "" } }],
+            },
+        ]);
+        expect((encoded.ck.content as Array<{ kind: Record<string, unknown> }>)[0]?.kind).toEqual({
+            type: "reasoning",
+            text: "t",
+            signature: "",
+        });
+    });
+
+    it("hashes fallback ids over the value JSON serialization emits", () => {
+        const when = new Date("2026-01-02T03:04:05.000Z");
+        const withToJson = encodeOpenCodeMessagesToCk([
+            { info: { role: "user" }, parts: [], when, skip: () => 1 },
+        ])[0];
+        const asWire = encodeOpenCodeMessagesToCk([
+            { info: { role: "user" }, parts: [], when: when.toISOString() },
+        ])[0];
+        expect(withToJson.mid).toBe(asWire.mid);
+    });
+
     it("preserves an explicitly empty tool-call id as the daemon does", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
@@ -1135,6 +1160,26 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         expect(pages).toHaveLength(1);
         expect(pages[0]?.page).toBe(body);
         expect(pages[0]?.bytes).toBe(Buffer.byteLength(JSON.stringify(body)));
+    });
+
+    it("keeps sparse array slots at their positions while paging", () => {
+        const input: unknown[] = Array.from({ length: 80 }, (_, index) => ({
+            mid: `m${index}`,
+            ordinal: index + 1,
+            ck: { text: "x".repeat(8_000) },
+        }));
+        delete input[3];
+        delete input[40];
+        const body = { method: "transform", session_id: "ses-sparse", input };
+        const pages = buildPagedModuleTransformPayloads(body);
+        const paged = pages.flatMap(
+            ({ page }) => JSON.parse(JSON.stringify(page.input)) as unknown[],
+        );
+        const unpaged = JSON.parse(JSON.stringify(input)) as unknown[];
+        expect(paged).toHaveLength(unpaged.length);
+        expect(paged[3]).toBeNull();
+        expect(paged[40]).toBeNull();
+        expect(paged).toEqual(unpaged);
     });
 
     it("sends an item carrying the reserved continuation key as a continuation", () => {
