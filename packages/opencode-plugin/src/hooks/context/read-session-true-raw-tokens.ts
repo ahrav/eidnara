@@ -75,12 +75,20 @@ interface CachedMessageEstimate {
 
 interface ToolSignal {
     callId: string;
+    toolName: string;
     hasInput: boolean;
     hasOutput: boolean;
     /** Provider-executed tools run on the provider's side, so they never form an in-flight local arc. */
     providerExecuted: boolean;
     inputText: string;
     outputText: string;
+    /** Image and file blocks inside a tool result, counted through the image heuristic instead of as text. */
+    outputMedia: readonly Record<string, unknown>[];
+}
+
+interface ToolResultContent {
+    text: string;
+    media: Record<string, unknown>[];
 }
 
 const MAX_MESSAGE_CACHE_ENTRIES = 100_000;
@@ -136,23 +144,37 @@ function stringValue(value: unknown): string {
     return stableStringify(value);
 }
 
-function textFromToolResultContent(content: unknown): string {
-    if (typeof content === "string") return content;
+function isMediaResultBlock(entry: Record<string, unknown>): boolean {
+    const type = partType(entry);
+    return type === "image" || type === "file" || looksImageLike(entry);
+}
+
+/**
+ * Image and file blocks are separated from text so a base64 payload is never tokenized as text.
+ */
+function toolResultContent(content: unknown): ToolResultContent {
+    if (typeof content === "string") return { text: content, media: [] };
     if (Array.isArray(content)) {
         const pieces: string[] = [];
+        const media: Record<string, unknown>[] = [];
         for (const entry of content) {
             if (typeof entry === "string") {
                 pieces.push(entry);
             } else if (isRecord(entry)) {
+                if (isMediaResultBlock(entry)) {
+                    media.push(entry);
+                    continue;
+                }
                 const text = firstStringField(entry, ["text", "content", "value"]);
                 pieces.push(text ?? stableStringify(entry));
             } else if (entry !== null && entry !== undefined) {
                 pieces.push(String(entry));
             }
         }
-        return pieces.join("\n");
+        return { text: pieces.join("\n"), media };
     }
-    return stringValue(content);
+    if (isRecord(content) && isMediaResultBlock(content)) return { text: "", media: [content] };
+    return { text: stringValue(content), media: [] };
 }
 
 function looksImageLike(part: Record<string, unknown>): boolean {
@@ -262,40 +284,79 @@ function callIdFromPart(part: Record<string, unknown>): string {
     return state ? (firstStringField(state, TOOL_CALL_ID_FIELDS) ?? "") : "";
 }
 
+function toolNameFromPart(part: Record<string, unknown>): string {
+    return firstStringField(part, ["tool", "toolName", "name"]) ?? "";
+}
+
+/** OpenCode persists the flag either at the top level or under `metadata`. */
+function providerExecutedFromPart(part: Record<string, unknown>): boolean {
+    if (part.providerExecuted === true) return true;
+    const metadata = isRecord(part.metadata) ? part.metadata : null;
+    return metadata !== null && metadata.providerExecuted === true;
+}
+
+const TERMINAL_TOOL_STATUSES = new Set(["completed", "error"]);
+
+/** A terminal `status` marks a completed call even when no output payload is stored. */
+function toolStatusIsTerminal(
+    part: Record<string, unknown>,
+    state: Record<string, unknown> | null,
+): boolean {
+    const status =
+        (state ? firstStringField(state, ["status"]) : null) ?? firstStringField(part, ["status"]);
+    return status !== null && TERMINAL_TOOL_STATUSES.has(status);
+}
+
+function emptyToolResultContent(): ToolResultContent {
+    return { text: "", media: [] };
+}
+
 function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (!isRecord(part)) return null;
     const type = partType(part);
     const state = isRecord(part.state) ? part.state : null;
     const callId = callIdFromPart(part);
     if (!callId && type !== "tool") return null;
+    const toolName = toolNameFromPart(part);
 
     if (type === "tool") {
-        const hasInput = state !== null && hasOwn(state, "input");
-        const outputKey = state ? firstOwnKey(state, ["output", "error", "result"]) : null;
-        const hasOutput = outputKey !== null;
-        const outputValue = outputKey && state ? state[outputKey] : undefined;
-        const providerExecuted = part.providerExecuted === true;
+        const inputOwner = state && hasOwn(state, "input") ? state : part;
+        const inputKey = firstOwnKey(inputOwner, ["input", "args"]);
+        const hasInput = inputKey !== null;
+        const outputOwner =
+            state && firstOwnKey(state, ["output", "error", "result"]) !== null ? state : part;
+        const outputKey = firstOwnKey(outputOwner, ["output", "error", "result"]);
+        const hasOutput = outputKey !== null || toolStatusIsTerminal(part, state);
+        const output = outputKey
+            ? toolResultContent(outputOwner[outputKey])
+            : emptyToolResultContent();
+        const providerExecuted = providerExecutedFromPart(part);
         const openInvocation = !providerExecuted && !hasOutput;
         return {
             callId,
+            toolName,
             hasInput: hasInput || openInvocation,
             hasOutput,
             providerExecuted,
-            inputText: hasInput && state ? stringValue(state.input) : "",
-            outputText: hasOutput ? stringValue(outputValue) : "",
+            inputText: inputKey ? stringValue(inputOwner[inputKey]) : "",
+            outputText: output.text,
+            outputMedia: output.media,
         };
     }
 
     if (type === "tool-invocation") {
         const argsKey = firstOwnKey(part, ["args", "input"]);
         const outputKey = firstOwnKey(part, ["result", "output"]);
+        const output = outputKey ? toolResultContent(part[outputKey]) : emptyToolResultContent();
         return {
             callId,
+            toolName,
             hasInput: argsKey !== null,
             hasOutput: outputKey !== null,
             providerExecuted: false,
             inputText: argsKey ? stringValue(part[argsKey]) : "",
-            outputText: outputKey ? textFromToolResultContent(part[outputKey]) : "",
+            outputText: output.text,
+            outputMedia: output.media,
         };
     }
 
@@ -303,23 +364,28 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
         const hasInput = hasOwn(part, "input");
         return {
             callId,
+            toolName,
             hasInput,
             hasOutput: false,
             providerExecuted: false,
             inputText: hasInput ? stringValue(part.input) : "",
             outputText: "",
+            outputMedia: [],
         };
     }
 
     if (type === "tool_result") {
         const contentKey = firstOwnKey(part, ["content", "output", "result"]);
+        const output = contentKey ? toolResultContent(part[contentKey]) : emptyToolResultContent();
         return {
             callId,
+            toolName,
             hasInput: false,
             hasOutput: contentKey !== null,
             providerExecuted: false,
             inputText: "",
-            outputText: contentKey ? textFromToolResultContent(part[contentKey]) : "",
+            outputText: output.text,
+            outputMedia: output.media,
         };
     }
 
@@ -455,11 +521,7 @@ function estimateNonToolPart(
             addBreakdown(breakdown, "reasoning", estimateTokens(content.text));
             return;
         case "image":
-            addBreakdown(
-                breakdown,
-                "image",
-                options.imageTokenHeuristic?.(part) ?? defaultImageTokenHeuristic(part),
-            );
+            addBreakdown(breakdown, "image", imageTokensFor(part, options));
             if (content.altText) addBreakdown(breakdown, "text", estimateTokens(content.altText));
             return;
         case "structured":
@@ -468,32 +530,27 @@ function estimateNonToolPart(
     }
 }
 
+function imageTokensFor(part: unknown, options: TrueRawEstimateOptions): number {
+    return options.imageTokenHeuristic?.(part) ?? defaultImageTokenHeuristic(part);
+}
+
+/** Each part is serialized independently; `buildToolArcs` queues parts with the same call id separately, so each must be counted. */
 export function estimateTrueRawMessageTokens(
     message: RawMessage,
     options: TrueRawEstimateOptions,
 ): TrueRawTokenBreakdown {
     const breakdown = cloneBreakdown(EMPTY_BREAKDOWN);
-    const countedInput = new Set<string>();
-    const countedOutput = new Set<string>();
-    let ordinalToolIndex = 0;
 
     for (const part of message.parts) {
         const signal = toolSignalFromPart(part);
         if (signal) {
-            const localKey = `${signal.callId || "tool"}:${message.ordinal}:${ordinalToolIndex}`;
-            ordinalToolIndex += 1;
             if (signal.hasInput) {
-                const key = `${signal.callId}:input:${message.ordinal}`;
-                if (!countedInput.has(key)) {
-                    countedInput.add(key);
-                    addBreakdown(breakdown, "toolInput", estimateTokens(signal.inputText));
-                }
+                addBreakdown(breakdown, "toolInput", estimateTokens(signal.inputText));
             }
             if (signal.hasOutput) {
-                const key = `${signal.callId}:output:${message.ordinal}:${localKey}`;
-                if (!countedOutput.has(key)) {
-                    countedOutput.add(key);
-                    addBreakdown(breakdown, "toolOutput", estimateTokens(signal.outputText));
+                addBreakdown(breakdown, "toolOutput", estimateTokens(signal.outputText));
+                for (const media of signal.outputMedia) {
+                    addBreakdown(breakdown, "image", imageTokensFor(media, options));
                 }
             }
             continue;
@@ -740,16 +797,30 @@ export function buildTrueRawTokenIndex(
     };
 }
 
+function mediaFingerprintFields(media: Record<string, unknown>): string[] {
+    return ["media", stringValue(media.width), stringValue(media.height)];
+}
+
 /**
  * The fingerprint hashes the content the tokenizer counts for each part.
  * Text-bearing parts contribute only their counted text, so `updated-at` metadata cannot perturb them.
- * Structured parts are tokenized as a whole, so they hash as a whole.
+ * Tool fingerprints include fields consumed by `buildToolArcs` and tool-call summaries, so topology and displayed-name changes invalidate them.
  */
 function partContentFingerprint(part: unknown): string {
     if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
     const tool = toolSignalFromPart(part);
     if (tool) {
-        return contentStringsHash(["tool", tool.inputText, tool.outputText]);
+        return contentStringsHash([
+            "tool",
+            tool.callId,
+            tool.toolName,
+            tool.hasInput ? "in" : "",
+            tool.hasOutput ? "out" : "",
+            tool.providerExecuted ? "provider" : "",
+            tool.inputText,
+            tool.outputText,
+            ...tool.outputMedia.flatMap(mediaFingerprintFields),
+        ]);
     }
     const content = classifyNonToolPart(part);
     switch (content.kind) {
@@ -759,12 +830,7 @@ function partContentFingerprint(part: unknown): string {
         case "reasoning":
             return contentStringsHash([content.kind, content.text]);
         case "image":
-            return contentStringsHash([
-                "image",
-                stringValue(part.width),
-                stringValue(part.height),
-                content.altText ?? "",
-            ]);
+            return contentStringsHash([...mediaFingerprintFields(part), content.altText ?? ""]);
         case "structured":
             return contentStringsHash(["structured", stableStringify(part)]);
     }

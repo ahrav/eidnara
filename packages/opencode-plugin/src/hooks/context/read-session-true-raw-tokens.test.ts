@@ -172,6 +172,126 @@ describe("tool arcs", () => {
             { callId: "call_1", invOrdinal: 1, resOrdinal: 1 },
         ]);
     });
+
+    it("reads providerExecuted from tool metadata", () => {
+        const message: RawMessage = {
+            id: "provider-tool",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "c1",
+                    tool: "web",
+                    metadata: { providerExecuted: true },
+                    state: { status: "running", input: { q: 1 } },
+                },
+            ],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([]);
+    });
+
+    it("reads top-level input and output fields on OpenCode tool parts", () => {
+        const message: RawMessage = {
+            id: "flat-tool",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "c1",
+                    tool: "bash",
+                    input: { cmd: "ls -la" },
+                    output: "a\nb\nc",
+                    status: "completed",
+                },
+            ],
+            ordinal: 1,
+        };
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+        });
+        expect(breakdown.toolInput).toBeGreaterThan(0);
+        expect(breakdown.toolOutput).toBeGreaterThan(0);
+        expect(buildToolArcs([message])).toEqual([{ callId: "c1", invOrdinal: 1, resOrdinal: 1 }]);
+    });
+
+    it("closes an arc on a terminal status even without an output payload", () => {
+        const messages: RawMessage[] = [
+            {
+                id: "completed",
+                role: "assistant",
+                parts: [{ type: "tool", callID: "c1", state: { status: "completed", input: {} } }],
+                ordinal: 1,
+            },
+            {
+                id: "errored",
+                role: "assistant",
+                parts: [{ type: "tool", callID: "c2", state: { status: "error", input: {} } }],
+                ordinal: 2,
+            },
+            {
+                id: "running",
+                role: "assistant",
+                parts: [{ type: "tool", callID: "c3", state: { status: "running", input: {} } }],
+                ordinal: 3,
+            },
+        ];
+        expect(buildToolArcs(messages)).toEqual([
+            { callId: "c1", invOrdinal: 1, resOrdinal: 1 },
+            { callId: "c2", invOrdinal: 2, resOrdinal: 2 },
+            { callId: "c3", invOrdinal: 3, resOrdinal: null },
+        ]);
+    });
+});
+
+describe("tool token accounting", () => {
+    it("counts media blocks in tool results through the image heuristic, not as text", () => {
+        const message: RawMessage = {
+            id: "result",
+            role: "user",
+            parts: [
+                {
+                    type: "tool_result",
+                    tool_use_id: "c1",
+                    content: [
+                        { type: "text", text: "done" },
+                        { type: "image", mimeType: "image/png", data: "A".repeat(20_000) },
+                        { type: "file", mimeType: "application/pdf", data: "B".repeat(20_000) },
+                    ],
+                },
+            ],
+            ordinal: 1,
+        };
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 300,
+        });
+        expect(breakdown.toolOutput).toBeLessThan(10);
+        expect(breakdown.image).toBe(600);
+    });
+
+    it("counts every input when several parts share one call id", () => {
+        const part = (cmd: string) => ({
+            type: "tool_use",
+            id: "dup",
+            name: "bash",
+            input: { cmd },
+        });
+        const single = estimateTrueRawMessageTokens(
+            { id: "one", role: "assistant", parts: [part("first command here")], ordinal: 1 },
+            { providerShapeVersion: "opencode-v1" },
+        );
+        const double = estimateTrueRawMessageTokens(
+            {
+                id: "two",
+                role: "assistant",
+                parts: [part("first command here"), part("second command here")],
+                ordinal: 1,
+            },
+            { providerShapeVersion: "opencode-v1" },
+        );
+        expect(double.toolInput).toBeGreaterThan(single.toolInput);
+    });
 });
 
 describe("tool arc fences", () => {
@@ -350,6 +470,21 @@ describe("raw range fingerprints", () => {
         );
         expect(fingerprintOf({ type: "custom", payload: { a: 1 } })).not.toBe(
             fingerprintOf({ type: "custom", payload: { a: 2 } }),
+        );
+    });
+
+    it("changes when a tool part's identity or completion state changes", () => {
+        const pending = { type: "tool-invocation", toolCallId: "c1", toolName: "bash", args: {} };
+        expect(fingerprintOf(pending)).not.toBe(fingerprintOf({ ...pending, result: null }));
+        expect(fingerprintOf(pending)).not.toBe(fingerprintOf({ ...pending, toolCallId: "c2" }));
+        expect(fingerprintOf(pending)).not.toBe(fingerprintOf({ ...pending, toolName: "grep" }));
+        expect(fingerprintOf({ type: "tool", callID: "c1", state: { input: {} } })).not.toBe(
+            fingerprintOf({
+                type: "tool",
+                callID: "c1",
+                metadata: { providerExecuted: true },
+                state: { input: {} },
+            }),
         );
     });
 
