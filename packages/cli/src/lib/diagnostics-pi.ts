@@ -124,13 +124,21 @@ function getSelfVersion(): string {
     return "unknown";
 }
 
-/** `userInfo()` throws when the process UID has no passwd entry. */
+function currentHome(): string {
+    if (process.env.HOME) return process.env.HOME;
+    try {
+        return homedir();
+    } catch {
+        return "";
+    }
+}
+
 function currentUsername(): string | undefined {
     try {
         const username = userInfo().username;
         if (username) return username;
     } catch {}
-    const home = process.env.HOME || homedir();
+    const home = currentHome();
     const fromHome = home ? basename(home) : "";
     return fromHome || undefined;
 }
@@ -156,7 +164,7 @@ function redactSecretString(value: string): string {
  * The stable hash correlates repeated occurrences without exposing the account name.
  */
 export function sanitizeString(value: string): string {
-    const home = process.env.HOME || homedir();
+    const home = currentHome();
     const username = currentUsername();
     const userHash = `<USER:${currentUserHash()}>`;
     let sanitized = redactSecretString(value);

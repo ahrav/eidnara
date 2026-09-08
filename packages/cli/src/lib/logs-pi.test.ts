@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PiDiagnosticReport } from "./diagnostics-pi";
@@ -85,8 +85,10 @@ describe("bundleIssueReport session filtering", () => {
             logPath,
             [
                 "[2026-07-07T12:00:00.000Z] [eidnara][pi] extension loaded",
+                "[2026-07-07T12:00:00.500Z] [eidnara][global] kernel ready",
                 `[2026-07-07T12:00:01.000Z] [eidnara][${wanted}] /ctx-status ran`,
                 `[2026-07-07T12:00:02.000Z] [eidnara][${other}] /ctx-status ran elsewhere`,
+                "[2026-07-07T12:00:02.500Z] [eidnara][pi-session-1a2b3c4d] /ctx-aug: project identity",
                 "[2026-07-07T12:00:03.000Z] untagged line",
             ].join("\n"),
         );
@@ -99,8 +101,10 @@ describe("bundleIssueReport session filtering", () => {
 
         expect(bundled.bodyMarkdown).toContain(`[eidnara][${wanted}] /ctx-status ran`);
         expect(bundled.bodyMarkdown).toContain("[eidnara][pi] extension loaded");
+        expect(bundled.bodyMarkdown).toContain("[eidnara][global] kernel ready");
         expect(bundled.bodyMarkdown).toContain("untagged line");
         expect(bundled.bodyMarkdown).not.toContain(other);
+        expect(bundled.bodyMarkdown).not.toContain("pi-session-1a2b3c4d");
     });
 
     it("drops another session's error stack along with its tagged first line", async () => {
@@ -145,5 +149,28 @@ describe("bundleIssueReport session filtering", () => {
         expect(bundled.bodyMarkdown).toContain("<log unreadable: ");
         expect(bundled.bodyMarkdown).toContain("EISDIR");
         expect(bundled.bodyMarkdown).toContain("## Diagnostics");
+    });
+});
+
+describe("bundleIssueReport file naming", () => {
+    it("does not overwrite a bundle written in the same second", async () => {
+        const root = makeTempRoot();
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(logPath, "[2026-07-07T12:00:00.000Z] one\n");
+        const now = new Date(2026, 6, 7, 12, 0, 0);
+
+        const first = await bundleIssueReport(reportWithLog(logPath), "first", "t", {
+            cwd: root,
+            now,
+        });
+        const second = await bundleIssueReport(reportWithLog(logPath), "second", "t", {
+            cwd: root,
+            now,
+        });
+
+        expect(first.path).toBe(join(root, "eidnara-pi-issue-20260707-120000.md"));
+        expect(second.path).toBe(join(root, "eidnara-pi-issue-20260707-120000-2.md"));
+        expect(readFileSync(first.path, "utf-8")).toContain("first");
+        expect(readFileSync(second.path, "utf-8")).toContain("second");
     });
 });

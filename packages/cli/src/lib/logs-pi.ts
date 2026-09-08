@@ -49,17 +49,18 @@ export function readLogTailLines(path: string, maxBytes = LOG_TAIL_MAX_BYTES): s
     }
 }
 
-/** `sessionLog` writes `[eidnara][<uuid>]`; a line with no UUID tag belongs to no single session. */
-const SESSION_TAG_PATTERN =
-    /\[eidnara\]\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]/gi;
+/** Tags the plugin writes without a session id do not restrict session matching. */
+const GLOBAL_TAGS = new Set(["pi", "pi-status", "global"]);
+const TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/g;
 
 /** `log` opens every entry with `[<ISO timestamp>]`; an `Error` stack continues on bare lines. */
 const ENTRY_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T[^\]]*\]/;
 
 /**
  * `sessionId` may end with `_<uuid>` because log tags contain bare UUIDs.
- * Continuation lines inherit the preceding entry's decision; lines before the
- * first entry start are excluded.
+ * Entries with non-global tags are kept only when every tag matches
+ * `sessionId`. Continuation lines retain the preceding entry's keep decision;
+ * lines before the first entry are excluded.
  */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
@@ -67,7 +68,9 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     let keep = false;
     return lines.filter((line) => {
         if (ENTRY_START_PATTERN.test(line)) {
-            const tags = [...line.matchAll(SESSION_TAG_PATTERN)].map((match) => match[1] ?? "");
+            const tags = [...line.matchAll(TAG_PATTERN)]
+                .map((match) => match[1] ?? "")
+                .filter((tag) => !GLOBAL_TAGS.has(tag));
             keep = tags.length === 0 || tags.every(isWanted);
         }
         return keep;
@@ -129,7 +132,28 @@ export async function bundleIssueReport(
     const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
     const cwd = options.cwd ?? process.cwd();
-    const path = join(cwd, `eidnara-pi-issue-${formatTimestamp(options.now ?? new Date())}.md`);
-    writeFileSync(path, `${bodyMarkdown}\n`);
+    const stem = join(cwd, `eidnara-pi-issue-${formatTimestamp(options.now ?? new Date())}`);
+    const path = writeNewFile(stem, `${bodyMarkdown}\n`);
     return { path, bodyMarkdown };
+}
+
+const MAX_BUNDLE_NAME_ATTEMPTS = 100;
+
+/**
+ * The timestamp has one-second resolution, so a second bundle in the same
+ * second takes a numbered suffix instead of replacing the first.
+ */
+function writeNewFile(stem: string, data: string): string {
+    for (let attempt = 1; attempt <= MAX_BUNDLE_NAME_ATTEMPTS; attempt++) {
+        const path = attempt === 1 ? `${stem}.md` : `${stem}-${attempt}.md`;
+        try {
+            writeFileSync(path, data, { flag: "wx" });
+            return path;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+    }
+    throw new Error(
+        `Could not find a free bundle name after ${MAX_BUNDLE_NAME_ATTEMPTS} tries at ${stem}`,
+    );
 }
