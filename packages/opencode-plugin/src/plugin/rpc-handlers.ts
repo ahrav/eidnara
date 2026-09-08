@@ -24,6 +24,7 @@ import {
 } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
 import { calibrateBuckets, resolveModelCalibration } from "../hooks/context/tokenizer-calibration";
+import { BoundedSessionMap } from "../shared/bounded-session-map";
 import {
     disabled,
     isServedMemoryDecisionRow,
@@ -40,12 +41,28 @@ import {
 } from "../shared/tail-hygiene-status";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 
+/** Sessions whose work-metrics carry stays resident. Matches the sticky sidebar cache's session cap, since both hold one entry per polled session. commentlint: allow(JUDGE) */
+const WORK_METRICS_CARRY_MAX_SESSIONS = 100;
 // Each poll processes only assistant rows newer than its watermark because the long-lived RPC server retains each session's carry across polls.
-// A restart discards the in-memory carry; the next poll re-reads the session's assistant rows from the start.
-const workMetricsCarryBySession = new Map<string, WorkMetricsCarry>();
+// Losing a carry is safe: a restart, an LRU eviction, and `session.deleted` all make the next poll re-read that session's assistant rows from the start.
+const workMetricsCarryBySession = new BoundedSessionMap<WorkMetricsCarry>(
+    WORK_METRICS_CARRY_MAX_SESSIONS,
+);
 const RUST_STATUS_CACHE_TTL_MS = 2_000;
 /** Live entries per poll cache. Each open sidebar pane polls one `(session, directory)` pair, so the cap covers concurrent panes while bounding growth across sessions and projects. commentlint: allow(JUDGE) */
 const POLL_CACHE_MAX_ENTRIES = 32;
+
+export function clearWorkMetricsCarry(sessionId: string): void {
+    workMetricsCarryBySession.delete(sessionId);
+}
+
+/**
+ * The module transport routes by `(sessionId, projectRoot)`, so every per-poll cache keys by both:
+ * one session id polled under two project roots must not share a daemon answer.
+ */
+function pollCacheKey(sessionId: string, directory: string): string {
+    return `${sessionId}\u001f${directory}`;
+}
 
 /** Every `get` and `set` sweeps expired entries, and a full cache evicts its oldest entry before inserting, so a long-lived RPC server polling many sessions never accumulates dead snapshots. commentlint: allow(JUDGE) */
 export class BoundedTtlCache<V> {
@@ -136,7 +153,8 @@ async function loadRustSessionStatus(
     directory: string,
 ): Promise<RustSessionStatus | undefined> {
     if (!client) return undefined;
-    const cached = rustStatusCache.get(sessionId);
+    const cacheKey = pollCacheKey(sessionId, directory);
+    const cached = rustStatusCache.get(cacheKey);
     if (cached !== undefined) {
         return cached;
     }
@@ -155,7 +173,7 @@ async function loadRustSessionStatus(
                 : raw;
         if (value.error || value.ok === false) return undefined;
         const status = value as RustSessionStatus;
-        rustStatusCache.set(sessionId, status);
+        rustStatusCache.set(cacheKey, status);
         return status;
     } catch (error) {
         log(`[rpc] Rust session.status unavailable for ${sessionId}:`, error);
@@ -425,6 +443,11 @@ export function buildStatusDetail(
         moduleStatus,
         compactionEnabled,
     );
+    // Building the base snapshot recovers a missing live model into `liveSessionState`, so a request that omits
+    // `modelKey` still resolves per-model geometry, threshold, and cache TTL from the same model the sidebar used.
+    const liveModel = liveSessionState?.liveModelBySession.get(sessionId);
+    const effectiveModelKey =
+        modelKey ?? (liveModel ? `${liveModel.providerID}/${liveModel.modelID}` : undefined);
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
@@ -454,11 +477,11 @@ export function buildStatusDetail(
     };
 
     try {
-        const modelSlash = modelKey?.indexOf("/") ?? -1;
-        if (modelKey && modelSlash > 0) {
+        const modelSlash = effectiveModelKey?.indexOf("/") ?? -1;
+        if (effectiveModelKey && modelSlash > 0) {
             detail.windowGeometry = resolveContextWindowGeometry(
-                modelKey.slice(0, modelSlash),
-                modelKey.slice(modelSlash + 1),
+                effectiveModelKey.slice(0, modelSlash),
+                effectiveModelKey.slice(modelSlash + 1),
             );
         }
 
@@ -478,11 +501,16 @@ export function buildStatusDetail(
                 | { default?: number; [k: string]: number | undefined }
                 | undefined;
             // The RPC uses resolveExecuteThresholdDetail to return the threshold mode and absolute-token threshold.
-            const thresholdDetail = resolveExecuteThresholdDetail(pctCfg ?? 65, modelKey, 65, {
-                tokensConfig: tokensCfg,
-                contextLimit: contextLimitForTokens || undefined,
-                sessionId,
-            });
+            const thresholdDetail = resolveExecuteThresholdDetail(
+                pctCfg ?? 65,
+                effectiveModelKey,
+                65,
+                {
+                    tokensConfig: tokensCfg,
+                    contextLimit: contextLimitForTokens || undefined,
+                    sessionId,
+                },
+            );
             detail.executeThreshold = thresholdDetail.percentage;
             detail.executeThresholdMode = thresholdDetail.mode;
             detail.executeThresholdClamped = thresholdDetail.clamped;
@@ -490,7 +518,7 @@ export function buildStatusDetail(
                 detail.executeThresholdTokens = thresholdDetail.absoluteTokens;
             }
 
-            const ct = resolveConfigValue<string>(config, "cache_ttl", modelKey, "5m");
+            const ct = resolveConfigValue<string>(config, "cache_ttl", effectiveModelKey, "5m");
             detail.cacheTtl = ct;
 
             if (typeof config.protected_tags === "number") {
@@ -502,7 +530,7 @@ export function buildStatusDetail(
             detail.toastDurationMs = resolveConfigValue<number>(
                 config,
                 "toast_duration_ms",
-                modelKey,
+                effectiveModelKey,
                 5000,
             );
         }
@@ -564,7 +592,7 @@ export function registerRpcHandlers(
         if (config.memory?.enabled === false) {
             return { state: disabled(), rows: [], knownAsOf: null };
         }
-        const cacheKey = `${sessionId}\u001f${dir}`;
+        const cacheKey = pollCacheKey(sessionId, dir);
         const cached = memorySnapshotCache.get(cacheKey);
         if (cached !== undefined) {
             return cached;

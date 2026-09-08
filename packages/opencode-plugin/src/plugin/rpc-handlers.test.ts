@@ -1,20 +1,27 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { EidnaraConfigSchema } from "../config/schema/eidnara";
 import { resetKernelClientsForTest } from "../hooks/context/kernel-transport";
 import { createLiveSessionState } from "../hooks/context/live-session-state";
+import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
 import { unavailable } from "../shared/kernel-client";
 import { ANTI_MEMORY_CATEGORY, renderAntiMemoryContent } from "../shared/kernel-client/anti-memory";
 import { FakeKernel } from "../shared/kernel-client-testing/fake-kernel";
 import type { EidnaraRpcServer } from "../shared/rpc-server";
 import { formatMemoryCount, type SidebarSnapshot, type StatusDetail } from "../shared/rpc-types";
+import { Database } from "../shared/sqlite";
+import { closeQuietly } from "../shared/sqlite-helpers";
 import {
     BoundedTtlCache,
     buildSidebarSnapshot,
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
+    clearWorkMetricsCarry,
     type RustSessionStatus,
     registerRpcHandlers,
 } from "./rpc-handlers";
@@ -46,9 +53,10 @@ const DAEMON_STATUS: RustSessionStatus = {
 function register(
     configOverrides: Record<string, unknown> = {},
     status: RustSessionStatus = {},
-): { handlers: Map<string, Handler>; calls: string[] } {
+): { handlers: Map<string, Handler>; calls: string[]; roots: string[] } {
     const handlers = new Map<string, Handler>();
     const calls: string[] = [];
+    const roots: string[] = [];
     const server = {
         handle(method: string, handler: Handler) {
             handlers.set(method, handler);
@@ -57,6 +65,7 @@ function register(
     const rustModeModuleClient: RustModeModuleClient = {
         async call(args) {
             calls.push(args.method);
+            roots.push(args.projectRoot);
             return { ok: true, result: status };
         },
     };
@@ -71,7 +80,7 @@ function register(
         liveSessionState: createLiveSessionState(),
         rustModeModuleClient,
     });
-    return { handlers, calls };
+    return { handlers, calls, roots };
 }
 
 function seedMemories(kernel: FakeKernel): void {
@@ -137,6 +146,20 @@ describe("registerRpcHandlers", () => {
         })) as unknown as StatusDetail;
         expect(calls).toEqual(["session.status"]);
         expect(detail.compartmentCount).toBe(4);
+    });
+
+    test("the daemon status cache keys by project root, so one session polled under two roots asks each route", async () => {
+        const { handlers, calls, roots } = register({}, DAEMON_STATUS);
+        const sessionId = "ses-handler-two-roots";
+        const rootA = process.cwd();
+        const rootB = join(process.cwd(), "src");
+
+        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootA });
+        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootB });
+        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootA });
+
+        expect(calls).toEqual(["session.status", "session.status"]);
+        expect(roots).toEqual([rootA, rootB]);
     });
 
     test("sidebar-snapshot reports disabled memory and rejects an empty session id", async () => {
@@ -353,6 +376,101 @@ describe("buildStatusDetail", () => {
         expect(bare.cacheRemainingMs).toBe(0);
         expect(bare.cacheExpired).toBe(false);
         expect(bare.cacheNeverExpires).toBe(false);
+    });
+
+    test("a request without modelKey resolves per-model config from the live model", () => {
+        const sessionId = "ses-status-live-model";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        const config = {
+            execute_threshold_percentage: { default: 65, "test-provider/test-model": 50 },
+            cache_ttl: { default: "5m", "test-provider/test-model": "10m" },
+            toast_duration_ms: { default: 5000, "test-provider/test-model": 1500 },
+        };
+
+        const fromLive = buildStatusDetail(sessionId, process.cwd(), undefined, config, live);
+        expect(fromLive.executeThreshold).toBe(50);
+        expect(fromLive.cacheTtl).toBe("10m");
+        expect(fromLive.toastDurationMs).toBe(1500);
+
+        // An explicit request key wins over the live model.
+        const requested = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "other-provider/other-model",
+            config,
+            live,
+        );
+        expect(requested.executeThreshold).toBe(65);
+        expect(requested.cacheTtl).toBe("5m");
+        expect(requested.toastDurationMs).toBe(5000);
+    });
+});
+
+describe("clearWorkMetricsCarry", () => {
+    const originalXdgDataHome = process.env.XDG_DATA_HOME;
+    let dataHome: string | undefined;
+
+    afterEach(() => {
+        closeReadOnlySessionDb();
+        if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = originalXdgDataHome;
+        if (dataHome) rmSync(dataHome, { recursive: true, force: true });
+        dataHome = undefined;
+    });
+
+    function openTempOpenCodeDb(): Database {
+        dataHome = mkdtempSync(join(tmpdir(), "rpc-handlers-carry-"));
+        const dbPath = join(dataHome, "opencode", "opencode.db");
+        mkdirSync(dirname(dbPath), { recursive: true });
+        const db = new Database(dbPath);
+        db.exec(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL)",
+        );
+        process.env.XDG_DATA_HOME = dataHome;
+        return db;
+    }
+
+    function insertAssistantRow(
+        db: Database,
+        sessionId: string,
+        id: string,
+        timeCreated: number,
+        inputTokens: number,
+    ): void {
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run(
+            id,
+            sessionId,
+            timeCreated,
+            JSON.stringify({
+                id,
+                role: "assistant",
+                agent: "build",
+                tokens: { input: inputTokens, output: 10, cache: { read: 0, write: 0 } },
+            }),
+        );
+    }
+
+    test("a retained carry survives row deletion until the session is cleared", () => {
+        const sessionId = "ses-carry-clear";
+        const db = openTempOpenCodeDb();
+        insertAssistantRow(db, sessionId, "a", 1, 1_000);
+        insertAssistantRow(db, sessionId, "b", 2, 2_000);
+
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(2_000);
+
+        // The carry holds row `a` as its watermark, so the next poll still reports `a` after the rows vanish.
+        db.exec("DELETE FROM message");
+        closeQuietly(db);
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(1_000);
+
+        clearWorkMetricsCarry(sessionId);
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(0);
     });
 });
 
