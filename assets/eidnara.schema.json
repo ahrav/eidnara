@@ -1033,6 +1033,46 @@
     "$schema": {
       "type": "string",
       "description": "JSON Schema reference for editor validation and autocomplete."
+    },
+    "disabled_hooks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Hook IDs to disable. User and project values are union-merged, so a project can only add to the user's list."
+    },
+    "command": {
+      "type": "object",
+      "description": "Custom slash commands keyed by command name.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string",
+            "description": "Prompt template for the command."
+          },
+          "description": {
+            "type": "string",
+            "description": "Command description."
+          },
+          "agent": {
+            "type": "string",
+            "description": "Agent that runs the command."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model override for the command."
+          },
+          "subtask": {
+            "type": "boolean",
+            "description": "Run the command as a subtask."
+          }
+        },
+        "required": [
+          "template"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": false

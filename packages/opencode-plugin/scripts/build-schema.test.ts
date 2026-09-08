@@ -46,6 +46,39 @@ describe("eidnara JSON schema", () => {
         expect(schema.properties.experimental).toBeUndefined();
     });
 
+    test("loader-only top-level keys are published so the closed root accepts them", () => {
+        const schema = buildSchema() as {
+            additionalProperties: boolean;
+            properties: {
+                $schema: { type: string };
+                disabled_hooks: { type: string; items: { type: string } };
+                command: {
+                    type: string;
+                    additionalProperties: {
+                        required: string[];
+                        properties: Record<string, unknown>;
+                    };
+                };
+            };
+        };
+
+        expect(schema.additionalProperties).toBe(false);
+        expect(schema.properties.$schema.type).toBe("string");
+        expect(schema.properties.disabled_hooks).toMatchObject({
+            type: "array",
+            items: { type: "string" },
+        });
+        expect(schema.properties.command.type).toBe("object");
+        expect(schema.properties.command.additionalProperties.required).toEqual(["template"]);
+        expect(Object.keys(schema.properties.command.additionalProperties.properties)).toEqual([
+            "template",
+            "description",
+            "agent",
+            "model",
+            "subtask",
+        ]);
+    });
+
     test("runtime string constraints are published as JSON Schema patterns", () => {
         // `z.toJSONSchema` drops `.refine` callbacks and publishes `.trim().min(1)` as a bare
         // `minLength: 1`, so these constraints must stay expressed as `.regex` checks or
