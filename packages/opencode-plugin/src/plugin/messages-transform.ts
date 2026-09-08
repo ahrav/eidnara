@@ -8,6 +8,10 @@ type MessageWithParts = {
 
 type MessagesTransformOutput = { messages: MessageWithParts[] };
 
+/**
+ * The hook publishes its result by replacing entries of `output.messages`, never by editing a
+ * message's `info` or `parts` in place: the handler's rollback restores array membership only.
+ */
 type EidnaraTransformHooks = {
     "experimental.chat.messages.transform"?: (
         input: Record<string, never>,
@@ -35,7 +39,7 @@ export function createMessagesTransformHandler(args: {
 
     return async (input, output): Promise<MessageWithParts[]> => {
         const eidnara = args.getEidnara ? args.getEidnara() : args.eidnara;
-        // The hook edits `output.messages` in place, so a throw mid-edit would otherwise leak a partial history to the model.
+        // A throw after the hook has replaced some entries would otherwise send that partial history to the model.
         const snapshot = output.messages.slice();
         try {
             await eidnara?.["experimental.chat.messages.transform"]?.(input, output);

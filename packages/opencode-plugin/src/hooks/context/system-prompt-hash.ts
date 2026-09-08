@@ -2,13 +2,8 @@ import { createHash } from "node:crypto";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
-import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
-import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
-import {
-    createPromptSurfaceGuidanceEpochCache,
-    createPromptSurfaceRuntime,
-    promptSurfaceHashMaterial,
-} from "../../shared/prompt-surface-runtime";
+import { type PromptSurfaceConfig, resolvePromptSurface } from "../../shared/prompt-surface";
+import { promptSurfaceHashMaterial } from "../../shared/prompt-surface-runtime";
 import { resolveCtxReduceAvailability } from "./ctx-reduce-availability";
 import {
     EIDNARA_INTERNAL_AGENT_SIGNATURES,
@@ -24,7 +19,7 @@ export interface SystemPromptState {
     isSubagent: boolean;
 }
 
-/** A sticky date kept in a separate map would outlive an evicted prompt state and rewrite a revisited session's date line to the stale value. commentlint: allow(JUDGE) */
+/** Everything the handler remembers per session; one LRU entry bounds it all by `SYSTEM_PROMPT_STATE_CAPACITY`. */
 interface SessionTracking {
     /** Sticky dates change only on cache-busting passes, preventing midnight cache rebuilds. */
     stickyDate?: string;
@@ -51,7 +46,6 @@ export function isEidnaraInternalAgent(systemPromptContent: string): boolean {
 
 export function createSystemPromptHashHandler(deps: {
     promptSurface?: PromptSurfaceConfig;
-    promptSurfaceRuntime?: PromptSurfaceRuntime;
     /** `resolveModel` recovers the session's latest model when the transform input omits it. */
     resolveModel?: (sessionId: string) => { providerID: string; modelID: string } | undefined;
     isSubagentSession?: (sessionId: string) => boolean;
@@ -78,13 +72,6 @@ export function createSystemPromptHashHandler(deps: {
     promptStateFor: (sessionId: string) => SystemPromptState | undefined;
     clearSession: (sessionId: string) => void;
 } {
-    const promptSurfaceRuntime =
-        deps.promptSurfaceRuntime ??
-        createPromptSurfaceRuntime({
-            userConfigDirectory: process.cwd(),
-            warn: (message) => console.warn(`[eidnara] config warning: ${message}`),
-        });
-    const guidanceEpochs = createPromptSurfaceGuidanceEpochCache(promptSurfaceRuntime);
     const isSubagentSession = deps.isSubagentSession ?? (() => false);
 
     const trackingBySession = new BoundedSessionMap<SessionTracking>(SYSTEM_PROMPT_STATE_CAPACITY);
@@ -140,7 +127,7 @@ export function createSystemPromptHashHandler(deps: {
             liveModel?.providerID && liveModel.modelID
                 ? piModelRefToCanonical(`${liveModel.providerID}/${liveModel.modelID}`)
                 : undefined;
-        const promptSurface = guidanceEpochs.resolve(sessionId, deps.promptSurface, modelKey);
+        const promptSurface = resolvePromptSurface(deps.promptSurface, modelKey);
 
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
 
@@ -265,7 +252,6 @@ export function createSystemPromptHashHandler(deps: {
         handler,
         promptStateFor: (sessionId: string) => trackingBySession.peek(sessionId)?.prompt,
         clearSession: (sessionId: string) => {
-            guidanceEpochs.clear(sessionId);
             trackingBySession.delete(sessionId);
         },
     };
