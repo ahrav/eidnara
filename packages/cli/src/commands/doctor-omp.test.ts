@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { runDoctor } from "./doctor-omp";
@@ -139,6 +139,60 @@ describe("OMP doctor", () => {
             expect(performance.now() - started).toBeLessThan(5_000);
             expect(code).toBe(1);
             expect(prompts.messages.join("\n")).toContain("not a regular file");
+        },
+    );
+
+    it.if(process.platform !== "win32")(
+        "reports OMP user-level paths as unavailable without a home and still finishes",
+        async () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-"));
+            roots.push(root);
+            mkdirSync(join(root, ".eidnara"), { recursive: true });
+            writeFileSync(join(root, ".eidnara", "eidnara.jsonc"), "{}\n");
+            delete process.env.HOME;
+            delete process.env.PI_CODING_AGENT_DIR;
+            delete process.env.XDG_CONFIG_HOME;
+            delete process.env.XDG_DATA_HOME;
+            const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
+                throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
+                    code: "ERR_SYSTEM_ERROR",
+                });
+            });
+            const prompts = new MockPrompts();
+
+            let code: number;
+            try {
+                code = await runDoctor({
+                    cwd: root,
+                    prompts,
+                    deps: {
+                        detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                        getOmpVersion: () => "17.1.7",
+                        listOmpPlugins: () => [
+                            { name: "@eidnara/pi", version: "0.33.0", enabled: true, path: root },
+                        ],
+                        getOmpSetting: ((_path: string, key: string) =>
+                            key === "compaction.enabled" ? false : "off") as never,
+                        runOmpCommand: () => ({
+                            ok: true,
+                            stdout: "/somewhere/.omp/agent",
+                            stderr: "",
+                        }),
+                    },
+                });
+            } finally {
+                homedirSpy.mockRestore();
+            }
+
+            expect(code).toBe(1);
+            const output = prompts.messages.join("\n");
+            expect(output).toContain("OMP 17.1.7 detected");
+            expect(output).toContain(
+                "Could not verify OMP active agent directory: no home directory",
+            );
+            expect(output).toContain("FAIL OMP user-level paths are unavailable");
+            expect(output).toContain("FAIL 2");
+            expect(existsSync(join(root, ".omp"))).toBe(false);
         },
     );
 

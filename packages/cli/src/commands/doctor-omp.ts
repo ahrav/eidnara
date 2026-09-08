@@ -172,6 +172,9 @@ async function runHealthChecks(options: {
         );
     }
     const loaded = loadPiConfig({ cwd: options.cwd });
+    // OMP's config root hangs off the home directory; without one the derived paths would be
+    // relative to the working directory, so they are neither compared, reported, nor scanned.
+    const ompPathsAvailable = hasHomeDir();
     const omp = options.deps.detectOmpBinary();
     if (!omp) {
         add(results, "fail", "OMP binary not found on PATH or in standard user bin directories");
@@ -256,7 +259,13 @@ async function runHealthChecks(options: {
         }
 
         const reportedAgentDir = options.deps.runOmpCommand(omp.path, ["config", "path"], 10_000);
-        if (!reportedAgentDir.ok) {
+        if (!ompPathsAvailable) {
+            add(
+                results,
+                "warn",
+                "Could not verify OMP active agent directory: no home directory to resolve the expected path",
+            );
+        } else if (!reportedAgentDir.ok) {
             add(results, "warn", "Could not verify OMP active agent directory");
         } else {
             const reportedPath = resolve(reportedAgentDir.stdout);
@@ -313,9 +322,6 @@ async function runHealthChecks(options: {
         add(results, "pass", "Eidnara runtime config loads successfully");
     else for (const warning of loaded.warnings.slice(0, 5)) add(results, "warn", warning);
 
-    // OMP's config root hangs off the home directory; without one the derived paths would be
-    // relative to the working directory, so they are neither reported nor scanned.
-    const ompPathsAvailable = hasHomeDir();
     if (!ompPathsAvailable) {
         add(results, "fail", "OMP user-level paths are unavailable: HOME is unset or not absolute");
     } else {
