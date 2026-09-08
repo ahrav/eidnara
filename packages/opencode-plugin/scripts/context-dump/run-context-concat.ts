@@ -6,15 +6,20 @@ import type { DumpMessage } from "./types";
 
 const tokenizer = new Tokenizer(claude);
 
-interface ConcatResult {
-    sessionId: string;
+export interface ConcatPage {
     totalMessages: number;
     startIndex: number;
+    /** Index of the last message consumed into this page; resume at `endIndex + 1`. */
     endIndex: number;
     messagesWithContent: number;
+    /** `totalTokens` counts `output` as one joined string, not as a sum over lines. */
     totalTokens: number;
     hasMore: boolean;
     output: string;
+}
+
+export interface ConcatResult extends ConcatPage {
+    sessionId: string;
 }
 
 function countTokens(text: string): number {
@@ -54,19 +59,54 @@ function capitalize(s: string): string {
     return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-export function runContextConcat(sessionId: string, tokenBudget: number, offset = 0): ConcatResult {
-    const opencodeDbPath = resolveOpenCodeDatabasePath();
-    const allMessages = readOpenCodeSessionMessages(opencodeDbPath, sessionId);
+function toolSummaryLine(firstIndex: number, toolCount: number): string {
+    return `[${firstIndex}] Assistant: ${toolCount} tool call${toolCount > 1 ? "s" : ""}`;
+}
 
-    const lines: { index: number; text: string }[] = [];
+/**
+ * Admission tokenizes the joined output because newline separators and BPE
+ * merges make per-line token counts non-additive.
+ *
+ * Consecutive assistant-only tool messages share one summary line. Their
+ * indices count toward `endIndex` only once that summary line is admitted, so
+ * a caller resuming at `endIndex + 1` never skips a run whose summary line the
+ * budget rejected.
+ */
+export function concatSessionMessages(
+    messages: DumpMessage[],
+    tokenBudget: number,
+    offset = 0,
+): ConcatPage {
+    let output = "";
     let totalTokens = 0;
     let messagesWithContent = 0;
     let lastIndex = offset;
-    let pendingToolCount = 0;
-    let pendingToolFirstIndex = offset;
 
-    for (let i = offset; i < allMessages.length; i++) {
-        const msg = allMessages[i] as DumpMessage;
+    let pendingToolCount = 0;
+    let pendingToolMessages = 0;
+    let pendingToolFirstIndex = offset;
+    let pendingToolLastIndex = offset;
+
+    const admit = (text: string): boolean => {
+        const candidate = output.length === 0 ? text : `${output}\n${text}`;
+        const candidateTokens = countTokens(candidate);
+        if (candidateTokens > tokenBudget) return false;
+        output = candidate;
+        totalTokens = candidateTokens;
+        return true;
+    };
+
+    const admitPendingTools = (): boolean => {
+        if (!admit(toolSummaryLine(pendingToolFirstIndex, pendingToolCount))) return false;
+        lastIndex = pendingToolLastIndex;
+        messagesWithContent += pendingToolMessages;
+        pendingToolCount = 0;
+        pendingToolMessages = 0;
+        return true;
+    };
+
+    for (let i = offset; i < messages.length; i++) {
+        const msg = messages[i] as DumpMessage;
         const role = String(msg.info.role ?? "unknown");
         const texts = extractTextParts(msg.parts);
         const toolCount = countToolParts(msg.parts);
@@ -74,51 +114,99 @@ export function runContextConcat(sessionId: string, tokenBudget: number, offset 
         if (toolCount > 0 && texts.length === 0 && role === "assistant") {
             if (pendingToolCount === 0) pendingToolFirstIndex = i;
             pendingToolCount += toolCount;
-            lastIndex = i;
-            messagesWithContent++;
+            pendingToolMessages++;
+            pendingToolLastIndex = i;
             continue;
         }
 
-        if (pendingToolCount > 0) {
-            const toolLine = `[${pendingToolFirstIndex}] Assistant: ${pendingToolCount} tool call${pendingToolCount > 1 ? "s" : ""}`;
-            const toolTokens = countTokens(toolLine);
-            if (totalTokens + toolTokens > tokenBudget) break;
-            lines.push({ index: pendingToolFirstIndex, text: toolLine });
-            totalTokens += toolTokens;
-            pendingToolCount = 0;
-        }
+        if (pendingToolCount > 0 && !admitPendingTools()) break;
 
-        if (texts.length === 0) continue;
+        if (texts.length === 0) {
+            lastIndex = i;
+            continue;
+        }
 
         const prefix =
             toolCount > 0 ? ` (+ ${toolCount} tool call${toolCount > 1 ? "s" : ""})` : "";
         const line = `[${i}] ${capitalize(role)}${prefix}: ${texts.join("\n")}`;
-        const lineTokens = countTokens(line);
-        if (totalTokens + lineTokens > tokenBudget) break;
+        if (!admit(line)) break;
 
-        lines.push({ index: i, text: line });
-        totalTokens += lineTokens;
         messagesWithContent++;
         lastIndex = i;
     }
 
-    if (pendingToolCount > 0) {
-        const toolLine = `[${pendingToolFirstIndex}] Assistant: ${pendingToolCount} tool call${pendingToolCount > 1 ? "s" : ""}`;
-        const toolTokens = countTokens(toolLine);
-        if (totalTokens + toolTokens <= tokenBudget) {
-            lines.push({ index: pendingToolFirstIndex, text: toolLine });
-            totalTokens += toolTokens;
-        }
-    }
+    if (pendingToolCount > 0) admitPendingTools();
 
     return {
-        sessionId,
-        totalMessages: allMessages.length,
+        totalMessages: messages.length,
         startIndex: offset,
         endIndex: lastIndex,
         messagesWithContent,
         totalTokens,
-        hasMore: lastIndex + 1 < allMessages.length,
-        output: lines.map((l) => l.text).join("\n"),
+        hasMore: lastIndex + 1 < messages.length,
+        output,
     };
+}
+
+export function runContextConcat(sessionId: string, tokenBudget: number, offset = 0): ConcatResult {
+    const opencodeDbPath = resolveOpenCodeDatabasePath();
+    const allMessages = readOpenCodeSessionMessages(opencodeDbPath, sessionId);
+    return { sessionId, ...concatSessionMessages(allMessages, tokenBudget, offset) };
+}
+
+const USAGE = `Usage: bun scripts/context-dump/run-context-concat.ts <session-id> --budget <tokens> [--offset <index>]
+
+Prints one page of the session as JSON (see ConcatResult). Pass the printed
+endIndex + 1 as --offset to fetch the next page while hasMore is true.`;
+
+function parseNonNegativeInt(flag: string, raw: string | undefined): number {
+    if (raw === undefined || !/^\d+$/.test(raw)) {
+        throw new Error(`${flag} requires a non-negative integer, got ${JSON.stringify(raw)}`);
+    }
+    return Number.parseInt(raw, 10);
+}
+
+function parseArgs(argv: string[]): { sessionId: string; tokenBudget: number; offset: number } {
+    let sessionId: string | undefined;
+    let tokenBudget: number | undefined;
+    let offset = 0;
+    for (let i = 0; i < argv.length; i++) {
+        const arg = argv[i];
+        if (arg === "--budget") {
+            tokenBudget = parseNonNegativeInt(arg, argv[++i]);
+        } else if (arg === "--offset") {
+            offset = parseNonNegativeInt(arg, argv[++i]);
+        } else if (arg.startsWith("--")) {
+            throw new Error(`Unknown flag ${arg}`);
+        } else if (sessionId === undefined) {
+            sessionId = arg;
+        } else {
+            throw new Error(`Unexpected argument ${JSON.stringify(arg)}`);
+        }
+    }
+    if (sessionId === undefined) throw new Error("Missing <session-id>");
+    if (tokenBudget === undefined) throw new Error("Missing --budget <tokens>");
+    return { sessionId, tokenBudget, offset };
+}
+
+function main(): void {
+    let args: ReturnType<typeof parseArgs>;
+    try {
+        args = parseArgs(process.argv.slice(2));
+    } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        console.error(USAGE);
+        process.exit(2);
+    }
+    try {
+        const result = runContextConcat(args.sessionId, args.tokenBudget, args.offset);
+        console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+    }
+}
+
+if (import.meta.main) {
+    main();
 }
