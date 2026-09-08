@@ -310,14 +310,12 @@ export function withClaudeMaxCacheTtl(
     selectedModels: readonly (string | null)[] = [],
 ): Record<string, string> {
     // The schema types every `cache_ttl` value as a string; a non-string value would fail the whole record.
-    const cacheTtl: Record<string, string> = {};
-    if (typeof existing === "string") {
-        cacheTtl.default = existing;
-    } else {
-        for (const [key, value] of Object.entries(asPlainRecord(existing))) {
-            if (typeof value === "string" && value.length > 0) cacheTtl[key] = value;
-        }
+    // An existing record is pruned in place so comment-json's comment metadata survives.
+    const record = typeof existing === "string" ? { default: existing } : asPlainRecord(existing);
+    for (const [key, value] of Object.entries(record)) {
+        if (typeof value !== "string" || value.length === 0) delete record[key];
     }
+    const cacheTtl = record as Record<string, string>;
     if (!cacheTtl.default) cacheTtl.default = "5m";
     cacheTtl["anthropic/claude-sonnet-4-6"] = "59m";
     cacheTtl["anthropic/claude-opus-4-6"] = "59m";
@@ -621,7 +619,9 @@ export async function runSetup(dryRun = false): Promise<number> {
             ? "Compaction: disabled (Eidnara manages the window)"
             : keepNativeCompaction
               ? "Compaction: built-in compaction left on (conflict fixes declined)"
-              : "Compaction: off (native compaction owns the window)",
+              : modes.enabled
+                ? "Compaction: native settings left unchanged (Eidnara compaction is off)"
+                : "Compaction: native settings left unchanged (Eidnara is disabled)",
         historianModel ? `Historian: ${historianModel}` : "Historian: fallback chain",
         sidekickEnabled
             ? `Sidekick: enabled${sidekickModel ? ` (${sidekickModel})` : ""}`
