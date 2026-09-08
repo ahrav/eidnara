@@ -158,15 +158,22 @@ function stringValue(value: unknown): string {
     return stableStringify(value);
 }
 
-function isMediaResultBlock(entry: Record<string, unknown>): boolean {
+/**
+ * Content blocks dispatch on their explicit type; MIME presence matters only when untyped.
+ * OpenCode attachments are media whenever they carry a MIME field, whatever their type.
+ */
+type ResultBlockOrigin = "content" | "attachment";
+
+function isMediaResultBlock(entry: Record<string, unknown>, origin: ResultBlockOrigin): boolean {
     const type = partType(entry);
-    return (
-        type === "image" ||
-        type === "file" ||
-        hasOwn(entry, "mime") ||
-        hasOwn(entry, "mimeType") ||
-        looksImageLike(entry)
-    );
+    const hasMime = hasOwn(entry, "mime") || hasOwn(entry, "mimeType");
+    if (origin === "attachment") {
+        return type === "image" || type === "file" || hasMime || looksImageLike(entry);
+    }
+    if (type === "image" || type === "file") return true;
+    if (type === "text") return false;
+    if (type.length > 0) return looksImageLike(entry);
+    return hasMime || looksImageLike(entry);
 }
 
 function mergeToolResultContent(a: ToolResultContent, b: ToolResultContent): ToolResultContent {
@@ -178,8 +185,12 @@ function mergeToolResultContent(a: ToolResultContent, b: ToolResultContent): Too
 
 /**
  * Image and file blocks are separated from text so a base64 payload is never tokenized as text.
+ * A block with an explicit type other than `text` is opaque and contributes its whole serialized form.
  */
-function toolResultContent(content: unknown): ToolResultContent {
+function toolResultContent(
+    content: unknown,
+    origin: ResultBlockOrigin = "content",
+): ToolResultContent {
     if (typeof content === "string") return { text: content, media: [] };
     if (Array.isArray(content)) {
         const pieces: string[] = [];
@@ -188,11 +199,15 @@ function toolResultContent(content: unknown): ToolResultContent {
             if (typeof entry === "string") {
                 pieces.push(entry);
             } else if (isRecord(entry)) {
-                if (isMediaResultBlock(entry)) {
+                if (isMediaResultBlock(entry, origin)) {
                     media.push(entry);
                     continue;
                 }
-                const text = firstStringFieldAllowEmpty(entry, ["text", "content", "value"]);
+                const type = partType(entry);
+                const text =
+                    type === "text" || type.length === 0
+                        ? firstStringFieldAllowEmpty(entry, ["text", "content", "value"])
+                        : null;
                 pieces.push(text ?? stableStringify(entry));
             } else if (entry !== null && entry !== undefined) {
                 pieces.push(String(entry));
@@ -200,7 +215,9 @@ function toolResultContent(content: unknown): ToolResultContent {
         }
         return { text: pieces.join("\n"), media };
     }
-    if (isRecord(content) && isMediaResultBlock(content)) return { text: "", media: [content] };
+    if (isRecord(content) && isMediaResultBlock(content, origin)) {
+        return { text: "", media: [content] };
+    }
     return { text: stringValue(content), media: [] };
 }
 
@@ -318,11 +335,15 @@ const TOOL_CALL_ID_FIELDS = [
     "id",
 ] as const;
 
+/** Pi `toolCall` blocks name the call in `id`. */
+const PI_TOOL_CALL_ID_FIELDS = ["id", "callId", "toolCallId"] as const;
+
 function callIdFromPart(part: Record<string, unknown>): string {
-    const direct = firstStringField(part, TOOL_CALL_ID_FIELDS);
+    const fields = partType(part) === "toolCall" ? PI_TOOL_CALL_ID_FIELDS : TOOL_CALL_ID_FIELDS;
+    const direct = firstStringField(part, fields);
     if (direct) return direct;
     const state = isRecord(part.state) ? part.state : null;
-    return state ? (firstStringField(state, TOOL_CALL_ID_FIELDS) ?? "") : "";
+    return state ? (firstStringField(state, fields) ?? "") : "";
 }
 
 function toolNameFromPart(part: Record<string, unknown>): string {
@@ -338,7 +359,7 @@ function providerExecutedFromPart(part: Record<string, unknown>): boolean {
 
 const TERMINAL_TOOL_STATUSES = new Set(["completed", "error"]);
 
-/** A terminal `status` marks a completed call even when no output payload is stored. */
+/** Only a terminal `status` completes an OpenCode tool. A stored `output` on a `running` tool is partial streamed output, not a result. */
 function toolStatusIsTerminal(
     part: Record<string, unknown>,
     state: Record<string, unknown> | null,
@@ -359,7 +380,7 @@ function toolAttachments(
     const attachments =
         state && Array.isArray(state.attachments) ? state.attachments : part.attachments;
     if (!Array.isArray(attachments)) return emptyToolResultContent();
-    return toolResultContent(attachments.filter(isRecord));
+    return toolResultContent(attachments.filter(isRecord), "attachment");
 }
 
 function metadataDescriptionFromState(state: Record<string, unknown> | null): string {
@@ -367,34 +388,48 @@ function metadataDescriptionFromState(state: Record<string, unknown> | null): st
     return metadata ? (firstStringField(metadata, ["description"]) ?? "") : "";
 }
 
+/**
+ * A folded Pi tool result is a part with `role: "toolResult"` and no `type`.
+ * Harnesses that synthesize a call identity for idless parts: OpenCode `tool` and Pi `toolCall`.
+ */
+function toolPartType(part: Record<string, unknown>): string {
+    const type = partType(part);
+    if (type.length === 0 && part.role === "toolResult") return "tool_result";
+    return type;
+}
+
+const SYNTHESIZED_ID_TOOL_TYPES = new Set(["tool", "toolCall"]);
+
+/** The Pi decoder names a folded result with no `toolCallId` after the generic tool. */
+const FOLDED_RESULT_DEFAULT_CALL_ID = "tool";
+
 function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (!isRecord(part)) return null;
-    const type = partType(part);
+    const type = toolPartType(part);
     const state = isRecord(part.state) ? part.state : null;
-    const callId = callIdFromPart(part);
-    if (!callId && type !== "tool") return null;
+    let callId = callIdFromPart(part);
+    if (!callId && part.role === "toolResult") callId = FOLDED_RESULT_DEFAULT_CALL_ID;
+    if (!callId && !SYNTHESIZED_ID_TOOL_TYPES.has(type)) return null;
     const toolName = toolNameFromPart(part);
 
     if (type === "tool") {
         const inputOwner = state && hasOwn(state, "input") ? state : part;
         const inputKey = firstOwnKey(inputOwner, ["input", "args"]);
-        const hasInput = inputKey !== null;
+        // The OpenCode decoder reads only `output` and `error`; a `result` field is not decoded output.
         const outputOwner =
-            state && firstOwnKey(state, ["output", "error", "result"]) !== null ? state : part;
-        const outputKey = firstOwnKey(outputOwner, ["output", "error", "result"]);
-        const hasOutput = outputKey !== null || toolStatusIsTerminal(part, state);
+            state && firstOwnKey(state, ["output", "error"]) !== null ? state : part;
+        const outputKey = firstOwnKey(outputOwner, ["output", "error"]);
+        const hasOutput = toolStatusIsTerminal(part, state);
         const output = mergeToolResultContent(
             outputKey ? toolResultContent(outputOwner[outputKey]) : emptyToolResultContent(),
             toolAttachments(part, state),
         );
-        const providerExecuted = providerExecutedFromPart(part);
-        const openInvocation = !providerExecuted && !hasOutput;
         return {
             callId,
             toolName,
-            hasInput: hasInput || openInvocation,
+            hasInput: true,
             hasOutput,
-            providerExecuted,
+            providerExecuted: providerExecutedFromPart(part),
             inputText: inputKey ? stringValue(inputOwner[inputKey]) : "",
             outputText: output.text,
             outputMedia: output.media,
@@ -409,7 +444,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
         return {
             callId,
             toolName,
-            hasInput: argsKey !== null,
+            hasInput: true,
             hasOutput: outputKey !== null,
             providerExecuted: false,
             inputText: argsKey ? stringValue(part[argsKey]) : "",
@@ -419,15 +454,18 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
         };
     }
 
-    if (type === "tool_use") {
-        const hasInput = hasOwn(part, "input");
+    if (type === "tool_use" || type === "toolCall") {
+        const inputKey = firstOwnKey(
+            part,
+            type === "toolCall" ? ["arguments", "input"] : ["input"],
+        );
         return {
             callId,
             toolName,
-            hasInput,
+            hasInput: true,
             hasOutput: false,
             providerExecuted: false,
-            inputText: hasInput ? stringValue(part.input) : "",
+            inputText: inputKey ? stringValue(part[inputKey]) : "",
             outputText: "",
             outputMedia: [],
             metadataDescription: "",
@@ -441,7 +479,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             toolName,
             hasInput: false,
-            hasOutput: contentKey !== null,
+            hasOutput: true,
             providerExecuted: false,
             inputText: "",
             outputText: output.text,
@@ -453,8 +491,13 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
     return null;
 }
 
+/** Primitive and array parts are tokenized as their serialized form, so they fingerprint the same way. */
+function nonRecordPartFingerprint(part: unknown): string {
+    return `${typeof part}:h${contentStringsHash([stringValue(part)])}`;
+}
+
 function partCheapFingerprint(part: unknown): string {
-    if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
+    if (!isRecord(part)) return nonRecordPartFingerprint(part);
     const version = rawPartVersion(part);
     const type = typeof part.type === "string" ? part.type : "";
     const byteLength = recursiveByteLength(part);
@@ -530,33 +573,60 @@ type NonToolPartContent =
  * function. A second classifier lets the fingerprint miss content the tokenizer counts.
  * commentlint: allow(JUDGE)
  */
+/** OpenCode bookkeeping parts the daemon decoder discards; they occupy no context. */
+const SKIPPED_PART_TYPES = new Set(["snapshot", "patch", "agent", "retry", "compaction"]);
+
+/**
+ * The opaque payload of a redacted reasoning block.
+ * Anthropic stores it in `data`; Pi in `thinkingSignature` with `redacted: true`.
+ * OpenCode stores it in a string `redacted` field at the top level or under `metadata`.
+ */
+function redactedReasoningData(part: Record<string, unknown>): string | null {
+    const direct = firstStringField(part, ["data"]);
+    if (direct) return direct;
+    if (typeof part.redacted === "string" && part.redacted.length > 0) return part.redacted;
+    const metadata = isRecord(part.metadata) ? part.metadata : null;
+    const fromMetadata = metadata ? firstStringField(metadata, ["redacted"]) : null;
+    if (fromMetadata) return fromMetadata;
+    if (part.redacted === true || partType(part) === "redacted_thinking") {
+        return firstStringField(part, ["thinkingSignature"]);
+    }
+    return null;
+}
+
 function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent {
     const type = partType(part);
-    if (
-        type === "step-start" ||
-        type === "step-finish" ||
-        (type === "meta" && Object.keys(part).length <= 1)
-    ) {
+    if (SKIPPED_PART_TYPES.has(type) || (type === "meta" && Object.keys(part).length <= 1)) {
         return { kind: "skip" };
     }
     if (type === "text") {
-        const text = firstStringField(part, ["text", "content"]);
+        if (part.ignored === true) return { kind: "skip" };
+        const text = firstStringFieldAllowEmpty(part, ["text", "content"]);
         return text ? { kind: "text", text } : { kind: "skip" };
     }
     if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
-        const text = firstStringField(part, ["thinking", "text", "content", "reasoning"]);
-        return text ? { kind: "reasoning", text } : { kind: "structured" };
+        // OpenCode `reasoning` parts store text in `text`; Pi `thinking` parts store it in `thinking`.
+        // A retained part can carry a stale copy of the other field, so the type decides precedence.
+        const fields =
+            type === "reasoning"
+                ? ["text", "thinking", "content", "reasoning"]
+                : ["thinking", "text", "content", "reasoning"];
+        const text = firstStringFieldAllowEmpty(part, fields);
+        if (text !== null && text.length > 0) return { kind: "reasoning", text };
+        const redacted = redactedReasoningData(part);
+        if (redacted !== null) return { kind: "reasoning", text: redacted };
+        return text !== null ? { kind: "reasoning", text } : { kind: "structured" };
     }
     if (type.length === 0) {
-        const reasoningText = firstStringField(part, ["thinking", "reasoning"]);
-        if (reasoningText) return { kind: "reasoning", text: reasoningText };
+        const reasoningText = firstStringFieldAllowEmpty(part, ["thinking", "reasoning"]);
+        if (reasoningText !== null) return { kind: "reasoning", text: reasoningText };
     }
     if (looksImageLike(part)) {
         return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
     }
-    if (type.includes("file") || type === "source") {
-        const content = firstStringField(part, ["content", "text", "source"]);
-        return content ? { kind: "text", text: content } : { kind: "structured" };
+    if (type === "file") {
+        // Every file part is a media block, whatever inline fields it carries.
+        return { kind: "image", altText: firstStringField(part, ["alt", "description"]) };
     }
     return { kind: "structured" };
 }
@@ -807,6 +877,27 @@ export function buildTrueRawTokenIndex(
     }
     const ordinalToIndex = (ordinal: number): number =>
         Math.max(0, Math.min(ordinalSpan, ordinal - firstOrdinal));
+    const representedOrdinals = ordered.map((message) => message.ordinal);
+    // Malformed rows consume ordinals without yielding messages, so the span can contain holes.
+    // A head end must sit right after a real message: never on a hole, never past a hole.
+    const lowerBound = (ordinal: number): number => {
+        let lo = 0;
+        let hi = representedOrdinals.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (representedOrdinals[mid] < ordinal) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    };
+    const firstRepresentedAtOrAfter = (ordinal: number): number | null => {
+        const index = lowerBound(ordinal);
+        return index < representedOrdinals.length ? representedOrdinals[index] : null;
+    };
+    const lastRepresentedBefore = (ordinal: number): number | null => {
+        const index = lowerBound(ordinal);
+        return index > 0 ? representedOrdinals[index - 1] : null;
+    };
     return {
         sessionId,
         providerShapeVersion: options.providerShapeVersion,
@@ -867,7 +958,15 @@ export function buildTrueRawTokenIndex(
                 }
             }
             let bestEnd = firstOrdinal + bestEndIndex;
-            if (bestEnd === start && start < end) bestEnd = start + 1;
+            // The dense prefix includes zero-token holes, so end at the last represented message that fits.
+            const lastIncluded = lastRepresentedBefore(bestEnd);
+            bestEnd = lastIncluded !== null && lastIncluded >= start ? lastIncluded + 1 : start;
+            // The head must contain at least the first represented message at or after `start`,
+            // even when that message alone exceeds the cap.
+            const firstMessage = firstRepresentedAtOrAfter(start);
+            if (firstMessage !== null && firstMessage < end && bestEnd <= firstMessage) {
+                bestEnd = firstMessage + 1;
+            }
             return Math.min(bestEnd, end);
         },
     };
@@ -887,7 +986,7 @@ function mediaFingerprintFields(media: Record<string, unknown>): string[] {
  * Tool fingerprints include fields consumed by `buildToolArcs` and tool-call summaries, so topology and displayed-name changes invalidate them.
  */
 function partContentFingerprint(part: unknown): string {
-    if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
+    if (!isRecord(part)) return nonRecordPartFingerprint(part);
     const tool = toolSignalFromPart(part);
     if (tool) {
         return contentStringsHash([
@@ -926,7 +1025,9 @@ export function computeRawRangeFingerprint(
     for (const message of messages) {
         if (message.ordinal < startInclusive || message.ordinal >= endExclusive) continue;
         const partFingerprint = message.parts.map(partContentFingerprint).join(",");
-        pieces.push(`${message.ordinal}:${message.id}:${message.parts.length}:${partFingerprint}`);
+        pieces.push(
+            `${message.ordinal}:${message.id}:${message.role}:${message.parts.length}:${partFingerprint}`,
+        );
     }
     return pieces.join("|");
 }

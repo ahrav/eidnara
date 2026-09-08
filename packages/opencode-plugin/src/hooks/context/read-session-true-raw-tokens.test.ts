@@ -81,6 +81,49 @@ describe("true raw token indexes with continued ordinals", () => {
         expect(fixture.rangeTokens(6, 8)).toBe(0);
         expect(fixture.rangeTokens(1, 4)).toBe(6);
     });
+
+    it("advances a head cap past an ordinal hole so the head always holds a message", () => {
+        const messages: RawMessage[] = [
+            { id: "a", role: "user", parts: [], ordinal: 101 },
+            { id: "c", role: "assistant", parts: [], ordinal: 103 },
+        ];
+        const totals = new Map([
+            ["a", 10],
+            ["c", 5000],
+        ]);
+        const index = buildTrueRawTokenIndex("holes", messages, {
+            providerShapeVersion: "opencode-v1",
+            cacheNamespace: "hole-test",
+            absoluteMessageCount: 103,
+            storedTotalForMessage: (message) => totals.get(message.id) ?? null,
+        });
+
+        expect(index.findHeadEndForCap(102, 104, 100)).toBe(104);
+        expect(index.findHeadEndForCap(101, 104, 5)).toBe(102);
+        expect(index.rangeTokens(101, index.findHeadEndForCap(101, 104, 100))).toBe(10);
+    });
+
+    it("ends a head cap right after the last fitting message, not after a trailing hole", () => {
+        const messages: RawMessage[] = [
+            { id: "a", role: "user", parts: [], ordinal: 7 },
+            { id: "b", role: "user", parts: [], ordinal: 9 },
+        ];
+        const totals = new Map([
+            ["a", 13],
+            ["b", 15],
+        ]);
+        const index = buildTrueRawTokenIndex("trailing-hole", messages, {
+            providerShapeVersion: "opencode-v1",
+            cacheNamespace: "trailing-hole-test",
+            absoluteMessageCount: 9,
+            storedTotalForMessage: (message) => totals.get(message.id) ?? null,
+        });
+
+        const end = index.findHeadEndForCap(7, 10, 24);
+        expect(end).toBe(8);
+        expect(index.messageIdAtOrdinal(end - 1)).toBe("a");
+        expect(index.findHeadEndForCap(7, 10, 100)).toBe(10);
+    });
 });
 
 describe("tool arcs", () => {
@@ -259,9 +302,510 @@ describe("tool arcs", () => {
         expect(arcs[0].callId).not.toBe(arcs[1].callId);
         expect(arcs.every((arc) => arc.invOrdinal === 7 && arc.resOrdinal === null)).toBe(true);
     });
+
+    it("recognizes a Pi toolCall block as an open invocation with its arguments as input", () => {
+        const message: RawMessage = {
+            id: "pi-call",
+            role: "assistant",
+            parts: [
+                { type: "toolCall", id: "tc1", name: "bash", arguments: { cmd: "ls -la /tmp" } },
+            ],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([
+            { callId: "tc1", invOrdinal: 1, resOrdinal: null },
+        ]);
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolInput).toBeGreaterThan(0);
+        expect(breakdown.other).toBe(0);
+    });
+
+    it("synthesizes an identity for an idless Pi toolCall", () => {
+        const message: RawMessage = {
+            id: "pi-idless",
+            role: "assistant",
+            parts: [{ type: "toolCall", name: "bash", arguments: { cmd: "ls" } }],
+            ordinal: 1,
+        };
+        const arcs = buildToolArcs([message]);
+        expect(arcs).toHaveLength(1);
+        expect(arcs[0].resOrdinal).toBeNull();
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolInput).toBeGreaterThan(0);
+        expect(breakdown.other).toBe(0);
+    });
+
+    it("closes a Pi toolCall through a folded toolResult part and counts its media", () => {
+        const call: RawMessage = {
+            id: "call",
+            role: "assistant",
+            parts: [{ type: "toolCall", id: "tc1", name: "read", arguments: {} }],
+            ordinal: 1,
+        };
+        const folded: RawMessage = {
+            id: "folded",
+            role: "user",
+            parts: [
+                {
+                    role: "toolResult",
+                    toolCallId: "tc1",
+                    toolName: "read",
+                    content: [
+                        { type: "text", text: "ok" },
+                        { type: "image", mimeType: "image/png", data: "A".repeat(20_000) },
+                    ],
+                },
+            ],
+            ordinal: 2,
+        };
+        expect(buildToolArcs([call, folded])).toEqual([
+            { callId: "tc1", invOrdinal: 1, resOrdinal: 2 },
+        ]);
+        const breakdown = estimateTrueRawMessageTokens(folded, {
+            providerShapeVersion: "pi-folded-v1",
+            imageTokenHeuristic: () => 300,
+        });
+        expect(breakdown.toolOutput).toBeLessThan(10);
+        expect(breakdown.image).toBe(300);
+        expect(breakdown.other).toBe(0);
+    });
+
+    it("keeps an argument-less Pi toolCall open", () => {
+        const message: RawMessage = {
+            id: "argless",
+            role: "assistant",
+            parts: [{ type: "toolCall", id: "tc1", name: "noop" }],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([
+            { callId: "tc1", invOrdinal: 1, resOrdinal: null },
+        ]);
+    });
+
+    it("counts a folded Pi toolResult without a toolCallId as tool output", () => {
+        const message: RawMessage = {
+            id: "folded-idless",
+            role: "user",
+            parts: [
+                {
+                    role: "toolResult",
+                    toolName: "read",
+                    content: [{ type: "image", mimeType: "image/png", data: "A".repeat(20_000) }],
+                },
+            ],
+            ordinal: 2,
+        };
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+            imageTokenHeuristic: () => 300,
+        });
+        expect(breakdown.image).toBe(300);
+        expect(breakdown.other).toBe(0);
+    });
+
+    it("closes an arc with a payload-less folded Pi toolResult", () => {
+        const call: RawMessage = {
+            id: "c",
+            role: "assistant",
+            parts: [{ type: "toolCall", id: "tc1", name: "noop", arguments: {} }],
+            ordinal: 1,
+        };
+        const result: RawMessage = {
+            id: "r",
+            role: "user",
+            parts: [{ role: "toolResult", toolCallId: "tc1", toolName: "noop" }],
+            ordinal: 2,
+        };
+        expect(buildToolArcs([call, result])).toEqual([
+            { callId: "tc1", invOrdinal: 1, resOrdinal: 2 },
+        ]);
+    });
+
+    it("prefers a Pi toolCall's native id over a retained callId", () => {
+        const call: RawMessage = {
+            id: "c",
+            role: "assistant",
+            parts: [
+                { type: "toolCall", id: "native-1", callId: "stale-9", name: "x", arguments: {} },
+            ],
+            ordinal: 1,
+        };
+        const result: RawMessage = {
+            id: "r",
+            role: "user",
+            parts: [{ role: "toolResult", toolCallId: "native-1", content: "ok" }],
+            ordinal: 2,
+        };
+        expect(buildToolArcs([call, result])).toEqual([
+            { callId: "native-1", invOrdinal: 1, resOrdinal: 2 },
+        ]);
+    });
+
+    it("closes a completed OpenCode tool that stored no input", () => {
+        const message: RawMessage = {
+            id: "no-input",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "c1",
+                    tool: "bash",
+                    state: { status: "completed", output: "done" },
+                },
+            ],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([{ callId: "c1", invOrdinal: 1, resOrdinal: 1 }]);
+    });
+
+    it("keeps a running OpenCode tool open even when partial output is stored", () => {
+        const message: RawMessage = {
+            id: "streaming",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "c",
+                    tool: "bash",
+                    state: { status: "running", input: {}, output: "partial stream..." },
+                },
+            ],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([
+            { callId: "c", invOrdinal: 1, resOrdinal: null },
+        ]);
+    });
 });
 
 describe("tool token accounting", () => {
+    it("counts an empty reasoning block as zero tokens", () => {
+        const message = (part: unknown): RawMessage => ({
+            id: "r",
+            role: "assistant",
+            parts: [part],
+            ordinal: 1,
+        });
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        expect(
+            estimateTrueRawMessageTokens(
+                message({ type: "reasoning", text: "", signature: "x".repeat(200) }),
+                options,
+            ).total,
+        ).toBe(0);
+        expect(
+            estimateTrueRawMessageTokens(message({ type: "thinking", thinking: "" }), options)
+                .total,
+        ).toBe(0);
+        expect(
+            estimateTrueRawMessageTokens(message({ type: "thinking", thinking: "hmm" }), options)
+                .reasoning,
+        ).toBeGreaterThan(0);
+    });
+
+    it("counts a redacted reasoning payload as reasoning and fingerprints it", () => {
+        const message = (signature: string): RawMessage => ({
+            id: "r",
+            role: "assistant",
+            parts: [
+                { type: "thinking", thinking: "", thinkingSignature: signature, redacted: true },
+            ],
+            ordinal: 1,
+        });
+        const options = { providerShapeVersion: "pi-folded-v1" as const };
+        expect(
+            estimateTrueRawMessageTokens(message("R".repeat(2000)), options).reasoning,
+        ).toBeGreaterThan(100);
+        expect(computeRawRangeFingerprint([message("A".repeat(100))], 1, 2)).not.toBe(
+            computeRawRangeFingerprint([message("B".repeat(3000))], 1, 2),
+        );
+        expect(
+            estimateTrueRawMessageTokens(
+                {
+                    id: "anthropic",
+                    role: "assistant",
+                    parts: [{ type: "redacted_thinking", data: "D".repeat(1000) }],
+                    ordinal: 1,
+                },
+                { providerShapeVersion: "opencode-v1" },
+            ).reasoning,
+        ).toBeGreaterThan(100);
+    });
+
+    it("skips OpenCode bookkeeping parts", () => {
+        const message: RawMessage = {
+            id: "bookkeeping",
+            role: "assistant",
+            parts: [
+                { type: "snapshot", snapshot: "x".repeat(5000) },
+                { type: "patch", hash: "abc", files: ["a", "b", "c"] },
+                { type: "agent", name: "coder" },
+                { type: "retry", attempt: 3 },
+            ],
+            ordinal: 1,
+        };
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
+    });
+
+    it("skips ignored OpenCode text and fingerprints the flag", () => {
+        const text = "routing notice ".repeat(50);
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        const visible = singlePartMessage({ type: "text", text });
+        const ignored = singlePartMessage({ type: "text", text, ignored: true });
+        expect(estimateTrueRawMessageTokens(visible, options).total).toBeGreaterThan(0);
+        expect(estimateTrueRawMessageTokens(ignored, options).total).toBe(0);
+        expect(fingerprintOf({ type: "text", text: "x" })).not.toBe(
+            fingerprintOf({ type: "text", text: "x", ignored: true }),
+        );
+    });
+
+    it("counts OpenCode redacted reasoning stored in metadata or a string redacted field", () => {
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        const viaMetadata = singlePartMessage({
+            type: "reasoning",
+            text: "",
+            metadata: { redacted: "R".repeat(2000) },
+        });
+        const viaField = singlePartMessage({
+            type: "reasoning",
+            text: "",
+            redacted: "S".repeat(2000),
+        });
+        expect(estimateTrueRawMessageTokens(viaMetadata, options).reasoning).toBeGreaterThan(100);
+        expect(estimateTrueRawMessageTokens(viaField, options).reasoning).toBeGreaterThan(100);
+        expect(
+            fingerprintOf({ type: "reasoning", text: "", metadata: { redacted: "A".repeat(100) } }),
+        ).not.toBe(
+            fingerprintOf({
+                type: "reasoning",
+                text: "",
+                metadata: { redacted: "B".repeat(3000) },
+            }),
+        );
+    });
+
+    it("counts a standalone file part through the media heuristic", () => {
+        const pdf = singlePartMessage({
+            type: "file",
+            mime: "application/pdf",
+            filename: "spec.pdf",
+            url: `data:application/pdf;base64,${"Q".repeat(30_000)}`,
+        });
+        const breakdown = estimateTrueRawMessageTokens(pdf, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 400,
+        });
+        expect(breakdown.image).toBe(400);
+        expect(breakdown.other).toBe(0);
+        expect(breakdown.text).toBe(0);
+    });
+
+    it("keeps a typed text block as text even when it carries MIME metadata", () => {
+        const message = singlePartMessage({
+            type: "tool_result",
+            tool_use_id: "c",
+            content: [{ type: "text", text: "the actual output text here", mimeType: null }],
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolOutput).toBeGreaterThan(0);
+        expect(breakdown.image).toBe(0);
+    });
+
+    it("prefers the type-native reasoning field over a stale sibling", () => {
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        const openCode = estimateTrueRawMessageTokens(
+            singlePartMessage({
+                type: "reasoning",
+                text: "new",
+                thinking: "old very long stale thinking text ".repeat(20),
+            }),
+            options,
+        );
+        const pi = estimateTrueRawMessageTokens(
+            singlePartMessage({
+                type: "thinking",
+                thinking: "new",
+                text: "old very long stale text ".repeat(20),
+            }),
+            options,
+        );
+        expect(openCode.reasoning).toBeLessThan(10);
+        expect(pi.reasoning).toBeLessThan(10);
+    });
+
+    it("lets an explicitly empty OpenCode text field win over retained content", () => {
+        const message = singlePartMessage({
+            type: "text",
+            text: "",
+            content: "stale compat content ".repeat(30),
+        });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
+    });
+
+    it("skips compaction marker parts", () => {
+        const message = singlePartMessage({
+            type: "compaction",
+            summary: "x".repeat(3000),
+            metadata: { a: 1 },
+        });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
+    });
+
+    it("counts step boundary parts like the daemon's boundary index", () => {
+        const message: RawMessage = {
+            id: "steps",
+            role: "assistant",
+            parts: [
+                { type: "step-start", snapshot: "abc123" },
+                {
+                    type: "step-finish",
+                    reason: "stop",
+                    cost: 0.01,
+                    tokens: { input: 100, output: 50 },
+                },
+            ],
+            ordinal: 1,
+        };
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).other,
+        ).toBeGreaterThan(0);
+    });
+
+    it("treats every standalone file part as media, even with inline content", () => {
+        const message = singlePartMessage({
+            type: "file",
+            mime: "text/plain",
+            filename: "big.txt",
+            content: "lorem ipsum ".repeat(2000),
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 400,
+        });
+        expect(breakdown.image).toBe(400);
+        expect(breakdown.text).toBe(0);
+    });
+
+    it("keeps a typed non-media result block opaque even when it carries a MIME field", () => {
+        const message = singlePartMessage({
+            type: "tool_result",
+            tool_use_id: "c",
+            content: [{ type: "opaque", mimeType: "application/x-custom", data: "Z".repeat(8000) }],
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolOutput).toBeGreaterThan(1000);
+        expect(breakdown.image).toBe(0);
+    });
+
+    it("serializes a typed opaque result block whole even when it carries a text field", () => {
+        const block = (data: string) => ({
+            type: "tool_result",
+            tool_use_id: "c",
+            content: [{ type: "opaque", text: "ok", data }],
+        });
+        const breakdown = estimateTrueRawMessageTokens(
+            singlePartMessage(block("Q".repeat(10_000))),
+            {
+                providerShapeVersion: "pi-folded-v1",
+            },
+        );
+        expect(breakdown.toolOutput).toBeGreaterThan(1000);
+        expect(fingerprintOf(block("A".repeat(100)))).not.toBe(
+            fingerprintOf(block("B".repeat(5000))),
+        );
+    });
+
+    it("treats a typed OpenCode attachment with a MIME field as media", () => {
+        const message = singlePartMessage({
+            type: "tool",
+            callID: "c",
+            tool: "read",
+            state: {
+                status: "completed",
+                input: {},
+                output: "",
+                attachments: [
+                    { type: "attachment", mime: "application/pdf", data: "P".repeat(20_000) },
+                ],
+            },
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 400,
+        });
+        expect(breakdown.image).toBe(400);
+        expect(breakdown.toolOutput).toBe(0);
+    });
+
+    it("ignores a result field on OpenCode tool parts", () => {
+        const message = singlePartMessage({
+            type: "tool",
+            callID: "c",
+            tool: "x",
+            state: { status: "completed", input: {}, result: "R".repeat(10_000) },
+        });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" })
+                .toolOutput,
+        ).toBe(0);
+    });
+
+    it("treats a text-typed OpenCode attachment with a MIME field as media", () => {
+        const message = singlePartMessage({
+            type: "tool",
+            callID: "c",
+            tool: "read",
+            state: {
+                status: "completed",
+                input: {},
+                output: "",
+                attachments: [{ type: "text", mime: "application/pdf", data: "P".repeat(20_000) }],
+            },
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 400,
+        });
+        expect(breakdown.image).toBe(400);
+        expect(breakdown.toolOutput).toBe(0);
+    });
+
+    it("classifies only an exact file type as media", () => {
+        const breakdown = estimateTrueRawMessageTokens(
+            singlePartMessage({ type: "profile", payload: "X".repeat(20_000) }),
+            { providerShapeVersion: "opencode-v1" },
+        );
+        expect(breakdown.image).toBe(0);
+        expect(breakdown.other).toBeGreaterThan(1000);
+    });
+
+    it("keeps source parts opaque", () => {
+        const part = (payload: string) => ({ type: "source", content: "short", payload });
+        const breakdown = estimateTrueRawMessageTokens(
+            singlePartMessage(part("Y".repeat(20_000))),
+            {
+                providerShapeVersion: "opencode-v1",
+            },
+        );
+        expect(breakdown.text).toBe(0);
+        expect(breakdown.other).toBeGreaterThan(1000);
+        expect(fingerprintOf(part("A".repeat(10)))).not.toBe(fingerprintOf(part("B".repeat(5000))));
+    });
+
     it("counts an empty text block in a tool result as empty output", () => {
         const result = (text: string): RawMessage => ({
             id: "r",
@@ -589,6 +1133,37 @@ describe("raw range fingerprints", () => {
             fingerprintOf({ type: "text", text: "same", updated_at: 2 }),
         );
     });
+
+    it("changes when a message's role changes", () => {
+        const message = (role: string): RawMessage[] => [
+            { id: "x", role, parts: [{ type: "text", text: "hi" }], ordinal: 1 },
+        ];
+        expect(computeRawRangeFingerprint(message("user"), 1, 2)).not.toBe(
+            computeRawRangeFingerprint(message("assistant"), 1, 2),
+        );
+    });
+
+    it("hashes primitive and array parts by content", () => {
+        expect(fingerprintOf("hello world!")).not.toBe(fingerprintOf("HELLO WORLD?"));
+        expect(fingerprintOf([1, 2, 3])).not.toBe(fingerprintOf([4, 5, 6]));
+        const options = {
+            providerShapeVersion: "opencode-v1" as const,
+            cacheNamespace: "primitive-parts-test",
+        };
+        const message = (part: unknown): RawMessage => ({
+            id: "x",
+            role: "user",
+            parts: [part],
+            ordinal: 1,
+        });
+        buildTrueRawTokenIndex("s", [message("hello world!")], options);
+        const cjk = buildTrueRawTokenIndex("s", [message("日本語日本語日本語日本語")], options);
+        const fresh = buildTrueRawTokenIndex("s", [message("日本語日本語日本語日本語")], {
+            ...options,
+            cacheNamespace: "primitive-parts-fresh-test",
+        });
+        expect(cjk.tokenForOrdinal(1)).toBe(fresh.tokenForOrdinal(1));
+    });
 });
 
 describe("message estimate cache after in-place part mutation", () => {
@@ -598,7 +1173,7 @@ describe("message estimate cache after in-place part mutation", () => {
 
     // The session reader stamps each part with the row's numeric `time_updated`.
     function readerStampedPart(output: string): { state: { output: string } } {
-        const part = { type: "tool", callID: "c", state: { output } };
+        const part = { type: "tool", callID: "c", state: { status: "completed", output } };
         Object.defineProperty(part, RAW_PART_VERSION_KEY, {
             value: 1_700_000_000_000,
             enumerable: false,
