@@ -19,6 +19,7 @@ const ENV_KEYS = [
     "XDG_CACHE_HOME",
     "OPENCODE_CONFIG_DIR",
     "OPENCODE_DB_PATH",
+    "EIDNARA_LOG_PATH",
 ] as const;
 const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
@@ -42,6 +43,7 @@ function isolatedRoot(): { root: string; configHome: string; cwd: string } {
     process.env.XDG_CACHE_HOME = join(root, "cache");
     delete process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OPENCODE_DB_PATH;
+    process.env.EIDNARA_LOG_PATH = join(root, "log", "eidnara.log");
     mkdirSync(join(configHome, "opencode"), { recursive: true });
     mkdirSync(join(configHome, "eidnara"), { recursive: true });
     mkdirSync(join(cwd, ".eidnara"), { recursive: true });
@@ -315,13 +317,13 @@ describe("collectDiagnostics log file", () => {
     });
 
     it("reports the size of an existing log", async () => {
-        const { cwd } = isolatedRoot();
-        const report0 = await collectDiagnostics(cwd);
-        mkdirSync(join(report0.logFile.path, ".."), { recursive: true });
-        writeFileSync(report0.logFile.path, "x".repeat(2048));
+        const { root, cwd } = isolatedRoot();
+        mkdirSync(join(root, "log"), { recursive: true });
+        writeFileSync(join(root, "log", "eidnara.log"), "x".repeat(2048));
 
         const report = await collectDiagnostics(cwd);
 
+        expect(report.logFile.path).toBe(join(root, "log", "eidnara.log"));
         expect(report.logFile.exists).toBe(true);
         expect(report.logFile.sizeKb).toBe(2);
     });

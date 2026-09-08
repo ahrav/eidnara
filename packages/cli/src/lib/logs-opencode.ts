@@ -1,7 +1,11 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
-import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
+import {
+    type DiagnosticReport,
+    describeProbeText,
+    renderDiagnosticsMarkdown,
+} from "./diagnostics-opencode";
 import { capBodyToGithubLimit, codeFenceFor, extractRecentErrors } from "./issue-body";
 import { readLogTailLines } from "./log-tail";
 
@@ -19,7 +23,7 @@ export function sanitizeLogContent(content: string): string {
  */
 function describeOpenCodeInstall(report: DiagnosticReport): string {
     if (!report.opencodeInstalled) return "not installed";
-    const version = report.opencodeVersion ? sanitizeDiagnosticText(report.opencodeVersion) : null;
+    const version = report.opencodeVersion ? describeProbeText(report.opencodeVersion) : null;
     return `${version ?? "unknown version"} [${report.opencodeInstallKind}]`;
 }
 

@@ -180,6 +180,16 @@ function sanitizeValue(value: unknown): unknown {
     return sanitizeConfigValue(value);
 }
 
+/**
+ * Version-probe output is external process text: a wrapper can print warnings on extra lines,
+ * which would inject Markdown lines and break table rows.
+ */
+export function describeProbeText(text: string): string {
+    return sanitizeDiagnosticText(text)
+        .replace(/\s*[\r\n]+\s*/g, " ")
+        .trim();
+}
+
 function readConfig(path: string): { value: Record<string, unknown> | null; error?: string } {
     if (!existsSync(path)) return { value: null };
     try {
@@ -441,7 +451,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
                   "| --- | --- | --- | --- |",
                   ...openCodeInstallations.map(
                       (installation) =>
-                          `| ${installation.active ? "[active]" : ""} | \`${sanitizeString(installation.path)}\` | ${sanitizeDiagnosticText(installation.version)} | ${installation.source} |`,
+                          `| ${installation.active ? "[active]" : ""} | \`${sanitizeString(installation.path)}\` | ${describeProbeText(installation.version)} | ${installation.source} |`,
                   ),
               ]
             : [];
@@ -503,7 +513,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- Plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${sanitizeDiagnosticText(report.opencodeVersion)})` : ""}`,
+        `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${describeProbeText(report.opencodeVersion)})` : ""}`,
         `- Project directory: ${sanitizeString(report.projectDirectory)}`,
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
         `- opencode config parse error: ${describeParseError(report.opencodeConfigParseError)}`,

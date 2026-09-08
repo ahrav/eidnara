@@ -371,7 +371,8 @@ describe("renderDiagnosticsMarkdown sanitization", () => {
     it("sanitizes version-probe output in the summary line and installation table", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-render-version-"));
         tempDirs.push(root);
-        const noisyVersion = "1.2.3 warning: shim at /home/alice/.local/bin/opencode token=abc123";
+        const noisyVersion =
+            "1.2.3\nwarning: shim at /home/alice/.local/bin/opencode token=abc123\r\n";
         const markdown = renderDiagnosticsMarkdown(
             makeReport(root, {
                 opencodeVersion: noisyVersion,

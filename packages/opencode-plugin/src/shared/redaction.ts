@@ -42,11 +42,28 @@ function redactionTypeForKey(key: string): string {
     );
 }
 
+// `password`, `secret`, and `credential` identify secrets without a preceding qualifier.
+// Generic `token` and `key` segments require a preceding `SECRET_QUALIFIERS` segment.
+const UNQUALIFIED_SECRET_SEGMENT_PATTERN = /^(?:password|passwd|pwd|secret|credential)s?$/i;
+
 // Do not redact numeric, boolean, null, or undefined values solely because their key contains a secret word.
 function isNonSecretScalarValue(value: string): boolean {
     const v = value.trim();
     if (v === "true" || v === "false" || v === "null" || v === "undefined") return true;
     return /^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(v);
+}
+
+// A number under `password`, `secret`, or `credential` is a PIN or numeric token and is redacted;
+// `api_key`, `token`, and `key` keep numeric values (`max_tokens: 4096`, and the fixture-pinned `"api_key": "4096"`).
+function keepsScalarValue(key: string, value: string): boolean {
+    if (!isNonSecretScalarValue(value)) return false;
+    const v = value.trim();
+    if (v === "true" || v === "false" || v === "null" || v === "undefined") return true;
+    return !key
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .some((segment) => UNQUALIFIED_SECRET_SEGMENT_PATTERN.test(segment));
 }
 
 export const SECRET_QUALIFIERS = new Set([
@@ -85,10 +102,6 @@ function hasSecretKeySegment(key: string): boolean {
         .split(/[^a-z0-9]+/)
         .some((segment) => SECRET_KEY_SEGMENT_PATTERN.test(segment));
 }
-
-// `password`, `secret`, and `credential` identify secrets without a preceding qualifier.
-// Generic `token` and `key` segments require a preceding `SECRET_QUALIFIERS` segment.
-const UNQUALIFIED_SECRET_SEGMENT_PATTERN = /^(?:password|passwd|pwd|secret|credential)s?$/i;
 
 export function isSecretKey(key: string): boolean {
     const segments = key
@@ -139,9 +152,12 @@ function currentUsername(): string | null {
 }
 
 // `homedir()` throws the same way when `HOME` is unset and the UID has no passwd entry.
+// Replacing `/` with `~` would replace every path separator.
 function currentHomeDir(): string | null {
     try {
-        return os.homedir() || null;
+        const home = os.homedir();
+        if (!home || /^(?:[A-Za-z]:)?[\\/]*$/.test(home)) return null;
+        return home;
     } catch {
         return null;
     }
@@ -158,7 +174,9 @@ export function sanitizePathString(value: string): string {
         .replace(/\/Users\/[^/]+\//gi, "/Users/<USER>/")
         .replace(/\/home\/[^/]+\//gi, "/home/<USER>/")
         .replace(/[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]/gi, "C:\\Users\\<USER>\\");
-    if (username) {
+    // A username that is itself a secret vocabulary word (`token`, `auth`) would erase the key
+    // the secret rules match on; the path patterns above still cover its home directory.
+    if (username && !hasSecretKeySegment(username)) {
         sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
     }
     return sanitized;
@@ -168,6 +186,12 @@ const SECRET_TEXT_PATTERNS: Array<{
     pattern: RegExp;
     replacement: string | ((match: string, ...groups: string[]) => string);
 }> = [
+    // A terminated PEM block is replaced whole; an unterminated header takes its base64 lines with it.
+    {
+        pattern:
+            /-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|(?:\r?\n[A-Za-z0-9+/=]{16,}(?=\r?\n|$))*)/g,
+        replacement: "<PRIVATE_KEY_REDACTED>",
+    },
     {
         pattern: /\bsk-ant-(?:api03-)?[A-Za-z0-9_-]{32,}/g,
         replacement: "<ANTHROPIC_API_KEY_REDACTED>",
@@ -224,7 +248,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     // `scheme://user:pass@host` keeps the scheme and host so the endpoint stays identifiable.
     {
-        pattern: /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/@]+)@/gi,
+        pattern: /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/]+)@/gi,
         replacement: (_full: string, scheme: string) => `${scheme}<REDACTED:userinfo>@`,
     },
     {
@@ -233,18 +257,21 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         pattern:
-            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4/gi,
+            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential)[^"']*)\1(\s*:\s*)(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|(-?\d+(?:\.\d+)?))/gi,
         replacement: (
             full: string,
             quote: string,
             key: string,
             separator: string,
-            valueQuote: string,
-            value: string,
-        ) =>
-            !hasSecretKeySegment(key) || isNonSecretScalarValue(value)
-                ? full
-                : `${quote}${key}${quote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`,
+            valueQuote: string | undefined,
+            quoted: string | undefined,
+            bare: string | undefined,
+        ) => {
+            const value = valueQuote ? (quoted ?? "") : (bare ?? "");
+            if (!hasSecretKeySegment(key) || keepsScalarValue(key, value)) return full;
+            const q = valueQuote ?? "";
+            return `${quote}${key}${quote}${separator}${q}<REDACTED:${redactionTypeForKey(key)}>${q}`;
+        },
     },
     // The negative lookahead excludes recognized authorization schemes from this pattern.
     // `[ \t]*` around the colon keeps a bare `key:` at end of line from consuming the next line's first word.
@@ -260,7 +287,7 @@ const SECRET_TEXT_PATTERNS: Array<{
             bare: string | undefined,
         ) => {
             const value = quote ? (quoted ?? "") : (bare ?? "");
-            if (!hasSecretKeySegment(key) || value === "" || isNonSecretScalarValue(value)) {
+            if (!hasSecretKeySegment(key) || value === "" || keepsScalarValue(key, value)) {
                 return full;
             }
             const q = quote ?? "";
@@ -278,7 +305,7 @@ const SECRET_TEXT_PATTERNS: Array<{
             bare: string | undefined,
         ) => {
             const value = quote ? (quoted ?? "") : (bare ?? "");
-            if (!hasSecretKeySegment(key) || value === "" || isNonSecretScalarValue(value)) {
+            if (!hasSecretKeySegment(key) || value === "" || keepsScalarValue(key, value)) {
                 return full;
             }
             const q = quote ?? "";
@@ -288,11 +315,21 @@ const SECRET_TEXT_PATTERNS: Array<{
     // `--api-key abc` / `-p hunter2` style arguments; a value beginning with `-` is the next flag.
     {
         pattern:
-            /(^|\s)(--?[A-Za-z0-9-]*(?:key|token|secret|password|passwd|pwd|auth|credential)[A-Za-z0-9-]*)(\s+)([^\s-]\S*)/gi,
-        replacement: (full: string, lead: string, flag: string, space: string, value: string) => {
+            /(^|\s)(--?[A-Za-z0-9-]*(?:key|token|secret|password|passwd|pwd|auth|credential)[A-Za-z0-9-]*)(\s+)(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|([^\s"'-]\S*))/gi,
+        replacement: (
+            full: string,
+            lead: string,
+            flag: string,
+            space: string,
+            quote: string | undefined,
+            quoted: string | undefined,
+            bare: string | undefined,
+        ) => {
             const key = flag.replace(/^--?/, "");
-            if (!hasSecretKeySegment(key) || isNonSecretScalarValue(value)) return full;
-            return `${lead}${flag}${space}<REDACTED:${redactionTypeForKey(key)}>`;
+            const value = quote ? (quoted ?? "") : (bare ?? "");
+            if (!hasSecretKeySegment(key) || keepsScalarValue(key, value)) return full;
+            const q = quote ?? "";
+            return `${lead}${flag}${space}${q}<REDACTED:${redactionTypeForKey(key)}>${q}`;
         },
     },
 ];

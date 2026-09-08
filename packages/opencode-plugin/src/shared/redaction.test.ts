@@ -10,6 +10,7 @@ import {
     SECRET_QUALIFIERS,
     SECRET_WORDS,
     sanitizeConfigValue,
+    sanitizeDiagnosticText,
     sanitizePathString,
 } from "./redaction";
 
@@ -383,6 +384,83 @@ describe("sanitizePathString without a home directory", () => {
             expect(sanitizePathString("/home/alice/project/eidnara.log")).toBe(
                 "/home/<USER>/project/eidnara.log",
             );
+            expect(spy).toHaveBeenCalled();
+        } finally {
+            spy.mockRestore();
+        }
+    });
+});
+
+describe("redactSecretText — round-eight edge cases", () => {
+    test("redacts a PEM private key block whole, terminated or not", () => {
+        const pem = [
+            "-----BEGIN PRIVATE KEY-----",
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC",
+            "-----END PRIVATE KEY-----",
+        ].join("\n");
+        // The `=` rule then treats the marker as the assigned value, as it does for `AWS_ACCESS_KEY_ID=`.
+        expect(redactSecretText(`PRIVATE_KEY=${pem} trailing`)).toBe(
+            "PRIVATE_KEY=<REDACTED:private_key> trailing",
+        );
+        expect(redactSecretText(`key material:\n${pem}\ndone`)).toBe(
+            "key material:\n<PRIVATE_KEY_REDACTED>\ndone",
+        );
+        const unterminated = "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkq\nhkiG9w0BAQEFAASC";
+        expect(redactSecretText(`${unterminated}\nnext log line`)).toBe(
+            "<PRIVATE_KEY_REDACTED>\nnext log line",
+        );
+    });
+
+    test("redacts URL userinfo through the final at-sign", () => {
+        expect(redactSecretText("https://user:p@ss@example.com/path")).toBe(
+            "https://<REDACTED:userinfo>@example.com/path",
+        );
+        expect(redactSecretText("https://example.com/path?x=a@b")).toBe(
+            "https://example.com/path?x=a@b",
+        );
+    });
+
+    test("redacts numeric values under password-like keys in serialized objects", () => {
+        expect(redactSecretText('{"password":123456}')).toBe('{"password":<REDACTED:password>}');
+        expect(redactSecretText("pin_secret: 4242")).toBe("pin_secret: <REDACTED:secret>");
+        expect(redactSecretText("DB_PASSWD=987654")).toBe("DB_PASSWD=<REDACTED:passwd>");
+        // Numeric values under `api_key`/`token`/`key` stay visible, as the fixture requires.
+        expect(redactSecretText('{"api_key":123456}')).toBe('{"api_key":123456}');
+        expect(redactSecretText('"max_tokens": "4096"')).toBe('"max_tokens": "4096"');
+    });
+
+    test("consumes a quoted CLI argument value whole", () => {
+        expect(redactSecretText('cmd --password "correct horse battery staple" --v')).toBe(
+            'cmd --password "<REDACTED:password>" --v',
+        );
+        expect(redactSecretText("cmd --api-key 'a b' next")).toBe(
+            "cmd --api-key '<REDACTED:api_key>' next",
+        );
+    });
+});
+
+describe("sanitizePathString with hostile OS identities", () => {
+    test("ignores a root home directory", () => {
+        const spy = spyOn(os, "homedir").mockImplementation(() => "/");
+        try {
+            expect(sanitizeDiagnosticText("postgres://user:pass@example.com/db")).toBe(
+                "postgres://<REDACTED:userinfo>@example.com/db",
+            );
+            expect(spy).toHaveBeenCalled();
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test("does not substitute a username that is a secret vocabulary word", () => {
+        const spy = spyOn(os, "userInfo").mockImplementation(
+            () => ({ username: "token" }) as ReturnType<typeof os.userInfo>,
+        );
+        try {
+            expect(sanitizeDiagnosticText("token: abc123 at /home/token/app")).toBe(
+                "token: <REDACTED:token>",
+            );
+            expect(sanitizeDiagnosticText("/home/token/app.log")).toBe("/home/<USER>/app.log");
             expect(spy).toHaveBeenCalled();
         } finally {
             spy.mockRestore();
