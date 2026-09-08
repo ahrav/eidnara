@@ -48,6 +48,11 @@ export interface EventHandlerDeps {
     contextUsageMap: Map<string, ContextUsageEntry>;
     onSessionCacheInvalidated?: (sessionId: string) => void;
     onRustWireInvalidated?: (sessionId: string) => void;
+    /** Fires when the response that supplied the live usage is removed; `model` is the preceding persisted response's model, or `undefined` when none remains. */
+    onNewestResponseRemoved?: (
+        sessionId: string,
+        model: { providerID: string; modelID: string } | undefined,
+    ) => void;
     onSessionDeleted?: (sessionId: string) => void;
     /** The in-process client OpenCode hands the plugin; the post-auth model-limit re-warm reads provider metadata through it. */
     client?: unknown;
@@ -271,6 +276,14 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 if (deps.contextUsageMap.get(info.sessionID)?.messageID === info.messageID) {
                     deps.contextUsageMap.delete(info.sessionID);
                     clearSidebarSnapshotCache(info.sessionID);
+                    // The live model followed the removed response; the preceding persisted response, if any, becomes the reference for both. commentlint: allow(JUDGE)
+                    const preceding = findLastAssistantUsageFromOpenCodeDb(info.sessionID);
+                    deps.onNewestResponseRemoved?.(
+                        info.sessionID,
+                        preceding
+                            ? { providerID: preceding.providerID, modelID: preceding.modelID }
+                            : undefined,
+                    );
                 }
 
                 deps.onSessionCacheInvalidated?.(info.sessionID);

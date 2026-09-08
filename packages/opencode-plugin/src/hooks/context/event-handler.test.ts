@@ -370,6 +370,40 @@ describe("createEventHandler — message.removed", () => {
                 .inputTokens,
         ).toBe(0);
     });
+
+    it("reports the preceding persisted response's model when the newest response is removed", async () => {
+        const db = openCodeDb();
+        try {
+            db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            ).run(
+                "msg-0",
+                SESSION,
+                500,
+                500,
+                JSON.stringify({
+                    role: "assistant",
+                    providerID: "earlier-provider",
+                    modelID: "earlier-model",
+                    tokens: { input: 8_000, output: 10, cache: { read: 0, write: 0 } },
+                }),
+            );
+        } finally {
+            closeQuietly(db);
+        }
+        const removed: Array<[string, { providerID: string; modelID: string } | undefined]> = [];
+        const { deps, handle } = buildHarness();
+        deps.onNewestResponseRemoved = (sessionId, model) => removed.push([sessionId, model]);
+
+        await handle("message.updated", assistantUpdated({ input: 40_000 }));
+        await handle("message.removed", { sessionID: SESSION, messageID: "msg-other" });
+        expect(removed).toEqual([]);
+
+        await handle("message.removed", { sessionID: SESSION, messageID: "msg-1" });
+        expect(removed).toEqual([
+            [SESSION, { providerID: "earlier-provider", modelID: "earlier-model" }],
+        ]);
+    });
 });
 
 describe("createEventHandler — session.compacted", () => {

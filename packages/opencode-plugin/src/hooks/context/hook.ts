@@ -313,6 +313,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         onRustWireInvalidated: (sessionId: string) => {
             rustTransform.invalidateWireState(sessionId);
         },
+        onNewestResponseRemoved: (sessionId: string, model) => {
+            if (model) liveModelBySession.set(sessionId, model);
+            else liveModelBySession.delete(sessionId);
+        },
         // Deletion prunes per-session state so entries do not outlive the session.
         onSessionDeleted: (sessionId: string) => {
             addBoundedSession(deletedSessions, sessionId);
