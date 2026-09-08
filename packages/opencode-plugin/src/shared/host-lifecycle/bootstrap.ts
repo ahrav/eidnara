@@ -242,7 +242,8 @@ function classifyEntry(entryPath: string): EntryKind {
  * trigger an auto-install.
  */
 export function resolvePayloadPackageDir(options: {
-    declaringParentRoot: string;
+    /** Start of the lexical `node_modules` walk; unused once `explicitExternalRoot` is set. */
+    declaringParentRoot?: string;
     packageName: string;
     /** Compiled-Bun external root; checked before lexical walking. */
     explicitExternalRoot?: string;
@@ -268,6 +269,13 @@ export function resolvePayloadPackageDir(options: {
             ok: false,
             reason: "unsupported_install_layout",
             detail: "explicit external root has no physical payload directory",
+        };
+    }
+    if (declaringParentRoot === undefined) {
+        return {
+            ok: false,
+            reason: "unsupported_install_layout",
+            detail: "no declaring parent root to walk and no explicit external root",
         };
     }
     const segments = packageName.split("/");

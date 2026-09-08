@@ -6,6 +6,7 @@ import hostRelease from "../../../../../release/host-release.json";
 import type { CatalogEntry } from "../host-client";
 import type { PlatformReaders } from "./bootstrap";
 import { parseDaemonResult } from "./contract";
+import { buildManagedCredentialEnvelope } from "./managed-policy";
 import {
     aggregateForTarget,
     HostLifecyclePolicy,
@@ -347,6 +348,19 @@ describe("observational commands without a trusted bootstrap (U3 scenario 21)", 
 });
 
 describe("native invocation mapping", () => {
+    test("managed credential envelopes include only bounded Broca credential names", () => {
+        expect(
+            buildManagedCredentialEnvelope({
+                OPENAI_API_KEY: "secret",
+                PATH: "/poisoned",
+                EMPTY: "",
+            }),
+        ).toEqual({
+            schema: 1,
+            credentials: { OPENAI_API_KEY: "secret" },
+        });
+    });
+
     test("native current validation precedes one deferred certified package lookup", async () => {
         const root = tempDir("eidnara-policy-fallback-");
         const invocationLog = path.join(root, "fallback-invocations.log");

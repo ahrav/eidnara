@@ -114,7 +114,7 @@ function compatibilityInput(snapshot: CompatibilitySnapshot): CompatibilityInput
  * explicit second signal rather than a clock that also jumps for timezone and
  * NTP corrections.
  */
-function monotonicNow(): number {
+export function monotonicNow(): number {
     return performance.now();
 }
 

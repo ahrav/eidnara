@@ -36,7 +36,8 @@ export interface PreparedManagedLaunchTarget {
 
 export interface PrepareManagedLaunchTargetOptions {
     dataRoot: string;
-    declaringParentRoot: string;
+    /** Start of the lexical `node_modules` walk; unused once `explicitExternalRoot` is set. */
+    declaringParentRoot?: string;
     target: PayloadTarget;
     /** Whether a missing or stale retained bootstrap may be staged from the package; observation never stages. */
     allowStaging: boolean;
@@ -252,8 +253,10 @@ function payloadPackageFor(target: PayloadTarget): string {
 
 function resolveVerifiedPayload(options: ResolveManagedPayloadDirOptions): VerifiedPayload {
     const resolution = resolvePayloadPackageDir({
-        declaringParentRoot: options.declaringParentRoot,
         packageName: payloadPackageFor(options.target),
+        ...(options.declaringParentRoot === undefined
+            ? {}
+            : { declaringParentRoot: options.declaringParentRoot }),
         ...(options.explicitExternalRoot === undefined
             ? {}
             : { explicitExternalRoot: options.explicitExternalRoot }),
