@@ -7,28 +7,18 @@ export interface ThinkingLikePart {
 
 const encoder = new TextEncoder();
 
-const TAG_PREFIX_REGEX = /^(?:§\d+§\s*)+/;
-
-//
-//
-// `§15298">§15298§ hello...` matches the malformed-prefix regex.
-// `MALFORMED_TAG_PREFIX_REGEX` matches `§15298">§ hello...` without closing digits.
-//
-//
-const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
-
-// `(?!\d|\.\d)` rejects decimal references and prevents `\d+` from backtracking to a shorter prefix.
-// Without the digit alternative, `§42.1` matches as `§4` and leaves `2.1`.
+// The lookahead preserves numeric references such as `§42.1` and adjacent tags such as `§1 §2§`.
 // The closed closer set prevents a broad symbol class from consuming an authored emoji or a `#` heading marker.
-const DANGLING_TAG_CLOSER = String.raw`(?:">|[$"'\u04a9])`;
-const DANGLING_TAG_GLOBAL_REGEX = new RegExp(
-    String.raw`\u00a7\d+(?!\d|\.\d)${DANGLING_TAG_CLOSER}?`,
-    "gu",
-);
-const DANGLING_TAG_PREFIX_REGEX = new RegExp(
-    String.raw`^(?:\u00a7\d+(?!\d|\.\d)${DANGLING_TAG_CLOSER}?\s*)+`,
-    "u",
-);
+const DANGLING_TAG_CORE = String.raw`\u00a7\d+(?!\d|\.\d|\u00a7)(?:">|[$"'\u04a9])?`;
+const DANGLING_TAG_GLOBAL_REGEX = new RegExp(DANGLING_TAG_CORE, "gu");
+
+// Sticky (`y`) makes each rule match only at the current offset. The malformed rule precedes the
+// dangling rule because both can match `§N">`, and only the malformed rule consumes the whole hybrid.
+const LEADING_TAG_RULES: readonly RegExp[] = [
+    /\u00a7\d+">\u00a7(?:\d+\u00a7)?\s*/y,
+    /\u00a7\d+\u00a7\s*/y,
+    new RegExp(String.raw`${DANGLING_TAG_CORE}\s*`, "uy"),
+];
 
 /* */
 const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;
@@ -83,20 +73,20 @@ export function byteSize(value: string): number {
  * Does not remove bare leading digits: preserve `99 files`, `2024 roadmap`, and numbered lists.
  */
 export function stripTagPrefix(value: string): string {
-    let stripped = value;
-    // Every replacement removes at least one character, so the loop ends within `value.length` passes.
-    for (;;) {
-        const prev = stripped;
-        stripped = stripped.replace(MALFORMED_TAG_PREFIX_REGEX, "");
-        stripped = stripped.replace(TAG_PREFIX_REGEX, "");
-        // A removed well-formed prefix can expose a malformed one, as in `§1§ §2">§2§ x`. Restarting
-        // lets the malformed pass remove it whole; the dangling pass would take only `§2"` and leave `>§2§ x`.
-        if (stripped !== prev) continue;
-        // The dangling pass runs only when no well-formed prefix remains, so `§N§` is never reduced to `§`.
-        stripped = stripped.replace(DANGLING_TAG_PREFIX_REGEX, "");
-        if (stripped === prev) break;
+    // Each accepted match advances `offset`, preventing zero-length matches from looping indefinitely.
+    let offset = 0;
+    scan: while (offset < value.length) {
+        for (const rule of LEADING_TAG_RULES) {
+            rule.lastIndex = offset;
+            const match = rule.exec(value);
+            if (match !== null && match[0].length > 0) {
+                offset += match[0].length;
+                continue scan;
+            }
+        }
+        break;
     }
-    return stripped;
+    return offset === 0 ? value : value.slice(offset);
 }
 
 /**

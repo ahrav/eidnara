@@ -228,4 +228,26 @@ describe("compactTextForSummary", () => {
             "Looked at abc1234",
         );
     });
+
+    it("keeps hashes beyond the per-block cap in the narrative", () => {
+        const result = compactTextForSummary(
+            "Committed a1b2c3d, b2c3d4e, c3d4e5f, d4e5f6a, e5f6a7b and f6a7b8c",
+            "assistant",
+        );
+
+        expect(result.commitHashes).toEqual([
+            "a1b2c3d",
+            "b2c3d4e",
+            "c3d4e5f",
+            "d4e5f6a",
+            "e5f6a7b",
+        ]);
+        expect(result.text).toBe("Committed, and f6a7b8c");
+    });
+
+    it("removes every occurrence of a retained hash, matching case-insensitively", () => {
+        expect(
+            compactTextForSummary("Committed ABC1234 then reverted abc1234", "assistant"),
+        ).toEqual({ text: "Committed then reverted", commitHashes: ["abc1234"] });
+    });
 });

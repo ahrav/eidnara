@@ -168,8 +168,12 @@ export function compactTextForSummary(
         return { text, commitHashes };
     }
 
+    // Remove only extracted hashes; hashes beyond `MAX_COMMITS_PER_BLOCK` remain in `text`.
+    const retained = new Set(commitHashes);
     const withoutHashes = text
-        .replace(createCommitHashExtractPattern(), removeHashKeepUnpairedBacktick)
+        .replace(createCommitHashExtractPattern(), (match, hash: string) =>
+            retained.has(hash.toLowerCase()) ? removeHashKeepUnpairedBacktick(match) : match,
+        )
         .replace(/\(\s*\)/g, "")
         .replace(/\s+,/g, ",")
         .replace(/,\s*,+/g, ", ")

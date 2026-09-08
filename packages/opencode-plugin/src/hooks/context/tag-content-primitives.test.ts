@@ -132,6 +132,33 @@ describe("stripTagPrefix (transform §N§ notation only)", () => {
         expect(prependTag(99, value)).toBe(`${SECTION}99${SECTION} hello`);
     });
 
+    it("#given a dangling prefix before a well-formed tag #when stripTagPrefix runs #then removes both whole", () => {
+        // The dangling rule must stop before `§2§` so the pair rule can take it as a unit.
+        expect(stripTagPrefix(`${SECTION}1 ${SECTION}2${SECTION} hello`)).toBe("hello");
+        expect(prependTag(9, `${SECTION}1 ${SECTION}2${SECTION} hello`)).toBe(
+            `${SECTION}9${SECTION} hello`,
+        );
+        expect(stripPersistedAssistantText(`${SECTION}1 ${SECTION}2${SECTION} hello`)).toBe(
+            "hello",
+        );
+    });
+
+    it("#given a very long adversarial prefix chain #when stripTagPrefix runs #then finishes in linear time", () => {
+        let value = "";
+        for (let i = 0; i < 40_000; i++) {
+            value +=
+                i % 2 === 0
+                    ? `${SECTION}${i}${SECTION} `
+                    : `${SECTION}${i}">${SECTION}${i}${SECTION} `;
+        }
+        value += "hello";
+
+        const started = performance.now();
+        expect(stripTagPrefix(value)).toBe("hello");
+        // The 40,000-prefix input distinguishes linear scans from quadratic scans.
+        expect(performance.now() - started).toBeLessThan(200);
+    });
+
     it("#given accumulated bare digit residue #when stripTagPrefix runs #then preserves digits", () => {
         expect(stripTagPrefix(`2030  2030  2030${DEGREE} Run clippy`)).toBe(
             `2030  2030  2030${DEGREE} Run clippy`,
