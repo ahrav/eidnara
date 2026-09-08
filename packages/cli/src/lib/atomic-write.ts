@@ -42,6 +42,8 @@ function resolveLinkTarget(path: string): string {
         return realpathSync.native(path);
     } catch {
         // realpath rejects a dangling link, so the chain is followed by hand to its missing end.
+        // A chain that never reaches a non-link is an error: renaming over the unresolved entry would replace the user's link with a file.
+        const seen = new Set<string>();
         let current = path;
         for (let hop = 0; hop < MAX_LINK_HOPS; hop++) {
             let link: string;
@@ -52,9 +54,17 @@ function resolveLinkTarget(path: string): string {
             } catch {
                 return current;
             }
+            if (seen.has(current)) {
+                throw new Error(
+                    `symlink cycle while resolving config target ${path} at ${current}`,
+                );
+            }
+            seen.add(current);
             current = resolve(dirname(current), link);
         }
-        return current;
+        throw new Error(
+            `symlink chain for config target ${path} exceeds ${MAX_LINK_HOPS} hops at ${current}`,
+        );
     }
 }
 

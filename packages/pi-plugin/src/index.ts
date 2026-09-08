@@ -12,7 +12,10 @@ import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import type { EidnaraConfig, SidekickConfig } from "@eidnara/opencode/config/schema/eidnara";
-import { resolveProjectIdentityForSession } from "@eidnara/opencode/features/context/project-identity";
+import {
+    resolveProjectIdentityForSession,
+    resolveProjectRootDirectory,
+} from "@eidnara/opencode/features/context/project-identity";
 import { setCtxReduceRegisteredGlobally } from "@eidnara/opencode/hooks/context/ctx-reduce-availability";
 import { closeKernelSession } from "@eidnara/opencode/hooks/context/kernel-transport";
 import {
@@ -296,7 +299,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // The boot project affects only initial config loading and logging.
     // Identity and path resolution use `ctx.cwd` for each hook and command, so cwd switches follow the active project without reloading config.
-    const projectDir = process.cwd();
+    // Project config lives at `<root>/.eidnara/`, so a nested start directory resolves to the checkout root the daemon routes also bind.
+    const projectDir = resolveProjectRootDirectory(process.cwd());
     // Invalid config fields use defaults per key.
     //
     // `warn()` surfaces invalid-config warnings to users.
@@ -368,7 +372,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         };
     }
 
-    function resolveProjectDepsForDir(dir: string): ResolvedPiProjectDeps {
+    // Keyed by the checkout root, so every nested cwd in one project shares one config load and one cache entry.
+    function resolveProjectDepsForDir(rawDir: string): ResolvedPiProjectDeps {
+        const dir = resolveProjectRootDirectory(rawDir);
         const cached = projectDepsByDir.get(dir);
         if (cached) return cached;
         const switchedLoad = loadPiConfig({ cwd: dir });

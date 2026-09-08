@@ -106,4 +106,34 @@ describe("writeFileAtomic", () => {
         expect(statSync(target).isDirectory()).toBe(true);
         expect(stagedSiblings(root)).toEqual([]);
     });
+
+    it("refuses a symlink cycle instead of replacing a link with a file", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-cycle-"));
+        roots.push(root);
+        const a = join(root, "a.jsonc");
+        const b = join(root, "b.jsonc");
+        symlinkSync("b.jsonc", a);
+        symlinkSync("a.jsonc", b);
+
+        expect(() => writeFileAtomic(a, "v1\n")).toThrow(/symlink cycle/);
+
+        expect(lstatSync(a).isSymbolicLink()).toBe(true);
+        expect(lstatSync(b).isSymbolicLink()).toBe(true);
+        expect(stagedSiblings(root)).toEqual([]);
+    });
+
+    it("refuses a dangling chain longer than the hop limit", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-long-chain-"));
+        roots.push(root);
+        // link-0 -> link-1 -> ... -> link-40 -> missing; the chain never reaches a non-link within 32 hops.
+        for (let i = 0; i <= 40; i++) {
+            symlinkSync(`link-${i + 1}.jsonc`, join(root, `link-${i}.jsonc`));
+        }
+        const head = join(root, "link-0.jsonc");
+
+        expect(() => writeFileAtomic(head, "v1\n")).toThrow(/exceeds 32 hops/);
+
+        expect(lstatSync(head).isSymbolicLink()).toBe(true);
+        expect(stagedSiblings(root)).toEqual([]);
+    });
 });
