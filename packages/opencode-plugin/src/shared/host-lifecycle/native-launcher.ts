@@ -99,6 +99,8 @@ export interface NativeStartupEnvelope {
 
 const MAX_STDOUT_BYTES = 256 * 1024;
 const STDIO_FLUSH_GRACE_MS = 250;
+/** The host rejects stdin envelopes larger than 64 KiB (`spawn.rs` `MAX_ENVELOPE_BYTES`). */
+const MAX_ENVELOPE_BYTES = 64 * 1024;
 /**
  * Largest delay `setTimeout` honors. Node and Bun coerce a larger value to 1ms
  * with a `TimeoutOverflowWarning`.
@@ -173,12 +175,17 @@ function collectChild(child: ChildProcess, deadlineAt: number): Promise<Collecte
             reject(new NativeLaunchError("spawn_failed", `native spawn failed: ${error.name}`));
         });
         // The `exit` handler waits STDIO_FLUSH_GRACE_MS before destroying the
-        // pipes so inherited descriptors cannot delay `close` indefinitely.
+        // pipes so inherited descriptors cannot delay `close` indefinitely. The
+        // wait is capped by the remaining budget so `close` cannot land past the
+        // caller's deadline.
         child.on("exit", () => {
-            stdioGrace = setTimeout(() => {
-                child.stdout?.destroy();
-                child.stderr?.destroy();
-            }, STDIO_FLUSH_GRACE_MS);
+            stdioGrace = setTimeout(
+                () => {
+                    child.stdout?.destroy();
+                    child.stderr?.destroy();
+                },
+                Math.min(STDIO_FLUSH_GRACE_MS, Math.max(0, deadlineAt - performance.now())),
+            );
         });
         child.on("close", (exitCode, signal) => {
             if (settled) return;
@@ -278,6 +285,12 @@ export async function runNativeLifecycle(
             throw new NativeLaunchError(
                 "usage_error",
                 "native startup envelope is not JSON-serializable",
+            );
+        }
+        if (Buffer.byteLength(serializedEnvelope, "utf8") > MAX_ENVELOPE_BYTES) {
+            throw new NativeLaunchError(
+                "usage_error",
+                "native startup envelope exceeds the launcher's byte cap",
             );
         }
     }

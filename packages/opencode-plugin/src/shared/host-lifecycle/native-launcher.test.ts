@@ -244,19 +244,23 @@ describe("native launcher output handling (U3 scenario 17)", () => {
     });
 
     test("a hung child is killed at the deadline (KTD22 bound)", async () => {
-        const binary = scriptBinary(dir, `sleep 30`);
-        const started = Date.now();
+        // A backgrounded grandchild keeps stdout open after the child exits, so
+        // `close` waits for the stdio grace timer instead of EOF.
+        const binary = scriptBinary(dir, `sleep 30 &\nsleep 30`);
+        const deadlineMs = 500;
+        const started = performance.now();
         let error: NativeLaunchError | null = null;
         try {
             await runNativeLifecycle(
                 { kind: "test-binary", path: binary },
-                { command: "probe", dataRoot: dir, deadlineMs: 500 },
+                { command: "probe", dataRoot: dir, deadlineMs },
             );
         } catch (caught) {
             error = caught as NativeLaunchError;
         }
         expect(error?.code).toBe("timeout");
-        expect(Date.now() - started).toBeLessThan(5_000);
+        // An uncapped 250ms stdio grace after the kill would land near 750ms.
+        expect(performance.now() - started).toBeLessThan(deadlineMs + 150);
     }, 10_000);
 
     test("the deadline clock starts at entry, so slow pre-spawn work spawns no child", async () => {
@@ -521,6 +525,44 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         expect(error).toBeInstanceOf(NativeLaunchError);
         expect(error?.code).toBe("usage_error");
     });
+
+    test("an envelope over the native 64 KiB cap is rejected before a child is spawned", async () => {
+        const sentinel = path.join(dir, "oversized-envelope-ran");
+        const binary = scriptBinary(dir, `touch ${sentinel}\ncat > /dev/null`);
+        const cap = 64 * 1024;
+        // `{"pad":"…"}` wraps the payload in 10 bytes, so the string length sets
+        // the serialized size exactly.
+        const atCap = { pad: "x".repeat(cap - 10) };
+        const overCap = { pad: "x".repeat(cap - 10 + 1) };
+        expect(Buffer.byteLength(JSON.stringify(atCap), "utf8")).toBe(cap);
+        expect(Buffer.byteLength(JSON.stringify(overCap), "utf8")).toBe(cap + 1);
+
+        let error: NativeLaunchError | null = null;
+        try {
+            await runNativeLifecycle(
+                { kind: "test-binary", path: binary },
+                { command: "start", dataRoot: dir, deadlineMs: 10_000, envelope: overCap },
+            );
+        } catch (caught) {
+            error = caught as NativeLaunchError;
+        }
+        expect(error?.code).toBe("usage_error");
+        expect(error?.message).toContain("byte cap");
+        expect(existsSync(sentinel)).toBe(false);
+
+        // Exactly at the cap is accepted and reaches the child.
+        let atCapError: NativeLaunchError | null = null;
+        try {
+            await runNativeLifecycle(
+                { kind: "test-binary", path: binary },
+                { command: "start", dataRoot: dir, deadlineMs: 10_000, envelope: atCap },
+            );
+        } catch (caught) {
+            atCapError = caught as NativeLaunchError;
+        }
+        expect(atCapError?.code).not.toBe("usage_error");
+        expect(existsSync(sentinel)).toBe(true);
+    }, 10_000);
 
     test("stderr past the cap is discarded without killing a healthy child", async () => {
         // Stderr must stay drained, not closed: this child writes far past the
