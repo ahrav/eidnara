@@ -43,28 +43,50 @@ function isToolCallId(value: unknown): value is string {
     return typeof value === "string" && value.length > 0;
 }
 
-/** A failed OpenCode tool carries its result in `state.error`; the wire serializes that field. */
-function isErrorState(state: Record<string, unknown>): boolean {
-    return state.status === "error" && typeof state.error === "string";
+interface ToolPartFields {
+    state: Record<string, unknown> | null;
+    status: string | undefined;
+    outputOwner: Record<string, unknown>;
+    errorOwner: Record<string, unknown>;
+    input: Record<string, unknown> | null;
 }
 
-// `crates/daemon/src/codec/opencode.rs` reads `state.attachments`, then `part.attachments`, into result blocks.
-function clearToolAttachments(
-    part: Record<string, unknown>,
-    state: Record<string, unknown>,
-): boolean {
-    const had = "attachments" in state || "attachments" in part;
-    delete state.attachments;
+/** Preserves nested versus top-level field placement when rewriting tool results. */
+function toolPartFields(part: Record<string, unknown>): ToolPartFields {
+    const state = isRecord(part.state) ? part.state : null;
+    const owner = (key: string): Record<string, unknown> => {
+        if (state !== null && key in state) return state;
+        if (key in part) return part;
+        return state ?? part;
+    };
+    const statusOwner = owner("status");
+    const status = typeof statusOwner.status === "string" ? statusOwner.status : undefined;
+    let input: Record<string, unknown> | null = null;
+    if (state !== null && isRecord(state.input)) input = state.input;
+    else if (isRecord(part.input)) input = part.input;
+    else if (isRecord(part.args)) input = part.args;
+    return { state, status, outputOwner: owner("output"), errorOwner: owner("error"), input };
+}
+
+/** A failed OpenCode tool carries its result in `error`; the wire serializes that field. */
+function isErrorResult(fields: ToolPartFields): boolean {
+    return fields.status === "error" && typeof fields.errorOwner.error === "string";
+}
+
+function clearToolAttachments(part: Record<string, unknown>, fields: ToolPartFields): boolean {
+    const had = (fields.state !== null && "attachments" in fields.state) || "attachments" in part;
+    if (fields.state !== null) delete fields.state.attachments;
     delete part.attachments;
     return had;
 }
 
 function getToolContent(part: unknown): string | undefined {
     if (!isRecord(part)) return undefined;
-    if (part.type === "tool" && isRecord(part.state)) {
-        const state = part.state;
-        if (typeof state.output === "string") return state.output;
-        return isErrorState(state) ? (state.error as string) : undefined;
+    if (part.type === "tool") {
+        const fields = toolPartFields(part);
+        const output = fields.outputOwner.output;
+        if (typeof output === "string") return output;
+        return isErrorResult(fields) ? (fields.errorOwner.error as string) : undefined;
     }
     if (part.type === "tool_result") {
         return typeof part.content === "string" ? part.content : undefined;
@@ -72,15 +94,19 @@ function getToolContent(part: unknown): string | undefined {
     return undefined;
 }
 
+function writeToolResult(fields: ToolPartFields, content: string): void {
+    fields.outputOwner.output = content;
+    if (isErrorResult(fields)) fields.errorOwner.error = content;
+}
+
 function setToolContent(part: unknown, content: string): boolean {
     if (!isRecord(part)) return false;
     let changed = false;
-    if (part.type === "tool" && isRecord(part.state)) {
-        const state = part.state;
+    if (part.type === "tool") {
+        const fields = toolPartFields(part);
         const textChanged = getToolContent(part) !== content;
-        const attachmentsCleared = clearToolAttachments(part, state);
-        state.output = content;
-        if (isErrorState(state)) state.error = content;
+        const attachmentsCleared = clearToolAttachments(part, fields);
+        writeToolResult(fields, content);
         changed = textChanged || attachmentsCleared;
     } else if (part.type === "tool_result") {
         changed = part.content !== content;
@@ -120,24 +146,20 @@ function clampCloneInPlace(occurrence: IndexedOccurrence, clamp: (part: unknown)
     }
 }
 
+function clampInput(input: Record<string, unknown>): void {
+    if (estimateInputSize(input) > INPUT_CLAMP_BYTES) truncateInputValues(input);
+}
+
 function truncateToolPart(part: unknown, tagId: number): void {
     if (!isRecord(part)) return;
 
     const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
 
-    if (part.type === "tool" && isRecord(part.state)) {
-        const state = part.state;
-        state.output = sentinel;
-        if (isErrorState(state)) state.error = sentinel;
-        clearToolAttachments(part, state);
-
-        if (isRecord(state.input)) {
-            const inputSize = estimateInputSize(state.input);
-            if (inputSize > 500) {
-                truncateInputValues(state.input);
-            }
-        }
-
+    if (part.type === "tool") {
+        const fields = toolPartFields(part);
+        writeToolResult(fields, sentinel);
+        clearToolAttachments(part, fields);
+        if (fields.input !== null) clampInput(fields.input);
         return;
     }
 
@@ -146,21 +168,12 @@ function truncateToolPart(part: unknown, tagId: number): void {
         return;
     }
 
-    if (part.type === "tool-invocation" && isRecord(part.args)) {
-        const inputSize = estimateInputSize(part.args as Record<string, unknown>);
-        if (inputSize > 500) {
-            truncateInputValues(part.args as Record<string, unknown>);
-        }
-        return;
-    }
-
-    if (part.type === "tool_use" && isRecord(part.input)) {
-        const inputSize = estimateInputSize(part.input as Record<string, unknown>);
-        if (inputSize > 500) {
-            truncateInputValues(part.input as Record<string, unknown>);
-        }
-    }
+    const input = readToolPartInput(part);
+    if (input !== null) clampInput(input);
 }
+
+/** Maximum JSON-serialized input size before truncation. */
+const INPUT_CLAMP_BYTES = 500;
 
 function estimateInputSize(input: Record<string, unknown>): number {
     try {
@@ -170,13 +183,9 @@ function estimateInputSize(input: Record<string, unknown>): number {
     }
 }
 
-/**
- */
 function readToolPartInput(part: unknown): Record<string, unknown> | null {
     if (!isRecord(part)) return null;
-    if (part.type === "tool" && isRecord(part.state) && isRecord(part.state.input)) {
-        return part.state.input;
-    }
+    if (part.type === "tool") return toolPartFields(part).input;
     if (part.type === "tool-invocation" && isRecord(part.args)) return part.args;
     if (part.type === "tool_use" && isRecord(part.input)) return part.input;
     return null;
@@ -245,28 +254,39 @@ function containsSignature(value: unknown): boolean {
     return Object.values(value).some(containsSignature);
 }
 
-/** Providers verify signed reasoning against its original bytes, so a signed part is left verbatim. */
-function isSignedReasoning(part: ThinkingLikePart): boolean {
+function isProtectedReasoning(part: ThinkingLikePart): boolean {
     const record: unknown = part;
     if (!isRecord(record)) return false;
-    return typeof record.signature === "string" || containsSignature(record.metadata);
+    if (typeof record.signature === "string" || containsSignature(record.metadata)) return true;
+    if (typeof record.data === "string" || typeof record.redacted === "string") return true;
+    return isRecord(record.metadata) && typeof record.metadata.redacted === "string";
 }
 
 function clearThinkingParts(thinkingParts: ThinkingLikePart[]): void {
     for (const part of thinkingParts) {
-        if (isSignedReasoning(part)) continue;
-        if (part.thinking !== undefined) part.thinking = "[cleared]";
-        if (part.text !== undefined) part.text = "[cleared]";
+        if (isProtectedReasoning(part)) continue;
+        let changed = false;
+        if (part.thinking !== undefined && part.thinking !== "[cleared]") {
+            part.thinking = "[cleared]";
+            changed = true;
+        }
+        if (part.text !== undefined && part.text !== "[cleared]") {
+            part.text = "[cleared]";
+            changed = true;
+        }
+        if (changed) markPartMutated(part);
     }
 }
 
 export function partHasCompletedResult(part: unknown): boolean {
     if (!isRecord(part)) return false;
     if (part.type === "tool") {
-        if (!isRecord(part.state)) return false;
-        const status = part.state.status;
+        const fields = toolPartFields(part);
+        if (fields.state === null && fields.status === undefined) return false;
         return (
-            status === "completed" || status === "error" || typeof part.state.output === "string"
+            fields.status === "completed" ||
+            fields.status === "error" ||
+            typeof fields.outputOwner.output === "string"
         );
     }
     return part.type === "tool_result";

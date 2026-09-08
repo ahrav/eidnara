@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { RAW_PART_VERSION_KEY } from "./read-session-raw";
 import type { MessageLike, ThinkingLikePart } from "./tag-content-primitives";
 import {
     createToolDropTarget,
@@ -126,6 +127,22 @@ describe("tool-drop-target", () => {
             ).toBe(true);
         });
 
+        it("counts a flat OpenCode tool part with top-level terminal fields as closed", () => {
+            expect(
+                partHasCompletedResult({
+                    type: "tool",
+                    callID: "c",
+                    status: "completed",
+                    input: { q: "a" },
+                    output: "done",
+                }),
+            ).toBe(true);
+            expect(
+                partHasCompletedResult({ type: "tool", callID: "c", status: "running", input: {} }),
+            ).toBe(false);
+            expect(partHasCompletedResult({ type: "tool", callID: "c" })).toBe(false);
+        });
+
         it("keeps a running OpenCode tool part (no output, no error) open", () => {
             expect(
                 partHasCompletedResult({
@@ -239,6 +256,68 @@ describe("tool-drop-target", () => {
                     expect(JSON.stringify(signedNested)).toBe(pristineNested);
                     expect(JSON.stringify(signedTop)).toBe(pristineTop);
                     expect(unsigned.text).toBe("[cleared]");
+                });
+
+                it("#then redacted reasoning stays verbatim in every persisted form", () => {
+                    const topData = { type: "reasoning", text: "", data: "opaque-1" };
+                    const topRedacted = { type: "reasoning", text: "", redacted: "opaque-2" };
+                    const metaRedacted = {
+                        type: "reasoning",
+                        text: "",
+                        metadata: { redacted: "opaque-3" },
+                    };
+                    const pristine = [topData, topRedacted, metaRedacted].map((p) =>
+                        JSON.stringify(p),
+                    );
+                    const messages: MessageLike[] = [
+                        message("m-inv", "assistant", [{ type: "tool_use", id: "call-red" }]),
+                        message("m-res", "tool", [
+                            { type: "tool", callID: "call-red", state: { output: "out" } },
+                        ]),
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget(
+                        "call-red",
+                        [topData, topRedacted, metaRedacted],
+                        index,
+                        batch,
+                        24,
+                    );
+
+                    expect(target.drop()).toBe("removed");
+
+                    expect(
+                        [topData, topRedacted, metaRedacted].map((p) => JSON.stringify(p)),
+                    ).toEqual(pristine);
+                });
+
+                it("#then clearing unsigned reasoning advances the part version once", () => {
+                    const reasoning = { type: "reasoning", text: "reasoning" };
+                    Object.defineProperty(reasoning, RAW_PART_VERSION_KEY, {
+                        value: 1_700_000_000_000,
+                        enumerable: false,
+                        configurable: true,
+                    });
+                    const versionOf = (p: object): unknown =>
+                        (p as Record<string, unknown>)[RAW_PART_VERSION_KEY];
+                    const messages: MessageLike[] = [
+                        message("m-res", "tool", [
+                            { type: "tool", callID: "call-ver", state: { output: "out" } },
+                        ]),
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-ver", [reasoning], index, batch, 25);
+
+                    expect(target.truncate()).toBe("truncated");
+                    const stamped = versionOf(reasoning);
+                    expect(reasoning.text).toBe("[cleared]");
+                    expect(typeof stamped).toBe("string");
+
+                    // A second clear over already-cleared text is a no-op and keeps the stamp.
+                    expect(target.drop()).toBe("removed");
+                    expect(versionOf(reasoning)).toBe(stamped);
                 });
             });
         });
@@ -701,6 +780,65 @@ describe("tool-drop-target", () => {
                     expect(failedRead.state.error).toBe("ENOENT");
                     // A second identical write is a no-op because the error field is what is compared.
                     expect(target.setContent("ENOENT")).toBe(false);
+                });
+            });
+        });
+
+        describe("#given a flat OpenCode tool part with top-level status, input, and output", () => {
+            describe("#when it is truncated or replaced", () => {
+                it("#then the top-level fields are the ones rewritten and the input is clamped", () => {
+                    const flat = {
+                        type: "tool",
+                        callID: "call-flat",
+                        status: "completed",
+                        input: { content: "f".repeat(600) },
+                        output: "big output",
+                    };
+                    const pristine = JSON.stringify(flat);
+                    const messages: MessageLike[] = [message("m-flat", "assistant", [flat])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-flat", [], index, batch, 26);
+
+                    expect(target.canDrop()).toBe(true);
+                    expect(target.readInput()).toEqual({ content: "f".repeat(600) });
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as Record<string, unknown> & {
+                        input: { content: string };
+                    };
+                    expect(wire.output).toBe("[dropped \u00a726\u00a7]");
+                    expect(wire.input.content).toBe("fffff...[truncated]");
+                    expect("state" in wire).toBe(false);
+                    expect(JSON.stringify(flat)).toBe(pristine);
+
+                    expect(target.setContent("replaced")).toBe(true);
+                    expect(wire.output).toBe("replaced");
+                    expect("state" in wire).toBe(false);
+                });
+
+                it("#then a nested state with a top-level input fallback clamps that input", () => {
+                    const mixed = {
+                        type: "tool",
+                        callID: "call-mixed",
+                        args: { query: "g".repeat(600) },
+                        state: { status: "completed", output: "done" },
+                    };
+                    const messages: MessageLike[] = [message("m-mixed", "assistant", [mixed])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-mixed", [], index, batch, 27);
+
+                    expect(target.readInput()).toBe(mixed.args);
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as {
+                        args: { query: string };
+                        state: { output: string };
+                    };
+                    expect(wire.args.query).toBe("ggggg...[truncated]");
+                    expect(wire.state.output).toBe("[dropped \u00a727\u00a7]");
+                    expect(mixed.args.query).toBe("g".repeat(600));
                 });
             });
         });
