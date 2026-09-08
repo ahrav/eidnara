@@ -106,6 +106,51 @@ describe("runSidekick", () => {
         expect(result).toBe("Focused result");
     });
 
+    it("rejects output that is only an unterminated thinking block", async () => {
+        const client = createSidekickClient({
+            messages: [
+                {
+                    info: { role: "assistant", time: { created: Date.now() } },
+                    parts: [{ type: "text", text: "<think>reasoning cut off mid-" }],
+                },
+            ],
+        });
+
+        const result = await runSidekick({
+            client,
+            projectPath: "/repo/project",
+            userMessage: "Implement sidekick.",
+            config: baseConfig,
+        });
+
+        expect(result).toBeNull();
+    });
+
+    it("strips a trailing unterminated thinking block after a closed one", async () => {
+        const client = createSidekickClient({
+            messages: [
+                {
+                    info: { role: "assistant", time: { created: Date.now() } },
+                    parts: [
+                        {
+                            type: "text",
+                            text: "<think>hidden</think>Focused result<think>more reasoning",
+                        },
+                    ],
+                },
+            ],
+        });
+
+        const result = await runSidekick({
+            client,
+            projectPath: "/repo/project",
+            userMessage: "Implement sidekick.",
+            config: baseConfig,
+        });
+
+        expect(result).toBe("Focused result");
+    });
+
     it("returns null when the child session cannot be created", async () => {
         const client = createSidekickClient({ createSessionId: null });
 
