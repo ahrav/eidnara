@@ -20,7 +20,8 @@ afterEach(() => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("OmpAdapter", () => {
+// The fixture is an extensionless `#!/bin/sh` script, which `findOnPath` does not accept on Windows.
+describe.if(process.platform !== "win32")("OmpAdapter", () => {
     it("detects an enabled Eidnara plugin from omp plugin list", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-adapter-"));
         roots.push(root);

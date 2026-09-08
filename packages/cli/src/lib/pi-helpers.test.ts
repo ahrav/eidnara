@@ -113,27 +113,37 @@ describe("Pi fallback discovery", () => {
 });
 
 describe("Pi command execution", () => {
-    it("routes cmd shims through ComSpec as one quoted command and parses their output", () => {
-        const root = mkdtempSync(join(tmpdir(), "eidnara pi command "));
-        tempDirs.push(root);
-        const comSpec = join(root, "fake-cmd");
-        writeFileSync(
-            comSpec,
-            `#!/bin/sh\ncase "$5" in\n  *--version*) printf '0.75.1\\n' ;;\n  *) printf '${HEADER}\\nanthropic claude-fable-5 1M 128K yes yes\\n' ;;\nesac\n`,
-        );
-        chmodSync(comSpec, 0o755);
-        process.env.ComSpec = comSpec;
-        const shim = join(root, "pi.cmd");
+    it("routes cmd shims through ComSpec as one quoted command", () => {
+        process.env.ComSpec = "custom-cmd.exe";
+        const shim = "C:\\Users\\John Doe\\AppData\\Roaming\\npm\\pi.cmd";
 
         expect(getPiCommandInvocation(shim, ["--version"])).toEqual({
-            command: comSpec,
+            command: "custom-cmd.exe",
             args: ["/d", "/s", "/v:off", "/c", '""%EIDNARA_PI_BINARY%" "--version""'],
             env: { PATH: childPathWithLauncherDir(shim), EIDNARA_PI_BINARY: shim },
             windowsVerbatimArguments: true,
         });
-        expect(getPiVersion(shim)).toBe("0.75.1");
-        expect(getAvailableModels(shim)).toEqual(["anthropic/claude-fable-5"]);
-    }, 30_000);
+    });
+
+    it.if(isPosix)(
+        "runs a cmd shim through a stand-in ComSpec and parses its output",
+        () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara pi command "));
+            tempDirs.push(root);
+            const comSpec = join(root, "fake-cmd");
+            writeFileSync(
+                comSpec,
+                `#!/bin/sh\ncase "$5" in\n  *--version*) printf '0.75.1\\n' ;;\n  *) printf '${HEADER}\\nanthropic claude-fable-5 1M 128K yes yes\\n' ;;\nesac\n`,
+            );
+            chmodSync(comSpec, 0o755);
+            process.env.ComSpec = comSpec;
+            const shim = join(root, "pi.cmd");
+
+            expect(getPiVersion(shim)).toBe("0.75.1");
+            expect(getAvailableModels(shim)).toEqual(["anthropic/claude-fable-5"]);
+        },
+        30_000,
+    );
 
     it("invokes a POSIX binary directly with its directory on the child PATH", () => {
         expect(getPiCommandInvocation("/usr/local/bin/pi", ["--version"])).toEqual({
