@@ -421,7 +421,7 @@
     },
     "execute_threshold_percentage": {
       "default": 65,
-      "description": "Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, \"provider/model\": 45 }). Values above 90 are rejected because the runtime caps at 90% of the output-reserved safe window (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE",
+      "description": "Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, \"provider/model\": 45 }); `default` falls back to DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE when omitted. Values above 90 are rejected because the runtime caps at 90% of the output-reserved safe window (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE",
       "anyOf": [
         {
           "type": "number",
@@ -437,9 +437,6 @@
               "maximum": 90
             }
           },
-          "required": [
-            "default"
-          ],
           "additionalProperties": {
             "type": "number",
             "minimum": 20,

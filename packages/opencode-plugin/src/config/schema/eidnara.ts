@@ -417,10 +417,13 @@ export const EidnaraConfigSchema = z
                     .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE),
                 z
                     .object({
+                        // Optional so a per-model map without `default` validates; the transform
+                        // fills `DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE`.
                         default: z
                             .number()
                             .min(MIN_EXECUTE_THRESHOLD_PERCENTAGE)
-                            .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE),
+                            .max(MAX_EXECUTE_THRESHOLD_PERCENTAGE, EXECUTE_THRESHOLD_CAP_MESSAGE)
+                            .optional(),
                     })
                     .catchall(
                         z
@@ -431,7 +434,7 @@ export const EidnaraConfigSchema = z
             ])
             .default(DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE)
             .describe(
-                'Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, "provider/model": 45 }). Values above 90 are rejected because the runtime caps at 90% of the output-reserved safe window (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE',
+                'Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, "provider/model": 45 }); `default` falls back to DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE when omitted. Values above 90 are rejected because the runtime caps at 90% of the output-reserved safe window (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE',
             ),
         execute_threshold_tokens: z
             .object({
@@ -750,8 +753,16 @@ export const EidnaraConfigSchema = z
         ),
     })
     .transform((data): EidnaraConfig => {
+        const percentage = data.execute_threshold_percentage;
         return {
             ...data,
+            execute_threshold_percentage:
+                typeof percentage === "number"
+                    ? percentage
+                    : {
+                          ...percentage,
+                          default: percentage.default ?? DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+                      },
             protected_tags: data.protected_tags ?? DEFAULT_PROTECTED_TAGS,
         };
     });

@@ -162,6 +162,37 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
+    it("strips commit_cluster_trigger so a project cannot fire the historian after fewer commits", () => {
+        for (const value of [{ enabled: true, min_clusters: 1 }, { enabled: false }, null]) {
+            const raw: Record<string, unknown> = {
+                commit_cluster_trigger: value,
+                sidekick: { model: "x" },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect("commit_cluster_trigger" in raw).toBe(false);
+            expect(raw.sidekick).toEqual({ model: "x" });
+            expect(warnings).toEqual([expect.stringContaining("commit_cluster_trigger")]);
+        }
+    });
+
+    it("strips hidden-agent maxSteps and maxTokens so a project cannot raise a user cost cap", () => {
+        const raw: Record<string, unknown> = {
+            historian: { maxSteps: 500, maxTokens: 100_000, temperature: 0.2 },
+            sidekick: { maxSteps: 500, model: "x" },
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect(raw.historian).toEqual({ temperature: 0.2 });
+        expect(raw.sidekick).toEqual({ model: "x" });
+        expect(warnings).toEqual([
+            expect.stringContaining("historian.maxSteps/maxTokens"),
+            expect.stringContaining("sidekick.maxSteps"),
+        ]);
+    });
+
     it("strips mural.model from project config but keeps the feature switch", () => {
         const raw: Record<string, unknown> = {
             mural: { enabled: true, model: "repo-controlled-model" },
@@ -693,6 +724,56 @@ describe("constrainProjectThresholdOverrides", () => {
         });
         expect(tokens.execute_threshold_tokens).toEqual({ "foo/*": 20_000 });
         expect(tokenWarnings[0]).toContain("cannot introduce");
+    });
+
+    it("normalizes out-of-range trusted values to the default before comparing", () => {
+        // A trusted value outside the schema range would otherwise be the baseline a project
+        // only has to beat, while schema recovery would replace that trusted value with 65.
+        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 20 };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: 20 },
+            trustedBaseConfig: { execute_threshold_percentage: 0 },
+        });
+        expect(mergedRaw.execute_threshold_percentage).toBe(65);
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage")]);
+
+        const object: Record<string, unknown> = {
+            execute_threshold_percentage: { default: 65, "gpt-4": 30 },
+        };
+        constrainProjectThresholdOverrides({
+            mergedRaw: object,
+            projectRaw: { execute_threshold_percentage: { "gpt-4": 30 } },
+            trustedBaseConfig: { execute_threshold_percentage: { default: 0, "gpt-4": 5 } },
+        });
+        expect(object.execute_threshold_percentage).toBe(65);
+
+        const tokens: Record<string, unknown> = { execute_threshold_tokens: { default: 6_000 } };
+        const tokenWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: tokens,
+            projectRaw: { execute_threshold_tokens: { default: 6_000 } },
+            trustedBaseConfig: { execute_threshold_tokens: { default: 10 } },
+        });
+        expect(tokens.execute_threshold_tokens).toBeUndefined();
+        expect(tokenWarnings[0]).toContain("cannot introduce");
+    });
+
+    it("keeps trusted per-model overrides when the trusted map has no default", () => {
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { "gpt-4": 80, "a/b": 70 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { "a/b": 70 } },
+            trustedBaseConfig: { execute_threshold_percentage: { "gpt-4": 80 } },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toEqual({
+            default: 65,
+            "gpt-4": 80,
+            "a/b": 70,
+        });
+        expect(warnings).toHaveLength(0);
     });
 
     it("preserves a trusted __proto__ model key when serializing the merged thresholds", () => {

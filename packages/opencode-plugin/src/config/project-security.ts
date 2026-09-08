@@ -26,6 +26,8 @@ const HISTORIAN_USER_ONLY_FIELDS = [
     "two_pass",
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
+/** The project tier replaces these caps, so a project value could raise a bound the user set to limit cost or runaway tool loops. */
+const AGENT_COST_CAP_FIELDS = ["maxSteps", "maxTokens"] as const;
 /**
  * Every block below has at least one leaf that only user config may set. The leaf sanitizers
  * skip non-object blocks, so a project `null`, string, or array here would survive to the merge
@@ -96,24 +98,28 @@ function isValidTokenThreshold(value: unknown): value is number {
     );
 }
 
+// The trusted tier is normalized with the same range predicates as project values. A trusted
+// value outside the schema range would otherwise become the baseline a project only has to beat,
+// while schema recovery would have replaced that trusted value with the default.
 function normalizeTrustedPercentageThresholds(value: unknown): PercentageThresholdConfig {
-    if (typeof value === "number" && Number.isFinite(value)) {
+    if (isValidPercentageThreshold(value)) {
         return { defaultValue: value, overrides: new Map() };
     }
 
-    if (
-        isPlainObject(value) &&
-        typeof value.default === "number" &&
-        Number.isFinite(value.default)
-    ) {
+    if (isPlainObject(value)) {
         const overrides = new Map<string, number>();
         for (const [key, child] of Object.entries(value)) {
             if (key === "default") continue;
-            if (typeof child === "number" && Number.isFinite(child)) {
+            if (isValidPercentageThreshold(child)) {
                 overrides.set(key, child);
             }
         }
-        return { defaultValue: value.default, overrides };
+        return {
+            defaultValue: isValidPercentageThreshold(value.default)
+                ? value.default
+                : DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+            overrides,
+        };
     }
 
     return { defaultValue: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE, overrides: new Map() };
@@ -127,16 +133,13 @@ function normalizeTrustedTokenThresholds(value: unknown): TokenThresholdConfig {
     const overrides = new Map<string, number>();
     for (const [key, child] of Object.entries(value)) {
         if (key === "default") continue;
-        if (typeof child === "number" && Number.isFinite(child)) {
+        if (isValidTokenThreshold(child)) {
             overrides.set(key, child);
         }
     }
 
     return {
-        defaultValue:
-            typeof value.default === "number" && Number.isFinite(value.default)
-                ? value.default
-                : undefined,
+        defaultValue: isValidTokenThreshold(value.default) ? value.default : undefined,
         overrides,
     };
 }
@@ -313,6 +316,8 @@ function bareBaseline<T extends number | undefined>(
  * Only user config may set `historian.disallowed_tools`: the project tier merges over the user tier, so a project array would replace the user's removals and restore the historian's default tools.
  * Only user config may set `historian.two_pass` because the second editor pass adds a model call to every historian run.
  * Only user config may set `system_prompt_injection`: a project `enabled: true` or a replaced `skip_signatures` array would undo the user's injection opt-outs.
+ * Only user config may set `commit_cluster_trigger`: a project `enabled: true` or a lower `min_clusters` would make the historian fire after fewer commits.
+ * Only user config may set hidden-agent `maxSteps` and `maxTokens`: the project tier replaces the leaf, so a project value could raise a cost bound the user set.
  * Only user config may set `mural.model` so repositories cannot select a provider for project memory.
  * Project config must not set `pi.subagent_extensions` because it controls extensions loaded by Pi child processes.
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
@@ -389,6 +394,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.system_prompt_injection;
         warnings.push(
             "Ignoring system_prompt_injection from project config (security: only user-level config may enable injection or change the skip signatures; a repository cannot undo the user's opt-outs).",
+        );
+    }
+
+    if ("commit_cluster_trigger" in projectRaw) {
+        delete projectRaw.commit_cluster_trigger;
+        warnings.push(
+            "Ignoring commit_cluster_trigger from project config (security: only user-level config may enable the trigger or lower min_clusters; a repository cannot make the historian fire after fewer commits).",
         );
     }
 
@@ -493,6 +505,18 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
             delete block.disable;
             warnings.push(
                 `Ignoring ${agentKey}.disable from project config (security: only user-level config may enable or disable hidden agents; a repository cannot reactivate an agent the user turned off).`,
+            );
+        }
+        const removedCaps: string[] = [];
+        for (const field of AGENT_COST_CAP_FIELDS) {
+            if (field in block) {
+                delete block[field];
+                removedCaps.push(field);
+            }
+        }
+        if (removedCaps.length > 0) {
+            warnings.push(
+                `Ignoring ${agentKey}.${removedCaps.join("/")} from project config (security: step and output-token caps are user-level only; a repository cannot raise a bound the user set on hidden-agent cost).`,
             );
         }
     }
