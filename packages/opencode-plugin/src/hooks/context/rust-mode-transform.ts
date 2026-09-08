@@ -61,6 +61,8 @@ export interface RustModeTransformDeps extends SessionDirectoryDeps {
     autoSearch?: { enabled: boolean; scoreThreshold: number; minPromptChars: number };
     cacheTtl: string | Record<string, string>;
     compactionOff?: boolean;
+    /** Sessions whose daemon usage predates a host compaction; a transform that forwards usage removes the session. */
+    staleDaemonUsageSessions?: Set<string>;
     isSubagentSession: (sessionId: string) => boolean;
     systemPromptHashFor: (sessionId: string) => string;
 }
@@ -1440,6 +1442,8 @@ export function createRustModeTransform(
                 return result.response;
             };
             let response = await sendTransformSeriesWithSingleRestart(body);
+            // The daemon now holds this usage sample, so the sidebar may read daemon usage again.
+            if (usage) deps.staleDaemonUsageSessions?.delete(sessionId);
             captureResponseTelemetry(response);
             const allDeliveryPassIds = new Set(noteDeliveryPassIds(response));
             const sendNoteDeliveryDisposition = async (

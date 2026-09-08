@@ -417,9 +417,12 @@ describe("Rust mode transform request", () => {
         const deps = makeDeps();
         const transform = createRustModeTransform(deps, { moduleClient: client });
 
+        deps.staleDaemonUsageSessions = new Set([sessionId]);
         const first = makeMessages(sessionId);
         await transform.run(sessionId, first, { messages: [...first] });
         expect("usage" in bodies[0]!).toBe(false);
+        // A transform without a sample leaves the daemon's stale usage fenced.
+        expect(deps.staleDaemonUsageSessions.has(sessionId)).toBe(true);
 
         deps.contextUsageMap.set(sessionId, {
             usage: { percentage: 50, inputTokens: 64_000 },
@@ -435,6 +438,7 @@ describe("Rust mode transform request", () => {
             current_total_input_tokens: 64_000,
             context_limit_tokens: 128_000,
         });
+        expect(deps.staleDaemonUsageSessions.has(sessionId)).toBe(false);
     });
 
     it("sends the combined todowrite map and live-permission verdict", async () => {

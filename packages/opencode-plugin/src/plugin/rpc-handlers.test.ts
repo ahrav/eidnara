@@ -425,6 +425,46 @@ describe("registerRpcHandlers", () => {
         expect(await handlers.get("sidebar-snapshot")?.({})).toEqual({ error: "unavailable" });
     });
 
+    test("a host compaction fences the daemon's usage until a transform forwards a new sample", async () => {
+        const sessionId = "ses-handler-compacted";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        live.staleDaemonUsageSessions.add(sessionId);
+        const { handlers } = register({}, DAEMON_STATUS, live);
+
+        // Right after compaction no response has landed, so the daemon's 42k must not show.
+        const emptied = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(emptied.inputTokens).toBe(0);
+        expect(emptied.compartmentCount).toBe(DAEMON_STATUS.compartment_count);
+
+        // The first post-compaction response supplies live usage; it wins over the daemon's stale sample.
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 5, inputTokens: 6_400 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+            model: { providerID: "test-provider", modelID: "test-model" },
+        });
+        clearRustSessionStatus(sessionId);
+        const fresh = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(fresh.inputTokens).toBe(6_400);
+
+        // Once the transform has forwarded usage, the daemon's sample is current again.
+        live.staleDaemonUsageSessions.delete(sessionId);
+        clearRustSessionStatus(sessionId);
+        const daemon = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(daemon.inputTokens).toBe(42_000);
+    });
+
     test("ts mode serves the live event usage without contacting the daemon", async () => {
         const sessionId = "ses-handler-ts-mode";
         const live = createLiveSessionState();

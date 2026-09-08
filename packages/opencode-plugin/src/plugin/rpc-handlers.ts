@@ -370,7 +370,9 @@ export function buildSidebarSnapshot(
         const activeModelID = activeModel?.modelID;
         const modelKey = modelKeyOf(activeModel);
 
-        const moduleUsage = moduleStatus?.usage;
+        // After a host compaction the daemon's usage describes the replaced context until a transform forwards a new sample; the live usage is authoritative meanwhile. commentlint: allow(JUDGE)
+        const daemonUsageStale = liveSessionState?.staleDaemonUsageSessions.has(sessionId) === true;
+        const moduleUsage = daemonUsageStale ? undefined : moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
         // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
