@@ -44,7 +44,7 @@ export interface SdkClientCore {
                 parts: Array<{ type: "text"; text: string }>;
                 agent?: string;
             };
-        }) => Promise<{ data?: unknown }>;
+        }) => Promise<{ data?: unknown; error?: unknown; response?: { status?: number } }>;
         messages: (opts: { path: { id: string } }) => Promise<{ data?: unknown }>;
     };
 }

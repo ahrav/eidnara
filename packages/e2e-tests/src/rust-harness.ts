@@ -344,23 +344,23 @@ export class RustTestHarness {
                     .slice(-2000)}\nhost log:\n${this.host.hostLog().slice(-2000)}`,
             );
         }
+        // The SDK reports a rejected request through `error` instead of throwing.
+        if (sdkRejected(result)) {
+            throw sdkFailure(
+                "session.prompt",
+                result,
+                `. stderr:\n${this.opencodeInstance.stderr().slice(-2000)}`,
+            );
+        }
         return result;
     }
 
-    /**
-     * `session.revert` removes the selected message and every later message. The SDK reports a
-     * rejected request through `error` instead of throwing, so that field is checked here.
-     */
     async revertMessage(sessionId: string, messageId: string): Promise<void> {
         const res = await this.clientInstance.session.revert({
             path: { id: sessionId },
             body: { messageID: messageId },
         });
-        if (res.error !== undefined || res.data === undefined) {
-            throw new Error(
-                `session.revert(${messageId}) failed with status ${res.response?.status ?? "unknown"}: ${JSON.stringify(res.error ?? null)}`,
-            );
-        }
+        if (sdkRejected(res)) throw sdkFailure(`session.revert(${messageId})`, res);
     }
 
     async listMessages(
@@ -512,6 +512,19 @@ export class RustTestHarness {
             // ignore
         }
     }
+}
+
+type SdkResult = { data?: unknown; error?: unknown; response?: { status?: number } };
+
+/** The SDK reports a rejected request through `error` instead of throwing. */
+function sdkFailure(label: string, res: SdkResult, detail = ""): Error {
+    return new Error(
+        `${label} failed with status ${res.response?.status ?? "unknown"}: ${JSON.stringify(res.error ?? null)}${detail}`,
+    );
+}
+
+function sdkRejected(res: SdkResult): boolean {
+    return res.error !== undefined || res.data === undefined;
 }
 
 function field(body: string, key: string): string {

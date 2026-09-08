@@ -10,20 +10,20 @@ import { RustTestHarness } from "./rust-harness";
 export const rustPrereqs = RustTestHarness.detectPrereqs();
 
 export function foldInfraEnabled(): boolean {
-    return process.env.EIDNARA_RUST_E2E_FOLD === "1";
+    return process.env.EIDNARA_E2E_FOLD === "1";
 }
 
 export const FOLD_SKIP_REASON =
     "requires broad Rust fold qualification beyond the focused direct " +
-    "backend fixture; set EIDNARA_RUST_E2E_FOLD=1 to run it";
+    "backend fixture; set EIDNARA_E2E_FOLD=1 to run it";
 
 export function duplicateIdInfraEnabled(): boolean {
-    return process.env.EIDNARA_RUST_E2E_DUPLICATE_IDS === "1";
+    return process.env.EIDNARA_E2E_DUPLICATE_IDS === "1";
 }
 
 export const DUPLICATE_ID_SKIP_REASON =
     "requires broad duplicate-ID qualification beyond the focused direct " +
-    "backend fixture; set EIDNARA_RUST_E2E_DUPLICATE_IDS=1 to run it";
+    "backend fixture; set EIDNARA_E2E_DUPLICATE_IDS=1 to run it";
 
 /** Gated scenarios print the skip reason to avoid silent skips. */
 export function printSkip(scenario: string, reason: string): void {

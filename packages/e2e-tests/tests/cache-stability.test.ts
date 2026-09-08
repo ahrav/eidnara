@@ -30,6 +30,40 @@ function serialize(value: unknown): string {
     return JSON.stringify(stripCacheControl(value));
 }
 
+const TURN_COUNT = 5;
+
+/** The stability assertions require every turn to be served from the Rust transform. */
+async function driveStableSession(h: RustTestHarness) {
+    h.mock.reset();
+    h.mock.setDefault({
+        text: "ok",
+        usage: {
+            input_tokens: 200,
+            output_tokens: 10,
+            cache_creation_input_tokens: 100,
+            cache_read_input_tokens: 100,
+        },
+    });
+
+    const sessionId = await h.createSession();
+    const passesBefore = h.readRustPasses().length;
+
+    for (let i = 1; i <= TURN_COUNT; i++) {
+        await h.sendPrompt(sessionId, `turn ${i}: probe message for cache stability.`);
+    }
+
+    const passes = (await h.waitForRustPasses(passesBefore + TURN_COUNT)).slice(passesBefore);
+    expect(passes.length).toBeGreaterThanOrEqual(TURN_COUNT);
+    for (const pass of passes) {
+        expect(pass.decision).not.toBe("error");
+        expect(pass.servedFrom).toBe("transform");
+    }
+
+    const mainRequests = h.mainRequests();
+    expect(mainRequests.length).toBeGreaterThanOrEqual(TURN_COUNT);
+    return mainRequests;
+}
+
 describe.skipIf(!rustPrereqs.ok)("cache stability", () => {
     let h: RustTestHarness;
 
@@ -46,31 +80,7 @@ describe.skipIf(!rustPrereqs.ok)("cache stability", () => {
     });
 
     it("system prompt stays stable across defer passes", async () => {
-        h.mock.reset();
-        h.mock.setDefault({
-            text: "ok",
-            usage: {
-                input_tokens: 200,
-                output_tokens: 10,
-                cache_creation_input_tokens: 100,
-                cache_read_input_tokens: 100,
-            },
-        });
-
-        const sessionId = await h.createSession();
-
-        const turnCount = 5;
-        for (let i = 1; i <= turnCount; i++) {
-            await h.sendPrompt(sessionId, `turn ${i}: probe message for cache stability.`);
-        }
-
-        const mainRequests = h.mock.requests().filter((r) => {
-            const sys = r.body.system;
-            if (sys === undefined || sys === null) return false;
-            const asString = typeof sys === "string" ? sys : JSON.stringify(sys);
-            return asString.includes("## Eidnara");
-        });
-        expect(mainRequests.length).toBeGreaterThanOrEqual(turnCount);
+        const mainRequests = await driveStableSession(h);
 
         // The test excludes turn 1 because it establishes the cache.
         // The comparison strips `cache_control` because OpenCode moves it to the latest message each turn.
@@ -85,31 +95,7 @@ describe.skipIf(!rustPrereqs.ok)("cache stability", () => {
     }, 60_000);
 
     it("prefix messages stay stable across defer passes", async () => {
-        h.mock.reset();
-        h.mock.setDefault({
-            text: "ok",
-            usage: {
-                input_tokens: 200,
-                output_tokens: 10,
-                cache_creation_input_tokens: 100,
-                cache_read_input_tokens: 100,
-            },
-        });
-
-        const sessionId = await h.createSession();
-
-        const turnCount = 5;
-        for (let i = 1; i <= turnCount; i++) {
-            await h.sendPrompt(sessionId, `turn ${i}: probe message for cache stability.`);
-        }
-
-        const mainRequests = h.mock.requests().filter((r) => {
-            const sys = r.body.system;
-            if (sys === undefined || sys === null) return false;
-            const asString = typeof sys === "string" ? sys : JSON.stringify(sys);
-            return asString.includes("## Eidnara");
-        });
-        expect(mainRequests.length).toBeGreaterThanOrEqual(turnCount);
+        const mainRequests = await driveStableSession(h);
 
         // After stripping `cache_control`, each earlier request's messages must be a byte-identical prefix of the next request's messages.
         for (let i = 1; i < mainRequests.length - 1; i++) {
