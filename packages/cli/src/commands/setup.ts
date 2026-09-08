@@ -3,7 +3,7 @@
  */
 import type { HarnessAdapter } from "../adapters/types";
 import { resolveAdaptersForCommand } from "../lib/harness-select";
-import { intro, log, note, outro } from "../lib/prompts";
+import { intro, isPromptCancelledError, log, note, outro } from "../lib/prompts";
 import { runSetup as runOmpSetup } from "./setup-omp";
 import { runSetup as runOpenCodeSetup } from "./setup-opencode";
 import { runSetup as runPiSetup } from "./setup-pi";
@@ -19,6 +19,7 @@ export async function runSetup(argv: string[]): Promise<number> {
             verb: "setup",
         });
     } catch (error) {
+        if (isPromptCancelledError(error)) throw error;
         log.error(error instanceof Error ? error.message : String(error));
         outro("Setup stopped — correct the command arguments and try again.");
         return 1;
