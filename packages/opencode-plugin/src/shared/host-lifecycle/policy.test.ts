@@ -1195,6 +1195,38 @@ describe("native invocation mapping", () => {
         }
     }, 20_000);
 
+    test("a demand runs the platform readers once, inside the start's preflight", async () => {
+        const root = tempDir("eidnara-policy-readers-once-");
+        const { binary } = fakeBinary(root);
+        let kernelReads = 0;
+        try {
+            const policy = new HostLifecyclePolicy({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                platformReaders: {
+                    platform: "linux",
+                    arch: "x64",
+                    kernelRelease: () => {
+                        kernelReads += 1;
+                        return "6.1.0";
+                    },
+                    glibcVersion: () => "2.34",
+                    procSelfFdUsable: () => true,
+                },
+                compatibilityProbe: async () => compatibleObservation(),
+                storageProbe: async () => "ready",
+            });
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+            expect(outcome.result.reason).toBe("started");
+            expect(kernelReads).toBe(1);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("restart is one native transaction, never TS stop+start", async () => {
         const root = tempDir("eidnara-policy-restart-");
         const { binary, invocationLog } = fakeBinary(root);

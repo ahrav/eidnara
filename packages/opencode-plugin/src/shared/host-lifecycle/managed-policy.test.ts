@@ -451,6 +451,33 @@ describe("managed probes", () => {
         expect(polls).toBe(0);
     });
 
+    test("a superseded compatibility probe that settles late cannot overwrite the newer record", async () => {
+        let polls = 0;
+        const releases: Array<(value: CompatibilityProbeResult) => void> = [];
+        const probes = managedProbes({
+            compatibility: () =>
+                new Promise((resolve) => {
+                    releases.push(resolve);
+                }),
+            storage: async () => {
+                polls += 1;
+                return "unavailable";
+            },
+        });
+        const stale = probes.compatibilityProbe(1_000);
+        const fresh = probes.compatibilityProbe(1_000);
+        // The replacement answers first with `starting`; the abandoned probe then
+        // settles with the older `ready` it saw on the same daemon.
+        releases[1]?.(result(daemon(7), "starting"));
+        await fresh;
+        releases[0]?.(result(daemon(7), "ready"));
+        await stale;
+
+        // The storage probe polls instead of returning `ready` from the stale observation.
+        expect(await probes.storageProbe(100, daemon(7))).toBe("unavailable");
+        expect(polls).toBe(1);
+    });
+
     test("a starting observation polls once for concurrent waiters", async () => {
         let polls = 0;
         const budgets: number[] = [];

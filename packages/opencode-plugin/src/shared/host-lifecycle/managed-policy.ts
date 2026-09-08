@@ -457,17 +457,22 @@ function joinStoragePoll(
  */
 export function managedProbes(io: ManagedProbeIo): ManagedProbes {
     let observed: { daemonId: Uint8Array; state: StorageReadinessState } | null = null;
+    let issued = 0;
     const polling = new Map<string, SharedStoragePoll>();
     return {
         async compatibilityProbe(budgetMs, signal) {
+            const sequence = ++issued;
             const probe = await io.compatibility(budgetMs, signal);
-            observed =
-                probe.status === null
-                    ? null
-                    : {
-                          daemonId: Uint8Array.from(probe.snapshot.authenticatedPeer.daemonId),
-                          state: storageState(probe.status.metrics),
-                      };
+            // Only the most recently issued probe may write the record. A probe the policy already gave up on can still settle after its replacement, and its older storage state must not displace the newer one. commentlint: allow(JUDGE)
+            if (sequence === issued) {
+                observed =
+                    probe.status === null
+                        ? null
+                        : {
+                              daemonId: Uint8Array.from(probe.snapshot.authenticatedPeer.daemonId),
+                              state: storageState(probe.status.metrics),
+                          };
+            }
             return probe.snapshot;
         },
         storageProbe(budgetMs, expectedDaemonId) {

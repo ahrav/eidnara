@@ -326,6 +326,7 @@ export class HostLifecyclePolicy {
     >();
     /** Advances after each native mutation except `already_running` and `already_stopped`, which leave the daemon as found. commentlint: allow(JUDGE) */
     private lifecycleGeneration = 0;
+    private qualifiedAggregateMs: number | undefined;
 
     constructor(options: LifecyclePolicyOptions = {}) {
         this.env = options.env ?? process.env;
@@ -552,10 +553,16 @@ export class HostLifecyclePolicy {
         return snapshot;
     }
 
+    /** `platformReaders` is `readonly`, so the gate's result is memoized; the demand path must not run the readers again outside any budget. commentlint: allow(JUDGE) */
     private compatibilityAggregateMs(): number {
         if (this.outerAggregateMs !== undefined) return this.outerAggregateMs;
-        const platform = checkPlatform(this.platformReaders);
-        return platform.ok ? aggregateForTarget(platform.target) : OUTER_AGGREGATE_MS;
+        if (this.qualifiedAggregateMs === undefined) {
+            const platform = checkPlatform(this.platformReaders);
+            this.qualifiedAggregateMs = platform.ok
+                ? aggregateForTarget(platform.target)
+                : OUTER_AGGREGATE_MS;
+        }
+        return this.qualifiedAggregateMs;
     }
 
     /** A policy deadline is not caller detachment, so its expiry surfaces as a plain error. */
@@ -683,6 +690,7 @@ export class HostLifecyclePolicy {
         // The gate already resolved which qualified target this host is, so the
         // aggregate comes from that rather than from a Linux-shaped default.
         const aggregate = this.outerAggregateMs ?? aggregateForTarget(platform.target);
+        this.qualifiedAggregateMs ??= aggregate;
         const deadlineMs = aggregate - (monotonicNow() - startedAt);
         if (deadlineMs <= 0) {
             // Preflight consumed the whole budget, so the operation is out of
