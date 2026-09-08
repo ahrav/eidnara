@@ -170,7 +170,7 @@ const TokenBreakdown = (props: {
         }
 
         // Compartments (blue)
-        if (s.compartmentTokens > 0) {
+        if (s.compaction_enabled !== false && s.compartmentTokens > 0) {
             result.push({
                 key: "comp",
                 tokens: s.compartmentTokens,

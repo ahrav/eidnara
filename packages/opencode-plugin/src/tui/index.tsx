@@ -68,11 +68,22 @@ function showConflictDialog(api: TuiPluginApi, directory: string, reasons: strin
             message={`${reasons.join("\n")}\n\nFix these conflicts automatically?`}
             onConfirm={() => {
                 const actions = fixConflicts(directory, conflicts)
-                const actionSummary = actions.length > 0
-                    ? actions.map(a => `• ${a}`).join("\n")
-                    : "No changes needed"
                 // DialogConfirm calls dialog.clear() after onConfirm, so defer the next dialog
                 setTimeout(() => {
+                    // `fixConflicts` edits only existing files, so an empty action list means the conflict stands.
+                    if (actions.length === 0) {
+                        api.ui.dialog.replace(() => (
+                            <api.ui.DialogAlert
+                                title="⚠️ Eidnara Still Disabled"
+                                message={`No configuration file could be edited, so nothing changed.\n\n${reasons.join("\n")}\n\nResolve these by hand (for native compaction, set compaction.auto and compaction.prune to false in opencode.json), then restart OpenCode.`}
+                                onConfirm={() => {
+                                    showToast(api, { message: "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor", variant: "warning" })
+                                }}
+                            />
+                        ))
+                        return
+                    }
+                    const actionSummary = actions.map(a => `• ${a}`).join("\n")
                     api.ui.dialog.replace(() => (
                         <api.ui.DialogAlert
                             title="✅ Configuration Fixed"
@@ -444,19 +455,25 @@ async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionI
     const detail = await loadStatusDetail(sessionId, directory, modelKey)
     if (getSessionId(api) !== sessionId) return false
 
-    api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />)
-    return true
+    // Resolve only after the dialog closes so callers queue subsequent dialogs afterward.
+    return new Promise((resolve) => {
+        api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />, () => resolve(true))
+    })
 }
 
-function showResultDialog(api: TuiPluginApi, title: string, message: string): boolean {
-    api.ui.dialog.replace(() => (
-        <api.ui.DialogAlert
-            title={title}
-            message={message}
-            onConfirm={() => {}}
-        />
-    ))
-    return true
+function showResultDialog(api: TuiPluginApi, title: string, message: string): Promise<boolean> {
+    return new Promise((resolve) => {
+        api.ui.dialog.replace(
+            () => (
+                <api.ui.DialogAlert
+                    title={title}
+                    message={message}
+                    onConfirm={() => {}}
+                />
+            ),
+            () => resolve(true),
+        )
+    })
 }
 
 type TuiProbeResult = {
@@ -801,12 +818,12 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         }
         if (action === "show-flush-dialog") {
             const flushMsg = String(n.payload?.message ?? "Flushed.")
-            return stillActive() && showResultDialog(api, "Flush", flushMsg)
+            return stillActive() && (await showResultDialog(api, "Flush", flushMsg))
         }
         if (action === "show-result-dialog") {
             const title = String(n.payload?.title ?? "Eidnara")
             const body = String(n.payload?.message ?? "")
-            return stillActive() && showResultDialog(api, title, body)
+            return stillActive() && (await showResultDialog(api, title, body))
         }
         return false
     }

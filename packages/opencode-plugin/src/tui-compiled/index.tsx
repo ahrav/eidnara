@@ -57,9 +57,25 @@ function showConflictDialog(api, directory, reasons, conflicts) {
     },
     onConfirm: () => {
       const actions = fixConflicts(directory, conflicts);
-      const actionSummary = actions.length > 0 ? actions.map(a => `• ${a}`).join("\n") : "No changes needed";
       // DialogConfirm calls dialog.clear() after onConfirm, so defer the next dialog
       setTimeout(() => {
+        // `fixConflicts` edits only existing files, so an empty action list means the conflict stands.
+        if (actions.length === 0) {
+          api.ui.dialog.replace(() => _$createComponent(api.ui.DialogAlert, {
+            title: "\u26A0\uFE0F Eidnara Still Disabled",
+            get message() {
+              return `No configuration file could be edited, so nothing changed.\n\n${reasons.join("\n")}\n\nResolve these by hand (for native compaction, set compaction.auto and compaction.prune to false in opencode.json), then restart OpenCode.`;
+            },
+            onConfirm: () => {
+              showToast(api, {
+                message: "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor",
+                variant: "warning"
+              });
+            }
+          }));
+          return;
+        }
+        const actionSummary = actions.map(a => `• ${a}`).join("\n");
         api.ui.dialog.replace(() => _$createComponent(api.ui.DialogAlert, {
           title: "\u2705 Configuration Fixed",
           message: `${actionSummary}\n\nPlease restart OpenCode for changes to take effect.`,
@@ -994,19 +1010,23 @@ async function showStatusDialog(api, targetSessionId = getSessionId(api)) {
   const modelKey = getModelKeyFromMessages(api, sessionId);
   const detail = await loadStatusDetail(sessionId, directory, modelKey);
   if (getSessionId(api) !== sessionId) return false;
-  api.ui.dialog.replace(() => _$createComponent(StatusDialog, {
-    api: api,
-    s: detail
-  }));
-  return true;
+
+  // Resolve only after the dialog closes so callers queue subsequent dialogs afterward.
+  return new Promise(resolve => {
+    api.ui.dialog.replace(() => _$createComponent(StatusDialog, {
+      api: api,
+      s: detail
+    }), () => resolve(true));
+  });
 }
 function showResultDialog(api, title, message) {
-  api.ui.dialog.replace(() => _$createComponent(api.ui.DialogAlert, {
-    title: title,
-    message: message,
-    onConfirm: () => {}
-  }));
-  return true;
+  return new Promise(resolve => {
+    api.ui.dialog.replace(() => _$createComponent(api.ui.DialogAlert, {
+      title: title,
+      message: message,
+      onConfirm: () => {}
+    }), () => resolve(true));
+  });
 }
 function probeErrorMessage(error) {
   const message = error instanceof Error ? error.message : String(error);
@@ -1285,12 +1305,12 @@ const tui = async (api, _options, meta) => {
     }
     if (action === "show-flush-dialog") {
       const flushMsg = String(n.payload?.message ?? "Flushed.");
-      return stillActive() && showResultDialog(api, "Flush", flushMsg);
+      return stillActive() && (await showResultDialog(api, "Flush", flushMsg));
     }
     if (action === "show-result-dialog") {
       const title = String(n.payload?.title ?? "Eidnara");
       const body = String(n.payload?.message ?? "");
-      return stillActive() && showResultDialog(api, title, body);
+      return stillActive() && (await showResultDialog(api, title, body));
     }
     return false;
   };
