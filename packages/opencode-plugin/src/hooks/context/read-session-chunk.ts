@@ -46,10 +46,14 @@ export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
  * The per-tag token store counts full content, whereas `blockTokenMemo` counts TC-chunked content.
  * Tool outputs contribute one-line summaries to the TC-chunked token count.
  *
- * `blockTokenMemo` evicts the least-recently-used entry at 2,048 entries; exact string keys avoid hash collisions.
+ * `blockTokenMemo` evicts least-recently-used entries past 2,048 entries or 4 Mi retained
+ * characters; exact string keys avoid hash collisions. A block larger than the character budget
+ * is tokenized but not retained.
  */
-const BLOCK_TOKEN_MEMO_MAX = 2048;
+const BLOCK_TOKEN_MEMO_MAX_ENTRIES = 2048;
+const BLOCK_TOKEN_MEMO_MAX_CHARS = 4 * 1024 * 1024;
 const blockTokenMemo = new Map<string, number>();
+let blockTokenMemoChars = 0;
 function estimateBlockTokens(blockText: string): number {
     const cached = blockTokenMemo.get(blockText);
     if (cached !== undefined) {
@@ -59,12 +63,27 @@ function estimateBlockTokens(blockText: string): number {
         return cached;
     }
     const count = estimateTokens(blockText);
-    if (blockTokenMemo.size >= BLOCK_TOKEN_MEMO_MAX) {
+    if (blockText.length > BLOCK_TOKEN_MEMO_MAX_CHARS) return count;
+    while (
+        blockTokenMemo.size >= BLOCK_TOKEN_MEMO_MAX_ENTRIES ||
+        blockTokenMemoChars + blockText.length > BLOCK_TOKEN_MEMO_MAX_CHARS
+    ) {
         const oldest = blockTokenMemo.keys().next().value;
-        if (oldest !== undefined) blockTokenMemo.delete(oldest);
+        if (oldest === undefined) break;
+        blockTokenMemo.delete(oldest);
+        blockTokenMemoChars -= oldest.length;
     }
     blockTokenMemo.set(blockText, count);
+    blockTokenMemoChars += blockText.length;
     return count;
+}
+
+export function blockTokenMemoStatsForTest(): { entries: number; chars: number; maxChars: number } {
+    return {
+        entries: blockTokenMemo.size,
+        chars: blockTokenMemoChars,
+        maxChars: BLOCK_TOKEN_MEMO_MAX_CHARS,
+    };
 }
 
 let activeRawMessageCache: Map<string, RawMessage[]> | null = null;

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    blockTokenMemoStatsForTest,
     getProtectedTailStartOrdinal,
     getRawSessionMessageCount,
     getRawSessionMessageIdsThrough,
@@ -425,6 +426,26 @@ describe("readSessionChunk", () => {
         createOpenCodeDb("ses-raw");
 
         expect(getRawSessionMessageIdsThrough("ses-raw", 2)).toEqual(["m-1", "m-2"]);
+    });
+
+    it("bounds the block-token memo by retained characters as well as entries", () => {
+        useTempDataHome("read-session-memo-chars-");
+        // Six alternating-role blocks of 800K characters each: 4.8M total against a 4M budget.
+        // Varied filler keeps byte-pair tokenization linear; a single repeated character is not.
+        const filler = "lorem ipsum dolor sit amet ".repeat(30_000);
+        const messages = Array.from({ length: 6 }, (_, index) => ({
+            id: `m-${index + 1}`,
+            role: index % 2 === 0 ? "user" : "assistant",
+            part: { type: "text", text: `block ${index} ${filler}` },
+        }));
+        createOpenCodeDbWithMessages("ses-memo-chars", messages);
+
+        const chunk = readSessionChunk("ses-memo-chars", 100_000_000, 1);
+        expect(chunk.messageCount).toBe(6);
+
+        const stats = blockTokenMemoStatsForTest();
+        expect(stats.chars).toBeLessThanOrEqual(stats.maxChars);
+        expect(stats.entries).toBeLessThan(6);
     });
 
     it("extracts commit hashes into compact assistant block metadata", () => {
