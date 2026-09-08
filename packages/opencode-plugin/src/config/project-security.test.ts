@@ -240,6 +240,24 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
+    it("strips the legacy hidden-agent enabled key so a project cannot undo a user's enabled=false", () => {
+        for (const enabled of [false, true]) {
+            const raw: Record<string, unknown> = {
+                historian: { enabled, temperature: 0.2 },
+                sidekick: { enabled, model: "x" },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw.historian).toEqual({ temperature: 0.2 });
+            expect(raw.sidekick).toEqual({ model: "x" });
+            expect(warnings).toEqual([
+                expect.stringContaining("historian.enabled"),
+                expect.stringContaining("sidekick.enabled"),
+            ]);
+        }
+    });
+
     it("strips compaction.enabled from project config (only-key case)", () => {
         const raw: Record<string, unknown> = {
             compaction: { enabled: false },

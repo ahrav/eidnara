@@ -456,6 +456,79 @@ describe("loadPluginConfigDetailed — combined outcome", () => {
         expect(result.recoveredTopLevelKeys).toEqual([]);
         expect(result.loadOutcome).toBe("schema-recovery");
     });
+
+    it("keeps a substitution failure bound when the same file also rejects a prototype-pollution key", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            '{"__proto__": {"polluted": true}, "sidekick": {"model": "{env:EIDNARA_TEST_UNSET_MODEL}"}}',
+            "{}",
+        );
+
+        expect(result.sources.userConfig).toBe("schema-recovery");
+        expect(result.substitutionFailures).toEqual([
+            expect.objectContaining({ source: "user", keyPath: "sidekick.model" }),
+        ]);
+        expect(result.loadOutcome).toBe("schema-recovery");
+    });
+
+    it("reports a user-tier schema recovery that a valid project override hides from the merged parse", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ smart_drops: "invalid" }),
+            JSON.stringify({ smart_drops: true }),
+        );
+
+        expect(result.config.smart_drops).toBe(true);
+        expect(result.sources.userConfig).toBe("schema-recovery");
+        expect(result.sources.projectConfig).toBe("ok");
+        expect(result.loadOutcome).toBe("schema-recovery");
+        expect(result.recoveredTopLevelKeys).toEqual(["smart_drops"]);
+        expect(result.config.configWarnings).toEqual([
+            expect.stringMatching(/^\[user config\] "smart_drops": invalid value/),
+        ]);
+    });
+
+    it("does not repeat a user-tier recovery warning the merged parse also reports", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ smart_drops: "invalid" }),
+            JSON.stringify({ enabled: true }),
+        );
+
+        expect(result.sources.userConfig).toBe("schema-recovery");
+        expect(result.recoveredTopLevelKeys).toEqual(["smart_drops"]);
+        expect(result.config.configWarnings).toEqual([
+            expect.stringMatching(/^\[config\] "smart_drops": invalid value/),
+        ]);
+    });
+
+    it("attributes a user-only schema recovery to the user source", () => {
+        const result = loadDetailedWithUserConfig(JSON.stringify({ smart_drops: "invalid" }));
+
+        expect(result.sources.userConfig).toBe("schema-recovery");
+        expect(result.recoveredTopLevelKeys).toEqual(["smart_drops"]);
+        expect(result.config.configWarnings).toHaveLength(1);
+    });
+});
+
+describe("loadPluginConfigDetailed — unsafe-key warnings", () => {
+    it("withholds substituted ancestor key names from rejected-key warnings", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            '{"{env:EIDNARA_TEST_ANCESTOR_SECRET}": {"__proto__": {}}}',
+            "{}",
+            { EIDNARA_TEST_ANCESTOR_SECRET: "hunter2-ancestor" },
+        );
+
+        const warnings = result.config.configWarnings?.join("\n") ?? "";
+        expect(warnings).not.toContain("hunter2-ancestor");
+        expect(warnings).toContain('Ignored unsafe config key "__proto__" at depth 2');
+        expect(result.sources.userConfig).toBe("schema-recovery");
+    });
+
+    it("names a top-level rejected key without a depth", () => {
+        const result = loadDetailedWithUserConfig('{"constructor": {"x": 1}, "enabled": true}');
+
+        expect(result.config.configWarnings?.join("\n")).toContain(
+            'Ignored unsafe config key "constructor" (security',
+        );
+    });
 });
 
 describe("loadPluginConfig — variable expansion scope", () => {
@@ -678,6 +751,55 @@ describe("loadPluginConfig — project compaction trust boundary", () => {
         );
 
         expect(result.storage?.enforce_private_permissions).toBe(false);
+    });
+
+    it("keeps user historian.model and disable when the project adds a schema-invalid leaf", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ historian: { model: "user/model", disable: true } }),
+            JSON.stringify({ historian: { temperature: 3 } }),
+        );
+
+        expect(result.config.historian?.model).toBe("user/model");
+        expect(result.config.historian?.disable).toBe(true);
+        expect(result.config.historian).not.toHaveProperty("temperature");
+        expect(result.recoveredTopLevelKeys).toEqual(["historian"]);
+        expect(result.config.configWarnings?.join("\n")).toContain(
+            '"historian": invalid nested field(s) "temperature"',
+        );
+    });
+
+    it("keeps user sidekick.disable=true when the project adds a schema-invalid leaf", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ sidekick: { disable: true } }),
+            JSON.stringify({ sidekick: { top_p: 7 } }),
+        );
+
+        expect(result.sidekick?.disable).toBe(true);
+        expect(result.sidekick).not.toHaveProperty("top_p");
+    });
+
+    it("keeps user historian.disable=true when the project sets disable=false", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ historian: { disable: true } }),
+            JSON.stringify({ historian: { disable: false } }),
+        );
+
+        expect(result.historian?.disable).toBe(true);
+        expect(result.configWarnings?.join("\n")).toContain(
+            "Ignoring historian.disable from project config",
+        );
+    });
+
+    it("keeps a legacy user sidekick.enabled=false when the project sets enabled=true", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ sidekick: { enabled: false } }),
+            JSON.stringify({ sidekick: { enabled: true } }),
+        );
+
+        expect(result.sidekick?.disable).toBe(true);
+        expect(result.configWarnings?.join("\n")).toContain(
+            "Ignoring sidekick.enabled from project config",
+        );
     });
 });
 
