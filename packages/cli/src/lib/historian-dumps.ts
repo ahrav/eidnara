@@ -15,7 +15,7 @@ export interface HistorianDumpSummary {
     sizeKb: number;
     /** Parsed metadata — only structural fields, never raw XML content. */
     meta?: HistorianDumpMeta;
-    /** Set when the file could not be read or holds no usable `<compartment>` element. */
+    /** Why the dump is unusable: unreadable, not one `<output>` document, or no compartment. */
     parseError?: string;
 }
 
@@ -46,9 +46,20 @@ export function fileSize(path: string): number {
     }
 }
 
+// Mirrors `output_document_regex` and `output_tag_regex` in the daemon's `historian_validate`.
+const OUTPUT_DOCUMENT_REGEX = /^\s*<output(?:\s[^>]*)?>([\s\S]*)<\/output\s*>\s*$/i;
+const OUTPUT_TAG_REGEX = /<\/?output(?:\s[^>]*)?>/i;
+
 export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: string } {
     try {
         const xml = readFileSync(path, "utf-8");
+        const root = OUTPUT_DOCUMENT_REGEX.exec(xml);
+        if (!root) {
+            return { error: "not one complete <output> document" };
+        }
+        if (OUTPUT_TAG_REGEX.test(root[1])) {
+            return { error: "more than one <output> document" };
+        }
         const parsed = parseCompartmentOutput(xml);
         if (parsed.compartments.length === 0) {
             return { error: "no usable <compartment> elements" };
