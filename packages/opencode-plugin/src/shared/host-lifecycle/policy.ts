@@ -45,6 +45,7 @@ import {
 } from "./contract";
 import {
     NativeLaunchError,
+    type NativeLaunchFailureCode,
     type NativeLaunchTarget,
     type NativeLifecycleCommand,
     type NativeStartupEnvelope,
@@ -124,6 +125,28 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 function timerDelay(deadlineMs: number): number {
     return Math.min(deadlineMs, MAX_TIMER_DELAY_MS);
 }
+
+/** Launch failures raised after `spawn` succeeded; every other failure leaves the daemon exactly as found. */
+const CHILD_RAN_FAILURES: ReadonlySet<NativeLaunchFailureCode> = new Set([
+    "timeout",
+    "signal_exit",
+    "output_cap_exceeded",
+    "exit_disagreement",
+    "malformed_output",
+    "command_mismatch",
+]);
+
+function nativeChildRan(error: unknown): boolean {
+    return error instanceof NativeLaunchError && CHILD_RAN_FAILURES.has(error.code);
+}
+
+/** `lifecycle_busy` and `harness_unavailable` return before the binary spawns or stops anything. commentlint: allow(JUDGE) */
+const DAEMON_AS_FOUND_REASONS: ReadonlySet<DaemonReason> = new Set([
+    "already_running",
+    "already_stopped",
+    "lifecycle_busy",
+    "harness_unavailable",
+]);
 
 export class WaiterDetachedError extends Error {
     /**
@@ -324,7 +347,7 @@ export class HostLifecyclePolicy {
         string,
         { generation: number; snapshot: Promise<CompatibilitySnapshot> }
     >();
-    /** Advances after each native mutation except `already_running` and `already_stopped`, which leave the daemon as found. commentlint: allow(JUDGE) */
+    /** Advances after each native mutation unless the daemon is provably as the command found it; see `invokeMutation`. commentlint: allow(JUDGE) */
     private lifecycleGeneration = 0;
     private qualifiedAggregateMs: number | undefined;
 
@@ -716,25 +739,23 @@ export class HostLifecyclePolicy {
             const state = preNativeState(classifyPreNativeRoots(preflight.root));
             return localResult(command, false, state, "native_payload_missing");
         }
-        const result = await this.invokeMutation(
+        const { result, daemonMayHaveChanged } = await this.invokeMutation(
             command,
             preflight,
             this.launchTarget,
             startupEnvelope,
         );
-        // Every other outcome, including a killed or malformed child, may have replaced or removed the daemon. commentlint: allow(JUDGE)
-        if (result.reason !== "already_running" && result.reason !== "already_stopped") {
-            this.lifecycleGeneration += 1;
-        }
+        if (daemonMayHaveChanged) this.lifecycleGeneration += 1;
         return result;
     }
 
+    /** `daemonMayHaveChanged` is false only when no child ran or the child answered that it acted on nothing. commentlint: allow(JUDGE) */
     private async invokeMutation(
         command: "start" | "stop" | "restart",
         preflight: { root: string; deadlineMs: number },
         launchTarget: NativeLaunchTarget,
         startupEnvelope: NativeStartupEnvelope | undefined,
-    ): Promise<DaemonResultV1> {
+    ): Promise<{ result: DaemonResultV1; daemonMayHaveChanged: boolean }> {
         try {
             // The aggregate is one request-to-transport bound for the whole
             // command, not per native invocation. The certified-package lookup
@@ -770,7 +791,10 @@ export class HostLifecyclePolicy {
             if (firstBudget <= 0) {
                 // The lookup consumed the command's budget before any child
                 // existed, so nothing was spawned and nothing committed.
-                return timeoutResult(command, preflight.root, true);
+                return {
+                    result: timeoutResult(command, preflight.root, true),
+                    daemonMayHaveChanged: false,
+                };
             }
             let native = await invoke(selectedPayloadDir, firstBudget);
             if (
@@ -789,9 +813,15 @@ export class HostLifecyclePolicy {
                     if (retryBudget > 0) native = await invoke(fallback, retryBudget);
                 }
             }
-            return this.relabel(native, command, command);
+            return {
+                result: this.relabel(native, command, command),
+                daemonMayHaveChanged: !DAEMON_AS_FOUND_REASONS.has(native.reason),
+            };
         } catch (error) {
-            return this.launchFailure(command, preflight.root, error);
+            return {
+                result: this.launchFailure(command, preflight.root, error),
+                daemonMayHaveChanged: nativeChildRan(error),
+            };
         }
     }
 
@@ -1021,27 +1051,15 @@ export class HostLifecyclePolicy {
             );
         }
         if (error instanceof NativeLaunchError) {
+            // If the native child ran, its effects are unknown; otherwise it committed nothing.
+            const effectsKnown = !nativeChildRan(error);
             switch (error.code) {
                 case "timeout":
-                    // The child was SIGKILLed mid-flight, so whatever it had
-                    // committed is unknown, not `false`.
-                    return timeoutResult(command, root, false);
+                    return timeoutResult(command, root, effectsKnown);
                 case "unsupported_platform":
-                    // The platform has no retained-descriptor exec path; the
-                    // binary was never invoked, so nothing committed.
                     return localResult(command, false, state, "unsupported_platform");
-                case "signal_exit":
-                case "output_cap_exceeded":
-                case "exit_disagreement":
-                case "malformed_output":
-                case "command_mismatch":
-                    // The child ran, so these failures leave command effects unknown.
-                    return localResult(command, false, state, "internal_error", false);
-                case "spawn_failed":
-                case "usage_error":
-                    // The binary never ran, or rejected its invocation before
-                    // touching anything, so nothing committed.
-                    return localResult(command, false, state, "internal_error");
+                default:
+                    return localResult(command, false, state, "internal_error", effectsKnown);
             }
         }
         return localResult(command, false, state, "internal_error");

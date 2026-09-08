@@ -1587,6 +1587,38 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("a mutation whose child never ran does not invalidate a pending probe", async () => {
+        const root = tempDir("eidnara-policy-probe-no-child-");
+        const { binary, invocationLog } = fakeBinary(root);
+        let release: () => void = () => {};
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                // A relative payload directory is rejected before any spawn.
+                payloadDirFallback: () => "relative/package",
+                compatibilityProbe: () =>
+                    new Promise((resolve) => {
+                        release = () => resolve(compatibleObservation());
+                    }),
+            });
+            const demand = policy.demandStart({ origin: "managed-default", capability: "context" });
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const restarted = await policy.restart();
+            expect(restarted.reason).toBe("internal_error");
+            expect(restarted.effects).toEqual({ stop_committed: false, start_committed: false });
+
+            release();
+            const outcome = await demand;
+            // The daemon was left exactly as the start found it, so the probe stands.
+            expect(outcome.result.ok).toBe(true);
+            expect(outcome.result.reason).toBe("started");
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("a failed compatibility probe becomes a typed closed result, not a raw rejection", async () => {
         const root = tempDir("eidnara-policy-probe-failure-");
         const { binary, invocationLog } = fakeBinary(root);
