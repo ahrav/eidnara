@@ -160,15 +160,12 @@ const SIMPLE_ESCAPES: Record<string, string> = {
     "0": "\0",
 };
 
-/**
- * Decodes JavaScript string escapes (`\u0070`, `\u{70}`, `\x70`, `\s`) so the
- * key vocabulary sees the spelled character. The same lenient decoder serves
- * both quote styles; over-decoding can only redact more.
- */
+/** Decodes JavaScript string escapes and removes line continuations. */
 function decodeQuotedKey(raw: string): string {
     return raw.replace(
-        /\\(?:u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(.))/g,
-        (match, braced?: string, u4?: string, x2?: string, ch?: string) => {
+        /\\(?:(\r\n|[\n\r\u2028\u2029])|u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(.))/g,
+        (match, lineBreak?: string, braced?: string, u4?: string, x2?: string, ch?: string) => {
+            if (lineBreak !== undefined) return "";
             if (braced !== undefined) {
                 const codePoint = Number.parseInt(braced, 16);
                 return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : match;
@@ -180,34 +177,58 @@ function decodeQuotedKey(raw: string): string {
     );
 }
 
+const LINE_END_PATTERN = /\r?\n|$/g;
+
+/** Index just past the bracket closing the structure opened at `start`; an unbalanced structure ends with its line. */
+function structuredValueEnd(text: string, start: number): number {
+    let depth = 0;
+    for (let at = start; at < text.length; at++) {
+        const ch = text[at];
+        if (ch === '"' || ch === "'" || ch === "`") {
+            for (at++; at < text.length && text[at] !== ch; at++) if (text[at] === "\\") at++;
+        } else if (ch === "{" || ch === "[") {
+            depth++;
+        } else if (ch === "}" || ch === "]") {
+            depth--;
+            if (depth === 0) return at + 1;
+        }
+    }
+    LINE_END_PATTERN.lastIndex = start;
+    return LINE_END_PATTERN.exec(text)?.index ?? text.length;
+}
+
+// The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
+// Quoted keys may contain spaces, escapes, or backslash line continuations;
+// a bare key is an identifier. A `{`/`[` value matches only its opening bracket.
+const KEYED_VALUE_PATTERN =
+    /(?:"((?:[^"\\\r\n]|\\(?:\r\n|[\s\S]))+)"|'((?:[^'\\\r\n]|\\(?:\r\n|[\s\S]))+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[{[]|[^\s&;,}\]]+)/g;
+
 function redactKeyedText(value: string): string {
-    // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
-    // A quoted key may hold spaces, slashes, or escapes (`"api key"`, `"\u0070assword"`);
-    // a bare key is an identifier. A `{`/`[` value is left whole for the shared
-    // redactor, which replaces balanced structures.
-    return value.replace(
-        /(?:"((?:[^"\\\r\n]|\\.)+)"|'((?:[^'\\\r\n]|\\.)+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|(?![{[])[^\s&;,}\]]+)/g,
-        (
-            full,
-            doubleQuoted: string | undefined,
-            singleQuoted: string | undefined,
-            bare: string | undefined,
-            separator: string,
-            secret: string,
-        ) => {
-            const quote = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : "";
-            const rawKey = doubleQuoted ?? singleQuoted ?? bare ?? "";
-            const key = quote ? decodeQuotedKey(rawKey) : rawKey;
-            const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
-            if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
-                return full;
-            }
-            // A quoted key marks a JSON literal, where a quoted placeholder keeps the document
-            // well-formed and stops the shared redactor from reading past the value.
-            const placeholder = quote ? `${quote}<REDACTED>${quote}` : "<REDACTED>";
-            return `${quote}${rawKey}${quote}${separator}${placeholder}`;
-        },
-    );
+    let out = "";
+    let last = 0;
+    KEYED_VALUE_PATTERN.lastIndex = 0;
+    for (let m = KEYED_VALUE_PATTERN.exec(value); m !== null; m = KEYED_VALUE_PATTERN.exec(value)) {
+        const [full, doubleQuoted, singleQuoted, bare, separator, secret] = m;
+        const quote = doubleQuoted !== undefined ? '"' : singleQuoted !== undefined ? "'" : "";
+        const rawKey = doubleQuoted ?? singleQuoted ?? bare ?? "";
+        const key = quote ? decodeQuotedKey(rawKey) : rawKey;
+        const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
+        if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
+            continue;
+        }
+        // A structured value under a secret key is redacted whole, numeric-only contents
+        // included, so a nested `pin` never reaches the bundle.
+        const valueEnd = m.index + full.length;
+        const end =
+            secret === "{" || secret === "[" ? structuredValueEnd(value, valueEnd - 1) : valueEnd;
+        // A quoted key marks a JSON literal, where a quoted placeholder keeps the document
+        // well-formed and stops the shared redactor from reading past the value.
+        const placeholder = quote ? `${quote}<REDACTED>${quote}` : "<REDACTED>";
+        out += `${value.slice(last, m.index)}${quote}${rawKey}${quote}${separator}${placeholder}`;
+        last = end;
+        KEYED_VALUE_PATTERN.lastIndex = end;
+    }
+    return out + value.slice(last);
 }
 
 function redactSecretString(value: string): string {

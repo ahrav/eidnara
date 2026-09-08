@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +31,23 @@ describe("resolveOpenCodeDatabasePath", () => {
         process.env.OPENCODE_DB_PATH = explicit;
         expect(resolveOpenCodeDatabasePath(root)).toBe(explicit);
     });
+
+    test.if(process.platform !== "win32")(
+        "skips a FIFO candidate and refuses a FIFO OPENCODE_DB_PATH",
+        () => {
+            const root = dataDir();
+            const real = join(root, "opencode", "opencode.db");
+            writeFileSync(real, "");
+            const fifo = join(root, "opencode", "opencode-beta.db");
+            execFileSync("mkfifo", [fifo]);
+            const later = Date.now() / 1000 + 60;
+            utimesSync(fifo, later, later);
+            expect(resolveOpenCodeDatabasePath(root)).toBe(real);
+
+            process.env.OPENCODE_DB_PATH = fifo;
+            expect(() => resolveOpenCodeDatabasePath(root)).toThrow("not a regular file");
+        },
+    );
 
     test("throws when OPENCODE_DB_PATH is set but does not exist", () => {
         const root = dataDir();

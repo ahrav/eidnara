@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OmpAdapter } from "./omp";
+import { OmpAdapter, readOmpRuntimeEnabled } from "./omp";
 
 const original = {
     HOME: process.env.HOME,
@@ -205,4 +206,24 @@ fi
         );
         expect(readFileSync(commandLog, "utf-8").trim()).toBe("plugin enable @eidnara/pi");
     }, 30_000);
+});
+
+describe.if(process.platform !== "win32")("readOmpRuntimeEnabled", () => {
+    it("reads the enable flag from a regular lock file", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-lock-"));
+        roots.push(root);
+        const lock = join(root, "omp-plugins.lock.json");
+        writeFileSync(lock, JSON.stringify({ plugins: { "@eidnara/pi": { enabled: false } } }));
+        expect(readOmpRuntimeEnabled(lock)).toBe(false);
+    });
+
+    it("returns undefined without blocking when the lock path is a FIFO", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-lock-"));
+        roots.push(root);
+        const lock = join(root, "omp-plugins.lock.json");
+        execFileSync("mkfifo", [lock]);
+        const started = performance.now();
+        expect(readOmpRuntimeEnabled(lock)).toBeUndefined();
+        expect(performance.now() - started).toBeLessThan(5_000);
+    });
 });

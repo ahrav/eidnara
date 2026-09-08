@@ -92,6 +92,8 @@ function isLossyNumberLiteral(literal: string, value: number): boolean {
     const source = normalizedDecimal(literal);
     const parsed = normalizedDecimal(String(value)) ?? normalizedDecimal(value.toFixed(0));
     if (source === null || parsed === null) return true;
+    // `-0` parses to negative zero, which serializes back as `0`.
+    if (source.digits === 0n && literal.startsWith("-")) return true;
     return source.digits !== parsed.digits || source.exponent !== parsed.exponent;
 }
 

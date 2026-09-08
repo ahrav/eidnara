@@ -812,6 +812,11 @@ describe("Pi doctor", () => {
         // An empty PATH sends binary detection to its home-relative candidates, the path CI takes.
         const originalPath = process.env.PATH;
         process.env.PATH = "";
+        const userInfoSpy = spyOn(os, "userInfo").mockImplementation(() => {
+            throw Object.assign(new Error("uv_os_get_passwd returned ENOENT"), {
+                code: "ERR_SYSTEM_ERROR",
+            });
+        });
         const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
             throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
                 code: "ERR_SYSTEM_ERROR",
@@ -839,6 +844,7 @@ describe("Pi doctor", () => {
         } finally {
             console.error = originalConsoleError;
             homedirSpy.mockRestore();
+            userInfoSpy.mockRestore();
             if (originalPath === undefined) delete process.env.PATH;
             else process.env.PATH = originalPath;
         }

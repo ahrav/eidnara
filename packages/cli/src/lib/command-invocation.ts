@@ -27,10 +27,19 @@ export function pathEnvKey(
     return Object.keys(env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
 }
 
-/** The child process searches the launcher's directory for sibling runtime executables. */
-export function childPathWithLauncherDir(binary: string, parentPath = process.env.PATH): string {
+/** The child process searches the launcher's directory, then any discovered runtime directories, for the interpreter an `env` shebang names. */
+export function childPathWithLauncherDir(
+    binary: string,
+    parentPath = process.env.PATH,
+    runtimeDirs: readonly string[] = [],
+): string {
     const launcherDir = dirname(binary);
-    return parentPath ? `${launcherDir}${delimiter}${parentPath}` : launcherDir;
+    const parentDirs = parentPath ? parentPath.split(delimiter) : [];
+    const dirs = [
+        launcherDir,
+        ...runtimeDirs.filter((dir) => dir !== launcherDir && !parentDirs.includes(dir)),
+    ];
+    return (parentPath ? [...dirs, parentPath] : dirs).join(delimiter);
 }
 
 /**
@@ -45,8 +54,9 @@ export function getCommandInvocation(
     binary: string,
     args: string[],
     binaryEnvName: string,
+    runtimeDirs: readonly string[] = [],
 ): CommandInvocation {
-    const env = { [pathEnvKey()]: childPathWithLauncherDir(binary) };
+    const env = { [pathEnvKey()]: childPathWithLauncherDir(binary, process.env.PATH, runtimeDirs) };
     if (!isCommandInterpreterScript(binary)) {
         return { command: binary, args, env };
     }

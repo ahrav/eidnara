@@ -165,6 +165,7 @@ describe("OpenCodeAdapter config safety", () => {
 describe("isLocalPathPluginEntry", () => {
     it("recognizes file URLs, absolute paths, and relative paths with either separator", () => {
         expect(isLocalPathPluginEntry("file:///opt/eidnara/opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("FILE:///opt/eidnara/opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry("/opt/eidnara/opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry("./packages/opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry("../opencode-plugin")).toBe(true);

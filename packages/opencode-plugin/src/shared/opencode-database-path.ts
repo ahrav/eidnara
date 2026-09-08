@@ -7,7 +7,10 @@ import { getDataDir } from "./data-path";
  * file's mtime can lag an active database.
  */
 function lastActivityMs(dbPath: string): number {
-    let latest = statSync(dbPath).mtimeMs;
+    const entry = statSync(dbPath);
+    // SQLite's synchronous open would block on a FIFO, so only regular files are candidates.
+    if (!entry.isFile()) throw new Error(`not a regular file: ${dbPath}`);
+    let latest = entry.mtimeMs;
     try {
         // A checkpoint can delete the WAL before statSync runs; fall back to the main file's mtime.
         latest = Math.max(latest, statSync(`${dbPath}-wal`).mtimeMs);
@@ -46,8 +49,12 @@ function listDatabaseFiles(dirPath: string, filePrefix: string): string[] {
 export function resolveOpenCodeDatabaseCandidates(dataDir: string = getDataDir()): string[] {
     const explicit = process.env.OPENCODE_DB_PATH;
     if (explicit) {
-        if (!existsSync(explicit)) {
+        const entry = statSync(explicit, { throwIfNoEntry: false });
+        if (entry === undefined) {
             throw new Error(`OPENCODE_DB_PATH is set to ${explicit}, which does not exist`);
+        }
+        if (!entry.isFile()) {
+            throw new Error(`OPENCODE_DB_PATH is set to ${explicit}, which is not a regular file`);
         }
         return [explicit];
     }

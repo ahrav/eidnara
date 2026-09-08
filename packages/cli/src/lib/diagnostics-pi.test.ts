@@ -252,10 +252,34 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString("{'\\u{70}assword': 123456}")).toBe(
             "{'\\u{70}assword': '<REDACTED>'}",
         );
-        // A structured value is left whole so the shared redactor replaces it as one unit.
-        const structured = sanitizeString('{"credentials": { "value": "opaque-live-value" }}');
-        expect(structured).not.toContain("opaque-live-value");
-        expect(structured).toMatch(/^\{"credentials": "<REDACTED[^"]*>"\}$/);
+        // A backslash line continuation joins the key across lines.
+        expect(sanitizeString("{'pa\\\nssword':123456}")).toBe("{'pa\\\nssword':'<REDACTED>'}");
+        expect(sanitizeString('{"pa\\\r\nssword":123456}')).toBe('{"pa\\\r\nssword":"<REDACTED>"}');
+        // A structured value under a secret key is redacted whole, even when numeric-only.
+        expect(sanitizeString('{"credentials": { "value": "opaque-live-value" }}')).toBe(
+            '{"credentials": "<REDACTED>"}',
+        );
+        expect(sanitizeString('{"credentials":[123456]}')).toBe('{"credentials":"<REDACTED>"}');
+        expect(sanitizeString('{"credentials":{"pin":123456}, "retries": 3}')).toBe(
+            '{"credentials":"<REDACTED>", "retries": 3}',
+        );
+        expect(sanitizeString('{"credentials":{"pin":"}]"}, "retries": 3}')).toBe(
+            '{"credentials":"<REDACTED>", "retries": 3}',
+        );
+        expect(
+            sanitizeString('{"credentials":{"value": `}` ,"other":"opaque-live"}, "retries": 3}'),
+        ).toBe('{"credentials":"<REDACTED>", "retries": 3}');
+        // An unclosed bracket redacts only to the end of its line.
+        expect(sanitizeString('{"credentials": {"pin": 1\n"retries": 3')).toBe(
+            '{"credentials": "<REDACTED>"\n"retries": 3',
+        );
+        expect(sanitizeString('{"credentials": [1, 2\r\n"retries": 3')).toBe(
+            '{"credentials": "<REDACTED>"\r\n"retries": 3',
+        );
+        // A non-secret outer key still exposes its nested keys to classification.
+        expect(sanitizeString('{"config": {"password": 123456, "retries": 3}}')).toBe(
+            '{"config": {"password": "<REDACTED>", "retries": 3}}',
+        );
         // A bare `key=` is an assignment, so its value goes even when numeric; `key:` stays prose.
         expect(sanitizeString("key=123456 and press any key: continue")).toBe(
             "key=<REDACTED> and press any key: continue",

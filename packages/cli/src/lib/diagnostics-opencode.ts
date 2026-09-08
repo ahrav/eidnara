@@ -214,6 +214,20 @@ export function describeProbeText(text: string): string {
         .trim();
 }
 
+/** Without a resolvable user config directory (no home), only the layers that can be located count. */
+function pluginRegisteredInLoadedLayers(cwd: string): boolean {
+    let entries: unknown[];
+    try {
+        entries = pluginEntriesOutside(cwd);
+    } catch {
+        return false;
+    }
+    return entries.some(
+        (entry) =>
+            matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) || isDevPathPluginEntry(entry, cwd),
+    );
+}
+
 function readUserOpenCodeConfigs(configDir: string): {
     values: Array<Record<string, unknown> | null>;
     error?: string;
@@ -524,10 +538,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         opencodeConfigHasPlugin: opencodeConfig.values.some((value) =>
             configHasPluginEntry(value, cwd),
         ),
-        pluginRegisteredInLoadedLayers: pluginEntriesOutside(cwd).some(
-            (entry) =>
-                matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) || isDevPathPluginEntry(entry, cwd),
-        ),
+        pluginRegisteredInLoadedLayers: pluginRegisteredInLoadedLayers(cwd),
         ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value, cwd),
         ...(tuiConfig.error ? { tuiConfigParseError: tuiConfig.error } : {}),

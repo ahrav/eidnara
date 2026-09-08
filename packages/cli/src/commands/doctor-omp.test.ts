@@ -153,6 +153,11 @@ describe("OMP doctor", () => {
             delete process.env.PI_CODING_AGENT_DIR;
             delete process.env.XDG_CONFIG_HOME;
             delete process.env.XDG_DATA_HOME;
+            const userInfoSpy = spyOn(os, "userInfo").mockImplementation(() => {
+                throw Object.assign(new Error("uv_os_get_passwd returned ENOENT"), {
+                    code: "ERR_SYSTEM_ERROR",
+                });
+            });
             const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
                 throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
                     code: "ERR_SYSTEM_ERROR",
@@ -182,6 +187,7 @@ describe("OMP doctor", () => {
                 });
             } finally {
                 homedirSpy.mockRestore();
+                userInfoSpy.mockRestore();
             }
 
             expect(code).toBe(1);
