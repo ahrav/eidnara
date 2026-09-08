@@ -134,13 +134,18 @@ function getSelfVersion(): string {
  * redactor reads it, while `key:` keeps the prose carve-out (`press any key: continue`).
  */
 function redactKeyedText(value: string): string {
+    // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
     return value.replace(
-        /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,]+)/g,
-        (full, key: string, separator: string, secret: string) => {
+        /(["']?)\b([A-Za-z][A-Za-z0-9_.-]*)\1(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,}\]]+)/g,
+        (full, quote: string, key: string, separator: string, secret: string) => {
             const bareKeyAssignment = !separator.includes(":") && /^keys?$/i.test(key);
-            return (isSecretKey(key) || bareKeyAssignment) && !/^(?:true|false|null)$/i.test(secret)
-                ? `${key}${separator}<REDACTED>`
-                : full;
+            if (!(isSecretKey(key) || bareKeyAssignment) || /^(?:true|false|null)$/i.test(secret)) {
+                return full;
+            }
+            // A quoted key marks a JSON literal, where a quoted placeholder keeps the document
+            // well-formed and stops the shared redactor from reading past the value.
+            const placeholder = quote ? `${quote}<REDACTED>${quote}` : "<REDACTED>";
+            return `${quote}${key}${quote}${separator}${placeholder}`;
         },
     );
 }
