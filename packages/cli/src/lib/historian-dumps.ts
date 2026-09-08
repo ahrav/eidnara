@@ -38,14 +38,6 @@ export interface HistorianDumpMeta {
     ordinalOverlapCount: number;
 }
 
-export function fileSize(path: string): number {
-    try {
-        return statSync(path).size;
-    } catch {
-        return 0;
-    }
-}
-
 export function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: string } {
     try {
         const xml = readFileSync(path, "utf-8");
@@ -92,14 +84,14 @@ export function listDumpsInDir(
     try {
         const entries = readdirSync(dir)
             .filter((name) => name.endsWith(".xml"))
-            .map((name) => {
-                const stat = statSync(join(dir, name));
-                return {
-                    name,
-                    mtime: stat.mtimeMs,
-                    sizeKb: Math.round(stat.size / 1024),
-                };
-            })
+            .map((name) => ({ name, stat: statSync(join(dir, name)) }))
+            // Reading a FIFO with no writer blocks, so only regular files are dumps.
+            .filter(({ stat }) => stat.isFile())
+            .map(({ name, stat }) => ({
+                name,
+                mtime: stat.mtimeMs,
+                sizeKb: Math.round(stat.size / 1024),
+            }))
             .sort((a, b) => b.mtime - a.mtime);
 
         const now = Date.now();
