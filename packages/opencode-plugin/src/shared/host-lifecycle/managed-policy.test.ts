@@ -1,15 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import kernelHealthBlocks from "../../../../../crates/daemon/tests/fixtures/kernel-health-blocks.json";
 import hostRelease from "../../../../../release/host-release.json";
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
 import { evaluateCompatibility } from "./compatibility";
 import {
+    type CompatibilityProbeResult,
     createManagedLifecyclePolicy,
     kernelReadiness,
     type ManagedCompatibilityClient,
+    managedProbes,
     readCompatibilitySnapshot,
     synapseReadiness,
 } from "./managed-policy";
@@ -334,6 +337,189 @@ describe("managed payload discovery", () => {
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
+    });
+
+    test("a malformed descriptor between the module and its package stops the walk", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-managed-data-"));
+        const install = mkdtempSync(join(tmpdir(), "eidnara-managed-install-"));
+        try {
+            // The farther ancestor carries the requested name; the nearer descriptor is present but unparseable, so climbing past it would certify the farther install. commentlint: allow(JUDGE)
+            writeFileSync(join(install, "package.json"), JSON.stringify({ name: "@eidnara/cli" }));
+            const nested = join(install, "nested");
+            mkdirSync(join(nested, "dist"), { recursive: true });
+            writeFileSync(join(nested, "package.json"), "{ not json");
+            const policy = createManagedLifecyclePolicy({
+                mode: "mutating",
+                declaringModuleUrl: pathToFileURL(join(nested, "dist", "main.js")).href,
+                parentPackageName: "@eidnara/cli",
+                env: { XDG_DATA_HOME: root },
+                platformReaders: supportedLinux,
+                admissionIo,
+            });
+            expect((await policy.start()).reason).toBe("unsupported_install_layout");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+            rmSync(install, { recursive: true, force: true });
+        }
+    });
+
+    test("an unrelated readable descriptor still lets the walk reach the declaring package", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-managed-data-"));
+        const install = mkdtempSync(join(tmpdir(), "eidnara-managed-install-"));
+        try {
+            writeFileSync(join(install, "package.json"), JSON.stringify({ name: "@eidnara/cli" }));
+            const nested = join(install, "dist");
+            mkdirSync(nested, { recursive: true });
+            writeFileSync(join(nested, "package.json"), JSON.stringify({ type: "module" }));
+            const policy = createManagedLifecyclePolicy({
+                mode: "mutating",
+                declaringModuleUrl: pathToFileURL(join(nested, "main.js")).href,
+                parentPackageName: "@eidnara/cli",
+                env: { XDG_DATA_HOME: root },
+                platformReaders: supportedLinux,
+                admissionIo,
+            });
+            // The walk found the declaring package; the failure is the payload lookup beneath it. commentlint: allow(JUDGE)
+            expect((await policy.start()).reason).toBe("native_payload_missing");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+            rmSync(install, { recursive: true, force: true });
+        }
+    });
+
+    test("commands and probes read the environment the policy was built from", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-managed-data-"));
+        try {
+            const env: Record<string, string | undefined> = { XDG_DATA_HOME: root };
+            const policy = createManagedLifecyclePolicy({
+                mode: "mutating",
+                declaringModuleUrl: orphanModuleUrl,
+                parentPackageName: "@eidnara/cli",
+                env,
+                platformReaders: supportedLinux,
+                admissionIo,
+            });
+            delete env.XDG_DATA_HOME;
+            // A policy reading the live object would now resolve no data root at all. commentlint: allow(JUDGE)
+            expect((await policy.start()).reason).toBe("unsupported_install_layout");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("managed probes", () => {
+    const daemon = (id: number) => new Uint8Array([id]);
+    const result = (daemonId: Uint8Array, storage: string | null): CompatibilityProbeResult => ({
+        snapshot: {
+            authenticatedPeer: {
+                daemonVer: hostRelease.versions.daemon,
+                daemonId,
+                proof: "current",
+            },
+            catalog,
+            epochs: {},
+        },
+        status:
+            storage === null
+                ? null
+                : {
+                      health: "ok",
+                      metrics: {
+                          components: { context: { metrics: { storage_state: storage } } },
+                      },
+                  },
+    });
+
+    test("every waiter of one compatibility probe reads its terminal storage observation", async () => {
+        let polls = 0;
+        const probes = managedProbes({
+            compatibility: async () => result(daemon(7), "ready"),
+            storage: async () => {
+                polls += 1;
+                return "unavailable";
+            },
+        });
+        await probes.compatibilityProbe(1_000);
+        const states = await Promise.all([
+            probes.storageProbe(100, daemon(7)),
+            probes.storageProbe(100, daemon(7)),
+            probes.storageProbe(100, daemon(7)),
+        ]);
+        expect(states).toEqual(["ready", "ready", "ready"]);
+        expect(polls).toBe(0);
+    });
+
+    test("a starting observation polls once for concurrent waiters", async () => {
+        let polls = 0;
+        let release: (state: "ready") => void = () => {};
+        const probes = managedProbes({
+            compatibility: async () => result(daemon(7), "starting"),
+            storage: () => {
+                polls += 1;
+                return new Promise((resolve) => {
+                    release = resolve;
+                });
+            },
+        });
+        await probes.compatibilityProbe(1_000);
+        const waiting = Promise.all([
+            probes.storageProbe(100, daemon(7)),
+            probes.storageProbe(100, daemon(7)),
+        ]);
+        expect(polls).toBe(1);
+        release("ready");
+        expect(await waiting).toEqual(["ready", "ready"]);
+        // The settled poll is evicted, so the next storage probe opens a fresh one.
+        const fresh = probes.storageProbe(100, daemon(7));
+        expect(polls).toBe(2);
+        release("ready");
+        expect(await fresh).toBe("ready");
+    });
+
+    test("an observation from another daemon is never reused", async () => {
+        const polled: Array<Uint8Array | undefined> = [];
+        const probes = managedProbes({
+            compatibility: async () => result(daemon(7), "ready"),
+            storage: async (_budget, expected) => {
+                polled.push(expected);
+                return "starting";
+            },
+        });
+        await probes.compatibilityProbe(1_000);
+        expect(await probes.storageProbe(100, daemon(8))).toBe("starting");
+        expect(polled).toEqual([daemon(8)]);
+    });
+
+    test("a short-circuited compatibility probe leaves no observation to reuse", async () => {
+        let polls = 0;
+        const probes = managedProbes({
+            compatibility: async () => result(daemon(7), null),
+            storage: async () => {
+                polls += 1;
+                return "unavailable";
+            },
+        });
+        await probes.compatibilityProbe(1_000);
+        expect(await probes.storageProbe(100, daemon(7))).toBe("unavailable");
+        expect(polls).toBe(1);
+    });
+
+    test("polls for different daemons do not coalesce", async () => {
+        const polled: Array<Uint8Array | undefined> = [];
+        const probes = managedProbes({
+            compatibility: async () => result(daemon(7), "starting"),
+            storage: async (_budget, expected) => {
+                polled.push(expected);
+                return "starting";
+            },
+        });
+        await probes.compatibilityProbe(1_000);
+        await Promise.all([
+            probes.storageProbe(100, daemon(7)),
+            probes.storageProbe(100, daemon(8)),
+        ]);
+        expect(polled).toEqual([daemon(7), daemon(8)]);
     });
 });
 

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -194,7 +194,7 @@ function samePeer(left: AuthenticatedPeer | null, right: AuthenticatedPeer): boo
     return sameDaemonId(left.daemonId, right.daemonId);
 }
 
-interface CompatibilityProbeResult {
+export interface CompatibilityProbeResult {
     snapshot: CompatibilitySnapshot;
     status: HostStatusSnapshot | null;
 }
@@ -370,24 +370,95 @@ export interface ManagedLifecyclePolicyOptions
     explicitExternalRoot?: string;
 }
 
+type StorageReadinessState = "ready" | "starting" | "unavailable";
+
+export interface ManagedProbeIo {
+    compatibility(budgetMs: number, signal?: AbortSignal): Promise<CompatibilityProbeResult>;
+    storage(budgetMs: number, expectedDaemonId?: Uint8Array): Promise<StorageReadinessState>;
+}
+
+export interface ManagedProbes {
+    compatibilityProbe(budgetMs: number, signal?: AbortSignal): Promise<CompatibilitySnapshot>;
+    storageProbe(budgetMs: number, expectedDaemonId?: Uint8Array): Promise<StorageReadinessState>;
+}
+
+function daemonKey(daemonId: Uint8Array): string {
+    return Buffer.from(daemonId).toString("hex");
+}
+
+/**
+ * The compatibility probe records the storage state with the reporting daemon ID. A storage probe expecting that daemon answers a terminal `ready` or `unavailable` from the record, so readiness and compatibility describe one observation and the storage probe opens no connection of its own; a `starting` record still polls within the storage budget. commentlint: allow(JUDGE)
+ *
+ * The record is not consumed on read. The policy shares one compatibility probe across concurrent demands and each of them runs its own storage probe, so a one-shot slot would hand the observation to the first waiter and send every other waiter to open a connection. Each later compatibility probe replaces the record, and a storage probe always follows the compatibility probe of its own demand, so no demand reads a record older than its own observation. commentlint: allow(JUDGE)
+ *
+ * Polls for the same daemon coalesce for the same reason: each connection attaches and prefaults a shared-memory ring, so a burst of demands during startup would otherwise spend admission on redundant probes. commentlint: allow(JUDGE)
+ */
+export function managedProbes(io: ManagedProbeIo): ManagedProbes {
+    let observed: { daemonId: Uint8Array; state: StorageReadinessState } | null = null;
+    const polling = new Map<string, Promise<StorageReadinessState>>();
+    return {
+        async compatibilityProbe(budgetMs, signal) {
+            const probe = await io.compatibility(budgetMs, signal);
+            observed =
+                probe.status === null
+                    ? null
+                    : {
+                          daemonId: Uint8Array.from(probe.snapshot.authenticatedPeer.daemonId),
+                          state: storageState(probe.status.metrics),
+                      };
+            return probe.snapshot;
+        },
+        storageProbe(budgetMs, expectedDaemonId) {
+            if (expectedDaemonId === undefined) return io.storage(budgetMs);
+            const record = observed;
+            if (
+                record !== null &&
+                sameDaemonId(record.daemonId, expectedDaemonId) &&
+                record.state !== "starting"
+            ) {
+                return Promise.resolve(record.state);
+            }
+            const key = daemonKey(expectedDaemonId);
+            const inflight = polling.get(key);
+            if (inflight !== undefined) return inflight;
+            const shared = io.storage(budgetMs, expectedDaemonId);
+            polling.set(key, shared);
+            const evict = (): void => {
+                if (polling.get(key) === shared) polling.delete(key);
+            };
+            void shared.then(evict, evict);
+            return shared;
+        },
+    };
+}
+
 function findDeclaringParentRoot(moduleUrl: string, packageName: string): string {
     let current = dirname(fileURLToPath(moduleUrl));
     for (let depth = 0; depth <= MAX_PARENT_WALK; depth += 1) {
         const packagePath = join(current, "package.json");
-        if (existsSync(packagePath)) {
-            try {
-                const parsed: unknown = JSON.parse(readFileSync(packagePath, "utf8"));
-                if (
-                    parsed !== null &&
-                    typeof parsed === "object" &&
-                    !Array.isArray(parsed) &&
-                    (parsed as Record<string, unknown>).name === packageName
-                ) {
-                    return current;
-                }
-            } catch {
-                // The search ignores malformed and unrelated ancestors.
+        let text: string | null;
+        try {
+            text = readFileSync(packagePath, "utf8");
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            // Only a genuine absence lets the walk climb. A descriptor that exists but cannot be read may name this package, and climbing past it would certify a farther install's payload as the declaring one. commentlint: allow(JUDGE)
+            if (code !== "ENOENT" && code !== "ENOTDIR") {
+                throw new BootstrapError(
+                    "unsupported_install_layout",
+                    "declaring parent package descriptor is not inspectable",
+                );
             }
+            text = null;
+        }
+        if (text !== null) {
+            const parsed = asRecord(parseJsonOrNull(text));
+            if (parsed === null) {
+                throw new BootstrapError(
+                    "unsupported_install_layout",
+                    "declaring parent package descriptor is malformed",
+                );
+            }
+            if (parsed.name === packageName) return current;
         }
         const parent = dirname(current);
         if (parent === current) break;
@@ -399,12 +470,21 @@ function findDeclaringParentRoot(moduleUrl: string, packageName: string): string
     );
 }
 
+function parseJsonOrNull(text: string): unknown {
+    try {
+        return JSON.parse(text) as unknown;
+    } catch {
+        return null;
+    }
+}
+
 /**
  */
 export function createManagedLifecyclePolicy(
     options: ManagedLifecyclePolicyOptions,
 ): HostLifecyclePolicy {
-    const env = options.env ?? process.env;
+    // Construction admits the data root, stages the bootstrap under it, and pins the probes to it; the policy's per-command root resolution reads the same snapshot so a later mutation of the supplied object cannot send commands to one root and probes to another. commentlint: allow(JUDGE)
+    const env: Record<string, string | undefined> = { ...(options.env ?? process.env) };
     const root = resolveLifecycleDataRoot(env);
     if (!root.ok) return new HostLifecyclePolicy({ ...options, env });
 
@@ -437,54 +517,19 @@ export function createManagedLifecyclePolicy(
             allowStaging: options.mode === "mutating",
             ...payloadLocator,
         });
-        // Reuse the `host.status` response so readiness and compatibility describe the same observation.
-        // Only terminal observations short-circuit; a `starting` observation still runs the polling probe.
-        // The polling probe can wait for startup within its own budget.
-        //
-        // Concurrent probes share the observation slot.
-        // Demand tags observations because untagged reuse could return a state from another request or daemon.
-        // Demand tags observations because untagged reuse could return a state from another request or daemon.
-        let observedStorage: {
-            daemonId: Uint8Array;
-            state: "ready" | "starting" | "unavailable";
-        } | null = null;
-        const defaultCompatibilityProbe = async (
-            budgetMs: number,
-            signal?: AbortSignal,
-        ): Promise<CompatibilitySnapshot> => {
-            const probe = await probeManagedCompatibility(root.root, budgetMs, signal);
-            observedStorage =
-                probe.status === null
-                    ? null
-                    : {
-                          daemonId: Uint8Array.from(probe.snapshot.authenticatedPeer.daemonId),
-                          state: storageState(probe.status.metrics),
-                      };
-            return probe.snapshot;
-        };
-        const defaultStorageProbe = (
-            budgetMs: number,
-            expectedDaemonId?: Uint8Array,
-        ): Promise<"ready" | "starting" | "unavailable"> => {
-            const observed = observedStorage;
-            observedStorage = null;
-            if (
-                expectedDaemonId !== undefined &&
-                observed !== null &&
-                sameDaemonId(observed.daemonId, expectedDaemonId) &&
-                (observed.state === "ready" || observed.state === "unavailable")
-            ) {
-                return Promise.resolve(observed.state);
-            }
-            return probeManagedStorage(root.root, budgetMs, expectedDaemonId);
-        };
+        const probes = managedProbes({
+            compatibility: (budgetMs, signal) =>
+                probeManagedCompatibility(root.root, budgetMs, signal),
+            storage: (budgetMs, expectedDaemonId) =>
+                probeManagedStorage(root.root, budgetMs, expectedDaemonId),
+        });
         return new HostLifecyclePolicy({
             ...options,
             env,
             launchTarget: prepared,
             defaultStartupEnvelope: buildManagedCredentialEnvelope(env),
-            storageProbe: options.storageProbe ?? defaultStorageProbe,
-            compatibilityProbe: options.compatibilityProbe ?? defaultCompatibilityProbe,
+            storageProbe: options.storageProbe ?? probes.storageProbe,
+            compatibilityProbe: options.compatibilityProbe ?? probes.compatibilityProbe,
             readinessProbe:
                 options.readinessProbe ??
                 ((budgetMs) => probeManagedReadiness(root.root, budgetMs)),
