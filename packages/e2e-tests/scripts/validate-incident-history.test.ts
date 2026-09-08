@@ -117,9 +117,17 @@ function withFixtureDir(files: FixtureFiles, run: (dir: string) => void): void {
 const BASE_SHA = "1".repeat(40);
 const HEAD_SHA = "2".repeat(40);
 const SECOND_PARENT_SHA = "3".repeat(40);
+const ADVANCED_BASE_SHA = "4".repeat(40);
 
 function fakeGit(
-    options: { head?: string; parents?: string[]; ancestor?: boolean; shallow?: boolean } = {},
+    options: {
+        head?: string;
+        parents?: string[];
+        ancestor?: boolean;
+        /** Answer for `merge-base --is-ancestor <payload base> <merge parent>`; defaults to `ancestor`. */
+        lineage?: boolean;
+        shallow?: boolean;
+    } = {},
 ): { git: GitRunner; calls: string[][] } {
     const head = options.head ?? HEAD_SHA;
     const parents = options.parents ?? [BASE_SHA, SECOND_PARENT_SHA];
@@ -145,11 +153,11 @@ function fakeGit(
             return { status: 0, stdout: "", stderr: "" };
         }
         if (args[0] === "merge-base") {
-            return {
-                status: options.ancestor === false ? 1 : 0,
-                stdout: "",
-                stderr: "",
-            };
+            const towardHead = args[3] === head;
+            const ok = towardHead
+                ? options.ancestor !== false
+                : (options.lineage ?? options.ancestor) !== false;
+            return { status: ok ? 0 : 1, stdout: "", stderr: "" };
         }
         if (args[0] === "rev-list") {
             return {
@@ -191,6 +199,63 @@ describe("trusted accepted-base derivation", () => {
             }),
         ).toBe(BASE_SHA);
         expect(calls).toContainEqual(["fetch", "--no-tags", "--force", "origin", BASE_SHA]);
+    });
+
+    it("accepts the merge parent when the base branch advanced past the payload base SHA", () => {
+        const { git, calls } = fakeGit({ parents: [ADVANCED_BASE_SHA, SECOND_PARENT_SHA] });
+        expect(
+            deriveTrustedAcceptedCommit({
+                eventName: "pull_request",
+                event: pullRequestEvent(),
+                githubSha: HEAD_SHA,
+                githubRef: "refs/pull/7/merge",
+                githubRefProtected: "false",
+                repoRoot: "/fixture",
+                git,
+            }),
+        ).toBe(ADVANCED_BASE_SHA);
+        expect(calls).toContainEqual(["fetch", "--no-tags", "--force", "origin", BASE_SHA]);
+        expect(calls).toContainEqual([
+            "fetch",
+            "--no-tags",
+            "--force",
+            "origin",
+            ADVANCED_BASE_SHA,
+        ]);
+        expect(calls).toContainEqual(["merge-base", "--is-ancestor", BASE_SHA, ADVANCED_BASE_SHA]);
+    });
+
+    it("rejects a merge parent that does not descend from the payload base SHA", () => {
+        const { git } = fakeGit({
+            parents: [ADVANCED_BASE_SHA, SECOND_PARENT_SHA],
+            lineage: false,
+        });
+        expect(() =>
+            deriveTrustedAcceptedCommit({
+                eventName: "pull_request",
+                event: pullRequestEvent(),
+                githubSha: HEAD_SHA,
+                githubRef: "refs/pull/7/merge",
+                githubRefProtected: "false",
+                repoRoot: "/fixture",
+                git,
+            }),
+        ).toThrow(/does not descend from pull_request.base.sha/);
+    });
+
+    it("rejects a pull-request checkout that is not a merge commit", () => {
+        const { git } = fakeGit({ parents: [BASE_SHA] });
+        expect(() =>
+            deriveTrustedAcceptedCommit({
+                eventName: "pull_request",
+                event: pullRequestEvent(),
+                githubSha: HEAD_SHA,
+                githubRef: "refs/pull/7/merge",
+                githubRefProtected: "false",
+                repoRoot: "/fixture",
+                git,
+            }),
+        ).toThrow(/not a merge commit/);
     });
 
     it("accepts a protected default-branch push predecessor", () => {

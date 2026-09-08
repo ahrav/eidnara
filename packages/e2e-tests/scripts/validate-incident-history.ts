@@ -155,7 +155,30 @@ export function deriveTrustedAcceptedCommit(input: TrustedBaseInput): string {
     if (input.eventName === "pull_request") {
         const pullRequest = record(event.pull_request, "pull_request");
         const base = record(pullRequest.base, "pull_request.base");
-        accepted = trustedSha(base.sha, "pull_request.base.sha");
+        const eventBase = trustedSha(base.sha, "pull_request.base.sha");
+        // A depth-1 clone records HEAD without parents, so `rev-list --parents` reports no merge parent until this fetch unshallows the checkout.
+        fetchTrustedCommit(git, repoRoot, eventBase);
+        // The base branch may advance after a pull request opens or retargets, so `pull_request.base.sha` can be an ancestor of the merge commit's first parent.
+        const parents = runGit(
+            git,
+            repoRoot,
+            ["rev-list", "--parents", "-n", "1", head],
+            "pull-request merge relation",
+        ).split(/\s+/);
+        if (parents.length < 3) {
+            throw new Error("checked-out pull-request commit is not a merge commit");
+        }
+        const mergeParent = trustedSha(parents[1], "pull-request merge parent");
+        if (mergeParent !== eventBase) {
+            fetchTrustedCommit(git, repoRoot, mergeParent);
+            const lineage = git(["merge-base", "--is-ancestor", eventBase, mergeParent], repoRoot);
+            if (lineage.status !== 0) {
+                throw new Error(
+                    "pull-request merge parent does not descend from pull_request.base.sha",
+                );
+            }
+        }
+        accepted = mergeParent;
     } else if (input.eventName === "push") {
         if (input.githubRefProtected !== "true") {
             throw new Error("push event ref is not marked protected");
@@ -174,27 +197,14 @@ export function deriveTrustedAcceptedCommit(input: TrustedBaseInput): string {
             throw new Error("push event.after does not match the checked-out commit");
         }
         accepted = trustedSha(event.before, "push event.before");
+        fetchTrustedCommit(git, repoRoot, accepted);
     } else {
         throw new Error(`unsupported GitHub event ${JSON.stringify(input.eventName)}`);
     }
 
-    fetchTrustedCommit(git, repoRoot, accepted);
     const relation = git(["merge-base", "--is-ancestor", accepted, head], repoRoot);
     if (relation.status !== 0) {
         throw new Error("trusted accepted commit is not an ancestor of HEAD");
-    }
-    if (input.eventName === "pull_request") {
-        const parents = runGit(
-            git,
-            repoRoot,
-            ["rev-list", "--parents", "-n", "1", head],
-            "pull-request merge relation",
-        ).split(/\s+/);
-        if (parents.length < 3 || parents[1] !== accepted) {
-            throw new Error(
-                "checked-out pull-request commit is not a merge commit rooted at the event base",
-            );
-        }
     }
     return accepted;
 }
