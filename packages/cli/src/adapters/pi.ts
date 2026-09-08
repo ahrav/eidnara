@@ -26,7 +26,7 @@ export class PiAdapter implements HarnessAdapter {
     hasPluginEntry(): boolean {
         const settings = readPiSettings();
         if (!settings) return false;
-        const packages = (settings.packages ?? []) as unknown[];
+        const packages = Array.isArray(settings.packages) ? settings.packages : [];
         return packages.some((entry) => isEidnaraPiPackageEntry(entry, getPiAgentDir()));
     }
 
@@ -44,10 +44,10 @@ export class PiAdapter implements HarnessAdapter {
         const settingsPath = getPiUserExtensionsPath();
         try {
             const settings = readPiSettingsForUpdate();
-            const packages = Array.isArray(settings.packages)
-                ? (settings.packages as unknown[])
-                : [];
+            const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
+            // A pinned or local entry is left as the user wrote it rather than
+            // replaced with the unversioned source.
             const present = packages.some((entry) =>
                 isEidnaraPiPackageEntry(entry, getPiAgentDir()),
             );

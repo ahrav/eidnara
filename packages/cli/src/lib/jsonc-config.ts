@@ -44,10 +44,17 @@ function parseErrorLocation(content: string, error: unknown): { line: number; co
     return { line: messageLine ? Number.parseInt(messageLine, 10) : 1, column: 1 };
 }
 
+type JsoncDocumentResult =
+    | { kind: "missing" }
+    | { kind: "parsed"; tree: Record<string, unknown>; plain: Record<string, unknown> }
+    | { kind: "parse-error"; error: ConfigParseError };
+
 /**
- * Callers may create a missing config but must not replace parse failures with empty objects.
+ * `tree` preserves comment metadata during serialization; `plain` contains
+ * the sanitized copy. A prototype-pollution key anywhere in the document, or
+ * a non-object root, rejects the whole file.
  */
-export function readJsoncConfig(path: string): JsoncReadResult {
+function readJsoncDocument(path: string): JsoncDocumentResult {
     if (!existsSync(path)) return { kind: "missing" };
 
     // The read stays inside the failure boundary: a path that exists but
@@ -57,7 +64,8 @@ export function readJsoncConfig(path: string): JsoncReadResult {
     let content = "";
     try {
         content = readFileSync(path, "utf-8");
-        return { kind: "parsed", value: parseJsoncObject(content) };
+        const document = parseJsoncObject(content);
+        return { kind: "parsed", tree: document.tree, plain: document.plain };
     } catch (error) {
         return { kind: "parse-error", error: new ConfigParseError(path, content, error) };
     }
@@ -66,30 +74,46 @@ export function readJsoncConfig(path: string): JsoncReadResult {
 /**
  * Parses JSONC that must be a config object: a prototype-pollution key or a
  * non-object root (an array, a scalar, `null`) throws, since the loader would
- * silently fall back to defaults for such a document.
+ * silently fall back to defaults for such a document. `tree` keeps the
+ * comment-json metadata that `stringify` needs to emit comments; `plain` is
+ * the sanitized copy without it.
  */
-export function parseJsoncObject(content: string): Record<string, unknown> {
+export function parseJsoncObject(content: string): {
+    tree: Record<string, unknown>;
+    plain: Record<string, unknown>;
+} {
     const rejectedKeyPaths: string[] = [];
-    const parsed: unknown = parseCommentJson(content);
-    // sanitizeParsedJson's return value is dropped: its copy lacks the
-    // symbol-keyed comment metadata that `stringify` needs to emit comments.
-    sanitizeParsedJson(parsed, {
+    const tree: unknown = parseCommentJson(content);
+    const plain = sanitizeParsedJson(tree, {
         onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
     });
     if (rejectedKeyPaths.length > 0) {
         throw new Error(`unsafe prototype-pollution key at ${rejectedKeyPaths.join(", ")}`);
     }
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    if (tree === null || typeof tree !== "object" || Array.isArray(tree)) {
         throw new Error("expected a JSON object at the document root");
     }
-    return parsed as Record<string, unknown>;
+    return { tree: tree as Record<string, unknown>, plain: plain as Record<string, unknown> };
 }
 
+/**
+ * Callers may create a missing config but must not replace parse failures with empty objects.
+ */
+export function readJsoncConfig(path: string): JsoncReadResult {
+    const result = readJsoncDocument(path);
+    return result.kind === "parsed" ? { kind: "parsed", value: result.plain } : result;
+}
+
+/**
+ * Returns the comment-json tree so a mutated config serializes with its
+ * comments intact. A missing file yields an empty object; an unparseable or
+ * unsafe one throws instead of being overwritten.
+ */
 export function readJsoncConfigForUpdate(path: string): Record<string, unknown> {
-    const result = readJsoncConfig(path);
+    const result = readJsoncDocument(path);
     if (result.kind === "missing") return {};
     if (result.kind === "parse-error") throw result.error;
-    return result.value;
+    return result.tree;
 }
 
 export function assertJsoncConfigsParseable(paths: readonly string[]): void {

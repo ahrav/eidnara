@@ -158,7 +158,7 @@ function currentUsername(): string | undefined {
 /** Text like `client_secret: value` is judged by the shared key vocabulary; numbers and booleans stay. */
 function redactKeyedText(value: string): string {
     return value.replace(
-        /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s&;,]+)/g,
+        /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,]+)/g,
         (full, key: string, separator: string, secret: string) =>
             isSecretKey(key) && !/^(?:true|false|null|[+-]?\d+(?:\.\d+)?)$/i.test(secret)
                 ? `${key}${separator}<REDACTED>`
@@ -216,7 +216,10 @@ function redactProse(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(redactProse);
     if (value && typeof value === "object") {
         return Object.fromEntries(
-            Object.entries(value).map(([entryKey, entry]) => [entryKey, redactProse(entry)]),
+            Object.entries(value).map(([entryKey, entry]) => [
+                sanitizeString(entryKey),
+                redactProse(entry),
+            ]),
         );
     }
     return value;
@@ -302,17 +305,23 @@ const SESSION_HEADER_MAX_BYTES = 8 * 1024;
 function readSessionHeaderCwd(file: string): string | null {
     const buffer = Buffer.alloc(SESSION_HEADER_MAX_BYTES);
     const fd = openSync(file, "r");
-    let bytesRead = 0;
+    // A read may return fewer bytes than asked; keep going until the header
+    // line, the bound, or EOF.
+    let filled = 0;
+    let newline = -1;
     try {
-        bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+        while (filled < buffer.length && newline === -1) {
+            const bytesRead = readSync(fd, buffer, filled, buffer.length - filled, filled);
+            if (bytesRead === 0) break;
+            newline = buffer.indexOf(0x0a, filled);
+            filled += bytesRead;
+        }
     } finally {
         closeSync(fd);
     }
-    const text = buffer.toString("utf-8", 0, bytesRead);
-    const newline = text.indexOf("\n");
-    if (newline === -1) return null;
+    if (newline === -1 || newline >= filled) return null;
     try {
-        const header = JSON.parse(text.slice(0, newline)) as { cwd?: unknown };
+        const header = JSON.parse(buffer.toString("utf-8", 0, newline)) as { cwd?: unknown };
         return typeof header.cwd === "string" && isAbsolute(header.cwd) ? header.cwd : null;
     } catch {
         return null;
@@ -378,12 +387,10 @@ export function collectPiRecentSessions(
                     const stat = statSync(file);
                     // Opening a FIFO with no writer blocks, so only a regular file is a candidate.
                     if (!stat.isFile()) continue;
-                    candidates.push({
-                        sessionId: piSessionIdFromFileName(name),
-                        file,
-                        slugDirectory,
-                        mtime: stat.mtimeMs,
-                    });
+                    // A bare `.jsonl` has no id to report or filter on.
+                    const sessionId = piSessionIdFromFileName(name);
+                    if (!sessionId) continue;
+                    candidates.push({ sessionId, file, slugDirectory, mtime: stat.mtimeMs });
                 } catch {
                     unreadable += 1;
                 }

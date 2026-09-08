@@ -2,9 +2,18 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join } from "node:path";
-import { findOnPath, isExecutableFile } from "./find-on-path";
+import {
+    type CommandInvocation,
+    getCommandInvocation,
+    invocationSpawnOptions,
+} from "./command-invocation";
+import {
+    findBunRuntime,
+    findOnPath,
+    isExecutableFile,
+    packageManagerBinCandidates,
+} from "./find-on-path";
 import { getOmpPackageDir } from "./paths";
-import { getPiCommandInvocation } from "./pi-helpers";
 import { standaloneVersion } from "./semver";
 export interface OmpBinaryInfo {
     path: string;
@@ -26,6 +35,9 @@ export interface OmpPluginInfo {
 
 export const OMP_PLUGIN_PACKAGE = "@eidnara/pi";
 
+const OMP_BINARY_ENV = "EIDNARA_OMP_BINARY";
+const BUN_BINARY_ENV = "EIDNARA_BUN_BINARY";
+
 /**
  * OMP publishes its CLI as a Bun script (`#!/usr/bin/env bun`), not a native executable.
  * Windows does not execute shebangs.
@@ -34,7 +46,7 @@ export const OMP_PLUGIN_PACKAGE = "@eidnara/pi";
 function detectOmpPackageCli(): string | null {
     const packageDir = getOmpPackageDir();
     if (!packageDir) return null;
-    if (!findOnPath("bun")) return null;
+    if (!findBunRuntime()) return null;
     try {
         const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")) as {
             name?: unknown;
@@ -46,15 +58,13 @@ function detectOmpPackageCli(): string | null {
         return null;
     }
 }
-export function getOmpCommandInvocation(
-    ompPath: string,
-    args: string[],
-): { command: string; args: string[] } {
+export function getOmpCommandInvocation(ompPath: string, args: string[]): CommandInvocation {
     if (extname(ompPath).toLowerCase() === ".js") {
-        const bun = findOnPath("bun");
-        if (bun) return { command: bun, args: [ompPath, ...args] };
+        const bun = findBunRuntime();
+        // A Bun found as an npm `.cmd` shim needs cmd.exe like any other shim.
+        if (bun) return getCommandInvocation(bun, [ompPath, ...args], BUN_BINARY_ENV);
     }
-    return getPiCommandInvocation(ompPath, args);
+    return getCommandInvocation(ompPath, args, OMP_BINARY_ENV);
 }
 
 export function getOmpFallbackCandidates(
@@ -62,15 +72,7 @@ export function getOmpFallbackCandidates(
     home: string,
     appData?: string,
 ): string[] {
-    if (platform !== "win32") {
-        return [join(home, ".bun", "bin", "omp"), join(home, ".local", "bin", "omp")];
-    }
-    const npmRoot = appData?.trim();
-    return [
-        ...(npmRoot ? [join(npmRoot, "npm", "omp.cmd"), join(npmRoot, "npm", "omp.exe")] : []),
-        join(home, ".bun", "bin", "omp.exe"),
-        join(home, ".bun", "bin", "omp.cmd"),
-    ];
+    return packageManagerBinCandidates("omp", platform, home, appData);
 }
 
 export function detectOmpBinary(): OmpBinaryInfo | null {
@@ -94,6 +96,7 @@ export function runOmpCommand(ompPath: string, args: string[], timeout = 30_000)
             timeout,
             maxBuffer: 10 * 1024 * 1024,
             stdio: ["ignore", "pipe", "pipe"],
+            ...invocationSpawnOptions(invocation),
         });
         return {
             ok: result.status === 0 && !result.error,
@@ -190,10 +193,8 @@ export function getOmpSetting(
     if (!result.ok) return null;
     try {
         const parsed = JSON.parse(result.stdout) as { value?: unknown };
-        if (key === "compaction.enabled") {
-            return typeof parsed.value === "boolean" ? parsed.value : null;
-        }
-        return typeof parsed.value === "string" ? parsed.value : null;
+        const expected = key === "compaction.enabled" ? "boolean" : "string";
+        return typeof parsed.value === expected ? (parsed.value as boolean | string) : null;
     } catch {
         return null;
     }

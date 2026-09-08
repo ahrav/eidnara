@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
     detectOmpBinary,
     getOmpCommandInvocation,
@@ -65,6 +65,23 @@ describe("OMP binary discovery", () => {
         expect(detectOmpBinary()).toBeNull();
     });
 
+    it("finds Bun under ~/.bun/bin when it is absent from PATH", () => {
+        const { root } = makePackageRoot();
+        const bunBin = join(root, "home", ".bun", "bin");
+        mkdirSync(bunBin, { recursive: true });
+        writeFileSync(join(bunBin, "bun"), "#!/bin/sh\n");
+        chmodSync(join(bunBin, "bun"), 0o755);
+        process.env.PATH = join(root, "empty-bin");
+        const cli = join(root, "pkg", "dist", "cli.js");
+
+        expect(detectOmpBinary()).toEqual({ path: cli, source: "package" });
+        expect(getOmpCommandInvocation(cli, ["--version"])).toEqual({
+            command: join(bunBin, "bun"),
+            args: [cli, "--version"],
+            env: { PATH: `${bunBin}${delimiter}${process.env.PATH}` },
+        });
+    });
+
     it("routes a package CLI script through Bun instead of spawning it directly", () => {
         const { root, binDir } = makePackageRoot();
         process.env.PATH = binDir;
@@ -73,17 +90,38 @@ describe("OMP binary discovery", () => {
         expect(getOmpCommandInvocation(cli, ["--version"])).toEqual({
             command: join(binDir, "bun"),
             args: [cli, "--version"],
+            env: { PATH: `${binDir}${delimiter}${process.env.PATH}` },
         });
     });
 
-    it("leaves a native OMP binary path untouched", () => {
+    it("runs a native OMP binary directly with its directory on the child PATH", () => {
         const { binDir } = makePackageRoot();
         process.env.PATH = binDir;
 
         expect(getOmpCommandInvocation("/usr/bin/omp", ["config", "path"])).toEqual({
             command: "/usr/bin/omp",
             args: ["config", "path"],
+            env: { PATH: `/usr/bin${delimiter}${binDir}` },
         });
+    });
+});
+
+describe.if(process.platform !== "win32")("OMP fallback launchers", () => {
+    it("runs an env-shebang launcher whose Bun runtime sits beside it, outside the parent PATH", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-bun-"));
+        roots.push(root);
+        const bunBin = join(root, ".bun", "bin");
+        mkdirSync(bunBin, { recursive: true });
+        // The stand-in "bun" runtime prints OMP's version line, which only it can
+        // produce here, so the test sees that the launcher ran through it. The
+        // line carries nothing else because the probe accepts only a bare version.
+        writeFileSync(join(bunBin, "bun"), '#!/bin/sh\necho "omp/1.2.3"\n');
+        chmodSync(join(bunBin, "bun"), 0o755);
+        writeFileSync(join(bunBin, "omp"), "#!/usr/bin/env bun\n");
+        chmodSync(join(bunBin, "omp"), 0o755);
+        process.env.PATH = join(root, "empty-bin");
+
+        expect(getOmpVersion(join(bunBin, "omp"))).toBe("1.2.3");
     });
 });
 
@@ -192,22 +230,34 @@ describe("OMP version probe", () => {
     });
 });
 
-describe("OMP setting probes", () => {
-    it("rejects a value whose type does not match the requested key", () => {
-        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-setting-"));
-        try {
-            const fake = join(root, "omp");
-            writeFileSync(
-                fake,
-                `#!/bin/sh
-if [ "$3" = "compaction.enabled" ]; then printf '%s' '{"value":"true"}'; else printf '%s' '{"value":true}'; fi
-`,
-            );
-            chmodSync(fake, 0o755);
-            expect(getOmpSetting(fake, "compaction.enabled")).toBeNull();
-            expect(getOmpSetting(fake, "memory.backend")).toBeNull();
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
+describe.if(process.platform !== "win32")("getOmpSetting", () => {
+    function fakeOmp(valuesByKey: Record<string, string>): string {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-settings-"));
+        roots.push(root);
+        const omp = join(root, "omp");
+        const cases = Object.entries(valuesByKey)
+            .map(([key, json]) => `  ${key}) printf '%s' '${json}' ;;`)
+            .join("\n");
+        writeFileSync(omp, `#!/bin/sh\ncase "$3" in\n${cases}\nesac\n`);
+        chmodSync(omp, 0o755);
+        return omp;
+    }
+
+    it("returns only the type each key declares", () => {
+        const omp = fakeOmp({
+            "compaction.enabled": '{"value":false}',
+            "memory.backend": '{"value":"sqlite"}',
+        });
+        expect(getOmpSetting(omp, "compaction.enabled")).toBe(false);
+        expect(getOmpSetting(omp, "memory.backend")).toBe("sqlite");
+    });
+
+    it("rejects a value of the other primitive type", () => {
+        const omp = fakeOmp({
+            "compaction.enabled": '{"value":"false"}',
+            "memory.backend": '{"value":true}',
+        });
+        expect(getOmpSetting(omp, "compaction.enabled")).toBeNull();
+        expect(getOmpSetting(omp, "memory.backend")).toBeNull();
     });
 });

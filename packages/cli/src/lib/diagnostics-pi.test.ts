@@ -183,6 +183,9 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString('client_secret: "correct horse battery staple" done')).toBe(
             "client_secret: <REDACTED> done",
         );
+        expect(sanitizeString('client_secret: "prefix\\" LIVE suffix" done')).toBe(
+            "client_secret: <REDACTED> done",
+        );
         expect(sanitizeString("bearer opaque-live-token and BEARER x.y")).toBe(
             "Bearer <REDACTED> and Bearer <REDACTED>",
         );
@@ -200,9 +203,13 @@ describe("sanitizeString home handling", () => {
         expect(
             sanitizeValue({
                 permission: { bash: { "curl -H 'X-API-Key: live' https://h": "allow" } },
+                prompt_surface: { tool_descriptions: { "X-API-Key: live": "desc" } },
             }),
         ).toEqual({
             permission: { bash: { "curl -H 'X-API-Key: <REDACTED>": "allow" } },
+            prompt_surface: {
+                tool_descriptions: { "X-API-Key: <REDACTED>": "<REDACTED 4 chars>" },
+            },
         });
     });
 });
@@ -364,12 +371,15 @@ describe("collectDiagnostics Pi path resolution", () => {
             join(rootSlugDir, "2026-07-07T12-00-00-000Z_root.jsonl"),
             '{"type":"session"}\n',
         );
+        writeFileSync(join(rootSlugDir, ".jsonl"), '{"type":"session"}\n');
         const logDir = join(cwd, "log-as-directory");
         mkdirSync(logDir);
         process.env.EIDNARA_LOG_PATH = logDir;
 
         const report = await collectDiagnostics(cwd);
 
+        // The timestamp prefix is file naming, not part of Pi's session id.
+        expect(report.recentSessions.map((session) => session.sessionId)).toEqual(["root"]);
         expect(report.recentSessions.map((session) => session.directory)).toEqual(["/"]);
         expect(report.logFile).toEqual({ path: logDir, exists: false, sizeKb: 0 });
     });

@@ -51,6 +51,8 @@ export async function resolveAdaptersForCommand(
 
     if (installed.length === 0) {
         log.warn("No supported harness was detected on PATH (opencode, pi, omp).");
+        // OMP is omitted: its plugin registry is written only by the omp
+        // binary, so nothing can be configured for it before it is installed.
         const pick = await selectOne(`Which harness do you want to ${options.verb}?`, [
             {
                 label: "OpenCode",
@@ -60,11 +62,6 @@ export async function resolveAdaptersForCommand(
             {
                 label: "Pi",
                 value: "pi",
-                hint: "@eidnara/pi",
-            },
-            {
-                label: "Oh My Pi (OMP)",
-                value: "omp",
                 hint: "@eidnara/pi",
             },
         ]);
