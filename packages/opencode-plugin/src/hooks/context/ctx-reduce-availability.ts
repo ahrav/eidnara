@@ -137,8 +137,10 @@ function resolveToolAvailability(sessionId: string, toolName: string): ToolAvail
             (db) =>
                 db
                     .prepare(
-                        `SELECT json_extract(data, '$.tools') AS tools FROM message
-                          WHERE session_id = ? AND json_extract(data, '$.role') = 'user'
+                        `SELECT json_extract(CASE WHEN json_valid(data) THEN data END, '$.tools') AS tools
+                          FROM message
+                          WHERE session_id = ?
+                            AND json_extract(CASE WHEN json_valid(data) THEN data END, '$.role') = 'user'
                           ORDER BY time_created ASC, id ASC LIMIT 1`,
                     )
                     .get(sessionId) as { tools: string | null } | undefined,

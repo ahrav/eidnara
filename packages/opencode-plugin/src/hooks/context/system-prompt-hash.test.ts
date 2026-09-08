@@ -285,6 +285,32 @@ describe("system-prompt-hash skips OpenCode internal hidden agents", () => {
         expect(system).toEqual(["You are a helpful coding assistant."]);
         expect(promptStateFor(sessionId)).toBeDefined();
     });
+
+    it("tracks a custom agent that quotes an internal signature inside its own prose", async () => {
+        useTempDataHome("sph-tracks-quoted-signature-");
+        const sessionId = "ses-quoted-signature";
+        const { handler, promptStateFor } = buildHandler();
+
+        const system = [
+            `You are a prompt reviewer.\nThe title agent's prompt begins: "${TITLE_PROMPT_HEAD}" Critique it.`,
+        ];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(promptStateFor(sessionId)).toBeDefined();
+    });
+
+    it("still skips a signature that opens a later segment after leading whitespace", async () => {
+        useTempDataHome("sph-skip-later-segment-");
+        const sessionId = "ses-later-segment";
+        const { handler, promptStateFor } = buildHandler();
+
+        await handler(
+            { sessionID: sessionId },
+            { system: ["<provider header>", `\n  ${TITLE_PROMPT_HEAD}`] },
+        );
+
+        expect(promptStateFor(sessionId)).toBeUndefined();
+    });
 });
 
 describe("system-prompt-hash skips Eidnara internal child agents", () => {

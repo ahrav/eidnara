@@ -100,6 +100,25 @@ describe("ctx_reduce availability (OpenCode DB)", () => {
 
         expect(resolveCtxReduceAvailability(sessionId)).toEqual({ callable: false, frozen: true });
     });
+
+    it("treats a message row with malformed JSON as a non-match instead of failing open unfrozen", () => {
+        dataHome = mkdtempSync(join(tmpdir(), "eidnara-ctx-reduce-db-"));
+        process.env.XDG_DATA_HOME = dataHome;
+        const sessionId = "ses-db-malformed";
+        clearCtxReduceAvailability(sessionId);
+
+        writeOpenCodeDb([{ id: "msg-2", sessionId, timeCreated: 2, tools: { ctx_reduce: false } }]);
+        const db = new Database(join(dataHome, "opencode", "opencode.db"));
+        try {
+            db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('msg-1', ?, 1, 1, '{not json')",
+            ).run(sessionId);
+        } finally {
+            closeQuietly(db);
+        }
+
+        expect(resolveCtxReduceAvailability(sessionId)).toEqual({ callable: false, frozen: true });
+    });
 });
 
 describe("ctx_reduce availability (spawn tools map)", () => {
