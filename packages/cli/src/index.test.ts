@@ -109,24 +109,43 @@ describe("import-safe CLI dispatch", () => {
         expect(h.stderr).toEqual([]);
     });
 
-    test("doctor --harness pi --help prints the Pi doctor help instead of running checks", async () => {
+    test.each([
+        [["setup", "--help"]],
+        [["doctor", "-h"]],
+        [["doctor", "--harness", "pi", "--help"]],
+    ])("%p prints the usage instead of running the command", async (argv) => {
         const h = dependencies();
-        const logged: string[] = [];
-        const originalLog = console.log;
-        console.log = (...args: unknown[]) => {
-            logged.push(args.map(String).join(" "));
-        };
-        try {
-            const exit = await dispatchCli(["doctor", "--harness", "pi", "--help"], h.deps);
 
-            expect(exit).toBe(0);
-        } finally {
-            console.log = originalLog;
-        }
-        const output = logged.join("\n");
-        expect(output).toContain("Eidnara for Pi doctor");
-        expect(output).toContain("eidnara doctor --harness pi --help");
-        expect(output).not.toContain("Summary: PASS");
+        const exit = await dispatchCli(argv, h.deps);
+
+        expect(exit).toBe(0);
+        expect(h.stdout).toEqual([usageText()]);
+        expect(h.stderr).toEqual([]);
+    });
+
+    test.each([
+        [["doctor", "repair-db"], "Unknown doctor argument: repair-db"],
+        [["doctor", "--clear"], "Unknown doctor argument: --clear"],
+        [["doctor", "--harness", "pi", "migrate"], "Unknown doctor argument: migrate"],
+        [["setup", "migrate", "--clear"], "Unknown setup arguments: migrate --clear"],
+    ])("%p is rejected as an argument error", async (argv, message) => {
+        const h = dependencies();
+
+        const exit = await dispatchCli(argv, h.deps);
+
+        expect(exit).toBe(1);
+        expect(h.stderr).toEqual([message]);
+        expect(h.stdout).toEqual([usageText()]);
+    });
+
+    test("the --harness value is not reported as an unknown argument", async () => {
+        const h = dependencies();
+
+        // An invalid value reaches the harness resolver, which rejects it by name.
+        await expect(dispatchCli(["doctor", "--harness", "opencdoe"], h.deps)).rejects.toThrow(
+            "Invalid --harness value: opencdoe",
+        );
+        expect(h.stderr).toEqual([]);
     });
 
     test("importing the executable module does not run or exit", async () => {

@@ -59,7 +59,6 @@ interface DoctorDeps {
 export interface RunDoctorOptions {
     force?: boolean;
     issue?: boolean;
-    help?: boolean;
     cwd?: string;
     prompts?: PromptIO;
     deps?: Partial<DoctorDeps>;
@@ -82,19 +81,6 @@ function depsFrom(options: RunDoctorOptions): DoctorDeps {
         prompts: options.prompts ?? DEFAULT_DEPS.prompts,
         ...options.deps,
     };
-}
-
-function printDoctorHelp(): void {
-    console.log("");
-    console.log("  Eidnara for Pi doctor");
-    console.log("  ───────────────────────────");
-    console.log("");
-    console.log("  Usage:");
-    console.log("    eidnara doctor --harness pi          Run health checks");
-    console.log("    eidnara doctor --harness pi --force  Repair safe issues, then re-check");
-    console.log("    eidnara doctor --harness pi --issue  Create a sanitized bug report");
-    console.log("    eidnara doctor --harness pi --help   Show this help");
-    console.log("");
 }
 
 function selfVersion(): string {
@@ -515,11 +501,6 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
     const prompts = options.prompts ?? deps.prompts;
     const cwd = options.cwd ?? process.cwd();
 
-    if (options.help) {
-        printDoctorHelp();
-        return 0;
-    }
-
     if (options.issue) {
         return runIssueFlow({ cwd, prompts, deps });
     }
@@ -548,12 +529,4 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
 
     prompts.outro(first.fail > 0 ? "Doctor found failures" : "Doctor complete");
     return first.fail > 0 ? 1 : 0;
-}
-
-export function parseDoctorArgs(args: string[]): RunDoctorOptions {
-    return {
-        force: args.includes("--force"),
-        issue: args.includes("--issue"),
-        help: args.includes("--help") || args.includes("-h"),
-    };
 }

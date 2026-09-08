@@ -201,6 +201,7 @@ export async function runDoctor(
 
     let issues = 0;
     let fixed = 0;
+    let resolved = 0;
     let passCount = 0;
     let warnCount = 0;
     let failCount = 0;
@@ -353,6 +354,9 @@ export async function runDoctor(
             }
             if (actions.length > 0) {
                 warn("Restart OpenCode for conflict fixes to take effect");
+                // A repair can clear some reported conflicts and leave others; only re-detection says which.
+                const remaining = detectConflicts(cwd, { compactionEnabled }).reasons.length;
+                resolved += Math.max(0, conflictResult.reasons.length - remaining);
             }
         } else {
             log.info("  Run 'doctor --force' to repair these conflicts");
@@ -374,7 +378,8 @@ export async function runDoctor(
         }
     }
 
-    const tuiAdded = ensureTuiPluginEntry();
+    // `ensureTuiPluginEntry` writes tui.json, so a plain check only reads it.
+    const tuiAdded = options.force ? ensureTuiPluginEntry() : false;
     if (tuiAdded) {
         pass("Added TUI sidebar plugin to tui.json");
         warn("Restart OpenCode to see the sidebar");
@@ -408,16 +413,22 @@ export async function runDoctor(
                 } else {
                     pass("TUI sidebar plugin configured");
                 }
-            } else {
+            } else if (options.force) {
                 fail("TUI sidebar plugin is missing after the repair attempt");
+            } else {
+                fail("TUI sidebar plugin is not registered in tui.json");
+                log.info("  Run 'doctor --force' to add it");
             }
         } catch (error) {
             fail(
                 `Could not verify TUI sidebar config: ${error instanceof Error ? error.message : String(error)}`,
             );
         }
-    } else {
+    } else if (options.force) {
         fail("Could not create or verify the TUI sidebar config");
+    } else {
+        fail(`No TUI sidebar config found at ${paths.tuiConfig}`);
+        log.info("  Run 'doctor --force' to create it");
     }
 
     const logPath = getEidnaraLogPath("opencode");
@@ -459,15 +470,20 @@ export async function runDoctor(
 
     console.log("");
     log.message(`Summary: PASS ${passCount} / WARN ${warnCount} / FAIL ${failCount}`);
+    const unresolved = issues - resolved;
     if (issues === 0 && fixed === 0) {
         outro("Everything looks good! ✨");
-    } else if (issues > 0 && fixed > 0) {
-        outro(`Found ${issues} issue(s), fixed ${fixed}. Restart OpenCode to apply.`);
-    } else if (fixed > 0) {
-        outro(`Fixed ${fixed} issue(s). Restart OpenCode to apply.`);
-    } else {
-        outro(`Found ${issues} issue(s) that need manual attention.`);
+    } else if (unresolved > 0) {
+        outro(
+            fixed > 0
+                ? `Found ${issues} issue(s), fixed ${fixed}; ${unresolved} still need manual attention.`
+                : `Found ${issues} issue(s) that need manual attention.`,
+        );
         return 1;
+    } else if (issues > 0) {
+        outro(`Found ${issues} issue(s), fixed ${fixed}. Restart OpenCode to apply.`);
+    } else {
+        outro(`Fixed ${fixed} issue(s). Restart OpenCode to apply.`);
     }
 
     return 0;

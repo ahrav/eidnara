@@ -148,4 +148,86 @@ describe("doctor OpenCode conflict repair", () => {
             successSpy.mockRestore();
         }
     });
+
+    it("reports a missing TUI sidebar entry without writing tui.jsonc, and adds it only under --force", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeFileSync(
+            opencodeConfigPath,
+            `${JSON.stringify(
+                { plugin: ["@eidnara/opencode"], compaction: { auto: false, prune: false } },
+                null,
+                2,
+            )}\n`,
+        );
+        const tuiConfigPath = join(configDir, "tui.jsonc");
+        writeFileSync(tuiConfigPath, `${JSON.stringify({ plugin: [] }, null, 2)}\n`);
+        const before = readFileSync(tuiConfigPath, "utf-8");
+
+        const errors: string[] = [];
+        const successes: string[] = [];
+        const errorSpy = spyOn(log, "error").mockImplementation((message: string) => {
+            errors.push(message);
+        });
+        const successSpy = spyOn(log, "success").mockImplementation((message: string) => {
+            successes.push(message);
+        });
+
+        try {
+            const detectCode = await runDoctor({});
+
+            expect(detectCode).toBe(1);
+            expect(errors).toContain("TUI sidebar plugin is not registered in tui.json");
+            expect(readFileSync(tuiConfigPath, "utf-8")).toBe(before);
+
+            errors.length = 0;
+            const repairCode = await runDoctor({ force: true });
+
+            expect(repairCode).toBe(0);
+            expect(successes).toContain("Added TUI sidebar plugin to tui.json");
+            const repaired = parseJsonc(readFileSync(tuiConfigPath, "utf-8")) as {
+                plugin?: unknown[];
+            };
+            expect(repaired.plugin).toEqual(["@eidnara/opencode@latest"]);
+        } finally {
+            errorSpy.mockRestore();
+            successSpy.mockRestore();
+        }
+    });
+
+    it("exits 1 under --force when a failure remains after the conflict repair", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        // The compaction conflict is repairable; the missing plugin entry is not.
+        writeFileSync(
+            opencodeConfigPath,
+            `${JSON.stringify({ plugin: [], compaction: { auto: true } }, null, 2)}\n`,
+        );
+        writeFileSync(
+            join(configDir, "tui.jsonc"),
+            `${JSON.stringify({ plugin: ["@eidnara/opencode@latest"] }, null, 2)}\n`,
+        );
+
+        const errors: string[] = [];
+        const successes: string[] = [];
+        const errorSpy = spyOn(log, "error").mockImplementation((message: string) => {
+            errors.push(message);
+        });
+        const successSpy = spyOn(log, "success").mockImplementation((message: string) => {
+            successes.push(message);
+        });
+
+        try {
+            const repairCode = await runDoctor({ force: true });
+
+            expect(repairCode).toBe(1);
+            expect(successes).toContain("Fixed: Disabled auto-compaction");
+            expect(
+                errors.some((message) =>
+                    message.startsWith("Plugin @eidnara/opencode is not registered"),
+                ),
+            ).toBe(true);
+        } finally {
+            errorSpy.mockRestore();
+            successSpy.mockRestore();
+        }
+    });
 });

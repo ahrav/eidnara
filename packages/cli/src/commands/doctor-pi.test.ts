@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
 import type { PiDiagnosticReport } from "../lib/diagnostics-pi";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
-import { parseDoctorArgs, type RunDoctorOptions, runDoctor } from "./doctor-pi";
+import { type RunDoctorOptions, runDoctor } from "./doctor-pi";
 
 setDefaultTimeout(30_000);
 
@@ -295,12 +295,5 @@ describe("Pi doctor", () => {
         const output = prompts.messages.join("\n");
         expect(output).toContain("INFO Eidnara for Pi CLI version unknown");
         expect(output).not.toContain("PASS Eidnara for Pi CLI");
-    });
-
-    it("does not recognize --clear as a doctor flag", () => {
-        const parsed = parseDoctorArgs(["--clear"]);
-
-        expect(parsed).toEqual({ force: false, issue: false, help: false });
-        expect(parsed).not.toHaveProperty("clear");
     });
 });

@@ -11,8 +11,6 @@ import { runDoctor as runPiDoctor } from "./doctor-pi";
 export interface RunDoctorOptions {
     force?: boolean;
     issue?: boolean;
-    /** Only the Pi doctor prints its own help; the other doctors ignore this. */
-    help?: boolean;
     argv?: string[];
 }
 
@@ -49,7 +47,6 @@ async function dispatchDoctor(adapter: HarnessAdapter, options: RunDoctorOptions
             return runPiDoctor({
                 force: options.force,
                 issue: options.issue,
-                help: options.help,
             });
         case "omp":
             return runOmpDoctor({

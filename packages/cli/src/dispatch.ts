@@ -67,6 +67,24 @@ export function usageText(): string {
     ].join("\n");
 }
 
+const HELP_FLAGS: ReadonlySet<string> = new Set(["--help", "-h"]);
+const SETUP_FLAGS: ReadonlySet<string> = new Set(["--dry-run", ...HELP_FLAGS]);
+const DOCTOR_FLAGS: ReadonlySet<string> = new Set(["--force", "--issue", ...HELP_FLAGS]);
+
+/** Tokens in `argv` that `allowed` does not name. `--harness` consumes the next token, so that token is never reported. */
+function unknownArguments(argv: string[], allowed: ReadonlySet<string>): string[] {
+    const unknown: string[] = [];
+    for (let i = 0; i < argv.length; i++) {
+        const token = argv[i];
+        if (token === "--harness") {
+            i++;
+            continue;
+        }
+        if (!allowed.has(token)) unknown.push(token);
+    }
+    return unknown;
+}
+
 export async function dispatchCli(
     argv: string[] = process.argv.slice(2),
     dependencies: CliDispatchDependencies = defaultDependencies,
@@ -84,6 +102,21 @@ export async function dispatchCli(
     const command = argv[0];
     const rest = argv.slice(1);
 
+    if (command === "setup" || command === "doctor") {
+        // A removed action such as `doctor repair-db` must not run an ordinary check and exit 0.
+        const unknown = unknownArguments(rest, command === "setup" ? SETUP_FLAGS : DOCTOR_FLAGS);
+        if (unknown.length > 0) {
+            const noun = unknown.length === 1 ? "argument" : "arguments";
+            dependencies.stderr(`Unknown ${command} ${noun}: ${unknown.join(" ")}`);
+            dependencies.stdout(usageText());
+            return 1;
+        }
+        if (rest.some((token) => HELP_FLAGS.has(token))) {
+            dependencies.stdout(usageText());
+            return 0;
+        }
+    }
+
     try {
         if (command === "daemon") {
             return await dependencies.runDaemon(rest);
@@ -99,7 +132,6 @@ export async function dispatchCli(
             return await runDoctor({
                 force: rest.includes("--force"),
                 issue: rest.includes("--issue"),
-                help: rest.includes("--help") || rest.includes("-h"),
                 argv: rest,
             });
         }

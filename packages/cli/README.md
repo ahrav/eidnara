@@ -27,7 +27,10 @@ several are installed. Add `--harness opencode`, `--harness pi`, or
 writes:
 
 - OpenCode: the `@eidnara/opencode` plugin entry in `opencode.jsonc` and
-  `tui.jsonc`, with OpenCode's native compaction disabled.
+  `tui.jsonc`. When Eidnara compaction is on (the default), setup also turns
+  off OpenCode's native `compaction.auto` and `compaction.prune`. When
+  `compaction.enabled` is `false` in `eidnara.jsonc`, setup leaves those
+  native fields as they are.
 - Pi: the `npm:@eidnara/pi` package entry in `settings.json`.
 - OMP: the plugin enabled through `omp`, with `compaction.enabled` and
   `memory.backend` turned off so two context managers do not run at once.
