@@ -152,6 +152,10 @@ export interface RustSessionState {
     /** `need_full_sync` forces the next pass to send the full wire array until a pass applies.
      * `need_full_sync` bypasses delta eligibility until a pass applies. */
     forceFullWire: boolean;
+    /** `invalidateWireState` increments this value. A pass commits its cache only when the value
+     * matches the one it read alongside the previous cache, so an invalidation that lands during
+     * the daemon call survives that pass's completion. */
+    wireInvalidations: number;
     moduleGeneration: number;
     idOrdinalMemoGeneration: number;
     idOrdinalMemo: Map<string, number>;
@@ -162,9 +166,11 @@ export interface RustSessionState {
      * The loop continues after `base` without regenerating `index + 1` ordinals. */
     ordinalContinuationBase: number | null;
     failureCount: number;
+    /** Consecutive passes whose newest user message is synthetic. A real user message resets it. */
     syntheticTurnCount: number;
     lastObservedUserMessageId: string | null;
-    syntheticLoopBreakerLogged: boolean;
+    /** One cascade log per run of synthetic turns; the reset that clears `syntheticTurnCount` re-arms it. */
+    syntheticCascadeLogged: boolean;
     routeRoot: string | null;
 }
 
@@ -449,7 +455,7 @@ function observeSyntheticTurn(state: RustSessionState, messages: MessageLike[]):
 
     if (!synthetic) {
         state.syntheticTurnCount = 0;
-        state.syntheticLoopBreakerLogged = false;
+        state.syntheticCascadeLogged = false;
     } else if (isNewMessage) {
         state.syntheticTurnCount += 1;
     }
@@ -560,6 +566,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             consecutiveFailures: 0,
             passCount: 0,
             forceFullWire: false,
+            wireInvalidations: 0,
             moduleGeneration: 0,
             idOrdinalMemoGeneration: 0,
             idOrdinalMemo: new Map(),
@@ -570,7 +577,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             failureCount: 0,
             syntheticTurnCount: 0,
             lastObservedUserMessageId: null,
-            syntheticLoopBreakerLogged: false,
+            syntheticCascadeLogged: false,
             routeRoot: null,
         };
         states.set(sessionId, state);
@@ -891,6 +898,7 @@ export function createRustModeTransform(
         if (!state) return;
         resetOrdinalMemo(state);
         state.forceFullWire = true;
+        state.wireInvalidations += 1;
     };
 
     const run = async (
@@ -903,12 +911,11 @@ export function createRustModeTransform(
         const timings = emptyRustPassTimings();
         state.passCount += 1;
         const syntheticTurn = observeSyntheticTurn(state, messages);
-        const syntheticLoopBlocked = syntheticTurn && state.syntheticTurnCount >= 3;
-        if (syntheticLoopBlocked && !state.syntheticLoopBreakerLogged) {
-            state.syntheticLoopBreakerLogged = true;
+        if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
+            state.syntheticCascadeLogged = true;
             sessionLog(
                 sessionId,
-                "RUST LOOP BREAKER: suppressing host directives after three consecutive synthetic turns until a real user message arrives",
+                `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
             );
         }
         const inputCount = messages.length;
@@ -1102,6 +1109,8 @@ export function createRustModeTransform(
                 protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
             };
             const previousWireCache = wireCaches.get(sessionId);
+            // Every await after this read lets `invalidateWireState` or `clearSession` run; the commit below compares against this value.
+            const wireInvalidationsAtRead = state.wireInvalidations;
             let wireDelta:
                 | {
                       rawStart: number;
@@ -1253,6 +1262,11 @@ export function createRustModeTransform(
                         fingerprint: `${ckFingerprint.fingerprint}|${nativeFingerprint.fingerprint}`,
                     };
                 }
+                const nativeMessages = messages.slice(wireDelta.rawStart);
+                if (nativeMessages.length === 0) {
+                    // An empty delta replaces nothing: the terminal message, its wire visibility, and both before-last fingerprints stay the acknowledged ones. Recomputing them from an empty tail would record the terminal as invisible and chain the before-last fingerprints off the full array.
+                    return { ...previousWireCache, nativeOutput: undefined };
+                }
                 let ckFingerprint = wireDelta.ckAfter;
                 let ckPrefixFingerprintBeforeLast = ckFingerprint;
                 for (let index = 0; index < encodedInput.length; index += 1) {
@@ -1260,7 +1274,6 @@ export function createRustModeTransform(
                         ckPrefixFingerprintBeforeLast = ckFingerprint;
                     ckFingerprint = advanceWireFingerprint(ckFingerprint, encodedInput[index]);
                 }
-                const nativeMessages = messages.slice(wireDelta.rawStart);
                 let nativeFingerprint = wireDelta.nativeAfter;
                 let nativePrefixFingerprintBeforeLast = nativeFingerprint;
                 for (let index = 0; index < nativeMessages.length; index += 1) {
@@ -1590,8 +1603,19 @@ export function createRustModeTransform(
             }
             state.initialized = true;
             state.consecutiveFailures = 0;
-            state.forceFullWire = false;
-            wireCaches.set(sessionId, pendingWireCache);
+            if (
+                states.get(sessionId) === state &&
+                state.wireInvalidations === wireInvalidationsAtRead
+            ) {
+                state.forceFullWire = false;
+                wireCaches.set(sessionId, pendingWireCache);
+            } else {
+                // The session was cleared or its wire state invalidated while this pass awaited the daemon. The applied output stands; the cache built from the pre-invalidation array does not, and `forceFullWire` keeps the invalidator's value.
+                sessionLog(
+                    sessionId,
+                    "rust wire state changed during the pass; discarding this pass's wire cache",
+                );
+            }
             appliedAt = performance.now();
             finishPass(true);
         } catch (error) {

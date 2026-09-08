@@ -413,10 +413,10 @@ describe("Rust mode transform request", () => {
         expect(bodies[0]?.todo_tool_present).toBe(false);
     });
 
-    it("breaks a synthetic-turn cascade after three turns", async () => {
-        const sessionId = `rust-loop-breaker-${Date.now()}`;
+    it("logs a synthetic-turn cascade once after three consecutive synthetic turns", async () => {
+        const sessionId = `rust-synthetic-cascade-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
-        const { client } = recordingClient(() => ({
+        const { client, bodies } = recordingClient(() => ({
             native_messages: [{ role: "assistant", parts: [] }],
         }));
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
@@ -433,15 +433,17 @@ describe("Rust mode transform request", () => {
                 await transform.run(sessionId, input, { messages: input });
             }
             expect(transform.getState(sessionId).syntheticTurnCount).toBe(4);
+            expect(bodies).toHaveLength(4);
             expect(
                 sessionLogs(logSpy, sessionId).filter((message) =>
-                    message.startsWith("RUST LOOP BREAKER"),
+                    message.startsWith("rust synthetic-turn cascade: 3 consecutive"),
                 ),
             ).toHaveLength(1);
 
             const realInput = makeMessages(sessionId);
             await transform.run(sessionId, realInput, { messages: realInput });
             expect(transform.getState(sessionId).syntheticTurnCount).toBe(0);
+            expect(transform.getState(sessionId).syntheticCascadeLogged).toBe(false);
         } finally {
             logSpy.mockRestore();
         }
@@ -622,6 +624,76 @@ describe("Rust mode transform transport", () => {
         expect(bodies[2]?.native_messages).toEqual(input);
         expect(transform.getState(sessionId).forceFullWire).toBe(false);
         expect(transform.getState(sessionId).passCount).toBe(3);
+    });
+
+    it("discards the pass cache when invalidateWireState lands while the daemon call is in flight", async () => {
+        const sessionId = `rust-invalidate-in-flight-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let release: (() => void) | undefined;
+        const bodies: Record<string, unknown>[] = [];
+        const client: RustModeModuleClient = {
+            call: async ({ body }) => {
+                bodies.push(body as Record<string, unknown>);
+                if (bodies.length === 2) {
+                    await new Promise<void>((resolve) => {
+                        release = resolve;
+                    });
+                }
+                return { native_messages: [] };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const first = makeMessages(sessionId);
+        await transform.run(sessionId, first, { messages: [...first] });
+
+        const second = makeMessages(sessionId);
+        const inFlight = transform.run(sessionId, second, { messages: [...second] });
+        while (release === undefined) await Bun.sleep(0);
+        expect(bodies[1]?.tail_delta).toBeDefined();
+        transform.invalidateWireState(sessionId);
+        release?.();
+        await inFlight;
+
+        expect(transform.getState(sessionId).forceFullWire).toBe(true);
+        const third = makeMessages(sessionId);
+        await transform.run(sessionId, third, { messages: [...third] });
+        expect(bodies[2]?.tail_delta).toBeUndefined();
+        expect(bodies[2]?.native_messages).toEqual(third);
+        expect(transform.getState(sessionId).forceFullWire).toBe(false);
+    });
+
+    it("does not resurrect a wire cache for a session cleared while its pass is in flight", async () => {
+        const sessionId = `rust-clear-in-flight-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let release: (() => void) | undefined;
+        const bodies: Record<string, unknown>[] = [];
+        const client: RustModeModuleClient = {
+            call: async ({ body }) => {
+                bodies.push(body as Record<string, unknown>);
+                if (bodies.length === 2) {
+                    await new Promise<void>((resolve) => {
+                        release = resolve;
+                    });
+                }
+                return { native_messages: [] };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const first = makeMessages(sessionId);
+        await transform.run(sessionId, first, { messages: [...first] });
+
+        const second = makeMessages(sessionId);
+        const inFlight = transform.run(sessionId, second, { messages: [...second] });
+        while (release === undefined) await Bun.sleep(0);
+        transform.clearSession(sessionId);
+        release?.();
+        await inFlight;
+
+        const third = makeMessages(sessionId);
+        await transform.run(sessionId, third, { messages: [...third] });
+        expect(bodies[2]?.tail_delta).toBeUndefined();
+        expect(bodies[2]?.native_messages).toEqual(third);
+        expect(transform.getState(sessionId).passCount).toBe(1);
     });
 
     it("keeps a multi-frame tail delta paged instead of rebuilding the full wire", async () => {
@@ -863,6 +935,40 @@ describe("delta prefix-mutation guard", () => {
         expect(bodies[3]?.messages).toEqual([]);
         expect(bodies[3]?.native_messages).toEqual([]);
         expect(stableOutput.messages).toEqual(mutatedOutput.messages);
+    });
+
+    it("carries terminal visibility across an empty delta so a later append resends a mutated terminal", async () => {
+        const sessionId = `rust-empty-delta-visibility-${Date.now()}`;
+        const rows = rawRows(2);
+        installRawRows(sessionId, rows);
+        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const buildMessages = (count: number, mutateTerminal = false): MessageLike[] =>
+            rowMessages(sessionId, rows.slice(0, count), (row) =>
+                mutateTerminal && row.id === "m-2" ? "MESSAGE m-2" : `message ${row.id}`,
+            );
+
+        const first = buildMessages(2);
+        await transform.run(sessionId, first, { messages: [...first] });
+        const unchanged = buildMessages(2);
+        await transform.run(sessionId, unchanged, { messages: [...unchanged] });
+        expect(bodies[1]?.tail_delta).toEqual({
+            after: bodies[0]?.full_array_fingerprint,
+            replace_from: 2,
+            native_replace_from: 2,
+        });
+
+        rows.push({ id: "m-3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true });
+        const appended = buildMessages(3, true);
+        await transform.run(sessionId, appended, { messages: [...appended] });
+        expect(bodies).toHaveLength(3);
+        expect(bodies[2]?.tail_delta).toEqual({
+            after: bodies[1]?.full_array_fingerprint,
+            replace_from: 1,
+            native_replace_from: 1,
+        });
+        expect(bodies[2]?.native_messages).toEqual(appended.slice(1));
+        expect(JSON.stringify(bodies[2]?.messages)).toContain("MESSAGE m-2");
     });
 
     it("recovers after a queued user message is mutated in place and the module rejects twice", async () => {
