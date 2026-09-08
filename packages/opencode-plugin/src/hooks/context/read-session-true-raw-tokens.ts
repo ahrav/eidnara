@@ -1,7 +1,7 @@
 import { isRecord } from "../../shared/record-type-guard";
 import { stableStringify } from "../../shared/stable-json";
 import { estimateTokens } from "./read-session-formatting";
-import type { RawMessage } from "./read-session-raw";
+import { RAW_PART_VERSION_KEY, type RawMessage } from "./read-session-raw";
 
 export interface TrueRawTokenBreakdown {
     text: number;
@@ -383,9 +383,23 @@ function contentStringsHash(fields: readonly string[]): string {
     return hash.toString(16).padStart(8, "0");
 }
 
+let partMutationSeq = 0;
+
+/** The non-enumerable marker stays out of JSON serialization and cannot collide with numeric raw versions. */
+export function markPartMutated(part: object): void {
+    partMutationSeq += 1;
+    try {
+        Object.defineProperty(part, RAW_PART_VERSION_KEY, {
+            value: `m${partMutationSeq}`,
+            enumerable: false,
+            configurable: true,
+        });
+    } catch {}
+}
+
 function rawPartVersion(part: Record<string, unknown>): unknown {
     return (
-        part.__eidnaraPartUpdatedAt ??
+        part[RAW_PART_VERSION_KEY] ??
         part.updated_at ??
         part.updatedAt ??
         part.version ??

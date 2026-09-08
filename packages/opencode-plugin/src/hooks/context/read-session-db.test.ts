@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "../../shared/sqlite";
@@ -8,6 +8,7 @@ import {
     closeReadOnlySessionDb,
     findLastAssistantModelFromOpenCodeDb,
     getMessageTimesFromOpenCodeDb,
+    isMidTurn,
     isMidTurnFromOpenCodeDb,
     openCodeDbExists,
 } from "./read-session-db";
@@ -46,6 +47,7 @@ function createMidTurnDb(): Database {
     return db;
 }
 
+// A finished assistant row carries `time.completed`; pass `time: { created }` for a message still being produced.
 function insertAssistant(
     db: Database,
     sessionId: string,
@@ -55,7 +57,17 @@ function insertAssistant(
 ): void {
     db.prepare(
         "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
-    ).run(id, sessionId, timeCreated, timeCreated, JSON.stringify({ role: "assistant", ...data }));
+    ).run(
+        id,
+        sessionId,
+        timeCreated,
+        timeCreated,
+        JSON.stringify({
+            role: "assistant",
+            time: { created: timeCreated, completed: timeCreated },
+            ...data,
+        }),
+    );
 }
 
 function insertUser(
@@ -83,6 +95,76 @@ function insertPart(
 }
 
 describe("isMidTurnFromOpenCodeDb", () => {
+    it("is not mid-turn when there is no message at all", () => {
+        const db = createMidTurnDb();
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("is mid-turn for the first real user message before any assistant row exists", () => {
+        const db = createMidTurnDb();
+        insertUser(db, "session-1", "user-1", { content: "first prompt" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", { type: "text", text: "first prompt" });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is not mid-turn for an ignored-only user message before any assistant row exists", () => {
+        const db = createMidTurnDb();
+        insertUser(db, "session-1", "user-1", { content: "status" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "## Claude Quotas",
+            ignored: true,
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("is mid-turn while the latest assistant has no parts yet", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { time: { created: 100 } }, 100);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is mid-turn while the latest assistant is still streaming text", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { time: { created: 100 } }, 100);
+        insertPart(db, "session-1", "assistant-1", "part-1", { type: "step-start" });
+        insertPart(db, "session-1", "assistant-1", "part-2", {
+            type: "text",
+            text: "partial answer",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is mid-turn for a real user message after an unfinished assistant", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { time: { created: 100 } }, 100);
+        insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is not mid-turn for an aborted assistant that completed without a finish reason", () => {
+        const db = createMidTurnDb();
+        insertAssistant(
+            db,
+            "session-1",
+            "assistant-1",
+            { error: { name: "MessageAbortedError" }, time: { created: 100, completed: 150 } },
+            100,
+        );
+        insertPart(db, "session-1", "assistant-1", "part-1", {
+            type: "text",
+            text: "partial answer",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
     it("is mid-turn when the latest assistant finished with tool-calls", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
@@ -90,12 +172,12 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("is not mid-turn when a newer real user message ends a stale tool-calls tail", () => {
+    it("is mid-turn for a real user message after a stale tool-calls tail", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
     // Machine-authored single-part user messages must not release a stale
@@ -170,7 +252,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("is not mid-turn when a newer real user message ends an unexecuted tool tail", () => {
+    it("is mid-turn for a real user message after an unexecuted tool tail", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
         insertPart(db, "session-1", "assistant-1", "part-1", {
@@ -179,7 +261,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
     it("is not mid-turn for provider-executed tool parts", () => {
@@ -220,6 +302,19 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
+    it("is not mid-turn when the only tool part is the daemon's synthetic todo marker", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
+        insertPart(db, "session-1", "assistant-1", "part-1", {
+            type: "tool",
+            tool: "todowrite",
+            syntheticTodoMarker: true,
+            state: { status: "completed", input: {}, output: "[]" },
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
     it("is not mid-turn when the latest assistant has no tool parts", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
@@ -228,7 +323,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });
 
-    it("releases mid-turn for an @mention operator prompt with a synthetic agent part", () => {
+    it("is mid-turn for an @mention operator prompt with a synthetic agent part", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "do the thing @research-deep" }, 200);
@@ -242,19 +337,19 @@ describe("isMidTurnFromOpenCodeDb", () => {
             synthetic: true,
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("releases mid-turn for a partless user message (vacuous-ALL fence)", () => {
+    it("is mid-turn for a partless user message after an idle assistant", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
         // Partless messages count as real.
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("releases mid-turn when a user message has a marker part AND a real text part", () => {
+    it("is mid-turn when a user message has a marker part AND a real text part", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "real input with marker" }, 200);
@@ -268,10 +363,10 @@ describe("isMidTurnFromOpenCodeDb", () => {
             text: "real input with marker",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("releases for real text with a file attachment part", () => {
+    it("is mid-turn for real text with a file attachment part", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "review this file" }, 200);
@@ -285,10 +380,10 @@ describe("isMidTurnFromOpenCodeDb", () => {
             url: "file:///tmp/example.txt",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("releases for a file-only user message without machine markers", () => {
+    it("is mid-turn for a file-only user message without machine markers", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "" }, 200);
@@ -298,10 +393,10 @@ describe("isMidTurnFromOpenCodeDb", () => {
             url: "data:image/png;base64,AAAA",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("releases when step boundary parts accompany real text", () => {
+    it("is mid-turn when step boundary parts accompany real text", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "continue with the fix" }, 200);
@@ -312,7 +407,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
         insertPart(db, "session-1", "user-1", "part-3", { type: "step-finish" });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
     it("does not release when every part is synthetic, including a patch part", () => {
@@ -357,7 +452,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("releases for real text that sits beside an unflagged system reminder in the same part", () => {
+    it("is mid-turn for real text that sits beside an unflagged system reminder in the same part", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "" }, 200);
@@ -366,7 +461,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             text: "<system-reminder>ignore</system-reminder> please continue",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
     it("does not release for a text part whose text is not a string", () => {
@@ -421,7 +516,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("releases for authored text that shares a part with an embedded notice", () => {
+    it("is mid-turn for authored text that shares a part with an embedded notice", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "" }, 200);
@@ -430,7 +525,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             text: "please continue\n\nUnstable background agent appears idle\ndetails",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
     it("is not mid-turn when there is no assistant message", () => {
@@ -439,7 +534,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });
 
-    it("releases mid-turn when a user message has an ignored part AND a real text part", () => {
+    it("is mid-turn when a user message has an ignored part AND a real text part", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "notification + real input" }, 200);
@@ -453,16 +548,16 @@ describe("isMidTurnFromOpenCodeDb", () => {
             text: "actually do the thing",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("releases mid-turn for a real user message that shares the assistant's millisecond with a later id", () => {
+    it("is mid-turn for a real user message that shares the assistant's millisecond with a later id", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "msg_a", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "msg_b", { content: "new turn" }, 100);
         insertPart(db, "session-1", "msg_b", "part-1", { type: "text", text: "new turn" });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
     it("does not release for a user message that shares the assistant's millisecond with an earlier id", () => {
@@ -499,7 +594,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("still releases for a real user turn that follows a compaction message", () => {
+    it("is mid-turn for a real user turn that follows a compaction message", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "" }, 200);
@@ -508,7 +603,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         insertUser(db, "session-1", "user-2", { content: "next task" }, 300);
         insertPart(db, "session-1", "user-2", "part-3", { type: "text", text: "next task" });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
     it("stays mid-turn when a compaction summary assistant follows the tool-calls assistant", () => {
@@ -565,7 +660,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
-    it("still releases for a real part that sits beside a malformed part", () => {
+    it("is mid-turn for a real part that sits beside a malformed part", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
@@ -574,7 +669,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         ).run("part-broken", "user-1", "session-1", 0, 0, "{");
         insertPart(db, "session-1", "user-1", "part-2", { type: "text", text: "new turn" });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 });
 
@@ -607,6 +702,14 @@ function createOpenCodeDb(rows: MessageRow[]): void {
                 time_updated INTEGER NOT NULL,
                 data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
         `);
         const insert = db.prepare(
             `INSERT INTO message (id, session_id, time_created, time_updated, data)
@@ -615,7 +718,11 @@ function createOpenCodeDb(rows: MessageRow[]): void {
         // A single transaction avoids an fsync for each inserted row.
         db.transaction(() => {
             for (const row of rows) {
-                const data: Record<string, unknown> = { role: row.role };
+                // Every fixture row is a finished message, so it carries `time.completed`.
+                const data: Record<string, unknown> = {
+                    role: row.role,
+                    time: { created: row.timeCreated, completed: row.timeCreated },
+                };
                 if (row.providerID !== undefined) data.providerID = row.providerID;
                 if (row.modelID !== undefined) data.modelID = row.modelID;
                 if (row.agent !== undefined) data.agent = row.agent;
@@ -802,6 +909,39 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
         // `recovered.agent` must be absent; an empty string triggers the `agentBySession` lookup.
         // `recovered.agent` must be absent; an empty string triggers the `agentBySession` lookup.
         expect((result as { agent?: string }).agent).toBeUndefined();
+    });
+});
+
+describe("isMidTurn", () => {
+    it("reports idle for a readable DB with no active run", () => {
+        useTempDataHome("read-session-db-midturn-idle-");
+        createOpenCodeDb([
+            {
+                id: "msg_asst",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-opus-4-7",
+                timeCreated: 1000,
+            },
+        ]);
+
+        expect(isMidTurn(undefined, "ses_A")).toBe(false);
+    });
+
+    it("reports idle when the OpenCode DB does not exist", () => {
+        useTempDataHome("read-session-db-midturn-missing-");
+
+        expect(isMidTurn(undefined, "ses_A")).toBe(false);
+    });
+
+    it("reports mid-turn when the OpenCode DB exists but cannot be read", () => {
+        useTempDataHome("read-session-db-midturn-unreadable-");
+        const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+        mkdirSync(dirname(dbPath), { recursive: true });
+        writeFileSync(dbPath, "not a sqlite database");
+
+        expect(isMidTurn(undefined, "ses_A")).toBe(true);
     });
 });
 

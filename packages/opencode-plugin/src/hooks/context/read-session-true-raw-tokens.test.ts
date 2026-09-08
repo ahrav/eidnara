@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 
-import type { RawMessage } from "./read-session-raw";
+import { RAW_PART_VERSION_KEY, type RawMessage } from "./read-session-raw";
 import type { ProviderShapeVersion } from "./read-session-true-raw-tokens";
 import {
     buildToolArcs,
@@ -13,6 +13,7 @@ import {
     estimateTrueRawMessageTokens,
     fenceBoundaryForToolArcs,
     invalidateTrueRawTokenCache,
+    markPartMutated,
 } from "./read-session-true-raw-tokens";
 
 function singlePartMessage(part: unknown, ordinal = 1): RawMessage {
@@ -1603,5 +1604,49 @@ describe("raw range fingerprints", () => {
             cacheNamespace: "primitive-parts-fresh-test",
         });
         expect(cjk.tokenForOrdinal(1)).toBe(fresh.tokenForOrdinal(1));
+    });
+});
+
+describe("message estimate cache after in-place part mutation", () => {
+    // The strings have equal byte length but different token counts.
+    const prose = "the quick brown fox jumps over the lazy dog and runs away fast";
+    const noise = "xq7z-k2p9 v4mn!8rt@ w1yb#5ju% e3ho&6ci* a0sd(2fg) h9lk_7pz+abc";
+
+    // The session reader stamps each part with the row's numeric `time_updated`.
+    function readerStampedPart(output: string): { state: { output: string } } {
+        const part = { type: "tool", callID: "c", state: { status: "completed", output } };
+        Object.defineProperty(part, RAW_PART_VERSION_KEY, {
+            value: 1_700_000_000_000,
+            enumerable: false,
+            configurable: true,
+        });
+        return part;
+    }
+
+    function buildFor(part: { state: { output: string } }): number {
+        const messages: RawMessage[] = [{ id: "m", role: "assistant", parts: [part], ordinal: 1 }];
+        return buildTrueRawTokenIndex("mutation", messages, {
+            providerShapeVersion: "opencode-v1",
+            cacheNamespace: "mutation-test",
+            absoluteMessageCount: 1,
+        }).tokenForOrdinal(1);
+    }
+
+    it("reuses the cached count when a versioned part changes without a new version", () => {
+        expect(prose.length).toBe(noise.length);
+        const part = readerStampedPart(prose);
+        const before = buildFor(part);
+        part.state.output = noise;
+        expect(buildFor(part)).toBe(before);
+    });
+
+    it("recounts after markPartMutated advances the part version", () => {
+        const part = readerStampedPart(prose);
+        const before = buildFor(part);
+        part.state.output = noise;
+        markPartMutated(part);
+        const after = buildFor(part);
+        expect(after).not.toBe(before);
+        expect(JSON.stringify(part)).not.toContain(RAW_PART_VERSION_KEY);
     });
 });

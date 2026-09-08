@@ -1,5 +1,7 @@
 import type { Database } from "../../shared/sqlite";
 
+export const RAW_PART_VERSION_KEY = "__eidnaraPartUpdatedAt";
+
 export interface RawMessageParts {
     id: string;
     role: string;
@@ -117,7 +119,7 @@ function attachRawPartVersion(value: unknown, timeUpdated: number | undefined): 
     if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
     if (typeof timeUpdated !== "number") return value;
     try {
-        Object.defineProperty(value, "__eidnaraPartUpdatedAt", {
+        Object.defineProperty(value, RAW_PART_VERSION_KEY, {
             value: timeUpdated,
             enumerable: false,
             configurable: true,

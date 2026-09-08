@@ -10,6 +10,7 @@ interface AssistantMidTurnRow {
     id?: string;
     finish?: string | null;
     timeCreated?: number;
+    timeCompleted?: number | null;
 }
 
 interface MessageIdRow {
@@ -78,12 +79,14 @@ function jsonField(column: string, path: string): string {
     return `CASE WHEN json_valid(${column}) = 1 THEN json_extract(${column}, '${path}') END`;
 }
 
+/** Treat errors reading an existing database as mid-turn; a missing database is idle. */
 export function isMidTurn(_deps: unknown, sessionId: string): boolean {
+    if (!openCodeDbExists()) return false;
     try {
         return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
     } catch (error) {
-        log("[eidnara] failed to inspect OpenCode mid-turn state:", error);
-        return false;
+        log("[eidnara] failed to inspect OpenCode mid-turn state; treating as mid-turn:", error);
+        return true;
     }
 }
 
@@ -96,6 +99,7 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         .prepare(
             `SELECT id,
                     json_extract(data, '$.finish') as finish,
+                    json_extract(data, '$.time.completed') as timeCompleted,
                     time_created as timeCreated
              FROM message
              WHERE session_id = ?
@@ -109,24 +113,36 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         )
         .get(sessionId) as AssistantMidTurnRow | null;
 
-    if (typeof latestAssistant?.id !== "string") return false;
-    if (hasNewerRealUserMessage(db, sessionId, latestAssistant.id, latestAssistant.timeCreated)) {
-        return false;
+    // A real user row newer than the latest assistant is a turn whose assistant row does not exist
+    // yet, including the first prompt of a session with no assistant row at all.
+    if (
+        hasNewerRealUserMessage(
+            db,
+            sessionId,
+            latestAssistant?.id ?? "",
+            latestAssistant?.timeCreated ?? -1,
+        )
+    ) {
+        return true;
     }
+    if (typeof latestAssistant?.id !== "string") return false;
+    // A missing `time.completed` marks an assistant message that is still being produced.
+    if (typeof latestAssistant.timeCompleted !== "number") return true;
     if (latestAssistant.finish === "tool-calls") return true;
 
     const partRows = db
         .prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?")
         .all(sessionId, latestAssistant.id) as PartDataRow[];
 
+    // A synthetic tool part is the daemon's own bookkeeping, not a local call still in flight.
     return partRows.some((row) => {
-        if (typeof row.data !== "string" || row.data.length === 0) return false;
-        try {
-            const part = JSON.parse(row.data) as Record<string, unknown>;
-            return part.type === "tool" && !isProviderExecuted(part);
-        } catch {
-            return false;
-        }
+        const part = parsePart(row);
+        return (
+            part !== null &&
+            part.type === "tool" &&
+            !isProviderExecuted(part) &&
+            !isMachineAuthoredPart(part)
+        );
     });
 }
 
@@ -141,13 +157,13 @@ function isProviderExecuted(part: Record<string, unknown>): boolean {
     );
 }
 
+/** Callers pass `""` and `-1` when the session has no assistant row; every user row is then newer. */
 function hasNewerRealUserMessage(
     db: Database,
     sessionId: string,
     latestAssistantId: string,
-    latestAssistantTimeCreated: unknown,
+    latestAssistantTimeCreated: number,
 ): boolean {
-    if (typeof latestAssistantTimeCreated !== "number") return false;
     // "Newer" is the `(time_created, id)` tuple ordering, so a user row that shares the
     // assistant's millisecond still counts when its id sorts after the assistant's.
     // A `compaction` part excludes the whole message.

@@ -311,6 +311,41 @@ describe("extractToolCallSummaries", () => {
             ]),
         ).toEqual([]);
     });
+
+    it("summarizes a Pi toolCall part from its name and arguments", () => {
+        expect(
+            extractToolCallSummaries([
+                { type: "toolCall", id: "tc1", name: "read", arguments: { path: "a.ts" } },
+            ]),
+        ).toEqual(["TC: read(a.ts)"]);
+        expect(extractToolCallSummaries([{ type: "toolCall", id: "tc1", name: "read" }])).toEqual([
+            "TC: read",
+        ]);
+    });
+
+    it("summarizes a folded Pi toolResult part by its tool name", () => {
+        expect(
+            extractToolCallSummaries([
+                {
+                    role: "toolResult",
+                    toolCallId: "tc1",
+                    toolName: "read",
+                    content: [{ type: "text", text: "ok" }],
+                },
+            ]),
+        ).toEqual(["TC: read"]);
+        expect(
+            extractToolCallSummaries([{ role: "toolResult", toolCallId: "tc1", content: [] }]),
+        ).toEqual([]);
+    });
+
+    it("skips a synthetic Pi toolCall part", () => {
+        expect(
+            extractToolCallSummaries([
+                { type: "toolCall", id: "tc1", name: "todowrite", arguments: {}, synthetic: true },
+            ]),
+        ).toEqual([]);
+    });
 });
 
 describe("compactRole", () => {

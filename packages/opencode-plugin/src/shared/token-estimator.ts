@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 import { getErrorMessage } from "./error-message";
 
 // Synchronous `require` preserves the `estimateTokens` API and defers both package loads until the first non-empty call.
-type TokenizerLike = {
+export type TokenizerLike = {
     encode: (text: string, allowedSpecial: string) => number[];
 };
 type TokenizerConstructor = new (encoding: unknown) => TokenizerLike;
@@ -38,6 +38,8 @@ let tokenizerPoisoned = false;
 let tokenizerLoadPromise: Promise<boolean> | undefined;
 /** Each failure cause warns once, so an encode failure after a recovered load is still reported. */
 const tokenizerWarningsSent = new Set<"load" | "encode">();
+/** Increments whenever the active estimator changes, so retained counts can be recognized as stale. */
+let tokenizerGeneration = 0;
 
 /** The XDG base directory spec says a relative or empty `XDG_CACHE_HOME` must be ignored. */
 function xdgCacheHome(): string {
@@ -195,6 +197,7 @@ export async function preloadTokenizer(): Promise<boolean> {
                 tokenizer = await loadTokenizerFromInstalledPackage();
             }
             tokenizerLoadAttempted = true;
+            tokenizerGeneration += 1;
             return true;
         } catch (error) {
             tokenizerLoadAttempted = true;
@@ -215,6 +218,7 @@ function getTokenizer(): TokenizerLike | undefined {
     tokenizerLoadAttempted = true;
     try {
         tokenizer = loadTokenizer();
+        tokenizerGeneration += 1;
     } catch (error) {
         warnTokenizerFallback("load", error);
     }
@@ -223,6 +227,32 @@ function getTokenizer(): TokenizerLike | undefined {
 
 function estimateTokensHeuristically(text: string): number {
     return Math.ceil(text.length / 3.5);
+}
+
+/** Callers that retain token counts across calls key or clear their caches on this value. */
+export function tokenEstimatorGeneration(): number {
+    getTokenizer();
+    return tokenizerGeneration;
+}
+
+/** Installs `next` as the process tokenizer; `null` forces the heuristic until the next reset. */
+export function installTokenizerForTest(next: TokenizerLike | null): void {
+    tokenizer = next ?? undefined;
+    tokenizerLoadAttempted = true;
+    tokenizerPreloadAttempted = true;
+    tokenizerPoisoned = false;
+    tokenizerLoadPromise = undefined;
+    tokenizerGeneration += 1;
+}
+
+/** Returns the estimator to its unloaded state, so the next call loads the real tokenizer again. */
+export function resetTokenEstimatorForTest(): void {
+    tokenizer = undefined;
+    tokenizerLoadAttempted = false;
+    tokenizerPreloadAttempted = false;
+    tokenizerPoisoned = false;
+    tokenizerLoadPromise = undefined;
+    tokenizerGeneration += 1;
 }
 
 export function estimateTokens(text: string): number {
@@ -237,6 +267,7 @@ export function estimateTokens(text: string): number {
         tokenizer = undefined;
         tokenizerLoadAttempted = true;
         tokenizerPoisoned = true;
+        tokenizerGeneration += 1;
         warnTokenizerFallback("encode", error);
         return estimateTokensHeuristically(text);
     }
