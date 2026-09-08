@@ -39,8 +39,14 @@ export function readLogTailLines(path: string, maxBytes = LOG_TAIL_MAX_BYTES): s
         const size = fstatSync(fd).size;
         const start = Math.max(0, size - maxBytes);
         const buffer = Buffer.alloc(size - start);
-        const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
-        const lines = buffer.toString("utf-8", 0, bytesRead).split(/\r?\n/);
+        // A read may return fewer bytes than asked; keep going until the tail is full or EOF.
+        let filled = 0;
+        while (filled < buffer.length) {
+            const bytesRead = readSync(fd, buffer, filled, buffer.length - filled, start + filled);
+            if (bytesRead === 0) break;
+            filled += bytesRead;
+        }
+        const lines = buffer.toString("utf-8", 0, filled).split(/\r?\n/);
         // A mid-file start lands inside a line, so the first entry is a fragment.
         if (start > 0) lines.shift();
         return lines;

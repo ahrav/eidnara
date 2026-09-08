@@ -149,8 +149,16 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString("password: hunter2 and token=abc")).toBe(
             "password: <REDACTED> and token=<REDACTED>",
         );
-        expect(sanitizeString("execute_threshold_tokens: 200000 max_tokens=3")).toBe(
-            "execute_threshold_tokens: 200000 max_tokens=3",
+        expect(
+            sanitizeString("client_secret: live access_key=live credential: live auth: live"),
+        ).toBe(
+            "client_secret: <REDACTED> access_key=<REDACTED> credential: <REDACTED> auth: <REDACTED>",
+        );
+        expect(sanitizeString("execute_threshold_tokens: 200000 max_tokens=3 enabled: true")).toBe(
+            "execute_threshold_tokens: 200000 max_tokens=3 enabled: true",
+        );
+        expect(sanitizeString("at 2026-07-07T12:00:01.000Z see https://example.test/x")).toBe(
+            "at 2026-07-07T12:00:01.000Z see https://example.test/x",
         );
     });
 });

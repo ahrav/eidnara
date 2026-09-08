@@ -142,17 +142,28 @@ function currentUsername(): string | undefined {
     return fromHome || undefined;
 }
 
+/** Text like `client_secret: value` is judged by the shared key vocabulary; numbers and booleans stay. */
+function redactKeyedText(value: string): string {
+    return value.replace(
+        /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)([^\s&;,]+)/g,
+        (full, key: string, separator: string, secret: string) =>
+            isSecretKey(key) && !/^(?:true|false|null|[+-]?\d+(?:\.\d+)?)$/i.test(secret)
+                ? `${key}${separator}<REDACTED>`
+                : full,
+    );
+}
+
 function redactSecretString(value: string): string {
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
-    return redactSecretText(value)
+    const redacted = redactSecretText(value)
         .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1<REDACTED>@")
         .replace(
             /(\b(?:Proxy-)?Authorization\s*[:=]\s*|\b(?:Set-)?Cookie\s*[:=]\s*|\bX-API-Key\s*[:=]\s*)[^\r\n]+/gi,
             "$1<REDACTED>",
         )
         .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
-        .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>")
-        .replace(/(\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*)[^\s&;,]+/gi, "$1<REDACTED>");
+        .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>");
+    return redactKeyedText(redacted);
 }
 
 /**
