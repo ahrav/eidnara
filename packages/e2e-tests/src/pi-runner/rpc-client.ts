@@ -234,6 +234,8 @@ export class PiRpcClient {
     private process: ChildProcess | null = null;
     private stopReadingStdout: (() => void) | null = null;
     private stderr = "";
+    /** Every non-JSON stdout line since spawn, including lines written while the extension loads. */
+    private readonly malformedLines: string[] = [];
     /** Set once the child has closed; later commands fail with it instead of writing to a dead stdin. */
     private exitError: Error | null = null;
 
@@ -279,6 +281,9 @@ export class PiRpcClient {
             this.protocol.rejectPending(this.stdinWriteError(error));
         });
         if (!child.stdout) throw new Error("Pi RPC process has no stdout pipe");
+        this.protocol.onEvent((event) => {
+            if (event.type === "rpc_parse_error") this.malformedLines.push(String(event.line));
+        });
         this.stopReadingStdout = attachStrictJsonlReader(child.stdout, (line) => {
             this.protocol.dispatchLine(line);
         });
@@ -338,6 +343,10 @@ export class PiRpcClient {
 
     getStderr(): string {
         return this.stderr;
+    }
+
+    getMalformedLines(): readonly string[] {
+        return this.malformedLines;
     }
 
     private stdinWriteError(error: Error): Error {

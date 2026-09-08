@@ -76,11 +76,8 @@ export class PiTestHarness {
         // The 180s default accommodates ctx_search subprocesses on GitHub-hosted Ubuntu runners.
         const timeoutMs = options.timeoutMs ?? 180_000;
         const events: PiRpcEvent[] = [];
-        const malformedLines: string[] = [];
         let capturing = false;
         const unsubscribe = this.rpc.onEvent((event) => {
-            // A non-JSON stdout line corrupts the RPC stream even when a valid `agent_end` follows.
-            if (event.type === "rpc_parse_error") malformedLines.push(String(event.line));
             if (event.type === "agent_start") capturing = true;
             if (capturing) events.push(event);
         });
@@ -99,9 +96,11 @@ export class PiTestHarness {
             const agentEndEvent = await agentEnd;
             const state = await this.getState();
             const status = await this.rpc.settledProcessStatus();
+            // A non-JSON stdout line corrupts the RPC stream whether it was written while the extension loaded or during this turn, even when a valid `agent_end` follows.
+            const malformedLines = this.rpc.getMalformedLines();
             if (malformedLines.length > 0) {
                 throw new Error(
-                    `Pi wrote ${malformedLines.length} non-JSON line(s) to its RPC stdout during the turn:\n${malformedLines.join("\n")}`,
+                    `Pi wrote ${malformedLines.length} non-JSON line(s) to its RPC stdout since it started:\n${malformedLines.join("\n")}`,
                 );
             }
             return {
