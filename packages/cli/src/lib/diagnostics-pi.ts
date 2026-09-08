@@ -145,7 +145,7 @@ function currentUsername(): string | undefined {
 function redactSecretString(value: string): string {
     // Keep the local `sk-{12,}` redaction because `redactSecretText` only redacts `sk-` tokens with at least 32 characters.
     return redactSecretText(value)
-        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1<REDACTED>@")
+        .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1<REDACTED>@")
         .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
         .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>")
         .replace(/api[_-]?key=([^\s&]+)/gi, "api_key=<REDACTED>")
@@ -317,9 +317,11 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
             for (const name of files) {
                 const file = join(slugDir, name);
                 try {
-                    const mtime = statSync(file).mtimeMs;
+                    const stat = statSync(file);
+                    // Opening a FIFO with no writer blocks, so only a regular file is a candidate.
+                    if (!stat.isFile()) continue;
                     const sessionId = name.replace(/\.jsonl$/, "");
-                    candidates.push({ sessionId, file, slugDirectory, mtime });
+                    candidates.push({ sessionId, file, slugDirectory, mtime: stat.mtimeMs });
                 } catch {}
             }
         }
@@ -443,6 +445,14 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     };
 }
 
+/**
+ * Strings rendered outside a fenced block stay on one line so a newline inside
+ * a config key or parser message cannot inject a Markdown heading.
+ */
+function oneLine(value: string): string {
+    return value.replace(/\s*\r?\n\s*/g, " ");
+}
+
 export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
     const configPaths = sanitizeValue(report.configPaths);
     const settings = sanitizeValue(report.settings);
@@ -452,11 +462,11 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         `- Pi plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- Pi installed: ${report.piInstalled}${report.piVersion ? ` (${report.piVersion})` : ""}`,
+        `- Pi installed: ${report.piInstalled}${report.piVersion ? ` (${oneLine(report.piVersion)})` : ""}`,
         `- Eidnara package registered: ${report.settings.hasEidnaraPackage}`,
-        `- User config parse error: ${report.userConfig.parseError ?? "none"}`,
-        `- Project config parse error: ${report.projectConfig.parseError ?? "none"}`,
-        `- Known Pi extension conflicts: ${report.conflicts.knownConflicts.length === 0 ? "none" : report.conflicts.knownConflicts.join("; ")}`,
+        `- User config parse error: ${oneLine(report.userConfig.parseError ?? "none")}`,
+        `- Project config parse error: ${oneLine(report.projectConfig.parseError ?? "none")}`,
+        `- Known Pi extension conflicts: ${report.conflicts.knownConflicts.length === 0 ? "none" : oneLine(report.conflicts.knownConflicts.join("; "))}`,
         "",
         "### Pi settings",
         "```json",
@@ -481,12 +491,12 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         "### Loaded config paths",
         report.loadedConfigPaths.length === 0
             ? "_No config files loaded; defaults are in use._"
-            : report.loadedConfigPaths.map((path) => `- ${path}`).join("\n"),
+            : report.loadedConfigPaths.map((path) => `- ${oneLine(path)}`).join("\n"),
         "",
         "### Config load warnings",
         report.loadWarnings.length === 0
             ? "_None._"
-            : report.loadWarnings.map((warning) => `- ${warning}`).join("\n"),
+            : report.loadWarnings.map((warning) => `- ${oneLine(warning)}`).join("\n"),
         "",
         "### Pi extension conflicts",
         "No known conflicting Pi extensions are currently registered. Other Pi packages are informational only.",

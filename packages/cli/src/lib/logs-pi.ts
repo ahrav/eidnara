@@ -114,7 +114,7 @@ export async function bundleIssueReport(
         "",
         "## Environment",
         `- Pi plugin: v${report.pluginVersion}`,
-        `- Pi: ${report.piVersion ?? "not installed"}`,
+        `- Pi: ${report.piInstalled ? (report.piVersion ?? "installed, version unavailable") : "not installed"}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
         "",

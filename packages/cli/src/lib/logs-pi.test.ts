@@ -196,6 +196,20 @@ describe("bundleIssueReport session filtering", () => {
         expect(bundled.bodyMarkdown).toContain("EISDIR");
         expect(bundled.bodyMarkdown).toContain("## Diagnostics");
     });
+
+    it("distinguishes an installed Pi without a version from an absent Pi", async () => {
+        const root = makeTempRoot();
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(logPath, "");
+        const report = { ...reportWithLog(logPath), piInstalled: true, piPath: "/usr/bin/pi" };
+
+        const bundled = await bundleIssueReport(report, "desc", "title", {
+            cwd: root,
+            now: new Date("2026-07-07T12:00:00Z"),
+        });
+
+        expect(bundled.bodyMarkdown).toContain("- Pi: installed, version unavailable");
+    });
 });
 
 describe("bundleIssueReport file naming", () => {

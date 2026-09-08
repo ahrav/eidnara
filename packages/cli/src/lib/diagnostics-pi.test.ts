@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectDiagnostics, sanitizeString, sanitizeValue } from "./diagnostics-pi";
+import {
+    collectDiagnostics,
+    type PiDiagnosticReport,
+    renderDiagnosticsMarkdown,
+    sanitizeString,
+    sanitizeValue,
+} from "./diagnostics-pi";
 
 setDefaultTimeout(15_000);
 
@@ -110,7 +116,55 @@ describe("sanitizeString home handling", () => {
         expect(sanitizeString(`clone https://${userinfo}@example.test/repo.git`)).toBe(
             "clone https://<REDACTED>@example.test/repo.git",
         );
+        expect(sanitizeString("https://opaque-private-token@example.test/repo")).toBe(
+            "https://<REDACTED>@example.test/repo",
+        );
         expect(sanitizeString("d:/users/alice/project")).toBe("C:\\Users\\<USER>\\project");
+    });
+});
+
+describe("renderDiagnosticsMarkdown", () => {
+    it("keeps warnings and parse errors on one line and reports an installed Pi without a version", () => {
+        const report: PiDiagnosticReport = {
+            timestamp: "2026-07-07T12:00:00.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: "/usr/bin/pi",
+            piVersion: null,
+            settings: {
+                path: "/x/settings.json",
+                exists: false,
+                hasEidnaraPackage: false,
+                packages: [],
+            },
+            configPaths: { agentDir: "/x", userConfig: "/x/u.jsonc", projectConfig: "/x/p.jsonc" },
+            userConfig: {
+                path: "/x/u.jsonc",
+                exists: true,
+                parseError: "bad\n## Log (last",
+                flags: {},
+            },
+            projectConfig: { path: "/x/p.jsonc", exists: false, flags: {} },
+            loadedConfigPaths: [],
+            loadWarnings: ["model key\n## Log (last\nunknown"],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: "/x/eidnara.log", exists: false, sizeKb: 0 },
+            recentSessions: [],
+            historianDumps: {
+                byProject: [],
+                legacyDumps: { dir: "/x/legacy", count: 0, recent: [] },
+            },
+        };
+
+        const markdown = renderDiagnosticsMarkdown(report);
+
+        expect(markdown).toContain("- User config parse error: bad ## Log (last");
+        expect(markdown).toContain("- model key ## Log (last unknown");
+        expect(markdown.match(/^## Log \(last/gm)).toBeNull();
+        expect(markdown).toContain("- Pi installed: true");
     });
 });
 
