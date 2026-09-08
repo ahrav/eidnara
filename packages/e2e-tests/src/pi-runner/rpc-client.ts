@@ -234,6 +234,8 @@ export class PiRpcClient {
     private process: ChildProcess | null = null;
     private stopReadingStdout: (() => void) | null = null;
     private stderr = "";
+    /** Set once the child has closed; later commands fail with it instead of writing to a dead stdin. */
+    private exitError: Error | null = null;
 
     constructor(options: PiRpcClientOptions) {
         this.env = options.env ?? createPiIsolatedEnv();
@@ -279,11 +281,9 @@ export class PiRpcClient {
         // `close` follows `exit` once the stdio pipes have drained, so an `agent_end` written just
         // before the process died reaches its waiter before the waiter is failed.
         child.once("close", (code, signal) => {
-            this.protocol.rejectPending(
-                new Error(
-                    `Pi RPC process exited with code ${code ?? "null"} signal ${signal ?? "null"}\n${this.stderr}`,
-                ),
-            );
+            const error = this.processExitError(code, signal);
+            this.exitError = error;
+            this.protocol.rejectPending(error);
         });
 
         await Bun.sleep(100);
@@ -310,15 +310,26 @@ export class PiRpcClient {
         params: Record<string, unknown> = {},
         opts: PiRpcWaitOptions = {},
     ): Promise<PiRpcResponse<T>> {
-        const stdin = this.process?.stdin;
-        if (!stdin || this.process?.killed) {
+        const child = this.process;
+        const stdin = child?.stdin;
+        if (!child || !stdin || child.killed) {
             throw new Error("Pi RPC process is not running");
+        }
+        // `killed` only records kills sent through this client.
+        if (child.exitCode !== null || child.signalCode !== null) {
+            throw this.exitError ?? this.processExitError(child.exitCode, child.signalCode);
         }
         return this.protocol.sendCommand<T>((line) => stdin.write(line), method, params, opts);
     }
 
     getStderr(): string {
         return this.stderr;
+    }
+
+    private processExitError(code: number | null, signal: NodeJS.Signals | null): Error {
+        return new Error(
+            `Pi RPC process exited with code ${code ?? "null"} signal ${signal ?? "null"}\n${this.stderr}`,
+        );
     }
 
     async shutdown(timeoutMs = 2_000): Promise<void> {

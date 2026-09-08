@@ -40,6 +40,7 @@ describe.skipIf(!piPrereqs.ok)("pi smoke", () => {
         expect(turn.exitCode).toBeNull();
         expect(turn.stderr).not.toContain("Failed to load extension");
         expect(turn.sessionId).toBeTruthy();
+        expect(turn.assistantText).toBe("pi smoke ok");
 
         const req = h.mock.lastRequest();
         expect(req).not.toBeNull();

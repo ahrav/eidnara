@@ -3,10 +3,12 @@
  * files a Pi process needs to load the built Eidnara extension against the mock provider.
  */
 
+import { spawnSync } from "node:child_process";
 import {
     existsSync,
     mkdirSync,
     readdirSync,
+    readFileSync,
     realpathSync,
     symlinkSync,
     writeFileSync,
@@ -73,6 +75,28 @@ export interface PiPrereqs {
     skipReason?: string;
 }
 
+/** Only a plain `>=X.Y.Z` range is recognized; any other range shape disables the version check. */
+function piNodeEngineFloor(): string | null {
+    try {
+        const pkg = JSON.parse(readFileSync(join(PI_PLUGIN_ROOT, "package.json"), "utf8")) as {
+            engines?: { node?: unknown };
+        };
+        const range = pkg.engines?.node;
+        if (typeof range !== "string") return null;
+        const match = /^>=\s*(\d+\.\d+\.\d+)$/.exec(range.trim());
+        return match?.[1] ?? null;
+    } catch {
+        return null;
+    }
+}
+
+function nodeVersionOnPath(): string | null {
+    const result = spawnSync("node", ["--version"], { encoding: "utf8" });
+    if (result.error || result.status !== 0 || typeof result.stdout !== "string") return null;
+    const match = /^v(\d+\.\d+\.\d+)/.exec(result.stdout.trim());
+    return match?.[1] ?? null;
+}
+
 /**
  * Pi's CLI is a Node ESM entrypoint (`engines.node`), so the runner spawns it with `node` rather
  * than the Bun test process; the built extension is required because Pi loads `dist/index.js`.
@@ -84,7 +108,17 @@ export function detectPiPrereqs(): PiPrereqs {
             "@earendil-works/pi-coding-agent is not installed under packages/pi-plugin/node_modules (run bun install)",
         );
     }
-    if (Bun.which("node") === null) missing.push("node is not on PATH");
+    const nodeVersion = nodeVersionOnPath();
+    if (nodeVersion === null) {
+        missing.push("node is not on PATH");
+    } else {
+        const floor = piNodeEngineFloor();
+        if (floor !== null && compareSemver(nodeVersion, floor) < 0) {
+            missing.push(
+                `node v${nodeVersion} is below the Pi extension's engines floor >=${floor} (packages/pi-plugin/package.json)`,
+            );
+        }
+    }
     if (!existsSync(PI_PLUGIN_ENTRY)) missing.push(PI_PLUGIN_BUILD_HINT);
     return missing.length === 0 ? { ok: true } : { ok: false, skipReason: missing.join("; ") };
 }
@@ -101,6 +135,8 @@ export interface PiIsolatedEnv {
 
 export interface PiRunResult {
     sessionId: string | null;
+    /** Text of the last assistant message in `agent_end`; `null` when that event carried none. */
+    assistantText: string | null;
     events: Array<Record<string, unknown>>;
     stdout: string;
     stderr: string;

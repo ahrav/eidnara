@@ -18,6 +18,23 @@ export interface PiTestHarnessOptions {
     mockDefault?: MockResponse;
 }
 
+export function finalAssistantText(agentEnd: PiRpcEvent): string | null {
+    const messages = agentEnd.messages;
+    if (!Array.isArray(messages)) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i] as { role?: unknown; content?: unknown } | null;
+        if (!message || message.role !== "assistant") continue;
+        if (!Array.isArray(message.content)) return "";
+        return message.content
+            .map((part) => {
+                const p = part as { type?: unknown; text?: unknown } | null;
+                return p && p.type === "text" && typeof p.text === "string" ? p.text : "";
+            })
+            .join("");
+    }
+    return null;
+}
+
 export class PiTestHarness {
     readonly mock: MockProvider;
     readonly env: PiIsolatedEnv;
@@ -76,10 +93,11 @@ export class PiTestHarness {
                 { timeoutMs, label: "prompt response" },
             );
             requireSuccessfulResponse(promptResponse);
-            await agentEnd;
+            const agentEndEvent = await agentEnd;
             const state = await this.getState();
             return {
                 sessionId: typeof state.sessionId === "string" ? state.sessionId : null,
+                assistantText: finalAssistantText(agentEndEvent),
                 events: events as Array<Record<string, unknown>>,
                 stdout: events.map((event) => JSON.stringify(event)).join("\n"),
                 stderr: this.rpc.getStderr(),

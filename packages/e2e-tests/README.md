@@ -58,7 +58,9 @@ needs; on that runtime the suite skips and prints
 (`src/pi-runner/spawn.ts`) requires `@earendil-works/pi-coding-agent`
 (installed as a dev dependency of `packages/pi-plugin`, resolved from that
 package's `node_modules` or the root `node_modules/.bun`), `node` on `PATH`
-(Pi's CLI runs under Node), and the built Pi extension. With
+at or above the floor `packages/pi-plugin/package.json` declares in
+`engines.node` (Pi's CLI runs under Node and loads the extension into it),
+and the built Pi extension. With
 `EIDNARA_E2E_REQUIRE_PI=1` an unmet prerequisite fails the file instead of
 skipping it; the `gates` job sets it because it provides all three, so a skip
 there would mean a resolution or layout regression.
