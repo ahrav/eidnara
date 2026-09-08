@@ -1152,9 +1152,26 @@ describe("clearWorkMetricsCarry", () => {
         expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(0);
         expect(live.contextUsageBySession.has(sessionId)).toBe(false);
 
+        // A restart empties the in-memory fence; the summary row with no later usage re-derives it, so the daemon's pre-compaction sample stays hidden.
+        const restarted = createLiveSessionState();
+        expect(
+            buildSidebarSnapshot(sessionId, process.cwd(), restarted, undefined, undefined, {
+                usage: { current_total_input_tokens: 90_000, context_limit_tokens: 100_000 },
+            }).inputTokens,
+        ).toBe(0);
+        expect(restarted.staleDaemonUsageSessions.has(sessionId)).toBe(true);
+
         insertAssistantRow(db, sessionId, "b", 3, 12_000);
         closeQuietly(db);
         expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(12_000);
+        // With a post-compaction usage row the database cannot tell whether the daemon received it, so an unmarked state trusts the daemon.
+        const later = createLiveSessionState();
+        expect(
+            buildSidebarSnapshot(sessionId, process.cwd(), later, undefined, undefined, {
+                usage: { current_total_input_tokens: 12_500, context_limit_tokens: 100_000 },
+            }).inputTokens,
+        ).toBe(12_500);
+        expect(later.staleDaemonUsageSessions.has(sessionId)).toBe(false);
     });
 
     test("recovery orders the compaction boundary by (time_created, id) and tolerates malformed rows", () => {

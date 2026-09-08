@@ -334,6 +334,28 @@ export interface PersistedAssistantUsage {
     respondedAt: number;
 }
 
+/** Whether the session holds a compaction summary row, the boundary `findLastAssistantUsageFromOpenCodeDb` skips back to. */
+export function sessionHasCompactionSummaryInOpenCodeDb(sessionId: string): boolean {
+    if (!openCodeDbExists()) return false;
+    try {
+        return withReadOnlySessionDb((db) => {
+            const row = db
+                .prepare(
+                    `SELECT 1 AS present
+                     FROM message
+                     WHERE session_id = ?
+                       AND COALESCE(${jsonField("data", "$.summary")}, 0) = 1
+                     LIMIT 1`,
+                )
+                .get(sessionId);
+            return row !== null && row !== undefined;
+        });
+    } catch (error) {
+        log("[eidnara] failed to probe compaction summary in OpenCode DB:", error);
+        return false;
+    }
+}
+
 /** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary in `(time_created, id)` order are skipped, so a compacted session reports no usage until a post-compaction response lands. commentlint: allow(JUDGE) */
 export function findLastAssistantUsageFromOpenCodeDb(
     sessionId: string,

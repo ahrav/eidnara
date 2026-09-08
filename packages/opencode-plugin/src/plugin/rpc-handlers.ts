@@ -19,11 +19,12 @@ import {
     resolveExecuteThresholdDetail,
 } from "../hooks/context/event-resolvers";
 import { kernelClientResolver } from "../hooks/context/kernel-transport";
-import type { LiveSessionState } from "../hooks/context/live-session-state";
+import { addBoundedSession, type LiveSessionState } from "../hooks/context/live-session-state";
 import {
     findLastAssistantModelFromOpenCodeDb,
     findLastAssistantUsageFromOpenCodeDb,
     openCodeDbExists,
+    sessionHasCompactionSummaryInOpenCodeDb,
     withReadOnlySessionDb,
 } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
@@ -323,6 +324,25 @@ function liveUsageEntryFor(
  * A model named by the request wins over live state. The live lookup still runs so a missing model or
  * agent is recovered from OpenCode's SQLite database and cached for later polls and hooks.
  */
+/**
+ * The in-memory mark is set by `session.compacted` and cleared by the transform that forwards new usage.
+ * A restart empties it, so a session with a compaction summary and no later usage row is re-marked from the
+ * database: any sample the daemon holds for it was forwarded before the compaction. Once a later usage row
+ * exists the database cannot tell whether the daemon has received it, so only the mark applies. commentlint: allow(JUDGE)
+ */
+function isDaemonUsageStale(
+    liveSessionState: LiveSessionState | undefined,
+    sessionId: string,
+): boolean {
+    if (!liveSessionState) return false;
+    if (liveSessionState.staleDaemonUsageSessions.has(sessionId)) return true;
+    if (liveSessionState.contextUsageBySession.has(sessionId)) return false;
+    if (findLastAssistantUsageFromOpenCodeDb(sessionId)) return false;
+    if (!sessionHasCompactionSummaryInOpenCodeDb(sessionId)) return false;
+    addBoundedSession(liveSessionState.staleDaemonUsageSessions, sessionId);
+    return true;
+}
+
 function resolveActiveModel(
     sessionId: string,
     liveSessionState: LiveSessionState | undefined,
@@ -371,8 +391,9 @@ export function buildSidebarSnapshot(
         const modelKey = modelKeyOf(activeModel);
 
         // After a host compaction the daemon's usage describes the replaced context until a transform forwards a new sample; the live usage is authoritative meanwhile. commentlint: allow(JUDGE)
-        const daemonUsageStale = liveSessionState?.staleDaemonUsageSessions.has(sessionId) === true;
-        const moduleUsage = daemonUsageStale ? undefined : moduleStatus?.usage;
+        const moduleUsage = isDaemonUsageStale(liveSessionState, sessionId)
+            ? undefined
+            : moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
         // The daemon's usage wins; the live event usage covers `ts` mode and a daemon that has not persisted usage yet.
