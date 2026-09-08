@@ -121,6 +121,17 @@ describe("readLogTailLines", () => {
         for (const entry of tail.slice(0, -1)) expect(entry).toBe(line);
     });
 
+    it("keeps a record that starts exactly at the window boundary", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
+        tempDirs.push(root);
+        const path = join(root, "eidnara.log");
+        writeFileSync(path, "one\ntwo\nthree\n");
+        // The final 10 bytes are "two\nthree\n", which opens on a record boundary.
+        expect(readLogTailLines(path, 10)).toEqual(["two", "three", ""]);
+        // The final 9 bytes are "wo\nthree\n": the partial "wo" is dropped.
+        expect(readLogTailLines(path, 9)).toEqual(["three", ""]);
+    });
+
     it("keeps a marked suffix when the newest record alone exceeds the window", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-log-tail-"));
         tempDirs.push(root);

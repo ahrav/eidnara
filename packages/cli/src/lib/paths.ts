@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import os from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
@@ -26,9 +26,9 @@ export function getOpenCodeConfigDir(): string {
     const envDir = process.env.OPENCODE_CONFIG_DIR?.trim();
     if (envDir) return envDir;
     if (process.platform === "win32") {
-        return join(homedir(), ".config", "opencode");
+        return join(os.homedir(), ".config", "opencode");
     }
-    const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+    const xdgConfig = process.env.XDG_CONFIG_HOME || join(os.homedir(), ".config");
     return join(xdgConfig, "opencode");
 }
 
@@ -99,7 +99,7 @@ export function detectConfigPaths(): ConfigPaths {
 
 function envFirstHomeDir(): string {
     const home = process.env.HOME?.trim();
-    return home || homedir();
+    return home || os.homedir();
 }
 
 /* */

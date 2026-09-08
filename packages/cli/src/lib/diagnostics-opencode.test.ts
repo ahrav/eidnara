@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     collectDiagnostics,
@@ -380,5 +380,31 @@ describe("renderDiagnosticsMarkdown path sanitization", () => {
         expect(markdown).toContain("- Path: ");
         expect(markdown).not.toContain("abc123");
         expect(markdown).toContain("token=<REDACTED:token>");
+    });
+});
+
+describe("collectDiagnostics without any home directory", () => {
+    it("produces a partial report when user-level paths cannot be resolved", async () => {
+        const { root, cwd } = isolatedRoot();
+        delete process.env.HOME;
+        delete process.env.XDG_CONFIG_HOME;
+        delete process.env.XDG_DATA_HOME;
+        const spy = spyOn(os, "homedir").mockImplementation(() => {
+            throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
+                code: "ERR_SYSTEM_ERROR",
+            });
+        });
+        try {
+            const report = await collectDiagnostics(cwd);
+            expect(report.configPathsError).toContain("uv_os_homedir");
+            expect(report.configPaths.opencodeConfigFormat).toBe("none");
+            expect(report.eidnaraConfig.exists).toBe(false);
+            expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
+            expect(report.projectDirectory).toBe(cwd);
+            expect(renderDiagnosticsMarkdown(report)).toContain("- User-level paths unavailable: ");
+            expect(root).toBeTruthy();
+        } finally {
+            spy.mockRestore();
+        }
     });
 });

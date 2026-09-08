@@ -64,6 +64,8 @@ export interface DiagnosticReport {
     /** `opencodeInstallations` marks the first detection-ladder rung as active. */
     opencodeInstallations: OpenCodeInstallationReport[];
     configPaths: ConfigPaths;
+    /** Set when user-level paths could not be resolved (no `HOME`, no `XDG_CONFIG_HOME`, no passwd entry); the paths are then empty. */
+    configPathsError?: string;
     /** Project-tier fields were collected for this directory; bundles for another directory must be re-collected. */
     projectDirectory: string;
     /** Registration in the user-level `opencode.json(c)` under the OpenCode config dir. */
@@ -355,12 +357,46 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     }
 }
 
+/**
+ * With `HOME` and `XDG_CONFIG_HOME` unset for a UID without a passwd entry, every user-level path
+ * resolution throws; the report then carries empty user-level paths and the error text.
+ */
+function resolveUserLevelPaths(): { configPaths: ConfigPaths; error?: string } {
+    try {
+        return { configPaths: detectConfigPaths() };
+    } catch (error) {
+        return {
+            configPaths: {
+                configDir: "",
+                opencodeConfig: "",
+                opencodeConfigFormat: "none",
+                eidnaraConfig: "",
+                omoConfig: null,
+                tuiConfig: "",
+                tuiConfigFormat: "none",
+            },
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
+
+function readUserEidnaraConfigTier(): EidnaraConfigTier {
+    try {
+        return readEidnaraConfigTier(eidnaraUserConfigBasePath());
+    } catch {
+        return { path: "", exists: false, flags: {} };
+    }
+}
+
 export async function collectDiagnostics(cwd = process.cwd()): Promise<DiagnosticReport> {
     const pluginVersion = getSelfVersion();
-    const configPaths = detectConfigPaths();
-    const opencodeConfig = readConfig(configPaths.opencodeConfig);
-    const tuiConfig = readConfig(configPaths.tuiConfig);
-    const eidnaraConfig = readEidnaraConfigTier(eidnaraUserConfigBasePath());
+    const userLevel = resolveUserLevelPaths();
+    const configPaths = userLevel.configPaths;
+    const opencodeConfig = configPaths.opencodeConfig
+        ? readConfig(configPaths.opencodeConfig)
+        : { value: null };
+    const tuiConfig = configPaths.tuiConfig ? readConfig(configPaths.tuiConfig) : { value: null };
+    const eidnaraConfig = readUserEidnaraConfigTier();
     const projectConfig = readEidnaraConfigTier(eidnaraProjectConfigBasePath(cwd));
 
     const logPath = getEidnaraLogPath("opencode");
@@ -403,6 +439,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
                 : null,
         opencodeInstallations,
         configPaths,
+        ...(userLevel.error ? { configPathsError: userLevel.error } : {}),
         projectDirectory: cwd,
         opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value, cwd),
         ...(opencodeConfig.error ? { opencodeConfigParseError: opencodeConfig.error } : {}),
@@ -514,6 +551,9 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- Node: ${report.nodeVersion}`,
         `- OpenCode installed: ${report.opencodeInstalled} [${report.opencodeInstallKind}]${report.opencodeVersion ? ` (${describeProbeText(report.opencodeVersion)})` : ""}`,
         `- Project directory: ${sanitizeString(report.projectDirectory)}`,
+        ...(report.configPathsError
+            ? [`- User-level paths unavailable: ${sanitizeDiagnosticText(report.configPathsError)}`]
+            : []),
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
         `- opencode config parse error: ${describeParseError(report.opencodeConfigParseError)}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,

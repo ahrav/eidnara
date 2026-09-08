@@ -535,3 +535,40 @@ describe("redactSecretText — round-ten edge cases", () => {
         );
     });
 });
+
+describe("redactSecretText — nested structured values", () => {
+    test("consumes a nested object or array under a secret key", () => {
+        expect(redactSecretText('{"passwords":{"primary":{"value":"hunter2"}},"n":1}')).toBe(
+            '{"passwords":<REDACTED:passwords>,"n":1}',
+        );
+        expect(redactSecretText('{"api_key":[{"v":"a]b"},["x"]]} tail')).toBe(
+            '{"api_key":<REDACTED:api_key>} tail',
+        );
+        // Brackets inside string literals do not end the container.
+        expect(redactSecretText('{"token":{"v":"}"}}')).toBe('{"token":<REDACTED:token>}');
+        // An unterminated container is left to the flat rules rather than consuming the rest of the text.
+        expect(redactSecretText('{"token":{"v":"a"')).toBe('{"token":{"v":"a"');
+    });
+});
+
+describe("sanitizeConfigValue prompt-bearing fields", () => {
+    test("keeps only presence and length for prompt prose", () => {
+        expect(
+            sanitizeConfigValue({
+                prompt: "You are an internal assistant for ACME payroll.",
+                system_prompt: "secret instructions",
+                description: "desc",
+                prompt_surface: { tool_descriptions: { bash: "run it" } },
+                skip_signatures: ["sig one", "sig two"],
+                model: "anthropic/claude",
+            }),
+        ).toEqual({
+            prompt: "<REDACTED 47 chars>",
+            system_prompt: "<REDACTED 19 chars>",
+            description: "<REDACTED 4 chars>",
+            prompt_surface: { tool_descriptions: { bash: "<REDACTED 6 chars>" } },
+            skip_signatures: ["<REDACTED 7 chars>", "<REDACTED 7 chars>"],
+            model: "anthropic/claude",
+        });
+    });
+});

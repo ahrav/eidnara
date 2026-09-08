@@ -52,6 +52,14 @@ describe("detectOpenCode", () => {
         expect(result).toEqual({ kind: "cli", binary: bin });
     });
 
+    it("never probes cwd-relative candidates when no home directory exists", () => {
+        // With an empty home, `join("", ".opencode", "bin", "opencode")` is a project-relative path.
+        const relative = join(".opencode", "bin", "opencode");
+        const d = { ...deps(new Set([relative]), "linux"), home: "", env: {} };
+        expect(detectOpenCodeInstallations(d)).toEqual([]);
+        expect(detectOpenCode(d).kind).toBe("none");
+    });
+
     it("reports cli when a bare opencode is on PATH", () => {
         const pathBinary = "/somewhere/opencode";
         const result = detectOpenCode(deps(new Set([pathBinary]), "linux", () => pathBinary));

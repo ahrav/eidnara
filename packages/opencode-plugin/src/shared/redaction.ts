@@ -255,7 +255,7 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
     {
         pattern:
-            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential|cookie)[^"']*)\1(\s*:\s*)(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|(-?\d+(?:\.\d+)?|\[[^[\]\r\n]*\]|\{[^{}\r\n]*\}))/gi,
+            /(["'])([^"']*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential|cookie)[^"']*)\1(\s*:\s*)(?:(["'])((?:\\.|(?!\4)[^\\\r\n])*)\4|(-?\d+(?:\.\d+)?))/gi,
         replacement: (
             full: string,
             quote: string,
@@ -334,8 +334,52 @@ const SECRET_TEXT_PATTERNS: Array<{
     },
 ];
 
+// `JSON.stringify` output nests arbitrarily; a regex cannot pair brackets, so a quoted secret key
+// followed by `[` or `{` has its value consumed by a bracket-aware scan that skips string literals.
+const QUOTED_SECRET_KEY_WITH_CONTAINER =
+    /(["'])([^"'\r\n]*(?:key|token|secret|password|passwd|pwd|auth|bearer|credential|cookie)[^"'\r\n]*)\1(\s*:\s*)(?=[[{])/gi;
+
+function containerEnd(text: string, open: number): number {
+    const stack: string[] = [];
+    let quote: string | null = null;
+    for (let i = open; i < text.length; i += 1) {
+        const ch = text[i];
+        if (quote) {
+            if (ch === "\\") i += 1;
+            else if (ch === quote) quote = null;
+            continue;
+        }
+        if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === "[" || ch === "{") stack.push(ch === "[" ? "]" : "}");
+        else if (ch === "]" || ch === "}") {
+            if (stack.pop() !== ch) return -1;
+            if (stack.length === 0) return i + 1;
+        } else if (ch === "\n" || ch === "\r") return -1;
+    }
+    return -1;
+}
+
+function redactStructuredSecretValues(value: string): string {
+    let out = "";
+    let cursor = 0;
+    QUOTED_SECRET_KEY_WITH_CONTAINER.lastIndex = 0;
+    for (;;) {
+        const match = QUOTED_SECRET_KEY_WITH_CONTAINER.exec(value);
+        if (!match) break;
+        const [full, quote, key, separator] = match;
+        const valueStart = match.index + full.length;
+        const end = hasSecretKeySegment(key) ? containerEnd(value, valueStart) : -1;
+        if (end === -1) continue;
+        out += value.slice(cursor, match.index);
+        out += `${quote}${key}${quote}${separator}<REDACTED:${redactionTypeForKey(key)}>`;
+        cursor = end;
+        QUOTED_SECRET_KEY_WITH_CONTAINER.lastIndex = end;
+    }
+    return out + value.slice(cursor);
+}
+
 export function redactSecretText(value: string): string {
-    let redacted = value;
+    let redacted = redactStructuredSecretValues(value);
     for (const { pattern, replacement } of SECRET_TEXT_PATTERNS) {
         if (typeof replacement === "string") {
             redacted = redacted.replace(pattern, replacement);
@@ -389,8 +433,24 @@ export function hasShareabilitySensitiveText(text: string): boolean {
     }
 }
 
+// Prompt fields hold arbitrary private prose; a shareable report keeps only presence and length.
+const PROMPT_KEY_PATTERN =
+    /^(?:prompt|system_prompt|description|tool_descriptions|skip_signatures)$/;
+
+function redactProse(value: unknown): unknown {
+    if (typeof value === "string") return `<REDACTED ${value.length} chars>`;
+    if (Array.isArray(value)) return value.map(redactProse);
+    if (value && typeof value === "object") {
+        return Object.fromEntries(
+            Object.entries(value).map(([entryKey, entry]) => [entryKey, redactProse(entry)]),
+        );
+    }
+    return value;
+}
+
 export function sanitizeConfigValue(value: unknown, keyPath: string[] = []): unknown {
     const key = keyPath.at(-1) ?? "";
+    if (PROMPT_KEY_PATTERN.test(key)) return redactProse(value);
     const secretKey = Boolean(key) && isSecretKey(key);
     // Null and booleans carry no credential. A number stays unless the key names a password-like
     // secret, where it can be a PIN (`keepsScalarValue`); a string under a secret key is always redacted.
