@@ -19,7 +19,11 @@ import {
 } from "./hooks/context/module-transport";
 import { preloadTokenizer } from "./hooks/context/read-session-formatting";
 import type { RustModeModuleClient } from "./hooks/context/rust-mode-transform";
-import { sendIgnoredMessage } from "./hooks/context/send-session-notification";
+import {
+    type ConfigWarningDelivery,
+    createConfigWarningDelivery,
+    formatConfigWarning,
+} from "./plugin/config-warning";
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooksAsync } from "./plugin/hooks/create-session-hooks";
@@ -60,48 +64,23 @@ const server: Plugin = async (ctx) => {
     });
     setKeepSubagents(pluginConfig.keep_subagents === true);
 
+    let configWarning: ConfigWarningDelivery | null = null;
     if (pluginConfig.configWarnings?.length) {
         for (const w of pluginConfig.configWarnings) {
             log(`[eidnara] config warning: ${w}`);
         }
-        // Delay the startup notification until an active session is available.
-        const warningText = [
-            "## ⚠️ Eidnara Config Warning",
-            "",
-            "Some configuration values are invalid and were replaced with defaults:",
-            "",
-            ...pluginConfig.configWarnings.map((w) => `- ${w}`),
-            "",
-            "Check your `eidnara.jsonc` to fix these values.",
-        ].join("\n");
-
-        setTimeout(async () => {
-            try {
-                // sendIgnoredMessage routes TUI notifications to toasts and Desktop notifications to ignored messages via isTuiConnected().
-                // Use the first active session because sendIgnoredMessage requires a session ID.
-                // session.list() may return `{ data: [...] }` or an array, so handle both shapes at runtime.
-                type SessionListFn = () => Promise<
-                    { data?: Array<{ id?: string }> } | Array<{ id?: string }>
-                >;
-                const clientWithSessions = ctx.client as unknown as {
-                    session?: { list?: SessionListFn };
-                };
-                const sessions = await Promise.resolve(clientWithSessions.session?.list?.()).catch(
-                    () => null,
-                );
-                const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
-                const sessionId = sessionList?.[0]?.id;
-                if (sessionId) {
-                    // Pass the session's agent, model, and variant so the ignored message does not select the default agent or model.
-                    // Passing no agent, model, or variant records the ignored message with the defaults.
-                    // Using the defaults attributes the notice to the default agent rather than the session agent.
-                    // Using the defaults switches the model on the next user turn and invalidates the prefix cache.
-                    // `resolvePromptContext` reads real session messages and returns `null` for fresh or empty sessions.
-                    await sendIgnoredMessage(ctx.client, sessionId, warningText, {});
-                }
-            } catch {
-                // Config warning delivery must not crash startup.
-            }
+        configWarning = createConfigWarningDelivery(
+            ctx.client,
+            formatConfigWarning(pluginConfig.configWarnings),
+        );
+        // sendIgnoredMessage routes TUI notifications to toasts and Desktop notifications to ignored messages via isTuiConnected().
+        // Passing no agent, model, or variant records the ignored message with the defaults.
+        // Using the defaults attributes the notice to the default agent rather than the session agent.
+        // Using the defaults switches the model on the next user turn and invalidates the prefix cache.
+        // `resolvePromptContext` reads real session messages and returns `null` for fresh or empty sessions.
+        // A project with no session yet keeps the warning pending; the `chat.message` hook delivers it to the first session the user prompts.
+        setTimeout(() => {
+            void configWarning?.deliverToFirstSession();
         }, 3000);
     }
 
@@ -243,6 +222,10 @@ const server: Plugin = async (ctx) => {
         "chat.message": async (input, _output) => {
             // The first prompt awaits `preloadTokenizer()` so later synchronous estimates use the installed package.
             await preloadTokenizer();
+            // Fire-and-forget: a pending delivery must not delay the user's prompt.
+            if (configWarning?.pending && input.sessionID) {
+                void configWarning.deliverTo(input.sessionID);
+            }
             await eidnara?.["chat.message"]?.(input);
         },
         "tool.execute.after": async (input, _output) => {

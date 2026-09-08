@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import {
     collectDiagnostics,
+    type PiDiagnosticReport,
     piSessionIdFromFileName,
     renderDiagnosticsMarkdown,
+    sanitizeString,
     sanitizeValue,
 } from "./diagnostics-pi";
 
@@ -17,6 +19,7 @@ const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
 const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
+const originalLogPath = process.env.EIDNARA_LOG_PATH;
 const originalPath = process.env.PATH;
 
 function makeTempRoot(prefix = "eidnara-pi-diagnostics-"): string {
@@ -36,6 +39,8 @@ afterEach(() => {
     else process.env.XDG_CACHE_HOME = originalCacheHome;
     if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = originalConfigHome;
+    if (originalLogPath === undefined) delete process.env.EIDNARA_LOG_PATH;
+    else process.env.EIDNARA_LOG_PATH = originalLogPath;
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
 
@@ -52,48 +57,212 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
                 "https://service-user:s3cr3t@example.com/plugin.git",
                 "git+ssh://git@github.com/example-org/eidnara.git",
                 "https://example.com/plugin.tgz?token=abc123",
+                "https://example.com/plugin.tgz?sig=abc123def",
             ]),
         ).toEqual([
             "npm:@eidnara/pi",
-            "https://<REDACTED:userinfo>@example.com/plugin.git",
-            "git+ssh://<REDACTED:userinfo>@github.com/example-org/eidnara.git",
+            "https://<REDACTED>@example.com/plugin.git",
+            "git+ssh://<REDACTED>@github.com/example-org/eidnara.git",
+            "https://example.com/plugin.tgz?<REDACTED:query>",
             "https://example.com/plugin.tgz?<REDACTED:query>",
         ]);
     });
 
-    it("redacts generic credential keys and keeps benign neighbors of secret words", () => {
-        expect(
-            sanitizeValue({
-                auth: "basic dXNlcjpwYXNz",
-                credential: "plain-text",
-                bearer: "abc",
-                private_key: "-----BEGIN-----",
-                cookie: "sid=1",
-                session_cookie: "sid=2",
-                pin_key_files: ["notes.md"],
-                token_budget: "5k",
-            }),
-        ).toEqual({
-            auth: "<REDACTED>",
-            credential: "<REDACTED>",
-            bearer: "<REDACTED>",
-            private_key: "<REDACTED>",
-            cookie: "<REDACTED>",
-            session_cookie: "<REDACTED>",
-            pin_key_files: ["notes.md"],
-            token_budget: "5k",
-        });
-    });
-
-    it("preserves numeric thresholds while redacting string secrets", () => {
+    it("preserves numeric thresholds while redacting string and numeric secrets", () => {
         expect(
             sanitizeValue({
                 execute_threshold_tokens: 200000,
+                timeout_ms: 30000,
+                enabled: true,
                 api_key: "sk-x",
+                password: 123456,
             }),
         ).toEqual({
             execute_threshold_tokens: 200000,
+            timeout_ms: 30000,
+            enabled: true,
             api_key: "<REDACTED>",
+            password: "<REDACTED>",
+        });
+    });
+
+    it("redacts a numeric PIN under a password-shaped key but keeps token budgets", () => {
+        expect(
+            sanitizeValue({
+                password: 123456,
+                db_secret: 42,
+                credential: 7,
+                max_tokens: 4096,
+                api_key: 4096,
+                enabled: true,
+            }),
+        ).toEqual({
+            password: "<REDACTED>",
+            db_secret: "<REDACTED>",
+            credential: "<REDACTED>",
+            max_tokens: 4096,
+            api_key: 4096,
+            enabled: true,
+        });
+    });
+
+    it("redacts every credential-shaped key the shared vocabulary knows, plus cookies", () => {
+        expect(
+            sanitizeValue({
+                credential: "c",
+                auth: "a",
+                private_key: "p",
+                access_key: "k",
+                cookie: "session=abc",
+                injection_budget_ms: 4000,
+            }),
+        ).toEqual({
+            credential: "<REDACTED>",
+            auth: "<REDACTED>",
+            private_key: "<REDACTED>",
+            access_key: "<REDACTED>",
+            cookie: "<REDACTED>",
+            injection_budget_ms: 4000,
+        });
+    });
+
+    it("keeps only presence and length for prompt prose", () => {
+        expect(
+            sanitizeValue({
+                historian: { prompt: "Summarize the last sprint", model: "claude" },
+                sidekick: { system_prompt: "Be terse" },
+                prompt_surface: {
+                    default: "light",
+                    tool_descriptions: { ctx_search: "Find prior notes" },
+                },
+                system_prompt_injection: { skip_signatures: ["<!-- eidnara: skip -->", "secret"] },
+            }),
+        ).toEqual({
+            historian: { prompt: "<REDACTED 25 chars>", model: "claude" },
+            sidekick: { system_prompt: "<REDACTED 8 chars>" },
+            prompt_surface: {
+                default: "light",
+                tool_descriptions: { ctx_search: "<REDACTED 16 chars>" },
+            },
+            system_prompt_injection: {
+                skip_signatures: ["<REDACTED 22 chars>", "<REDACTED 6 chars>"],
+            },
+        });
+    });
+});
+
+describe("sanitizeString home handling", () => {
+    it("does not treat a root home directory as a redactable prefix", () => {
+        process.env.HOME = "/";
+        expect(sanitizeString("https://example.test/a/b")).toBe("https://example.test/a/b");
+    });
+
+    it("strips URL userinfo and matches Windows profile paths on any drive", () => {
+        process.env.HOME = "/nonexistent/home";
+        // Assembled at runtime so the fixture never appears as a credential in source.
+        const userinfo = ["alice", "not-a-real-password"].join(":");
+        expect(sanitizeString(`clone https://${userinfo}@example.test/repo.git`)).toBe(
+            "clone https://<REDACTED>@example.test/repo.git",
+        );
+        expect(sanitizeString("https://opaque-private-token@example.test/repo")).toBe(
+            "https://<REDACTED>@example.test/repo",
+        );
+        const atPassword = ["alice", "p@ss"].join(":");
+        expect(sanitizeString(`https://${atPassword}@example.test/repo`)).toBe(
+            "https://<REDACTED>@example.test/repo",
+        );
+        expect(sanitizeString("fetch //opaque-private-token@example.test/v1")).toBe(
+            "fetch //<REDACTED>@example.test/v1",
+        );
+        expect(sanitizeString("d:/users/alice/project")).toBe("d:/Users/<USER>/project");
+        expect(sanitizeString("profile at d:/users/alice")).toBe("profile at d:/Users/<USER>");
+        expect(sanitizeString("home /home/alice and /Users/alice end")).toBe(
+            "home /home/<USER> and /Users/<USER> end",
+        );
+        expect(
+            sanitizeString("C:\\Users\\John Doe\\AppData\\x and /Users/John Doe/Documents/x"),
+        ).toBe("C:\\Users\\<USER>\\AppData\\x and /Users/<USER>/Documents/x");
+    });
+
+    it("replaces the account name and home only at identifier boundaries", () => {
+        process.env.HOME = "/nonexistent/home";
+        const user = userInfo().username;
+        expect(sanitizeString(`${user}x kept, ${user} redacted, x${user} kept`)).toBe(
+            `${user}x kept, <USER> redacted, x${user} kept`,
+        );
+        expect(sanitizeString("/nonexistent/home2/x and /nonexistent/home/y")).toBe(
+            "/nonexistent/home2/x and ~/y",
+        );
+    });
+
+    it("redacts every Authorization scheme", () => {
+        process.env.HOME = "/nonexistent/home";
+        // Assembled at runtime so the fixture never appears as a credential in source.
+        const basic = `Basic ${Buffer.from("alice:not-a-real-password").toString("base64")}`;
+        expect(sanitizeString(`Authorization: ${basic}`)).toBe("Authorization: <REDACTED>");
+        expect(sanitizeString("authorization=Token abc.def")).toBe("authorization=<REDACTED>");
+        expect(
+            sanitizeString(
+                "Authorization: AWS4-HMAC-SHA256 Credential=x, SignedHeaders=y, Signature=z",
+            ),
+        ).toBe("Authorization: <REDACTED>");
+        expect(sanitizeString("the Authorization header is missing")).toBe(
+            "the Authorization header is missing",
+        );
+    });
+
+    it("redacts credential headers and colon-delimited secrets in text", () => {
+        process.env.HOME = "/nonexistent/home";
+        expect(sanitizeString("X-API-Key: opaque-value")).toBe("X-API-Key: <REDACTED>");
+        expect(sanitizeString("Cookie: sid=opaque; theme=dark")).toBe("Cookie: <REDACTED>");
+        // An unquoted value has no delimiter, so the shared redactor takes the rest of the segment.
+        expect(sanitizeString("password: hunter2 and token=abc")).toBe("password: <REDACTED>");
+        // Every value is gone even though the shared redactor's plain scalar spans the middle pairs.
+        expect(
+            sanitizeString("client_secret: live access_key=live credential: live auth: live"),
+        ).toBe("client_secret: <REDACTED> <REDACTED> auth: <REDACTED>");
+        // `tokens` is a secret label in the shared vocabulary, so the plain scalar after it goes.
+        expect(sanitizeString("execute_threshold_tokens: 200000 max_tokens=3 enabled: true")).toBe(
+            "execute_threshold_tokens: <REDACTED> true",
+        );
+        expect(sanitizeString("at 2026-07-07T12:00:01.000Z see https://example.test/x")).toBe(
+            "at 2026-07-07T12:00:01.000Z see https://example.test/x",
+        );
+        expect(sanitizeString('client_secret: "correct horse battery staple" done')).toBe(
+            "client_secret: <REDACTED>",
+        );
+        expect(sanitizeString('client_secret: "prefix\\" LIVE suffix" done')).toBe(
+            "client_secret: <REDACTED>",
+        );
+        // A bare `key=` is an assignment, so its value goes even when numeric; `key:` stays prose.
+        expect(sanitizeString("key=123456 and press any key: continue")).toBe(
+            "key=<REDACTED> and press any key: continue",
+        );
+        expect(sanitizeString("bearer opaque-live-token and BEARER x.y")).toBe(
+            "Bearer <REDACTED> and Bearer <REDACTED>",
+        );
+        // Assembled at runtime so the fixture never appears as a key block in source.
+        const pem = [
+            "-----BEGIN",
+            "PRIVATE KEY-----\nMIIE\nvQIB\n-----END",
+            "PRIVATE KEY-----",
+        ].join(" ");
+        expect(sanitizeString(`${pem} tail`)).toBe("<PRIVATE_KEY_REDACTED> tail");
+    });
+
+    it("sanitizes dynamic record keys as well as values", () => {
+        process.env.HOME = "/nonexistent/home";
+        expect(
+            sanitizeValue({
+                permission: { bash: { "curl -H 'X-API-Key: live' https://h": "allow" } },
+                prompt_surface: { tool_descriptions: { "X-API-Key: live": "desc" } },
+            }),
+        ).toEqual({
+            // A key that names a credential is itself secret, so its value is dropped too.
+            permission: { bash: { "curl -H 'X-API-Key: <REDACTED>": "<REDACTED>" } },
+            prompt_surface: {
+                tool_descriptions: { "X-API-Key: <REDACTED>": "<REDACTED 4 chars>" },
+            },
         });
     });
 });
@@ -118,38 +287,147 @@ describe("piSessionIdFromFileName", () => {
     });
 });
 
+describe("renderDiagnosticsMarkdown", () => {
+    it("keeps warnings and parse errors on one line and reports an installed Pi without a version", () => {
+        const report: PiDiagnosticReport = {
+            timestamp: "2026-07-07T12:00:00.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: "/usr/bin/pi",
+            piVersion: null,
+            settings: {
+                path: "/x/settings.json",
+                exists: false,
+                hasEidnaraPackage: false,
+                packages: [],
+            },
+            configPaths: { agentDir: "/x", userConfig: "/x/u.jsonc", projectConfig: "/x/p.jsonc" },
+            userConfig: {
+                path: "/x/u.jsonc",
+                exists: true,
+                parseError: "bad\n## Log (last",
+                flags: {},
+            },
+            projectConfig: { path: "/x/p.jsonc", exists: false, flags: {} },
+            loadedConfigPaths: [],
+            loadWarnings: ["model key\n## Log (last\nunknown", "lone\r## Log (last"],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: "/x/eidnara.log", exists: false, sizeKb: 0 },
+            recentSessions: [],
+            historianDumps: {
+                byProject: [],
+                legacyDumps: { dir: "/x/legacy", count: 0, recent: [] },
+            },
+        };
+
+        const markdown = renderDiagnosticsMarkdown(report);
+
+        expect(markdown).toContain("- User config parse error: bad ## Log (last");
+        expect(markdown).toContain("- model key ## Log (last unknown");
+        expect(markdown).toContain("- lone ## Log (last");
+        expect(markdown.match(/(^|\r)## Log \(last/gm)).toBeNull();
+        expect(markdown).toContain("- Pi installed: true");
+    });
+
+    it("includes sanitized historian dump metadata", () => {
+        const home = process.env.HOME ?? "/home/tester";
+        const report: PiDiagnosticReport = {
+            timestamp: "2026-07-07T12:00:00.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: "/usr/bin/pi",
+            piVersion: "0.80.2",
+            settings: {
+                path: "/x/settings.json",
+                exists: true,
+                hasEidnaraPackage: true,
+                packages: [],
+            },
+            configPaths: { agentDir: "/x", userConfig: "/x/u.jsonc", projectConfig: "/x/p.jsonc" },
+            userConfig: { path: "/x/u.jsonc", exists: false, flags: {} },
+            projectConfig: { path: "/x/p.jsonc", exists: false, flags: {} },
+            loadedConfigPaths: [],
+            loadWarnings: [],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: "/x/eidnara.log", exists: false, sizeKb: 0 },
+            recentSessions: [],
+            sessionDiscovery: "ok",
+            historianDumps: {
+                byProject: [
+                    {
+                        directory: `${home}/private-project`,
+                        primarySessionId: "ses_1",
+                        sessionIds: ["ses_1"],
+                        count: 1,
+                        recent: [
+                            {
+                                name: "dump-1.xml",
+                                ageMinutes: 5,
+                                sizeKb: 12,
+                                parseError: `unexpected close tag in ${home}/private-project/dump-1.xml`,
+                            },
+                        ],
+                    },
+                ],
+                legacyDumps: { dir: `${home}/legacy`, count: 0, recent: [] },
+            },
+        };
+
+        const markdown = renderDiagnosticsMarkdown(report);
+
+        expect(markdown).toContain("### Historian dumps");
+        expect(markdown).toContain('"count": 1');
+        expect(markdown).toContain('"name": "dump-1.xml"');
+        expect(markdown).not.toContain(home);
+    });
+});
+
+interface IsolatedEnv {
+    home: string;
+    cwd: string;
+    agentDir: string;
+    configHome: string;
+}
+
+function isolateEnv(): IsolatedEnv {
+    const root = makeTempRoot();
+    const home = join(root, "home");
+    const cwd = join(root, "workspace");
+    const agentDir = join(root, "isolated", "agent");
+    const configHome = join(home, ".config");
+    process.env.HOME = home;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.XDG_DATA_HOME = join(root, "data");
+    process.env.XDG_CACHE_HOME = join(root, "cache");
+    process.env.XDG_CONFIG_HOME = configHome;
+
+    mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+    mkdirSync(agentDir, { recursive: true });
+    mkdirSync(join(configHome, "eidnara"), { recursive: true });
+    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+    return { home, cwd, agentDir, configHome };
+}
+
 describe("collectDiagnostics Pi path resolution", () => {
     it("reads recent sessions from PI_CODING_AGENT_DIR instead of HOME/.pi/agent", async () => {
-        const root = makeTempRoot();
-        const home = join(root, "home");
-        const cwd = join(root, "workspace");
-        const agentDir = join(root, "isolated", "agent");
-        process.env.HOME = home;
-        process.env.PI_CODING_AGENT_DIR = agentDir;
-        process.env.XDG_DATA_HOME = join(root, "data");
-        process.env.XDG_CACHE_HOME = join(root, "cache");
-        process.env.XDG_CONFIG_HOME = join(root, "config");
-
-        mkdirSync(cwd, { recursive: true });
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        mkdirSync(agentDir, { recursive: true });
-        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
-
-        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
-        writeFileSync(
-            join(process.env.XDG_CONFIG_HOME, "eidnara", "eidnara.jsonc"),
-            JSON.stringify({}),
-        );
+        const { home, cwd, agentDir, configHome } = isolateEnv();
+        writeFileSync(join(configHome, "eidnara", "eidnara.jsonc"), JSON.stringify({}));
         writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), JSON.stringify({}));
 
+        const customProject = "/tmp/eidnaradiagnosticproject";
+        // The file name carries a timestamp prefix; the reported id is Pi's bare id.
         const customSessionId = "customsession";
         const customSlugDir = join(agentDir, "sessions", "--tmp-eidnaradiagnosticproject--");
         mkdirSync(customSlugDir, { recursive: true });
-        // The slug for `/tmp/eidnaradiagnosticproject` is exact; the header's
-        // `cwd` names a hyphenated directory the slug cannot round-trip.
         writeFileSync(
             join(customSlugDir, `2026-07-07T12-00-00-000Z_${customSessionId}.jsonl`),
-            `${JSON.stringify({ type: "session", version: 3, id: customSessionId, cwd: "/tmp/my-hyphenated-project" })}\n`,
+            `${JSON.stringify({ type: "session", cwd: customProject })}\n`,
         );
 
         const homeFallbackSlugDir = join(
@@ -171,26 +449,68 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.recentSessions).toEqual([
             {
                 sessionId: customSessionId,
-                directory: "/tmp/my-hyphenated-project",
+                directory: customProject,
                 lastActiveAt: report.recentSessions[0]?.lastActiveAt,
             },
         ]);
     });
 
-    it("falls back to the slug directory when a session file has no header", async () => {
-        const root = makeTempRoot();
-        const home = join(root, "home");
-        const cwd = join(root, "workspace");
-        const agentDir = join(root, "agent");
-        process.env.HOME = home;
-        process.env.PI_CODING_AGENT_DIR = agentDir;
-        process.env.XDG_DATA_HOME = join(root, "data");
-        process.env.XDG_CACHE_HOME = join(root, "cache");
-        process.env.XDG_CONFIG_HOME = join(root, "config");
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        mkdirSync(agentDir, { recursive: true });
-        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
-        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+    it("takes the project directory from the session header instead of the lossy slug", async () => {
+        const { cwd, agentDir } = isolateEnv();
+        const slugDir = join(agentDir, "sessions", "--tmp-my-project--");
+        mkdirSync(slugDir, { recursive: true });
+        writeFileSync(
+            join(slugDir, "2026-07-07T12-00-00-000Z_hyphenated.jsonl"),
+            `${JSON.stringify({ type: "session", cwd: "/tmp/my-project" })}\n{"type":"message"}\n`,
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.recentSessions.map((session) => session.directory)).toEqual([
+            "/tmp/my-project",
+        ]);
+    });
+
+    it("keeps a session launched from the filesystem root and ignores a non-regular log", async () => {
+        const { cwd, agentDir } = isolateEnv();
+        const rootSlugDir = join(agentDir, "sessions", "----");
+        mkdirSync(rootSlugDir, { recursive: true });
+        writeFileSync(
+            join(rootSlugDir, "2026-07-07T12-00-00-000Z_root.jsonl"),
+            '{"type":"session"}\n',
+        );
+        writeFileSync(join(rootSlugDir, ".jsonl"), '{"type":"session"}\n');
+        const logDir = join(cwd, "log-as-directory");
+        mkdirSync(logDir);
+        process.env.EIDNARA_LOG_PATH = logDir;
+
+        const report = await collectDiagnostics(cwd);
+
+        // The timestamp prefix is file naming, not part of Pi's session id; a header
+        // without `cwd` leaves the raw slug as the label, and no project is scanned for it.
+        expect(report.recentSessions.map((session) => session.sessionId)).toEqual(["root"]);
+        expect(report.recentSessions.map((session) => session.directory)).toEqual(["----"]);
+        expect(report.historianDumps.byProject).toEqual([]);
+        expect(report.logFile).toEqual({ path: logDir, exists: false, sizeKb: 0 });
+    });
+
+    it("diagnoses the .json config the Pi loader selects and sanitizes its parse error", async () => {
+        const { home, cwd, configHome } = isolateEnv();
+        const userJson = join(configHome, "eidnara", "eidnara.json");
+        writeFileSync(userJson, "{ not json");
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.userConfig?.path).toBe(userJson);
+        expect(report.userConfig?.exists).toBe(true);
+        expect(report.userConfig?.parseError).toContain("~/.config/eidnara/eidnara.json");
+        expect(report.userConfig?.parseError).not.toContain(home);
+        expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
+        expect(report.projectConfig.exists).toBe(false);
+    });
+
+    it("keeps the raw slug as the label when a session file has no header", async () => {
+        const { cwd, agentDir } = isolateEnv();
         const slugDir = join(agentDir, "sessions", "--tmp-plainproject--");
         mkdirSync(slugDir, { recursive: true });
         writeFileSync(join(slugDir, "2026-07-07T12-00-00-000Z_headerless.jsonl"), "not json\n");
@@ -200,31 +520,24 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.recentSessions).toEqual([
             {
                 sessionId: "headerless",
-                directory: "/tmp/plainproject",
+                directory: "--tmp-plainproject--",
                 lastActiveAt: report.recentSessions[0]?.lastActiveAt,
             },
         ]);
+        expect(report.sessionDiscovery).toBe("ok");
     });
 
     it("reports a local checkout as the registered package and normalizes the Pi version", async () => {
-        const root = makeTempRoot();
-        const home = join(root, "home");
-        const cwd = join(root, "workspace");
-        const agentDir = join(root, "agent");
-        process.env.HOME = home;
-        process.env.PI_CODING_AGENT_DIR = agentDir;
-        process.env.XDG_DATA_HOME = join(root, "data");
-        process.env.XDG_CACHE_HOME = join(root, "cache");
-        process.env.XDG_CONFIG_HOME = join(root, "config");
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        mkdirSync(agentDir, { recursive: true });
-        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
+        const { home, cwd, agentDir } = isolateEnv();
+        const root = join(agentDir, "..", "..");
         const checkout = join(root, "eidnara-pi-checkout");
         mkdirSync(checkout, { recursive: true });
         writeFileSync(join(checkout, "package.json"), JSON.stringify({ name: "@eidnara/pi" }));
         writeFileSync(
             join(agentDir, "settings.json"),
-            JSON.stringify({ packages: ["./../eidnara-pi-checkout", "npm:other-pi-extension"] }),
+            JSON.stringify({
+                packages: ["./../../eidnara-pi-checkout", "npm:other-pi-extension"],
+            }),
         );
         const binDir = join(root, "bin");
         mkdirSync(binDir, { recursive: true });
@@ -244,21 +557,33 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(renderDiagnosticsMarkdown(report)).not.toContain("abc123");
     });
 
+    it("recognizes a version-pinned Eidnara package and lists only the other extensions", async () => {
+        const { cwd, agentDir } = isolateEnv();
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: ["npm:@eidnara/pi@0.1.0", "npm:@eidnara/pi-extras"] }),
+        );
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.settings.hasEidnaraPackage).toBe(true);
+        expect(report.conflicts.otherPiExtensions).toEqual(["npm:@eidnara/pi-extras"]);
+    });
+
+    it("reports discovery as unavailable when the sessions directory is missing", async () => {
+        const { cwd } = isolateEnv();
+
+        const report = await collectDiagnostics(cwd);
+
+        // The append-only log can outlive the sessions directory, so its
+        // records stay unattributable and the issue flow must ask first.
+        expect(report.recentSessions).toEqual([]);
+        expect(report.sessionDiscovery).toBe("unavailable");
+    });
+
     it("reports discovery as unavailable when every session directory is unreadable", async () => {
         if (typeof process.getuid === "function" && process.getuid() === 0) return;
-        const root = makeTempRoot();
-        const home = join(root, "home");
-        const cwd = join(root, "workspace");
-        const agentDir = join(root, "agent");
-        process.env.HOME = home;
-        process.env.PI_CODING_AGENT_DIR = agentDir;
-        process.env.XDG_DATA_HOME = join(root, "data");
-        process.env.XDG_CACHE_HOME = join(root, "cache");
-        process.env.XDG_CONFIG_HOME = join(root, "config");
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        mkdirSync(agentDir, { recursive: true });
-        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
-        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+        const { cwd, agentDir } = isolateEnv();
         const slugDir = join(agentDir, "sessions", "--tmp-lockedproject--");
         mkdirSync(slugDir, { recursive: true });
         writeFileSync(join(slugDir, "2026-07-07T12-00-00-000Z_hidden.jsonl"), "{}\n");
@@ -275,19 +600,7 @@ describe("collectDiagnostics Pi path resolution", () => {
 
     it("drops a session whose header cannot be read and reports partial discovery", async () => {
         if (typeof process.getuid === "function" && process.getuid() === 0) return;
-        const root = makeTempRoot();
-        const home = join(root, "home");
-        const cwd = join(root, "workspace");
-        const agentDir = join(root, "agent");
-        process.env.HOME = home;
-        process.env.PI_CODING_AGENT_DIR = agentDir;
-        process.env.XDG_DATA_HOME = join(root, "data");
-        process.env.XDG_CACHE_HOME = join(root, "cache");
-        process.env.XDG_CONFIG_HOME = join(root, "config");
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        mkdirSync(agentDir, { recursive: true });
-        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
-        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+        const { cwd, agentDir } = isolateEnv();
         const slugDir = join(agentDir, "sessions", "--tmp-my-project--");
         mkdirSync(slugDir, { recursive: true });
         const readable = join(slugDir, "2026-07-07T12-00-00-000Z_visible.jsonl");
@@ -307,19 +620,7 @@ describe("collectDiagnostics Pi path resolution", () => {
 
     it("reports discovery as partial when some session directories are unreadable", async () => {
         if (typeof process.getuid === "function" && process.getuid() === 0) return;
-        const root = makeTempRoot();
-        const home = join(root, "home");
-        const cwd = join(root, "workspace");
-        const agentDir = join(root, "agent");
-        process.env.HOME = home;
-        process.env.PI_CODING_AGENT_DIR = agentDir;
-        process.env.XDG_DATA_HOME = join(root, "data");
-        process.env.XDG_CACHE_HOME = join(root, "cache");
-        process.env.XDG_CONFIG_HOME = join(root, "config");
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        mkdirSync(agentDir, { recursive: true });
-        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
-        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
+        const { cwd, agentDir } = isolateEnv();
         const readable = join(agentDir, "sessions", "--tmp-openproject--");
         const locked = join(agentDir, "sessions", "--tmp-lockedproject--");
         mkdirSync(readable, { recursive: true });
@@ -335,35 +636,5 @@ describe("collectDiagnostics Pi path resolution", () => {
         } finally {
             chmodSync(locked, 0o755);
         }
-    });
-
-    it("sanitizes config parse errors so the issue body does not carry local paths", async () => {
-        const root = makeTempRoot();
-        const home = join(root, "home");
-        const cwd = join(home, "workspace");
-        const agentDir = join(root, "agent");
-        process.env.HOME = home;
-        process.env.PI_CODING_AGENT_DIR = agentDir;
-        process.env.XDG_DATA_HOME = join(root, "data");
-        process.env.XDG_CACHE_HOME = join(root, "cache");
-        process.env.XDG_CONFIG_HOME = join(home, ".config");
-
-        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
-        mkdirSync(agentDir, { recursive: true });
-        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
-        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
-        writeFileSync(join(process.env.XDG_CONFIG_HOME, "eidnara", "eidnara.jsonc"), "{ nope");
-        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), "[1]");
-
-        const report = await collectDiagnostics(cwd);
-
-        expect(report.userConfig.parseError).toContain("<HOME>/.config/eidnara/eidnara.jsonc");
-        expect(report.projectConfig.parseError).toContain(
-            "<HOME>/workspace/.eidnara/eidnara.jsonc",
-        );
-
-        const markdown = renderDiagnosticsMarkdown(report);
-        expect(markdown).toContain("User config parse error: Refusing to overwrite");
-        expect(markdown).not.toContain(home);
     });
 });

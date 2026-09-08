@@ -25,6 +25,9 @@ interface NotificationSocketOptions {
     /** The callback returns `true` only after the notification is fully consumed and can be acknowledged.
      * Dialog handlers await, so `onNotification` may return a Promise. */
     onNotification: (notification: SocketNotification) => boolean | Promise<boolean>;
+    /** Runs on every socket open, so RPC-backed preferences can be (re)loaded once the server is reachable.
+     * Notifications from that connection, the hello backlog included, are handled only after the returned promise settles. */
+    onConnected?: () => void | Promise<void>;
 }
 
 const RECONNECT_BASE_MS = 500;
@@ -32,6 +35,12 @@ const RECONNECT_MAX_MS = 10_000;
 /**
  * The watcher performs no IPC when the active session is unchanged. */
 const SESSION_WATCH_MS = 1_000;
+
+/** Bun's constructor accepts connection headers; the DOM declaration that `tsconfig.tui.json` loads for Solid's JSX types does not. */
+const HeaderedWebSocket = WebSocket as unknown as new (
+    url: string,
+    options: { headers: Record<string, string> },
+) => WebSocket;
 
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -55,9 +64,18 @@ const LEGACY_INSTANCE_ID = "legacy";
 type NotificationProtocolMode = "legacy" | "v2";
 
 /**
+ * A legacy server announces no instance ID and restarts notification IDs at 1, so its port-file identity supplies the epoch: a restart changes `started_at`, a reconnect does not.
+ */
+function legacyInstanceId(endpoint: { port: number; startedAt: number }): string {
+    return `${LEGACY_INSTANCE_ID}:${endpoint.port}:${endpoint.startedAt}`;
+}
+
+/**
  * Notification IDs restart with each server instance, so cursor and deduplication keys include the instance epoch.
  */
 let activeInstanceId: string | null = null;
+/** The epoch a legacy `hello-ack` on the current socket resolves to. */
+let socketLegacyInstanceId: string = LEGACY_INSTANCE_ID;
 let notificationProtocolMode: NotificationProtocolMode | null = null;
 const bufferedNotifications: SocketNotification[] = [];
 const lastHandledIdByCursor = new Map<string, number>();
@@ -136,10 +154,16 @@ async function connect(): Promise<void> {
     const rpcGeneration = getRpcGeneration();
     inFlightAttemptId = attemptId;
     const endpoint = await client.resolveEndpoint();
-    if (closed || inFlightAttemptId !== attemptId || getRpcGeneration() !== rpcGeneration) {
+    // A stop, or a restart that launched a newer attempt, already owns `inFlightAttemptId`.
+    if (closed || inFlightAttemptId !== attemptId) {
         return;
     }
     inFlightAttemptId = null;
+    if (getRpcGeneration() !== rpcGeneration) {
+        // The endpoint belongs to a replaced client; the retry resolves it against the current one.
+        scheduleReconnect();
+        return;
+    }
     if (!endpoint) {
         scheduleReconnect();
         return;
@@ -147,7 +171,7 @@ async function connect(): Promise<void> {
 
     let ws: WebSocket;
     try {
-        ws = new WebSocket(`ws://127.0.0.1:${endpoint.port}/ws`, {
+        ws = new HeaderedWebSocket(`ws://127.0.0.1:${endpoint.port}/ws`, {
             headers: endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {},
         });
     } catch {
@@ -164,7 +188,8 @@ async function connect(): Promise<void> {
     activeToken = endpoint.token;
     notificationProtocolMode = null;
     bufferedNotifications.length = 0;
-    switchNotificationEpoch(endpoint.instanceId ?? LEGACY_INSTANCE_ID);
+    socketLegacyInstanceId = legacyInstanceId(endpoint);
+    switchNotificationEpoch(endpoint.instanceId ?? socketLegacyInstanceId);
     socket = ws;
 
     ws.addEventListener("open", () => {
@@ -173,6 +198,13 @@ async function connect(): Promise<void> {
             return;
         }
         reconnectAttempt = 0;
+        // Queued ahead of the hello so the backlog the server answers with is handled after the refresh settles.
+        const connected = opts?.onConnected;
+        if (connected) {
+            notificationHandlingChain = notificationHandlingChain
+                .then(() => connected())
+                .catch(() => {});
+        }
         sendHello(ws, endpoint.token);
     });
 
@@ -237,7 +269,7 @@ function handleSocketMessage(ws: WebSocket, raw: string, token: string | null): 
             // A hello-ack without an instance ID identifies the frozen v0.32 protocol.
             // server ignores exact-id acks, so cursors must remain gap-safe.
             notificationProtocolMode = "legacy";
-            switchNotificationEpoch(LEGACY_INSTANCE_ID);
+            switchNotificationEpoch(socketLegacyInstanceId);
         }
         flushBufferedNotifications(ws);
         return;
@@ -437,9 +469,19 @@ export function _resetNotificationSocketStateForTesting(): void {
 }
 
 /**
- * */
+ * When `getRpcGeneration()` changes, closing the stale socket runs its down handler, which reconnects using the current RPC client.
+ */
 function watchSession(): void {
-    if (closed || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (closed || !socket) return;
+    if (getRpcGeneration() !== connectGeneration) {
+        try {
+            socket.close();
+        } catch {
+            // best-effort
+        }
+        return;
+    }
+    if (socket.readyState !== WebSocket.OPEN) return;
     const current = opts?.getSessionId() ?? null;
     if (current === helloedSession) return;
     sendHello(socket, activeToken);

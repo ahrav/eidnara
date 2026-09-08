@@ -92,7 +92,78 @@ describe("stripTagPrefixFromAssistantMessage", () => {
             };
             expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
             expect((msg.content[0] as { type: string; text: string }).text).toBe("First chunk");
-            expect((msg.content[1] as { type: string; text: string }).text).toBe("Second chunk");
+            expect((msg.content[1] as { type: string; text: string }).text).toBe(" Second chunk");
+        });
+
+        it("keeps the separator that follows a tag at the start of a later part", () => {
+            const msg = {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "§4§ Hello" },
+                    { type: "text", text: "§5§ world" },
+                ],
+            };
+            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+            const texts = (msg.content as Array<{ text: string }>).map((part) => part.text);
+            expect(texts).toEqual(["Hello", " world"]);
+            expect(texts.join("")).toBe("Hello world");
+        });
+
+        it("leaves boundary whitespace between untagged text parts alone", () => {
+            const msg = {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "Hello " },
+                    { type: "text", text: "world" },
+                ],
+            };
+            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
+            expect((msg.content[0] as { type: string; text: string }).text).toBe("Hello ");
+            expect((msg.content[1] as { type: string; text: string }).text).toBe("world");
+        });
+
+        it("keeps interior boundary whitespace while scrubbing tags from a middle part", () => {
+            const msg = {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "§4§ Hello " },
+                    { type: "text", text: " §5§ big " },
+                    { type: "text", text: " world §6§ " },
+                ],
+            };
+            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+            const texts = (msg.content as Array<{ text: string }>).map((part) => part.text);
+            // Mid-text scrubs leave whitespace on both sides of the removed tag.
+            expect(texts).toEqual(["Hello ", "  big ", " world"]);
+            expect(texts.join("")).toMatch(/^Hello\s+big\s+world$/);
+        });
+
+        it("empties an edge part that held only tag notation", () => {
+            const msg = {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "§4§ " },
+                    { type: "text", text: "Hello" },
+                ],
+            };
+            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+            expect((msg.content[0] as { type: string; text: string }).text).toBe("");
+            expect((msg.content[1] as { type: string; text: string }).text).toBe("Hello");
+        });
+
+        it("keeps the separator when an interior part held only tag notation", () => {
+            const msg = {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "Hello" },
+                    { type: "text", text: " §4§ " },
+                    { type: "text", text: "world" },
+                ],
+            };
+            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+            const texts = (msg.content as Array<{ text: string }>).map((part) => part.text);
+            expect(texts).toEqual(["Hello", "  ", "world"]);
+            expect(texts.join("")).toMatch(/^Hello\s+world$/);
         });
 
         it("ignores non-text parts (thinking, toolCall, image)", () => {

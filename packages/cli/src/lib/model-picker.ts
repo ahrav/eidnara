@@ -41,6 +41,30 @@ export function modelOptions(models: string[]): SelectOption[] {
     return sortModelsForPicker(models).map((model) => ({ label: model, value: model }));
 }
 
+/** Matches `MAX_MODEL_FIELD_BYTES` in `crates/host-runtime/src/broca/protocol.rs`. */
+const MAX_MODEL_SEGMENT_BYTES = 256;
+
+export function validateModelId(value: string): string | undefined {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return "A model id is required";
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0 || slash === trimmed.length - 1 || /[\s\p{Cc}]/u.test(trimmed)) {
+        return "Use the canonical provider/model form without spaces or control characters (e.g. anthropic/claude-haiku-4-5)";
+    }
+    const provider = trimmed.slice(0, slash);
+    const model = trimmed.slice(slash + 1);
+    if (provider.startsWith("-") || model.startsWith("-")) {
+        return "Neither the provider nor the model may start with '-'";
+    }
+    if (
+        Buffer.byteLength(provider, "utf8") > MAX_MODEL_SEGMENT_BYTES ||
+        Buffer.byteLength(model, "utf8") > MAX_MODEL_SEGMENT_BYTES
+    ) {
+        return `The provider and model must each be at most ${MAX_MODEL_SEGMENT_BYTES} bytes`;
+    }
+    return undefined;
+}
+
 /**
  * Free-text entry prevents an empty catalog from blocking setup.
  */
@@ -57,8 +81,7 @@ export async function pickModel(
         return (
             await prompts.text(`${copy.pickMessage} (type a provider/model id)`, {
                 placeholder: "e.g. anthropic/claude-haiku-4-5",
-                validate: (value) =>
-                    value.trim().length === 0 ? "A model id is required" : undefined,
+                validate: validateModelId,
             })
         ).trim();
     }

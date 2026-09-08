@@ -1,3 +1,4 @@
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "./with-timeout";
 /**
  * The resolver reads recent OpenCode HTTP API messages to determine the agent, model, and variant.
  *
@@ -73,14 +74,21 @@ function extractFromMessage(message: unknown): ResolvedPromptContext | null {
     return out;
 }
 
+/** Variants are defined per model, so `patch.variant` is inherited only when `patch.model` matches the resolved model. */
 function mergeContexts(
     base: ResolvedPromptContext,
     patch: ResolvedPromptContext,
 ): ResolvedPromptContext {
+    const model = base.model ?? patch.model;
+    const sameModel =
+        patch.model !== undefined &&
+        model !== undefined &&
+        patch.model.providerID === model.providerID &&
+        patch.model.modelID === model.modelID;
     return {
         agent: base.agent ?? patch.agent,
-        model: base.model ?? patch.model,
-        variant: base.variant ?? patch.variant,
+        model,
+        variant: base.variant ?? (sameModel ? patch.variant : undefined),
     };
 }
 
@@ -107,10 +115,14 @@ export async function resolvePromptContext(
 
     let messages: unknown[] = [];
     try {
-        const response = await c.session.messages({
-            path: { id: sessionId },
-            query: { limit: PROMPT_CONTEXT_MESSAGE_LIMIT },
-        });
+        const response = await withTimeout(
+            c.session.messages({
+                path: { id: sessionId },
+                query: { limit: PROMPT_CONTEXT_MESSAGE_LIMIT },
+            }),
+            HOST_SDK_READ_TIMEOUT_MS,
+            "prompt context read timed out",
+        );
         messages = extractMessages(response);
     } catch {
         return null;

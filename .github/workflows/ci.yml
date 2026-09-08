@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,13 +22,91 @@ env:
   # Incremental artifacts are dead weight in a fresh checkout and bloat
   # the target cache.
   CARGO_INCREMENTAL: "0"
+  # Line tables preserve file and line locations for backtraces and Valgrind.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: "1"
 
 jobs:
+  # Skipping a job needs positive evidence that none of its inputs changed.
+  # `steps.filter` runs only for pull requests; missing outputs make every job run.
+  #
+  # `docs/` stays out of the Rust filters: the schema-migration step in `gates` rejects any manifest path or `include!` that reaches `docs/` or a `.md` file. commentlint: allow(JUDGE)
+  # Tests read `release/` manifests and `docs/host-wire-protocol.md` at runtime, so `test` includes them in addition to `rust`. commentlint: allow(JUDGE)
+  changes:
+    name: changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust || 'true' }}
+      test: ${{ steps.filter.outputs.test || 'true' }}
+      shm: ${{ steps.filter.outputs.shm || 'true' }}
+      native: ${{ steps.filter.outputs.native || 'true' }}
+      ts: ${{ steps.filter.outputs.ts || 'true' }}
+      manifests: ${{ steps.filter.outputs.manifests || 'true' }}
+    steps:
+      # dorny/paths-filter v4.0.3
+      # Pull requests read the file list from the API; no checkout needed.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d
+        if: github.event_name == 'pull_request'
+        id: filter
+        continue-on-error: true
+        with:
+          filters: |
+            workflow: &workflow
+              - '.github/workflows/ci.yml'
+            cargo: &cargo
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - 'clippy.toml'
+              - 'rustfmt.toml'
+            shm:
+              - *workflow
+              - *cargo
+              - 'crates/shm-transport/**'
+            rust: &rust
+              - *workflow
+              - *cargo
+              - 'crates/**'
+              - 'packages/shm-native/Cargo.toml'
+              - 'packages/shm-native/build.rs'
+              - 'packages/shm-native/src/**'
+            test:
+              - *rust
+              - 'release/**'
+              - 'docs/host-wire-protocol.md'
+            native:
+              - *workflow
+              - *cargo
+              - 'crates/shm-transport/**'
+              - 'crates/daemon/**'
+              - 'packages/**'
+              - 'scripts/**'
+              - 'release/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'tsconfig.json'
+            ts:
+              - *workflow
+              - 'packages/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'tsconfig.json'
+              - 'crates/*/gen/**'
+            manifests:
+              - *workflow
+              - *cargo
+              - '**/Cargo.toml'
+
   gates:
     name: gates
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: changes
+    if: ${{ !cancelled() }}
     steps:
       # actions/checkout v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -181,14 +262,23 @@ jobs:
             -E "$types" -- "${paths[@]}"
 
       # oven-sh/setup-bun v2.2.0
+      # The workspace-graph step below also needs `bun -e`.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.3.14
 
+      # actions/setup-node v7.0.0
+      # The smart-note parity suite requires Node within @eidnara/opencode's engines.node range.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
       - name: Install TypeScript tooling
+        if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
         run: bun install --frozen-lockfile
 
       - name: TypeScript
+        if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
         run: bun run check:repo
 
       - name: Incident history and verifier gates
@@ -198,6 +288,10 @@ jobs:
         run: |
           bun run --cwd packages/e2e-tests validate:incident-history:ci
           bun run --cwd packages/e2e-tests validate:incident-verifiers:ci
+
+      # `bun test` resolves QuickJS and the TUI from source and node_modules, so only these smokes exercise the shipped bundles.
+      - name: Plugin bundle smokes
+        run: bun run --cwd packages/opencode-plugin smoke
 
       - name: Rust toolchain
         run: rustup toolchain install 1.98 --profile minimal --component rustfmt
@@ -239,6 +333,8 @@ jobs:
     name: lint (1.98)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     steps:
       # actions/checkout v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -249,8 +345,10 @@ jobs:
         run: rustup toolchain install 1.98 --profile minimal --component clippy
 
       # Swatinem/rust-cache v2.9.2
+      # PRs restore `main`'s cache without saving, preventing a separate cache entry for each PR job.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             . -> target
             crates/shm-transport/fuzz -> target
@@ -283,6 +381,8 @@ jobs:
     name: test (1.98)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
     steps:
       # actions/checkout v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -294,18 +394,36 @@ jobs:
 
       # Swatinem/rust-cache v2.9.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # taiki-e/install-action v2.87.7
+      - uses: taiki-e/install-action@84f5ac3124727fb3d284d4d22ee9ab3654fd09a6
+        with:
+          tool: cargo-nextest@0.9.143
 
       - name: Tests
-        run: cargo +1.98 test --workspace --all-targets --all-features --locked
+        # nextest schedules every test binary onto the same worker pool, so
+        # one slow binary no longer serializes behind the others.
+        run: >
+          cargo +1.98 nextest run --profile ci --workspace --all-targets
+          --all-features --locked
+
+      - name: Benches in test mode
+        # `.config/nextest.toml` keeps bench targets out of nextest.
+        # `--bench '*'` selects only bench targets; `--benches` also runs library unit tests.
+        run: cargo +1.98 test --workspace --all-features --locked --bench '*'
 
       - name: Doctests
-        # `--all-targets` skips doctests.
+        # nextest does not run doctests.
         run: cargo +1.98 test --workspace --doc --all-features --locked
 
   stable:
     name: lint and test (stable)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     steps:
       # actions/checkout v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -337,6 +455,7 @@ jobs:
           # would resolve to 1.98. commentlint: allow(JUDGE)
           RUSTUP_TOOLCHAIN: stable
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             . -> target
             crates/shm-transport/fuzz -> target
@@ -363,6 +482,9 @@ jobs:
     name: unsafe boundary under Miri
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: changes
+    # `shm-transport` has no path dependencies, so only its own sources reach Miri. commentlint: allow(JUDGE)
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.shm == 'true') }}
     env:
       # A dated nightly keeps this required gate reproducible; bump the
       # date deliberately.
@@ -382,6 +504,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         env:
           RUSTUP_TOOLCHAIN: ${{ env.MIRI_TOOLCHAIN }}
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Miri
         # `cargo miri test` exits zero when its filter matches no tests, so
@@ -398,6 +522,8 @@ jobs:
     name: ring under valgrind memcheck
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.shm == 'true') }}
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: >-
         valgrind --tool=memcheck --leak-check=full
@@ -420,6 +546,8 @@ jobs:
 
       # Swatinem/rust-cache v2.9.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Ring tests
         run: cargo +1.98 test -p shm-transport --test ring --locked
@@ -428,6 +556,8 @@ jobs:
     name: native addon package (Bun)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.native == 'true') }}
     env:
       # The claimed-target flag makes an addon-load failure fail the suite
       # instead of skipping the tests that need the artifact.
@@ -451,6 +581,8 @@ jobs:
 
       # Swatinem/rust-cache v2.9.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # actions/setup-node v4.4.0; the E2E harness runs OpenCode, whose npm
       # package installs through Node.
@@ -498,6 +630,9 @@ jobs:
     name: pinned toolchain with unlocked latest dependencies
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: changes
+    # `cargo update` reads only the manifests, so on a pull request this lane reacts to manifest edits; the weekly schedule catches new registry releases. commentlint: allow(JUDGE)
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.manifests == 'true') }}
     steps:
       # actions/checkout v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -513,6 +648,7 @@ jobs:
           # The lock file is regenerated below, so only the registry
           # index and sources are worth keeping.
           cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check
         run: |

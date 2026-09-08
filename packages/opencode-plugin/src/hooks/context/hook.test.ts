@@ -11,7 +11,11 @@ import {
 import { __resetProjectIdentityForTests } from "../../features/context/project-identity";
 import { createEidnaraHook, type EidnaraDeps } from "./hook";
 import { createLiveSessionState } from "./live-session-state";
+import { setRawMessageProvider } from "./read-session-chunk";
+import { closeReadOnlySessionDb } from "./read-session-db";
+import type { RawMessage } from "./read-session-raw";
 import type { RustModeModuleClient } from "./rust-mode-transform";
+import type { MessageLike } from "./tag-content-primitives";
 
 type RecordedCall = { sessionId: string; projectRoot: string; method: string; body: unknown };
 
@@ -33,6 +37,7 @@ const HOOK_KEYS = [
 ].sort();
 
 const tempDirs: string[] = [];
+const unregisterProviders: Array<() => void> = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 /** An empty data home has no `opencode.db`, so tool verdicts freeze fail-open and prompt hashes persist. */
@@ -43,7 +48,27 @@ function useTempDataHome(prefix: string): string {
     return dir;
 }
 
+/** One raw user message lets the transform resolve ordinals without an OpenCode session DB. */
+function installOneRawMessage(sessionId: string): MessageLike[] {
+    const row = { id: "m-1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true };
+    unregisterProviders.push(
+        setRawMessageProvider(sessionId, {
+            readMessages: () => [row] as unknown as RawMessage[],
+            readMessageOrdinalPage: (after) => (after ? [] : [row]),
+            getStoredMessageCount: () => 1,
+        }),
+    );
+    return [
+        {
+            info: { id: row.id, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "hello" }],
+        },
+    ];
+}
+
 afterEach(() => {
+    closeReadOnlySessionDb();
+    for (const unregister of unregisterProviders.splice(0)) unregister();
     __resetProjectIdentityForTests();
     clearHookInitFailure();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -75,12 +100,14 @@ function createFakeModuleClient(
     return { client, calls, deleteSession, closeSession };
 }
 
-function createClientMock(promptMock = mock(() => undefined)) {
+function createClientMock(promptMock = mock(() => undefined), sessionDirectory?: string) {
     return {
         session: {
             prompt: promptMock,
             promptAsync: mock(async () => undefined),
-            get: mock(async () => ({ data: {} })),
+            get: mock(async () => ({
+                data: sessionDirectory === undefined ? {} : { directory: sessionDirectory },
+            })),
         },
         app: { agents: mock(async () => ({ data: [] })) },
         tui: { showToast: mock(async () => undefined) },
@@ -126,15 +153,11 @@ describe("eidnara hook", () => {
         }
         expect("tool.definition" in hook).toBe(false);
         expect("config" in hook).toBe(false);
-        expect(Object.keys(hook.rustToolBackends ?? {}).sort()).toEqual([
-            "note",
-            "noteEvaluationAvailable",
-            "reduce",
-        ]);
-        expect(hook.rustToolBackends?.noteEvaluationAvailable?.("any-project")).toBe(true);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+        expect("noteEvaluationAvailable" in hook.rustToolBackends).toBe(false);
     });
 
-    it("leaves rustToolBackends undefined in ts mode", () => {
+    it("attaches the daemon tool backends in ts mode and leaves the messages transform a no-op", async () => {
         useTempDataHome("hook-ts-mode-");
         const fake = createFakeModuleClient();
         const hook = requireHook(
@@ -146,8 +169,22 @@ describe("eidnara hook", () => {
             ),
         );
 
-        expect(hook.rustToolBackends).toBeUndefined();
         expect(Object.keys(hook).sort()).toEqual(HOOK_KEYS);
+        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
+
+        await hook.rustToolBackends.reduce?.({
+            sessionId: "ses-ts",
+            projectRoot: "/repo",
+            drop: "1",
+            commandId: "cmd-ts",
+        });
+        expect(fake.calls.map((call) => call.method)).toEqual(["agent_drops.append"]);
+
+        const messages = [{ info: { sessionID: "ses-ts" } }];
+        const output = { messages: [...messages] };
+        await hook["experimental.chat.messages.transform"]({}, output);
+        expect(output.messages).toEqual(messages);
+        expect(fake.calls).toHaveLength(1);
     });
 
     it("returns null and records no_project when no project identity resolves", () => {
@@ -201,6 +238,140 @@ describe("eidnara hook", () => {
                 },
             },
         ]);
+    });
+
+    it("routes todo snapshots by the session's own directory", async () => {
+        useTempDataHome("hook-todo-route-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-todo-routed",
+            args: { todos: [{ status: "pending", priority: "high", content: "Route me" }] },
+        });
+        await Bun.sleep(0);
+
+        expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
+            ["todo_state.set", "/other/repo"],
+        ]);
+        expect(liveSessionState.sessionDirectoryBySession.get("ses-todo-routed")).toBe(
+            "/other/repo",
+        );
+    });
+
+    it("drops a detached todo snapshot whose session was deleted while it awaited the directory", async () => {
+        useTempDataHome("hook-todo-deleted-race-");
+        const fake = createFakeModuleClient();
+        const liveSessionState = createLiveSessionState();
+        let releaseDirectoryRead: (() => void) | undefined;
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(
+            () =>
+                new Promise<{ data: { directory: string } }>((resolve) => {
+                    releaseDirectoryRead = () => resolve({ data: { directory: "/other/repo" } });
+                }),
+        );
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: "ses-todo-deleted",
+            args: { todos: [{ status: "pending", priority: "high", content: "Too late" }] },
+        });
+        while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+        await hook.event({
+            event: { type: "session.deleted", properties: { info: { id: "ses-todo-deleted" } } },
+        });
+        releaseDirectoryRead?.();
+        await Bun.sleep(0);
+        await Bun.sleep(0);
+
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(0);
+    });
+
+    it("skips the transform for a hidden eidnara- child restored after a restart", async () => {
+        useTempDataHome("hook-internal-child-rehydrate-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        const liveSessionState = createLiveSessionState();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(async () => ({
+            data: { directory: "/other/repo", parentID: "ses-parent", title: "eidnara-sidekick" },
+        }));
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        const messages = installOneRawMessage("ses-restored-internal");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+
+        expect(liveSessionState.internalChildSessions.has("ses-restored-internal")).toBe(true);
+        expect(fake.calls.filter((call) => call.method === "transform")).toHaveLength(0);
+    });
+
+    it("treats a restored child session as a subagent from the host's parentID", async () => {
+        useTempDataHome("hook-subagent-rehydrate-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        const liveSessionState = createLiveSessionState();
+        const client = createClientMock(undefined, "/other/repo") as unknown as {
+            session: { get: ReturnType<typeof mock> };
+        };
+        client.session.get = mock(async () => ({
+            data: { directory: "/other/repo", parentID: "ses-parent" },
+        }));
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: client as unknown as EidnaraDeps["client"],
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        const messages = installOneRawMessage("ses-restored-child");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+
+        expect(liveSessionState.subagentSessions.has("ses-restored-child")).toBe(true);
+        const transformBody = fake.calls.find((call) => call.method === "transform")?.body as
+            | { is_subagent?: boolean }
+            | undefined;
+        expect(transformBody?.is_subagent).toBe(true);
     });
 
     it("sends agent_drops.append through rustToolBackends.reduce", async () => {
@@ -308,12 +479,53 @@ describe("eidnara hook", () => {
         );
     });
 
-    it("clears the transform session and prompt state on session.deleted", async () => {
-        useTempDataHome("hook-session-deleted-");
-        const fake = createFakeModuleClient();
+    it("routes the transform by the session's own directory and skips hidden eidnara- children", async () => {
+        useTempDataHome("hook-transform-route-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
         const liveSessionState = createLiveSessionState();
         const hook = requireHook(
-            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client, liveSessionState })),
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        const messages = installOneRawMessage("ses-routed");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
+            ["transform", "/other/repo"],
+        ]);
+        expect(liveSessionState.sessionDirectoryBySession.get("ses-routed")).toBe("/other/repo");
+
+        liveSessionState.internalChildSessions.add("ses-hidden");
+        const hidden = installOneRawMessage("ses-hidden");
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...hidden] });
+        expect(fake.calls).toHaveLength(1);
+    });
+
+    it("clears the transform session and prompt state on session.deleted", async () => {
+        useTempDataHome("hook-session-deleted-");
+        const fake = createFakeModuleClient(({ method }) =>
+            method === "transform"
+                ? { decision: "PASSTHROUGH", native_messages: [] }
+                : { ok: true },
+        );
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
         );
         const sessionId = "ses-deleted";
         const selectModel = () =>
@@ -323,6 +535,8 @@ describe("eidnara hook", () => {
             });
 
         await selectModel();
+        const messages = installOneRawMessage(sessionId);
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
         await hook["experimental.chat.system.transform"](
             { sessionID: sessionId },
             { system: ["first prompt"] },
@@ -338,9 +552,11 @@ describe("eidnara hook", () => {
         });
         await Bun.sleep(0);
 
-        expect(fake.deleteSession).toHaveBeenCalledWith(sessionId, "/tmp");
+        // Session deletion uses the transform's recorded project root, not the plugin launch directory.
+        expect(fake.deleteSession).toHaveBeenCalledWith(sessionId, "/other/repo");
         expect(fake.closeSession).toHaveBeenCalledWith(sessionId);
         expect(liveSessionState.liveModelBySession.has(sessionId)).toBe(false);
+        expect(liveSessionState.sessionDirectoryBySession.has(sessionId)).toBe(false);
         expect(liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
 
         // A prompt change after deletion finds no persisted hash, so it initializes instead of flagging a change.
@@ -401,6 +617,36 @@ describe("eidnara hook", () => {
                     ],
                 }),
             }),
+        );
+    });
+
+    it("routes ctx commands by the session's own directory like the transform", async () => {
+        useTempDataHome("hook-command-route-");
+        const fake = createFakeModuleClient(() => ({ result: { armed: false } }));
+        const liveSessionState = createLiveSessionState();
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    client: createClientMock(undefined, "/other/repo"),
+                    rustModeModuleClient: fake.client,
+                    liveSessionState,
+                }),
+            ),
+        );
+
+        await expectSentinel(
+            hook["command.execute.before"](
+                { command: "ctx-flush", sessionID: "ses-routed-cmd", arguments: "" },
+                { parts: [{ type: "text", text: "" }] },
+            ),
+            "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+        );
+
+        expect(fake.calls.map((call) => [call.method, call.projectRoot])).toEqual([
+            ["session.flush", "/other/repo"],
+        ]);
+        expect(liveSessionState.sessionDirectoryBySession.get("ses-routed-cmd")).toBe(
+            "/other/repo",
         );
     });
 });

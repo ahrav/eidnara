@@ -14,10 +14,10 @@ import { stringify as stringifyJsonc } from "comment-json";
 
 import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics, sanitizeString } from "../lib/diagnostics-pi";
-import { readFileTail } from "../lib/fs-utils";
 import { describeHistorianDumps } from "../lib/historian-dumps";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
+import { readLogTailLines } from "../lib/log-tail";
 import { bundleIssueReport } from "../lib/logs-pi";
 import { getEidnaraLogPath, getPiAgentDir, getPiUserExtensionsPath } from "../lib/paths";
 import {
@@ -117,8 +117,7 @@ function describeVersionOutput(output: string): string {
 const LOG_TAIL_BYTES = 64 * 1024;
 
 function readLastNonEmptyLine(path: string): string | undefined {
-    return readFileTail(path, LOG_TAIL_BYTES)
-        .split(/\r?\n/)
+    return readLogTailLines(path, LOG_TAIL_BYTES)
         .map((line) => line.trim())
         .filter(Boolean)
         .at(-1);
@@ -238,12 +237,22 @@ async function runHealthChecks(options: {
 
     // Both `.jsonc` and `.json` are loadable config files, and `.jsonc` wins
     // when both exist, so a default `.jsonc` must not be written next to a `.json`.
-    const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
+    const userConfigBase = eidnaraUserConfigBasePath();
     const projectConfig = detectConfigFile(eidnaraProjectConfigBasePath(options.cwd));
+    if (userConfigBase === undefined) {
+        // No absolute `HOME` or `XDG_CONFIG_HOME`: there is no user tier to check or create.
+        add(
+            results,
+            "fail",
+            "No user Eidnara config path: HOME and XDG_CONFIG_HOME are unset or not absolute",
+        );
+    }
     for (const [label, detected, required] of [
-        ["user", userConfig, true],
-        ["project", projectConfig, false],
-    ] as const) {
+        ...(userConfigBase === undefined
+            ? []
+            : [["user", detectConfigFile(userConfigBase), true] as const]),
+        ["project", projectConfig, false] as const,
+    ]) {
         if (detected.format === "none") {
             if (required) {
                 add(results, "warn", `No ${label} eidnara.jsonc found at ${detected.path}`);
@@ -394,8 +403,9 @@ function repair(plan: RepairPlan, prompts: PromptIO): RepairOutcome {
     }
 
     if (plan.writeUserConfig) {
-        const detected = detectConfigFile(eidnaraUserConfigBasePath());
-        if (detected.format === "none") {
+        const userConfigBase = eidnaraUserConfigBasePath();
+        const detected = userConfigBase === undefined ? null : detectConfigFile(userConfigBase);
+        if (detected !== null && detected.format === "none") {
             try {
                 writeDefaultEidnaraConfig(detected.path);
                 prompts.log.success(`Wrote default Eidnara config to ${detected.path}`);
@@ -449,11 +459,12 @@ async function runIssueFlow(options: {
 
         // A lone discovered session still filters: the append-only log can hold older sessions' records.
         let sessionFilter: string | null = report.recentSessions[0]?.sessionId ?? null;
-        if (report.recentSessions.length === 0 && report.sessionDiscovery === "unavailable") {
-            // Discovery failed rather than found nothing, so cross-session records
-            // are excluded unless the user opts in explicitly.
+        if (report.recentSessions.length === 0) {
+            // Without a discovered session, cross-session records are excluded unless the user opts in.
             const includeAll = await options.prompts.confirm(
-                "The Pi sessions directory could not be read, so log records cannot be attributed to this session. Include records from every session in the report?",
+                report.sessionDiscovery === "unavailable"
+                    ? "The Pi sessions directory could not be read, so log records cannot be attributed to this session. Include records from every session in the report?"
+                    : "No Pi sessions were found, so log records cannot be attributed to this session. Include records from every session in the report?",
                 false,
             );
             if (!includeAll) sessionFilter = EXCLUDE_SESSION_RECORDS;

@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+    chmodSync,
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    realpathSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
@@ -36,7 +46,7 @@ function validResult(overrides: Record<string, unknown> = {}): Record<string, un
         ],
         versions: {
             release: "0.38.0",
-            proof: "current",
+            proof: null,
             daemon: "eidnara-host/0.1.0",
             context: "0.1.0",
             synapse: "0.1.0",
@@ -69,6 +79,27 @@ describe("parseDaemonResult", () => {
         expect(parsed.readiness).toEqual({
             transport: { state: "ready", reason: "healthy" },
         });
+    });
+
+    test("accepts the key set the eidnara-host binary emits, which omits readiness and shared_memory", () => {
+        // Output serialized by `DaemonResult` in `crates/daemon/src/bin/eidnara-host.rs`.
+        const stdout =
+            '{"schema":"eidnara.daemon/v1","command":"status","ok":false,"state":"wedged","reason":"wedged","remediation":"inspect_daemon_process","effects":null,"checks":[{"id":"lifecycle.fences","status":"fail","reason":"wedged","remediation":"inspect_daemon_process"},{"id":"lifecycle.publication","status":"fail","reason":"wedged","remediation":"inspect_daemon_process"}],"versions":{"release":"0.1.0","proof":null,"daemon":null,"context":"0.1.0","synapse":"0.1.0","broca":"0.1.0"}}';
+        const parsed = parseDaemonResult(stdout);
+        expect(parsed.state).toBe("wedged");
+        expect(parsed.reason).toBe("wedged");
+        expect(parsed.readiness).toBeNull();
+        expect(parsed.checks.map((check) => check.id)).toEqual([
+            "lifecycle.fences",
+            "lifecycle.publication",
+        ]);
+        const withNull = { ...(JSON.parse(stdout) as Record<string, unknown>), readiness: null };
+        expect(parseDaemonResult(JSON.stringify(withNull))).toEqual(parsed);
+        const withoutVersions = JSON.parse(stdout) as Record<string, unknown>;
+        delete withoutVersions.versions;
+        expect(() => parseDaemonResult(JSON.stringify(withoutVersions))).toThrow(
+            /result has an unexpected key set/,
+        );
     });
 
     test("rejects a probe command in a result and accepts the status it really emits", () => {
@@ -131,6 +162,7 @@ describe("parseDaemonResult", () => {
                     remediation: null,
                     readiness,
                     checks: [],
+                    versions: { ...(validResult().versions as object), proof: "current" },
                 }),
             );
         expect(() =>
@@ -351,6 +383,35 @@ describe("parseDaemonResult", () => {
         ).toThrow(/remediation does not match its reason/);
     });
 
+    test("a harness_unavailable check admits only its subreason remediations", () => {
+        // Checks omit the subreason, so `harness_unavailable` permits only `null` or `restart_with_supported_harness`.
+        const withCheck = (remediation: string | null) =>
+            JSON.stringify(
+                validResult({
+                    command: "start",
+                    ok: false,
+                    state: "stopped",
+                    reason: "harness_unavailable",
+                    remediation: "restart_with_supported_harness",
+                    readiness: null,
+                    checks: [
+                        {
+                            id: "credentials.broca",
+                            status: "fail",
+                            reason: "harness_unavailable",
+                            remediation,
+                        },
+                    ],
+                }),
+            );
+        for (const legal of [null, "restart_with_supported_harness"]) {
+            expect(parseDaemonResult(withCheck(legal)).checks[0]?.remediation).toBe(legal);
+        }
+        expect(() => parseDaemonResult(withCheck("free_storage"))).toThrow(
+            /check remediation contradicts its reason/,
+        );
+    });
+
     test("rejects every malformed shape fail-closed", () => {
         const cases: Record<string, Record<string, unknown>> = {
             wrong_schema: validResult({ schema: "eidnara.daemon/v2" }),
@@ -480,7 +541,7 @@ describe("parseDaemonResult", () => {
         );
     });
 
-    test("valid restart effects parse; unavailable requires no_data_dir", () => {
+    test("valid restart effects parse for failed restarts", () => {
         const restart = parseDaemonResult(
             JSON.stringify(
                 validResult({
@@ -528,6 +589,164 @@ describe("parseDaemonResult", () => {
         }
     });
 
+    test("shutdown_timeout admits the running state the stop phase reports for an uncertain commit", () => {
+        const withState = (state: string) =>
+            JSON.stringify(
+                validResult({
+                    command: "stop",
+                    ok: false,
+                    state,
+                    reason: "shutdown_timeout",
+                    remediation: "inspect_daemon_process",
+                    readiness: null,
+                    checks: [],
+                }),
+            );
+        for (const state of ["running", "stopping"]) {
+            expect(parseDaemonResult(withState(state)).state).toBe(state);
+        }
+        expect(() => parseDaemonResult(withState("stopped"))).toThrow(
+            /state contradicts the selected reason/,
+        );
+    });
+
+    test("unavailable admits the reasons the binary pairs with an unresolved data root", () => {
+        const withReason = (reason: string, remediation: string | null) =>
+            JSON.stringify(
+                validResult({
+                    command: "start",
+                    ok: false,
+                    state: "unavailable",
+                    reason,
+                    remediation,
+                    readiness: null,
+                    checks: [],
+                }),
+            );
+        for (const [reason, remediation] of [
+            ["no_data_dir", "set_data_directory"],
+            ["harness_unavailable", "restart_with_supported_harness"],
+            ["harness_unavailable", null],
+            ["internal_error", "report_bug"],
+        ] as const) {
+            const parsed = parseDaemonResult(withReason(reason, remediation));
+            expect(parsed.state).toBe("unavailable");
+            expect(parsed.reason).toBe(reason);
+        }
+        expect(() => parseDaemonResult(withReason("not_running", "run_daemon_start"))).toThrow(
+            ContractViolation,
+        );
+    });
+
+    test("a successful verdict must be one its command can produce", () => {
+        const success = (command: string, state: string, reason: string) =>
+            JSON.stringify(
+                validResult({
+                    command,
+                    ok: true,
+                    state,
+                    reason,
+                    remediation: null,
+                    effects:
+                        command === "restart"
+                            ? { stop_committed: true, start_committed: true }
+                            : null,
+                    readiness: null,
+                    checks: [],
+                }),
+            );
+        const legal: ReadonlyArray<readonly [string, string, string]> = [
+            ["start", "running", "started"],
+            ["start", "running", "already_running"],
+            ["restart", "running", "started"],
+            ["stop", "stopped", "stopped"],
+            ["stop", "stopped", "already_stopped"],
+            ["status", "running", "healthy"],
+            ["doctor", "running", "healthy"],
+        ];
+        for (const [command, state, reason] of legal) {
+            const parsed = parseDaemonResult(success(command, state, reason));
+            expect(parsed.command).toBe(command);
+            expect(exitAgreesWithResult(0, parsed)).toBe(true);
+        }
+        const borrowed: ReadonlyArray<readonly [string, string, string]> = [
+            ["stop", "running", "started"],
+            ["stop", "running", "already_running"],
+            ["start", "stopped", "stopped"],
+            ["start", "running", "healthy"],
+            ["restart", "running", "already_running"],
+            ["status", "running", "started"],
+            ["status", "stopped", "already_stopped"],
+            ["doctor", "stopped", "stopped"],
+        ];
+        for (const [command, state, reason] of borrowed) {
+            expect(() => parseDaemonResult(success(command, state, reason))).toThrow(
+                /verdict its command cannot produce/,
+            );
+        }
+    });
+
+    test("versions.proof is current only from a successful start or restart", () => {
+        const withProof = (
+            command: string,
+            ok: boolean,
+            state: string,
+            reason: string,
+            proof: string | null,
+        ) =>
+            JSON.stringify(
+                validResult({
+                    command,
+                    ok,
+                    state,
+                    reason,
+                    remediation: ok ? null : "run_daemon_start",
+                    effects:
+                        command === "restart" && ok
+                            ? { stop_committed: true, start_committed: true }
+                            : null,
+                    readiness: null,
+                    checks: [],
+                    versions: {
+                        release: "0.1.0",
+                        proof,
+                        daemon: "eidnara-host/0.1.0",
+                        context: "0.1.0",
+                        synapse: "0.1.0",
+                        broca: "0.1.0",
+                    },
+                }),
+            );
+        for (const [command, reason] of [
+            ["start", "started"],
+            ["start", "already_running"],
+            ["restart", "started"],
+        ] as const) {
+            const parsed = parseDaemonResult(
+                withProof(command, true, "running", reason, "current"),
+            );
+            expect(parsed.versions.proof).toBe("current");
+            expect(
+                parseDaemonResult(withProof(command, true, "running", reason, null)).versions.proof,
+            ).toBeNull();
+        }
+        expect(() =>
+            parseDaemonResult(withProof("status", true, "running", "healthy", "current")),
+        ).toThrow(/cannot authenticate/);
+        expect(() =>
+            parseDaemonResult(withProof("stop", true, "stopped", "stopped", "current")),
+        ).toThrow(/cannot authenticate/);
+        expect(() =>
+            parseDaemonResult(withProof("start", false, "stopped", "not_running", "current")),
+        ).toThrow(/cannot authenticate/);
+        expect(() =>
+            parseDaemonResult(withProof("start", true, "running", "started", "stale")),
+        ).toThrow(/outside its closed literal/);
+        expect(
+            parseDaemonResult(withProof("status", true, "running", "healthy", null)).versions.proof,
+        ).toBeNull();
+    });
+
     test("schema violations never echo oversized native text", () => {
         const long = validResult({ reason: "x".repeat(10_000) });
         try {
@@ -537,6 +756,48 @@ describe("parseDaemonResult", () => {
             expect(error).toBeInstanceOf(ContractViolation);
             expect((error as Error).message.length).toBeLessThan(300);
         }
+    });
+
+    test("versions.daemon is bounded by the authentication frame, not the generic string cap", () => {
+        // The widest `ServerProof` frame with an empty `daemon_ver` is 385 bytes, so 3711 ASCII bytes fit a 4096-byte frame and 3712 do not.
+        const withDaemon = (daemon: string | null) =>
+            JSON.stringify(
+                validResult({
+                    command: "status",
+                    ok: false,
+                    state: "running",
+                    reason: "incompatible_daemon",
+                    remediation: "align_versions",
+                    readiness: null,
+                    checks: [],
+                    versions: {
+                        release: "0.1.0",
+                        proof: null,
+                        daemon,
+                        context: "0.1.0",
+                        synapse: "0.1.0",
+                        broca: "0.1.0",
+                    },
+                }),
+            );
+        const prefix = "eidnara-host/";
+        const fits = prefix + "9".repeat(3711 - prefix.length);
+        const overflows = prefix + "9".repeat(3712 - prefix.length);
+        const parsed = parseDaemonResult(withDaemon(fits));
+        expect(parsed.reason).toBe("incompatible_daemon");
+        expect(parsed.versions.daemon).toBe(fits);
+        expect(() => parseDaemonResult(withDaemon(overflows))).toThrow(
+            /does not fit the authentication frame/,
+        );
+        // Escaped quotes consume two bytes each in the authentication frame.
+        const escaped = `${prefix}${'"'.repeat(1856)}`;
+        expect(() => parseDaemonResult(withDaemon(escaped))).toThrow(
+            /does not fit the authentication frame/,
+        );
+        expect(() => parseDaemonResult(withDaemon(""))).toThrow(
+            /does not fit the authentication frame/,
+        );
+        expect(parseDaemonResult(withDaemon(null)).versions.daemon).toBeNull();
     });
 });
 
@@ -614,7 +875,8 @@ describe("reason vocabulary pins", () => {
 
 describe("pre-native root classifier", () => {
     function tempRoot(): string {
-        return mkdtempSync(path.join(os.tmpdir(), "eidnara-lifecycle-classifier-"));
+        // The classifier walks every ancestor without following links, so the temp root must not sit behind one.
+        return mkdtempSync(path.join(realpathSync(os.tmpdir()), "eidnara-lifecycle-classifier-"));
     }
 
     test("definitely absent coordination and managed roots classify stopped", () => {
@@ -699,6 +961,113 @@ describe("pre-native root classifier", () => {
         try {
             writeFileSync(path.join(root, ".eidnara-coordination"), "not a directory");
             expect(classifyPreNativeRoots(root)).toEqual({ kind: "hazard", hazard: "special" });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a regular file on the traversed path is a hazard, never stopped", () => {
+        const root = tempRoot();
+        try {
+            const fileRoot = path.join(root, "data-root");
+            writeFileSync(fileRoot, "not a directory");
+            expect(classifyPreNativeRoots(fileRoot)).toEqual({ kind: "hazard", hazard: "special" });
+            expect(probeFallbackVerdict(classifyPreNativeRoots(fileRoot))).toEqual({
+                state: "wedged",
+                reason: "native_probe_unavailable",
+            });
+            writeFileSync(path.join(root, "eidnara"), "not a directory");
+            expect(classifyPreNativeRoots(root)).toEqual({ kind: "hazard", hazard: "special" });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a symlinked ancestor is a hazard even when its target lacks the leaf", () => {
+        const root = tempRoot();
+        try {
+            const emptyTarget = path.join(root, "empty-target");
+            mkdirSync(emptyTarget);
+            const linkedRoot = path.join(root, "linked-root");
+            symlinkSync(emptyTarget, linkedRoot);
+            expect(classifyPreNativeRoots(linkedRoot)).toEqual({
+                kind: "hazard",
+                hazard: "symlink",
+            });
+            const dataRoot = path.join(root, "data-root");
+            mkdirSync(dataRoot);
+            symlinkSync(emptyTarget, path.join(dataRoot, "eidnara"));
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "symlink",
+            });
+            const residueTarget = path.join(root, "residue-target");
+            mkdirSync(path.join(residueTarget, "run"), { recursive: true });
+            rmSync(path.join(dataRoot, "eidnara"));
+            symlinkSync(residueTarget, path.join(dataRoot, "eidnara"));
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "symlink",
+            });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a symlink above the data root is a hazard even when the root itself is a real directory", () => {
+        const root = tempRoot();
+        try {
+            mkdirSync(path.join(root, "real", "data"), { recursive: true });
+            symlinkSync(path.join(root, "real"), path.join(root, "link"));
+            expect(classifyPreNativeRoots(path.join(root, "real", "data"))).toEqual({
+                kind: "absent",
+            });
+            expect(classifyPreNativeRoots(path.join(root, "link", "data"))).toEqual({
+                kind: "hazard",
+                hazard: "symlink",
+            });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a group- or world-writable ancestor is a hazard unless it is sticky", () => {
+        const root = tempRoot();
+        try {
+            const dataRoot = path.join(root, "data-root");
+            mkdirSync(dataRoot, { mode: 0o777 });
+            chmodSync(dataRoot, 0o777);
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "unsafe_ancestor",
+            });
+            // Bun's `chmodSync` masks the sticky bit, so the positive control sets it through chmod(1).
+            execFileSync("chmod", ["1777", dataRoot]);
+            expect(lstatSync(dataRoot).mode & 0o1000).not.toBe(0);
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({ kind: "absent" });
+            chmodSync(dataRoot, 0o755);
+            mkdirSync(path.join(dataRoot, "eidnara"), { mode: 0o775 });
+            chmodSync(path.join(dataRoot, "eidnara"), 0o775);
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({
+                kind: "hazard",
+                hazard: "unsafe_ancestor",
+            });
+            chmodSync(path.join(dataRoot, "eidnara"), 0o755);
+            expect(classifyPreNativeRoots(dataRoot)).toEqual({ kind: "absent" });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("a parent component in the data root is a hazard before any path is probed", () => {
+        const root = tempRoot();
+        try {
+            const withParent = `${root}${path.sep}..${path.sep}${path.basename(root)}`;
+            expect(classifyPreNativeRoots(withParent)).toEqual({
+                kind: "hazard",
+                hazard: "parent_component",
+            });
+            expect(classifyPreNativeRoots(root)).toEqual({ kind: "absent" });
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

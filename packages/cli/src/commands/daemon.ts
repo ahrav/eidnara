@@ -1,3 +1,4 @@
+import { parse } from "node:path";
 import {
     createManagedLifecyclePolicy,
     type DaemonResultV1,
@@ -6,6 +7,7 @@ import {
     sensitiveRootsFor,
 } from "@eidnara/opencode/shared/host-lifecycle";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import { TERMINAL_CONTROL_CHARS } from "../lib/terminal-text";
 
 const ACTIONS = new Set<LifecycleCommand>(["start", "stop", "restart", "status", "doctor"]);
 
@@ -14,10 +16,6 @@ export const PARENT_PACKAGE_NAME = "@eidnara/cli";
 
 /** Bounds redacted version text so a peer cannot flood the terminal or the JSON result. */
 const MAX_VERSION_TEXT_LEN = 128;
-
-/** Replacing C0 and C1 controls prevents peer-supplied version text from moving the cursor, erasing lines, or forging terminal output. */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: the security boundary intentionally matches C0/C1 ranges
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
 interface DaemonPolicy {
     start(): Promise<DaemonResultV1>;
@@ -89,9 +87,12 @@ function redactResult(
             // Version text may embed a sensitive root mid-string, so redaction replaces every occurrence.
             let redacted = value;
             for (const sensitiveRoot of sensitiveRoots) {
+                // A filesystem root such as `/` names nothing private and would
+                // match every separator, including the one in `eidnara-host/0.1.0`.
+                if (parse(sensitiveRoot).root === sensitiveRoot) continue;
                 redacted = redacted.split(sensitiveRoot).join("<data-root>");
             }
-            redacted = sanitizeDiagnosticText(redacted).replace(CONTROL_CHARS, " ");
+            redacted = sanitizeDiagnosticText(redacted).replace(TERMINAL_CONTROL_CHARS, " ");
             return redacted.length > MAX_VERSION_TEXT_LEN
                 ? redacted.slice(0, MAX_VERSION_TEXT_LEN)
                 : redacted;
@@ -103,7 +104,8 @@ function redactResult(
         ...result,
         versions: {
             release: redact(result.versions.release),
-            proof: redact(result.versions.proof),
+            // Although `proof` is typed as a literal, it comes from peer data and must be redacted before casting.
+            proof: redact(result.versions.proof) as DaemonResultV1["versions"]["proof"],
             daemon: redact(result.versions.daemon),
             context: redact(result.versions.context),
             synapse: redact(result.versions.synapse),

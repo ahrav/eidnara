@@ -17,6 +17,7 @@ import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { collectPiHistorianDumps, collectPiRecentSessions } from "../lib/diagnostics-pi";
 import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import { writeNewFile } from "../lib/fs-utils";
 import { describeHistorianDumps } from "../lib/historian-dumps";
 import { capBodyToGithubLimit } from "../lib/issue-body";
 import { readJsoncLenient } from "../lib/jsonc-config";
@@ -273,12 +274,22 @@ async function runHealthChecks(options: {
 
     // Both `.jsonc` and `.json` are loadable config files, and `.jsonc` wins
     // when both exist, so a default `.jsonc` must not be written next to a `.json`.
-    const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
+    const userConfigBase = eidnaraUserConfigBasePath();
     const projectConfig = detectConfigFile(eidnaraProjectConfigBasePath(options.cwd));
+    if (userConfigBase === undefined) {
+        // No absolute `HOME` or `XDG_CONFIG_HOME`: there is no user tier to check or create.
+        add(
+            results,
+            "fail",
+            "No user Eidnara config path: HOME and XDG_CONFIG_HOME are unset or not absolute",
+        );
+    }
     for (const [label, detected, required] of [
-        ["user", userConfig, true],
-        ["project", projectConfig, false],
-    ] as const) {
+        ...(userConfigBase === undefined
+            ? []
+            : [["user", detectConfigFile(userConfigBase), true] as const]),
+        ["project", projectConfig, false] as const,
+    ]) {
         if (detected.format === "none") {
             if (required) {
                 add(results, "warn", `No Eidnara user config at ${detected.path}`);
@@ -347,27 +358,36 @@ function writeDefaultConfig(path: string): void {
     writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
+interface RepairOutcome {
+    fixed: number;
+    /** Repairs that were attempted and did not take; the doctor exits non-zero when any did. */
+    failed: number;
+}
+
 async function repair(
     plan: RepairPlan,
     deps: DoctorDeps,
     prompts: PromptIO,
     cwd: string,
-): Promise<number> {
+): Promise<RepairOutcome> {
     let fixed = 0;
-    const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
-    if (plan.writeUserConfig && userConfig.format === "none") {
+    let failed = 0;
+    const userConfigBase = eidnaraUserConfigBasePath();
+    const userConfig = userConfigBase === undefined ? null : detectConfigFile(userConfigBase);
+    if (plan.writeUserConfig && userConfig !== null && userConfig.format === "none") {
         try {
             writeDefaultConfig(userConfig.path);
             prompts.log.success(`Wrote default Eidnara config to ${userConfig.path}`);
             fixed += 1;
         } catch (error) {
+            failed += 1;
             prompts.log.error(
                 `Could not write default Eidnara config to ${userConfig.path}: ${error instanceof Error ? error.message : String(error)}`,
             );
         }
     }
     const omp = deps.detectOmpBinary();
-    if (!omp) return fixed;
+    if (!omp) return { fixed, failed };
     // Enabling the plugin on an unverified host would run it beside both
     // native managers, which stay on below.
     if (!plan.hostSupported) {
@@ -376,7 +396,7 @@ async function repair(
                 `Leaving ${OMP_PLUGIN_PACKAGE} and OMP native compaction and memory as they are: this OMP is missing a version or older than ${MIN_OMP_VERSION}, so the plugin may not run. Upgrade with \`omp update\` first.`,
             );
         }
-        return fixed;
+        return { fixed, failed };
     }
     const wantsManagersOff = plan.disableCompaction || plan.disableMemory;
     // Global settings are unobservable under project or overlay config, so the
@@ -387,7 +407,7 @@ async function repair(
         prompts.log.error(
             `Leaving OMP as it is: effective settings include ${nonGlobalSources.join(", ")}, so the global compaction and memory settings cannot be changed safely`,
         );
-        return fixed;
+        return { fixed, failed };
     }
     let enabledHere = false;
     if (plan.installPlugin) {
@@ -400,7 +420,7 @@ async function repair(
             prompts.log.error(
                 `Leaving ${OMP_PLUGIN_PACKAGE} disabled: its install${installed ? ` at ${installed.path}` : ""} has no verifiable OMP/Pi extension manifest, so OMP would load a package that is not an extension`,
             );
-            return fixed;
+            return { fixed, failed };
         }
         const result = await deps.ensurePluginEntry();
         if (result.ok) {
@@ -409,7 +429,7 @@ async function repair(
             enabledHere = true;
         } else prompts.log.error(result.message);
     }
-    if (!wantsManagersOff) return fixed;
+    if (!wantsManagersOff) return { fixed, failed };
     // A plugin enabled in this run beside a native manager that stayed on
     // would run both after restart, so any later failure restores the prior
     // disabled state.
@@ -439,7 +459,7 @@ async function repair(
             `Leaving OMP native compaction and memory on: ${OMP_PLUGIN_PACKAGE} is not enabled in OMP with a verified extension manifest, so nothing would replace them`,
         );
         disablePluginAgain("its enabled state could not be verified afterwards");
-        return fixed;
+        return { fixed, failed };
     }
     // Each mutation records the value that undoes it, so a later failure can
     // restore every manager already turned off in this run.
@@ -461,7 +481,7 @@ async function repair(
             break;
         }
     }
-    if (failedKey === null) return fixed;
+    if (failedKey === null) return { fixed, failed };
     for (const { key, prior } of applied.reverse()) {
         const restore = deps.runOmpCommand(omp.path, ["config", "set", key, prior], 10_000);
         if (restore.ok) {
@@ -479,7 +499,7 @@ async function repair(
         `OMP ${failedKey} could not be turned off, so leaving it enabled would run both`,
     );
 
-    return fixed;
+    return { fixed, failed };
 }
 
 function timestamp(date: Date): string {
@@ -514,8 +534,10 @@ async function runIssueFlow(options: {
                 `- ${result.status.toUpperCase()}: ${sanitizeDiagnosticText(result.message)}`,
         ),
     ].join("\n");
-    const path = join(options.cwd, `eidnara-omp-issue-${timestamp(options.deps.now())}.md`);
-    writeFileAtomic(path, `${capBodyToGithubLimit(body)}\n`);
+    const path = writeNewFile(
+        join(options.cwd, `eidnara-omp-issue-${timestamp(options.deps.now())}`),
+        `${capBodyToGithubLimit(body)}\n`,
+    );
     options.prompts.log.success(`Sanitized report written to ${path}`);
     try {
         options.deps.execFileSync("gh", ["--version"], { stdio: "ignore" });
@@ -567,9 +589,17 @@ export async function runDoctor(options: RunOmpDoctorOptions = {}): Promise<numb
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
     if (!options.force) return first.fail === 0 ? 0 : 1;
     if (first.fail === 0 && !first.repairPlan.writeUserConfig) return 0;
-    const fixed = await repair(first.repairPlan, deps, prompts, cwd);
-    prompts.log.info(`Applied ${fixed} repair(s); re-checking`);
+    const repaired = await repair(first.repairPlan, deps, prompts, cwd);
+    prompts.log.info(
+        repaired.failed > 0
+            ? `Applied ${repaired.fixed} repair(s), ${repaired.failed} failed; re-checking`
+            : `Applied ${repaired.fixed} repair(s); re-checking`,
+    );
     const second = await runHealthChecks({ cwd, prompts, deps });
     prompts.log.message(`Summary: PASS ${second.pass} / WARN ${second.warn} / FAIL ${second.fail}`);
+    if (repaired.failed > 0) {
+        prompts.log.error("Doctor could not complete the requested repair");
+        return 1;
+    }
     return second.fail === 0 ? 0 : 1;
 }

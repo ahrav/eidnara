@@ -19,7 +19,7 @@ import {
     isLocalPathPluginEntry,
     matchesPluginEntry,
 } from "../adapters/opencode";
-import { collectDiagnostics } from "../lib/diagnostics-opencode";
+import { collectDiagnostics, resolveUserLevelPaths } from "../lib/diagnostics-opencode";
 import { compactionEnabledFor } from "../lib/eidnara-modes";
 import { parseJsoncObject } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
@@ -29,7 +29,7 @@ import {
     describeOpenCodeInstallations,
     type OpenCodeInstallationReport,
 } from "../lib/opencode-helpers";
-import { detectConfigPaths, getEidnaraLogPath } from "../lib/paths";
+import { getEidnaraLogPath } from "../lib/paths";
 import {
     confirm,
     intro,
@@ -40,6 +40,7 @@ import {
     spinner,
     text,
 } from "../lib/prompts";
+import { printableLine } from "../lib/terminal-text";
 import { compareVersionStrings } from "../lib/version";
 import { OPENCODE_MINIMUM_VERSION } from "./setup-opencode";
 
@@ -130,11 +131,12 @@ async function runIssueFlow(cwd: string): Promise<number> {
 
         // A lone discovered session still filters: the append-only log can hold older sessions' records.
         let sessionFilter: string | null = report.recentSessions[0]?.sessionId ?? null;
-        if (report.recentSessions.length === 0 && report.sessionDiscovery === "unavailable") {
-            // Discovery failed rather than found nothing, so cross-session records
-            // are excluded unless the user opts in explicitly.
+        if (report.recentSessions.length === 0) {
+            // Without a discovered session, cross-session records are excluded unless the user opts in.
             const includeAll = await confirm(
-                "The OpenCode session database could not be read, so log records cannot be attributed to this session. Include records from every session in the report?",
+                report.sessionDiscovery === "unavailable"
+                    ? "The OpenCode session database could not be read, so log records cannot be attributed to this session. Include records from every session in the report?"
+                    : "No OpenCode sessions were found, so log records cannot be attributed to this session. Include records from every session in the report?",
                 false,
             );
             if (!includeAll) sessionFilter = EXCLUDE_SESSION_RECORDS;
@@ -144,13 +146,9 @@ async function runIssueFlow(cwd: string): Promise<number> {
                 "Which session is this issue about? (filters log lines from other sessions)",
                 [
                     ...report.recentSessions.map((session, index) => {
-                        const displayTitle = session.title.trim() || "(no title)";
-                        const truncatedTitle =
-                            displayTitle.length > 50
-                                ? `${displayTitle.slice(0, 47)}...`
-                                : displayTitle;
+                        const displayTitle = printableLine(session.title, 50) || "(no title)";
                         return {
-                            label: `${truncatedTitle} — ${session.sessionId}${index === 0 ? " (most recent)" : ""}`,
+                            label: `${displayTitle} — ${session.sessionId}${index === 0 ? " (most recent)" : ""}`,
                             value: session.sessionId,
                         };
                     }),
@@ -366,18 +364,34 @@ export async function runDoctor(
 
     log.info(`Eidnara CLI v${getSelfVersion()}`);
 
-    const paths = detectConfigPaths();
+    // A UID without a passwd entry and no `HOME` has no user-level paths; the
+    // project-level checks below still run against `cwd`.
+    const userLevel = resolveUserLevelPaths();
+    const paths = userLevel.configPaths;
+    const userPathsAvailable = userLevel.error === undefined;
 
-    if (paths.opencodeConfigFormat === "none") {
+    if (!userPathsAvailable) {
+        fail(
+            `User-level configuration paths are unavailable (${userLevel.error}); checking project-level configuration only`,
+        );
+    } else if (paths.opencodeConfigFormat === "none") {
         fail(`No opencode.json found at ${paths.opencodeConfig}`);
     } else {
         pass(`OpenCode config: ${paths.opencodeConfig}`);
     }
 
     // Both loader tiers are checked; a project-only config is a supported layout.
+    const userTierBase = eidnaraUserConfigBasePath() ?? null;
+    if (userTierBase === null && userPathsAvailable) {
+        fail(
+            "User-level Eidnara config path is unavailable (HOME and XDG_CONFIG_HOME are unset or not absolute)",
+        );
+    }
     const eidnaraConfigTiers = (
         [
-            { label: "user", base: eidnaraUserConfigBasePath(), isProjectConfig: false },
+            ...(userTierBase !== null
+                ? [{ label: "user", base: userTierBase, isProjectConfig: false }]
+                : []),
             { label: "project", base: eidnaraProjectConfigBasePath(cwd), isProjectConfig: true },
         ] as const
     ).flatMap((tier) => {
@@ -440,14 +454,25 @@ export async function runDoctor(
     const compactionEnabled = modes.compactionEnabled;
     // With `enabled: false` the plugin skips every hook, so nothing here would
     // replace native compaction, DCP, or the OMO hooks; they are left in place.
-    const conflictResult = modes.enabled ? detectConflicts(cwd, { compactionEnabled }) : null;
+    let conflictResult: ReturnType<typeof detectConflicts> | null = null;
+    let conflictDetectionError: string | null = null;
+    if (modes.enabled) {
+        try {
+            conflictResult = detectConflicts(cwd, { compactionEnabled });
+        } catch (error) {
+            // `detectConflicts` reads `~/.omo`, which has no home to resolve against here.
+            conflictDetectionError = error instanceof Error ? error.message : String(error);
+        }
+    }
 
     // Doctor uses the file-based compaction check because it has no OpenCode server handle.
     log.info(
         "Compaction check: file-based; the running server's resolved config may differ — `opencode debug config` is authoritative",
     );
 
-    if (conflictResult === null) {
+    if (conflictDetectionError !== null) {
+        fail(`Conflict detection unavailable: ${conflictDetectionError}`);
+    } else if (conflictResult === null) {
         pass(
             "Eidnara is disabled (enabled: false); native compaction, DCP, and OMO hooks are left in place",
         );
@@ -506,12 +531,12 @@ export async function runDoctor(
         }
     }
 
-    if (paths.tuiConfigFormat === "none") {
+    if (userPathsAvailable && paths.tuiConfigFormat === "none") {
         fail(
             `TUI sidebar plugin ${PLUGIN_NAME} is not registered (no tui.json at ${paths.tuiConfig})`,
         );
         log.info("  Run 'setup' to register the TUI sidebar plugin");
-    } else {
+    } else if (userPathsAvailable) {
         const tuiConfigName = paths.tuiConfigFormat === "jsonc" ? "tui.jsonc" : "tui.json";
         reportPluginEntry(paths.tuiConfig, tuiConfigName, "TUI sidebar plugin");
     }

@@ -2,11 +2,15 @@ import { describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    buildInMemoryTailRawMessages,
     countRawSessionMessageOrdinalsFromDb,
+    type InMemoryMessageView,
+    readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
     readRawSessionMessagePageFromDb,
     readRawSessionMessagesFromDb,
+    readRawSessionTailFromDb,
 } from "./read-session-raw";
 
 describe("raw session message id ordinals", () => {
@@ -43,6 +47,16 @@ describe("raw session message id ordinals", () => {
                 ["m-weird", 20, JSON.stringify({ role: { unexpected: true }, summary: "true" })],
                 ["m-user", 10, JSON.stringify({ role: "user" })],
                 ["m-malformed", 25, "{"],
+                // `JSON.parse` keeps the last duplicate key, so this row is a compaction summary in every reader.
+                ["m-dup-key-summary", 25, '{"summary":false,"summary":true,"finish":"stop"}'],
+                // A valid non-object document consumes an ordinal but has no addressable info, like a malformed row.
+                ["m-array", 26, "[1]"],
+                // Numeric `1` is not the JSON boolean `true`, so this row is an ordinary message in every reader.
+                [
+                    "m-numeric-summary",
+                    27,
+                    JSON.stringify({ role: "assistant", summary: 1, finish: "stop" }),
+                ],
                 [
                     "m-assistant",
                     20,
@@ -80,27 +94,187 @@ describe("raw session message id ordinals", () => {
             expect(readRawSessionMessageIdOrdinalsFromDb(db, "session")).toEqual(fullReaderMap);
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-user")).toBe(1);
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-assistant")).toBe(2);
+            expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-numeric-summary")).toBe(
+                6,
+            );
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-summary")).toBeNull();
+            expect(
+                readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-dup-key-summary"),
+            ).toBeNull();
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-dup-key-summary")).toBeNull();
             expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "missing")).toBeNull();
+            // Rows without a JSON-object info are not addressable by id in any reader, though they hold ordinals 4 and 5.
+            expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-malformed")).toBeNull();
+            expect(readRawSessionMessageOrdinalByIdFromDb(db, "session", "m-array")).toBeNull();
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-malformed")).toBeNull();
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-array")).toBeNull();
             expect([...fullReaderMap]).toEqual([
                 ["m-user", 1],
                 ["m-assistant", 2],
                 ["m-weird", 3],
-                ["m-tool-result", 5],
+                ["m-numeric-summary", 6],
+                ["m-tool-result", 7],
             ]);
 
-            const firstPage = readRawSessionMessagePageFromDb(db, "session", 0, 2, 5);
-            const secondPage = readRawSessionMessagePageFromDb(db, "session", 2, 3, 5);
+            // The by-id reader counts ordinals across the earlier malformed row instead of aborting on it.
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-tool-result")?.ordinal).toBe(
+                7,
+            );
+            expect(
+                readRawSessionMessageByIdFromDb(db, "session", "m-numeric-summary")?.ordinal,
+            ).toBe(6);
+            expect(readRawSessionMessageByIdFromDb(db, "session", "m-summary")).toBeNull();
+
+            const firstPage = readRawSessionMessagePageFromDb(db, "session", 0, 2, 7);
+            const secondPage = readRawSessionMessagePageFromDb(db, "session", 2, 5, 7);
             expect([...firstPage, ...secondPage].map(({ id, ordinal }) => [id, ordinal])).toEqual([
                 ["m-user", 1],
                 ["m-assistant", 2],
                 ["m-weird", 3],
                 ["m-malformed", 4],
-                ["m-tool-result", 5],
+                ["m-array", 5],
+                ["m-numeric-summary", 6],
+                ["m-tool-result", 7],
             ]);
-            expect(countRawSessionMessageOrdinalsFromDb(db, "session")).toBe(5);
+            expect(countRawSessionMessageOrdinalsFromDb(db, "session")).toBe(7);
+
+            // A negative cursor reads from the start, numbers the first row 1, and stays inside the watermark.
+            expect(
+                readRawSessionMessagePageFromDb(db, "session", -1, 100, 5).map(
+                    ({ id, ordinal }) => [id, ordinal],
+                ),
+            ).toEqual([
+                ["m-user", 1],
+                ["m-assistant", 2],
+                ["m-weird", 3],
+                ["m-malformed", 4],
+                ["m-array", 5],
+            ]);
+
+            // The tail begins at `m-weird` at ordinal 3; omitted rows preserve later ordinals.
+            const tail = readRawSessionTailFromDb(db, "session", 3, "m-weird");
+            expect(tail?.messages.map(({ id, ordinal }) => [id, ordinal])).toEqual([
+                ["m-weird", 3],
+                ["m-numeric-summary", 6],
+                ["m-tool-result", 7],
+            ]);
+            expect(tail?.absoluteMessageCount).toBe(7);
+            // A summary or non-object anchor yields no tail rather than one with an empty boundary slot.
+            expect(readRawSessionTailFromDb(db, "session", 4, "m-malformed")).toBeNull();
+            expect(readRawSessionTailFromDb(db, "session", 5, "m-array")).toBeNull();
+            expect(readRawSessionTailFromDb(db, "session", 2, "m-summary")).toBeNull();
+            expect(readRawSessionTailFromDb(db, "session", 4, "m-dup-key-summary")).toBeNull();
+            expect(readRawSessionTailFromDb(db, "session", 1, "missing")).toBeNull();
         } finally {
             closeQuietly(db);
         }
+    });
+
+    it("reads a page wider than one part-lookup chunk with every part attached in order", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec(`
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE part (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+            `);
+            const insertMessage = db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, 'session', ?, ?, ?)",
+            );
+            const insertPart = db.prepare(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, 'session', ?, ?, ?)",
+            );
+            const messageCount = 1_700;
+            db.exec("BEGIN");
+            for (let i = 1; i <= messageCount; i += 1) {
+                const id = `m-${String(i).padStart(5, "0")}`;
+                insertMessage.run(id, i, i, JSON.stringify({ role: "user" }));
+                insertPart.run(`${id}-b`, id, i * 10 + 2, i * 10 + 2, JSON.stringify({ seq: 2 }));
+                insertPart.run(`${id}-a`, id, i * 10 + 1, i * 10 + 1, JSON.stringify({ seq: 1 }));
+            }
+            db.exec("COMMIT");
+
+            const page = readRawSessionMessagePageFromDb(db, "session", 0, messageCount);
+            expect(page.length).toBe(messageCount);
+            expect(page[0]).toMatchObject({ id: "m-00001", ordinal: 1 });
+            expect(page[messageCount - 1]).toMatchObject({
+                id: `m-${String(messageCount).padStart(5, "0")}`,
+                ordinal: messageCount,
+            });
+            for (const message of page) {
+                expect(message.parts).toEqual([{ seq: 1 }, { seq: 2 }]);
+            }
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("in-memory tail", () => {
+    const view = (id: string, extra: Partial<InMemoryMessageView> = {}): InMemoryMessageView => ({
+        id,
+        role: "assistant",
+        parts: [],
+        ...extra,
+    });
+
+    it("yields no tail for a compaction-summary anchor, matching the DB reader", () => {
+        const messages = [
+            view("m-1"),
+            view("m-summary", { summary: true, finish: "stop" }),
+            view("m-2"),
+            view("m-3"),
+        ];
+        expect(
+            buildInMemoryTailRawMessages({
+                messages,
+                lastCompartmentEnd: 2,
+                anchorMessageId: "m-summary",
+            }),
+        ).toBeNull();
+    });
+
+    it("anchors on an ordinary message and skips summary rows without spending ordinals", () => {
+        const messages = [
+            view("m-1"),
+            view("m-2"),
+            view("m-summary", { summary: true, finish: "stop" }),
+            view("m-3"),
+        ];
+        const tail = buildInMemoryTailRawMessages({
+            messages,
+            lastCompartmentEnd: 2,
+            anchorMessageId: "m-2",
+        });
+        expect(tail?.anchorFound).toBe(true);
+        expect(tail?.messages.map((m) => [m.id, m.ordinal])).toEqual([
+            ["m-2", 2],
+            ["m-3", 3],
+        ]);
+    });
+
+    it("starts after the compartment end when the anchor is absent", () => {
+        const tail = buildInMemoryTailRawMessages({
+            messages: [view("m-4"), view("m-5")],
+            lastCompartmentEnd: 3,
+            anchorMessageId: "missing",
+        });
+        expect(tail?.anchorFound).toBe(false);
+        expect(tail?.messages.map((m) => [m.id, m.ordinal])).toEqual([
+            ["m-4", 4],
+            ["m-5", 5],
+        ]);
     });
 });

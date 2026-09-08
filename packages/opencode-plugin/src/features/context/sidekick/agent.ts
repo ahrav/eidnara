@@ -4,6 +4,7 @@ import type { SidekickConfig } from "../../../config/schema/eidnara";
 import {
     childSessionMessagesFetcher,
     createChildSession,
+    deleteChildSession,
 } from "../../../hooks/context/child-session-spawn";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
@@ -11,7 +12,7 @@ import { extractLatestAssistantText } from "../../../shared/assistant-message-ex
 import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log, sessionLog } from "../../../shared/logger";
 import { resolveFallbackChain } from "../../../shared/resolve-fallbacks";
-import { SIDEKICK_SYSTEM_PROMPT, stripThinkingBlocks } from "./core";
+import { isEmptySidekickResult, SIDEKICK_SYSTEM_PROMPT, stripThinkingBlocks } from "./core";
 
 export { SIDEKICK_SYSTEM_PROMPT };
 
@@ -88,6 +89,11 @@ export async function runSidekick(deps: {
             },
         );
 
+        // The no-result sentinel is a valid completion, not a failure, so it is filtered
+        // after validation rather than thrown into the fallback-model retry.
+        if (isEmptySidekickResult(sidekickRun.validated)) {
+            return null;
+        }
         return sidekickRun.validated;
     } catch (error) {
         if (deps.sessionId) {
@@ -98,13 +104,9 @@ export async function runSidekick(deps: {
         return null;
     } finally {
         if (agentSessionId && !shouldKeepSubagents()) {
-            await deps.client.session
-                .delete({
-                    path: { id: agentSessionId },
-                })
-                .catch((error: unknown) => {
-                    log("[eidnara] failed to delete sidekick child session:", error);
-                });
+            await deleteChildSession(deps.client, agentSessionId).catch((error: unknown) => {
+                log("[eidnara] failed to delete sidekick child session:", error);
+            });
         }
     }
 }

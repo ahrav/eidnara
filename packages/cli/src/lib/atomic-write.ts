@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
     chmodSync,
     lstatSync,
@@ -5,58 +6,81 @@ import {
     readlinkSync,
     realpathSync,
     renameSync,
+    rmSync,
     statSync,
     writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 /**
- * When targetPath names a file and chmodSync succeeds, writeFileAtomic copies its 0o777 permission bits to tmpPath.
- *
+ * An existing symlink resolves to its target, so `renameSync` replaces the target, not the link.
+ * A dangling symlink resolves to its missing target, preserving the link.
+ * The staged file is created no more permissively than the existing regular file.
+ * A failed write or rename removes the staged sibling before the error propagates.
  * Callers need not create the parent directory.
  *
  * A symlink resolves to its target before renameSync, preserving the symlink.
  */
 export function writeFileAtomic(targetPath: string, data: string): void {
-    const destination = resolveSymlinkTarget(targetPath);
-    mkdirSync(dirname(destination), { recursive: true });
-    const tmpPath = `${destination}.tmp`;
-    writeFileSync(tmpPath, data, { encoding: "utf-8" });
+    const finalPath = resolveLinkTarget(targetPath);
+    mkdirSync(dirname(finalPath), { recursive: true });
+    const mode = existingFileMode(finalPath);
+    const tmpPath = `${finalPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
     try {
-        if (statSync(destination, { throwIfNoEntry: false })?.isFile()) {
-            const mode = statSync(destination).mode & 0o777;
-            chmodSync(tmpPath, mode);
-        }
-    } catch {
-        // If statSync or chmodSync throws, writeFileAtomic still attempts renameSync(tmpPath, destination).
+        writeFileSync(tmpPath, data, { encoding: "utf-8", mode: mode ?? 0o666 });
+        // open(2) masks the creation mode with the umask; chmod restores the exact bits.
+        if (mode !== undefined) chmodSync(tmpPath, mode);
+        renameSync(tmpPath, finalPath);
+    } catch (error) {
+        rmSync(tmpPath, { force: true });
+        throw error;
     }
-    renameSync(tmpPath, destination);
 }
 
-/** Mirrors the kernel's symlink-following limit so a link cycle terminates instead of looping. */
-const MAX_SYMLINK_HOPS = 40;
+const MAX_LINK_HOPS = 32;
 
-/** `realpathSync` cannot resolve a dangling symlink, so the fallback follows link text hop by hop and the write creates the final target. commentlint: allow(JUDGE) */
-function resolveSymlinkTarget(path: string): string {
+/**
+ * A read-modify-write that reads through a symlink and then writes through it
+ * again resolves the link twice, and a link retargeted in between makes the
+ * write land on the new target with the old target's contents. Callers resolve
+ * once and use the result for both the read and the write.
+ */
+export function resolveLinkTarget(path: string): string {
     try {
-        if (!lstatSync(path).isSymbolicLink()) return path;
+        return realpathSync.native(path);
     } catch {
-        return path;
-    }
-    try {
-        return realpathSync(path);
-    } catch {
+        // realpath rejects a dangling link, so the chain is followed by hand to its missing end.
+        // A chain that never reaches a non-link is an error: renaming over the unresolved entry would replace the user's link with a file.
+        const seen = new Set<string>();
         let current = path;
-        for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
-            let isLink: boolean;
+        for (let hop = 0; hop < MAX_LINK_HOPS; hop++) {
+            let link: string;
             try {
-                isLink = lstatSync(current).isSymbolicLink();
+                const entry = lstatSync(current, { throwIfNoEntry: false });
+                if (!entry?.isSymbolicLink()) return current;
+                link = readlinkSync(current);
             } catch {
                 return current;
             }
-            if (!isLink) return current;
-            current = resolve(dirname(current), readlinkSync(current));
+            if (seen.has(current)) {
+                throw new Error(
+                    `symlink cycle while resolving config target ${path} at ${current}`,
+                );
+            }
+            seen.add(current);
+            current = resolve(dirname(current), link);
         }
-        throw new Error(`Too many levels of symbolic links: ${path}`);
+        throw new Error(
+            `symlink chain for config target ${path} exceeds ${MAX_LINK_HOPS} hops at ${current}`,
+        );
+    }
+}
+
+function existingFileMode(path: string): number | undefined {
+    try {
+        const stat = statSync(path, { throwIfNoEntry: false });
+        return stat?.isFile() ? stat.mode & 0o777 : undefined;
+    } catch {
+        return undefined;
     }
 }

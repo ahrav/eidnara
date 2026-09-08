@@ -156,11 +156,11 @@ export function writePiSettingsPackage(
         );
     }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
-    // A local checkout or pinned spec of the same package counts as present;
-    // adding the npm entry beside it would load the plugin twice.
+    // A version-pinned source (`npm:@eidnara/pi@0.1.0`), a local checkout, or the object form of
+    // the same package counts as present; a second entry would load the extension twice.
     const present = packages.some(
         (entry) =>
-            entry === packageSource ||
+            matchesPackageSource(entry, packageSource) ||
             (packageSource === PI_PACKAGE_SOURCE &&
                 isEidnaraPiPackageEntry(entry, dirname(settingsPath))),
     );
@@ -171,6 +171,13 @@ export function writePiSettingsPackage(
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return true;
 }
+function matchesPackageSource(entry: unknown, packageSource: string): boolean {
+    return (
+        typeof entry === "string" &&
+        (entry === packageSource || entry.startsWith(`${packageSource}@`))
+    );
+}
+
 export function removePiSettingsPackage(
     settingsPath: string,
     packageSource = PI_PACKAGE_SOURCE,
@@ -301,10 +308,17 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             : `${host.displayName} detected at ${binary.path}`,
     );
 
-    if (version && host.minimumVersion && compareVersionStrings(version, host.minimumVersion) < 0) {
+    const minimum = host.minimumVersion;
+    const versionTooOld =
+        minimum !== undefined && version !== null && compareVersionStrings(version, minimum) < 0;
+    // An unreadable version leaves the minimum unverified, so it takes the same confirmation as an old one.
+    const versionUnknown = minimum !== undefined && version === null;
+    if (minimum !== undefined && (versionTooOld || versionUnknown)) {
         prompts.log.warn(
-            host.versionWarning?.(version, host.minimumVersion) ??
-                `${host.displayName} ${version} is older than required ${host.minimumVersion}.`,
+            version !== null
+                ? (host.versionWarning?.(version, minimum) ??
+                      `${host.displayName} ${version} is older than required ${minimum}.`)
+                : `${host.displayName} did not report a version, so the required ${minimum} cannot be verified.`,
         );
         const proceed = await prompts.confirm(
             "Continue with setup anyway? (subagents may fail at runtime)",
@@ -312,7 +326,11 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         );
         if (!proceed) {
             // A non-zero code keeps the dispatcher from printing next steps after nothing was written.
-            prompts.outro(`Setup cancelled — upgrade ${host.displayName} and try again.`);
+            prompts.outro(
+                version !== null
+                    ? `Setup cancelled — upgrade ${host.displayName} and try again.`
+                    : `Setup cancelled — check the ${host.displayName} installation and try again.`,
+            );
             return 1;
         }
     }
@@ -323,6 +341,13 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 
     const settingsPath = env.paths.getPiUserExtensionsPath();
     const configPath = env.paths.getPiUserConfigPath();
+    if (configPath === undefined) {
+        prompts.log.error(
+            "No user configuration directory: set HOME (or XDG_CONFIG_HOME) to an absolute path so eidnara.jsonc has a location.",
+        );
+        prompts.outro("Setup stopped.");
+        return 1;
+    }
     const configureHost = await prompts.confirm(
         `Configure ${host.displayName} to load Eidnara?`,
         true,

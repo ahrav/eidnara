@@ -1,17 +1,9 @@
-/**
- * `theme.accent` background).
- *
- *
- *
- */
-
 type Color = { r: number; g: number; b: number; a?: number };
 
-const MIN_OPAQUE_ALPHA = 0.5;
+/** WCAG 2 requires a 3:1 contrast ratio for large or bold text. */
+const MIN_LABEL_CONTRAST = 3;
 
-const MIN_CHANNEL_DISTANCE = 0.06;
-
-const LIGHT_ACCENT_LUMINANCE = 0.5;
+const WHITE_LUMINANCE = 1;
 
 function srgbChannelToLinear(c: number): number {
     return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
@@ -25,26 +17,36 @@ function relativeLuminance(bg: Color): number {
     );
 }
 
-function nearlyEqual(a: Color, b: Color): boolean {
-    return (
-        Math.abs(a.r - b.r) < MIN_CHANNEL_DISTANCE &&
-        Math.abs(a.g - b.g) < MIN_CHANNEL_DISTANCE &&
-        Math.abs(a.b - b.b) < MIN_CHANNEL_DISTANCE
-    );
+function contrastRatio(a: number, b: number): number {
+    const [lighter, darker] = a >= b ? [a, b] : [b, a];
+    return (lighter + 0.05) / (darker + 0.05);
+}
+
+function compositeOver(fg: Color, bg: Color): Color {
+    const alpha = fg.a ?? 1;
+    return {
+        r: fg.r * alpha + bg.r * (1 - alpha),
+        g: fg.g * alpha + bg.g * (1 - alpha),
+        b: fg.b * alpha + bg.b * (1 - alpha),
+    };
 }
 
 /**
+ * Prefers white whenever it clears the 3:1 bar, even when black would contrast more.
  */
 export function readableTextColorOn(bg: Color): string {
-    return relativeLuminance(bg) < LIGHT_ACCENT_LUMINANCE ? "#ffffff" : "#000000";
+    const whiteContrast = contrastRatio(WHITE_LUMINANCE, relativeLuminance(bg));
+    return whiteContrast >= MIN_LABEL_CONTRAST ? "#ffffff" : "#000000";
 }
 
 /**
+ * The badge renders as `accent` composited over `background`, and the label as `background` composited over that badge; both contrast checks use those rendered colors. A fully transparent accent or background therefore lands at 1:1 and falls back.
  */
 export function badgeTextColor<T extends Color>(accent: T, background: T): T | string {
-    const alpha = background.a ?? 1;
-    if (alpha >= MIN_OPAQUE_ALPHA && !nearlyEqual(accent, background)) {
+    const badge = compositeOver(accent, background);
+    const label = compositeOver(background, badge);
+    if (contrastRatio(relativeLuminance(label), relativeLuminance(badge)) >= MIN_LABEL_CONTRAST) {
         return background;
     }
-    return readableTextColorOn(accent);
+    return readableTextColorOn(badge);
 }

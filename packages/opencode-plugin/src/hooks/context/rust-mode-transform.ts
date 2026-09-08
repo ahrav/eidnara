@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
-import type { PluginContext } from "../../plugin/types";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import {
@@ -11,9 +11,11 @@ import {
 } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import {
     cachedToolPermissionDenied,
     resolveCtxReduceAvailability,
+    resolveCtxReduceAvailabilityFromMessages,
     resolveTodowriteAvailability,
     resolveTodowriteAvailabilityFromMessages,
     type ToolAvailabilityVerdict,
@@ -38,10 +40,15 @@ import {
 } from "./module-wire";
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
+import {
+    knownSessionDirectory,
+    resolveSessionDirectory,
+    type SessionDirectoryDeps,
+} from "./session-directory";
 import type { MessageLike } from "./tag-content-primitives";
 import { logTransformTiming } from "./transform-stage-logger";
 
-export interface RustModeTransformDeps {
+export interface RustModeTransformDeps extends SessionDirectoryDeps {
     contextUsageMap: Map<string, ContextUsageEntry>;
     protectedTags?: number;
     clearReasoningAge: number;
@@ -54,9 +61,6 @@ export interface RustModeTransformDeps {
     autoSearch?: { enabled: boolean; scoreThreshold: number; minPromptChars: number };
     cacheTtl: string | Record<string, string>;
     compactionOff?: boolean;
-    client?: PluginContext["client"];
-    directory?: string;
-    sessionDirectoryBySession?: Map<string, string>;
     isSubagentSession: (sessionId: string) => boolean;
     systemPromptHashFor: (sessionId: string) => string;
 }
@@ -81,13 +85,17 @@ async function resolveCombinedTodowriteVerdict(
     let permissionDenied = cachedToolPermissionDenied(sessionId, "todowrite") ?? false;
     if (deps.client) {
         try {
-            permissionDenied = await todowritePermissionDenied(
-                deps.client,
-                sessionId,
-                activeAgentFromMessages(messages),
+            permissionDenied = await withTimeout(
+                todowritePermissionDenied(
+                    deps.client,
+                    sessionId,
+                    activeAgentFromMessages(messages),
+                ),
+                HOST_SDK_READ_TIMEOUT_MS,
+                "todowrite permission read timed out",
             );
         } catch (error) {
-            // A failed SDK read leaves the last in-memory verdict unchanged until a later read obtains authoritative data.
+            // A failed or slow SDK read leaves the last in-memory verdict unchanged until a later read obtains authoritative data.
             sessionLog(
                 sessionId,
                 "todowrite permission read failed; retaining the last successful verdict:",
@@ -112,6 +120,9 @@ export interface RustModeModuleClient {
 }
 
 type ContentSnapshotField = string | number | boolean | symbol;
+
+/** Wire caches hold a session's content snapshots and its last native output, so the LRU bound is sized to the sessions one OpenCode process keeps active. An evicted session sends its next pass as a full array. */
+const WIRE_CACHE_SESSION_CAPACITY = 64;
 
 const SNAPSHOT_ARRAY = Symbol("array");
 const SNAPSHOT_OBJECT = Symbol("object");
@@ -152,6 +163,10 @@ export interface RustSessionState {
     /** `need_full_sync` forces the next pass to send the full wire array until a pass applies.
      * `need_full_sync` bypasses delta eligibility until a pass applies. */
     forceFullWire: boolean;
+    /** `invalidateWireState` increments this value. A pass commits its cache only when the value
+     * matches the one it read alongside the previous cache, so an invalidation that lands during
+     * the daemon call survives that pass's completion. */
+    wireInvalidations: number;
     moduleGeneration: number;
     idOrdinalMemoGeneration: number;
     idOrdinalMemo: Map<string, number>;
@@ -162,9 +177,11 @@ export interface RustSessionState {
      * The loop continues after `base` without regenerating `index + 1` ordinals. */
     ordinalContinuationBase: number | null;
     failureCount: number;
+    /** Consecutive passes whose newest user message is synthetic. A real user message resets it. */
     syntheticTurnCount: number;
     lastObservedUserMessageId: string | null;
-    syntheticLoopBreakerLogged: boolean;
+    /** One cascade log per run of synthetic turns; the reset that clears `syntheticTurnCount` re-arms it. */
+    syntheticCascadeLogged: boolean;
     routeRoot: string | null;
 }
 
@@ -449,7 +466,7 @@ function observeSyntheticTurn(state: RustSessionState, messages: MessageLike[]):
 
     if (!synthetic) {
         state.syntheticTurnCount = 0;
-        state.syntheticLoopBreakerLogged = false;
+        state.syntheticCascadeLogged = false;
     } else if (isNewMessage) {
         state.syntheticTurnCount += 1;
     }
@@ -560,6 +577,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             consecutiveFailures: 0,
             passCount: 0,
             forceFullWire: false,
+            wireInvalidations: 0,
             moduleGeneration: 0,
             idOrdinalMemoGeneration: 0,
             idOrdinalMemo: new Map(),
@@ -570,7 +588,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             failureCount: 0,
             syntheticTurnCount: 0,
             lastObservedUserMessageId: null,
-            syntheticLoopBreakerLogged: false,
+            syntheticCascadeLogged: false,
             routeRoot: null,
         };
         states.set(sessionId, state);
@@ -578,37 +596,11 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
     return state;
 }
 
-function getSessionDirectory(
+function loadContextUsage(
     deps: RustModeTransformDeps,
     sessionId: string,
-): Promise<{ directory: string; resolvedFromHost: boolean }> {
-    const cached = deps.sessionDirectoryBySession?.get(sessionId);
-    if (cached) return Promise.resolve({ directory: cached, resolvedFromHost: true });
-    if (!deps.client)
-        return Promise.resolve({
-            directory: deps.directory ?? process.cwd(),
-            resolvedFromHost: false,
-        });
-    return Promise.resolve().then(async () => {
-        try {
-            const response = await deps.client?.session
-                ?.get({ path: { id: sessionId } })
-                .catch(() => null);
-            const directory = (response as { data?: { directory?: unknown } } | null)?.data
-                ?.directory;
-            if (typeof directory === "string" && directory.length > 0) {
-                deps.sessionDirectoryBySession?.set(sessionId, directory);
-                return { directory, resolvedFromHost: true };
-            }
-        } catch {
-            // Module routing falls back to the launch directory without failing.
-        }
-        return { directory: deps.directory ?? process.cwd(), resolvedFromHost: false };
-    });
-}
-
-function loadContextUsage(deps: RustModeTransformDeps, sessionId: string): ContextUsage {
-    return deps.contextUsageMap.get(sessionId)?.usage ?? { percentage: 0, inputTokens: 0 };
+): ContextUsage | undefined {
+    return deps.contextUsageMap.get(sessionId)?.usage;
 }
 
 function resolveHistoryBudgetTokens(
@@ -748,7 +740,7 @@ function buildTransformBody(args: {
     input: unknown[];
     nativeMessages: unknown[];
     passInputs: Record<string, unknown>;
-    usage: Record<string, number | boolean>;
+    usage?: Record<string, number | boolean>;
     geometry?: TransformGeometryWire;
     modelKey: string | null;
     providerId: string | null;
@@ -794,7 +786,7 @@ function buildTransformBody(args: {
                   },
               }
             : {}),
-        usage: args.usage,
+        ...(args.usage ? { usage: args.usage } : {}),
         ...(args.geometry ? { geometry: args.geometry } : {}),
         mid_turn: args.midTurn,
         prev_response_completed_at_ms: args.prevResponseCompletedAtMs,
@@ -839,7 +831,7 @@ export function createRustModeTransform(
     getState: (sessionId: string) => Readonly<RustSessionState>;
 } {
     const states = new Map<string, RustSessionState>();
-    const wireCaches = new Map<string, RustWireCache>();
+    const wireCaches = new BoundedSessionMap<RustWireCache>(WIRE_CACHE_SESSION_CAPACITY);
 
     const logStage = (
         sessionId: string,
@@ -860,6 +852,13 @@ export function createRustModeTransform(
 
     const callModule = (args: Parameters<RustModeModuleClient["call"]>[0]): Promise<unknown> =>
         options.moduleClient.call(args);
+
+    /** Thrown before a send when `clearSession` ran during this pass's preflight; the pass serves its input unchanged without counting a failure. */
+    class SessionClearedDuringPass extends Error {
+        constructor(sessionId: string) {
+            super(`rust session ${sessionId} was cleared during the pass`);
+        }
+    }
 
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
         state.consecutiveFailures += 1;
@@ -883,6 +882,7 @@ export function createRustModeTransform(
         anchor: state.ordinalMemoAnchor,
         storedCount: state.ordinalMemoStoredCount,
         canonicalCount: state.ordinalMemoCanonicalCount,
+        continuationBase: state.ordinalContinuationBase ?? 0,
     });
 
     const invalidateWireState = (sessionId: string): void => {
@@ -891,6 +891,7 @@ export function createRustModeTransform(
         if (!state) return;
         resetOrdinalMemo(state);
         state.forceFullWire = true;
+        state.wireInvalidations += 1;
     };
 
     const run = async (
@@ -903,12 +904,11 @@ export function createRustModeTransform(
         const timings = emptyRustPassTimings();
         state.passCount += 1;
         const syntheticTurn = observeSyntheticTurn(state, messages);
-        const syntheticLoopBlocked = syntheticTurn && state.syntheticTurnCount >= 3;
-        if (syntheticLoopBlocked && !state.syntheticLoopBreakerLogged) {
-            state.syntheticLoopBreakerLogged = true;
+        if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
+            state.syntheticCascadeLogged = true;
             sessionLog(
                 sessionId,
-                "RUST LOOP BREAKER: suppressing host directives after three consecutive synthetic turns until a real user message arrives",
+                `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
             );
         }
         const inputCount = messages.length;
@@ -919,6 +919,8 @@ export function createRustModeTransform(
         let rowVersion = 0;
         let appliedAt: number | undefined;
         const passUsageSnapshot = loadContextUsage(deps, sessionId);
+        // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
+        const directory = await resolveSessionDirectory(deps, sessionId);
         const isSubagent = deps.isSubagentSession(sessionId);
         const systemPromptHash = deps.systemPromptHashFor(sessionId);
         let preflightError: unknown;
@@ -1036,6 +1038,8 @@ export function createRustModeTransform(
                 if (detail) sessionLog(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
+        // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
+        resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
         const reduceAvailability = resolveCtxReduceAvailability(sessionId);
         // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
         // Synthesis fails closed when host evidence is provisional or missing.
@@ -1050,12 +1054,11 @@ export function createRustModeTransform(
         );
         try {
             if (preflightError) throw preflightError;
-            const { directory } = await getSessionDirectory(deps, sessionId);
             const usage = passUsageSnapshot;
             const contextLimit =
                 resolvedContextLimit && resolvedContextLimit > 0
                     ? resolvedContextLimit
-                    : usage.percentage > 0
+                    : usage && usage.percentage > 0
                       ? Math.round(usage.inputTokens / (usage.percentage / 100))
                       : 128_000;
             const threshold = resolveExecuteThreshold(
@@ -1066,7 +1069,7 @@ export function createRustModeTransform(
             );
             const historyBudgetTokens = resolveHistoryBudgetTokens(
                 deps.historyBudgetPercentage,
-                usage,
+                usage ?? { percentage: 0, inputTokens: 0 },
                 deps.executeThresholdPercentage,
                 modelKey ?? undefined,
                 deps.executeThresholdTokens,
@@ -1102,6 +1105,8 @@ export function createRustModeTransform(
                 protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
             };
             const previousWireCache = wireCaches.get(sessionId);
+            // Every await after this read lets `invalidateWireState` or `clearSession` run; the commit below compares against this value.
+            const wireInvalidationsAtRead = state.wireInvalidations;
             let wireDelta:
                 | {
                       rawStart: number;
@@ -1117,9 +1122,9 @@ export function createRustModeTransform(
                 messages.length >= previousWireCache.rawCount
             ) {
                 const appending = messages.length > previousWireCache.rawCount;
-                const lastMessage = messages.at(-1);
+                const formerTerminal = messages[previousWireCache.rawCount - 1];
                 // Use delta transport only when the reusable prefix byte-identically matches OpenCode's copy.
-                // Count and last-signature checks validate the appended tail.
+                // The prefix guard stops before the former terminal; the signature check below covers it.
                 const prefixGuardStartedAt = performance.now();
                 const prefixIntact = prefixContentSnapshotsMatch(
                     messages,
@@ -1127,10 +1132,11 @@ export function createRustModeTransform(
                     Math.max(0, previousWireCache.rawCount - 1),
                 );
                 logStage(sessionId, "prefixGuard", prefixGuardStartedAt, timings);
+                // When appending, an invisible former terminal may have been edited in place, so only a visible former terminal skips the signature check.
                 const lastChanged =
-                    !appending && lastMessage !== undefined
-                        ? messageCacheSignature(lastMessage) !== previousWireCache.rawLastSignature
-                        : false;
+                    formerTerminal !== undefined &&
+                    !(appending && previousWireCache.rawLastVisible) &&
+                    messageCacheSignature(formerTerminal) !== previousWireCache.rawLastSignature;
                 const replaceExistingTail =
                     lastChanged || (appending && previousWireCache.rawLastVisible);
                 const rawStart = replaceExistingTail
@@ -1253,6 +1259,11 @@ export function createRustModeTransform(
                         fingerprint: `${ckFingerprint.fingerprint}|${nativeFingerprint.fingerprint}`,
                     };
                 }
+                const nativeMessages = messages.slice(wireDelta.rawStart);
+                if (nativeMessages.length === 0) {
+                    // An empty delta replaces nothing: the terminal message, its wire visibility, and both before-last fingerprints stay the acknowledged ones. Recomputing them from an empty tail would record the terminal as invisible and chain the before-last fingerprints off the full array.
+                    return { ...previousWireCache, nativeOutput: undefined };
+                }
                 let ckFingerprint = wireDelta.ckAfter;
                 let ckPrefixFingerprintBeforeLast = ckFingerprint;
                 for (let index = 0; index < encodedInput.length; index += 1) {
@@ -1260,7 +1271,6 @@ export function createRustModeTransform(
                         ckPrefixFingerprintBeforeLast = ckFingerprint;
                     ckFingerprint = advanceWireFingerprint(ckFingerprint, encodedInput[index]);
                 }
-                const nativeMessages = messages.slice(wireDelta.rawStart);
                 let nativeFingerprint = wireDelta.nativeAfter;
                 let nativePrefixFingerprintBeforeLast = nativeFingerprint;
                 for (let index = 0; index < nativeMessages.length; index += 1) {
@@ -1299,7 +1309,8 @@ export function createRustModeTransform(
             const transformBodyBase = {
                 sessionId,
                 passInputs,
-                usage: passUsage(usage, contextLimit),
+                // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.
+                usage: usage ? passUsage(usage, contextLimit) : undefined,
                 geometry: transformGeometry,
                 modelKey: modelKey ?? null,
                 providerId: model?.providerID ?? null,
@@ -1349,6 +1360,9 @@ export function createRustModeTransform(
                 );
                 let response: Record<string, unknown> | undefined;
                 for (const [index, { page, bytes }] of pages.entries()) {
+                    // A `session.deleted` that landed during preflight or an earlier page has already queued the daemon-side delete; sending now would recreate the session's durable state.
+                    if (states.get(sessionId) !== state)
+                        throw new SessionClearedDuringPass(sessionId);
                     const transportStartedAt = performance.now();
                     let moduleResponse: unknown;
                     try {
@@ -1507,9 +1521,7 @@ export function createRustModeTransform(
                         "retry=full",
                     );
                 }
-                const retryWireBuildStartedAt = performance.now();
                 response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
-                logStage(sessionId, "wireBuild", retryWireBuildStartedAt, timings, "retry=full");
                 captureResponseTelemetry(response);
                 if (isNeedFullSync(response)) {
                     throw new Error("rust module still requires full sync after a full-array send");
@@ -1590,15 +1602,31 @@ export function createRustModeTransform(
             }
             state.initialized = true;
             state.consecutiveFailures = 0;
-            state.forceFullWire = false;
-            wireCaches.set(sessionId, pendingWireCache);
+            if (
+                states.get(sessionId) === state &&
+                state.wireInvalidations === wireInvalidationsAtRead
+            ) {
+                state.forceFullWire = false;
+                wireCaches.set(sessionId, pendingWireCache);
+            } else {
+                // The session was cleared or its wire state invalidated while this pass awaited the daemon. The applied output stands; the cache built from the pre-invalidation array does not, and `forceFullWire` keeps the invalidator's value.
+                sessionLog(
+                    sessionId,
+                    "rust wire state changed during the pass; discarding this pass's wire cache",
+                );
+            }
             appliedAt = performance.now();
             finishPass(true);
         } catch (error) {
             servedFrom = "raw";
-            if (decision.toLowerCase() !== "need_full_sync") decision = "error";
             materializeReason = "none";
-            markFailure(sessionId, state, error);
+            if (error instanceof SessionClearedDuringPass) {
+                decision = "cleared";
+                sessionLog(sessionId, error.message);
+            } else {
+                if (decision.toLowerCase() !== "need_full_sync") decision = "error";
+                markFailure(sessionId, state, error);
+            }
             replaceMessagesInPlace(output, messages);
             finishPass(false);
             return;
@@ -1608,10 +1636,14 @@ export function createRustModeTransform(
     return {
         run,
         clearSession(sessionId: string): void {
-            const projectRoot = states.get(sessionId)?.routeRoot ?? options.projectRoot ?? null;
+            // Without a `routeRoot`, the fallback is the root `run` would have used, so the daemon's durable state is still addressed.
+            const projectRoot =
+                states.get(sessionId)?.routeRoot ??
+                options.projectRoot ??
+                knownSessionDirectory(deps, sessionId);
             states.delete(sessionId);
             wireCaches.delete(sessionId);
-            if (projectRoot && options.moduleClient.deleteSession) {
+            if (options.moduleClient.deleteSession) {
                 void options.moduleClient
                     .deleteSession(sessionId, projectRoot)
                     .catch((error) => {
@@ -1633,6 +1665,7 @@ export function createRustModeTransform(
 }
 
 export const __rustModeTransformTest = {
+    WIRE_CACHE_SESSION_CAPACITY,
     applyNativeMessagesVerbatim,
     contentSnapshotsFor,
     snapshotTags: {

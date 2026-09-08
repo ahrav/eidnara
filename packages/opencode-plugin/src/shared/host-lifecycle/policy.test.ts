@@ -7,10 +7,12 @@ import type { CatalogEntry } from "../host-client";
 import type { PlatformReaders } from "./bootstrap";
 import { parseDaemonResult } from "./contract";
 import { buildManagedCredentialEnvelope } from "./managed-policy";
+import type { NativeStartupEnvelope } from "./native-launcher";
 import {
     aggregateForTarget,
     HostLifecyclePolicy,
     OUTER_AGGREGATE_MS,
+    STORAGE_HARD_BUDGET_MS,
     type WaiterDetachedError,
 } from "./policy";
 
@@ -26,12 +28,13 @@ function authenticatedPeerAt(daemonVer: string) {
 let counter = 0;
 
 function startResultJson(command: string): string {
+    const mutating = command === "start" || command === "restart";
     return JSON.stringify({
         schema: "eidnara.daemon/v1",
         command,
         ok: true,
         state: "running",
-        reason: command === "start" || command === "restart" ? "started" : "healthy",
+        reason: mutating ? "started" : "healthy",
         remediation: null,
         // A successful restart must carry its commit evidence, so a fixture that
         // reported null here would be rejected by the parser and land as
@@ -41,7 +44,8 @@ function startResultJson(command: string): string {
         checks: [],
         versions: {
             release: "0.38.0",
-            proof: "current",
+            // Only a successful start or restart authenticates the running code.
+            proof: mutating ? "current" : null,
             daemon: "eidnara-host/0.1.0",
             context: null,
             synapse: null,
@@ -81,12 +85,15 @@ function restartResultJson(): string {
 }
 
 function harnessUnavailableResultJson(): string {
+    const base = JSON.parse(startResultJson("start"));
     return JSON.stringify({
-        ...JSON.parse(startResultJson("start")),
+        ...base,
         ok: false,
         state: "running",
         reason: "harness_unavailable",
         readiness: null,
+        // A failed start authenticates nothing.
+        versions: { ...base.versions, proof: null },
     });
 }
 
@@ -137,6 +144,7 @@ function policyFor(
             glibcVersion: () => "2.34",
             procSelfFdUsable: () => true,
         },
+        compatibilityProbe: async () => compatibleObservation(),
         ...options,
     });
 }
@@ -403,17 +411,16 @@ describe("native invocation mapping", () => {
         const root = tempDir("eidnara-policy-fallback-budget-");
         const invocationLog = path.join(root, "budget-invocations.log");
         const binary = path.join(root, "budget-eidnara-host.sh");
-        // The first invocation reports the payload missing after burning a
-        // second; the second (with --payload-dir) succeeds immediately.
+        // The retry's two seconds fit a fresh aggregate but not the residual.
         writeFileSync(
             binary,
             `#!/bin/sh\necho "$*" >> ${invocationLog}\n` +
                 `if [ "$2" != "--payload-dir" ]; then sleep 1; echo '${missingPayloadResultJson()}'; exit 1; fi\n` +
-                `echo '${startResultJson("start")}'\nexit 0\n`,
+                `sleep 2\necho '${startResultJson("start")}'\nexit 0\n`,
         );
         chmodSync(binary, 0o700);
         const LOOKUP_MS = 500;
-        const AGGREGATE_MS = 20_000;
+        const AGGREGATE_MS = 3_000;
         try {
             const policy = policyFor({
                 env: { XDG_DATA_HOME: root },
@@ -434,14 +441,15 @@ describe("native invocation mapping", () => {
             const result = await policy.start();
             const elapsed = Date.now() - started;
 
-            expect(result.reason).toBe("started");
             // Both invocations happened, so the retry really did run.
             expect(readFileSync(invocationLog, "utf8").trim().split("\n")).toEqual([
                 "start",
                 "start --payload-dir /qualified/package",
             ]);
-            // The whole command stayed inside one aggregate rather than two.
-            expect(elapsed).toBeLessThan(AGGREGATE_MS);
+            // A fresh aggregate would let the retry return `started` after about 3.5 seconds.
+            expect(result.reason).toBe("startup_timeout");
+            expect(elapsed).toBeGreaterThanOrEqual(AGGREGATE_MS - 100);
+            expect(elapsed).toBeLessThan(AGGREGATE_MS + 500);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -571,6 +579,44 @@ describe("native invocation mapping", () => {
                         remediation,
                     });
                     // The rendered result must round-trip through the strict parser.
+                    expect(() => parseDaemonResult(JSON.stringify(result))).not.toThrow();
+                }
+            } finally {
+                rmSync(root, { recursive: true, force: true });
+            }
+        }
+    });
+
+    test("a component still starting carries the state its promoted reason requires", async () => {
+        const cases = [
+            { component: "transport", record: { state: "starting", reason: "starting" } },
+            { component: "storage", record: { state: "starting", reason: "starting" } },
+            { component: "synapse", record: { state: "starting", reason: "starting" } },
+            { component: "kernel", record: { state: "starting", reason: "starting" } },
+        ] as const;
+        for (const { component, record } of cases) {
+            const root = tempDir(`eidnara-policy-${component}-starting-`);
+            const { binary } = fakeBinary(root);
+            try {
+                const policy = policyFor({
+                    env: { XDG_DATA_HOME: root },
+                    launchTarget: { kind: "test-binary", path: binary },
+                    readinessProbe: async () => ({
+                        ...compatibleObservation(),
+                        readiness: {
+                            transport: { state: "ready", reason: "healthy" },
+                            storage: { state: "ready", reason: "healthy" },
+                            synapse: { state: "ready", reason: "healthy" },
+                            kernel: { state: "ready", reason: "healthy" },
+                            [component]: record,
+                        },
+                    }),
+                });
+                for (const result of [await policy.status(), await policy.doctor()]) {
+                    expect(result.ok).toBe(false);
+                    expect(result.reason).toBe("starting");
+                    expect(result.state).toBe("starting");
+                    expect(result.remediation).toBe("wait_and_retry");
                     expect(() => parseDaemonResult(JSON.stringify(result))).not.toThrow();
                 }
             } finally {
@@ -824,6 +870,110 @@ describe("native invocation mapping", () => {
             rmSync(root, { recursive: true, force: true });
         }
     });
+
+    test("a readiness probe that ignores its budget cannot hold status past the aggregate", async () => {
+        const root = tempDir("eidnara-policy-readiness-budget-");
+        const { binary } = fakeBinary(root);
+        try {
+            const budgets: number[] = [];
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 750,
+                readinessProbe: (budgetMs) => {
+                    budgets.push(budgetMs);
+                    return new Promise<never>(() => {});
+                },
+            });
+            const unprobed = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 750,
+            });
+            for (const command of ["status", "doctor"] as const) {
+                const startedAt = performance.now();
+                const result = await policy[command]();
+                const elapsed = performance.now() - startedAt;
+                // The aggregate deadline drops only readiness; native status remains healthy.
+                expect(elapsed).toBeLessThan(750 + 500);
+                expect(result).toEqual(await unprobed[command]());
+                expect(result.ok).toBe(true);
+                expect(result.reason).toBe("healthy");
+            }
+            expect(budgets).toHaveLength(2);
+            for (const budget of budgets) expect(budget).toBeLessThanOrEqual(750);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a readiness probe whose synchronous prefix outlasts the aggregate is dropped", async () => {
+        const root = tempDir("eidnara-policy-readiness-sync-prefix-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 750,
+                readinessProbe: (budgetMs) => {
+                    const until = performance.now() + budgetMs + 200;
+                    while (performance.now() < until) {
+                        // spin
+                    }
+                    return Promise.resolve({
+                        ...compatibleObservation(),
+                        readiness: {
+                            transport: { state: "ready", reason: "healthy" },
+                            storage: { state: "unavailable", reason: "storage_unavailable" },
+                        },
+                    });
+                },
+            });
+            for (const command of ["status", "doctor"] as const) {
+                const result = await policy[command]();
+                // The stale observation is refused; the native probe's verdict stands alone.
+                expect(result.ok).toBe(true);
+                expect(result.reason).toBe("healthy");
+                expect(
+                    result.checks.find((check) => check.id === "readiness.storage"),
+                ).toBeUndefined();
+            }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a compatibility verdict beyond the reported stage still fails status and doctor", async () => {
+        const root = tempDir("eidnara-policy-verdict-beyond-stage-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                readinessProbe: async () => ({
+                    ...compatibleObservation(),
+                    // The daemon stage passed and the probe stopped there, yet the
+                    // snapshot carries mismatched epochs.
+                    epochs: { ...compatibleObservation().epochs, tagger: 99 },
+                    evaluatedThrough: "daemon" as const,
+                    readiness: { transport: { state: "ready", reason: "healthy" } },
+                }),
+            });
+            for (const result of [await policy.status(), await policy.doctor()]) {
+                expect(result.ok).toBe(false);
+                expect(result.reason).toBe("incompatible_epochs");
+                expect(result.remediation).toBe("align_versions");
+                // The unreached stage is still not asserted as a check.
+                expect(
+                    result.checks.find((check) => check.id === "compatibility.epochs"),
+                ).toBeUndefined();
+                expect(() => parseDaemonResult(JSON.stringify(result))).not.toThrow();
+            }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     test("restart resolves the certified payload before one native transaction", async () => {
         const root = tempDir("eidnara-policy-restart-payload-");
         const invocationLog = path.join(root, "restart-invocations.log");
@@ -1046,6 +1196,38 @@ describe("native invocation mapping", () => {
         }
     }, 20_000);
 
+    test("a demand runs the platform readers once, inside the start's preflight", async () => {
+        const root = tempDir("eidnara-policy-readers-once-");
+        const { binary } = fakeBinary(root);
+        let kernelReads = 0;
+        try {
+            const policy = new HostLifecyclePolicy({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                platformReaders: {
+                    platform: "linux",
+                    arch: "x64",
+                    kernelRelease: () => {
+                        kernelReads += 1;
+                        return "6.1.0";
+                    },
+                    glibcVersion: () => "2.34",
+                    procSelfFdUsable: () => true,
+                },
+                compatibilityProbe: async () => compatibleObservation(),
+                storageProbe: async () => "ready",
+            });
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+            expect(outcome.result.reason).toBe("started");
+            expect(kernelReads).toBe(1);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("restart is one native transaction, never TS stop+start", async () => {
         const root = tempDir("eidnara-policy-restart-");
         const { binary, invocationLog } = fakeBinary(root);
@@ -1226,6 +1408,325 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     });
 
+    test("the demand's compatibility wait is bounded by what the start left of the aggregate", async () => {
+        const root = tempDir("eidnara-policy-compat-residual-");
+        const { binary } = fakeBinary(root, { sleepSeconds: 1 });
+        let storageProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 2_000,
+                compatibilityProbe: () => new Promise<never>(() => {}),
+                storageProbe: async () => {
+                    storageProbes += 1;
+                    return "ready";
+                },
+            });
+            const startedAt = performance.now();
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+            const elapsed = performance.now() - startedAt;
+            expect(elapsed).toBeLessThan(2_000 + 1_000);
+            expect(outcome.result.ok).toBe(false);
+            expect(outcome.result.reason).toBe("native_probe_unavailable");
+            expect(storageProbes).toBe(0);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a deadline beyond the timer limit waits for the result instead of detaching at once", async () => {
+        const root = tempDir("eidnara-policy-huge-deadline-");
+        const { binary } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: async () => "ready",
+            });
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+                // Above the 32-bit signed millisecond limit `setTimeout` honors.
+                deadlineMs: 2_147_483_648 * 4,
+            });
+            expect(outcome.result.reason).toBe("started");
+            expect(outcome.storage).toBe("ready");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a compatibility probe that ignores its budget is bounded by the policy aggregate", async () => {
+        const root = tempDir("eidnara-policy-probe-hang-");
+        const { binary, invocationLog } = fakeBinary(root);
+        let storageProbes = 0;
+        let compatibilityProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 750,
+                compatibilityProbe: () => {
+                    compatibilityProbes += 1;
+                    return new Promise<never>(() => {});
+                },
+                storageProbe: async () => {
+                    storageProbes += 1;
+                    return "ready";
+                },
+            });
+            const startedAt = performance.now();
+            // No caller deadline: the policy's own aggregate must end the wait,
+            // and expiring it is an unproven claim rather than a detachment.
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+            expect(performance.now() - startedAt).toBeLessThan(750 + 1_000);
+            expect(outcome.result.ok).toBe(false);
+            expect(outcome.result.reason).toBe("native_probe_unavailable");
+            expect(outcome.authenticatedDaemonId).toBeUndefined();
+            expect(outcome.storage).toBeNull();
+            expect(storageProbes).toBe(0);
+            expect(invocations(invocationLog)).toEqual(["start"]);
+
+            // The expired probe was evicted, so the next demand starts a fresh one.
+            await policy.demandStart({ origin: "managed-default", capability: "context" });
+            expect(compatibilityProbes).toBe(2);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a compatibility probe outlived by a restart is rejected and not joined", async () => {
+        const root = tempDir("eidnara-policy-probe-generation-");
+        const { binary, invocationLog } = fakeBinary(root);
+        const releases: Array<() => void> = [];
+        let storageProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                compatibilityProbe: () =>
+                    new Promise((resolve) => {
+                        releases.push(() => resolve(compatibleObservation()));
+                    }),
+                storageProbe: async () => {
+                    storageProbes += 1;
+                    return "ready";
+                },
+            });
+            const first = policy.demandStart({ origin: "managed-default", capability: "context" });
+            while (releases.length === 0) await new Promise((r) => setTimeout(r, 5));
+
+            // Restart replaces the daemon while its compatibility probe is in flight.
+            const restarted = await policy.restart();
+            expect(restarted.reason).toBe("started");
+
+            // The later demand starts a probe against the new incarnation.
+            const second = policy.demandStart({ origin: "managed-default", capability: "context" });
+            while (releases.length < 2) await new Promise((r) => setTimeout(r, 5));
+            expect(releases).toHaveLength(2);
+
+            for (const release of releases) release();
+            const [a, b] = await Promise.all([first, second]);
+
+            expect(a.result.ok).toBe(false);
+            expect(a.result.reason).toBe("native_probe_unavailable");
+            expect(a.authenticatedDaemonId).toBeUndefined();
+            expect(b.result.ok).toBe(true);
+            expect(b.storage).toBe("ready");
+            // Only the demand certified against the live incarnation reached storage.
+            expect(storageProbes).toBe(1);
+            expect(invocations(invocationLog)).toEqual(["start", "restart", "start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a start that finds the daemon already running does not invalidate a pending probe", async () => {
+        const root = tempDir("eidnara-policy-probe-already-running-");
+        const invocationLog = path.join(root, "already-running-invocations.log");
+        const binary = path.join(root, "already-running-eidnara-host.sh");
+        const alreadyRunning = JSON.stringify({
+            ...JSON.parse(startResultJson("start")),
+            reason: "already_running",
+        });
+        writeFileSync(
+            binary,
+            `#!/bin/sh\necho "$1" >> ${invocationLog}\n` +
+                `if [ "$(wc -l < ${invocationLog})" -gt 1 ]; then echo '${alreadyRunning}'; else echo '${startResultJson("start")}'; fi\nexit 0\n`,
+        );
+        chmodSync(binary, 0o700);
+        let compatibilityProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                compatibilityProbe: async () => {
+                    compatibilityProbes += 1;
+                    await new Promise((resolve) => setTimeout(resolve, 1_000));
+                    return compatibleObservation();
+                },
+            });
+            const first = policy.demandStart({ origin: "managed-default", capability: "context" });
+            // The second demand runs after the first start settles but before
+            // its compatibility probe completes, so its start answers `already_running`.
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            const second = policy.demandStart({ origin: "managed-default", capability: "context" });
+            const [a, b] = await Promise.all([first, second]);
+            expect(invocations(invocationLog)).toEqual(["start", "start"]);
+            expect(a.result.ok).toBe(true);
+            expect(b.result.ok).toBe(true);
+            expect(compatibilityProbes).toBe(1);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a mutation whose child never ran does not invalidate a pending probe", async () => {
+        const root = tempDir("eidnara-policy-probe-no-child-");
+        const { binary, invocationLog } = fakeBinary(root);
+        let release: () => void = () => {};
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                // A relative payload directory is rejected before any spawn.
+                payloadDirFallback: () => "relative/package",
+                compatibilityProbe: () =>
+                    new Promise((resolve) => {
+                        release = () => resolve(compatibleObservation());
+                    }),
+            });
+            const demand = policy.demandStart({ origin: "managed-default", capability: "context" });
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const restarted = await policy.restart();
+            expect(restarted.reason).toBe("internal_error");
+            expect(restarted.effects).toEqual({ stop_committed: false, start_committed: false });
+
+            release();
+            const outcome = await demand;
+            // The daemon was left exactly as the start found it, so the probe stands.
+            expect(outcome.result.ok).toBe(true);
+            expect(outcome.result.reason).toBe("started");
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a restart that committed no effects does not invalidate a pending probe", async () => {
+        const root = tempDir("eidnara-policy-probe-restart-no-effects-");
+        const invocationLog = path.join(root, "no-effects-invocations.log");
+        const binary = path.join(root, "no-effects-eidnara-host.sh");
+        // `restart` fails before touching the daemon and says so in its effects.
+        const failedRestart = JSON.stringify({
+            ...JSON.parse(startResultJson("restart")),
+            ok: false,
+            reason: "authentication_failed",
+            remediation: "inspect_daemon_process",
+            effects: { stop_committed: false, start_committed: false },
+            versions: { ...JSON.parse(startResultJson("restart")).versions, proof: null },
+        });
+        writeFileSync(
+            binary,
+            `#!/bin/sh\necho "$1" >> ${invocationLog}\n` +
+                `if [ "$1" = "restart" ]; then echo '${failedRestart}'; exit 1; fi\n` +
+                `echo '${startResultJson("start")}'\nexit 0\n`,
+        );
+        chmodSync(binary, 0o700);
+        let release: () => void = () => {};
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                compatibilityProbe: () =>
+                    new Promise((resolve) => {
+                        release = () => resolve(compatibleObservation());
+                    }),
+            });
+            const demand = policy.demandStart({ origin: "managed-default", capability: "context" });
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const restarted = await policy.restart();
+            expect(restarted.reason).toBe("authentication_failed");
+            expect(restarted.effects).toEqual({ stop_committed: false, start_committed: false });
+
+            release();
+            const outcome = await demand;
+            expect(outcome.result.ok).toBe(true);
+            expect(outcome.result.reason).toBe("started");
+            expect(invocations(invocationLog)).toEqual(["start", "restart"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a fallback lookup that exhausts the budget after a found payload is a timeout", async () => {
+        const root = tempDir("eidnara-policy-fallback-exhausts-");
+        const invocationLog = path.join(root, "exhaust-invocations.log");
+        const binary = path.join(root, "exhaust-eidnara-host.sh");
+        writeFileSync(
+            binary,
+            `#!/bin/sh\necho "$*" >> ${invocationLog}\necho '${missingPayloadResultJson()}'\nexit 1\n`,
+        );
+        chmodSync(binary, 0o700);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 500,
+                payloadDirFallback: () => {
+                    const until = Date.now() + 700;
+                    while (Date.now() < until) {
+                        // spin
+                    }
+                    return "/qualified/package";
+                },
+            });
+            const result = await policy.start();
+            // The found payload disproves `native_payload_missing`, but no retry budget remains.
+            expect(result.reason).toBe("startup_timeout");
+            expect(result.effects).toBeNull();
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a deadline spent before spawn reports known effects, not unknown ones", async () => {
+        const root = tempDir("eidnara-policy-pre-spawn-timeout-");
+        const { binary, invocationLog } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 300,
+            });
+            // Serializing this envelope exceeds the aggregate deadline before any child exists.
+            const slowEnvelope = {
+                toJSON() {
+                    const until = performance.now() + 400;
+                    while (performance.now() < until) {
+                        // spin
+                    }
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            const restarted = await policy.restart(slowEnvelope);
+            expect(restarted.reason).toBe("startup_timeout");
+            // No process existed, so both effects are known false rather than null.
+            expect(restarted.effects).toEqual({ stop_committed: false, start_committed: false });
+            expect(invocations(invocationLog)).toEqual([]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("a failed compatibility probe becomes a typed closed result, not a raw rejection", async () => {
         const root = tempDir("eidnara-policy-probe-failure-");
         const { binary, invocationLog } = fakeBinary(root);
@@ -1252,6 +1753,43 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(outcome.result.ok).toBe(false);
             expect(outcome.result.reason).toBe("native_probe_unavailable");
             expect(outcome.result.remediation).toBe("run_daemon_restart");
+            expect(outcome.authenticatedDaemonId).toBeUndefined();
+            expect(outcome.storage).toBeNull();
+            expect(storageProbes).toBe(0);
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("managed demand without a compatibility probe fails closed", async () => {
+        const root = tempDir("eidnara-policy-no-compat-probe-");
+        const { binary, invocationLog } = fakeBinary(root);
+        let storageProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                compatibilityProbe: undefined,
+                storageProbe: async () => {
+                    storageProbes += 1;
+                    return "ready";
+                },
+            });
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+
+            // The native start succeeded, but nothing certified the incarnation.
+            // A certified daemon ID is required before probing storage;
+            // otherwise `undefined` disables client fencing.
+            expect(outcome.result.ok).toBe(false);
+            expect(outcome.result.reason).toBe("native_probe_unavailable");
+            expect(outcome.result.remediation).toBe("run_daemon_restart");
+            // The native start's `proof: "current"` is withdrawn with its success.
+            expect(outcome.result.versions.proof).toBeNull();
+            expect(() => parseDaemonResult(JSON.stringify(outcome.result))).not.toThrow();
             expect(outcome.authenticatedDaemonId).toBeUndefined();
             expect(outcome.storage).toBeNull();
             expect(storageProbes).toBe(0);
@@ -1359,6 +1897,76 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(b.result.reason).toBe("started");
             expect(c.result.reason).toBe("started");
             expect(a.storage).toBe("ready");
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("demands coalesce only when their startup envelopes are the same request", async () => {
+        const root = tempDir("eidnara-policy-coalesce-envelope-");
+        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: async () => "ready",
+            });
+            const [a, b, c, d] = await Promise.all([
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: { schema: 1, credentials: { A: "1", B: "2" } },
+                }),
+                // Same envelope, different key order: one request, so it joins.
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: { schema: 1, credentials: { B: "2", A: "1" } },
+                }),
+                // An optional field set to `undefined` is omitted on the wire, so requests with and without the field join.
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: { schema: 1, credentials: { A: "1", B: "2" }, pi: undefined },
+                }),
+                // Different credentials require a separate native `start` request.
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: { schema: 1, credentials: { A: "1", B: "changed" } },
+                }),
+            ]);
+            expect(a.result.reason).toBe("started");
+            expect(b.result.reason).toBe("started");
+            expect(c.result.reason).toBe("started");
+            expect(d.result.reason).toBe("started");
+            expect(invocations(invocationLog)).toEqual(["start", "start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("an omitted envelope coalesces with an explicit copy of the default", async () => {
+        const root = tempDir("eidnara-policy-coalesce-default-envelope-");
+        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                defaultStartupEnvelope: { schema: 1, credentials: { KEY: "default" } },
+                storageProbe: async () => "ready",
+            });
+            const [a, b] = await Promise.all([
+                policy.demandStart({ origin: "managed-default", capability: "context" }),
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: { schema: 1, credentials: { KEY: "default" } },
+                }),
+            ]);
+            expect(a.result.reason).toBe("started");
+            expect(b.result.reason).toBe("started");
             expect(invocations(invocationLog)).toEqual(["start"]);
         } finally {
             rmSync(root, { recursive: true, force: true });
@@ -1477,11 +2085,13 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         const root = tempDir("eidnara-policy-storage-abort-");
         const { binary } = fakeBinary(root);
         const controller = new AbortController();
+        let probeSignal: AbortSignal | undefined;
         try {
             const policy = policyFor({
                 env: { XDG_DATA_HOME: root },
                 launchTarget: { kind: "test-binary", path: binary },
-                storageProbe: () => {
+                storageProbe: (_budgetMs, _expectedDaemonId, signal) => {
+                    probeSignal = signal;
                     queueMicrotask(() => controller.abort());
                     return new Promise<never>(() => {});
                 },
@@ -1497,6 +2107,8 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 name: "WaiterDetachedError",
                 cause_kind: "aborted",
             });
+            expect(probeSignal).toBe(controller.signal);
+            expect(probeSignal?.aborted).toBe(true);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -1546,6 +2158,233 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             // detach rather than accept the start that lands right after.
             expect(accepted).toBeNull();
             expect(kind).toBe("deadline");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("an envelope whose serialization spends the deadline never spawns a start", async () => {
+        const root = tempDir("eidnara-policy-slow-envelope-key-");
+        const { binary, invocationLog } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+            });
+            // The coalescing key serializes the envelope before any start exists.
+            const slowEnvelope = {
+                toJSON() {
+                    const until = performance.now() + 300;
+                    while (performance.now() < until) {
+                        // spin
+                    }
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            await expect(
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    deadlineMs: 150,
+                    startupEnvelope: slowEnvelope,
+                }),
+            ).rejects.toMatchObject({ name: "WaiterDetachedError", cause_kind: "deadline" });
+            // A caller that had already expired must not have launched a child.
+            expect(invocations(invocationLog)).toEqual([]);
+            expect(policy.inflightStartCount).toBe(0);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("an envelope whose serialization spends the aggregate never spawns a start", async () => {
+        const root = tempDir("eidnara-policy-slow-envelope-aggregate-");
+        const { binary, invocationLog } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 200,
+            });
+            // The coalescing key serializes first, so it consumes the aggregate before launcher serialization.
+            let serialized = false;
+            const slowEnvelope = {
+                toJSON() {
+                    if (!serialized) {
+                        serialized = true;
+                        const until = performance.now() + 350;
+                        while (performance.now() < until) {
+                            // spin
+                        }
+                    }
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            // No caller deadline: the policy aggregate is the only bound.
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+                startupEnvelope: slowEnvelope,
+            });
+            expect(outcome.result.reason).toBe("startup_timeout");
+            expect(outcome.result.ok).toBe(false);
+            expect(invocations(invocationLog)).toEqual([]);
+            expect(policy.inflightStartCount).toBe(0);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("the shared start is bounded by what the demand's aggregate has left", async () => {
+        const root = tempDir("eidnara-policy-start-within-aggregate-");
+        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 600,
+            });
+            // Key serialization consumes 300 ms of the demand's 600 ms aggregate; the start receives a fresh aggregate.
+            let serialized = false;
+            const slowEnvelope = {
+                toJSON() {
+                    if (!serialized) {
+                        serialized = true;
+                        const until = performance.now() + 300;
+                        while (performance.now() < until) {
+                            // spin
+                        }
+                    }
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            const startedAt = performance.now();
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+                startupEnvelope: slowEnvelope,
+            });
+            // The demand answers at its own aggregate, not after the start's.
+            expect(performance.now() - startedAt).toBeLessThan(600 + 250);
+            expect(outcome.result.reason).toBe("startup_timeout");
+            // The start launched despite the demand timeout.
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a stateful envelope serializer cannot coalesce demands that would launch differently", async () => {
+        const root = tempDir("eidnara-policy-stateful-envelope-");
+        const stdinLog = path.join(root, "stdin.log");
+        const binary = path.join(root, "stateful-eidnara-host.sh");
+        writeFileSync(
+            binary,
+            `#!/bin/sh\ncat >> ${stdinLog}\necho >> ${stdinLog}\nsleep 1\necho '${startResultJson("start")}'\nexit 0\n`,
+        );
+        chmodSync(binary, 0o700);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: async () => "ready",
+            });
+            // `shifty` returns one credential set on its first serialization and another on later serializations.
+            const shifty = (first: string, later: string) => {
+                let calls = 0;
+                return {
+                    toJSON() {
+                        calls += 1;
+                        return { schema: 1, credentials: { KEY: calls === 1 ? first : later } };
+                    },
+                } as unknown as NativeStartupEnvelope;
+            };
+            const [a, b] = await Promise.all([
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: shifty("same", "alpha"),
+                }),
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: shifty("same", "beta"),
+                }),
+            ]);
+            expect(a.result.reason).toBe("started");
+            expect(b.result.reason).toBe("started");
+            // The two demands use their first serialization as the coalescing key, and the child receives that snapshot rather than a second serialization.
+            const received = readFileSync(stdinLog, "utf8").trim().split("\n");
+            expect(received).toEqual([JSON.stringify({ schema: 1, credentials: { KEY: "same" } })]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("an envelope serializer that aborts the caller never spawns a start", async () => {
+        const root = tempDir("eidnara-policy-envelope-aborts-");
+        const { binary, invocationLog } = fakeBinary(root);
+        const controller = new AbortController();
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+            });
+            const abortingEnvelope = {
+                toJSON() {
+                    controller.abort();
+                    return { schema: 1 };
+                },
+            } as unknown as NativeStartupEnvelope;
+            await expect(
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    signal: controller.signal,
+                    startupEnvelope: abortingEnvelope,
+                }),
+            ).rejects.toMatchObject({ name: "WaiterDetachedError", cause_kind: "aborted" });
+            expect(invocations(invocationLog)).toEqual([]);
+            expect(policy.inflightStartCount).toBe(0);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("an envelope with no JSON form never shares a start", async () => {
+        const root = tempDir("eidnara-policy-cyclic-envelope-");
+        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: async () => "ready",
+            });
+            // A cyclic object's fallback identity can equal a valid envelope's literal `self` value.
+            const cyclic: Record<string, unknown> = { schema: 1 };
+            cyclic.credentials = { KEY: "x" };
+            cyclic.self = cyclic;
+            const valid = {
+                schema: 1,
+                credentials: { KEY: "x" },
+                self: "[Circular]",
+            } as unknown as NativeStartupEnvelope;
+            const [a, b] = await Promise.all([
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: valid,
+                }),
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: cyclic as unknown as NativeStartupEnvelope,
+                }),
+            ]);
+            expect(a.result.reason).toBe("started");
+            // The launcher rejects the unserializable envelope before any spawn.
+            expect(b.result.reason).toBe("internal_error");
+            expect(invocations(invocationLog)).toEqual(["start"]);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -1664,6 +2503,33 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("a hanging storage probe under the policy's own cap degrades to unavailable", async () => {
+        const root = tempDir("eidnara-policy-storage-hard-cap-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: () => new Promise<never>(() => {}),
+            });
+            // No caller deadline: the storage cap expiring makes storage
+            // unavailable rather than detaching the caller.
+            const startedAt = performance.now();
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+            expect(performance.now() - startedAt).toBeGreaterThanOrEqual(
+                STORAGE_HARD_BUDGET_MS - 50,
+            );
+            expect(outcome.result.reason).toBe("started");
+            expect(outcome.storage).toBe("unavailable");
+            expect(outcome.authenticatedDaemonId).toEqual(new Uint8Array([7]));
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("a rejecting storage probe still returns the successful start result", async () => {
         const root = tempDir("eidnara-policy-storage-reject-");
         const { binary } = fakeBinary(root);
@@ -1705,6 +2571,70 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             });
             expect(outcome.result.reason).toBe("started");
             expect(outcome.storage).toBe("unavailable");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a storage probe whose synchronous prefix outlasts the caller deadline detaches", async () => {
+        const root = tempDir("eidnara-policy-storage-sync-prefix-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                storageProbe: () => {
+                    const until = performance.now() + 1_200;
+                    while (performance.now() < until) {
+                        // spin
+                    }
+                    return Promise.resolve("ready" as const);
+                },
+            });
+            await expect(
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    deadlineMs: 1_000,
+                }),
+            ).rejects.toMatchObject({
+                name: "WaiterDetachedError",
+                cause_kind: "deadline",
+            });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a storage probe that answers after the caller deadline still detaches", async () => {
+        const root = tempDir("eidnara-policy-storage-at-deadline-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                // The probe blocks the event loop past its deadline so its resolution microtask runs before the policy deadline timer.
+                storageProbe: (budgetMs) =>
+                    new Promise((resolve) => {
+                        const budgetEndsAt = performance.now() + budgetMs;
+                        setTimeout(() => {
+                            while (performance.now() < budgetEndsAt + 30) {
+                                // spin
+                            }
+                            resolve("starting");
+                        }, budgetMs - 20);
+                    }),
+            });
+            await expect(
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    deadlineMs: 800,
+                }),
+            ).rejects.toMatchObject({
+                name: "WaiterDetachedError",
+                cause_kind: "deadline",
+            });
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -1774,20 +2704,20 @@ describe("native result labeling and indeterminate effects", () => {
                 outerAggregateMs: 250,
             });
             const expected = {
-                start: "startup_timeout",
-                restart: "startup_timeout",
-                stop: "shutdown_timeout",
+                start: { reason: "startup_timeout", state: "stopped" },
+                restart: { reason: "startup_timeout", state: "stopped" },
+                // `shutdown_timeout` requires `stopping`; `stopped` fails parser validation.
+                stop: { reason: "shutdown_timeout", state: "stopping" },
                 // A read-only probe ran out of time; no startup was attempted.
-                status: "native_probe_unavailable",
-                doctor: "native_probe_unavailable",
+                status: { reason: "native_probe_unavailable", state: "stopped" },
+                doctor: { reason: "native_probe_unavailable", state: "stopped" },
             } as const;
             for (const op of ["start", "restart", "stop", "status", "doctor"] as const) {
                 const result = await policy[op]();
                 expect(result.command).toBe(op);
-                expect(result.reason).toBe(expected[op]);
-                // The classifier state travels unchanged: these roots are
-                // wholly absent.
-                expect(result.state).toBe("stopped");
+                expect(result.reason).toBe(expected[op].reason);
+                expect(result.state).toBe(expected[op].state);
+                expect(() => parseDaemonResult(JSON.stringify(result))).not.toThrow();
             }
         } finally {
             rmSync(root, { recursive: true, force: true });

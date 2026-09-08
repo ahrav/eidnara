@@ -214,10 +214,31 @@ describe("EidnaraConfigSchema", () => {
             ).toEqual({ subagent_extensions: ["provider-package", "./local.ts"] });
         });
 
+        it("fills the default for a per-model percentage map that omits it", () => {
+            expect(
+                EidnaraConfigSchema.parse({ execute_threshold_percentage: { "openai/gpt-4": 80 } })
+                    .execute_threshold_percentage,
+            ).toEqual({ default: 65, "openai/gpt-4": 80 });
+            expect(
+                EidnaraConfigSchema.parse({
+                    execute_threshold_percentage: { default: 70, "openai/gpt-4": 80 },
+                }).execute_threshold_percentage,
+            ).toEqual({ default: 70, "openai/gpt-4": 80 });
+        });
+
         it("accepts and normalizes 2-letter ISO 639-1 language codes", () => {
             expect(EidnaraConfigSchema.parse({ language: "tr" }).language).toBe("tr");
             expect(EidnaraConfigSchema.parse({ language: "  ES " }).language).toBe("es");
             expect(EidnaraConfigSchema.parse({ language: "ja" }).language).toBe("ja");
+        });
+
+        it("rejects language values that are not two letters or do not name a language", () => {
+            for (const language of ["english", "e", "t1", "", "zz"]) {
+                const result = EidnaraConfigSchema.safeParse({ language });
+                expect([language, result.success]).toEqual([language, false]);
+                // The shape check aborts before the ISO lookup so a malformed value reports one issue.
+                expect([language, result.error?.issues.length]).toEqual([language, 1]);
+            }
         });
 
         it("parses per-model cache_ttl objects", () => {
@@ -269,14 +290,30 @@ describe("EidnaraConfigSchema", () => {
                 "provider//model",
                 "provider/model/",
                 "provider/ model",
+                "provider /model",
+                " provider/model",
+                "provider/model ",
                 "*/model",
+                "*",
+                "\u00a0model",
             ];
             for (const key of malformedKeys) {
-                expect(
+                expect([
+                    key,
                     EidnaraConfigSchema.safeParse({
                         prompt_surface: { models: { [key]: "light" } },
                     }).success,
-                ).toBe(false);
+                ]).toEqual([key, false]);
+            }
+
+            const acceptedKeys = ["gpt-4", "openai/gpt-4", "openai/*", "openai/gpt/4/x", "a b/c d"];
+            for (const key of acceptedKeys) {
+                expect([
+                    key,
+                    EidnaraConfigSchema.safeParse({
+                        prompt_surface: { models: { [key]: "light" } },
+                    }).success,
+                ]).toEqual([key, true]);
             }
 
             expect(
@@ -300,6 +337,30 @@ describe("EidnaraConfigSchema", () => {
             expect(() =>
                 EidnaraConfigSchema.parse({ pi: { subagent_extensions: ["  "] } }),
             ).toThrow();
+        });
+
+        it("rejects whitespace-only trimmed path and model fields but keeps trimming valid ones", () => {
+            const blank = [
+                { mural: { model: "   " } },
+                { models: { window_overlay_path: "\t" } },
+                { subc: { connection_file: " " } },
+            ];
+            for (const input of blank) {
+                expect([input, EidnaraConfigSchema.safeParse(input).success]).toEqual([
+                    input,
+                    false,
+                ]);
+            }
+
+            expect(EidnaraConfigSchema.parse({ mural: { model: " m " } }).mural.model).toBe("m");
+            expect(
+                EidnaraConfigSchema.parse({ models: { window_overlay_path: " ./o.json " } }).models
+                    ?.window_overlay_path,
+            ).toBe("./o.json");
+            expect(
+                EidnaraConfigSchema.parse({ pi: { subagent_extensions: [" ext "] } }).pi
+                    ?.subagent_extensions,
+            ).toEqual(["ext"]);
         });
 
         it("rejects protected_tags greater than 100", () => {

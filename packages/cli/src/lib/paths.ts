@@ -1,6 +1,6 @@
-import { existsSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { existsSync, lstatSync, statSync } from "node:fs";
+import os from "node:os";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
 // ============================================================================
@@ -12,7 +12,8 @@ export interface ConfigPaths {
     /* */
     opencodeConfig: string;
     opencodeConfigFormat: "json" | "jsonc" | "none";
-    eidnaraConfig: string;
+    /** Absent when the environment provides no absolute home, so no user tier exists to read or write. */
+    eidnaraConfig: string | undefined;
     /* */
     omoConfig: string | null;
     tuiConfig: string;
@@ -26,10 +27,14 @@ export function getOpenCodeConfigDir(): string {
     const envDir = process.env.OPENCODE_CONFIG_DIR?.trim();
     if (envDir) return envDir;
     if (process.platform === "win32") {
-        return join(homedir(), ".config", "opencode");
+        return join(os.homedir(), ".config", "opencode");
     }
-    const xdgConfig = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-    return join(xdgConfig, "opencode");
+    // XDG requires an absolute value; a relative one would resolve against this process's cwd.
+    const xdgConfig = process.env.XDG_CONFIG_HOME;
+    return join(
+        xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(os.homedir(), ".config"),
+        "opencode",
+    );
 }
 
 function findOmoConfig(configDir: string): string | null {
@@ -45,6 +50,19 @@ function findOmoConfig(configDir: string): string | null {
     return null;
 }
 
+/**
+ * A dangling symlink counts as a present config entry. Writes follow the link to
+ * its target, so selecting the link keeps a dotfile-managed config in place
+ * instead of creating a higher-precedence sibling that shadows it.
+ */
+function configEntryPresent(path: string): boolean {
+    try {
+        return lstatSync(path, { throwIfNoEntry: false }) !== undefined;
+    } catch {
+        return false;
+    }
+}
+
 export function detectConfigPaths(): ConfigPaths {
     const configDir = getOpenCodeConfigDir();
 
@@ -55,10 +73,10 @@ export function detectConfigPaths(): ConfigPaths {
 
     const jsoncPath = join(configDir, "opencode.jsonc");
     const jsonPath = join(configDir, "opencode.json");
-    if (existsSync(jsoncPath)) {
+    if (configEntryPresent(jsoncPath)) {
         opencodeConfig = jsoncPath;
         opencodeConfigFormat = "jsonc";
-    } else if (existsSync(jsonPath)) {
+    } else if (configEntryPresent(jsonPath)) {
         opencodeConfig = jsonPath;
         opencodeConfigFormat = "json";
     } else {
@@ -69,11 +87,11 @@ export function detectConfigPaths(): ConfigPaths {
 
     const tuiJsoncPath = join(configDir, "tui.jsonc");
     const tuiJsonPath = join(configDir, "tui.json");
-    if (existsSync(tuiJsoncPath)) {
+    if (configEntryPresent(tuiJsoncPath)) {
         // OpenCode gives tui.jsonc precedence over tui.json, so write to an existing tui.jsonc.
         tuiConfig = tuiJsoncPath;
         tuiConfigFormat = "jsonc";
-    } else if (existsSync(tuiJsonPath)) {
+    } else if (configEntryPresent(tuiJsonPath)) {
         tuiConfig = tuiJsonPath;
         tuiConfigFormat = "json";
     } else {
@@ -97,9 +115,22 @@ export function detectConfigPaths(): ConfigPaths {
 // Pi paths
 // ============================================================================
 
-function envFirstHomeDir(): string {
+/**
+ * The home the harnesses themselves resolve: `os.homedir()` on Windows (which reads `USERPROFILE`),
+ * `HOME` first elsewhere. `os.homedir()` throws for a UID without a passwd entry; an empty string
+ * then yields no home-relative paths instead of aborting detection.
+ */
+export function envFirstHomeDir(): string {
+    const osHome = () => {
+        try {
+            return os.homedir();
+        } catch {
+            return "";
+        }
+    };
+    if (process.platform === "win32") return osHome();
     const home = process.env.HOME?.trim();
-    return home || homedir();
+    return home || osHome();
 }
 
 /* */
@@ -119,8 +150,8 @@ export function getPiCacheRoot(): string {
     return join(dirname(getPiAgentDir()), "cache");
 }
 
-/** Shared Eidnara user config, independent of any harness agent settings dir. */
-export function getSharedUserConfigPath(): string {
+/** Shared Eidnara user config, independent of any harness agent settings dir; `undefined` when the environment provides no absolute home. */
+export function getSharedUserConfigPath(): string | undefined {
     return resolveEidnaraUserConfigPath();
 }
 
@@ -167,7 +198,8 @@ export function resolveOmpPaths(): OmpPaths {
     let dataRoot = configRoot;
     if (canUseXdg) {
         const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
-        if (xdgDataHome) {
+        // XDG requires an absolute value; a relative one would resolve against this process's cwd.
+        if (xdgDataHome && isAbsolute(xdgDataHome)) {
             const appRoot = join(xdgDataHome, "omp");
             const candidate = profile ? join(appRoot, "profiles", profile) : appRoot;
             if (existsSync(candidate)) dataRoot = candidate;

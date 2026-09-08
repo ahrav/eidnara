@@ -6,8 +6,9 @@ import {
     DCP_CONFLICT_REASON,
     detectConflicts,
     hasOmoPlugin,
+    openCodeConfigLayerPaths,
+    pluginEntriesOutside,
     projectOpenCodeConfigPaths,
-    projectPluginEntries,
 } from "@eidnara/opencode/shared/conflict-detector";
 import { collectOmoConfigPaths, fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import {
@@ -25,6 +26,7 @@ import {
 import { type AgentBlockKind, pruneInvalidAgentFields } from "../lib/agent-config";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { type EidnaraModes, projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import { restoreFiles, snapshotFiles } from "../lib/file-snapshot";
 import {
     assertJsoncConfigsParseable,
     readJsoncConfigForUpdate,
@@ -361,7 +363,7 @@ export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
  * first-time branch.
  */
 export function preflightConfigPaths(
-    paths: ConfigPaths,
+    paths: ConfigPaths & { eidnaraConfig: string },
     directory: string,
     options: { omoRepairReachable: boolean },
 ): string[] {
@@ -448,7 +450,16 @@ export async function runSetup(dryRun = false): Promise<number> {
         log.warn("You can configure models manually in eidnara.jsonc later");
     }
 
-    const paths = detectConfigPaths();
+    const detected = detectConfigPaths();
+    if (detected.eidnaraConfig === undefined) {
+        log.error(
+            "No user configuration directory: set HOME (or XDG_CONFIG_HOME) to an absolute path so eidnara.jsonc has a location.",
+        );
+        outro("Setup stopped.");
+        return 1;
+    }
+    // The guard above narrows the user config path for every write and preflight that follows.
+    const paths = { ...detected, eidnaraConfig: detected.eidnaraConfig };
     // Shared Eidnara config can come from Pi or OMP; only OpenCode config files establish an OpenCode setup. commentlint: allow(JUDGE)
     // Project-level OpenCode configs are included because `detectConflicts` and `fixConflicts` read and repair them.
     const hadExistingSetup =
@@ -572,78 +583,104 @@ export async function runSetup(dryRun = false): Promise<number> {
     const disableNativeCompaction = compactionEnabled && !keepNativeCompaction;
     let repairIncomplete = false;
     if (!dryRun) {
-        addPluginToOpenCodeConfig(
-            paths.opencodeConfig,
-            paths.opencodeConfigFormat,
-            removeDcp,
-            disableNativeCompaction,
-            projectPluginEntries(process.cwd()),
-        );
-        log.success(`Plugin added to ${paths.opencodeConfig}`);
-        if (removeDcp) log.success("Removed opencode-dcp from plugin list");
-        if (disableNativeCompaction) {
-            log.info("Disabled built-in compaction (auto=false, prune=false)");
-            log.message("Eidnara handles context management — built-in compaction would interfere");
-        } else if (keepNativeCompaction) {
-            log.warn(
-                "Left built-in compaction unchanged because automatic conflict fixes were declined — Eidnara stays disabled until compaction.auto and compaction.prune are false",
+        // Every file a later step may write is captured first, so a failure part-way (a read-only
+        // directory, for example) restores the OpenCode registration and compaction flags instead
+        // of leaving the plugin active without its config.
+        const snapshot = snapshotFiles([
+            ...preflightConfigPaths(paths, process.cwd(), { omoRepairReachable }),
+            ...openCodeConfigLayerPaths(process.cwd()),
+        ]);
+        try {
+            addPluginToOpenCodeConfig(
+                paths.opencodeConfig,
+                paths.opencodeConfigFormat,
+                removeDcp,
+                disableNativeCompaction,
+                pluginEntriesOutside(process.cwd(), paths.opencodeConfig),
             );
-        } else {
-            log.info("Compaction-off mode active — leaving native compaction config untouched");
-        }
-
-        if (conflictFix) {
-            const actions = fixConflicts(process.cwd(), conflictFix, {
-                compactionEnabled,
-            });
-            if (actions.length > 0) {
-                for (const action of actions) log.success(action);
-            } else {
-                log.info("No additional conflict changes were needed");
-            }
-            // The fixer edits only files that exist, so an accepted repair can leave a conflict in place
-            // (an OMO plugin entry with no OMO config file, for example); re-detect and say so.
-            const remaining = detectConflicts(process.cwd(), { compactionEnabled });
-            if (remaining.hasConflict) {
-                repairIncomplete = true;
-                log.warn(
-                    "Conflicts remain after the automatic fixes; Eidnara stays disabled until they are resolved:",
-                );
-                for (const reason of remaining.reasons) log.message(`  • ${reason}`);
+            log.success(`Plugin added to ${paths.opencodeConfig}`);
+            if (removeDcp) log.success("Removed opencode-dcp from plugin list");
+            if (disableNativeCompaction) {
+                log.info("Disabled built-in compaction (auto=false, prune=false)");
                 log.message(
-                    "For oh-my-opencode without a config file, add `disabled_hooks` (context-window-monitor, preemptive-compaction, anthropic-context-window-limit-recovery) to its config, then rerun setup.",
+                    "Eidnara handles context management — built-in compaction would interfere",
                 );
+            } else if (keepNativeCompaction) {
+                log.warn(
+                    "Left built-in compaction unchanged because automatic conflict fixes were declined — Eidnara stays disabled until compaction.auto and compaction.prune are false",
+                );
+            } else {
+                log.info("Compaction-off mode active — leaving native compaction config untouched");
             }
-        }
 
-        writeEidnaraConfig(paths.eidnaraConfig, {
-            historianModel,
-            sidekickEnabled,
-            sidekickModel,
-            claudeMax,
-        });
-        log.success(`Config written to ${paths.eidnaraConfig}`);
-        addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
-        log.success(`TUI sidebar plugin added to ${basename(paths.tuiConfig)}`);
-
-        if (disableOmoHooks) {
-            const actions = fixConflicts(
-                process.cwd(),
-                {
-                    compactionAuto: false,
-                    compactionPrune: false,
-                    dcpPlugin: false,
-                    omoPreemptiveCompaction: true,
-                    omoContextWindowMonitor: true,
-                    omoAnthropicRecovery: true,
-                },
-                {
+            if (conflictFix) {
+                const actions = fixConflicts(process.cwd(), conflictFix, {
                     compactionEnabled,
-                },
-            );
-            if (actions.includes("Disabled conflicting oh-my-opencode hooks")) {
-                log.success("Hooks disabled in oh-my-opencode config");
+                });
+                if (actions.length > 0) {
+                    for (const action of actions) log.success(action);
+                } else {
+                    log.info("No additional conflict changes were needed");
+                }
+                // The fixer edits only files that exist, so an accepted repair can leave a conflict in place
+                // (an OMO plugin entry with no OMO config file, for example); re-detect and say so.
+                const remaining = detectConflicts(process.cwd(), { compactionEnabled });
+                if (remaining.hasConflict) {
+                    repairIncomplete = true;
+                    log.warn(
+                        "Conflicts remain after the automatic fixes; Eidnara stays disabled until they are resolved:",
+                    );
+                    for (const reason of remaining.reasons) log.message(`  • ${reason}`);
+                    log.message(
+                        "For oh-my-opencode without a config file, add `disabled_hooks` (context-window-monitor, preemptive-compaction, anthropic-context-window-limit-recovery) to its config, then rerun setup.",
+                    );
+                }
             }
+
+            writeEidnaraConfig(paths.eidnaraConfig, {
+                historianModel,
+                sidekickEnabled,
+                sidekickModel,
+                claudeMax,
+            });
+            log.success(`Config written to ${paths.eidnaraConfig}`);
+            addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
+            log.success(`TUI sidebar plugin added to ${basename(paths.tuiConfig)}`);
+
+            if (disableOmoHooks) {
+                const actions = fixConflicts(
+                    process.cwd(),
+                    {
+                        compactionAuto: false,
+                        compactionPrune: false,
+                        dcpPlugin: false,
+                        omoPreemptiveCompaction: true,
+                        omoContextWindowMonitor: true,
+                        omoAnthropicRecovery: true,
+                    },
+                    {
+                        compactionEnabled,
+                    },
+                );
+                if (actions.includes("Disabled conflicting oh-my-opencode hooks")) {
+                    log.success("Hooks disabled in oh-my-opencode config");
+                }
+            }
+        } catch (error) {
+            log.error(error instanceof Error ? error.message : String(error));
+            try {
+                restoreFiles(snapshot);
+            } catch (rollbackError) {
+                log.error(
+                    rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+                );
+                outro(
+                    "Setup stopped — changes were only partly rolled back; restore the files above by hand.",
+                );
+                return 1;
+            }
+            outro("Setup stopped — rolled back OpenCode changes.");
+            return 1;
         }
     }
 

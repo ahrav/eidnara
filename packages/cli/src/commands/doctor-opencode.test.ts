@@ -8,7 +8,7 @@ import {
     rmSync,
     writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
 import { log } from "../lib/prompts";
@@ -20,6 +20,8 @@ const ENV_KEYS = [
     "XDG_DATA_HOME",
     "PATH",
     "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_DISABLE_AUTOCOMPACT",
 ] as const;
 
@@ -74,6 +76,9 @@ function installIsolatedHome(): { configDir: string; opencodeConfigPath: string 
     process.env.XDG_DATA_HOME = join(root, ".local", "share");
     process.env.PATH = binDir;
     delete process.env.OPENCODE_CONFIG_DIR;
+    // The conflict detector reads these as extra config layers; the host's own config must not leak in.
+    delete process.env.OPENCODE_CONFIG;
+    delete process.env.OPENCODE_CONFIG_CONTENT;
     delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
 
     const opencodeConfigPath = join(configDir, "opencode.jsonc");
@@ -158,7 +163,8 @@ describe("doctor OpenCode conflict repair", () => {
                 compaction?: { auto?: boolean; prune?: boolean };
             };
             expect(repaired.compaction?.auto).toBe(false);
-            expect(repaired.compaction?.prune).toBe(false);
+            // Only `auto` conflicted, so the fixer leaves `prune` untouched.
+            expect(repaired.compaction?.prune).toBeUndefined();
             expect(repaired.plugin).toEqual(["@eidnara/opencode"]);
 
             errors.length = 0;
@@ -225,7 +231,9 @@ describe("doctor OpenCode conflict repair", () => {
             const { configDir, opencodeConfigPath } = installIsolatedHome();
             writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
             writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
-            chmodSync(opencodeConfigPath, 0o444);
+            // The fixer replaces the file through a temporary sibling, so only a read-only
+            // directory refuses the write.
+            chmodSync(configDir, 0o555);
             const cwd = makeTempDir("eidnara-doctor-project-");
             const { errors, successes, restore } = captureDoctorLog();
 
@@ -242,6 +250,7 @@ describe("doctor OpenCode conflict repair", () => {
                 };
                 expect(untouched.compaction?.auto).toBe(true);
             } finally {
+                chmodSync(configDir, 0o755);
                 restore();
             }
         },
@@ -542,6 +551,46 @@ describe("doctor OpenCode read-only checks", () => {
             expect(untouched.compaction?.auto).toBe(true);
         } finally {
             restore();
+        }
+    });
+});
+
+describe("doctor OpenCode without any home directory", () => {
+    it("reports unavailable user-level paths and still checks the project config", async () => {
+        installIsolatedHome();
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), '{ "enabled": true, \n');
+        delete process.env.HOME;
+        delete process.env.XDG_CONFIG_HOME;
+        delete process.env.XDG_DATA_HOME;
+        const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
+            throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
+                code: "ERR_SYSTEM_ERROR",
+            });
+        });
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ cwd });
+
+            expect(code).toBe(1);
+            expect(
+                errors.some((message) =>
+                    message.startsWith("User-level configuration paths are unavailable"),
+                ),
+            ).toBe(true);
+            expect(successes.some((message) => message.startsWith("Eidnara project config:"))).toBe(
+                true,
+            );
+            expect(
+                errors.some((message) =>
+                    message.startsWith("Eidnara project eidnara.jsonc parse failed"),
+                ),
+            ).toBe(true);
+        } finally {
+            restore();
+            homedirSpy.mockRestore();
         }
     });
 });

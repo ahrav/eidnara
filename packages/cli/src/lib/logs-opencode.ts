@@ -1,10 +1,14 @@
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
-import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
-import { readFileTail } from "./fs-utils";
-import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import {
+    type DiagnosticReport,
+    describeProbeText,
+    renderDiagnosticsMarkdown,
+} from "./diagnostics-opencode";
+import { writeNewFile } from "./fs-utils";
+import { capBodyToGithubLimit, codeFenceFor, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
+import { readLogTailLines } from "./log-tail";
 
 /**
  *
@@ -12,6 +16,16 @@ import { filterLogRecords } from "./log-records";
  */
 export function sanitizeLogContent(content: string): string {
     return sanitizeDiagnosticText(content);
+}
+
+/**
+ * A Desktop install reports no version, so absence is decided by the install kind, not the version.
+ * The version text is external process output and is sanitized like any other probe result.
+ */
+function describeOpenCodeInstall(report: DiagnosticReport): string {
+    if (!report.opencodeInstalled) return "not installed";
+    const version = report.opencodeVersion ? describeProbeText(report.opencodeVersion) : null;
+    return `${version ?? "unknown version"} [${report.opencodeInstallKind}]`;
 }
 
 function formatTimestamp(date: Date): string {
@@ -62,9 +76,11 @@ function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
 }
 
 /**
- * With a session selected, only records that name that session survive. An
- * untagged record cannot be attributed, and the plugin writes some per-session
- * failures without a tag, so it fails closed rather than into the bundle.
+ * With a session selected, only records whose first line names that session
+ * survive. An untagged record cannot be attributed, and the plugin writes some
+ * per-session failures without a tag, so it fails closed rather than into the
+ * bundle. Stack frames following an `Error` record have no session tag and
+ * inherit that record's decision.
  */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
@@ -77,39 +93,47 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     });
 }
 
-const ISSUE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
-
-/**
- * A session filter also narrows the rendered report: other sessions' titles,
- * directories, and historian dumps are as much theirs as their log records.
- */
-function narrowReportToSession(report: DiagnosticReport, sessionFilter: string): DiagnosticReport {
+function scopeReportToSession(
+    report: DiagnosticReport,
+    sessionId: string | null,
+): DiagnosticReport {
+    if (!sessionId) return report;
     return {
         ...report,
-        recentSessions: report.recentSessions.filter(
-            (session) => session.sessionId === sessionFilter,
-        ),
+        recentSessions: report.recentSessions.filter((session) => session.sessionId === sessionId),
         historianDumps: {
             ...report.historianDumps,
-            byProject: report.historianDumps.byProject.filter((bucket) =>
-                bucket.sessionIds.includes(sessionFilter),
-            ),
+            byProject: report.historianDumps.byProject
+                .filter((bucket) => bucket.sessionIds.includes(sessionId))
+                .map((bucket) => ({
+                    ...bucket,
+                    primarySessionId: sessionId,
+                    sessionIds: [sessionId],
+                })),
         },
     };
 }
 
 export async function bundleIssueReport(
-    fullReport: DiagnosticReport,
+    report: DiagnosticReport,
     description: string,
     title: string,
     sessionFilter: string | null = null,
 ): Promise<BundledIssueReport> {
-    const report =
-        sessionFilter === null ? fullReport : narrowReportToSession(fullReport, sessionFilter);
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists
-        ? readFileTail(report.logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/)
-        : [];
+    const scopedReport = scopeReportToSession(report, sessionFilter);
+    // A log statted during diagnostics can become unreadable before bundling.
+    let allLogLines: string[] = [];
+    let logReadError: string | null = null;
+    if (report.logFile.exists) {
+        try {
+            allLogLines = readLogTailLines(report.logFile.path);
+        } catch (error) {
+            logReadError = sanitizeDiagnosticText(
+                error instanceof Error ? error.message : String(error),
+            );
+        }
+    }
     const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
@@ -121,10 +145,13 @@ export async function bundleIssueReport(
     const errorScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
     const recentErrorLines = extractRecentErrors(errorScanWindow, 20);
 
-    const configBody = JSON.stringify(sanitizeConfigValue(report.eidnaraConfig.flags), null, 2);
-    const sanitizedConfigPath = sanitizeDiagnosticText(report.configPaths.eidnaraConfig);
+    const sanitizedUserConfigPath = sanitizeDiagnosticText(report.eidnaraConfig.path);
+    const sanitizedProjectConfigPath = sanitizeDiagnosticText(report.projectConfig.path);
     const sanitizedDescription = sanitizeDiagnosticText(description);
     const sanitizedTitle = sanitizeDiagnosticText(title).trim();
+    const historianBlock = historianFailureLines.join("\n");
+    const errorBlock = recentErrorLines.join("\n");
+    const fence = codeFenceFor(historianBlock, errorBlock, recentLog);
 
     const rawBodyMarkdown = [
         ...(sanitizedTitle ? ["## Title", sanitizedTitle, ""] : []),
@@ -135,36 +162,38 @@ export async function bundleIssueReport(
         `- Plugin: v${report.pluginVersion}`,
         `- OS: ${report.platform} ${report.arch}`,
         `- Node: ${report.nodeVersion}`,
-        `- OpenCode: ${report.opencodeVersion ?? "not installed"}`,
+        `- OpenCode: ${describeOpenCodeInstall(report)}`,
         "",
         "## Configuration",
-        `Config from \`${sanitizedConfigPath}\`:`,
-        "```jsonc",
-        configBody,
-        "```",
+        `User config from \`${sanitizedUserConfigPath}\`${report.eidnaraConfig.exists ? "" : " (missing)"}`,
+        `Project config from \`${sanitizedProjectConfigPath}\`${report.projectConfig.exists ? "" : " (missing)"}`,
+        "Sanitized flags for both tiers are listed under Diagnostics.",
         "",
         "## Diagnostics",
-        renderDiagnosticsMarkdown(report),
+        renderDiagnosticsMarkdown(scopedReport),
         "",
         "## Historian failure signals (log, sanitized)",
         historianFailureLines.length === 0
             ? "_No historian failure log lines found in recent history._"
-            : ["```", historianFailureLines.join("\n"), "```"].join("\n"),
+            : [fence, historianBlock, fence].join("\n"),
         "",
         "## Recent errors (last 20, sanitized)",
         recentErrorLines.length === 0
             ? "_No error-shaped log lines found in recent history._"
-            : ["```", recentErrorLines.join("\n"), "```"].join("\n"),
+            : [fence, errorBlock, fence].join("\n"),
         "",
         `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
-        "```",
+        ...(logReadError ? [`_Log could not be read: ${logReadError}_`] : []),
+        fence,
         recentLog || "<no log output>",
-        "```",
+        fence,
     ].join("\n");
 
     const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
-    const path = join(process.cwd(), `eidnara-issue-${formatTimestamp(new Date())}.md`);
-    writeFileSync(path, `${bodyMarkdown}\n`);
+    const path = writeNewFile(
+        join(process.cwd(), `eidnara-issue-${formatTimestamp(new Date())}`),
+        `${bodyMarkdown}\n`,
+    );
     return { path, bodyMarkdown };
 }

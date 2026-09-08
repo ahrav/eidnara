@@ -1,11 +1,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, isAbsolute, parse as parsePath, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
-import { writeFileAtomic } from "../lib/atomic-write";
+import { stringify as stringifyJsonc } from "comment-json";
+import { resolveLinkTarget, writeFileAtomic } from "../lib/atomic-write";
 import { ensureParentDir } from "../lib/fs-utils";
+import { readJsoncConfig, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { detectOpenCode } from "../lib/opencode-detect";
-import { detectConfigPaths, getEidnaraLogPath } from "../lib/paths";
+import { detectConfigPaths, envFirstHomeDir, getEidnaraLogPath } from "../lib/paths";
 import type { HarnessAdapter, HarnessConfigPaths, PluginEntryResult } from "./types";
 
 const PLUGIN_NAME = "@eidnara/opencode";
@@ -25,15 +26,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
     hasPluginEntry(): boolean {
         const paths = detectConfigPaths();
         if (paths.opencodeConfigFormat === "none") return false;
-        try {
-            const raw = readFileSync(paths.opencodeConfig, "utf-8");
-            const cfg = parseJsonc(raw) as Record<string, unknown> | null;
-            const plugin = cfg?.plugin;
-            if (!Array.isArray(plugin)) return false;
-            return plugin.some((entry) => matchesPluginEntry(entry, PLUGIN_NAME));
-        } catch {
-            return false;
-        }
+        const result = readJsoncConfig(paths.opencodeConfig);
+        if (result.kind !== "parsed") return false;
+        const plugin = result.value.plugin;
+        if (!Array.isArray(plugin)) return false;
+        return plugin.some(
+            (entry) => matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
+        );
     }
 
     getConfigPaths(): HarnessConfigPaths {
@@ -50,6 +49,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
         const paths = detectConfigPaths();
         const target = paths.opencodeConfig;
         try {
+            const file = resolveLinkTarget(target);
             const exists = paths.opencodeConfigFormat !== "none";
             if (!exists) {
                 const initial = {
@@ -57,7 +57,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     plugin: [PLUGIN_NAME],
                 };
                 ensureParentDir(target);
-                writeFileAtomic(target, `${JSON.stringify(initial, null, 4)}\n`);
+                writeFileAtomic(file, `${JSON.stringify(initial, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "added",
@@ -66,16 +66,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                 };
             }
 
-            const raw = readFileSync(target, "utf-8");
-            const cfg = parseJsonc(raw) as Record<string, unknown> | null;
-            if (cfg === null || typeof cfg !== "object") {
-                return {
-                    ok: false,
-                    action: "error",
-                    message: `Could not parse ${target}.`,
-                    configPath: target,
-                };
-            }
+            const cfg = readJsoncConfigForUpdate(file);
 
             const plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
             const existingIdx = plugin.findIndex((e) => matchesPluginEntry(e, PLUGIN_NAME));
@@ -85,7 +76,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
             if (existingIdx === -1 && existingDevIdx === -1) {
                 plugin.push(PLUGIN_NAME);
                 cfg.plugin = plugin;
-                writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
+                writeFileAtomic(file, `${stringifyJsonc(cfg, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "added",
@@ -100,19 +91,6 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     ok: true,
                     action: "already_present",
                     message: `Plugin already present (dev path: ${devEntry}) in ${target}.`,
-                    configPath: target,
-                };
-            }
-
-            const current = plugin[existingIdx];
-            if (typeof current === "string" && current !== PLUGIN_NAME) {
-                plugin[existingIdx] = PLUGIN_NAME;
-                cfg.plugin = plugin;
-                writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
-                return {
-                    ok: true,
-                    action: "updated",
-                    message: `Updated plugin entry to ${PLUGIN_NAME} in ${target}.`,
                     configPath: target,
                 };
             }
@@ -146,12 +124,18 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
               ? entry[0]
               : null;
     if (!candidate) return false;
+    // Windows configs spell relative entries with backslashes, which `isAbsolute` does not cover.
     return (
         candidate.startsWith("file://") ||
         isAbsolute(candidate) ||
-        candidate.startsWith("./") ||
-        candidate.startsWith("../")
+        /^\.\.?[\\/]/.test(candidate) ||
+        /^~[\\/]/.test(candidate)
     );
+}
+
+/** OpenCode expands a leading `~` in a plugin path to the home directory. */
+function expandHomePrefix(path: string): string {
+    return /^~[\\/]/.test(path) ? join(envFirstHomeDir(), path.slice(2)) : path;
 }
 
 /**
@@ -159,7 +143,7 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
  * OpenCode Eidnara package. A basename substring is not sufficient: paths
  * such as `eidnara-theme` must not suppress the real plugin registration.
  */
-export function isDevPathPluginEntry(entry: unknown): boolean {
+export function isDevPathPluginEntry(entry: unknown, baseDir: string = process.cwd()): boolean {
     const candidate =
         typeof entry === "string"
             ? entry
@@ -173,7 +157,9 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
         if (candidate.startsWith("file://")) {
             localPath = fileURLToPath(candidate);
         } else {
-            localPath = resolve(candidate);
+            // A `~` entry is home-relative; any other relative entry is relative to the project
+            // whose config declares it.
+            localPath = resolve(baseDir, expandHomePrefix(candidate));
         }
 
         if (statSync(localPath).isFile()) localPath = dirname(localPath);

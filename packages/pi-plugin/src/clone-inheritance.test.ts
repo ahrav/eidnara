@@ -60,6 +60,43 @@ describe("Pi clone state inheritance", () => {
         resetPiKernelClientsForTest();
     });
 
+    it("a redelivered fork event keeps the tokens the clone accumulated", async () => {
+        resetKernelClientsForTest();
+        resetPiKernelClientsForTest();
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: `mem_${"a".repeat(32)}`,
+            decision_kind: "NAMING",
+            summary: "Clone read this.",
+        });
+        const projectRoot = "/project";
+        const event = { reason: "fork" };
+        const ctx = { sessionManager: { getSessionId: () => "clone" } };
+        const deps = { writeLog: () => undefined };
+
+        await handlePiCloneSessionStart(event, ctx, deps);
+        const resolver = createPiKernelClientResolver(() => ({}));
+        const clone = resolver({ sessionId: "clone", projectRoot });
+        const cloneClient = new KernelClient({
+            transport: new FakeKernelTransport(kernel),
+            enabled: true,
+            sessionId: "clone",
+            projectRoot,
+            tokens: clone.tokens,
+        });
+        await cloneClient.read({ surface: "explicit_search", gated: false });
+        expect(clone.tokens.size(projectRoot)).toBe(1);
+        expect(clone.tokens.knownAsOfFor(projectRoot)).toBe(1);
+
+        expect(await handlePiCloneSessionStart(event, ctx, deps)).toBe(true);
+
+        const redelivered = resolver({ sessionId: "clone", projectRoot });
+        expect(redelivered.tokens).toBe(clone.tokens);
+        expect(redelivered.tokens.size(projectRoot)).toBe(1);
+        expect(redelivered.tokens.knownAsOfFor(projectRoot)).toBe(1);
+        resetPiKernelClientsForTest();
+    });
+
     it("fails open with one actionable structured log line", async () => {
         const messages: string[] = [];
 

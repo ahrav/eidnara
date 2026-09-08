@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
 
 export type RustAuthorityDomain = "memories" | "notes";
@@ -21,6 +22,8 @@ export interface RustNoteToolRequest {
     limit?: number;
     offset?: number;
     noteId?: number;
+    /** The harness's tool-call abort signal; the transport settles an aborted call without waiting for the daemon. */
+    signal?: AbortSignal;
 }
 
 export function toolCallIdFromContext(context: unknown): string | undefined {
@@ -40,12 +43,22 @@ export function toolCallIdFromContext(context: unknown): string | undefined {
     return undefined;
 }
 
+/** The daemon rejects facade and agent-drop command ids above this many bytes. */
+const MAX_COMMAND_ID_BYTES = 128;
+
+/** A deterministic hash gives retries the same bounded id. */
+export function boundedCommandId(id: string): string {
+    if (Buffer.byteLength(id) <= MAX_COMMAND_ID_BYTES) return id;
+    return `oc-${createHash("sha256").update(id).digest("hex")}`;
+}
+
 export interface RustToolBackends {
     reduce?: (args: {
         sessionId: string;
         projectRoot: string;
         drop: string;
         commandId: string;
+        signal?: AbortSignal;
     }) => Promise<unknown>;
     authorityState?: (args: {
         projectPath: string;
@@ -58,7 +71,7 @@ export interface RustToolBackends {
 
 export function createRustToolBackends(moduleClient: RustModeModuleClient): RustToolBackends {
     return {
-        reduce: ({ sessionId, projectRoot, drop, commandId }) =>
+        reduce: ({ sessionId, projectRoot, drop, commandId, signal }) =>
             moduleClient.call({
                 sessionId,
                 projectRoot,
@@ -70,6 +83,7 @@ export function createRustToolBackends(moduleClient: RustModeModuleClient): Rust
                     drop,
                     command_id: commandId,
                 },
+                ...(signal ? { signal } : {}),
             }),
         note: ({
             commandId,
@@ -87,6 +101,7 @@ export function createRustToolBackends(moduleClient: RustModeModuleClient): Rust
             limit,
             offset,
             noteId,
+            signal,
         }) =>
             moduleClient.call({
                 sessionId,
@@ -114,9 +129,9 @@ export function createRustToolBackends(moduleClient: RustModeModuleClient): Rust
                         note_id: noteId,
                     },
                 },
+                ...(signal ? { signal } : {}),
             }),
-        // The daemon's `ctx_note` facade stores the compiled fields, so the compiler runs for every conditioned note. commentlint: allow(JUDGE)
-        noteEvaluationAvailable: () => true,
+        // `noteEvaluationAvailable` stays absent: the daemon accepts a conditioned write only while a `note.evaluation.register` heartbeat is live for the project, and no shipped host registers one, so the tool must surface the daemon's refusal instead of compiling the condition. commentlint: allow(JUDGE)
     };
 }
 

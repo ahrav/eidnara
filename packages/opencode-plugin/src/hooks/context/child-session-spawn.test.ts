@@ -1,5 +1,14 @@
-import { describe, expect, it, mock } from "bun:test";
-import { childSessionMessagesFetcher, createChildSession } from "./child-session-spawn";
+import { afterEach, describe, expect, it, mock } from "bun:test";
+import {
+    __childSessionSpawnTest,
+    childSessionMessagesFetcher,
+    createChildSession,
+    deleteChildSession,
+} from "./child-session-spawn";
+
+afterEach(() => {
+    __childSessionSpawnTest.reset();
+});
 
 describe("createChildSession", () => {
     it("creates the child under its parent with the title and directory", async () => {
@@ -24,6 +33,53 @@ describe("createChildSession", () => {
             body: { title: "t" },
             query: { directory: undefined },
         });
+    });
+
+    it("rejects when the create endpoint never settles", async () => {
+        const create = mock(() => new Promise<never>(() => {}));
+        __childSessionSpawnTest.setLifecycleTimeoutMs(20);
+        await expect(
+            createChildSession({ client: { session: { create } } as never, title: "t" }),
+        ).rejects.toThrow("child session create timed out");
+    });
+
+    it("deletes a child whose create settles after the deadline so no orphan remains", async () => {
+        let settle: ((value: { data: { id: string } }) => void) | undefined;
+        const create = mock(
+            () =>
+                new Promise<{ data: { id: string } }>((resolve) => {
+                    settle = resolve;
+                }),
+        );
+        const del = mock(async (_input: unknown) => ({}));
+        __childSessionSpawnTest.setLifecycleTimeoutMs(20);
+        await expect(
+            createChildSession({
+                client: { session: { create, delete: del } } as never,
+                title: "t",
+            }),
+        ).rejects.toThrow("child session create timed out");
+        expect(del).not.toHaveBeenCalled();
+
+        __childSessionSpawnTest.reset();
+        settle?.({ data: { id: "ses_late" } });
+        await Bun.sleep(0);
+        await Bun.sleep(0);
+        expect(del).toHaveBeenCalledWith({ path: { id: "ses_late" } });
+    });
+});
+
+describe("deleteChildSession", () => {
+    it("deletes by id and rejects when the endpoint never settles", async () => {
+        const del = mock(async (_input: unknown) => ({}));
+        await deleteChildSession({ session: { delete: del } } as never, "ses_child");
+        expect(del.mock.calls[0]?.[0]).toEqual({ path: { id: "ses_child" } });
+
+        const hung = mock(() => new Promise<never>(() => {}));
+        __childSessionSpawnTest.setLifecycleTimeoutMs(20);
+        await expect(
+            deleteChildSession({ session: { delete: hung } } as never, "ses_child"),
+        ).rejects.toThrow("child session delete timed out");
     });
 });
 

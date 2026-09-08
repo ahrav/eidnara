@@ -29,7 +29,14 @@ export function isToolPartWithOutput(part: unknown): part is ValidToolPart {
     const p = part as Record<string, unknown>;
     if (p.type !== "tool" || typeof p.callID !== "string") return false;
     if (p.state === null || typeof p.state !== "object") return false;
-    return typeof (p.state as Record<string, unknown>).output === "string";
+    const state = p.state as Record<string, unknown>;
+    if (typeof state.output !== "string") return false;
+    // `ValidToolPart` promises a record for a present `input`, so a present non-record fails the guard.
+    return state.input === undefined || isRecord(state.input);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export function isFilePart(part: unknown): part is ValidFilePart {
