@@ -137,4 +137,14 @@ describe("removeSystemInjections", () => {
 
         expect(removeSystemInjections(text)).toBe("first\n\nsecond\n\nthird");
     });
+
+    it("removes many repeated notice blocks in linear time", () => {
+        const block = "[task CALL FAILED - IMMEDIATE RETRY REQUIRED] retry\n\n";
+        const text = `${"keep\n\n".repeat(1)}${block.repeat(20_000)}tail`;
+
+        const started = performance.now();
+        expect(removeSystemInjections(text)).toBe("keep\n\ntail");
+        // 20,000 blocks distinguish a linear pass from one that copies the tail per block.
+        expect(performance.now() - started).toBeLessThan(500);
+    });
 });

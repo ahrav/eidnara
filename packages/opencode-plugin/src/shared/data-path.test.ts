@@ -75,6 +75,16 @@ describe("data-path", () => {
         expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
     });
 
+    test("getDataDir treats an empty XDG_DATA_HOME as unset, as xdg-basedir does", () => {
+        process.env.XDG_DATA_HOME = "";
+        expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
+    });
+
+    test("getDataDir honors a set XDG_DATA_HOME", () => {
+        process.env.XDG_DATA_HOME = "/tmp/custom-data";
+        expect(getDataDir()).toBe("/tmp/custom-data");
+    });
+
     test("getOpenCodeStorageDir composes correctly", () => {
         expect(getOpenCodeStorageDir()).toBe(
             path.join(os.homedir(), ".local", "share", "opencode", "storage"),

@@ -20,7 +20,7 @@ export interface ChunkBlock {
     isToolOnly: boolean;
 }
 
-const MAX_COMMITS_PER_BLOCK = 5;
+export const MAX_COMMITS_PER_BLOCK = 5;
 
 export function isTruthyFlag(value: unknown): boolean {
     return value === true || value === 1 || value === "true";
@@ -152,29 +152,31 @@ export function formatBlock(block: ChunkBlock): string {
     return `${range} ${block.role}:${commitSuffix} ${block.parts.join(" / ")}`;
 }
 
-function extractCommitHashes(text: string): string[] {
+function extractCommitHashes(text: string, maxHashes: number): string[] {
     const hashes: string[] = [];
+    if (maxHashes <= 0) return hashes;
     const seen = new Set<string>();
     for (const match of text.matchAll(createCommitHashExtractPattern())) {
         const hash = match[1]?.toLowerCase();
         if (!hash || seen.has(hash)) continue;
         seen.add(hash);
         hashes.push(hash);
-        if (hashes.length >= MAX_COMMITS_PER_BLOCK) break;
+        if (hashes.length >= maxHashes) break;
     }
     return hashes;
 }
 
+/** Callers pass remaining block capacity as `maxHashes` so hashes beyond it remain in `text`. */
 export function compactTextForSummary(
     text: string,
     role: string,
+    maxHashes: number = MAX_COMMITS_PER_BLOCK,
 ): { text: string; commitHashes: string[] } {
-    const commitHashes = role === "assistant" ? extractCommitHashes(text) : [];
+    const commitHashes = role === "assistant" ? extractCommitHashes(text, maxHashes) : [];
     if (commitHashes.length === 0 || !COMMIT_VERB_PATTERN.test(text)) {
         return { text, commitHashes };
     }
 
-    // Remove only extracted hashes; hashes beyond `MAX_COMMITS_PER_BLOCK` remain in `text`.
     const retained = new Set(commitHashes);
     const withoutHashes = text
         .replace(createCommitHashExtractPattern(), (match, hash: string) =>

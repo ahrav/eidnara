@@ -46,40 +46,40 @@ export function removeSystemReminders(text: string): string {
 
 export function removeSystemInjections(text: string): string {
     let cleaned = removeSystemReminders(text).replaceAll(OMO_INTERNAL_INITIATOR_MARKER, "");
-    cleaned = removeDirectiveBlocks(cleaned);
+    cleaned = removeBlocksStartingWith(cleaned, SYSTEM_DIRECTIVE_PREFIX, directiveBlockEnd);
     for (const marker of SYSTEM_NOTICE_MARKERS) {
-        cleaned = removeBlocksStartingWith(cleaned, marker, (body) => blankLineEnd(body, 0));
+        cleaned = removeBlocksStartingWith(cleaned, marker, (source, start) =>
+            blankLineEnd(source, start + marker.length),
+        );
     }
     // Cutting a whole paragraph leaves the blank lines on both sides of it adjacent.
     return cleaned.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-/** A directive block includes its header and body; blank lines before list items remain part of the body. */
-function removeDirectiveBlocks(text: string): string {
-    return removeBlocksStartingWith(text, SYSTEM_DIRECTIVE_PREFIX, (body) => {
-        const close = body.indexOf("]");
-        return close === -1 ? body.length : directiveBodyEnd(body, close + 1);
-    });
-}
-
+/** Collecting kept segments avoids copying the remaining tail for each marker. `endOf` must return an index past `start`. */
 function removeBlocksStartingWith(
     text: string,
     marker: string,
-    endOf: (body: string) => number,
+    endOf: (text: string, start: number) => number,
 ): string {
-    let cleaned = text;
-    let searchFrom = 0;
-    for (;;) {
-        const start = cleaned.indexOf(marker, searchFrom);
-        if (start === -1) return cleaned;
-        const end = start + endOf(cleaned.slice(start));
-        cleaned = cleaned.slice(0, start) + cleaned.slice(end);
-        searchFrom = start;
+    let start = text.indexOf(marker);
+    if (start === -1) return text;
+    const kept: string[] = [];
+    let cursor = 0;
+    while (start !== -1) {
+        kept.push(text.slice(cursor, start));
+        cursor = endOf(text, start);
+        start = text.indexOf(marker, cursor);
     }
+    kept.push(text.slice(cursor));
+    return kept.join("");
 }
 
-function directiveBodyEnd(text: string, bodyStart: number): number {
-    let searchFrom = bodyStart;
+/** A directive block includes its header and body; blank lines before list items remain part of the body. */
+function directiveBlockEnd(text: string, start: number): number {
+    const close = text.indexOf("]", start);
+    if (close === -1) return text.length;
+    let searchFrom = close + 1;
     for (;;) {
         const boundary = text.indexOf("\n\n", searchFrom);
         if (boundary === -1) return text.length;

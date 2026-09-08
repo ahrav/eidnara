@@ -5,7 +5,8 @@ import hostRelease from "../../../../release/host-release.json";
 import { getHarness, type HarnessId } from "./harness";
 
 export function getDataDir(): string {
-    return process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
+    // `||` rather than `??`: `xdg-basedir` treats an empty `XDG_DATA_HOME` as unset, matching OpenCode's data directory.
+    return process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
 }
 
 /**

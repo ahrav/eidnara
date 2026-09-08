@@ -6,6 +6,7 @@ import {
     extractTexts,
     extractToolCallSummaries,
     hasMeaningfulUserText,
+    MAX_COMMITS_PER_BLOCK,
     mergeCommitHashes,
     normalizeText,
 } from "./read-session-formatting";
@@ -307,5 +308,31 @@ describe("compactTextForSummary", () => {
         expect(
             compactTextForSummary("Committed ABC1234 then reverted abc1234", "assistant"),
         ).toEqual({ text: "Committed then reverted", commitHashes: ["abc1234"] });
+    });
+
+    it("extracts only as many hashes as the block has room for and leaves the rest in the text", () => {
+        expect(compactTextForSummary("Committed a1b2c3d and b2c3d4e", "assistant", 1)).toEqual({
+            text: "Committed and b2c3d4e",
+            commitHashes: ["a1b2c3d"],
+        });
+    });
+
+    it("leaves the text untouched when the block has no room left", () => {
+        expect(compactTextForSummary("Committed f6a7b8c", "assistant", 0)).toEqual({
+            text: "Committed f6a7b8c",
+            commitHashes: [],
+        });
+    });
+
+    it("keeps a later part's hash visible when merged into a full block", () => {
+        const block = ["a1b2c3d", "b2c3d4e", "c3d4e5f", "d4e5f6a", "e5f6a7b"];
+        const later = compactTextForSummary(
+            "Committed f6a7b8c",
+            "assistant",
+            MAX_COMMITS_PER_BLOCK - block.length,
+        );
+
+        expect(later.text).toBe("Committed f6a7b8c");
+        expect(mergeCommitHashes(block, later.commitHashes)).toEqual(block);
     });
 });
