@@ -143,15 +143,12 @@ const SIMPLE_ESCAPES: Record<string, string> = {
     "0": "\0",
 };
 
-/**
- * Decodes JavaScript string escapes (`\u0070`, `\u{70}`, `\x70`, `\s`) so the
- * key vocabulary sees the spelled character. The same lenient decoder serves
- * both quote styles; over-decoding can only redact more.
- */
+/** Decodes JavaScript string escapes and removes line continuations. */
 function decodeQuotedKey(raw: string): string {
     return raw.replace(
-        /\\(?:u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(.))/g,
-        (match, braced?: string, u4?: string, x2?: string, ch?: string) => {
+        /\\(?:(\r\n|[\n\r\u2028\u2029])|u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(.))/g,
+        (match, lineBreak?: string, braced?: string, u4?: string, x2?: string, ch?: string) => {
+            if (lineBreak !== undefined) return "";
             if (braced !== undefined) {
                 const codePoint = Number.parseInt(braced, 16);
                 return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : match;
@@ -168,7 +165,7 @@ function structuredValueEnd(text: string, start: number): number {
     let depth = 0;
     for (let at = start; at < text.length; at++) {
         const ch = text[at];
-        if (ch === '"' || ch === "'") {
+        if (ch === '"' || ch === "'" || ch === "`") {
             for (at++; at < text.length && text[at] !== ch; at++) if (text[at] === "\\") at++;
         } else if (ch === "{" || ch === "[") {
             depth++;
@@ -181,10 +178,10 @@ function structuredValueEnd(text: string, start: number): number {
 }
 
 // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.
-// A quoted key may hold spaces, slashes, or escapes (`"api key"`, `"\u0070assword"`);
+// Quoted keys may contain spaces, escapes, or backslash line continuations;
 // a bare key is an identifier. A `{`/`[` value matches only its opening bracket.
 const KEYED_VALUE_PATTERN =
-    /(?:"((?:[^"\\\r\n]|\\.)+)"|'((?:[^'\\\r\n]|\\.)+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[{[]|[^\s&;,}\]]+)/g;
+    /(?:"((?:[^"\\\r\n]|\\(?:\r\n|[\s\S]))+)"|'((?:[^'\\\r\n]|\\(?:\r\n|[\s\S]))+)'|\b([A-Za-z][A-Za-z0-9_.-]*))(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[{[]|[^\s&;,}\]]+)/g;
 
 function redactKeyedText(value: string): string {
     let out = "";

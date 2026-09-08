@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDevPathPluginEntry } from "../adapters/opencode";
 import { resolveAdaptersForCommand } from "./harness-select";
-import { detectConfigPaths, getOpenCodeConfigDir } from "./paths";
+import { detectConfigPaths, envFirstHomeDir, getOpenCodeConfigDir } from "./paths";
 
 const roots: string[] = [];
 const originalOpenCodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
@@ -30,6 +30,19 @@ describe("CLI hardening helpers", () => {
                 verb: "setup",
             }),
         ).rejects.toThrow("Invalid --harness value: opencdoe");
+    });
+
+    it.if(process.platform !== "win32")("ignores a relative HOME", () => {
+        const originalHome = process.env.HOME;
+        try {
+            process.env.HOME = "workspace-home";
+            const home = envFirstHomeDir();
+            expect(isAbsolute(home)).toBe(true);
+            expect(home).not.toBe("workspace-home");
+        } finally {
+            if (originalHome === undefined) delete process.env.HOME;
+            else process.env.HOME = originalHome;
+        }
     });
 
     it.if(process.platform !== "win32")("ignores a relative XDG_CONFIG_HOME", () => {

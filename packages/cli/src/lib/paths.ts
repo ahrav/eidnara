@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 
@@ -119,7 +119,14 @@ export function detectConfigPaths(): ConfigPaths {
 export function envFirstHomeDir(): string {
     if (process.platform === "win32") return homedir();
     const home = process.env.HOME?.trim();
-    return home || homedir();
+    if (home && isAbsolute(home)) return home;
+    // A relative `HOME` would resolve against the working directory, and `homedir()` reads
+    // the same variable, so the passwd entry is the fallback.
+    try {
+        return userInfo().homedir;
+    } catch {
+        return homedir();
+    }
 }
 
 /* */
