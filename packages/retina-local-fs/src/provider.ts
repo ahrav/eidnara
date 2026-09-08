@@ -190,7 +190,9 @@ async function evaluatePredicate(
             };
         }
         case "git_tag_matching": {
-            const tagsOutput = await git(pathAtUse, ["tag", "--list", predicate.pattern]);
+            // `--` ends option parsing so a pattern such as `--format=%(objectname)` is
+            // matched as a glob instead of changing what `git tag` prints.
+            const tagsOutput = await git(pathAtUse, ["tag", "--list", "--", predicate.pattern]);
             const above = predicate.above ? parseSemver(predicate.above) : undefined;
             const tags = tagsOutput
                 .split("\n")
