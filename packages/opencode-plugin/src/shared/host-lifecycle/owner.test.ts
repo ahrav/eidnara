@@ -330,6 +330,23 @@ describe("managed lifecycle owner", () => {
         expect(prepare(f, true)?.kind).toBe("retained-fd");
     });
 
+    test("nesting past serde_json's recursion limit is rejected before staging", () => {
+        const f = fixture();
+        // The manifest object is depth 1 and `platform_floor` depth 2, so 125 arrays reach serde's accepted maximum of 127 and 126 exceed it.
+        const nested = (n: number) => `${"[".repeat(n)}1${"]".repeat(n)}`;
+        writeFileSync(
+            f.manifestPath,
+            f.manifestText.replace('"glibc": "2.34"', `"glibc": "2.34", "deep": ${nested(125)}`),
+        );
+        expect(prepare(f, true)?.kind).toBe("retained-fd");
+
+        writeFileSync(
+            f.manifestPath,
+            f.manifestText.replace('"glibc": "2.34"', `"glibc": "2.34", "deep": ${nested(126)}`),
+        );
+        expect(() => prepare(f, true)).toThrow(/nests deeper/);
+    });
+
     test("umask-stripped source modes are accepted; extra permission bits are not", () => {
         const f = fixture();
         const launcherPath = join(f.packageDir, "payload", "bin", "eidnara-host");

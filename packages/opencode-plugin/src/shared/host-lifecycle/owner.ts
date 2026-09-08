@@ -12,6 +12,8 @@ import {
 import { managedSubtreePath } from "./paths";
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
+/** serde_json's default recursion limit is 128, counted so the 128th open container fails; 127 nested containers parse. */
+const MAX_JSON_DEPTH = 127;
 /** A high surrogate not followed by a low one, or a low surrogate not preceded by a high one; `u` flag matching by code point pairs the valid ones. */
 const LONE_SURROGATE_RE = /\p{Surrogate}/u;
 const MAX_METADATA_BYTES = 1024 * 1024;
@@ -186,7 +188,7 @@ function readNoFollowBytes(path: string, label: string): Buffer {
 /**
  * Input `JSON.parse` accepts that `serde_json::from_slice::<TrustedPayloadManifest>` rejects. `text` has already passed `JSON.parse`, so the scan assumes well-formed input. commentlint: allow(JUDGE)
  *
- * A repeated key: `JSON.parse` keeps the last, serde fails on the duplicate. A number outside f64: `JSON.parse` yields `Infinity`, serde fails. A `size` with a fraction or exponent: `JSON.parse` yields the plain integer, serde's `u64` rejects a float. A lone surrogate escape such as `\ud800`: `JSON.parse` yields an ill-formed string, serde fails because the value is not UTF-8. commentlint: allow(JUDGE)
+ * A repeated key: `JSON.parse` keeps the last, serde fails on the duplicate. A number outside f64: `JSON.parse` yields `Infinity`, serde fails. A `size` with a fraction or exponent: `JSON.parse` yields the plain integer, serde's `u64` rejects a float. A lone surrogate escape such as `\ud800`: `JSON.parse` yields an ill-formed string, serde fails because the value is not UTF-8. Nesting past serde's recursion limit: `JSON.parse` has no fixed limit, serde fails. commentlint: allow(JUDGE)
  */
 function serdeRejection(text: string): string | null {
     // One frame per open container: a key set for an object, `null` for an array.
@@ -218,12 +220,10 @@ function serdeRejection(text: string): string | null {
             if (inFileEntry && lastKey === "size" && !/^(0|[1-9][0-9]*)$/.test(token)) {
                 return "holds a size that is not an integer literal";
             }
-        } else if (ch === "{") {
-            frames.push(new Set());
-            expectKey = true;
-        } else if (ch === "[") {
-            frames.push(null);
-            expectKey = false;
+        } else if (ch === "{" || ch === "[") {
+            frames.push(ch === "{" ? new Set() : null);
+            if (frames.length > MAX_JSON_DEPTH) return "nests deeper than the daemon parses";
+            expectKey = ch === "{";
         } else if (ch === "}" || ch === "]") {
             frames.pop();
             expectKey = false;
