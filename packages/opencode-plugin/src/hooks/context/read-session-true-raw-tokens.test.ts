@@ -350,6 +350,39 @@ describe("tool arcs", () => {
         expect(breakdown.image).toBe(300);
         expect(breakdown.other).toBe(0);
     });
+
+    it("keeps an argument-less Pi toolCall open", () => {
+        const message: RawMessage = {
+            id: "argless",
+            role: "assistant",
+            parts: [{ type: "toolCall", id: "tc1", name: "noop" }],
+            ordinal: 1,
+        };
+        expect(buildToolArcs([message])).toEqual([
+            { callId: "tc1", invOrdinal: 1, resOrdinal: null },
+        ]);
+    });
+
+    it("counts a folded Pi toolResult without a toolCallId as tool output", () => {
+        const message: RawMessage = {
+            id: "folded-idless",
+            role: "user",
+            parts: [
+                {
+                    role: "toolResult",
+                    toolName: "read",
+                    content: [{ type: "image", mimeType: "image/png", data: "A".repeat(20_000) }],
+                },
+            ],
+            ordinal: 2,
+        };
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+            imageTokenHeuristic: () => 300,
+        });
+        expect(breakdown.image).toBe(300);
+        expect(breakdown.other).toBe(0);
+    });
 });
 
 describe("tool token accounting", () => {
@@ -474,6 +507,63 @@ describe("tool token accounting", () => {
         expect(breakdown.image).toBe(400);
         expect(breakdown.other).toBe(0);
         expect(breakdown.text).toBe(0);
+    });
+
+    it("keeps a typed text block as text even when it carries MIME metadata", () => {
+        const message = singlePartMessage({
+            type: "tool_result",
+            tool_use_id: "c",
+            content: [{ type: "text", text: "the actual output text here", mimeType: null }],
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "pi-folded-v1",
+        });
+        expect(breakdown.toolOutput).toBeGreaterThan(0);
+        expect(breakdown.image).toBe(0);
+    });
+
+    it("prefers the type-native reasoning field over a stale sibling", () => {
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        const openCode = estimateTrueRawMessageTokens(
+            singlePartMessage({
+                type: "reasoning",
+                text: "new",
+                thinking: "old very long stale thinking text ".repeat(20),
+            }),
+            options,
+        );
+        const pi = estimateTrueRawMessageTokens(
+            singlePartMessage({
+                type: "thinking",
+                thinking: "new",
+                text: "old very long stale text ".repeat(20),
+            }),
+            options,
+        );
+        expect(openCode.reasoning).toBeLessThan(10);
+        expect(pi.reasoning).toBeLessThan(10);
+    });
+
+    it("lets an explicitly empty OpenCode text field win over retained content", () => {
+        const message = singlePartMessage({
+            type: "text",
+            text: "",
+            content: "stale compat content ".repeat(30),
+        });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
+    });
+
+    it("skips compaction marker parts", () => {
+        const message = singlePartMessage({
+            type: "compaction",
+            summary: "x".repeat(3000),
+            metadata: { a: 1 },
+        });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
+        ).toBe(0);
     });
 
     it("counts an empty text block in a tool result as empty output", () => {

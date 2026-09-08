@@ -160,6 +160,7 @@ function stringValue(value: unknown): string {
 
 function isMediaResultBlock(entry: Record<string, unknown>): boolean {
     const type = partType(entry);
+    if (type === "text") return false;
     return (
         type === "image" ||
         type === "file" ||
@@ -365,11 +366,15 @@ function toolPartType(part: Record<string, unknown>): string {
 
 const SYNTHESIZED_ID_TOOL_TYPES = new Set(["tool", "toolCall"]);
 
+/** The Pi decoder names a folded result with no `toolCallId` after the generic tool. */
+const FOLDED_RESULT_DEFAULT_CALL_ID = "tool";
+
 function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (!isRecord(part)) return null;
     const type = toolPartType(part);
     const state = isRecord(part.state) ? part.state : null;
-    const callId = callIdFromPart(part);
+    let callId = callIdFromPart(part);
+    if (!callId && part.role === "toolResult") callId = FOLDED_RESULT_DEFAULT_CALL_ID;
     if (!callId && !SYNTHESIZED_ID_TOOL_TYPES.has(type)) return null;
     const toolName = toolNameFromPart(part);
 
@@ -407,7 +412,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
         return {
             callId,
             toolName,
-            hasInput: argsKey !== null,
+            hasInput: true,
             hasOutput: outputKey !== null,
             providerExecuted: false,
             inputText: argsKey ? stringValue(part[argsKey]) : "",
@@ -425,7 +430,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
         return {
             callId,
             toolName,
-            hasInput: inputKey !== null,
+            hasInput: true,
             hasOutput: false,
             providerExecuted: false,
             inputText: inputKey ? stringValue(part[inputKey]) : "",
@@ -539,6 +544,7 @@ const SKIPPED_PART_TYPES = new Set([
     "patch",
     "agent",
     "retry",
+    "compaction",
 ]);
 
 /**
@@ -566,11 +572,17 @@ function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent 
     }
     if (type === "text") {
         if (part.ignored === true) return { kind: "skip" };
-        const text = firstStringField(part, ["text", "content"]);
+        const text = firstStringFieldAllowEmpty(part, ["text", "content"]);
         return text ? { kind: "text", text } : { kind: "skip" };
     }
     if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
-        const text = firstStringFieldAllowEmpty(part, ["thinking", "text", "content", "reasoning"]);
+        // OpenCode `reasoning` parts store text in `text`; Pi `thinking` parts store it in `thinking`.
+        // A retained part can carry a stale copy of the other field, so the type decides precedence.
+        const fields =
+            type === "reasoning"
+                ? ["text", "thinking", "content", "reasoning"]
+                : ["thinking", "text", "content", "reasoning"];
+        const text = firstStringFieldAllowEmpty(part, fields);
         if (text !== null && text.length > 0) return { kind: "reasoning", text };
         const redacted = redactedReasoningData(part);
         if (redacted !== null) return { kind: "reasoning", text: redacted };
