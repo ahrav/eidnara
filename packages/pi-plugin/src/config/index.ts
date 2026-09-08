@@ -1,5 +1,5 @@
 import "@eidnara/opencode/config/prune-config-leaf";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { migrateLegacyAgentEnabledInMemory } from "@eidnara/opencode/config/agent-disable";
 import {
     eidnaraProjectConfigBasePath,
@@ -21,6 +21,7 @@ import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
 import { isPrototypePollutionKey, parseConfigJsonc } from "@eidnara/opencode/shared/jsonc-parser";
 import { setOutputReserveConfig } from "@eidnara/opencode/shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "@eidnara/opencode/shared/prompt-surface";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { setWindowOverlayPath } from "@eidnara/opencode/shared/window-geometry";
 
 export type { LoadOutcome } from "@eidnara/opencode/config/load-outcome";
@@ -77,7 +78,9 @@ function resolveFirstExisting(paths: string[]): string | undefined {
 
 function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFile | null {
     try {
-        const rawText = readFileSync(path, "utf-8");
+        // A FIFO without a writer would block a plain read; the regular-file reader rejects it and
+        // a directory, so either becomes this file's load warning instead of a hang.
+        const rawText = readRegularFileSync(path);
         const substituted = substituteConfigVariables({
             text: rawText,
             configPath: path,

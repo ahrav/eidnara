@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,6 +103,44 @@ describe("OMP doctor", () => {
         expect(prompts.messages.join("\n")).toContain("OMP 17.1.7 detected");
         expect(prompts.messages.join("\n")).toContain("FAIL 0");
     });
+
+    it.if(process.platform !== "win32")(
+        "reports a FIFO user config as a load warning instead of blocking",
+        async () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-"));
+            roots.push(root);
+            const agentDir = join(root, ".omp", "agent");
+            const configDir = join(root, ".config", "eidnara");
+            mkdirSync(agentDir, { recursive: true });
+            mkdirSync(configDir, { recursive: true });
+            execFileSync("mkfifo", [join(configDir, "eidnara.jsonc")]);
+            process.env.HOME = root;
+            process.env.PI_CODING_AGENT_DIR = agentDir;
+            process.env.XDG_CONFIG_HOME = join(root, ".config");
+            process.env.XDG_DATA_HOME = join(root, ".local", "share");
+            const prompts = new MockPrompts();
+
+            const started = performance.now();
+            const code = await runDoctor({
+                cwd: root,
+                prompts,
+                deps: {
+                    detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                    getOmpVersion: () => "17.1.7",
+                    listOmpPlugins: () => [
+                        { name: "@eidnara/pi", version: "0.33.0", enabled: true, path: root },
+                    ],
+                    getOmpSetting: ((_path: string, key: string) =>
+                        key === "compaction.enabled" ? false : "off") as never,
+                    runOmpCommand: () => ({ ok: true, stdout: `${agentDir}/./`, stderr: "" }),
+                },
+            });
+
+            expect(performance.now() - started).toBeLessThan(5_000);
+            expect(code).toBe(1);
+            expect(prompts.messages.join("\n")).toContain("not a regular file");
+        },
+    );
 
     it("repairs a missing config when it is the only health finding", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-config-only-"));

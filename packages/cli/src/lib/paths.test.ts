@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os, { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { envFirstHomeDir, resolveOmpPaths } from "./paths";
+import { envFirstHomeDir, hasHomeDir, hasPiAgentDir, resolveOmpPaths } from "./paths";
 
 const ENV_KEYS = [
     "HOME",
@@ -50,6 +50,17 @@ describe("envFirstHomeDir", () => {
         setEnv("HOME", "C:\\msys64\\home\\fox");
         expect(envFirstHomeDir()).toBe(homedir());
     });
+
+    it.if(process.platform !== "win32")(
+        "throws for a relative HOME instead of returning it",
+        () => {
+            setEnv("HOME", "tmp");
+            setEnv("PI_CODING_AGENT_DIR", undefined);
+            expect(() => envFirstHomeDir()).toThrow("relative path");
+            expect(hasHomeDir()).toBe(false);
+            expect(hasPiAgentDir()).toBe(false);
+        },
+    );
 
     it.if(process.platform !== "win32")(
         "throws instead of yielding cwd-relative paths without a home",

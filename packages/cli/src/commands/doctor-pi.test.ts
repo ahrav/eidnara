@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -220,6 +221,38 @@ describe("Pi doctor", () => {
             expect(prompts.messages.join("\n")).not.toContain("Added npm:@eidnara/pi");
         });
     }
+
+    it.if(process.platform !== "win32")(
+        "reports a FIFO project config as invalid instead of blocking the loader",
+        async () => {
+            const root = makeTempRoot();
+            const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+            const agentDir = setEnv(root, cwd);
+            writeHealthyFiles(agentDir, cwd);
+            const projectConfig = join(cwd, ".eidnara", "eidnara.jsonc");
+            rmSync(projectConfig);
+            execFileSync("mkfifo", [projectConfig]);
+            const prompts = new MockPrompts();
+            const stderr: string[] = [];
+            const originalConsoleError = console.error;
+            console.error = (...args: unknown[]) => {
+                stderr.push(args.map(String).join(" "));
+            };
+
+            const started = performance.now();
+            let code: number;
+            try {
+                code = await runDoctor(baseOptions(root, cwd, prompts));
+            } finally {
+                console.error = originalConsoleError;
+            }
+
+            expect(performance.now() - started).toBeLessThan(5_000);
+            expect(code).toBe(1);
+            expect(stderr.join("\n")).toContain("not a regular file");
+            expect(prompts.messages.join("\n")).toContain("not a regular file");
+        },
+    );
 
     it("reports a log path that exists but cannot be read instead of aborting", async () => {
         const root = makeTempRoot();

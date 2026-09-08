@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { execFileSync } from "node:child_process";
 import {
     chmodSync,
     existsSync,
@@ -232,6 +233,27 @@ describe("doctor OpenCode conflict repair", () => {
             restore();
         }
     });
+
+    it.if(process.platform !== "win32")(
+        "fails on a FIFO opencode.jsonc instead of blocking on it",
+        async () => {
+            const { configDir, opencodeConfigPath } = installIsolatedHome();
+            execFileSync("mkfifo", [opencodeConfigPath]);
+            writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+            const { errors, restore } = captureDoctorLog();
+
+            try {
+                const started = performance.now();
+                const code = await runDoctor({});
+
+                expect(performance.now() - started).toBeLessThan(5_000);
+                expect(code).toBe(1);
+                expect(errors.some((message) => message.includes("not a regular file"))).toBe(true);
+            } finally {
+                restore();
+            }
+        },
+    );
 
     it("fails when EIDNARA_LOG_PATH names a directory instead of a log file", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();

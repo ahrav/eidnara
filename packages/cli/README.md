@@ -41,7 +41,11 @@ writes:
   `$XDG_CONFIG_HOME/eidnara/eidnara.jsonc` with its `$schema` URL.
 
 Setup reads only local files and the harness binaries. It makes no network
-requests.
+requests itself, with one exception: when OMP does not yet have `@eidnara/pi`
+installed, setup runs `omp plugin install @eidnara/pi`, and OMP fetches the
+package and its dependencies from the npm registry. On a host without registry
+access, install the package through `omp` by another route first, or run setup
+for the other harnesses only.
 
 ## Doctor
 

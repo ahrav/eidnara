@@ -117,21 +117,33 @@ export function detectConfigPaths(): ConfigPaths {
 
 /**
  * The home the harnesses themselves resolve: `os.homedir()` on Windows (which reads `USERPROFILE`),
- * `HOME` first elsewhere. Throws when neither yields a directory (a UID with no passwd entry and
- * no `HOME`): every caller builds config or binary paths from the result, and a cwd-relative
- * `.pi/bin/pi` would let a checkout supply the binary setup runs.
+ * `HOME` first elsewhere. Throws when neither yields an absolute directory (a UID with no passwd
+ * entry and no `HOME`, or a relative `HOME`): every caller builds config or binary paths from the
+ * result, and a cwd-relative `.pi/bin/pi` would let a checkout supply the binary setup runs.
  */
 export function envFirstHomeDir(): string {
     const home = process.platform === "win32" ? undefined : process.env.HOME?.trim();
-    if (home) return home;
+    if (home) {
+        if (isAbsolute(home)) return home;
+        throw new Error(
+            `No home directory: HOME is the relative path ${JSON.stringify(home)}; set it to an absolute path so harness paths can be resolved.`,
+        );
+    }
+    let resolved: string;
     try {
-        return os.homedir();
+        resolved = os.homedir();
     } catch (error) {
         throw new Error(
             "No home directory: set HOME to an absolute path so harness paths can be resolved.",
             { cause: error },
         );
     }
+    if (!isAbsolute(resolved)) {
+        throw new Error(
+            `No home directory: os.homedir() returned the relative path ${JSON.stringify(resolved)}; set HOME to an absolute path so harness paths can be resolved.`,
+        );
+    }
+    return resolved;
 }
 
 /* */

@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename } from "node:path";
 import { loadPluginConfig } from "@eidnara/opencode/config";
@@ -12,6 +12,7 @@ import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse } from "comment-json";
 
 import {
@@ -292,7 +293,7 @@ export async function runDoctor(
     ): boolean => {
         let config: Record<string, unknown>;
         try {
-            config = parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
+            config = parse(readRegularFileSync(configPath)) as Record<string, unknown>;
         } catch (error) {
             fail(
                 `Could not parse ${configName} to verify the ${what} entry: ${error instanceof Error ? error.message : String(error)}`,
@@ -422,7 +423,7 @@ export async function runDoctor(
         const fileName = basename(tier.path);
         pass(`Eidnara ${tier.label} config: ${tier.path}`);
         try {
-            const raw = readFileSync(tier.path, "utf-8");
+            const raw = readRegularFileSync(tier.path);
             const substituted = substituteConfigVariables({
                 text: raw,
                 configPath: tier.path,
