@@ -1055,6 +1055,34 @@ describe("runSetup", () => {
         expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(false);
         expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
     });
+
+    it("treats version output without a version-only line as unverified", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
+            // A wrapper warning quoting another tool's version, then a version below the floor.
+            getPiVersion: () => "warning: npm 10.0.0 is out of date\n0.70.0 (pi, unofficial build)",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [false] });
+
+        const code = await runSetup({ prompts, env });
+
+        expect(code).toBe(1);
+        const log = prompts.messages.join("\n");
+        expect(log).toContain(
+            "Pi did not report a version, so the required 0.80.2 cannot be verified",
+        );
+        expect(log).not.toContain("10.0.0");
+        expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
+    });
 });
 
 describe("writePiSettingsPackage", () => {

@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, dirname } from "node:path";
+import { basename, dirname, isAbsolute } from "node:path";
 import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
@@ -516,13 +516,21 @@ async function runIssueFlow(options: {
         }
 
         // A selected session from another project gets that project's config,
-        // loader warnings, and dumps, not the current directory's.
+        // loader warnings, and dumps, not the current directory's. A session whose
+        // JSONL header carried no absolute `cwd` is labelled with its raw slug,
+        // which names no directory, so the report collected from `options.cwd` stands.
         const selected = report.recentSessions.find(
             (session) => session.sessionId === sessionFilter,
         );
         let reportForBundle = report;
-        if (selected !== undefined && selected.directory !== options.cwd) {
-            spinner.start(`Collecting diagnostics for ${selected.directory}`);
+        if (
+            selected !== undefined &&
+            isAbsolute(selected.directory) &&
+            selected.directory !== options.cwd
+        ) {
+            spinner.start(
+                `Collecting diagnostics for ${printableLine(selected.directory, SESSION_LABEL_MAX_LENGTH)}`,
+            );
             reportForBundle = await options.deps.collectDiagnostics(selected.directory);
             spinner.stop("Diagnostics collected for the selected session");
         }
