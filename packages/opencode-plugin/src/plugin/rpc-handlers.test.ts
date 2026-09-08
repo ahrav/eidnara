@@ -1,20 +1,27 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { EidnaraConfigSchema } from "../config/schema/eidnara";
 import { resetKernelClientsForTest } from "../hooks/context/kernel-transport";
 import { createLiveSessionState } from "../hooks/context/live-session-state";
+import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
 import { unavailable } from "../shared/kernel-client";
 import { ANTI_MEMORY_CATEGORY, renderAntiMemoryContent } from "../shared/kernel-client/anti-memory";
 import { FakeKernel } from "../shared/kernel-client-testing/fake-kernel";
 import type { EidnaraRpcServer } from "../shared/rpc-server";
 import { formatMemoryCount, type SidebarSnapshot, type StatusDetail } from "../shared/rpc-types";
+import { Database } from "../shared/sqlite";
+import { closeQuietly } from "../shared/sqlite-helpers";
 import {
     BoundedTtlCache,
     buildSidebarSnapshot,
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
+    clearWorkMetricsCarry,
     type RustSessionStatus,
     registerRpcHandlers,
 } from "./rpc-handlers";
@@ -45,10 +52,12 @@ const DAEMON_STATUS: RustSessionStatus = {
 /** Registers against a handler map: the fake server captures registrations without starting a transport. */
 function register(
     configOverrides: Record<string, unknown> = {},
-    status: RustSessionStatus = {},
-): { handlers: Map<string, Handler>; calls: string[] } {
+    status: RustSessionStatus | Error = {},
+    liveSessionState = createLiveSessionState(),
+): { handlers: Map<string, Handler>; calls: string[]; roots: string[] } {
     const handlers = new Map<string, Handler>();
     const calls: string[] = [];
+    const roots: string[] = [];
     const server = {
         handle(method: string, handler: Handler) {
             handlers.set(method, handler);
@@ -57,6 +66,8 @@ function register(
     const rustModeModuleClient: RustModeModuleClient = {
         async call(args) {
             calls.push(args.method);
+            roots.push(args.projectRoot);
+            if (status instanceof Error) throw status;
             return { ok: true, result: status };
         },
     };
@@ -68,10 +79,10 @@ function register(
             ...configOverrides,
         }),
         client: null,
-        liveSessionState: createLiveSessionState(),
+        liveSessionState,
         rustModeModuleClient,
     });
-    return { handlers, calls };
+    return { handlers, calls, roots };
 }
 
 function seedMemories(kernel: FakeKernel): void {
@@ -139,6 +150,110 @@ describe("registerRpcHandlers", () => {
         expect(detail.compartmentCount).toBe(4);
     });
 
+    test("the daemon status cache keys by project root, so one session polled under two roots asks each route", async () => {
+        const { handlers, calls, roots } = register({}, DAEMON_STATUS);
+        const sessionId = "ses-handler-two-roots";
+        const rootA = process.cwd();
+        const rootB = join(process.cwd(), "src");
+
+        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootA });
+        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootB });
+        await handlers.get("sidebar-snapshot")?.({ sessionId, directory: rootA });
+
+        expect(calls).toEqual(["session.status", "session.status"]);
+        expect(roots).toEqual([rootA, rootB]);
+    });
+
+    test("a zero-token answer from a second root does not inherit the first root's sticky totals", async () => {
+        const sessionId = "ses-handler-sticky-roots";
+        const rootA = process.cwd();
+        const rootB = join(process.cwd(), "src");
+        // Root B keeps root A's compartment count so a session-keyed sticky cache would substitute A's totals.
+        const statusByRoot = new Map<string, RustSessionStatus>([
+            [rootA, DAEMON_STATUS],
+            [
+                rootB,
+                {
+                    usage: { current_total_input_tokens: 0, context_limit_tokens: 100_000 },
+                    compartment_count: DAEMON_STATUS.compartment_count,
+                },
+            ],
+        ]);
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: rootA,
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: null,
+            liveSessionState: createLiveSessionState(),
+            rustModeModuleClient: {
+                async call(args) {
+                    return { ok: true, result: statusByRoot.get(args.projectRoot) ?? {} };
+                },
+            },
+        });
+
+        const first = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+            directory: rootA,
+        })) as unknown as SidebarSnapshot;
+        expect(first.inputTokens).toBe(42_000);
+
+        const second = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+            directory: rootB,
+        })) as unknown as SidebarSnapshot;
+        expect(second.inputTokens).toBe(0);
+        expect(second.usagePercentage).toBe(0);
+    });
+
+    test("a daemon that cannot answer fails the poll instead of returning a zero snapshot", async () => {
+        const { handlers, calls } = register({}, new Error("route closed"));
+        const sessionId = "ses-handler-daemon-down";
+
+        expect(await handlers.get("sidebar-snapshot")?.({ sessionId })).toEqual({
+            error: "sidebar snapshot unavailable",
+        });
+        expect(await handlers.get("status-detail")?.({ sessionId })).toEqual({
+            error: "status detail unavailable",
+        });
+        // A failure is not cached, so the next poll asks the daemon again.
+        expect(calls).toEqual(["session.status", "session.status"]);
+    });
+
+    test("a daemon error response fails the poll the same way", async () => {
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: process.cwd(),
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: null,
+            liveSessionState: createLiveSessionState(),
+            rustModeModuleClient: {
+                async call() {
+                    return { ok: false, error: { code: "store_load_failed", message: "io" } };
+                },
+            },
+        });
+        expect(await handlers.get("sidebar-snapshot")?.({ sessionId: "ses-daemon-error" })).toEqual(
+            { error: "sidebar snapshot unavailable" },
+        );
+    });
+
     test("sidebar-snapshot reports disabled memory and rejects an empty session id", async () => {
         const { handlers } = register({ memory: { enabled: false } });
         const snapshot = (await handlers.get("sidebar-snapshot")?.({
@@ -146,6 +261,37 @@ describe("registerRpcHandlers", () => {
         })) as unknown as SidebarSnapshot;
         expect(snapshot.memoryState).toBe("disabled");
         expect(await handlers.get("sidebar-snapshot")?.({})).toEqual({ error: "unavailable" });
+    });
+
+    test("ts mode serves the live event usage without contacting the daemon", async () => {
+        const sessionId = "ses-handler-ts-mode";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 64_000 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+        });
+        const { handlers, calls } = register({ transform_mode: "ts" }, DAEMON_STATUS, live);
+
+        const snapshot = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(calls).toEqual([]);
+        expect(snapshot.inputTokens).toBe(64_000);
+        expect(snapshot.usagePercentage).toBe(50);
+        expect(snapshot.compartmentCount).toBe(0);
+
+        const detail = (await handlers.get("status-detail")?.({
+            sessionId,
+        })) as unknown as StatusDetail;
+        expect(calls).toEqual([]);
+        expect(detail.inputTokens).toBe(64_000);
+        expect(detail.lastResponseTime).toBeGreaterThan(0);
     });
 });
 
@@ -218,7 +364,7 @@ describe("buildSidebarSnapshot — daemon status", () => {
         expect(response).toMatchObject({ sessionId: "ses-empty", inputTokens: 0 });
     });
 
-    test("reports the resolved compaction mode and raw native usage", () => {
+    test("reports the resolved compaction mode and leaves native usage unset without a model", () => {
         const snapshot = buildSidebarSnapshot(
             "ses-native-sidebar",
             process.cwd(),
@@ -229,8 +375,126 @@ describe("buildSidebarSnapshot — daemon status", () => {
             false,
         );
         expect(snapshot.compaction_enabled).toBe(false);
-        expect(snapshot.native_context_usage_percentage).toBe(41);
+        expect(snapshot.native_context_usage_percentage).toBeUndefined();
+        expect(snapshot.usagePercentage).toBe(41);
         expect(snapshot.cacheTtl).toBe("5m");
+    });
+
+    test("native usage divides by the live model's unreserved window", () => {
+        const sessionId = "ses-native-live";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        const snapshot = buildSidebarSnapshot(
+            sessionId,
+            process.cwd(),
+            live,
+            undefined,
+            undefined,
+            {
+                usage: { current_total_input_tokens: 64_000, context_limit_tokens: 100_000 },
+            },
+        );
+        expect(snapshot.usagePercentage).toBe(64);
+        expect(snapshot.native_context_usage_percentage).toBe(50);
+    });
+
+    test("usage divides by the model's limit when the daemon sends tokens without a limit", () => {
+        const sessionId = "ses-usage-fallback-limit";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        const snapshot = buildSidebarSnapshot(
+            sessionId,
+            process.cwd(),
+            live,
+            undefined,
+            undefined,
+            { usage: { current_total_input_tokens: 32_000 } },
+        );
+        expect(snapshot.inputTokens).toBe(32_000);
+        expect(snapshot.contextLimit).toBe(128_000);
+        expect(snapshot.usagePercentage).toBe(25);
+    });
+
+    test("without daemon usage the sidebar reports the live event usage", () => {
+        const sessionId = "ses-live-usage";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 64_000 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+        });
+        const fromLive = buildSidebarSnapshot(sessionId, process.cwd(), live);
+        expect(fromLive.inputTokens).toBe(64_000);
+        expect(fromLive.contextLimit).toBe(128_000);
+        expect(fromLive.usagePercentage).toBe(50);
+        expect(fromLive.native_context_usage_percentage).toBe(50);
+
+        // Daemon usage wins when present.
+        const fromDaemon = buildSidebarSnapshot(
+            sessionId,
+            process.cwd(),
+            live,
+            undefined,
+            undefined,
+            {
+                usage: { current_total_input_tokens: 42_000, context_limit_tokens: 100_000 },
+            },
+        );
+        expect(fromDaemon.inputTokens).toBe(42_000);
+        expect(fromDaemon.usagePercentage).toBe(42);
+    });
+
+    test("surfaces the daemon's last transform rejection", () => {
+        const rejected = buildSidebarSnapshot(
+            "ses-rejected",
+            process.cwd(),
+            undefined,
+            undefined,
+            undefined,
+            {
+                ...DAEMON_STATUS,
+                pass_trace: { last_reject_error: "wire page exceeded budget" },
+            },
+        );
+        expect(rejected.lastTransformError).toBe("wire page exceeded budget");
+        expect(
+            buildStatusDetail(
+                "ses-rejected",
+                process.cwd(),
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                {
+                    ...DAEMON_STATUS,
+                    pass_trace: { last_reject_error: "wire page exceeded budget" },
+                },
+            ).lastTransformError,
+        ).toBe("wire page exceeded budget");
+
+        const clean = buildSidebarSnapshot(
+            "ses-clean",
+            process.cwd(),
+            undefined,
+            undefined,
+            undefined,
+            {
+                ...DAEMON_STATUS,
+                pass_trace: { last_reject_error: null },
+            },
+        );
+        expect(clean.lastTransformError).toBeNull();
     });
 
     test("falls back to the live model's context limit and per-model config when the daemon gives none", () => {
@@ -333,6 +597,11 @@ describe("buildStatusDetail", () => {
         expect(detail.isSubagent).toBe(true);
         expect(detail.toastDurationMs).toBe(2500);
         expect(detail.cacheTtl).toBe("never");
+        expect(detail.cacheTtlMs).toBe(-1);
+        expect(detail.cacheRemainingMs).toBe(-1);
+        expect(detail.cacheNeverExpires).toBe(true);
+        expect(detail.cacheExpired).toBe(false);
+        expect(detail.totalTags).toBe(0);
         expect(detail.executeThreshold).toBe(65);
         expect(detail.executeThresholdMode).toBe("percentage");
         expect(detail.historyBlockTokens).toBe(detail.compartmentTokens);
@@ -349,10 +618,238 @@ describe("buildStatusDetail", () => {
         expect(bare.pendingOps).toEqual([]);
         expect(bare.isSubagent).toBe(false);
         expect(bare.lastResponseTime).toBe(0);
-        expect(bare.cacheTtlMs).toBe(0);
+        // The default "5m" TTL normalizes to milliseconds; no response has been seen, so nothing counts down.
+        expect(bare.cacheTtl).toBe("5m");
+        expect(bare.cacheTtlMs).toBe(300_000);
         expect(bare.cacheRemainingMs).toBe(0);
         expect(bare.cacheExpired).toBe(false);
         expect(bare.cacheNeverExpires).toBe(false);
+    });
+
+    test("cache countdown and tag totals follow the live response time and daemon status", () => {
+        const sessionId = "ses-status-countdown";
+        const live = createLiveSessionState();
+        const now = Date.now();
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 10, inputTokens: 10_000 },
+            updatedAt: now,
+            lastResponseTime: now - 60_000,
+            hasUsageTokens: true,
+        });
+        const detail = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            undefined,
+            { cache_ttl: "5m" },
+            live,
+            undefined,
+            { ...DAEMON_STATUS, tag_count: 12 },
+        );
+        expect(detail.totalTags).toBe(12);
+        expect(detail.lastResponseTime).toBe(now - 60_000);
+        expect(detail.cacheTtlMs).toBe(300_000);
+        expect(detail.cacheRemainingMs).toBeGreaterThan(230_000);
+        expect(detail.cacheRemainingMs).toBeLessThanOrEqual(240_000);
+        expect(detail.cacheExpired).toBe(false);
+
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 10, inputTokens: 10_000 },
+            updatedAt: now,
+            lastResponseTime: now - 600_000,
+            hasUsageTokens: true,
+        });
+        const expired = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            undefined,
+            { cache_ttl: "5m" },
+            live,
+        );
+        expect(expired.cacheRemainingMs).toBe(0);
+        expect(expired.cacheExpired).toBe(true);
+    });
+
+    test("an unparseable cache TTL falls back to the daemon's five-minute default", () => {
+        const sessionId = "ses-status-bad-ttl";
+        const live = createLiveSessionState();
+        const now = Date.now();
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 10, inputTokens: 10_000 },
+            updatedAt: now,
+            lastResponseTime: now - 60_000,
+            hasUsageTokens: true,
+        });
+        for (const cacheTtl of ["5d", ""]) {
+            const detail = buildStatusDetail(
+                sessionId,
+                process.cwd(),
+                undefined,
+                { cache_ttl: cacheTtl },
+                live,
+            );
+            expect(detail.cacheTtl).toBe(cacheTtl);
+            expect(detail.cacheTtlMs).toBe(300_000);
+            expect(detail.cacheRemainingMs).toBeGreaterThan(230_000);
+            expect(detail.cacheNeverExpires).toBe(false);
+        }
+    });
+
+    test("a request without modelKey resolves per-model config from the live model", () => {
+        const sessionId = "ses-status-live-model";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
+        const config = {
+            execute_threshold_percentage: { default: 65, "test-provider/test-model": 50 },
+            cache_ttl: { default: "5m", "test-provider/test-model": "10m" },
+            toast_duration_ms: 1500,
+        };
+
+        const fromLive = buildStatusDetail(sessionId, process.cwd(), undefined, config, live);
+        expect(fromLive.executeThreshold).toBe(50);
+        expect(fromLive.cacheTtl).toBe("10m");
+        expect(fromLive.toastDurationMs).toBe(1500);
+
+        // An explicit request key wins over the live model.
+        const requested = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "other-provider/other-model",
+            config,
+            live,
+        );
+        expect(requested.executeThreshold).toBe(65);
+        expect(requested.cacheTtl).toBe("5m");
+    });
+
+    test("the dialog's cache TTL matches the sidebar's base-model lookup", () => {
+        const sessionId = "ses-status-derived-model";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model-fast",
+        });
+        const config = { cache_ttl: { default: "5m", "test-provider/test-model": "10m" } };
+
+        const snapshot = buildSidebarSnapshot(sessionId, process.cwd(), live, undefined, config);
+        const detail = buildStatusDetail(sessionId, process.cwd(), undefined, config, live);
+        expect(snapshot.cacheTtl).toBe("10m");
+        expect(detail.cacheTtl).toBe("10m");
+    });
+
+    test("a requested modelKey drives the base snapshot when live state has no model", () => {
+        const sessionId = "ses-status-requested-model";
+        const detail = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "test-provider/test-model",
+            { execute_threshold_tokens: { "test-provider/test-model": 50_000 } },
+            createLiveSessionState(),
+            undefined,
+            { usage: { current_total_input_tokens: 64_000, context_limit_tokens: 100_000 } },
+        );
+        expect(detail.contextLimit).toBe(100_000);
+        expect(detail.native_context_usage_percentage).toBe(50);
+        expect(detail.executeThresholdMode).toBe("tokens");
+        expect(detail.executeThresholdTokens).toBe(50_000);
+
+        const noDaemon = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "test-provider/test-model",
+            undefined,
+            createLiveSessionState(),
+        );
+        expect(noDaemon.contextLimit).toBe(128_000);
+    });
+
+    test("a requested modelKey overrides a stale live model without rewriting live state", () => {
+        const sessionId = "ses-status-stale-live";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, { providerID: "stale", modelID: "model" });
+        const config = {
+            execute_threshold_percentage: { default: 65, "test-provider/test-model": 50 },
+            cache_ttl: { default: "5m", "test-provider/test-model": "10m" },
+        };
+        const detail = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "test-provider/test-model",
+            config,
+            live,
+        );
+        expect(detail.executeThreshold).toBe(50);
+        expect(detail.cacheTtl).toBe("10m");
+        expect(live.liveModelBySession.get(sessionId)).toEqual({
+            providerID: "stale",
+            modelID: "model",
+        });
+    });
+});
+
+describe("clearWorkMetricsCarry", () => {
+    const originalXdgDataHome = process.env.XDG_DATA_HOME;
+    let dataHome: string | undefined;
+
+    afterEach(() => {
+        closeReadOnlySessionDb();
+        if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = originalXdgDataHome;
+        if (dataHome) rmSync(dataHome, { recursive: true, force: true });
+        dataHome = undefined;
+    });
+
+    function openTempOpenCodeDb(): Database {
+        dataHome = mkdtempSync(join(tmpdir(), "rpc-handlers-carry-"));
+        const dbPath = join(dataHome, "opencode", "opencode.db");
+        mkdirSync(dirname(dbPath), { recursive: true });
+        const db = new Database(dbPath);
+        db.exec(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL)",
+        );
+        process.env.XDG_DATA_HOME = dataHome;
+        return db;
+    }
+
+    function insertAssistantRow(
+        db: Database,
+        sessionId: string,
+        id: string,
+        timeCreated: number,
+        inputTokens: number,
+    ): void {
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run(
+            id,
+            sessionId,
+            timeCreated,
+            JSON.stringify({
+                id,
+                role: "assistant",
+                agent: "build",
+                tokens: { input: inputTokens, output: 10, cache: { read: 0, write: 0 } },
+            }),
+        );
+    }
+
+    test("a retained carry survives row deletion until the session is cleared", () => {
+        const sessionId = "ses-carry-clear";
+        const db = openTempOpenCodeDb();
+        insertAssistantRow(db, sessionId, "a", 1, 1_000);
+        insertAssistantRow(db, sessionId, "b", 2, 2_000);
+
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(2_000);
+
+        // The carry holds row `a` as its watermark, so the next poll still reports `a` after the rows vanish.
+        db.exec("DELETE FROM message");
+        closeQuietly(db);
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(1_000);
+
+        clearWorkMetricsCarry(sessionId);
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(0);
     });
 });
 
@@ -383,18 +880,5 @@ describe("BoundedTtlCache", () => {
         expect(cache.get("a", 3_000)).toBeUndefined();
         expect(cache.get("b", 3_000)).toBe("beta-2");
         expect(cache.get("c", 3_000)).toBe("gamma");
-    });
-
-    test("an infinite TTL never expires an entry but the size cap still evicts the oldest", () => {
-        const cache = new BoundedTtlCache<string>(Number.POSITIVE_INFINITY, 2);
-        cache.set("a", "alpha", 1_000);
-        cache.set("b", "beta", 2_000);
-        expect(cache.get("a", Number.MAX_SAFE_INTEGER)).toBe("alpha");
-        expect(cache.size).toBe(2);
-        cache.set("c", "gamma", 3_000);
-        expect(cache.size).toBe(2);
-        expect(cache.get("a", 4_000)).toBeUndefined();
-        expect(cache.get("b", 4_000)).toBe("beta");
-        expect(cache.get("c", 4_000)).toBe("gamma");
     });
 });
