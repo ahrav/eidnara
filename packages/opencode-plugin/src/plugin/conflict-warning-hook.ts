@@ -7,7 +7,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import { openCodeDbExists, withReadOnlySessionDb } from "../hooks/context/read-session-db";
+import {
+    jsonField,
+    openCodeDbExists,
+    withReadOnlySessionDb,
+} from "../hooks/context/read-session-db";
 import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
 import type { ConflictResult } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
@@ -190,15 +194,15 @@ const MARKER_MESSAGE_IDS_SQL = `
 SELECT m.id AS id
 FROM message m
 WHERE m.session_id = ?
-  AND json_extract(m.data, '$.role') = 'user'
+  AND ${jsonField("m.data", "$.role")} = 'user'
   AND EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
   AND NOT EXISTS (
     SELECT 1 FROM part p
     WHERE p.message_id = m.id
       AND NOT (
-        COALESCE(json_extract(p.data, '$.ignored'), 0) IN (1, 'true')
-        AND json_extract(p.data, '$.type') = 'text'
-        AND substr(COALESCE(json_extract(p.data, '$.text'), ''), 1, length(?)) = ?
+        COALESCE(${jsonField("p.data", "$.ignored")}, 0) IN (1, 'true')
+        AND ${jsonField("p.data", "$.type")} = 'text'
+        AND substr(COALESCE(${jsonField("p.data", "$.text")}, ''), 1, length(?)) = ?
       )
   )
 ORDER BY m.time_created, m.id`;

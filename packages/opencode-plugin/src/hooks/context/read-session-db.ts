@@ -75,7 +75,7 @@ export function closeReadOnlySessionDb(): void {
  * `CASE` evaluates only the taken branch, so the extract never runs on an invalid document; an `AND`
  * guard has no such ordering guarantee. `column` and `path` are code literals, never caller input.
  */
-function jsonField(column: string, path: string): string {
+export function jsonField(column: string, path: string): string {
     return `CASE WHEN json_valid(${column}) = 1 THEN json_extract(${column}, '${path}') END`;
 }
 
