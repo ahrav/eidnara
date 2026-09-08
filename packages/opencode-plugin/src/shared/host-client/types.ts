@@ -11,8 +11,14 @@ export interface BindIdentity {
     project_root: string;
     harness: string;
     session: string;
-    credential_fingerprints?: Readonly<Record<string, string>>;
+    credential_fingerprints?: CredentialFingerprints;
 }
+
+/** The only keys `identity.credential_fingerprints` may carry on the wire. */
+export type BrocaProvider = "anthropic" | "google" | "openai";
+
+/** Partial because `docs/host-wire-protocol.md` reads an absent provider as no claim, not a denied one. */
+export type CredentialFingerprints = Readonly<Partial<Record<BrocaProvider, string>>>;
 
 /** `RouteTarget` serializes with `kind` as its snake_case tag. */
 export type RouteTarget =

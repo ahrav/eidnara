@@ -24,23 +24,28 @@ export interface TrueRawEstimateOptions {
  * Rules for part types that differ by harness decoder.
  * Types outside `toolTypes` are never tool signals, even when they carry tool-like fields;
  * `assistantOnlyToolTypes` are tool signals only inside assistant messages.
- * Types outside `reasoningTypes` and `standaloneMediaTypes` are opaque, however they are named.
+ * `foldsToolResultRole` accepts a typeless part with `role: "toolResult"` as a tool result.
+ * Parts whose type is in neither `reasoningTypes` nor `standaloneMediaTypes` are opaque;
+ * `standaloneMediaRoles` limits media types to those message roles when set.
  * `reasoningFields` lists, per reasoning type, the fields the decoder reads for visible text.
  * `skippedTypes` are bookkeeping parts the decoder discards.
  * `honorsIgnoredText` drops `text` parts flagged `ignored: true`.
- * `textSidecar` and `reasoningSidecar` return extra fields stored with decoded text for indexing.
+ * `textSidecar`, `reasoningSidecar`, and `toolCallSidecar` return extra fields stored with decoded content for indexing.
  * `isSyntheticPart` identifies parts whose message the decoder marks synthetic when every part matches.
  */
 interface ProviderPartRules {
     readonly toolTypes: ReadonlySet<string>;
     readonly assistantOnlyToolTypes: ReadonlySet<string>;
+    readonly foldsToolResultRole: boolean;
     readonly reasoningTypes: ReadonlySet<string>;
     readonly reasoningFields: Readonly<Record<string, readonly string[]>>;
     readonly standaloneMediaTypes: ReadonlySet<string>;
+    readonly standaloneMediaRoles: ReadonlySet<string> | null;
     readonly skippedTypes: ReadonlySet<string>;
     readonly honorsIgnoredText: boolean;
     readonly textSidecar: (part: Record<string, unknown>) => string;
     readonly reasoningSidecar: (part: Record<string, unknown>) => string;
+    readonly toolCallSidecar: (part: Record<string, unknown>) => string;
     readonly isSyntheticPart: ((part: Record<string, unknown>) => boolean) | null;
 }
 
@@ -50,29 +55,39 @@ function serializedMetadata(part: Record<string, unknown>): string {
     return isRecord(part.metadata) ? stableStringify(part.metadata) : "";
 }
 
+const noSidecar = (): string => "";
+
 const PROVIDER_PART_RULES: Record<ProviderShapeVersion, ProviderPartRules> = {
     "opencode-v1": {
         toolTypes: new Set([...GENERIC_TOOL_TYPES, "tool"]),
         assistantOnlyToolTypes: new Set(),
+        foldsToolResultRole: false,
         reasoningTypes: new Set(["reasoning"]),
         reasoningFields: { reasoning: ["text", "thinking"] },
         standaloneMediaTypes: new Set(["file", "image"]),
+        standaloneMediaRoles: null,
         skippedTypes: new Set(["snapshot", "patch", "agent", "retry", "compaction"]),
         honorsIgnoredText: true,
         textSidecar: serializedMetadata,
         reasoningSidecar: serializedMetadata,
+        toolCallSidecar: noSidecar,
         isSyntheticPart: (part) => part.synthetic === true || part.syntheticTodoMarker === true,
     },
     "pi-folded-v1": {
         toolTypes: new Set([...GENERIC_TOOL_TYPES, "toolCall"]),
         assistantOnlyToolTypes: new Set(["toolCall"]),
+        foldsToolResultRole: true,
         reasoningTypes: new Set(["thinking"]),
         reasoningFields: { thinking: ["thinking"] },
         standaloneMediaTypes: new Set(["image"]),
+        standaloneMediaRoles: new Set(["user"]),
         skippedTypes: new Set(),
         honorsIgnoredText: false,
         textSidecar: (part) => firstStringField(part, ["textSignature"]) ?? "",
-        reasoningSidecar: (part) => firstStringField(part, ["thinkingSignature"]) ?? "",
+        // A redacted block's signature is its payload, not a sidecar.
+        reasoningSidecar: (part) =>
+            part.redacted === true ? "" : (firstStringField(part, ["thinkingSignature"]) ?? ""),
+        toolCallSidecar: (part) => firstStringField(part, ["thoughtSignature"]) ?? "",
         isSyntheticPart: null,
     },
 };
@@ -146,6 +161,8 @@ interface ToolSignal {
     /** Error polarity of the result, which the decoders preserve as a distinct output kind. */
     isError: boolean;
     inputText: string;
+    /** Extra fields the decoder stores with the call block, such as a Pi `thoughtSignature`. */
+    inputSidecar: string;
     outputText: string;
     /** Image and file blocks inside a tool result, counted through the image heuristic instead of as text. */
     outputMedia: readonly Record<string, unknown>[];
@@ -467,20 +484,46 @@ function resultIsError(part: Record<string, unknown>): boolean {
     return part.isError === true || part.is_error === true;
 }
 
-/**
- * A folded Pi tool result is a part with `role: "toolResult"` and no `type`.
- * Harnesses that synthesize a call identity for idless parts: OpenCode `tool` and Pi `toolCall`.
- */
-function toolPartType(part: Record<string, unknown>): string {
-    const type = partType(part);
-    if (type.length === 0 && part.role === "toolResult") return "tool_result";
-    return type;
+/** A folded Pi tool result is a typeless part with `role: "toolResult"`; only a provider that folds accepts it. */
+function isFoldedToolResult(part: Record<string, unknown>, rules: ProviderPartRules): boolean {
+    return rules.foldsToolResultRole && partType(part).length === 0 && part.role === "toolResult";
 }
 
+/** Harnesses that synthesize a call identity for idless parts: OpenCode `tool` and Pi `toolCall`. */
 const SYNTHESIZED_ID_TOOL_TYPES = new Set(["tool", "toolCall"]);
 
-/** The Pi decoder names a folded result with no `toolCallId` after the generic tool. */
+/** The Pi decoder names a folded result by `toolCallId` alone, defaulting to the generic tool. */
 const FOLDED_RESULT_DEFAULT_CALL_ID = "tool";
+
+/**
+ * The Pi decoder reads a folded result's content only as an array. A single block whose keys are
+ * exactly `type` and `text` is plain text; any other block set is stored whole.
+ */
+function foldedResultContent(content: unknown): ToolResultContent {
+    if (!Array.isArray(content)) return emptyToolResultContent();
+    if (content.length === 1) {
+        const only = content[0];
+        if (
+            isRecord(only) &&
+            partType(only) === "text" &&
+            Object.keys(only).every((key) => key === "type" || key === "text")
+        ) {
+            return { text: firstStringFieldAllowEmpty(only, ["text"]) ?? "", media: [] };
+        }
+    }
+    const pieces: string[] = [];
+    const media: Record<string, unknown>[] = [];
+    for (const entry of content) {
+        if (!isRecord(entry)) {
+            if (entry !== null && entry !== undefined) pieces.push(String(entry));
+            continue;
+        }
+        const type = partType(entry);
+        if (type === "image" || type === "file") media.push(entry);
+        else pieces.push(stableStringify(entry));
+    }
+    return { text: pieces.join("\n"), media };
+}
 
 function toolSignalFromPart(
     part: unknown,
@@ -488,12 +531,14 @@ function toolSignalFromPart(
     messageRole: string,
 ): ToolSignal | null {
     if (!isRecord(part)) return null;
-    const type = toolPartType(part);
+    const folded = isFoldedToolResult(part, rules);
+    const type = folded ? "tool_result" : partType(part);
     if (!rules.toolTypes.has(type)) return null;
     if (rules.assistantOnlyToolTypes.has(type) && messageRole !== "assistant") return null;
     const state = isRecord(part.state) ? part.state : null;
-    let callId = callIdFromPart(part);
-    if (!callId && part.role === "toolResult") callId = FOLDED_RESULT_DEFAULT_CALL_ID;
+    const callId = folded
+        ? (firstStringField(part, ["toolCallId"]) ?? FOLDED_RESULT_DEFAULT_CALL_ID)
+        : callIdFromPart(part);
     if (!callId && !SYNTHESIZED_ID_TOOL_TYPES.has(type)) return null;
     const toolName = toolNameFromPart(part);
 
@@ -518,6 +563,7 @@ function toolSignalFromPart(
             providerExecuted: providerExecutedFromPart(part),
             isError: status === "error" || outputKey === "error",
             inputText: inputKey ? stringValue(inputOwner[inputKey]) : "",
+            inputSidecar: rules.toolCallSidecar(part),
             outputText: output.text,
             outputMedia: output.media,
             metadataDescription: metadataDescriptionFromState(state),
@@ -536,6 +582,7 @@ function toolSignalFromPart(
             providerExecuted: false,
             isError: resultIsError(part) || part.state === "error",
             inputText: argsKey ? stringValue(part[argsKey]) : "",
+            inputSidecar: "",
             outputText: output.text,
             outputMedia: output.media,
             metadataDescription: "",
@@ -552,6 +599,7 @@ function toolSignalFromPart(
             providerExecuted: false,
             isError: false,
             inputText: inputKey ? stringValue(part[inputKey]) : "",
+            inputSidecar: rules.toolCallSidecar(part),
             outputText: "",
             outputMedia: [],
             metadataDescription: "",
@@ -561,12 +609,11 @@ function toolSignalFromPart(
     if (type === "tool_result") {
         const contentKey = firstOwnKey(part, ["content", "output", "result"]);
         const contentValue = contentKey ? part[contentKey] : undefined;
-        // A folded Pi result decodes only an array `content`; any other shape is an empty result.
-        const folded = part.role === "toolResult";
-        const output =
-            contentKey && (!folded || Array.isArray(contentValue))
-                ? toolResultContent(contentValue)
-                : emptyToolResultContent();
+        const output = folded
+            ? foldedResultContent(contentValue)
+            : contentKey
+              ? toolResultContent(contentValue)
+              : emptyToolResultContent();
         return {
             callId,
             toolName,
@@ -575,6 +622,7 @@ function toolSignalFromPart(
             providerExecuted: false,
             isError: resultIsError(part),
             inputText: "",
+            inputSidecar: "",
             outputText: output.text,
             outputMedia: output.media,
             metadataDescription: "",
@@ -687,6 +735,7 @@ function redactedReasoningData(part: Record<string, unknown>): string | null {
 function classifyNonToolPart(
     part: Record<string, unknown>,
     rules: ProviderPartRules,
+    messageRole: string,
 ): NonToolPartContent {
     const type = partType(part);
     if (rules.skippedTypes.has(type) || (type === "meta" && Object.keys(part).length <= 1)) {
@@ -700,16 +749,17 @@ function classifyNonToolPart(
         return text || sidecar ? { kind: "text", text, sidecar } : { kind: "skip" };
     }
     if (rules.reasoningTypes.has(type)) {
+        const sidecar = rules.reasoningSidecar(part);
         const text = firstStringFieldAllowEmpty(part, rules.reasoningFields[type] ?? []);
-        if (text !== null && text.length > 0) {
-            return { kind: "reasoning", text, sidecar: rules.reasoningSidecar(part) };
-        }
-        // A redacted payload is the block's only content, so it carries no separate sidecar.
+        if (text !== null && text.length > 0) return { kind: "reasoning", text, sidecar };
         const redacted = redactedReasoningData(part);
-        if (redacted !== null) return { kind: "reasoning", text: redacted, sidecar: "" };
-        return text !== null ? { kind: "reasoning", text, sidecar: "" } : { kind: "structured" };
+        if (redacted !== null) return { kind: "reasoning", text: redacted, sidecar };
+        return text !== null ? { kind: "reasoning", text, sidecar } : { kind: "structured" };
     }
-    if (rules.standaloneMediaTypes.has(type)) {
+    if (
+        rules.standaloneMediaTypes.has(type) &&
+        (rules.standaloneMediaRoles === null || rules.standaloneMediaRoles.has(messageRole))
+    ) {
         return { kind: "image", altText: firstStringField(part, ["alt", "description"]) };
     }
     return { kind: "structured" };
@@ -718,6 +768,7 @@ function classifyNonToolPart(
 function estimateNonToolPart(
     part: unknown,
     options: TrueRawEstimateOptions,
+    messageRole: string,
     breakdown: TrueRawTokenBreakdown,
 ): void {
     if (!isRecord(part)) {
@@ -725,7 +776,11 @@ function estimateNonToolPart(
             addBreakdown(breakdown, "other", estimateStructured(part));
         return;
     }
-    const content = classifyNonToolPart(part, partRulesFor(options.providerShapeVersion));
+    const content = classifyNonToolPart(
+        part,
+        partRulesFor(options.providerShapeVersion),
+        messageRole,
+    );
     switch (content.kind) {
         case "skip":
             return;
@@ -774,6 +829,9 @@ export function estimateTrueRawMessageTokens(
         if (signal) {
             if (signal.hasInput) {
                 addBreakdown(breakdown, "toolInput", estimateTokens(signal.inputText));
+                if (signal.inputSidecar) {
+                    addBreakdown(breakdown, "other", estimateTokens(signal.inputSidecar));
+                }
             }
             if (signal.hasOutput) {
                 addBreakdown(breakdown, "toolOutput", estimateTokens(signal.outputText));
@@ -783,7 +841,7 @@ export function estimateTrueRawMessageTokens(
             }
             continue;
         }
-        estimateNonToolPart(part, options, breakdown);
+        estimateNonToolPart(part, options, message.role, breakdown);
     }
     return breakdown;
 }
@@ -1103,12 +1161,13 @@ function partContentFingerprint(
             tool.providerExecuted ? "provider" : "",
             tool.isError ? "error" : "",
             tool.inputText,
+            tool.inputSidecar,
             tool.outputText,
             tool.metadataDescription,
             ...tool.outputMedia.flatMap(mediaFingerprintFields),
         ]);
     }
-    const content = classifyNonToolPart(part, rules);
+    const content = classifyNonToolPart(part, rules, messageRole);
     switch (content.kind) {
         case "skip":
             return contentStringsHash(["skip"]);
@@ -1135,8 +1194,10 @@ export function computeRawRangeFingerprint(
         const partFingerprint = message.parts
             .map((part) => partContentFingerprint(part, rules, message.role))
             .join(",");
+        // A fully synthetic message is excluded from accounting, so that state is part of its identity.
+        const synthetic = messageIsSynthetic(message, rules) ? "synthetic" : "";
         pieces.push(
-            `${message.ordinal}:${message.id}:${message.role}:${message.parts.length}:${partFingerprint}`,
+            `${message.ordinal}:${message.id}:${message.role}:${synthetic}:${message.parts.length}:${partFingerprint}`,
         );
     }
     return pieces.join("|");

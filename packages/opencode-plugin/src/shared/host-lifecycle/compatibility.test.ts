@@ -90,19 +90,31 @@ describe("module version ranges", () => {
 });
 
 describe("exact epoch comparison", () => {
+    const wireEpochs = {
+        memory_render_epoch: 2,
+        compartment_render_epoch: 2,
+        profile_epoch: 2,
+        tagger_epoch: 3,
+        state_sync_epoch: 1,
+    };
+
     test("maps the five Eidnara wire epoch names to the release contract", () => {
-        expect(
-            observedEpochsFromContextMetrics({
-                epochs: {
-                    memory_render_epoch: 2,
-                    compartment_render_epoch: 2,
-                    profile_epoch: 2,
-                    tagger_epoch: 3,
-                    state_sync_epoch: 1,
-                    state_sync_deltas: true,
-                },
-            }),
-        ).toEqual(healthyEpochs);
+        expect(observedEpochsFromContextMetrics({ epochs: wireEpochs })).toEqual(healthyEpochs);
+    });
+
+    test("a sixth wire epoch invalidates the whole observed set", () => {
+        // The wire contract admits exactly five names; dropping a sixth would hide a contract change.
+        const observed = observedEpochsFromContextMetrics({
+            epochs: { ...wireEpochs, state_sync_deltas: true },
+        });
+        expect(observed).toEqual({});
+        const verdict = evaluateCompatibility({
+            authenticatedPeer: peer(hostRelease.versions.daemon),
+            catalog: healthyCatalog,
+            epochs: observed,
+        });
+        expect(verdict.ok).toBe(false);
+        if (!verdict.ok) expect(verdict.reason).toBe("incompatible_epochs");
     });
 
     test("missing or malformed status fields remain absent and fail closed", () => {

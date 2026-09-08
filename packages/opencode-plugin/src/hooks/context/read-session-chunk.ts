@@ -1,5 +1,3 @@
-import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
-import { removeSystemReminders } from "../../shared/system-directive";
 import { tokenEstimatorGeneration } from "../../shared/token-estimator";
 import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
 import {
@@ -216,11 +214,6 @@ export function withRawMessageProvider<T>(
     fn: () => T,
 ): T {
     return withScopedCleanup(fn, setRawMessageProvider(sessionId, provider));
-}
-
-/** Chunk compaction strips system-reminder blocks and OMO markers from user text. */
-export function cleanUserText(text: string): string {
-    return removeSystemReminders(text).replace(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
 }
 
 export interface SessionChunk {
@@ -703,8 +696,7 @@ export function readSessionChunk(
         }
 
         const role = compactRole(msg.role);
-        const textParts = extractTexts(msg.parts)
-            .map((t) => (msg.role === "user" ? cleanUserText(t) : t))
+        const textParts = extractTexts(msg.parts, msg.role)
             .map(normalizeText)
             .filter((value) => value.length > 0);
 
