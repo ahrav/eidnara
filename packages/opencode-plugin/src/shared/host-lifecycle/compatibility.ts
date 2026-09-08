@@ -140,23 +140,29 @@ function asRecord(value: unknown): Record<string, unknown> | null {
         : null;
 }
 
+/** Maps `host.status` `metrics.epochs` wire names to release-contract epoch names. */
+const WIRE_EPOCH_NAMES: Readonly<Record<string, EpochName>> = {
+    memory_render_epoch: "memory_render",
+    compartment_render_epoch: "compartment_render",
+    profile_epoch: "profile_claude_code_anthropic",
+    tagger_epoch: "tagger",
+    state_sync_epoch: "state_sync",
+};
+
 /**
  * The epoch evaluator performs numeric validation without coercing values.
+ * Unknown wire epoch names invalidate the whole observed set.
  */
 export function observedEpochsFromContextMetrics(metrics: unknown): ObservedEpochs {
     const epochs = asRecord(asRecord(metrics)?.epochs);
     if (epochs === null) return {};
-    return {
-        ...("memory_render_epoch" in epochs ? { memory_render: epochs.memory_render_epoch } : {}),
-        ...("compartment_render_epoch" in epochs
-            ? { compartment_render: epochs.compartment_render_epoch }
-            : {}),
-        ...("profile_epoch" in epochs
-            ? { profile_claude_code_anthropic: epochs.profile_epoch }
-            : {}),
-        ...("tagger_epoch" in epochs ? { tagger: epochs.tagger_epoch } : {}),
-        ...("state_sync_epoch" in epochs ? { state_sync: epochs.state_sync_epoch } : {}),
-    };
+    const observed: ObservedEpochs = {};
+    for (const [wireName, value] of Object.entries(epochs)) {
+        const name = WIRE_EPOCH_NAMES[wireName];
+        if (name === undefined) return {};
+        observed[name] = value;
+    }
+    return observed;
 }
 
 /**
@@ -198,8 +204,11 @@ export function evaluateEpochCompatibility(observed: ObservedEpochs): Compatibil
 }
 
 export interface CompatibilityInput {
-    authenticatedPeer?: AuthenticatedPeer;
-    authenticatedDaemonVer?: string;
+    /**
+     * The handshake-authenticated peer. Connection-file daemon versions are
+     * untrusted text and never stand in for it.
+     */
+    authenticatedPeer: AuthenticatedPeer;
     catalog: CatalogEntry[];
     epochs: ObservedEpochs;
 }
@@ -214,14 +223,8 @@ export const COMPATIBILITY_STAGES = [
     {
         stage: "daemon",
         checkId: "compatibility.daemon",
-        evaluate: (input: CompatibilityInput): CompatibilityVerdict => {
-            const peer = input.authenticatedPeer ?? {
-                daemonVer: input.authenticatedDaemonVer ?? "",
-                daemonId: new Uint8Array(),
-                proof: "current" as const,
-            };
-            return evaluateDaemonCompatibility(peer);
-        },
+        evaluate: (input: CompatibilityInput): CompatibilityVerdict =>
+            evaluateDaemonCompatibility(input.authenticatedPeer),
     },
     {
         stage: "modules",

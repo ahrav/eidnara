@@ -9,11 +9,16 @@ import { readFileSync, realpathSync } from "node:fs";
 import * as path from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import { getTestBackstopDataRoot } from "../data-path";
+import type { FailingReason, Remediation } from "./contract-vocabulary";
 
 /** Canonical publication filename (version-2 literal). */
 export const CONNECTION_FILE_NAME = hostRelease.layout.connection_file;
 
-export type DataRootResolution = { ok: true; root: string } | { ok: false; reason: "no_data_dir" };
+// Verdict fields narrow the contract unions instead of restating their literals.
+// `Extract` collapses to `never` when the contract drops a member, so a stale literal fails to compile.
+export type DataRootResolution =
+    | { ok: true; root: string }
+    | { ok: false; reason: Extract<FailingReason, "no_data_dir"> };
 
 function absoluteOrNull(value: string | undefined): string | null {
     if (!value || !path.isAbsolute(value)) return null;
@@ -112,14 +117,14 @@ export type FilesystemAdmission =
     | { ok: true }
     | {
           ok: false;
-          reason: "unsupported_filesystem";
-          remediation: "set_data_directory";
+          reason: Extract<FailingReason, "unsupported_filesystem">;
+          remediation: Extract<Remediation, "set_data_directory">;
           detail: string;
       }
     | {
           ok: false;
-          reason: "unsupported_platform";
-          remediation: "use_supported_platform";
+          reason: Extract<FailingReason, "unsupported_platform">;
+          remediation: Extract<Remediation, "use_supported_platform">;
           detail: string;
       };
 
@@ -155,17 +160,29 @@ const UNSUPPORTED_FS_TYPES = new Set([
     "fuse.glusterfs",
     "lustre",
     "beegfs",
+    // BeeGFS registered as `fhgfs` before its rename.
+    "fhgfs",
     "gpfs",
     "orangefs",
+    // The in-tree OrangeFS module registers its filesystem type as `pvfs2`.
+    "pvfs2",
+    "panfs",
+    "wekafs",
+    "coda",
     "moosefs",
     "fuse.moosefs",
+    "gfs",
     "gfs2",
     "ocfs2",
     "fuse.s3fs",
     "fuse.rclone",
     "fuse.gcsfuse",
     "vboxsf",
+    "vmhgfs",
+    "prl_fs",
     "virtiofs",
+    // An untriggered automount point has no backing store to admit.
+    "autofs",
 ]);
 
 export interface MountEntry {
@@ -322,6 +339,15 @@ export function admitLifecycleFilesystem(
             detail: "platform is outside the release's qualified set",
         };
     }
+    // Canonicalization runs before the mount-table read because traversing the root can trigger an automount.
+    // A table read before traversal would still list the trigger instead of the mounted filesystem.
+    // Linux classifies a nonexistent root by the mount containing its would-be path because the kernel will use that mount.
+    let lookupRoot: string;
+    try {
+        lookupRoot = mountLookupPath(dataRoot, io.realpath ?? nativeRealpath);
+    } catch {
+        return rejected("data root cannot be resolved");
+    }
     let mounts: MountEntry[];
     try {
         mounts =
@@ -330,13 +356,6 @@ export function admitLifecycleFilesystem(
                 : parseMounts(io.readMounts());
     } catch {
         return rejected("mount table is unreadable");
-    }
-    // Linux classifies a nonexistent root by the mount containing its would-be path because the kernel will use that mount.
-    let lookupRoot: string;
-    try {
-        lookupRoot = mountLookupPath(dataRoot, io.realpath ?? nativeRealpath);
-    } catch {
-        return rejected("data root cannot be resolved");
     }
     const mount = longestMountFor(lookupRoot, mounts);
     if (!mount) return rejected("no mount contains the data root");

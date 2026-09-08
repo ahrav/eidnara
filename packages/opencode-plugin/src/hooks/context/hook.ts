@@ -121,6 +121,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const agentBySession = deps.liveSessionState?.agentBySession ?? new Map<string, string>();
     const sessionDirectoryBySession =
         deps.liveSessionState?.sessionDirectoryBySession ?? new Map<string, string>();
+    const sessionMetadataReadStateBySession =
+        deps.liveSessionState?.sessionMetadataReadStateBySession ?? new Map();
     const internalChildSessions = deps.liveSessionState?.internalChildSessions ?? new Set<string>();
     const subagentSessions = deps.liveSessionState?.subagentSessions ?? new Set<string>();
     // One resolver serves the transform, the commands, the todo snapshots, and the Sidekick child, so every daemon call for a session shares one route root.
@@ -128,6 +130,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         client: deps.client,
         directory: deps.directory,
         sessionDirectoryBySession,
+        sessionMetadataReadStateBySession,
         subagentSessions,
         internalChildSessions,
     };
@@ -321,6 +324,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             liveModelBySession.delete(sessionId);
             agentBySession.delete(sessionId);
             sessionDirectoryBySession.delete(sessionId);
+            sessionMetadataReadStateBySession.delete(sessionId);
             internalChildSessions.delete(sessionId);
         },
     });
@@ -329,6 +333,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         moduleClient,
         compactionOff,
         resolveProjectRoot: sessionDirectoryFor,
+        isSessionDeleted: (sessionId) => deletedSessions.has(sessionId),
         isSubagentSession,
         // The DB fallback gives /ctx-status the model-specific threshold before the first hook after a restart.
         getLiveModelKey: (sessionId) => {
@@ -342,7 +347,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             pendingMaterializationSessions.add(sessionId);
         },
         sendNotification: async (sessionId, text, params) => {
-            await sendIgnoredMessage(deps.client, sessionId, text, {
+            const notificationParams = {
                 ...getLiveNotificationParams(
                     sessionId,
                     liveModelBySession,
@@ -351,7 +356,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                     deps.config.toast_duration_ms,
                 ),
                 ...params,
-            });
+            };
+            await sendIgnoredMessage(
+                deps.client,
+                sessionId,
+                text,
+                notificationParams,
+                params.forcePersist === true,
+            );
         },
         sidekick: sidekickConfig
             ? {

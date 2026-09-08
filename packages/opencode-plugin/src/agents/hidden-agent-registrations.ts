@@ -1,8 +1,11 @@
 import { buildAllowOnlyPermission } from "./permissions";
 
 // Hidden-agent caps are 40 for sidekick and 8 for the smart-note compiler.
+/** A step budget below one cannot run a turn, and the host rejects a fractional count, so only a positive integer at or under `cap` is kept. */
 function clampHiddenAgentStepLimit(value: unknown, cap: number): number {
-    return typeof value === "number" && Number.isFinite(value) ? Math.min(value, cap) : cap;
+    return typeof value === "number" && Number.isInteger(value) && value >= 1
+        ? Math.min(value, cap)
+        : cap;
 }
 
 export const HIDDEN_AGENT_DESCRIPTION_MARKER = "Internal Eidnara";

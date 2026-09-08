@@ -230,27 +230,32 @@ function readA1GoldenTools(): Record<
     );
     const headings = [...toolSection.matchAll(/^### (ctx_[a-z_]+) —.*$/gm)];
     return Object.fromEntries(
-        headings.map((heading, index) => {
-            const start = (heading.index ?? 0) + heading[0].length;
-            const end = headings[index + 1]?.index ?? toolSection.length;
-            const body = toolSection.slice(start, end);
-            const description = body.match(/\*\*Description:\*\*\s+```\n([\s\S]*?)\n```/)?.[1];
-            const parameters = body.match(
-                /\*\*Parameters \(JSON Schema per parameter, as serialized to the provider\):\*\*\s+```json\n([\s\S]*?)\n```/,
-            )?.[1];
-            if (description === undefined || parameters === undefined) {
-                throw new Error(`Malformed A1 golden tool section: ${heading[1]}`);
-            }
-            return [
-                heading[1],
-                {
-                    description,
-                    parameters: JSON.parse(parameters) as Record<string, unknown>,
-                },
-            ];
-        }),
+        headings
+            .map((heading, index) => {
+                const start = (heading.index ?? 0) + heading[0].length;
+                const end = headings[index + 1]?.index ?? toolSection.length;
+                const body = toolSection.slice(start, end);
+                const description = body.match(/\*\*Description:\*\*\s+```\n([\s\S]*?)\n```/)?.[1];
+                const parameters = body.match(
+                    /\*\*Parameters \(JSON Schema per parameter, as serialized to the provider\):\*\*\s+```json\n([\s\S]*?)\n```/,
+                )?.[1];
+                if (description === undefined || parameters === undefined) {
+                    throw new Error(`Malformed A1 golden tool section: ${heading[1]}`);
+                }
+                return [
+                    heading[1],
+                    {
+                        description,
+                        parameters: JSON.parse(parameters) as Record<string, unknown>,
+                    },
+                ] as const;
+            })
+            .filter(([toolId]) => !UNREGISTERED_CATALOG_TOOL_IDS.has(toolId)),
     );
 }
+
+/** Tool ids the prompt-surface catalog names but neither adapter builds. */
+const UNREGISTERED_CATALOG_TOOL_IDS = new Set<string>(["ctx_expand"]);
 
 function captureRegisteredTools(
     options: Parameters<typeof registerEidnaraTools>[1],

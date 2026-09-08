@@ -470,7 +470,7 @@ function replayMatchesRow(args: CtxMemoryArgs, row: ReadRow): boolean {
     return decision.payload.summary === args.content.trim();
 }
 
-/** The revise and merge replay probe requires every payload field explicitly: an omitted category, content, or reason inherits from the retired predecessors, which no read serves, so the reconstructed spec is unverifiable — the probe answers no match and the ordinary path surfaces the mismatch instead of a false "already applied". A generated anti-memory expiry is the one field a redelivery legitimately drifts on — it is day-aligned at delivery time — so the comparison re-renders under the stored expiry when the stored value could have been generated, mirroring the create probe. commentlint: allow(JUDGE) */
+/** The revise and merge replay probe compares only the fields this request states: an omitted category, content, or reason inherits from the retired predecessors, which no read serves, so it is consistent with whatever the successor holds, and the daemon's digest probe on the row-rebuilt spec is what proves the identity committed that successor. An explicit field must equal the stored one so a request that names different content keeps the daemon's `operation_key_reused` rejection. A generated anti-memory expiry is the one field a redelivery legitimately drifts on — it is day-aligned at delivery time — so the comparison re-renders under the stored expiry when the stored value could have been generated, mirroring the create probe. commentlint: allow(JUDGE) */
 function replayMatchesSuccessor(
     args: CtxMemoryArgs,
     row: ReadRow,
@@ -478,11 +478,8 @@ function replayMatchesSuccessor(
 ): boolean {
     const decision = row.decision;
     if (!decision) return false;
-    const category = args.category?.trim();
-    if (!category || decision.decision_kind !== category) return false;
-    if (args.reason == null || decision.payload.rationale !== args.reason.trim()) {
-        return false;
-    }
+    if (args.category != null && decision.decision_kind !== args.category.trim()) return false;
+    if (args.reason != null && decision.payload.rationale !== args.reason.trim()) return false;
     if (args.antiMemory) {
         if (!generatedExpiry) {
             return renderAntiMemoryContent(args.antiMemory) === decision.payload.summary;
@@ -501,7 +498,7 @@ function replayMatchesSuccessor(
             return false;
         }
     }
-    if (args.content == null) return false;
+    if (args.content == null) return true;
     return decision.payload.summary === args.content.trim();
 }
 

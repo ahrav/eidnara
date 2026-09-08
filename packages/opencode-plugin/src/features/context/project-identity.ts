@@ -9,7 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { accessSync, existsSync, constants as fsConstants, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { log } from "../../shared/logger";
@@ -145,6 +145,7 @@ function assertDirectoryUsable(canonicalDirectory: string, rawDirectory: string)
                 `Project path is not a directory: ${canonicalDirectory}`,
             );
         }
+        accessSync(canonicalDirectory, fsConstants.R_OK | fsConstants.X_OK);
     } catch (error) {
         if (error instanceof ProjectIdentityError) {
             throw error;
@@ -247,11 +248,19 @@ function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentity
  */
 export function resolveProjectIdentityStrict(directory: string): string {
     const canonical = path.resolve(directory);
-    // A subdirectory of one repository can later be initialized as its own, so a hit is honoured only while the nearest `.git` is unchanged. An unreadable directory yields no root and cannot prove a change, so its hit stands.
     const gitRoot = gitRootDirectory(canonical);
     const cached = identityCache.get(canonical);
     if (cached !== undefined) {
-        if (gitRoot === null || cached.gitRoot === gitRoot) return cached.identity;
+        if (cached.gitRoot === gitRoot) return cached.identity;
+        if (gitRoot === null) {
+            try {
+                assertDirectoryUsable(canonical, directory);
+            } catch {
+                // A path that cannot be inspected cannot prove that Git metadata disappeared.
+                return cached.identity;
+            }
+        }
+        // The accessible directory either moved to another Git root or no longer has Git metadata.
         identityCache.delete(canonical);
         lastKnownGitIdentityCache.delete(canonical);
     }

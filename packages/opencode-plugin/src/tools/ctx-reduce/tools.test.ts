@@ -4,7 +4,9 @@ import { createCtxReduceTools } from "./tools";
 
 type ReduceInput = Parameters<NonNullable<RustToolBackends["reduce"]>>[0];
 
-const toolContext = (sessionID = "ses-1") => ({ sessionID, directory: "/repo/project" }) as never;
+// OpenCode passes the model's tool-call id to plugin tools as `callID`.
+const toolContext = (sessionID = "ses-1") =>
+    ({ sessionID, directory: "/repo/project", callID: `call-${sessionID}` }) as never;
 
 function recordingReduce(response: unknown = { ok: true, queued: 1 }) {
     const calls: ReduceInput[] = [];
@@ -187,27 +189,19 @@ describe("createCtxReduceTools", () => {
             );
         });
 
-        it("issues fallback command ids that differ across tool incarnations", async () => {
-            const first = recordingReduce();
-            const second = recordingReduce();
-            const firstTools = createCtxReduceTools({ rustToolBackends: { reduce: first.reduce } });
-            const secondTools = createCtxReduceTools({
-                rustToolBackends: { reduce: second.reduce },
-            });
+        it("refuses a drop when the host supplies no tool-call id instead of minting one", async () => {
+            const { calls, reduce } = recordingReduce();
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
 
-            await firstTools.ctx_reduce.execute({ drop: "1" }, toolContext());
-            await firstTools.ctx_reduce.execute({ drop: "2" }, toolContext());
-            await secondTools.ctx_reduce.execute({ drop: "1" }, toolContext());
+            const result = await tools.ctx_reduce.execute({ drop: "1" }, {
+                sessionID: "ses-1",
+                directory: "/repo/project",
+            } as never);
 
-            const ids = [
-                first.calls[0]?.commandId,
-                first.calls[1]?.commandId,
-                second.calls[0]?.commandId,
-            ];
-            expect(new Set(ids).size).toBe(3);
-            for (const id of ids) {
-                expect(id).toMatch(/^oc-ses-1-[0-9a-f]{12}-\d+$/);
-            }
+            expect(result).toBe(
+                "Error: ctx_reduce requires a stable tool-call identity from the host; nothing was queued.",
+            );
+            expect(calls).toHaveLength(0);
         });
 
         it("returns the unavailable error when no reduce backend is registered", async () => {

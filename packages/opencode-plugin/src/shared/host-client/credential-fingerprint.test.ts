@@ -45,16 +45,35 @@ describe("Broca credential fingerprints", () => {
             PATH: "/attacker/bin",
         });
         expect(Object.keys(fingerprints)).toEqual(["openai"]);
+        expect(fingerprints.anthropic).toBeUndefined();
+        expect(fingerprints.google).toBeUndefined();
         expect(JSON.stringify(fingerprints)).not.toContain("direct");
         expect(JSON.stringify(fingerprints)).not.toContain("ambient");
     });
 
-    test("rejects malformed keys and oversize values", () => {
+    test("rejects malformed keys", () => {
         expect(() => credentialFingerprints(new Uint8Array(31), "pi", {})).toThrow(/exactly 32/);
-        expect(() =>
-            credentialFingerprints(new Uint8Array(32), "pi", {
-                ANTHROPIC_API_KEY: "x".repeat(16 * 1024 + 1),
-            }),
-        ).toThrow(/size cap/);
+    });
+
+    test("omits only the provider whose value exceeds the cap", () => {
+        // The host qualifies rows per provider, so one oversize value must not hide the
+        // fingerprints of the other providers.
+        const key = new Uint8Array(32);
+        const oversize = "x".repeat(BROCA_CREDENTIAL_VALUE_CAP_BYTES + 1);
+        const fingerprints = credentialFingerprints(key, "pi", {
+            ANTHROPIC_API_KEY: "direct",
+            GEMINI_API_KEY: oversize,
+            OPENAI_API_KEY: "direct",
+        });
+        expect(Object.keys(fingerprints).sort()).toEqual(["anthropic", "openai"]);
+        expect(credentialFingerprints(key, "pi", { ANTHROPIC_API_KEY: oversize })).toEqual({});
+    });
+
+    test("a value exactly at the cap still qualifies", () => {
+        const key = new Uint8Array(32);
+        const fingerprints = credentialFingerprints(key, "pi", {
+            ANTHROPIC_API_KEY: "x".repeat(BROCA_CREDENTIAL_VALUE_CAP_BYTES),
+        });
+        expect(Object.keys(fingerprints)).toEqual(["anthropic"]);
     });
 });

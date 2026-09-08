@@ -7,8 +7,14 @@ const SRC = resolve(import.meta.dir);
 const PACKAGE_ROOT = resolve(SRC, "..");
 const ENTRY = join(SRC, "index.ts");
 
-/** Package boundaries the bundle stops at; the metafile lists nothing behind them. */
-const BUILD_EXTERNALS = ["@eidnara/shm-native", "@opencode-ai/plugin", "bun:sqlite", "node:sqlite"];
+/** Package boundaries the bundle stops at; the metafile lists nothing behind them. `jsonc-parser` stays external because Bun's node target selects its UMD `main`, whose AMD branch runs inside an ESM bundle and requires `./impl/*` paths that do not exist there. commentlint: allow(JUDGE) */
+const BUILD_EXTERNALS = [
+    "@eidnara/shm-native",
+    "@opencode-ai/plugin",
+    "bun:sqlite",
+    "node:sqlite",
+    "jsonc-parser",
+];
 
 /** A bundled input under `src/features` or `src/hooks` matching `NOT_PORTED` is residue from a subsystem this package does not contain; the same pattern lives in `testing/module-graph.test.ts`. commentlint: allow(JUDGE) */
 const NOT_PORTED = /\/(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*)(\/|\.ts$)/;

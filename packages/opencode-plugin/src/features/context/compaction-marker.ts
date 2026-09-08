@@ -178,11 +178,8 @@ function getWritableOpenCodeDb(): Database {
         return cachedWriteDb.db;
     }
     if (cachedWriteDb) {
-        try {
-            closeQuietly(cachedWriteDb.db);
-        } catch {
-            // ignore
-        }
+        closeQuietly(cachedWriteDb.db);
+        cachedWriteDb = null;
     }
     // Opening a missing path creates an empty database, whose later queries fail with `no such table`.
     if (!existsSync(dbPath)) {
@@ -190,20 +187,22 @@ function getWritableOpenCodeDb(): Database {
     }
     assertSqliteRuntimeGate();
     const db = new Database(dbPath);
-    // Set `busy_timeout` before `journal_mode=WAL` so a cold open waits up to 5 s when OpenCode holds the lock.
-    db.exec("PRAGMA busy_timeout=5000");
-    db.exec("PRAGMA journal_mode=WAL");
+    try {
+        // Set `busy_timeout` before `journal_mode=WAL` so a cold open waits up to 5 s when OpenCode holds the lock.
+        db.exec("PRAGMA busy_timeout=5000");
+        db.exec("PRAGMA journal_mode=WAL");
+    } catch (error) {
+        // A handle that failed initialization is never cached, so it must be closed here or it leaks until GC.
+        closeQuietly(db);
+        throw error;
+    }
     cachedWriteDb = { path: dbPath, db };
     return db;
 }
 
 export function closeCompactionMarkerDb(): void {
     if (cachedWriteDb) {
-        try {
-            closeQuietly(cachedWriteDb.db);
-        } catch {
-            // ignore
-        }
+        closeQuietly(cachedWriteDb.db);
         cachedWriteDb = null;
     }
     // Reset the schema-probe cache because the next open can use a different `opencode.db` path.

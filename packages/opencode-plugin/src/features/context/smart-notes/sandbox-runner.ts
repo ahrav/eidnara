@@ -99,6 +99,7 @@ export interface RunCompiledSmartNoteCheckFailure {
     cancelled: false;
     error: string;
     network: boolean;
+    hostNetworkError?: true;
 }
 
 export interface RunCompiledSmartNoteCheckCancelled {
@@ -230,8 +231,20 @@ async function runCompiledSmartNoteCheckLocked(
             // A guest `try/catch` around a host call can swallow the abort or the host's refusal and
             // return a value computed without the input.
             if (controller.signal.aborted) throw smartNoteAbortError(controller.signal);
+            const checkResult = result as { met?: unknown; hostNetworkError?: unknown } | null;
+            const rejectionIndex = checkResult?.hostNetworkError;
+            if (
+                typeof rejectionIndex === "number" &&
+                Number.isSafeInteger(rejectionIndex) &&
+                rejectionIndex >= 0
+            ) {
+                const reason = hostCalls.reasons[rejectionIndex];
+                if (!(reason instanceof SmartNoteNetworkError)) {
+                    throw new Error("sandbox reported a host network error without one");
+                }
+                return failureResult(formatSandboxError(reason), true, true);
+            }
             if (hostCalls.rejected) throw hostCalls.reason;
-            const checkResult = result as { met?: unknown } | null;
             if (!checkResult || typeof checkResult.met !== "boolean") {
                 return failureResult("check() must return { met: boolean }", false);
             }
@@ -253,8 +266,18 @@ async function runCompiledSmartNoteCheckLocked(
     }
 }
 
-function failureResult(error: string, network: boolean): RunCompiledSmartNoteCheckFailure {
-    return { ok: false, cancelled: false, error: truncate(error), network };
+function failureResult(
+    error: string,
+    network: boolean,
+    hostNetworkError = false,
+): RunCompiledSmartNoteCheckFailure {
+    return {
+        ok: false,
+        cancelled: false,
+        error: truncate(error),
+        network,
+        ...(hostNetworkError ? { hostNetworkError: true as const } : {}),
+    };
 }
 
 function cancelledResult(reason: unknown): RunCompiledSmartNoteCheckCancelled {
@@ -280,6 +303,7 @@ function truncate(value: string): string {
 interface HostCallLedger {
     rejected: boolean;
     reason: unknown;
+    reasons: unknown[];
 }
 
 function installCapabilityObject(
@@ -287,7 +311,7 @@ function installCapabilityObject(
     cap: SmartNoteCapabilityApi,
     signal: AbortSignal,
 ): HostCallLedger {
-    const ledger: HostCallLedger = { rejected: false, reason: undefined };
+    const ledger: HostCallLedger = { rejected: false, reason: undefined, reasons: [] };
     const guard = <T>(call: () => Promise<T>) => guardHostCall(call, signal, ledger);
     const capObject = context.newObject();
     try {
@@ -295,9 +319,21 @@ function installCapabilityObject(
             const value = await guard(() => cap.readFile(arg));
             return value === null ? null : value;
         });
-        installAsyncStringFunction(context, capObject, "__httpGet", async (arg) =>
-            JSON.stringify(await guard(() => cap.httpGet(arg))),
-        );
+        installAsyncStringFunction(context, capObject, "__httpGet", async (arg) => {
+            try {
+                return JSON.stringify({ ok: true, value: await guard(() => cap.httpGet(arg)) });
+            } catch (error) {
+                if (!(error instanceof SmartNoteNetworkError)) throw error;
+                const rejection = ledger.reasons.lastIndexOf(error);
+                if (rejection < 0) throw new Error("network rejection missing from host ledger");
+                return JSON.stringify({
+                    ok: false,
+                    rejection,
+                    name: error.name,
+                    message: error.message,
+                });
+            }
+        });
         installAsyncNoArgFunction(context, capObject, "__gitHeadSha", () =>
             guard(() => cap.gitHeadSha()),
         );
@@ -323,6 +359,7 @@ async function guardHostCall<T>(
     try {
         return await raceWithAbort(call(), signal);
     } catch (error) {
+        ledger.reasons.push(error);
         if (!ledger.rejected) {
             ledger.rejected = true;
             ledger.reason = error;
@@ -425,8 +462,7 @@ function disableAmbientDynamicCode(context: QuickJSAsyncContext): void {
 async function evalCheck(context: QuickJSAsyncContext, compiledCheck: string): Promise<unknown> {
     const wrapped = `
 "use strict";
-const module = { exports: {} };
-const exports = module.exports;
+const __hostNetworkErrors = new WeakMap();
 const __mcCap = (() => {
   const hostCap = __eidnaraHostCap;
   delete globalThis.__eidnaraHostCap;
@@ -435,18 +471,38 @@ const __mcCap = (() => {
   }
   return Object.freeze({
     readFile(path) { return hostCap.__readFile(String(path)); },
-    httpGet(url) { return JSON.parse(hostCap.__httpGet(String(url))); },
+    httpGet(url) {
+      const result = JSON.parse(hostCap.__httpGet(String(url)));
+      if (result.ok) return result.value;
+      const error = new Error(result.message);
+      error.name = result.name;
+      __hostNetworkErrors.set(error, result.rejection);
+      throw error;
+    },
     gitHeadSha() { return hostCap.__gitHeadSha(); },
     gitTag() { return hostCap.__gitTag(); },
     gitLog(opts) { return JSON.parse(hostCap.__gitLog(JSON.stringify(opts || {}))); },
   });
 })();
+const __check = (() => {
+  const module = { exports: {} };
+  const exports = module.exports;
 ${compiledCheck}
-const __check = typeof check === "function" ? check : module.exports.check;
-if (typeof __check !== "function") throw new Error("compiled check must define check(cap)");
-const __result = __check(__mcCap);
-if (!__result || typeof __result.met !== "boolean") throw new Error("check() must return { met: boolean }");
-JSON.stringify({ met: __result.met });`;
+  const selected = typeof check === "function" ? check : module.exports.check;
+  if (typeof selected !== "function") throw new Error("compiled check must define check(cap)");
+  return selected;
+})();
+let __wireResult;
+try {
+  const result = __check(__mcCap);
+  if (!result || typeof result.met !== "boolean") throw new Error("check() must return { met: boolean }");
+  __wireResult = { met: result.met };
+} catch (error) {
+  const rejection = __hostNetworkErrors.get(error);
+  if (rejection === undefined) throw error;
+  __wireResult = { hostNetworkError: rejection };
+}
+JSON.stringify(__wireResult);`;
     const evalResult = await context.evalCodeAsync(wrapped, "smart-note-check.js", {
         type: "global",
     });

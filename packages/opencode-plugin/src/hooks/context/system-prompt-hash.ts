@@ -214,6 +214,8 @@ export function createSystemPromptHashHandler(deps: {
                   .digest("hex")
             : previousHash;
 
+        // A Set does not record when an entry was added.
+        let refreshRaisedThisPass = false;
         if (hashReady && hasPersistedHash && previousHash !== currentHash) {
             sessionLog(
                 sessionId,
@@ -222,6 +224,7 @@ export function createSystemPromptHashHandler(deps: {
             // A prompt-content or preset change must refresh history, adjuncts, and materialization together.
             deps.historyRefreshSessions.add(sessionId);
             deps.systemPromptRefreshSessions.add(sessionId);
+            refreshRaisedThisPass = true;
             deps.pendingMaterializationSessions.add(sessionId);
             deps.lastHeuristicsTurnId.delete(sessionId);
         } else if (hashReady && !hasPersistedHash) {
@@ -258,8 +261,8 @@ export function createSystemPromptHashHandler(deps: {
         // A pass that cannot persist the hash leaves the refresh flag for the one that can.
         if (!hashReady) return;
 
-        // Drain only refresh entries present at handler entry so hash changes still trigger the next pass.
-        if (isCacheBusting) {
+        // Drain only the refresh entry present at handler entry; one raised by this pass's hash change stays so the next pass is cache-busting.
+        if (isCacheBusting && !refreshRaisedThisPass) {
             deps.systemPromptRefreshSessions.delete(sessionId);
         }
     };
