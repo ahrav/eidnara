@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { resolveProjectIdentity } from "@eidnara/opencode/features/context/project-identity";
 import type { RustSessionStatus } from "@eidnara/opencode/plugin/rpc-handlers";
 import {
@@ -69,7 +70,12 @@ function renderingContext(sessionId: string, width: number) {
         },
         getSystemPrompt: () => "system prompt",
     };
-    return { ctx, text: () => rendered.flat().join("\n"), reset: () => (rendered.length = 0) };
+    return {
+        ctx,
+        text: () => rendered.flat().join("\n"),
+        rows: () => rendered.flat(),
+        reset: () => (rendered.length = 0),
+    };
 }
 
 describe("Pi status dialog", () => {
@@ -155,6 +161,23 @@ describe("Pi status dialog", () => {
         expect(text()).toContain("Pending drops: 2");
         expect(text()).toContain("Historian: running");
         expect(text()).not.toContain("Context:");
+    });
+
+    it("keeps every row within the render width, including widths under 24 columns", async () => {
+        for (const width of [16, 24, 90]) {
+            const sessionId = `ses-status-width-${width}`;
+            const { ctx, rows } = renderingContext(sessionId, width);
+            await showStatusDialog(
+                fakePi,
+                { ...ctx, getSystemPrompt: () => "system prompt" } as never,
+                deps(),
+                DAEMON_STATUS,
+            );
+            const widths = rows().map((row) => visibleWidth(row));
+            expect(widths.length).toBeGreaterThan(2);
+            expect(Math.max(...widths)).toBe(width);
+            expect(Math.min(...widths)).toBe(width);
+        }
     });
 
     it("renders the window derivation only when its usable limit is the summary denominator", () => {

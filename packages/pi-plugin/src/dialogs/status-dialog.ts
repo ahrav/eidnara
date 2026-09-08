@@ -259,8 +259,7 @@ class StatusDialogComponent implements Component {
         // `drawBorder` reserves two columns for borders and one for padding.
         // `renderInner` receives the remaining width so the segmented bar fills each row.
         // `renderInner` avoids a fixed 56-character cap so the segmented bar fills the available width.
-        const innerWidth = Math.max(20, width - 4);
-        const inner = renderInner(this.detail, this.props.theme, innerWidth);
+        const inner = renderInner(this.detail, this.props.theme, innerWidthFor(width));
         return drawBorder(inner, width, this.props.theme);
     }
 
@@ -358,11 +357,16 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
     return lines;
 }
 
+function innerWidthFor(width: number): number {
+    // 2 chars border + 1 padding each side
+    return Math.max(1, width - 4);
+}
+
 /**
  * The `borderMuted` border distinguishes the overlay from its background.
  */
 function drawBorder(inner: string[], width: number, theme: Theme): string[] {
-    const innerWidth = Math.max(20, width - 4); // 2 chars border + 1 padding each side
+    const innerWidth = innerWidthFor(width);
     const border = (s: string) => theme.fg("borderMuted", s);
 
     const top = border(`╭${"─".repeat(innerWidth + 2)}╮`);
@@ -592,8 +596,7 @@ function breakdownSegments(s: StatusDialogDetail): Array<{
 }
 
 function renderBar(s: StatusDialogDetail, innerWidth: number): string {
-    // The 20-column minimum keeps segments visible in narrow terminals.
-    const barWidth = Math.max(20, innerWidth);
+    const barWidth = Math.max(1, innerWidth);
     const segs = breakdownSegments(s);
     if (segs.length === 0) return "";
     const widths = segs.map((seg) =>
