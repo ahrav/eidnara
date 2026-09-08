@@ -344,8 +344,19 @@ export function registerTodosCommand(pi: Pick<ExtensionAPI, "registerCommand">):
     });
 }
 
-function todoKey(todo: TodoItem, index: number): string {
-    return todo.id ? `id:${todo.id}` : `pos:${index}:${todo.content}`;
+// Keys must be unique within one list, so duplicate `id`s use positional keys.
+function keyedTodos(todos: readonly TodoItem[]): Array<{ todo: TodoItem; key: string }> {
+    const idCounts = new Map<string, number>();
+    for (const todo of todos) {
+        if (todo.id) idCounts.set(todo.id, (idCounts.get(todo.id) ?? 0) + 1);
+    }
+    return todos.map((todo, index) => ({
+        todo,
+        key:
+            todo.id && idCounts.get(todo.id) === 1
+                ? `id:${todo.id}`
+                : `pos:${index}:${todo.content}`,
+    }));
 }
 
 function isOverlayLive(todo: TodoItem): boolean {
@@ -437,17 +448,15 @@ export class TodoOverlay {
     }
 
     private pruneCompletedDisplayState(todos: readonly TodoItem[]): void {
-        const currentKeys = new Set(todos.map((todo, index) => todoKey(todo, index)));
+        const keyed = keyedTodos(todos);
+        const currentKeys = new Set(keyed.map(({ key }) => key));
         const hasSharedKeys = [...currentKeys].some((key) => this.lastTodoKeys.has(key));
         if (this.lastTodoKeys.size > 0 && currentKeys.size > 0 && !hasSharedKeys) {
             this.resetCompletedDisplayState();
         }
         this.lastTodoKeys = currentKeys;
         const completedKeys = new Set(
-            todos
-                .map((todo, index) => ({ todo, key: todoKey(todo, index) }))
-                .filter(({ todo }) => todo.status === "completed")
-                .map(({ key }) => key),
+            keyed.filter(({ todo }) => todo.status === "completed").map(({ key }) => key),
         );
         for (const taskId of this.completedTaskIdsPendingHide) {
             if (!completedKeys.has(taskId)) this.completedTaskIdsPendingHide.delete(taskId);
@@ -458,12 +467,10 @@ export class TodoOverlay {
     }
 
     private selectOverlayTodos(todos: readonly TodoItem[]): Array<{ todo: TodoItem; key: string }> {
-        return todos
-            .map((todo, index) => ({ todo, key: todoKey(todo, index) }))
-            .filter(({ todo, key }) => {
-                if (isOverlayLive(todo)) return true;
-                return todo.status === "completed" && !this.hiddenCompletedTaskIds.has(key);
-            });
+        return keyedTodos(todos).filter(({ todo, key }) => {
+            if (isOverlayLive(todo)) return true;
+            return todo.status === "completed" && !this.hiddenCompletedTaskIds.has(key);
+        });
     }
 
     private renderWidget(theme: Theme, width: number): string[] {

@@ -437,6 +437,33 @@ describe("TodoOverlay lifecycle", () => {
         expect(nextTurn.join("\n")).not.toContain("Done");
         expect(nextTurn[1]).toContain("○ #p Pending");
     });
+    it("still shows a later completion when two tasks share an id", () => {
+        setTodoSnapshot("ses-overlay", [
+            { id: "x", content: "First", status: "completed" },
+            { id: "x", content: "Second", status: "pending" },
+        ]);
+        const overlay = new TodoOverlay();
+        const { ui, setWidgetCalls } = makeUi();
+        overlay.setUICtx("ses-overlay", ui);
+        overlay.update("ses-overlay");
+        const widget = widgetFactory(setWidgetCalls[0])(
+            { requestRender: () => undefined },
+            identityTheme,
+        );
+        expect(widget.render(120).join("\n")).toContain("✓ #x First");
+        overlay.hideCompletedTasksFromPreviousTurn();
+        const afterHide = widget.render(120).join("\n");
+        expect(afterHide).not.toContain("First");
+        expect(afterHide).toContain("○ #x Second");
+        setTodoSnapshot("ses-overlay", [
+            { id: "x", content: "First", status: "completed" },
+            { id: "x", content: "Second", status: "completed" },
+        ]);
+        overlay.update("ses-overlay");
+        const afterSecondCompletes = widget.render(120).join("\n");
+        expect(afterSecondCompletes).not.toContain("First");
+        expect(afterSecondCompletes).toContain("✓ #x Second");
+    });
     it("caps content rows with a +N more tail", () => {
         setTodoSnapshot(
             "ses-overlay",
