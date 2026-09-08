@@ -751,11 +751,11 @@ describe("tool-drop-target", () => {
 
                     // `ToolMutationBatch` replaces the message part with a clamped sentinel clone and does not mutate OpenCode's original part.
                     const wire = messages[0]?.parts[0] as {
-                        state: { input: Record<string, unknown>; output: string; error: string };
+                        state: Record<string, unknown> & { input: Record<string, unknown> };
                     };
                     expect(wire).not.toBe(failedWrite);
-                    expect(wire.state.output).toBe("[dropped \u00a713\u00a7]");
                     expect(wire.state.error).toBe("[dropped \u00a713\u00a7]");
+                    expect("output" in wire.state).toBe(false);
                     expect(wire.state.input.content).toBe("zzzzz...[truncated]");
 
                     // `ToolMutationBatch` replaces the message part with a clamped sentinel clone and does not mutate OpenCode's original part.
@@ -839,6 +839,125 @@ describe("tool-drop-target", () => {
                     expect(wire.args.query).toBe("ggggg...[truncated]");
                     expect(wire.state.output).toBe("[dropped \u00a727\u00a7]");
                     expect(mixed.args.query).toBe("g".repeat(600));
+                });
+
+                it("#then a large top-level array input collapses to an item count", () => {
+                    const arrayInput = {
+                        type: "tool",
+                        callID: "call-arr",
+                        state: {
+                            status: "completed",
+                            output: "done",
+                            input: Array(200).fill("item"),
+                        },
+                    };
+                    const messages: MessageLike[] = [message("m-arr", "assistant", [arrayInput])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-arr", [], index, batch, 28);
+
+                    expect(target.readInput()).toBeNull();
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as { state: { input: unknown } };
+                    expect(wire.state.input).toBe("[200 items]");
+                    expect(Array.isArray(arrayInput.state.input)).toBe(true);
+                });
+
+                it("#then the result payload resolves as a group, state first", () => {
+                    const grouped = {
+                        type: "tool",
+                        callID: "call-grp",
+                        output: "top-level output",
+                        state: { status: "completed", error: "e".repeat(600) },
+                    };
+                    const messages: MessageLike[] = [message("m-grp", "assistant", [grouped])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-grp", [], index, batch, 29);
+
+                    expect(target.truncate()).toBe("truncated");
+
+                    const wire = messages[0]?.parts[0] as Record<string, unknown> & {
+                        state: Record<string, unknown>;
+                    };
+                    expect(wire.state.error).toBe("[dropped \u00a729\u00a7]");
+                    expect("output" in wire).toBe(false);
+                    expect(grouped.output).toBe("top-level output");
+                });
+            });
+        });
+
+        describe("#given a tool_result part whose payload is under output or result", () => {
+            describe("#when it is truncated or replaced", () => {
+                it("#then the existing payload field is overwritten rather than shadowed", () => {
+                    const viaOutput = {
+                        type: "tool_result",
+                        tool_use_id: "call-out",
+                        output: "big",
+                    };
+                    const viaResult = {
+                        type: "tool_result",
+                        tool_use_id: "call-res",
+                        result: "big",
+                    };
+                    const messages: MessageLike[] = [
+                        message("m-inv", "assistant", [
+                            { type: "tool_use", id: "call-out" },
+                            { type: "tool_use", id: "call-res" },
+                        ]),
+                        message("m-res", "assistant", [viaOutput, viaResult]),
+                    ];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+
+                    expect(createToolDropTarget("call-out", [], index, batch, 30).truncate()).toBe(
+                        "truncated",
+                    );
+                    const wireOut = messages[1]?.parts[0] as Record<string, unknown>;
+                    expect(wireOut.output).toBe("[dropped \u00a730\u00a7]");
+                    expect("content" in wireOut).toBe(false);
+
+                    const resTarget = createToolDropTarget("call-res", [], index, batch, 31);
+                    expect(resTarget.setContent("small")).toBe(true);
+                    expect(viaResult.result).toBe("small");
+                    expect("content" in viaResult).toBe(false);
+                });
+            });
+        });
+
+        describe("#given an OpenCode tool part keyed by a call-id alias", () => {
+            describe("#when the index is built", () => {
+                it("#then callId and id resolve in codec order", () => {
+                    expect(extractToolCallObservation({ type: "tool", callId: "alias-1" })).toEqual(
+                        {
+                            callId: "alias-1",
+                            kind: "result",
+                        },
+                    );
+                    expect(extractToolCallObservation({ type: "tool", id: "prt-2" })).toEqual({
+                        callId: "prt-2",
+                        kind: "result",
+                    });
+                    expect(
+                        extractToolCallObservation({
+                            type: "tool",
+                            callID: "primary",
+                            id: "prt-3",
+                        }),
+                    ).toEqual({ callId: "primary", kind: "result" });
+
+                    const aliased = {
+                        type: "tool",
+                        callId: "call-alias",
+                        state: { status: "completed", output: "done" },
+                    };
+                    const messages: MessageLike[] = [message("m-alias", "assistant", [aliased])];
+                    const index = buildIndex(messages);
+                    const batch = new ToolMutationBatch(messages);
+                    const target = createToolDropTarget("call-alias", [], index, batch, 32);
+                    expect(target.canDrop()).toBe(true);
+                    expect(target.drop()).toBe("removed");
                 });
             });
         });

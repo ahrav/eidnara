@@ -43,34 +43,47 @@ function isToolCallId(value: unknown): value is string {
     return typeof value === "string" && value.length > 0;
 }
 
+interface FieldRef {
+    owner: Record<string, unknown>;
+    key: string;
+}
+
 interface ToolPartFields {
     state: Record<string, unknown> | null;
     status: string | undefined;
-    outputOwner: Record<string, unknown>;
-    errorOwner: Record<string, unknown>;
-    input: Record<string, unknown> | null;
+    result: FieldRef;
+    staleResults: FieldRef[];
+    input: FieldRef | null;
 }
 
-/** Preserves nested versus top-level field placement when rewriting tool results. */
+const RESULT_KEYS = ["output", "error"] as const;
+
+function firstPresent(refs: FieldRef[]): FieldRef | undefined {
+    return refs.find((ref) => ref.key in ref.owner);
+}
+
 function toolPartFields(part: Record<string, unknown>): ToolPartFields {
     const state = isRecord(part.state) ? part.state : null;
-    const owner = (key: string): Record<string, unknown> => {
-        if (state !== null && key in state) return state;
-        if (key in part) return part;
-        return state ?? part;
-    };
-    const statusOwner = owner("status");
-    const status = typeof statusOwner.status === "string" ? statusOwner.status : undefined;
-    let input: Record<string, unknown> | null = null;
-    if (state !== null && isRecord(state.input)) input = state.input;
-    else if (isRecord(part.input)) input = part.input;
-    else if (isRecord(part.args)) input = part.args;
-    return { state, status, outputOwner: owner("output"), errorOwner: owner("error"), input };
-}
+    const statusValue = state !== null && "status" in state ? state.status : part.status;
+    const status = typeof statusValue === "string" ? statusValue : undefined;
 
-/** A failed OpenCode tool carries its result in `error`; the wire serializes that field. */
-function isErrorResult(fields: ToolPartFields): boolean {
-    return fields.status === "error" && typeof fields.errorOwner.error === "string";
+    const resultCandidates: FieldRef[] = [];
+    if (state !== null) for (const key of RESULT_KEYS) resultCandidates.push({ owner: state, key });
+    for (const key of RESULT_KEYS) resultCandidates.push({ owner: part, key });
+    const presentResults = resultCandidates.filter((ref) => ref.key in ref.owner);
+    const result = presentResults[0] ?? { owner: state ?? part, key: "output" };
+
+    const inputCandidates: FieldRef[] = [];
+    if (state !== null) inputCandidates.push({ owner: state, key: "input" });
+    inputCandidates.push({ owner: part, key: "input" }, { owner: part, key: "args" });
+
+    return {
+        state,
+        status,
+        result,
+        staleResults: presentResults.slice(1),
+        input: firstPresent(inputCandidates) ?? null,
+    };
 }
 
 function clearToolAttachments(part: Record<string, unknown>, fields: ToolPartFields): boolean {
@@ -80,23 +93,26 @@ function clearToolAttachments(part: Record<string, unknown>, fields: ToolPartFie
     return had;
 }
 
-function getToolContent(part: unknown): string | undefined {
-    if (!isRecord(part)) return undefined;
-    if (part.type === "tool") {
-        const fields = toolPartFields(part);
-        const output = fields.outputOwner.output;
-        if (typeof output === "string") return output;
-        return isErrorResult(fields) ? (fields.errorOwner.error as string) : undefined;
-    }
-    if (part.type === "tool_result") {
-        return typeof part.content === "string" ? part.content : undefined;
-    }
-    return undefined;
+const TOOL_RESULT_PAYLOAD_KEYS = ["content", "output", "result"] as const;
+
+function toolResultPayload(part: Record<string, unknown>): {
+    ref: FieldRef;
+    stale: FieldRef[];
+} {
+    const present = TOOL_RESULT_PAYLOAD_KEYS.filter((key) => key in part).map((key) => ({
+        owner: part,
+        key,
+    }));
+    return { ref: present[0] ?? { owner: part, key: "content" }, stale: present.slice(1) };
 }
 
-function writeToolResult(fields: ToolPartFields, content: string): void {
-    fields.outputOwner.output = content;
-    if (isErrorResult(fields)) fields.errorOwner.error = content;
+function readRef(ref: FieldRef): unknown {
+    return ref.owner[ref.key];
+}
+
+function writeRef(ref: FieldRef, stale: FieldRef[], value: unknown): void {
+    ref.owner[ref.key] = value;
+    for (const s of stale) delete s.owner[s.key];
 }
 
 function setToolContent(part: unknown, content: string): boolean {
@@ -104,13 +120,14 @@ function setToolContent(part: unknown, content: string): boolean {
     let changed = false;
     if (part.type === "tool") {
         const fields = toolPartFields(part);
-        const textChanged = getToolContent(part) !== content;
+        const textChanged = readRef(fields.result) !== content || fields.staleResults.length > 0;
         const attachmentsCleared = clearToolAttachments(part, fields);
-        writeToolResult(fields, content);
+        writeRef(fields.result, fields.staleResults, content);
         changed = textChanged || attachmentsCleared;
     } else if (part.type === "tool_result") {
-        changed = part.content !== content;
-        part.content = content;
+        const payload = toolResultPayload(part);
+        changed = readRef(payload.ref) !== content || payload.stale.length > 0;
+        writeRef(payload.ref, payload.stale, content);
     }
     if (changed) markPartMutated(part);
     return changed;
@@ -146,8 +163,20 @@ function clampCloneInPlace(occurrence: IndexedOccurrence, clamp: (part: unknown)
     }
 }
 
-function clampInput(input: Record<string, unknown>): void {
-    if (estimateInputSize(input) > INPUT_CLAMP_BYTES) truncateInputValues(input);
+/** An object input is clamped per value; an array input collapses to `[N items]`; scalars pass through. */
+function clampInput(ref: FieldRef): void {
+    const value = readRef(ref);
+    if (estimateInputSize(value) <= INPUT_CLAMP_BYTES) return;
+    if (Array.isArray(value)) ref.owner[ref.key] = `[${value.length} items]`;
+    else if (isRecord(value)) truncateInputValues(value);
+}
+
+function inputRefOf(part: Record<string, unknown>): FieldRef | null {
+    if (part.type === "tool") return toolPartFields(part).input;
+    if (part.type === "tool-invocation")
+        return firstPresent([{ owner: part, key: "args" }]) ?? null;
+    if (part.type === "tool_use") return firstPresent([{ owner: part, key: "input" }]) ?? null;
+    return null;
 }
 
 function truncateToolPart(part: unknown, tagId: number): void {
@@ -157,27 +186,28 @@ function truncateToolPart(part: unknown, tagId: number): void {
 
     if (part.type === "tool") {
         const fields = toolPartFields(part);
-        writeToolResult(fields, sentinel);
+        writeRef(fields.result, fields.staleResults, sentinel);
         clearToolAttachments(part, fields);
         if (fields.input !== null) clampInput(fields.input);
         return;
     }
 
     if (part.type === "tool_result") {
-        part.content = sentinel;
+        const payload = toolResultPayload(part);
+        writeRef(payload.ref, payload.stale, sentinel);
         return;
     }
 
-    const input = readToolPartInput(part);
+    const input = inputRefOf(part);
     if (input !== null) clampInput(input);
 }
 
 /** Maximum JSON-serialized input size before truncation. */
 const INPUT_CLAMP_BYTES = 500;
 
-function estimateInputSize(input: Record<string, unknown>): number {
+function estimateInputSize(input: unknown): number {
     try {
-        return Buffer.byteLength(JSON.stringify(input), "utf8");
+        return Buffer.byteLength(JSON.stringify(input) ?? "", "utf8");
     } catch {
         return 0;
     }
@@ -185,10 +215,10 @@ function estimateInputSize(input: Record<string, unknown>): number {
 
 function readToolPartInput(part: unknown): Record<string, unknown> | null {
     if (!isRecord(part)) return null;
-    if (part.type === "tool") return toolPartFields(part).input;
-    if (part.type === "tool-invocation" && isRecord(part.args)) return part.args;
-    if (part.type === "tool_use" && isRecord(part.input)) return part.input;
-    return null;
+    const ref = inputRefOf(part);
+    if (ref === null) return null;
+    const value = readRef(ref);
+    return isRecord(value) ? value : null;
 }
 
 const TRUNCATION_SENTINEL = "...[truncated]";
@@ -282,20 +312,28 @@ export function partHasCompletedResult(part: unknown): boolean {
     if (!isRecord(part)) return false;
     if (part.type === "tool") {
         const fields = toolPartFields(part);
-        if (fields.state === null && fields.status === undefined) return false;
-        return (
-            fields.status === "completed" ||
-            fields.status === "error" ||
-            typeof fields.outputOwner.output === "string"
-        );
+        if (fields.status === "completed" || fields.status === "error") return true;
+        return fields.result.key === "output" && typeof readRef(fields.result) === "string";
     }
     return part.type === "tool_result";
 }
 
+/** Call-id aliases in the order the codec resolves them for an OpenCode `tool` part. */
+const OPENCODE_TOOL_CALL_ID_KEYS = ["callID", "callId", "id"] as const;
+
+function openCodeToolCallId(part: Record<string, unknown>): string | null {
+    for (const key of OPENCODE_TOOL_CALL_ID_KEYS) {
+        const value = part[key];
+        if (isToolCallId(value)) return value;
+    }
+    return null;
+}
+
 export function extractToolCallObservation(part: unknown): ToolCallObservation | null {
     if (!isRecord(part)) return null;
-    if (part.type === "tool" && isToolCallId(part.callID)) {
-        return { callId: part.callID, kind: "result" };
+    if (part.type === "tool") {
+        const callId = openCodeToolCallId(part);
+        return callId === null ? null : { callId, kind: "result" };
     }
     if (part.type === "tool-invocation" && isToolCallId(part.callID)) {
         return { callId: part.callID, kind: "invocation" };
