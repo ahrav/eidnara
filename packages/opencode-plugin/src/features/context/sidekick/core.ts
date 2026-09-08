@@ -9,10 +9,10 @@
 
 export const SIDEKICK_SYSTEM_PROMPT = `You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.
 
-Your job is to search project memories, session facts, and conversation history and return a concise augmentation for the user's prompt.
+Your job is to search the project's durable memories and return a concise augmentation for the user's prompt.
 
 Rules:
-- Use ctx_search(query="...") to look up relevant memories, facts, and history before answering.
+- Use ctx_search(query="...") to look up relevant project memories before answering. It searches memories only, not session facts or conversation history.
 - Run targeted searches only; prefer 1-3 precise queries.
 - Return only findings that materially help with the user's prompt.
 - If nothing useful is found, respond with exactly: No relevant memories found.
@@ -21,15 +21,20 @@ Rules:
 
 /**
  * Reasoning-model `<think>` blocks must not reach augmentation output.
- * suppress them.
+ *
+ * An unclosed `<think>` is removed through end of input so raw reasoning
+ * cannot pass as a nonempty result. Closed blocks are removed first so their
+ * opening tags do not trigger the unclosed-block pass and discard following
+ * output.
  */
 export function stripThinkingBlocks(text: string): string {
-    return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    return text
+        .replace(/<think>[\s\S]*?<\/think>/g, "")
+        .replace(/<think>[\s\S]*$/, "")
+        .trim();
 }
 
-/**
- *
- */
+/** Matches the exact no-result reply the system prompt requests, tolerating case and trailing punctuation. */
 export function isEmptySidekickResult(text: string): boolean {
     const trimmed = text
         .trim()

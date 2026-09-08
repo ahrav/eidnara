@@ -1,4 +1,5 @@
 import { log } from "./logger";
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "./with-timeout";
 
 /**
  * Post ignored notifications only to sessions with non-default titles.
@@ -31,7 +32,11 @@ async function readSessionTitle(client: unknown, sessionId: string): Promise<str
             session?: { get?: (input: unknown) => unknown };
         };
         if (typeof c.session?.get !== "function") return null;
-        const raw = await Promise.resolve(c.session.get({ path: { id: sessionId } }));
+        const raw = await withTimeout(
+            Promise.resolve(c.session.get({ path: { id: sessionId } })),
+            HOST_SDK_READ_TIMEOUT_MS,
+            "session title read timed out",
+        );
         const obj = raw as { data?: { title?: unknown }; title?: unknown } | null;
         const title = obj && typeof obj === "object" ? (obj.data?.title ?? obj.title) : undefined;
         return typeof title === "string" ? title : null;

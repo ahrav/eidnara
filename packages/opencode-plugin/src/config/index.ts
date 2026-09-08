@@ -7,6 +7,7 @@ import {
 } from "../shared/jsonc-parser";
 import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
+import { isRecord } from "../shared/record-type-guard";
 import { setWindowOverlayPath } from "../shared/window-geometry";
 import { isCompactionEnabled, migrateLegacyAgentEnabledInMemory } from "./agent-disable";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
@@ -17,6 +18,7 @@ import {
 } from "./project-security";
 import { pruneNestedConfigLeaf } from "./prune-config-leaf";
 import { type EidnaraConfig, EidnaraConfigSchema, REMOVED_CONFIG_KEYS } from "./schema/eidnara";
+import { redactConfigIssuePath } from "./schema/issue-path";
 import { resolveTransformMode } from "./transform-mode";
 import { substituteConfigVariables } from "./variable";
 
@@ -66,6 +68,20 @@ export interface LoadResultDetailed {
 interface LoadedConfigFileDetailed extends LoadedConfigFile {
     outcome: LoadOutcome;
     source: "user" | "project";
+    /**
+     * The `{env:}`/`{file:}` subset of `warnings`. A rejected prototype-pollution key in the same
+     * file sets `outcome` to `schema-recovery`, so `outcome` alone cannot identify these failures.
+     */
+    substitutionWarnings: string[];
+}
+
+/**
+ * Ancestor key names are withheld because substitution runs on the raw text, so a parent key can
+ * carry a resolved secret. The rejected key itself is always one of the fixed prototype-pollution names.
+ */
+function describeRejectedKeyPath(path: readonly (string | number)[]): string {
+    const key = String(path.at(-1) ?? "");
+    return path.length > 1 ? `"${key}" at depth ${path.length}` : `"${key}"`;
 }
 
 function loadConfigFileDetailed(
@@ -87,6 +103,7 @@ function loadConfigFileDetailed(
             ],
             outcome: "project-file-io-error",
             source,
+            substitutionWarnings: [],
         };
     }
 
@@ -96,26 +113,35 @@ function loadConfigFileDetailed(
             configPath,
             isProjectConfig: source === "project",
         });
-        const rejectedKeyPaths: string[] = [];
-        const config = parseConfigJsonc<Record<string, unknown>>(substituted.text, {
-            onRejectedKey: (path) => rejectedKeyPaths.push(path.join(".")),
+        const rejectedKeyPaths: (string | number)[][] = [];
+        const parsed: unknown = parseConfigJsonc(substituted.text, {
+            onRejectedKey: (path) => rejectedKeyPaths.push([...path]),
         });
-        const unsafeKeyWarnings = rejectedKeyPaths.map(
-            (path) =>
-                `Ignored unsafe config key "${path}" (security: prototype-pollution keys are not allowed).`,
+        // The generic parser returns whatever JSON value the file holds; a `null`, array, or scalar top level would throw inside `parsePluginConfig`, outside this try.
+        if (!isRecord(parsed)) {
+            throw new Error(
+                `config top level must be a JSON object, got ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed}`,
+            );
+        }
+        const config: Record<string, unknown> = parsed;
+        const prefix = (warning: string) => `${configPath}: ${warning}`;
+        const substitutionWarnings = substituted.warnings.map(prefix);
+        const unsafeKeyWarnings = rejectedKeyPaths.map((path) =>
+            prefix(
+                `Ignored unsafe config key ${describeRejectedKeyPath(path)} (security: prototype-pollution keys are not allowed).`,
+            ),
         );
         return {
             config,
-            warnings: [...substituted.warnings, ...unsafeKeyWarnings].map(
-                (warning) => `${configPath}: ${warning}`,
-            ),
+            warnings: [...substitutionWarnings, ...unsafeKeyWarnings],
             outcome:
                 rejectedKeyPaths.length > 0
                     ? "schema-recovery"
-                    : substituted.warnings.length > 0
+                    : substitutionWarnings.length > 0
                       ? "substitution-failure"
                       : "ok",
             source,
+            substitutionWarnings,
         };
     } catch (error) {
         return {
@@ -125,6 +151,7 @@ function loadConfigFileDetailed(
             ],
             outcome: "project-file-parse-error",
             source,
+            substitutionWarnings: [],
         };
     }
 }
@@ -191,8 +218,7 @@ function deepMergeRawConfig(
 /**
  * Warning rendering never exposes values resolved by `{env:...}` or `{file:...}` substitution.
  *
- * The renderer reports string lengths and object and array shapes.
- * `<missing>`.
+ * Object keys are withheld because substitution runs on the raw text, so a key can hold a resolved secret as readily as a value.
  */
 function redactConfigValue(value: unknown): string {
     if (value === undefined) return "<missing>";
@@ -203,15 +229,21 @@ function redactConfigValue(value: unknown): string {
     if (typeof value === "boolean") return `boolean ${value}`;
     if (Array.isArray(value)) return `array, ${value.length} item${value.length === 1 ? "" : "s"}`;
     if (typeof value === "object") {
-        const keys = Object.keys(value as Record<string, unknown>);
-        return `object with keys [${keys.join(", ")}]`;
+        const count = Object.keys(value as Record<string, unknown>).length;
+        return `object with ${count} key${count === 1 ? "" : "s"}`;
     }
     return typeof value;
 }
 
+/** Records a top-level key changed by schema recovery and its triggering Zod issue paths. */
+interface ConfigRecovery {
+    key: string;
+    issuePaths: readonly PropertyKey[][];
+}
+
 function parsePluginConfig(
     rawConfig: Record<string, unknown>,
-    recoveredTopLevelKeys: string[] = [],
+    recoveries: ConfigRecovery[] = [],
 ): EidnaraPluginConfig & { configWarnings?: string[] } {
     // The loader migrates legacy `<agent>.enabled` keys before Zod parsing so opt-outs become `disable: true` without running `doctor`.
     const preMigrationWarnings: string[] = [];
@@ -263,21 +295,14 @@ function parsePluginConfig(
 
     const patched: Record<string, unknown> = { ...rawConfig };
     for (const key of errorPaths) {
-        recoveredTopLevelKeys.push(key);
-        const isAgentConfig = key === "historian" || key === "sidekick";
-        if (isAgentConfig) {
-            // Invalid agent configurations are dropped because default model settings could run expensive models or fail silently.
-            delete patched[key];
-            warnings.push(
-                `"${key}": invalid agent configuration, ignoring. Check your eidnara.jsonc.`,
-            );
-            continue;
-        }
+        const issuePaths = issuePathsByKey.get(key) ?? [];
+        recoveries.push({ key, issuePaths });
 
         // Recovery prunes invalid nested leaves from object-valued keys and preserves valid siblings.
         // Preserving valid siblings retains `memory.auto_search` and `memory.git_commit_indexing` settings.
+        // For `historian` and `sidekick`, pruning the invalid leaf keeps the user's `disable` and `model`;
+        // discarding the whole block would let a project reset them by supplying one invalid leaf.
         // The recovery code deletes the whole key when the issue targets that key or its value is not a prunable object.
-        const issuePaths = issuePathsByKey.get(key) ?? [];
         const rawValue = rawConfig[key];
         const allNested =
             issuePaths.length > 0 &&
@@ -299,7 +324,12 @@ function parsePluginConfig(
                 const result = pruneNestedConfigLeaf(prunedBlock, relative);
                 if (result) {
                     prunedBlock = result.block;
-                    prunedLeaves.push(result.removed);
+                    // The rendered leaf omits `key`, which the warning names separately.
+                    prunedLeaves.push(
+                        redactConfigIssuePath([key, ...result.removed])
+                            .slice(1)
+                            .join("."),
+                    );
                 }
             }
             patched[key] = prunedBlock;
@@ -312,15 +342,20 @@ function parsePluginConfig(
 
         // `redactConfigValue` reports type and length, not resolved values, because `{env:...}` and `{file:...}` substitutions may expand secrets into `rawConfig`.
         delete patched[key];
-        // Every top-level Zod issue path names a field in `defaults`.
+        // Optional blocks such as `historian` have no default and are omitted after validation fails.
         const defaultVal = (defaults as unknown as Record<string, unknown>)[key];
         const reason = customMessagesByKey.get(key);
+        const fallback =
+            defaultVal === undefined
+                ? "omitting it"
+                : `using default ${JSON.stringify(defaultVal)}`;
         warnings.push(
-            `"${key}": invalid value (${redactConfigValue(rawConfig[key])}), using default ${JSON.stringify(defaultVal)}.${reason ? ` ${reason}` : ""}`,
+            `"${key}": invalid value (${redactConfigValue(rawConfig[key])}), ${fallback}.${reason ? ` ${reason}` : ""}`,
         );
     }
 
-    const retryMigrated = migrateLegacyAgentEnabledInMemory(patched, preMigrationWarnings);
+    // `patched` derives from `rawConfig` by deleting or pruning keys, so any legacy `enabled` field the retry migrates was already migrated and reported by the first pass.
+    const retryMigrated = migrateLegacyAgentEnabledInMemory(patched, []);
     const retryParsed = EidnaraConfigSchema.safeParse(retryMigrated);
     if (retryParsed.success) {
         return {
@@ -372,12 +407,12 @@ function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {
 function bindSubstitutionFailures(
     loaded: LoadedConfigFileDetailed | null,
 ): Array<{ keyPath: string; source: "user" | "project"; message: string }> {
-    if (!loaded || loaded.warnings.length === 0 || loaded.outcome !== "substitution-failure") {
+    if (!loaded || loaded.substitutionWarnings.length === 0) {
         return [];
     }
 
     const emptyPaths = collectEmptyStringPaths(loaded.config);
-    return loaded.warnings.map((message) => {
+    return loaded.substitutionWarnings.map((message) => {
         const matchedPath = emptyPaths.find((path) => {
             const tail = path.split(".").at(-1) ?? path;
             return message.includes(path) || message.toLowerCase().includes(tail.toLowerCase());
@@ -393,6 +428,32 @@ function removedKeyWarnings(raw: Record<string, unknown>): string[] {
     );
 }
 
+function withSchemaRecovery(outcome: LoadOutcome, recovered: boolean): LoadOutcome {
+    if (!recovered) return outcome;
+    return outcome === "ok" || outcome === "substitution-failure" ? "schema-recovery" : outcome;
+}
+
+function hasOwnPath(value: unknown, path: readonly PropertyKey[]): boolean {
+    let cursor: unknown = value;
+    for (const segment of path) {
+        if (cursor === null || typeof cursor !== "object" || !Object.hasOwn(cursor, segment)) {
+            return false;
+        }
+        cursor = (cursor as Record<PropertyKey, unknown>)[segment];
+    }
+    return true;
+}
+
+/** The raw merge takes the project's leaf wherever the project supplies one, so that leaf's issue is the project's. */
+function projectCausedRecovery(
+    recoveries: readonly ConfigRecovery[],
+    projectRaw: Record<string, unknown>,
+): boolean {
+    return recoveries.some((recovery) =>
+        recovery.issuePaths.some((path) => hasOwnPath(projectRaw, path)),
+    );
+}
+
 function combinedOutcome(args: {
     sources: LoadResultDetailed["sources"];
     substitutionFailures: LoadResultDetailed["substitutionFailures"];
@@ -401,7 +462,10 @@ function combinedOutcome(args: {
     const sourceOutcomes = Object.values(args.sources);
     if (sourceOutcomes.includes("project-file-parse-error")) return "project-file-parse-error";
     if (sourceOutcomes.includes("project-file-io-error")) return "project-file-io-error";
-    if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
+    // A rejected prototype-pollution key never reaches Zod, so it appears only as a source outcome, not in `recoveredTopLevelKeys`.
+    if (sourceOutcomes.includes("schema-recovery") || args.recoveredTopLevelKeys.length > 0) {
+        return "schema-recovery";
+    }
     if (args.substitutionFailures.length > 0) return "substitution-failure";
     return "ok";
 }
@@ -419,7 +483,8 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
 
     const allWarnings: string[] = [];
     let mergedRaw: Record<string, unknown> = {};
-    const trustedBaseConfig = parsePluginConfig(userLoaded?.config ?? {});
+    const userRecoveries: ConfigRecovery[] = [];
+    const trustedBaseConfig = parsePluginConfig(userLoaded?.config ?? {}, userRecoveries);
 
     if (userLoaded) {
         allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
@@ -427,12 +492,13 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         mergedRaw = deepMergeRawConfig(mergedRaw, userLoaded.config);
     }
 
+    let projectRaw: Record<string, unknown> = {};
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
         allWarnings.push(
             ...removedKeyWarnings(projectLoaded.config).map((w) => `[project config] ${w}`),
         );
-        const projectRaw = { ...projectLoaded.config };
+        projectRaw = { ...projectLoaded.config };
         for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
             allWarnings.push(`[project config] ${warning}`);
         }
@@ -446,10 +512,18 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         }
     }
 
-    const recoveredTopLevelKeys: string[] = [];
-    const config = parsePluginConfig(mergedRaw, recoveredTopLevelKeys);
+    const mergedRecoveries: ConfigRecovery[] = [];
+    const config = parsePluginConfig(mergedRaw, mergedRecoveries);
     setOutputReserveConfig(config.output_reserve);
     setWindowOverlayPath(config.models?.window_overlay_path);
+    if (userLoaded && projectLoaded) {
+        // A project override can hide an invalid user field from the merged parse.
+        // The user-tier warning is kept unless the merged parse emitted the same warning.
+        const mergedWarnings = new Set(config.configWarnings ?? []);
+        for (const warning of trustedBaseConfig.configWarnings ?? []) {
+            if (!mergedWarnings.has(warning)) allWarnings.push(`[user config] ${warning}`);
+        }
+    }
     if (config.configWarnings?.length) {
         allWarnings.push(
             ...config.configWarnings.map((w) => {
@@ -480,9 +554,19 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         ...bindSubstitutionFailures(projectLoaded),
     ];
     const sources: LoadResultDetailed["sources"] = {
-        userConfig: userLoaded?.outcome ?? "ok",
-        projectConfig: projectLoaded?.outcome ?? "ok",
+        userConfig: userLoaded
+            ? withSchemaRecovery(userLoaded.outcome, userRecoveries.length > 0)
+            : "ok",
+        projectConfig: projectLoaded
+            ? withSchemaRecovery(
+                  projectLoaded.outcome,
+                  projectCausedRecovery(mergedRecoveries, projectRaw),
+              )
+            : "ok",
     };
+    const recoveredTopLevelKeys = [
+        ...new Set([...userRecoveries, ...mergedRecoveries].map((recovery) => recovery.key)),
+    ];
 
     return {
         config,

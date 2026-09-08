@@ -18,7 +18,8 @@ import { log } from "../../shared/logger";
 // The cooldown prevents repeated failed Git probes.
 const GIT_TIMEOUT_MS = 5_000;
 const TRANSIENT_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
-const identityCache = new Map<string, string>();
+/** A cached `git:` identity is valid only while the directory still resolves to the Git root it was derived from. */
+const identityCache = new Map<string, { identity: string; gitRoot: string }>();
 const lastKnownGitIdentityCache = new Map<string, string>();
 // `directoryFallbackCache` stores `dir:` fallbacks only when no ancestor has a `.git` entry.
 // Resolution bypasses `directoryFallbackCache` when an ancestor has a `.git` entry.
@@ -122,8 +123,14 @@ function getErrorStderr(error: unknown): string {
 }
 
 function directoryFallback(directory: string): string {
-    // The fallback hashes the full canonical path to distinguish directories with identical basenames.
-    const canonical = path.resolve(directory);
+    // The hash covers the physical path so a project opened through a symlink and through its real path shares one `dir:` identity; a path with a missing component keeps its lexical spelling.
+    const resolved = path.resolve(directory);
+    let canonical: string;
+    try {
+        canonical = realpathSync.native(resolved);
+    } catch {
+        canonical = resolved;
+    }
     const hash = createHash("md5").update(canonical, "utf8").digest("hex").slice(0, 12);
     return `dir:${hash}`;
 }
@@ -240,14 +247,18 @@ function classifyGitError(error: unknown, rawDirectory: string): ProjectIdentity
  */
 export function resolveProjectIdentityStrict(directory: string): string {
     const canonical = path.resolve(directory);
+    // A subdirectory of one repository can later be initialized as its own, so a hit is honoured only while the nearest `.git` is unchanged. An unreadable directory yields no root and cannot prove a change, so its hit stands.
+    const gitRoot = gitRootDirectory(canonical);
     const cached = identityCache.get(canonical);
     if (cached !== undefined) {
-        return cached;
+        if (gitRoot === null || cached.gitRoot === gitRoot) return cached.identity;
+        identityCache.delete(canonical);
+        lastKnownGitIdentityCache.delete(canonical);
     }
 
     assertDirectoryUsable(canonical, directory);
 
-    if (!hasGitDir(canonical)) {
+    if (gitRoot === null) {
         throw new ProjectIdentityError(
             "not_git_repo",
             directory,
@@ -283,7 +294,7 @@ export function resolveProjectIdentityStrict(directory: string): string {
     }
 
     const identity = `git:${rootCommit}`;
-    identityCache.set(canonical, identity);
+    identityCache.set(canonical, { identity, gitRoot });
     lastKnownGitIdentityCache.set(canonical, identity);
     transientFailureCooldown.delete(canonical);
     dubiousOwnershipFallbackDirectories.delete(canonical);
@@ -304,19 +315,21 @@ function getActiveCooldown(canonical: string): number | undefined {
 }
 
 function lastKnownGitIdentity(canonical: string): string | undefined {
-    return lastKnownGitIdentityCache.get(canonical) ?? identityCache.get(canonical);
+    return lastKnownGitIdentityCache.get(canonical) ?? identityCache.get(canonical)?.identity;
 }
 
 function nearestLastKnownGitIdentity(
     canonical: string,
 ): { identity: string; source: string } | undefined {
     const visited = new Set<string>();
+    // The walk stops at the directory's own Git root: an ancestor above it belongs to an enclosing repository whose identity is not this one's.
     const walk = (start: string): { identity: string; source: string } | undefined => {
         let current = start;
         while (!visited.has(current)) {
             visited.add(current);
             const cached = lastKnownGitIdentity(current);
             if (cached !== undefined) return { identity: cached, source: current };
+            if (existsSync(path.join(current, ".git"))) break;
             const parent = path.dirname(current);
             if (parent === current) break;
             current = parent;
@@ -497,15 +510,16 @@ function gitRootDirectory(canonical: string): string | null {
 
 /** Answers the git worktree root containing `directory`, or the directory's canonical path when no `.git` is found, matching the daemon's canonical project root. commentlint: allow(JUDGE) */
 export function resolveProjectRootDirectory(directory: string): string {
-    const canonical = path.resolve(directory);
-    const root = gitRootDirectory(canonical);
-    if (root) return root;
-    // Matches the daemon's `ProjectBinding`, which compares roots after `canonical_root` symlink resolution; a raw spelling would derive distinct import identities inside one daemon scope. commentlint: allow(JUDGE)
+    const resolved = path.resolve(directory);
+    // Git discovers the repository from the physical path, so a symlinked subtree beneath another checkout belongs to the link target's repository, not the outer one; walking the raw spelling first would find the outer `.git`. The daemon's `ProjectBinding` compares roots after the same `canonical_root` symlink resolution, so a raw spelling would also derive a distinct import identity inside one daemon scope. commentlint: allow(JUDGE)
+    let canonical: string;
     try {
-        return realpathSync.native(canonical);
+        canonical = realpathSync.native(resolved);
     } catch {
-        return canonical;
+        // A path with a missing component has no physical spelling; the raw ancestor chain still finds an existing `.git`.
+        return gitRootInAncestorChain(resolved) ?? resolved;
     }
+    return gitRootInAncestorChain(canonical) ?? canonical;
 }
 
 export function resolveProjectIdentityForSession(

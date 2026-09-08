@@ -69,9 +69,9 @@ const ctxMemoryArgsShape = {
 
 const ctxMemoryArgsSchema = tool.schema.object(ctxMemoryArgsShape).passthrough();
 
-function allowedActions(deps: CtxMemoryToolDeps): [CtxMemoryAction, ...CtxMemoryAction[]] {
-    const allowed = deps.allowedActions?.length ? deps.allowedActions : CTX_MEMORY_ACTIONS;
-    return [...allowed] as [CtxMemoryAction, ...CtxMemoryAction[]];
+/** An omitted `allowedActions` admits every action; an explicit empty list admits none, so a caller whose computed allowlist is empty exposes no operation. */
+function allowedActions(deps: CtxMemoryToolDeps): readonly CtxMemoryAction[] {
+    return deps.allowedActions ?? CTX_MEMORY_ACTIONS;
 }
 
 function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {

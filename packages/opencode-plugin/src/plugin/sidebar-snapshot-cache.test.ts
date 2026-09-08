@@ -22,6 +22,7 @@ function makeSnapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot
         systemPromptTokens: 0,
         compartmentCount: 0,
         memoryCount: 0,
+        memoryState: "available",
         memoryBlockCount: 0,
         pendingOpsCount: 0,
         historianRunning: false,
@@ -29,11 +30,14 @@ function makeSnapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot
         sessionNoteCount: 0,
         readySmartNoteCount: 0,
         cacheTtl: "5m",
+        lastTransformError: null,
         lastDreamerRunAt: null,
         projectIdentity: null,
         compartmentTokens: 0,
         factTokens: 0,
         memoryTokens: 0,
+        docsTokens: 0,
+        profileTokens: 0,
         conversationTokens: 0,
         toolCallTokens: 0,
         toolDefinitionTokens: 0,
@@ -69,10 +73,13 @@ describe("applyStickySnapshotCache", () => {
             makeSnapshot({
                 inputTokens: 350_000,
                 usagePercentage: 35,
+                native_context_usage_percentage: 17.5,
                 systemPromptTokens: 25_000,
                 compartmentTokens: 128_000,
                 factTokens: 200,
                 memoryTokens: 8_000,
+                docsTokens: 3_000,
+                profileTokens: 1_800,
                 conversationTokens: 53_000,
                 toolCallTokens: 99_000,
                 toolDefinitionTokens: 32_000,
@@ -82,32 +89,73 @@ describe("applyStickySnapshotCache", () => {
         );
         const flickered = makeSnapshot({
             inputTokens: 0, // mid-turn flicker
+            native_context_usage_percentage: 0,
             compartmentCount: 393, // a new compartment landed
             memoryCount: 487,
             historianRunning: true,
             pendingOpsCount: 12,
+            totalInputTokens: 9_000_000,
+            newWorkTokens: 4_000,
         });
         const result = applyStickySnapshotCache(
             { sessionId: "ses_test", directory: ROOT },
             flickered,
         );
 
-        // Token-breakdown values come from the cached snapshot.
+        // Every token-derived value comes from the cached snapshot.
         expect(result.inputTokens).toBe(350_000);
         expect(result.usagePercentage).toBe(35);
+        expect(result.native_context_usage_percentage).toBe(17.5);
         expect(result.systemPromptTokens).toBe(25_000);
         expect(result.compartmentTokens).toBe(128_000);
         expect(result.factTokens).toBe(200);
         expect(result.memoryTokens).toBe(8_000);
+        expect(result.docsTokens).toBe(3_000);
+        expect(result.profileTokens).toBe(1_800);
         expect(result.conversationTokens).toBe(53_000);
         expect(result.toolCallTokens).toBe(99_000);
         expect(result.toolDefinitionTokens).toBe(32_000);
 
-        // Counts and live state come from the fresh build.
+        // Counts, live state, and cumulative work metrics come from the fresh build.
         expect(result.compartmentCount).toBe(393);
         expect(result.memoryCount).toBe(487);
         expect(result.historianRunning).toBe(true);
         expect(result.pendingOpsCount).toBe(12);
+        expect(result.totalInputTokens).toBe(9_000_000);
+        expect(result.newWorkTokens).toBe(4_000);
+    });
+
+    test("restored breakdown stays consistent: buckets sum to the restored inputTokens", () => {
+        applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({
+                inputTokens: 100_000,
+                systemPromptTokens: 10_000,
+                toolDefinitionTokens: 5_000,
+                compartmentTokens: 30_000,
+                factTokens: 1_000,
+                memoryTokens: 4_000,
+                docsTokens: 6_000,
+                profileTokens: 2_000,
+                conversationTokens: 30_000,
+                toolCallTokens: 12_000,
+            }),
+        );
+        const result = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        const bucketSum =
+            result.systemPromptTokens +
+            result.toolDefinitionTokens +
+            result.compartmentTokens +
+            result.factTokens +
+            result.memoryTokens +
+            result.docsTokens +
+            result.profileTokens +
+            result.conversationTokens +
+            result.toolCallTokens;
+        expect(bucketSum).toBe(result.inputTokens);
     });
 
     test("clears cached tokens when zero snapshot drops counts too (real reset)", () => {
@@ -139,6 +187,87 @@ describe("applyStickySnapshotCache", () => {
             makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
         );
         expect(later.inputTokens).toBe(0);
+    });
+
+    test("a complete available memory read with a lower count is reset evidence", () => {
+        applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 100_000, compartmentCount: 5, memoryCount: 10 }),
+        );
+        const reset = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({
+                inputTokens: 0,
+                compartmentCount: 5,
+                memoryCount: 4,
+                memoryState: "available",
+            }),
+        );
+        expect(reset.inputTokens).toBe(0);
+
+        const later = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        expect(later.inputTokens).toBe(0);
+    });
+
+    test("a truncated memory read with a lower count is not reset evidence", () => {
+        applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 100_000, compartmentCount: 5, memoryCount: 300 }),
+        );
+        // The capped read returns a prefix, so its count is a lower bound and can fall below the cached count.
+        const result = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({
+                inputTokens: 0,
+                compartmentCount: 5,
+                memoryCount: 256,
+                memoryTruncated: true,
+            }),
+        );
+        expect(result.inputTokens).toBe(100_000);
+        expect(result.memoryCount).toBe(256);
+        expect(result.memoryTruncated).toBe(true);
+    });
+
+    test("a non-available memory state with a zero count is not reset evidence", () => {
+        applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 100_000, compartmentCount: 5, memoryCount: 10 }),
+        );
+        for (const memoryState of ["unavailable:daemon_absent", "stale", "disabled", null]) {
+            const result = applyStickySnapshotCache(
+                "ses_test",
+                makeSnapshot({
+                    inputTokens: 0,
+                    compartmentCount: 5,
+                    memoryCount: 0,
+                    memoryState,
+                }),
+            );
+            expect(result.inputTokens).toBe(100_000);
+            expect(result.memoryCount).toBe(0);
+            expect(result.memoryState).toBe(memoryState);
+        }
+    });
+
+    test("an indeterminate memory read does not rescue a compartment-count drop", () => {
+        applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 100_000, compartmentCount: 5, memoryCount: 10 }),
+        );
+        const reset = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({
+                inputTokens: 0,
+                compartmentCount: 0,
+                memoryCount: 0,
+                memoryState: "unavailable:daemon_absent",
+            }),
+        );
+        expect(reset.inputTokens).toBe(0);
     });
 
     test("sticks during first-user-prompt flicker when counts survive", () => {

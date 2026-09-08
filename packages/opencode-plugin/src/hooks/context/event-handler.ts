@@ -1,4 +1,6 @@
 import { detectOverflow } from "../../features/context/overflow-detection";
+import { clearWorkMetricsCarry, clearWorkMetricsCarryIfFolded } from "../../plugin/rpc-handlers";
+import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsAfterAuthOnce } from "../../shared/models-dev-cache";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
@@ -6,11 +8,13 @@ import {
     type ContextUsage,
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
+    getMessageUpdatedInfo,
     getSessionCreatedInfo,
     getSessionErrorInfo,
     getSessionProperties,
 } from "./event-payloads";
 import { resolveContextLimit, resolveSessionId } from "./event-resolvers";
+import { recordChildSession } from "./live-session-state";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
@@ -20,6 +24,10 @@ export interface ContextUsageEntry {
     updatedAt: number;
     lastResponseTime?: number;
     hasUsageTokens?: boolean;
+    /** The model whose window `usage` was measured against; readers must not pair it with another model's limit. */
+    model?: { providerID: string; modelID: string };
+    /** The assistant message `usage` came from, so removing that message can discard the entry. */
+    messageID?: string;
 }
 
 export interface EventHandlerDeps {
@@ -36,9 +44,6 @@ export interface EventHandlerDeps {
     /** `subagentSessions` records every session created with a non-empty `parentID`, in memory only. */
     subagentSessions?: Set<string>;
 }
-
-/** Hidden Eidnara child sessions carry this title prefix at creation. */
-const INTERNAL_CHILD_TITLE_PREFIX = "eidnara-";
 
 function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry>): void {
     const now = Date.now();
@@ -79,19 +84,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
-            const isChild = info.parentID.length > 0;
-            if (isChild) {
-                deps.subagentSessions?.add(info.id);
-            }
-
-            // The handler adds hidden sessions titled `eidnara-` to `internalChildSessions` so transform and system-prompt hooks exempt them; the set is not persisted across restarts.
-            if (
-                deps.internalChildSessions &&
-                isChild &&
-                typeof info.title === "string" &&
-                info.title.startsWith(INTERNAL_CHILD_TITLE_PREFIX)
-            ) {
-                deps.internalChildSessions.add(info.id);
+            // Transform and system-prompt hooks exempt hidden `eidnara-` children; the sets are in memory only, and the session-directory read re-derives them after a restart.
+            if (recordChildSession(deps, info.id, info).internalChild) {
                 sessionLog(
                     info.id,
                     `marked internal eidnara child (title="${info.title}") — exempt from transform + injection`,
@@ -114,26 +108,32 @@ export function createEventHandler(deps: EventHandlerDeps) {
         }
 
         if (input.event.type === "message.updated") {
-            const info = getMessageUpdatedAssistantInfo(input.event.properties);
-            if (!info) {
+            const updated = getMessageUpdatedInfo(input.event.properties);
+            if (!updated) {
                 const sessionId = properties ? resolveSessionId(properties) : null;
                 if (sessionId) {
                     sessionLog(
                         sessionId,
-                        "event message.updated: no assistant info extracted from event",
+                        "event message.updated: no message info extracted from event",
                     );
                 } else {
-                    log("[eidnara] event message.updated: no assistant info extracted from event");
+                    log("[eidnara] event message.updated: no message info extracted from event");
                 }
                 return;
             }
 
-            // Streaming, edited, or retried messages carry stale cached token estimates; a missing message ID widens the invalidation to the whole session.
+            // Streaming, edited, or retried messages of any role carry stale cached token estimates; a missing message ID widens the invalidation to the whole session.
             invalidateTrueRawTokenCache({
-                sessionId: info.sessionID,
-                messageId: info.messageID,
+                sessionId: updated.sessionID,
+                messageId: updated.messageID,
                 reason: "message.updated",
             });
+
+            // Usage and overflow live on assistant messages only.
+            const info = getMessageUpdatedAssistantInfo(input.event.properties);
+            if (!info) {
+                return;
+            }
 
             // OpenCode may report overflow through `session.error` or the assistant message error; either can arrive first or be absent.
             if (info.error !== undefined && info.error !== null) {
@@ -149,6 +149,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             const now = Date.now();
+            // An update to a row the work-metrics carry has already folded invalidates the carry.
+            if (info.messageID) clearWorkMetricsCarryIfFolded(info.sessionID, info.messageID);
             const usageTokens = [
                 info.tokens?.input,
                 info.tokens?.cache?.read,
@@ -169,6 +171,15 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             try {
+                // An edit or retry of an older response updates that older row; its tokens must not replace the newest response's usage. OpenCode message ids are time-ordered. commentlint: allow(JUDGE)
+                const current = deps.contextUsageMap.get(info.sessionID);
+                if (current?.messageID && info.messageID && info.messageID < current.messageID) {
+                    sessionLog(
+                        info.sessionID,
+                        `event message.updated: skipping — ${info.messageID} is older than the recorded response ${current.messageID}`,
+                    );
+                    return;
+                }
                 const totalInputTokens =
                     (info.tokens?.input ?? 0) +
                     (info.tokens?.cache?.read ?? 0) +
@@ -195,6 +206,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     updatedAt: now,
                     lastResponseTime: now,
                     hasUsageTokens: true,
+                    model:
+                        info.providerID && info.modelID
+                            ? { providerID: info.providerID, modelID: info.modelID }
+                            : undefined,
+                    messageID: info.messageID,
                 });
             } catch (error) {
                 sessionLog(info.sessionID, "event message.updated usage tracking failed:", error);
@@ -234,6 +250,13 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     messageId: info.messageID,
                     reason: "message.removed",
                 });
+                // The removed row may sit below the work-metrics watermark; the next poll re-reads the session.
+                clearWorkMetricsCarry(info.sessionID);
+                // Live usage describes one assistant response; once that response is gone, so is the usage, and the sticky snapshot must not restore it. commentlint: allow(JUDGE)
+                if (deps.contextUsageMap.get(info.sessionID)?.messageID === info.messageID) {
+                    deps.contextUsageMap.delete(info.sessionID);
+                    clearSidebarSnapshotCache(info.sessionID);
+                }
 
                 deps.onSessionCacheInvalidated?.(info.sessionID);
                 sessionLog(
@@ -259,6 +282,9 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 sessionLog(sessionId, "event session.compacted marker cleanup failed:", error);
             }
             invalidateTrueRawTokenCache({ sessionId, reason: "session.compacted" });
+            // Compaction replaces the context the live usage measured, so the pre-compaction count must not carry over.
+            deps.contextUsageMap.delete(sessionId);
+            clearSidebarSnapshotCache(sessionId);
             deps.onSessionCacheInvalidated?.(sessionId);
             return;
         }

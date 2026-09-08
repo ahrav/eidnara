@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { EidnaraConfigSchema } from "../config/schema/eidnara";
+import { createEventHandler } from "../hooks/context/event-handler";
 import { resetKernelClientsForTest } from "../hooks/context/kernel-transport";
 import { createLiveSessionState } from "../hooks/context/live-session-state";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
@@ -21,7 +22,9 @@ import {
     buildSidebarSnapshot,
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
+    clearRustSessionStatus,
     clearWorkMetricsCarry,
+    clearWorkMetricsCarryIfFolded,
     type RustSessionStatus,
     registerRpcHandlers,
 } from "./rpc-handlers";
@@ -254,6 +257,96 @@ describe("registerRpcHandlers", () => {
         );
     });
 
+    test("concurrent polls that miss the status cache share one daemon request", async () => {
+        const sessionId = "ses-handler-inflight";
+        let calls = 0;
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: process.cwd(),
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: null,
+            liveSessionState: createLiveSessionState(),
+            rustModeModuleClient: {
+                async call() {
+                    calls += 1;
+                    await gate;
+                    return { ok: true, result: DAEMON_STATUS };
+                },
+            },
+        });
+
+        const first = handlers.get("sidebar-snapshot")?.({ sessionId });
+        const second = handlers.get("status-detail")?.({ sessionId });
+        release?.();
+        const [snapshot, detail] = (await Promise.all([first, second])) as unknown as [
+            SidebarSnapshot,
+            StatusDetail,
+        ];
+        expect(calls).toBe(1);
+        expect(snapshot.compartmentCount).toBe(4);
+        expect(detail.compartmentCount).toBe(4);
+    });
+
+    test("clearRustSessionStatus forgets the cached status and fences a request in flight", async () => {
+        const sessionId = "ses-handler-status-cleared";
+        let calls = 0;
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: process.cwd(),
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: null,
+            liveSessionState: createLiveSessionState(),
+            rustModeModuleClient: {
+                async call() {
+                    calls += 1;
+                    if (calls === 3) await gate;
+                    return { ok: true, result: DAEMON_STATUS };
+                },
+            },
+        });
+
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toBe(1);
+        // Within the TTL a poll would reuse the cache; the clear forces a fresh daemon read.
+        clearRustSessionStatus(sessionId);
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toBe(2);
+
+        // A clear while a request is in flight discards its late answer: the waiting poll fails instead of rendering the invalidated session, and nothing is cached.
+        clearRustSessionStatus(sessionId);
+        const pending = handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toBe(3);
+        clearRustSessionStatus(sessionId);
+        release?.();
+        expect(await pending).toEqual({ error: "sidebar snapshot unavailable" });
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toBe(4);
+    });
+
     test("sidebar-snapshot reports disabled memory and rejects an empty session id", async () => {
         const { handlers } = register({ memory: { enabled: false } });
         const snapshot = (await handlers.get("sidebar-snapshot")?.({
@@ -275,6 +368,7 @@ describe("registerRpcHandlers", () => {
             updatedAt: Date.now(),
             lastResponseTime: Date.now(),
             hasUsageTokens: true,
+            model: { providerID: "test-provider", modelID: "test-model" },
         });
         const { handlers, calls } = register({ transform_mode: "ts" }, DAEMON_STATUS, live);
 
@@ -433,6 +527,7 @@ describe("buildSidebarSnapshot — daemon status", () => {
             updatedAt: Date.now(),
             lastResponseTime: Date.now(),
             hasUsageTokens: true,
+            model: { providerID: "test-provider", modelID: "test-model" },
         });
         const fromLive = buildSidebarSnapshot(sessionId, process.cwd(), live);
         expect(fromLive.inputTokens).toBe(64_000);
@@ -453,6 +548,30 @@ describe("buildSidebarSnapshot — daemon status", () => {
         );
         expect(fromDaemon.inputTokens).toBe(42_000);
         expect(fromDaemon.usagePercentage).toBe(42);
+    });
+
+    test("live usage measured against a different model is not shown after a model switch", () => {
+        const sessionId = "ses-live-usage-stale-model";
+        const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, { providerID: "test-provider", modelID: "large" });
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 64_000 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+            model: { providerID: "test-provider", modelID: "small" },
+        });
+        const snapshot = buildSidebarSnapshot(sessionId, process.cwd(), live);
+        expect(snapshot.inputTokens).toBe(0);
+        expect(snapshot.usagePercentage).toBe(0);
+
+        // An entry without a model cannot be matched to the active model either.
+        live.contextUsageBySession.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 64_000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(0);
     });
 
     test("surfaces the daemon's last transform rejection", () => {
@@ -629,12 +748,17 @@ describe("buildStatusDetail", () => {
     test("cache countdown and tag totals follow the live response time and daemon status", () => {
         const sessionId = "ses-status-countdown";
         const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
         const now = Date.now();
         live.contextUsageBySession.set(sessionId, {
             usage: { percentage: 10, inputTokens: 10_000 },
             updatedAt: now,
             lastResponseTime: now - 60_000,
             hasUsageTokens: true,
+            model: { providerID: "test-provider", modelID: "test-model" },
         });
         const detail = buildStatusDetail(
             sessionId,
@@ -657,6 +781,7 @@ describe("buildStatusDetail", () => {
             updatedAt: now,
             lastResponseTime: now - 600_000,
             hasUsageTokens: true,
+            model: { providerID: "test-provider", modelID: "test-model" },
         });
         const expired = buildStatusDetail(
             sessionId,
@@ -667,17 +792,34 @@ describe("buildStatusDetail", () => {
         );
         expect(expired.cacheRemainingMs).toBe(0);
         expect(expired.cacheExpired).toBe(true);
+
+        // A response recorded for another model does not start the new model's countdown.
+        const switched = buildStatusDetail(
+            sessionId,
+            process.cwd(),
+            "test-provider/other-model",
+            { cache_ttl: "5m" },
+            live,
+        );
+        expect(switched.lastResponseTime).toBe(0);
+        expect(switched.cacheRemainingMs).toBe(0);
+        expect(switched.cacheExpired).toBe(false);
     });
 
     test("an unparseable cache TTL falls back to the daemon's five-minute default", () => {
         const sessionId = "ses-status-bad-ttl";
         const live = createLiveSessionState();
+        live.liveModelBySession.set(sessionId, {
+            providerID: "test-provider",
+            modelID: "test-model",
+        });
         const now = Date.now();
         live.contextUsageBySession.set(sessionId, {
             usage: { percentage: 10, inputTokens: 10_000 },
             updatedAt: now,
             lastResponseTime: now - 60_000,
             hasUsageTokens: true,
+            model: { providerID: "test-provider", modelID: "test-model" },
         });
         for (const cacheTtl of ["5d", ""]) {
             const detail = buildStatusDetail(
@@ -692,6 +834,21 @@ describe("buildStatusDetail", () => {
             expect(detail.cacheRemainingMs).toBeGreaterThan(230_000);
             expect(detail.cacheNeverExpires).toBe(false);
         }
+    });
+
+    test("the compression budget applies the effective threshold without an extra cap", () => {
+        const detail = buildStatusDetail(
+            "ses-status-budget-90",
+            process.cwd(),
+            undefined,
+            { execute_threshold_percentage: 90 },
+            undefined,
+            undefined,
+            DAEMON_STATUS,
+        );
+        expect(detail.executeThreshold).toBe(90);
+        // Mirrors resolveHistoryBudgetTokens: 100k * 0.90 * 0.15.
+        expect(detail.compressionBudget).toBe(13_500);
     });
 
     test("a request without modelKey resolves per-model config from the live model", () => {
@@ -830,10 +987,66 @@ describe("clearWorkMetricsCarry", () => {
                 id,
                 role: "assistant",
                 agent: "build",
+                providerID: "test-provider",
+                modelID: "test-model",
+                time: { created: timeCreated, completed: timeCreated + 5 },
                 tokens: { input: inputTokens, output: 10, cache: { read: 0, write: 0 } },
             }),
         );
     }
+
+    test("usage lost from memory is recovered from the newest persisted response", () => {
+        const sessionId = "ses-usage-recovered";
+        const db = openTempOpenCodeDb();
+        insertAssistantRow(db, sessionId, "a", 1, 10_000);
+        insertAssistantRow(db, sessionId, "b", 2, 64_000);
+        closeQuietly(db);
+
+        // No live model and no live usage: both come back from the database.
+        const live = createLiveSessionState();
+        const snapshot = buildSidebarSnapshot(sessionId, process.cwd(), live);
+        expect(snapshot.inputTokens).toBe(64_000);
+        expect(snapshot.usagePercentage).toBe(50);
+        const recovered = live.contextUsageBySession.get(sessionId);
+        expect(recovered?.messageID).toBe("b");
+        expect(recovered?.model).toEqual({ providerID: "test-provider", modelID: "test-model" });
+        expect(recovered?.lastResponseTime).toBe(7);
+
+        // The recovered entry is cached, so the dialog's countdown starts from the persisted response time.
+        const detail = buildStatusDetail(sessionId, process.cwd(), undefined, undefined, live);
+        expect(detail.lastResponseTime).toBe(7);
+    });
+
+    test("recovery ignores responses at or before the newest compaction summary", () => {
+        const sessionId = "ses-usage-compacted";
+        const db = openTempOpenCodeDb();
+        insertAssistantRow(db, sessionId, "a", 1, 90_000);
+        // The compaction summary is an assistant row flagged `summary`; its own tokens describe the compaction call.
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run(
+            "s",
+            sessionId,
+            2,
+            JSON.stringify({
+                id: "s",
+                role: "assistant",
+                summary: true,
+                finish: "stop",
+                providerID: "test-provider",
+                modelID: "test-model",
+                tokens: { input: 95_000, output: 500, cache: { read: 0, write: 0 } },
+            }),
+        );
+
+        const live = createLiveSessionState();
+        expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(0);
+        expect(live.contextUsageBySession.has(sessionId)).toBe(false);
+
+        insertAssistantRow(db, sessionId, "b", 3, 12_000);
+        closeQuietly(db);
+        expect(buildSidebarSnapshot(sessionId, process.cwd(), live).inputTokens).toBe(12_000);
+    });
 
     test("a retained carry survives row deletion until the session is cleared", () => {
         const sessionId = "ses-carry-clear";
@@ -850,6 +1063,57 @@ describe("clearWorkMetricsCarry", () => {
 
         clearWorkMetricsCarry(sessionId);
         expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(0);
+    });
+
+    test("message.removed clears the carry so the next poll re-reads the session", async () => {
+        const sessionId = "ses-carry-removed";
+        const db = openTempOpenCodeDb();
+        // A prompt drop at `b` closes a 3k phase, so the total is 3k + 2k while `a` exists and 2k once it is gone.
+        insertAssistantRow(db, sessionId, "a", 1, 3_000);
+        insertAssistantRow(db, sessionId, "b", 2, 1_000);
+        insertAssistantRow(db, sessionId, "c", 3, 2_000);
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
+
+        db.exec("DELETE FROM message WHERE id = 'a'");
+        closeQuietly(db);
+        // The carry already folded `a`, so a poll without the event still reports the closed phase.
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
+
+        const handle = createEventHandler({ contextUsageMap: new Map() });
+        await handle({
+            event: {
+                type: "message.removed",
+                properties: { sessionID: sessionId, messageID: "a" },
+            },
+        });
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(2_000);
+    });
+
+    test("an update to a folded row clears the carry; an update to the held-back newest row keeps it", () => {
+        const sessionId = "ses-carry-updated";
+        const db = openTempOpenCodeDb();
+        insertAssistantRow(db, sessionId, "a", 1, 3_000);
+        insertAssistantRow(db, sessionId, "b", 2, 1_000);
+        insertAssistantRow(db, sessionId, "c", 3, 2_000);
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
+
+        // Row `a` shrinks to 1.5k, so the phase `b` closes is worth 1.5k once re-read.
+        db.prepare("UPDATE message SET data = ? WHERE id = 'a'").run(
+            JSON.stringify({
+                id: "a",
+                role: "assistant",
+                agent: "build",
+                tokens: { input: 1_500, output: 10, cache: { read: 0, write: 0 } },
+            }),
+        );
+        closeQuietly(db);
+
+        // `c` is the held-back newest row (watermark is `b`), so an update to it leaves the carry alone.
+        clearWorkMetricsCarryIfFolded(sessionId, "c");
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(5_000);
+
+        clearWorkMetricsCarryIfFolded(sessionId, "a");
+        expect(buildSidebarSnapshot(sessionId, process.cwd()).totalInputTokens).toBe(3_500);
     });
 });
 

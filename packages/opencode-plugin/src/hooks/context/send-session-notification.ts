@@ -340,22 +340,36 @@ export async function sendUserPrompt(
     client: unknown,
     sessionId: string,
     text: string,
+    promptContext: NotificationParams = {},
 ): Promise<void> {
     if (!hasNotificationSessionClient(client)) {
         throw new Error("session prompt API unavailable for user prompt");
     }
     const c = client as NotificationClient;
 
+    const model =
+        promptContext.providerId && promptContext.modelId
+            ? { providerID: promptContext.providerId, modelID: promptContext.modelId }
+            : undefined;
     const input = {
         path: { id: sessionId },
         body: {
+            ...(promptContext.agent ? { agent: promptContext.agent } : {}),
+            ...(model ? { model } : {}),
+            ...(promptContext.variant ? { variant: promptContext.variant } : {}),
             parts: [{ type: "text", text }],
         },
     };
 
     if (typeof c.session?.promptAsync === "function") {
-        await c.session.promptAsync(input);
+        // `promptAsync` only enqueues the turn, so a call still pending after the deadline is a stuck endpoint, not a long turn.
+        await withTimeout(
+            c.session.promptAsync(input),
+            notificationSendTimeoutMs,
+            "user prompt delivery timed out",
+        );
     } else if (typeof c.session?.prompt === "function") {
+        // `prompt` returns after the model turn completes; a deadline here would report a slow turn as an undelivered prompt.
         await Promise.resolve(c.session.prompt(input));
     } else {
         throw new Error("session prompt API unavailable for user prompt");

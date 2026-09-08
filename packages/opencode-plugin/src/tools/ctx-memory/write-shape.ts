@@ -28,26 +28,31 @@ export function requireTaxonomyCategory(category: string | undefined): string | 
     return category;
 }
 
-export function assertCtxMemoryWriteShape(args: CtxMemoryWriteShape): void {
-    // The wrappers fall back to unvalidated raw arguments when schema parsing fails, so each optional string field is type-checked before any `.trim()` call can throw a TypeError outside the input-error path. `null` stays admitted: the optional-chained reads downstream treat it as absent. commentlint: allow(JUDGE)
+/** The wrappers fall back to unvalidated raw arguments when schema parsing fails, so each optional string field is type-checked before any `.trim()` call can throw a TypeError outside the input-error path. `null` stays admitted: every downstream read treats it as absent. commentlint: allow(JUDGE) */
+export function assertCtxMemoryFieldTypes(args: CtxMemoryWriteShape): void {
     for (const field of ["content", "category", "reason", "objectId"] as const) {
         const value = (args as Record<string, unknown>)[field];
         if (value !== undefined && value !== null && typeof value !== "string") {
             throw new ClaimOperationInputError(`'${field}' must be a string`);
         }
     }
+}
+
+/** `null` in `content` or `antiMemory` counts as absent on both arms, the same admission the field-type check grants, so a raw-argument anti-memory create carrying `content: null` is a valid anti-memory write rather than a mixed one. commentlint: allow(JUDGE) */
+export function assertCtxMemoryWriteShape(args: CtxMemoryWriteShape): void {
+    assertCtxMemoryFieldTypes(args);
     if (args.action !== "create" && args.action !== "revise") return;
     const category = requireTaxonomyCategory(args.category?.trim());
-    const antiArm = category === ANTI_MEMORY_CATEGORY || args.antiMemory !== undefined;
+    const antiArm = category === ANTI_MEMORY_CATEGORY || args.antiMemory != null;
     if (antiArm) {
-        if (category !== ANTI_MEMORY_CATEGORY || !args.antiMemory || args.content !== undefined) {
+        if (category !== ANTI_MEMORY_CATEGORY || !args.antiMemory || args.content != null) {
             throw new ClaimOperationInputError(
                 `${args.action} anti-memory requires category ${ANTI_MEMORY_CATEGORY}, antiMemory payload, and no content`,
             );
         }
         return;
     }
-    if (args.antiMemory !== undefined) {
+    if (args.antiMemory != null) {
         throw new ClaimOperationInputError(
             `${args.action} positive memory cannot carry antiMemory`,
         );

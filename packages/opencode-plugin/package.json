@@ -34,6 +34,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@eidnara/retina-local-fs": "0.1.0",
     "@eidnara/shm-native": "0.1.0",
     "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
     "@opencode-ai/plugin": "^1.17.11",

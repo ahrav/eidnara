@@ -91,6 +91,28 @@ describe("filesystem predicates", () => {
         expect(absent.events[0]?.observed).toEqual({ contains: false });
     });
 
+    test("file_contains finds a needle that straddles the streaming chunk boundary", async () => {
+        const directory = await temporaryDirectory();
+        const path = join(directory, "large.log");
+        // Place the needle across the 64 KiB read boundary and pad past a second chunk.
+        const chunk = 64 * 1024;
+        const needle = "BUILD SUCCESSFUL";
+        const before = "x".repeat(chunk - 4);
+        await writeFile(path, `${before}${needle}${"y".repeat(chunk + 100)}\n`);
+
+        const found = await poll({ kind: "file_contains", path, needle });
+        expect(found.events[0]?.observed).toEqual({ contains: true });
+
+        await writeFile(path, `${before}${"y".repeat(chunk + 100)}\n`);
+        const missing = await poll({ kind: "file_contains", path, needle });
+        expect(missing.events).toHaveLength(0);
+
+        // A multibyte character split by the byte boundary must still match as one code point.
+        await writeFile(path, `${"x".repeat(chunk - 1)}é${"y".repeat(chunk)}\n`);
+        const multibyte = await poll({ kind: "file_contains", path, needle: "xéy" });
+        expect(multibyte.events[0]?.observed).toEqual({ contains: true });
+    });
+
     test("path_exists treats missing as an observation and supports gone", async () => {
         const directory = await temporaryDirectory();
         const path = join(directory, "result.json");
@@ -197,6 +219,55 @@ describe("git predicates", () => {
         const next = await poll(config, matching.scalar);
         expect(next.events[0]?.id).not.toBe(matching.events[0]?.id);
     });
+
+    test("git_tag_matching orders prerelease identifiers by ASCII and exact integers", async () => {
+        const { repo } = await createRepository();
+        // `Z` (0x5A) sorts before `a` (0x61) in SemVer, so `v1.0.0-Z` is below the threshold.
+        await git(repo, "tag", "v1.0.0-Z");
+        await git(repo, "tag", "v1.0.0-b");
+        const alpha = await poll({
+            kind: "git_tag_matching",
+            repo_path: repo,
+            pattern: "v1.0.0-*",
+            above: "1.0.0-a",
+        });
+        expect(alpha.events.map((event) => event.observed)).toEqual([{ tag: "v1.0.0-b" }]);
+
+        // Both identifiers round to the same `Number`, so only exact comparison separates them.
+        await git(repo, "tag", "v2.0.0-9007199254740992");
+        await git(repo, "tag", "v2.0.0-9007199254740994");
+        const numeric = await poll({
+            kind: "git_tag_matching",
+            repo_path: repo,
+            pattern: "v2.0.0-*",
+            above: "2.0.0-9007199254740993",
+        });
+        expect(numeric.events.map((event) => event.observed)).toEqual([
+            { tag: "v2.0.0-9007199254740994" },
+        ]);
+
+        // `01` is not a SemVer numeric identifier, so the tag is not a version and cannot fire.
+        await git(repo, "tag", "v3.0.0-01");
+        await git(repo, "tag", "v3.0.0-1");
+        const malformed = await poll({
+            kind: "git_tag_matching",
+            repo_path: repo,
+            pattern: "v3.0.0-*",
+            above: "3.0.0-0",
+        });
+        expect(malformed.events.map((event) => event.observed)).toEqual([{ tag: "v3.0.0-1" }]);
+    });
+
+    test("git_tag_matching treats an option-shaped pattern as a glob, not a git flag", async () => {
+        const { repo } = await createRepository();
+        await git(repo, "tag", "v1.0.0");
+        const result = await poll({
+            kind: "git_tag_matching",
+            repo_path: repo,
+            pattern: "--format=%(objectname)",
+        });
+        expect(result.events).toHaveLength(0);
+    });
 });
 
 describe("compound scalar behavior", () => {
@@ -238,6 +309,45 @@ describe("compound scalar behavior", () => {
         expect(
             validateProviderConfig({ kind: "path_exists", path: "/tmp/future", guessed: true }),
         ).toMatchObject({ success: false, reason: expect.stringContaining("unknown field") });
+    });
+
+    test.each([
+        "1.0.0-01",
+        "1.0.0-a..b",
+        "1.0.0-",
+        "1.0.0-a.",
+        "01.0.0",
+        "1.0.0+",
+        "1.0.0+a..b",
+    ])("rejects the malformed SemVer threshold %s", (above) => {
+        expect(
+            validateProviderConfig({
+                kind: "git_tag_matching",
+                repo_path: "/tmp/repo",
+                pattern: "v*",
+                above,
+            }),
+        ).toMatchObject({
+            success: false,
+            reason: expect.stringContaining("Invalid semantic version"),
+        });
+    });
+
+    test.each([
+        "1.0.0-0",
+        "1.0.0-0a",
+        "1.0.0-a-b.1",
+        "v1.0.0-rc.1+build.5",
+        "1.0.0+001",
+    ])("accepts the well-formed SemVer threshold %s", (above) => {
+        expect(
+            validateProviderConfig({
+                kind: "git_tag_matching",
+                repo_path: "/tmp/repo",
+                pattern: "v*",
+                above,
+            }),
+        ).toMatchObject({ success: true });
     });
 
     test("rejects compounds larger than four", async () => {

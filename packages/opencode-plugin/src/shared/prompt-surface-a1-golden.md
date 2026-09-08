@@ -220,7 +220,7 @@ Never blanket-mark large ranges (e.g. "1-50") — review what each tag holds fir
 ```
 Working notes for this session's future — reminders, follow-ups, and things to revisit later.
 
-Use a note when something matters LATER but not in the next few steps: "revisit the retry logic after the release", "user wants the dashboard polish batched", "flaky test to investigate when touching CI". Don't use notes for active multi-step work (use todos) or for durable project knowledge that should outlive this session (use ctx_memory). Notes resurface automatically at natural work boundaries and whenever you read them.
+Use a note when something matters LATER but not in the next few steps: "revisit the retry logic after the release", "user wants the dashboard polish batched", "flaky test to investigate when touching CI". Don't use notes for active multi-step work (use todos) or for durable project knowledge that should outlive this session (use ctx_memory). Read your notes at natural work boundaries (after a commit, when a todo list completes, before starting the next piece of work); smart notes also surface on their own once their condition is confirmed.
 
 Actions:
 - write: save a note (content). Add surface_condition to make it a smart note (below).

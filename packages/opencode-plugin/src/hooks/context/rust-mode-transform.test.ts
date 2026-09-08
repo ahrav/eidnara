@@ -674,6 +674,47 @@ describe("Rust mode transform transport", () => {
         expect(transform.getState(sessionId).passCount).toBe(1);
     });
 
+    it("serves the input unchanged without sending when the session is cleared during preflight", async () => {
+        const sessionId = `rust-cleared-during-preflight-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let releaseDirectoryRead: (() => void) | undefined;
+        const deps = makeDeps();
+        deps.client = {
+            session: {
+                get: () =>
+                    new Promise<{ data: { directory: string } }>((resolve) => {
+                        releaseDirectoryRead = () =>
+                            resolve({ data: { directory: "/tmp/project" } });
+                    }),
+            },
+        } as never;
+        const deleteSession = mock(async () => {});
+        const { client, calls } = recordingClient(() => ({ native_messages: [] }));
+        client.deleteSession = deleteSession;
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            const transform = createRustModeTransform(deps, { moduleClient: client });
+            const messages = makeMessages(sessionId);
+            const output = { messages: [...messages] as unknown[] };
+            const pass = transform.run(sessionId, messages, output);
+            while (releaseDirectoryRead === undefined) await Bun.sleep(0);
+            transform.clearSession(sessionId);
+            releaseDirectoryRead?.();
+            await pass;
+
+            expect(calls.filter((call) => call.method === "transform")).toHaveLength(0);
+            expect(output.messages).toEqual(messages);
+            expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+            expect(
+                sessionLogs(logSpy, sessionId).some((message) =>
+                    message.includes("was cleared during the pass"),
+                ),
+            ).toBe(true);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
     it("deletes the daemon session by its known directory when no pass has run in this process", async () => {
         const sessionId = `rust-clear-before-pass-${Date.now()}`;
         const deleteSession = mock(async () => {});

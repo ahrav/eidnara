@@ -74,14 +74,16 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
                 }),
             },
             session: {
-                get: async () => ({ data: { agent: "build" } }),
+                get: async () => ({ data: {} }),
             },
         } as never;
         const { hook, calls } = createForwardingHook({ client });
 
+        // The hook forwards the input's agent; the SDK session payload carries none.
         await hook({
             tool: "todowrite",
             sessionID: "ses-denied-capture",
+            agent: "build",
             args: {
                 todos: [{ status: "pending", priority: "high", content: "Must not capture" }],
             },
@@ -93,6 +95,7 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
         await hook({
             tool: "mcp_Todowrite",
             sessionID: "ses-denied-capture",
+            agent: "build",
             args: {
                 todos: [{ status: "pending", priority: "high", content: "Still refuse" }],
             },
@@ -102,12 +105,34 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
         await hook({
             tool: "todowrite",
             sessionID: "ses-denied-capture",
+            agent: "build",
             args: {
                 todos: [{ status: "pending", priority: "high", content: "Capture now" }],
             },
         });
         expect(calls).toHaveLength(1);
         expect(calls[0]?.stateJson).toContain("Capture now");
+    });
+
+    test("a permission read that never settles falls back to the cached verdict within the deadline", async () => {
+        const client = {
+            app: { agents: () => new Promise<never>(() => {}) },
+            session: { get: async () => ({ data: {} }) },
+        } as never;
+        const { hook, calls } = createForwardingHook({ client });
+
+        const startedAt = performance.now();
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-permission-hung",
+            agent: "build",
+            args: { todos: [{ status: "pending", priority: "high", content: "Capture anyway" }] },
+        });
+        const elapsedMs = performance.now() - startedAt;
+
+        expect(calls).toHaveLength(1);
+        expect(elapsedMs).toBeGreaterThanOrEqual(1_500);
+        expect(elapsedMs).toBeLessThan(10_000);
     });
 
     test("multiple todowrite calls forward each snapshot in order", async () => {

@@ -100,6 +100,116 @@ describe("createCtxReduceTools", () => {
             );
         });
 
+        it("acknowledges only the tags the daemon accepted when some were unknown", async () => {
+            const { reduce } = recordingReduce({
+                ok: true,
+                queued: 1,
+                accepted: [1],
+                unknown: [99],
+            });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "1,99" }, toolContext());
+
+            expect(result).toBe("Queued: drop §1§; tags 99 not found.");
+            expect(result).not.toContain("§99§");
+        });
+
+        it("rebuilds ranges from the accepted tags so unknown members never appear as queued", async () => {
+            const { reduce } = recordingReduce({
+                ok: true,
+                queued: 4,
+                accepted: [1, 2, 3, 7],
+                unknown: [4, 5, 99],
+            });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "1-5, §99§, 7" }, toolContext());
+
+            expect(result).toBe("Queued: drop §1§-§3§, §7§; tags 4, 5, 99 not found.");
+        });
+
+        it("echoes the raw request only when the daemon reports no accepted list", async () => {
+            const { reduce } = recordingReduce({ ok: true, queued: 3 });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "3-5" }, toolContext());
+
+            expect(result).toBe("Queued: drop 3-5.");
+        });
+
+        it("names already-queued tags separately so only newly queued targets read as queued", async () => {
+            const { reduce } = recordingReduce({
+                ok: true,
+                queued: 1,
+                accepted: [1, 2],
+                already_queued: [1],
+                unknown: [99],
+            });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "1, 2, 99" }, toolContext());
+
+            expect(result).toBe("Queued: drop §2§; tags 1 already queued; tags 99 not found.");
+        });
+
+        it("reports unknown tags when every accepted tag was already queued", async () => {
+            const { reduce } = recordingReduce({
+                ok: true,
+                queued: 0,
+                accepted: [1],
+                unknown: [99],
+            });
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+
+            const result = await tools.ctx_reduce.execute({ drop: "1,99" }, toolContext());
+
+            expect(result).toBe(
+                "All known requested tags were already queued or processed. No new action is needed. Tags 99 not found.",
+            );
+        });
+
+        it("derives the stable command id from every supported tool-call id alias", async () => {
+            const { calls, reduce } = recordingReduce();
+            const tools = createCtxReduceTools({ rustToolBackends: { reduce } });
+            const aliases = ["toolUseId", "toolCallId", "tool_use_id", "tool_call_id"] as const;
+
+            for (const alias of aliases) {
+                await tools.ctx_reduce.execute({ drop: "1" }, {
+                    sessionID: "ses-1",
+                    directory: "/repo/project",
+                    [alias]: ` call-${alias} `,
+                } as never);
+            }
+
+            expect(calls.map((call) => call.commandId)).toEqual(
+                aliases.map((alias) => `oc-ses-1-call-${alias}`),
+            );
+        });
+
+        it("issues fallback command ids that differ across tool incarnations", async () => {
+            const first = recordingReduce();
+            const second = recordingReduce();
+            const firstTools = createCtxReduceTools({ rustToolBackends: { reduce: first.reduce } });
+            const secondTools = createCtxReduceTools({
+                rustToolBackends: { reduce: second.reduce },
+            });
+
+            await firstTools.ctx_reduce.execute({ drop: "1" }, toolContext());
+            await firstTools.ctx_reduce.execute({ drop: "2" }, toolContext());
+            await secondTools.ctx_reduce.execute({ drop: "1" }, toolContext());
+
+            const ids = [
+                first.calls[0]?.commandId,
+                first.calls[1]?.commandId,
+                second.calls[0]?.commandId,
+            ];
+            expect(new Set(ids).size).toBe(3);
+            for (const id of ids) {
+                expect(id).toMatch(/^oc-ses-1-[0-9a-f]{12}-\d+$/);
+            }
+        });
+
         it("returns the unavailable error when no reduce backend is registered", async () => {
             const tools = createCtxReduceTools({ rustToolBackends: {} });
 
