@@ -22,6 +22,7 @@ import {
 } from "../adapters/opencode";
 import {
     collectDiagnostics,
+    pluginRegisteredInLoadedLayers,
     readProjectOpenCodeConfigs,
     resolveUserLevelPaths,
 } from "../lib/diagnostics-opencode";
@@ -289,7 +290,7 @@ export async function runDoctor(
         configPath: string,
         configName: string,
         what: string,
-        registeredInProject = false,
+        registeredInAnotherLayer = false,
     ): boolean => {
         let config: Record<string, unknown>;
         try {
@@ -311,8 +312,10 @@ export async function runDoctor(
                 matchesPluginEntry(candidate, PLUGIN_NAME) || isDevPathPluginEntry(candidate),
         );
         if (entry === undefined) {
-            if (registeredInProject) {
-                pass(`${what} registered in a project opencode config (not in ${configName})`);
+            if (registeredInAnotherLayer) {
+                pass(
+                    `${what} registered in another loaded OpenCode config layer (not in ${configName})`,
+                );
                 return true;
             }
             fail(`${what} ${PLUGIN_NAME} is not registered in ${configName}`);
@@ -463,6 +466,10 @@ export async function runDoctor(
     for (const parseError of projectOpencode.parseErrors) {
         fail(`Could not parse a project opencode config: ${parseError}`);
     }
+    // The host merges the user siblings, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`, and the
+    // project files, so a registration in any of them counts even when the detected user config
+    // lacks the entry.
+    const registeredInLoadedLayers = pluginRegisteredInLoadedLayers(cwd);
     let serverPluginRegistered = false;
     if (paths.opencodeConfigFormat !== "none") {
         const configName =
@@ -471,11 +478,13 @@ export async function runDoctor(
             paths.opencodeConfig,
             configName,
             "Plugin",
-            projectOpencode.hasPlugin,
+            registeredInLoadedLayers,
         );
-    } else if (projectOpencode.hasPlugin) {
+    } else if (registeredInLoadedLayers) {
         pass(
-            `Plugin registered in a project opencode config (${projectOpencode.paths.join(", ")})`,
+            projectOpencode.hasPlugin
+                ? `Plugin registered in a project opencode config (${projectOpencode.paths.join(", ")})`
+                : "Plugin registered in a loaded OpenCode config layer (OPENCODE_CONFIG or OPENCODE_CONFIG_CONTENT)",
         );
         serverPluginRegistered = true;
     }

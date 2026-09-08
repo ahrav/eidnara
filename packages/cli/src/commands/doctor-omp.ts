@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -336,11 +336,27 @@ async function runHealthChecks(options: {
         add(results, "info", `OMP non-global config: ${source}`);
     }
     const logPath = getEidnaraLogPath("pi");
-    add(
-        results,
-        "info",
-        `Pi-compatible runtime log: ${logPath}${existsSync(logPath) ? "" : " (not created yet)"}`,
-    );
+    if (existsSync(logPath)) {
+        // The shared logger drops records it cannot append, so a directory or FIFO named by
+        // EIDNARA_LOG_PATH is broken logging, not an informational path.
+        try {
+            const stat = statSync(logPath);
+            if (!stat.isFile()) throw new Error("not a regular file");
+            add(
+                results,
+                "info",
+                `Pi-compatible runtime log: ${logPath} (${(stat.size / 1024).toFixed(0)} KB)`,
+            );
+        } catch (error) {
+            add(
+                results,
+                "fail",
+                `Pi-compatible runtime log ${logPath} exists but could not be read: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    } else {
+        add(results, "info", `Pi-compatible runtime log: ${logPath} (not created yet)`);
+    }
 
     if (ompPathsAvailable) {
         const sessions = collectPiRecentSessions(getOmpSessionsRoot());

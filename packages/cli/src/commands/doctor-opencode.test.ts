@@ -222,7 +222,33 @@ describe("doctor OpenCode conflict repair", () => {
             expect(code).toBe(0);
             expect(
                 successes.some((message) =>
-                    message.startsWith("Plugin registered in a project opencode config"),
+                    message.startsWith("Plugin registered in another loaded OpenCode config layer"),
+                ),
+            ).toBe(true);
+            expect(successes).toContain("Fixed: Disabled auto-compaction");
+            expect(
+                errors.some((message) => message.startsWith("Leaving conflicts in place:")),
+            ).toBe(false);
+        } finally {
+            restore();
+        }
+    });
+
+    it("counts a registration supplied through OPENCODE_CONFIG_CONTENT", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, { plugin: [], compaction: { auto: true } });
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ plugin: ["@eidnara/opencode"] });
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ force: true, cwd });
+
+            expect(code).toBe(0);
+            expect(
+                successes.some((message) =>
+                    message.startsWith("Plugin registered in another loaded OpenCode config layer"),
                 ),
             ).toBe(true);
             expect(successes).toContain("Fixed: Disabled auto-compaction");

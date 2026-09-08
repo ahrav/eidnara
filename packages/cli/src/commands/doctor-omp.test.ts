@@ -48,6 +48,7 @@ const original = {
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
     PI_CONFIG_FILES: process.env.PI_CONFIG_FILES,
+    EIDNARA_LOG_PATH: process.env.EIDNARA_LOG_PATH,
 };
 
 afterEach(() => {
@@ -201,6 +202,44 @@ describe("OMP doctor", () => {
             expect(existsSync(join(root, ".omp"))).toBe(false);
         },
     );
+
+    it("fails when EIDNARA_LOG_PATH names a directory instead of a log file", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const configDir = join(root, ".config", "eidnara");
+        const logDir = join(root, "log-as-directory");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        mkdirSync(logDir, { recursive: true });
+        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        process.env.EIDNARA_LOG_PATH = logDir;
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    { name: "@eidnara/pi", version: "0.33.0", enabled: true, path: root },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: `${agentDir}/./`, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(1);
+        expect(prompts.messages.join("\n")).toContain(
+            `FAIL Pi-compatible runtime log ${logDir} exists but could not be read: not a regular file`,
+        );
+    });
 
     it("repairs a missing config when it is the only health finding", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-config-only-"));

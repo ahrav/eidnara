@@ -215,7 +215,11 @@ export function describeProbeText(text: string): string {
 }
 
 /** Without a resolvable user config directory (no home), only the layers that can be located count. */
-function pluginRegisteredInLoadedLayers(cwd: string): boolean {
+/**
+ * Whether any config layer the host loads — both user siblings, `OPENCODE_CONFIG`,
+ * `OPENCODE_CONFIG_CONTENT`, and the project files — registers the plugin.
+ */
+export function pluginRegisteredInLoadedLayers(cwd: string): boolean {
     let entries: unknown[];
     try {
         entries = pluginEntriesOutside(cwd);
