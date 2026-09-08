@@ -80,6 +80,10 @@ const KNOWN_SLOTS: Record<string, KnownSlot> = {
         classification: "PUBLICATION",
         reason: "Publishes last-known-good model metadata, not a failure verdict; refresh writes a later successful value.",
     },
+    "packages/opencode-plugin/src/shared/models-dev-cache.ts:persistSeedLoaded": {
+        classification: "VERDICT",
+        reason: "Bounded: the persisted file is only a cold-start seed. A failed first read skips the seed for this process; the SDK warm path fills apiCache and rewrites the file, after which the latch is unreachable because apiCache is non-null.",
+    },
 };
 
 function sourceFiles(directory: string): string[] {
@@ -99,7 +103,7 @@ function declaredOneShotSlots(source: string): string[] {
     const declarations =
         /^(?:export\s+)?let\s+([A-Za-z_$][\w$]*)\b[^\n]*(?:=\s*(?:null|false|true)|Promise<)/gm;
     const verdictName =
-        /(?:attempted|availability|compatible|cooldown|disabled|failed|failure|latch|missing|permission|poisoned|promise|registered|unavailable)/i;
+        /(?:attempted|availability|compatible|cooldown|disabled|failed|failure|latch|loaded|missing|permission|poisoned|promise|registered|unavailable)/i;
     const moduleSlots = [...source.matchAll(declarations)].map((match) => match[1]);
     // Provider-local permanent failures short-circuit later provider calls without re-probing.
     const providerLatches = [

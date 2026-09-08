@@ -314,18 +314,27 @@ describe("loadPluginConfig — secret redaction", () => {
         expect(w).toBeDefined();
     });
 
-    it("still shows numeric and boolean invalid values (not secrets by nature)", () => {
-        // Numbers and booleans are rendered verbatim.
+    it("reports only the length of an invalid number because an unquoted token can resolve to one", () => {
         const config = JSON.stringify({
             execute_threshold_percentage: 5, // below min (20)
         });
 
         const result = loadWithUserConfig(config);
-        const warnings = result.configWarnings ?? [];
-        const combined = warnings.join("\n");
+        const combined = (result.configWarnings ?? []).join("\n");
 
         expect(combined).toContain("execute_threshold_percentage");
-        expect(combined).toMatch(/number 5/);
+        expect(combined).toContain("number, 1 char");
+        expect(combined).not.toMatch(/number 5/);
+    });
+
+    it("does not leak a numeric secret substituted outside quotes", () => {
+        const config = '{ "historian_timeout_ms": {env:EIDNARA_TEST_NUMERIC_SECRET} }';
+
+        const result = loadWithUserConfig(config, { EIDNARA_TEST_NUMERIC_SECRET: "-31337" });
+        const combined = (result.configWarnings ?? []).join("\n");
+
+        expect(combined).toContain('"historian_timeout_ms"');
+        expect(combined).not.toContain("31337");
     });
 
     it("rejects execute_threshold_percentage > 90 with the cache-safety explanation (issue #111)", () => {
@@ -557,6 +566,75 @@ describe("loadPluginConfigDetailed — combined outcome", () => {
 
         expect(result.sources.userConfig).toBe("schema-recovery");
         expect(result.sources.projectConfig).toBe("ok");
+    });
+
+    it("marks the project source when the sanitizer strips or constrains a project value", () => {
+        for (const projectConfig of [
+            { compaction: null },
+            { fail_closed_blocking: false },
+            { execute_threshold_percentage: 30 },
+        ]) {
+            const result = loadDetailedWithUserAndProjectConfig(
+                JSON.stringify({ execute_threshold_percentage: 70 }),
+                JSON.stringify(projectConfig),
+            );
+
+            expect([projectConfig, result.sources.projectConfig]).toEqual([
+                projectConfig,
+                "schema-recovery",
+            ]);
+            expect(result.sources.userConfig).toBe("ok");
+            expect(result.loadOutcome).toBe("schema-recovery");
+            expect(result.recoveredTopLevelKeys).toEqual([]);
+        }
+    });
+
+    it("keeps a clean project source ok when the project only raises a threshold", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ execute_threshold_percentage: 70 }),
+            JSON.stringify({ execute_threshold_percentage: 80 }),
+        );
+
+        expect(result.config.execute_threshold_percentage).toBe(80);
+        expect(result.sources.projectConfig).toBe("ok");
+        expect(result.loadOutcome).toBe("ok");
+    });
+
+    it("binds two fields that reference the same missing token to distinct paths", () => {
+        const result = loadDetailedWithUserConfig(
+            '{"historian": {"model": "{env:EIDNARA_TEST_UNSET_SHARED}"}, "sidekick": {"model": "{env:EIDNARA_TEST_UNSET_SHARED}"}}',
+        );
+
+        expect(result.substitutionFailures.map((failure) => failure.keyPath)).toEqual([
+            "historian.model",
+            "sidekick.model",
+        ]);
+    });
+});
+
+describe("loadPluginConfigDetailed — sensitive-path advisory", () => {
+    it("does not report a successfully inlined sensitive file as a substitution failure", () => {
+        const home = mkdtempSync(join(tmpdir(), "eidnara-home-"));
+        const sshDir = join(home, ".ssh");
+        require("node:fs").mkdirSync(sshDir, { recursive: true });
+        writeFileSync(join(sshDir, "note.txt"), "inline-me");
+        const origHome = process.env.HOME;
+        process.env.HOME = home;
+        try {
+            const result = loadDetailedWithUserConfig(
+                JSON.stringify({ sidekick: { model: "{file:~/.ssh/note.txt}" } }),
+            );
+
+            expect(result.config.sidekick?.model).toBe("inline-me");
+            expect(result.sources.userConfig).toBe("ok");
+            expect(result.loadOutcome).toBe("ok");
+            expect(result.substitutionFailures).toEqual([]);
+            expect(result.config.configWarnings?.join("\n")).toContain("sensitive path");
+        } finally {
+            if (origHome === undefined) delete process.env.HOME;
+            else process.env.HOME = origHome;
+            rmSync(home, { recursive: true, force: true });
+        }
     });
 });
 

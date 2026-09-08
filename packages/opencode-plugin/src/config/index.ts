@@ -69,10 +69,12 @@ interface LoadedConfigFileDetailed extends LoadedConfigFile {
     outcome: LoadOutcome;
     source: "user" | "project";
     /**
-     * The `{env:}`/`{file:}` subset of `warnings`. A rejected prototype-pollution key in the same
-     * file sets `outcome` to `schema-recovery`, so `outcome` alone cannot identify these failures.
+     * The `{env:}`/`{file:}` failures within `warnings`: tokens replaced with an empty string or left
+     * unresolved. A rejected prototype-pollution key in the same file sets `outcome` to
+     * `schema-recovery`, so `outcome` alone cannot identify these failures. Sensitive-path advisories
+     * are warnings but not failures.
      */
-    substitutionWarnings: string[];
+    substitutionFailures: string[];
 }
 
 /**
@@ -103,7 +105,7 @@ function loadConfigFileDetailed(
             ],
             outcome: "project-file-io-error",
             source,
-            substitutionWarnings: [],
+            substitutionFailures: [],
         };
     }
 
@@ -126,6 +128,7 @@ function loadConfigFileDetailed(
         const config: Record<string, unknown> = parsed;
         const prefix = (warning: string) => `${configPath}: ${warning}`;
         const substitutionWarnings = substituted.warnings.map(prefix);
+        const substitutionFailures = substituted.failures.map(prefix);
         const unsafeKeyWarnings = rejectedKeyPaths.map((path) =>
             prefix(
                 `Ignored unsafe config key ${describeRejectedKeyPath(path)} (security: prototype-pollution keys are not allowed).`,
@@ -137,11 +140,11 @@ function loadConfigFileDetailed(
             outcome:
                 rejectedKeyPaths.length > 0
                     ? "schema-recovery"
-                    : substitutionWarnings.length > 0
+                    : substitutionFailures.length > 0
                       ? "substitution-failure"
                       : "ok",
             source,
-            substitutionWarnings,
+            substitutionFailures,
         };
     } catch (error) {
         return {
@@ -151,7 +154,7 @@ function loadConfigFileDetailed(
             ],
             outcome: "project-file-parse-error",
             source,
-            substitutionWarnings: [],
+            substitutionFailures: [],
         };
     }
 }
@@ -219,13 +222,17 @@ function deepMergeRawConfig(
  * Warning rendering never exposes values resolved by `{env:...}` or `{file:...}` substitution.
  *
  * Object keys are withheld because substitution runs on the raw text, so a key can hold a resolved secret as readily as a value.
+ * Numbers report only their length: an unquoted token resolves to a JSON number, so a numeric secret reaches the parsed value.
  */
 function redactConfigValue(value: unknown): string {
     if (value === undefined) return "<missing>";
     if (value === null) return "null";
     if (typeof value === "string")
         return `string, ${value.length} char${value.length === 1 ? "" : "s"}`;
-    if (typeof value === "number") return `number ${value}`;
+    if (typeof value === "number") {
+        const rendered = String(value);
+        return `number, ${rendered.length} char${rendered.length === 1 ? "" : "s"}`;
+    }
     if (typeof value === "boolean") return `boolean ${value}`;
     if (Array.isArray(value)) return `array, ${value.length} item${value.length === 1 ? "" : "s"}`;
     if (typeof value === "object") {
@@ -407,17 +414,33 @@ function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {
 function bindSubstitutionFailures(
     loaded: LoadedConfigFileDetailed | null,
 ): Array<{ keyPath: string; source: "user" | "project"; message: string }> {
-    if (!loaded || loaded.substitutionWarnings.length === 0) {
+    if (!loaded || loaded.substitutionFailures.length === 0) {
         return [];
     }
 
+    // Equal counts preserve duplicate token-to-path pairing by index; otherwise each path can match once.
     const emptyPaths = collectEmptyStringPaths(loaded.config);
-    return loaded.substitutionWarnings.map((message) => {
-        const matchedPath = emptyPaths.find((path) => {
+    const { substitutionFailures, source } = loaded;
+    if (emptyPaths.length === substitutionFailures.length) {
+        return substitutionFailures.map((message, index) => ({
+            keyPath: emptyPaths[index] ?? "<unknown>",
+            source,
+            message,
+        }));
+    }
+
+    const unboundPaths = new Set(emptyPaths);
+    return substitutionFailures.map((message) => {
+        let matchedPath: string | undefined;
+        for (const path of unboundPaths) {
             const tail = path.split(".").at(-1) ?? path;
-            return message.includes(path) || message.toLowerCase().includes(tail.toLowerCase());
-        });
-        return { keyPath: matchedPath ?? "<unknown>", source: loaded.source, message };
+            if (message.includes(path) || message.toLowerCase().includes(tail.toLowerCase())) {
+                matchedPath = path;
+                unboundPaths.delete(path);
+                break;
+            }
+        }
+        return { keyPath: matchedPath ?? "<unknown>", source, message };
     });
 }
 
@@ -493,21 +516,23 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     }
 
     let projectRaw: Record<string, unknown> = {};
+    let projectSanitized = false;
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
         allWarnings.push(
             ...removedKeyWarnings(projectLoaded.config).map((w) => `[project config] ${w}`),
         );
         projectRaw = { ...projectLoaded.config };
-        for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
-            allWarnings.push(`[project config] ${warning}`);
-        }
+        // Every sanitizer warning marks a project value the loader did not accept as written.
+        const stripWarnings = stripUnsafeProjectConfigFields(projectRaw);
         mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
-        for (const warning of constrainProjectThresholdOverrides({
+        const thresholdWarnings = constrainProjectThresholdOverrides({
             mergedRaw,
             projectRaw,
             trustedBaseConfig,
-        })) {
+        });
+        projectSanitized = stripWarnings.length > 0 || thresholdWarnings.length > 0;
+        for (const warning of [...stripWarnings, ...thresholdWarnings]) {
             allWarnings.push(`[project config] ${warning}`);
         }
     }
@@ -560,7 +585,7 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         projectConfig: projectLoaded
             ? withSchemaRecovery(
                   projectLoaded.outcome,
-                  projectCausedRecovery(mergedRecoveries, projectRaw),
+                  projectSanitized || projectCausedRecovery(mergedRecoveries, projectRaw),
               )
             : "ok",
     };

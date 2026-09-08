@@ -528,5 +528,50 @@ describe("substituteConfigVariables", () => {
             expect(result.text).toBe(`{ "key": "private-key" }`);
             expect(result.warnings.some((w) => w.includes("SSH keys"))).toBe(true);
         });
+
+        it("reports the advisory as a warning but not as a failure", () => {
+            process.env.HOME = tmpDir;
+            mkdirSync(join(tmpDir, ".ssh"));
+            writeFileSync(join(tmpDir, ".ssh", "note.txt"), "inline-me");
+
+            const result = substituteConfigVariables({
+                text: `{ "key": "{file:~/.ssh/note.txt}" }`,
+            });
+
+            expect(result.text).toBe(`{ "key": "inline-me" }`);
+            expect(result.warnings).toEqual([expect.stringContaining("sensitive path")]);
+            expect(result.failures).toEqual([]);
+        });
+    });
+
+    describe("failures subset", () => {
+        it("lists every empty-string fallback and nothing else", () => {
+            delete process.env.EIDNARA_MISSING_FOR_FAILURES;
+            const missing = join(tmpDir, "no-such-file.txt");
+            const input = `{ "a": "{env:EIDNARA_MISSING_FOR_FAILURES}", "b": "{file:${missing}}" }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.failures).toEqual(result.warnings);
+            expect(result.failures).toHaveLength(2);
+        });
+
+        it("keeps a sensitive-path advisory out of failures when the file is then missing", () => {
+            process.env.HOME = tmpDir;
+            const result = substituteConfigVariables({ text: `{ "key": "{file:~/.ssh/id_rsa}" }` });
+
+            expect(result.warnings).toHaveLength(2);
+            expect(result.failures).toEqual([expect.stringContaining("not found")]);
+        });
+
+        it("treats literal project-level tokens as failures", () => {
+            const result = substituteConfigVariables({
+                text: `{ "a": "{env:X}" }`,
+                isProjectConfig: true,
+            });
+
+            expect(result.failures).toEqual(result.warnings);
+            expect(result.failures).toHaveLength(1);
+        });
     });
 });

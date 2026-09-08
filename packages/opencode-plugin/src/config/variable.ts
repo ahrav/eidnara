@@ -24,9 +24,14 @@ export interface SubstituteResult {
     /* */
     text: string;
     /**
-     * Warnings cover missing environment variables, unreadable files, and tokens replaced with an empty string.
+     * Warnings cover missing environment variables, unreadable files, tokens replaced with an empty string, and sensitive-path advisories.
      */
     warnings: string[];
+    /**
+     * The subset of `warnings` where a token was replaced with an empty string or left unresolved.
+     * A sensitive-path advisory is not a failure: the file was read and inlined.
+     */
+    failures: string[];
 }
 
 const ENV_PATTERN = /\{env:([^}]+)\}/g;
@@ -78,6 +83,11 @@ function sensitiveFilePathReason(resolvedPath: string): string | null {
  */
 export function substituteConfigVariables(input: SubstituteInput): SubstituteResult {
     const warnings: string[] = [];
+    const failures: string[] = [];
+    const fail = (message: string): void => {
+        warnings.push(message);
+        failures.push(message);
+    };
     let text = input.text;
 
     if (input.isProjectConfig) {
@@ -96,11 +106,11 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             ]
                 .filter(Boolean)
                 .join(" and ");
-            warnings.push(
+            fail(
                 `Project-level config no longer supports ${tokenTypes} tokens for security reasons; leaving tokens literal. Move secret expansion to user-level config.`,
             );
         }
-        return { text, warnings };
+        return { text, warnings, failures };
     }
 
     // Strip JSONC comments before substitution to prevent tokens in comments from triggering environment or file reads.
@@ -117,7 +127,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         const varName = rawName.trim();
         const value = varName ? process.env[varName] : undefined;
         if (value === undefined || value === "") {
-            warnings.push(
+            fail(
                 `Environment variable ${varName} is not set (referenced via {env:${varName}}); using empty string`,
             );
             return undefined;
@@ -169,9 +179,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             if (spelledReason) warnSensitive(spelledReason, shownPath);
 
             if (!existsSync(filePath)) {
-                warnings.push(
-                    `File not found for ${token} (resolved to ${shownPath}); using empty string`,
-                );
+                fail(`File not found for ${token} (resolved to ${shownPath}); using empty string`);
                 return "";
             }
 
@@ -198,14 +206,14 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
                     : error instanceof Error
                       ? error.message
                       : String(error);
-                warnings.push(
+                fail(
                     `Failed to read file for ${token} (${shownPath}): ${message}; using empty string`,
                 );
                 return "";
             }
 
             if (contents === "") {
-                warnings.push(`File for ${token} (${shownPath}) is empty; using empty string`);
+                fail(`File for ${token} (${shownPath}) is empty; using empty string`);
                 return "";
             }
 
@@ -224,5 +232,5 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
         PLACEHOLDER_PATTERN,
         (_, index: string) => substitutions[Number(index)] ?? "",
     );
-    return { text, warnings };
+    return { text, warnings, failures };
 }
