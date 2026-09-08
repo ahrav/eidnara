@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
     chmodSync,
     cpSync,
+    existsSync,
     mkdirSync,
     mkdtempSync,
     readFileSync,
@@ -227,16 +228,34 @@ describe("build-host-payload", () => {
         }
     });
 
-    test("validatePayloadPackageDir accepts the committed package and rejects extra files", () => {
-        expect(() => validatePayloadPackageDir(rootDir)).not.toThrow();
-
-        const shadow = join(tmp, "shadow-root");
+    /** Copies the release files and the payload package into a fresh root under `tmp`. */
+    function shadowRoot(name: string): { shadow: string; packageDir: string } {
+        const shadow = join(tmp, name);
         mkdirSync(join(shadow, "packages"), { recursive: true });
         cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
         cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
             recursive: true,
         });
-        const packageJsonPath = join(shadow, PAYLOAD_TARGET.dir, "package.json");
+        return { shadow, packageDir: join(shadow, PAYLOAD_TARGET.dir) };
+    }
+
+    /** A shadow root whose payload package has a dev payload staged into it. */
+    function stagedShadow(name: string): { shadow: string; packageDir: string } {
+        const root = shadowRoot(name);
+        buildDevPayload(root.shadow, {
+            outDir: root.packageDir,
+            launcherPath,
+            addonPath: releaseAddon,
+        });
+        expect(() => validatePayloadPackageDir(root.shadow)).not.toThrow();
+        return root;
+    }
+
+    test("validatePayloadPackageDir accepts the committed package and rejects extra files", () => {
+        expect(() => validatePayloadPackageDir(rootDir)).not.toThrow();
+
+        const { shadow, packageDir } = shadowRoot("shadow-root");
+        const packageJsonPath = join(packageDir, "package.json");
         const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { files: string[] };
         pkg.files.push("extra.txt");
         writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
@@ -244,26 +263,13 @@ describe("build-host-payload", () => {
     });
 
     test("a staged package with a stale manifest fails the package check", () => {
-        const shadow = join(tmp, "shadow-staged");
-        mkdirSync(join(shadow, "packages"), { recursive: true });
-        cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
-        cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
-            recursive: true,
-        });
-        const packageDir = join(shadow, PAYLOAD_TARGET.dir);
-        buildDevPayload(shadow, { outDir: packageDir, launcherPath, addonPath: releaseAddon });
-        expect(() => validatePayloadPackageDir(shadow)).not.toThrow();
+        const { shadow, packageDir } = stagedShadow("shadow-staged");
         chmodSync(join(packageDir, LAUNCHER_PATH), 0o644);
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/mode drift/);
     });
 
     test("the default launcher prefers target/debug over target/release", () => {
-        const shadow = join(tmp, "shadow-launcher");
-        mkdirSync(join(shadow, "packages"), { recursive: true });
-        cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
-        cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
-            recursive: true,
-        });
+        const { shadow } = shadowRoot("shadow-launcher");
         for (const profile of ["debug", "release"]) {
             mkdirSync(join(shadow, "target", profile), { recursive: true });
             writeFileSync(
@@ -281,33 +287,39 @@ describe("build-host-payload", () => {
     });
 
     test("a staged payload tree without a manifest fails the package check", () => {
-        const shadow = join(tmp, "shadow-orphan");
-        mkdirSync(join(shadow, "packages"), { recursive: true });
-        cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
-        cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
-            recursive: true,
-        });
-        const packageDir = join(shadow, PAYLOAD_TARGET.dir);
-        buildDevPayload(shadow, { outDir: packageDir, launcherPath, addonPath: releaseAddon });
+        const { shadow, packageDir } = stagedShadow("shadow-orphan");
         rmSync(join(packageDir, "payload-manifest.json"));
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/manifest.json is missing/);
     });
 
     test("a symlinked payload root fails the package check", () => {
-        const shadow = join(tmp, "shadow-symlink");
-        mkdirSync(join(shadow, "packages"), { recursive: true });
-        cpSync(join(rootDir, "release"), join(shadow, "release"), { recursive: true });
-        cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(shadow, PAYLOAD_TARGET.dir), {
-            recursive: true,
-        });
-        const packageDir = join(shadow, PAYLOAD_TARGET.dir);
-        buildDevPayload(shadow, { outDir: packageDir, launcherPath, addonPath: releaseAddon });
+        const { shadow, packageDir } = stagedShadow("shadow-symlink");
         const outside = join(tmp, "outside-payload");
         renameSync(join(packageDir, "payload"), outside);
         symlinkSync(outside, join(packageDir, "payload"));
         expect(() => validatePayloadPackageDir(shadow)).toThrow(
             /payload root must not be a symlink/,
         );
+    });
+
+    test("a symlinked manifest fails the package check", () => {
+        const { shadow, packageDir } = stagedShadow("shadow-manifest-symlink");
+        const outside = join(tmp, "outside-manifest.json");
+        renameSync(join(packageDir, "payload-manifest.json"), outside);
+        symlinkSync(outside, join(packageDir, "payload-manifest.json"));
+        expect(() => validatePayloadPackageDir(shadow)).toThrow(/must be a regular file/);
+    });
+
+    test("the CLI refuses a flag where a path value is expected", () => {
+        const script = join(rootDir, "scripts", "build-host-payload.ts");
+        const run = Bun.spawnSync(["bun", script, "--dev", "--out", "--check"], {
+            cwd: tmp,
+            stdout: "pipe",
+            stderr: "pipe",
+        });
+        expect(run.exitCode).toBe(2);
+        expect(run.stderr.toString()).toContain("--out requires a path");
+        expect(existsSync(join(tmp, "--check"))).toBe(false);
     });
 
     test("payloadManifestDigest equals the digest of the written file minus its newline", () => {

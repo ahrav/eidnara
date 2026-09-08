@@ -353,14 +353,18 @@ export function validatePayloadManifest(
     return manifest as unknown as PayloadManifest;
 }
 
+function lstatIfPresent(path: string): ReturnType<typeof lstatSync> | undefined {
+    try {
+        return lstatSync(path);
+    } catch {
+        return undefined;
+    }
+}
+
 /** Whether a payload root exists at `dir/payload`. A symlink or non-directory there is rejected because every per-file stat below would follow it. commentlint: allow(JUDGE) */
 function payloadRootPresent(dir: string): boolean {
-    let stat: ReturnType<typeof lstatSync>;
-    try {
-        stat = lstatSync(join(dir, "payload"));
-    } catch {
-        return false;
-    }
+    const stat = lstatIfPresent(join(dir, "payload"));
+    if (stat === undefined) return false;
     if (stat.isSymbolicLink()) fail("payload root must not be a symlink");
     if (!stat.isDirectory()) fail("payload root must be a directory");
     return true;
@@ -580,13 +584,16 @@ export function validatePayloadPackageDir(rootDir: string): void {
     }
     const packageDir = join(rootDir, PAYLOAD_TARGET.dir);
     for (const doc of PACKAGE_DOCS) {
-        const path = join(packageDir, doc);
-        if (!existsSync(path) || !lstatSync(path).isFile()) {
+        if (lstatIfPresent(join(packageDir, doc))?.isFile() !== true) {
             fail(`${PAYLOAD_TARGET.dir}: missing ${doc}`);
         }
     }
-    const manifestPath = join(packageDir, MANIFEST_FILE_NAME);
-    const manifestPresent = existsSync(manifestPath);
+    const manifestStat = lstatIfPresent(join(packageDir, MANIFEST_FILE_NAME));
+    // npm omits symlinks from the tarball, so a symlinked manifest ships a payload tree without one. commentlint: allow(JUDGE)
+    if (manifestStat !== undefined && !manifestStat.isFile()) {
+        fail(`${PAYLOAD_TARGET.dir}/${MANIFEST_FILE_NAME} must be a regular file`);
+    }
+    const manifestPresent = manifestStat !== undefined;
     // npm packs `payload/` whether or not a manifest sits beside it, and `packages/shm-native/index.ts` refuses a package without one, so both must be present or both absent. commentlint: allow(JUDGE)
     if (payloadRootPresent(packageDir) && !manifestPresent) {
         fail(`${MANIFEST_FILE_NAME} is missing but a payload directory is staged`);
@@ -618,7 +625,10 @@ function main(): void {
         const arg = args[i];
         if (arg === "--out" || arg === "--launcher" || arg === "--addon") {
             const value = args[i + 1];
-            if (value === undefined) usageError(`${arg} requires a path`);
+            // A path that begins with `--` is passed as `./--name`.
+            if (value === undefined || value.startsWith("--")) {
+                usageError(`${arg} requires a path`);
+            }
             values[arg.slice(2) as keyof typeof values] = value;
             i += 1;
         } else if (arg === "--check" || arg === "--dev") {
