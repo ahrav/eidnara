@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -6,6 +6,7 @@ import {
     renderDiagnosticsMarkdown,
     sanitizeString,
 } from "./diagnostics-pi";
+import { readFileTail } from "./fs-utils";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
 
 export function sanitizeLogContent(content: string): string {
@@ -34,26 +35,20 @@ export interface BundledIssueReport {
 const SESSION_TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/;
 
 /**
- * Pi accepts UUIDs and caller-chosen session ids, so a UUID tag belongs to
- * another session unless it equals the selected id, and a non-UUID tag does so
- * only when the report lists it. Non-session tags such as `[eidnara][pi-status]`
- * pass through.
+ * The filter retains these tags and drops every other mismatched tag, so it
+ * never has to infer a session id's format.
  */
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NON_SESSION_TAGS: ReadonlySet<string> = new Set(["pi", "pi-status", "global"]);
 
-function filterLogLinesBySession(
-    lines: string[],
-    sessionId: string | null,
-    knownSessionIds: readonly string[],
-): string[] {
+function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
-    const otherSessionIds = new Set(knownSessionIds.filter((id) => id !== sessionId));
     return lines.filter((line) => {
         const tagged = SESSION_TAG_PATTERN.exec(line)?.[1];
-        if (tagged === undefined || tagged === sessionId) return true;
-        return !otherSessionIds.has(tagged) && !UUID_PATTERN.test(tagged);
+        return tagged === undefined || tagged === sessionId || NON_SESSION_TAGS.has(tagged);
     });
 }
+
+const ISSUE_LOG_TAIL_BYTES = 4 * 1024 * 1024;
 
 export async function bundleIssueReport(
     report: PiDiagnosticReport,
@@ -63,13 +58,9 @@ export async function bundleIssueReport(
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
     const allLogLines = report.logFile.exists
-        ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
+        ? readFileTail(report.logFile.path, ISSUE_LOG_TAIL_BYTES).split(/\r?\n/)
         : [];
-    const logLines = filterLogLinesBySession(
-        allLogLines,
-        options.sessionFilter ?? null,
-        report.recentSessions.map((session) => session.sessionId),
-    );
+    const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // The error scan uses 4,000 lines so trailing log output does not exclude earlier errors.

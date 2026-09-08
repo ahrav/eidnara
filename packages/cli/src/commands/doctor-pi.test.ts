@@ -278,6 +278,86 @@ describe("Pi doctor", () => {
         expect(report).not.toContain("sk-12345678901234567890");
     });
 
+    it("sanitizes the issue title before passing it to gh issue create", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const ghCalls: Array<{ command: string; args: readonly string[] }> = [];
+        const originalConsoleLog = console.log;
+        console.log = () => {};
+        const prompts = new MockPrompts({
+            texts: [`Crash in ${root}/private token=abc123`, "Description"],
+            confirms: [true],
+        });
+        const diagnosticReport: PiDiagnosticReport = {
+            timestamp: "2026-04-28T12:34:56.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: join(root, ".pi", "bin", "pi"),
+            piVersion: "0.74.0",
+            settings: {
+                path: join(agentDir, "settings.json"),
+                exists: true,
+                hasEidnaraPackage: true,
+                packages: ["npm:@eidnara/pi"],
+            },
+            configPaths: {
+                agentDir,
+                userConfig: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                projectConfig: join(cwd, ".eidnara", "eidnara.jsonc"),
+            },
+            userConfig: {
+                path: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            projectConfig: {
+                path: join(cwd, ".eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            loadedConfigPaths: [],
+            loadWarnings: [],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
+            recentSessions: [],
+            historianDumps: {
+                byProject: [],
+                legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+            },
+        };
+
+        const options = baseOptions(root, cwd, prompts);
+        try {
+            const code = await runDoctor({
+                ...options,
+                issue: true,
+                deps: {
+                    ...options.deps,
+                    collectDiagnostics: async () => diagnosticReport,
+                    execFileSync: (() => "") as never,
+                    spawnSync: ((command: string, args: readonly string[]) => {
+                        ghCalls.push({ command, args });
+                        return { status: 0, stdout: "https://github.com/x/1", stderr: "" };
+                    }) as never,
+                },
+            });
+            expect(code).toBe(0);
+        } finally {
+            console.log = originalConsoleLog;
+        }
+
+        expect(ghCalls).toHaveLength(1);
+        const titleArg = ghCalls[0]?.args[ghCalls[0].args.indexOf("--title") + 1] ?? "";
+        expect(titleArg).toStartWith("[pi] Crash in ");
+        expect(titleArg).not.toContain(root);
+        expect(titleArg).not.toContain("abc123");
+    });
+
     it("reports an unknown CLI version as info instead of pass-current", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");

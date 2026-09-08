@@ -233,6 +233,116 @@ describe("OMP doctor", () => {
         });
 
         expect(code).toBe(1);
-        expect(prompts.messages.join("\n")).toContain("Invalid Eidnara config");
+        expect(prompts.messages.join("\n")).toContain("Invalid Eidnara user config");
+    });
+
+    it("does not write a default eidnara.jsonc over an existing eidnara.json in --force mode", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-json-"));
+        roots.push(root);
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(join(configDir, "eidnara.json"), JSON.stringify({ enabled: false }));
+        process.env.HOME = root;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: { detectOmpBinary: () => null },
+        });
+
+        expect(code).toBe(1);
+        expect(existsSync(join(configDir, "eidnara.jsonc"))).toBe(false);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("Eidnara user config parses: eidnara.json");
+        expect(output).not.toContain("No Eidnara user config");
+        expect(output).not.toContain("Wrote default Eidnara config");
+    });
+
+    it("fails when the project config is malformed even though the loader recovers", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-project-bad-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "eidnara");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        mkdirSync(join(root, ".eidnara"), { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(root, ".eidnara", "eidnara.jsonc"), "{ nope\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    {
+                        name: "@eidnara/pi",
+                        version: "0.33.0",
+                        enabled: true,
+                        path: pluginDir,
+                    },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(1);
+        expect(prompts.messages.join("\n")).toContain("Invalid Eidnara project config");
+    });
+
+    it("sanitizes the issue title before passing it to gh issue create", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-omp-doctor-title-"));
+        roots.push(root);
+        process.env.HOME = root;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const ghCalls: string[][] = [];
+        class SubmittingPrompts extends MockPrompts {
+            override async confirm(): Promise<boolean> {
+                return true;
+            }
+            override async text(): Promise<string> {
+                return "Crash in /home/alice/private token=abc123";
+            }
+        }
+        const prompts = new SubmittingPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            issue: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => null,
+                execFileSync: (() => "") as never,
+                spawnSync: ((_command: string, args: string[]) => {
+                    ghCalls.push(args);
+                    return { status: 0, stdout: "https://github.com/x/1", stderr: "" };
+                }) as never,
+            },
+        });
+
+        expect(code).toBe(0);
+        expect(ghCalls).toHaveLength(1);
+        const args = ghCalls[0] ?? [];
+        const titleArg = args[args.indexOf("--title") + 1] ?? "";
+        expect(titleArg).toBe("[omp] Crash in /home/<USER>/private token=<REDACTED:token>");
     });
 });

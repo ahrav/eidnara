@@ -1,13 +1,19 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import {
+    eidnaraProjectConfigBasePath,
+    eidnaraUserConfigBasePath,
+} from "@eidnara/opencode/config/config-paths";
 import { EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
+import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
-import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { readJsoncLenient } from "../lib/jsonc-config";
 import {
     detectOmpBinary,
     getOmpSetting,
@@ -25,7 +31,6 @@ import {
     getOmpPackageDir,
     getOmpPluginsLockPath,
     getOmpSessionsRoot,
-    getSharedUserConfigPath,
 } from "../lib/paths";
 import { type PromptIO, promptIO } from "../lib/prompts";
 
@@ -116,18 +121,6 @@ function selfVersion(): string {
         } catch {}
     }
     return "unknown";
-}
-
-function readConfig(path: string): { error?: string } {
-    if (!existsSync(path)) return {};
-    try {
-        const parsed = parseJsonc(readFileSync(path, "utf-8"));
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-            ? {}
-            : { error: "top level is not an object" };
-    } catch (error) {
-        return { error: error instanceof Error ? error.message : String(error) };
-    }
 }
 
 function pluginDeclaresOmp(path: string | undefined): boolean | null {
@@ -237,14 +230,31 @@ async function runHealthChecks(options: {
         }
     }
 
-    const userConfigPath = getSharedUserConfigPath();
-    if (!existsSync(userConfigPath)) {
-        add(results, "warn", `No Eidnara user config at ${userConfigPath}`);
-        repairPlan.writeUserConfig = true;
-    } else {
-        const parsed = readConfig(userConfigPath);
-        if (parsed.error) add(results, "fail", `Invalid Eidnara config: ${parsed.error}`);
-        else add(results, "pass", `Eidnara config parses: ${userConfigPath}`);
+    // Both `.jsonc` and `.json` are loadable config files, and `.jsonc` wins
+    // when both exist, so a default `.jsonc` must not be written next to a `.json`.
+    const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
+    const projectConfig = detectConfigFile(eidnaraProjectConfigBasePath(options.cwd));
+    for (const [label, detected, required] of [
+        ["user", userConfig, true],
+        ["project", projectConfig, false],
+    ] as const) {
+        if (detected.format === "none") {
+            if (required) {
+                add(results, "warn", `No Eidnara user config at ${detected.path}`);
+                repairPlan.writeUserConfig = true;
+            } else {
+                add(results, "info", `No project Eidnara config at ${detected.path}`);
+            }
+            continue;
+        }
+        // The runtime loader downgrades a malformed file to a warning and runs
+        // on defaults, so the parse result is checked here to surface it as a failure.
+        const parsed = readJsoncLenient(detected.path);
+        if (parsed.parseError) {
+            add(results, "fail", `Invalid Eidnara ${label} config: ${parsed.parseError}`);
+        } else {
+            add(results, "pass", `Eidnara ${label} config parses: ${basename(detected.path)}`);
+        }
     }
     const loaded = loadPiConfig({ cwd: options.cwd });
     if (loaded.warnings.length === 0)
@@ -292,9 +302,10 @@ async function repair(
     cwd: string,
 ): Promise<number> {
     let fixed = 0;
-    if (plan.writeUserConfig && !existsSync(getSharedUserConfigPath())) {
-        writeDefaultConfig(getSharedUserConfigPath());
-        prompts.log.success(`Wrote default Eidnara config to ${getSharedUserConfigPath()}`);
+    const userConfig = detectConfigFile(eidnaraUserConfigBasePath());
+    if (plan.writeUserConfig && userConfig.format === "none") {
+        writeDefaultConfig(userConfig.path);
+        prompts.log.success(`Wrote default Eidnara config to ${userConfig.path}`);
         fixed += 1;
     }
     const omp = deps.detectOmpBinary();
@@ -386,7 +397,7 @@ async function runIssueFlow(options: {
                 "-R",
                 "ahrav/eidnara",
                 "--title",
-                `[omp] ${title}`,
+                `[omp] ${sanitizeDiagnosticText(title)}`,
                 "--body-file",
                 path,
             ],

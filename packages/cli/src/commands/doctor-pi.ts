@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname } from "node:path";
 import {
@@ -13,7 +13,8 @@ import { loadPiConfig } from "@eidnara/pi/config";
 import { stringify as stringifyJsonc } from "comment-json";
 
 import { writeFileAtomic } from "../lib/atomic-write";
-import { collectDiagnostics } from "../lib/diagnostics-pi";
+import { collectDiagnostics, sanitizeString } from "../lib/diagnostics-pi";
+import { readFileTail } from "../lib/fs-utils";
 import { readJsoncLenient } from "../lib/jsonc-config";
 import { bundleIssueReport } from "../lib/logs-pi";
 import { getEidnaraLogPath, getPiUserExtensionsPath } from "../lib/paths";
@@ -142,23 +143,12 @@ function describeVersionOutput(output: string): string {
 /** The plugin log is append-only and never rotated, so reads of it are bounded. */
 const LOG_TAIL_BYTES = 64 * 1024;
 
-/** Reads at most `LOG_TAIL_BYTES` from file end; a longer final line returns only its tail. */
-function readLastNonEmptyLine(path: string, size: number): string | undefined {
-    const offset = Math.max(0, size - LOG_TAIL_BYTES);
-    const buffer = Buffer.alloc(size - offset);
-    const fd = openSync(path, "r");
-    let read = 0;
-    try {
-        read = readSync(fd, buffer, 0, buffer.length, offset);
-    } finally {
-        closeSync(fd);
-    }
-    const lines = buffer
-        .toString("utf-8", 0, read)
+function readLastNonEmptyLine(path: string): string | undefined {
+    return readFileTail(path, LOG_TAIL_BYTES)
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .filter(Boolean);
-    return lines.at(-1);
+        .filter(Boolean)
+        .at(-1);
 }
 
 function add(results: CheckResult[], status: CheckStatus, message: string): void {
@@ -350,7 +340,7 @@ async function runHealthChecks(options: {
         const stat = statSync(logPath);
         const sizeKb = (stat.size / 1024).toFixed(0);
         add(results, "info", `Log file: ${logPath} (${sizeKb} KB)`);
-        const lastLine = readLastNonEmptyLine(logPath, stat.size);
+        const lastLine = readLastNonEmptyLine(logPath);
         add(
             results,
             "info",
@@ -525,7 +515,7 @@ async function runIssueFlow(options: {
                         "-R",
                         "ahrav/eidnara",
                         "--title",
-                        `[pi] ${title}`,
+                        `[pi] ${sanitizeString(title)}`,
                         "--body-file",
                         bundled.path,
                     ],
