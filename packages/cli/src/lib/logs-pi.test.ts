@@ -115,6 +115,19 @@ describe("bundleIssueReport session filtering", () => {
         expect(body).toContain("continuation of the untagged record");
     });
 
+    it("drops untagged lines that precede the first record when a session is selected", async () => {
+        const log = [
+            "    at leading-fragment-frame (/work/b/file.ts:1:1)",
+            "    at another-leading-frame (/work/b/file.ts:2:2)",
+            `[2026-05-11T12:00:01.000Z] [eidnara][${SELECTED}] selected line`,
+        ].join("\n");
+        const body = await bundleWithLog("eidnara-pi-issue-fragment-", `${log}\n`, SELECTED);
+
+        expect(body).not.toContain("leading-fragment-frame");
+        expect(body).not.toContain("another-leading-frame");
+        expect(body).toContain("selected line");
+    });
+
     it("keeps every line when no session is selected", async () => {
         const body = await bundleWithLog(
             "eidnara-pi-issue-nofilter-",

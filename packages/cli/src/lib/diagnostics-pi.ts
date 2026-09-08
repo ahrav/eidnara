@@ -22,7 +22,7 @@ import {
     getPiUserExtensionsPath,
     getSharedUserConfigPath,
 } from "./paths";
-import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
+import { detectPiBinary, getPiVersion, isEidnaraPiPackageEntry } from "./pi-helpers";
 
 /** Pi-named aliases of the shared historian-dump shapes. */
 export type PiHistorianDumpMeta = HistorianDumpMeta;
@@ -186,6 +186,10 @@ export function sanitizeValue(value: unknown, key = ""): unknown {
 
 function getProjectConfigPath(cwd: string): string {
     return resolveEidnaraProjectConfigPath(cwd);
+}
+
+function parsedSemver(output: string | null): string | null {
+    return output === null ? null : (/\d+\.\d+\.\d+/.exec(output)?.[0] ?? null);
 }
 
 function readConfigDiagnostic(path: string): PiConfigDiagnostic {
@@ -376,7 +380,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const logPath = getEidnaraLogPath("pi");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
     const otherPiExtensions = packages
-        .filter((entry) => entry !== PI_PACKAGE_SOURCE)
+        .filter((entry) => !isEidnaraPiPackageEntry(entry, getPiAgentDir()))
         .map(describePackageEntry);
     const recentSessions = collectPiRecentSessions();
     const historianDumps = collectPiHistorianDumps(recentSessions);
@@ -389,12 +393,16 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         pluginVersion: getSelfVersion(),
         piInstalled: pi !== null,
         piPath: pi?.path ?? null,
-        piVersion: pi ? getPiVersion(pi.path) : null,
+        // Only the parsed semver enters the report; `pi --version` output can
+        // carry warnings that name paths or credentials.
+        piVersion: pi ? parsedSemver(getPiVersion(pi.path)) : null,
         settings: {
             path: settingsPath,
             exists: existsSync(settingsPath),
             ...(settingsParsed.parseError ? { parseError: settingsParsed.parseError } : {}),
-            hasEidnaraPackage: packages.some((entry) => entry === PI_PACKAGE_SOURCE),
+            hasEidnaraPackage: packages.some((entry) =>
+                isEidnaraPiPackageEntry(entry, getPiAgentDir()),
+            ),
             packages: sanitizeValue(packages) as unknown[],
         },
         configPaths: {

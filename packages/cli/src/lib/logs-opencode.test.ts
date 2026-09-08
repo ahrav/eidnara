@@ -565,6 +565,43 @@ describe("bundleIssueReport secret redaction", () => {
         }
     });
 
+    it("filters another session's multi-line record and a leading fragment when a session is selected", async () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-issue-session-records-"));
+        tempDirs.push(root);
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const logPath = join(root, "eidnara.log");
+            writeFileSync(
+                logPath,
+                [
+                    "    at leading-fragment-frame (/work/x.ts:1:1)",
+                    "[2026-05-11T12:00:00.000Z] [eidnara][ses_other000] other failed: boom",
+                    "Error: boom",
+                    "    at other-session-frame (/work/b.ts:1:1)",
+                    "[2026-05-11T12:00:01.000Z] [eidnara][ses_selected0] selected failed: mine",
+                    "Error: mine",
+                    "    at selected-session-frame (/work/a.ts:1:1)",
+                    "[2026-05-11T12:00:02.000Z] untagged record",
+                ].join("\n"),
+            );
+            const report = baseReport(root);
+            report.logFile = { path: logPath, exists: true, sizeKb: 1 };
+
+            const bundled = await bundleIssueReport(report, "desc", "title", "ses_selected0");
+            const body = readFileSync(bundled.path, "utf-8");
+
+            expect(body).not.toContain("leading-fragment-frame");
+            expect(body).not.toContain("boom");
+            expect(body).not.toContain("other-session-frame");
+            expect(body).toContain("Error: mine");
+            expect(body).toContain("selected-session-frame");
+            expect(body).toContain("untagged record");
+        } finally {
+            process.chdir(originalCwd);
+        }
+    });
+
     it("reads only the tail of a large log", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-issue-log-tail-"));
         tempDirs.push(root);

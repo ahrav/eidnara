@@ -4,6 +4,7 @@ import { sanitizeConfigValue, sanitizeDiagnosticText } from "@eidnara/opencode/s
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
 import { readFileTail } from "./fs-utils";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { filterLogRecords } from "./log-records";
 
 /**
  *
@@ -60,15 +61,12 @@ function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
     return matches.reverse();
 }
 
-/**
- *
- */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
     // Word boundaries prevent matching `ses_` embedded in longer identifiers.
     const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
-    return lines.filter((line) => {
-        const matches = line.match(otherSessionPattern);
+    return filterLogRecords(lines, (firstLine) => {
+        const matches = firstLine.match(otherSessionPattern);
         if (!matches) return true;
         return matches.every((id) => id === sessionId);
     });

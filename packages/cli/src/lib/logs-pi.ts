@@ -8,6 +8,7 @@ import {
 } from "./diagnostics-pi";
 import { readFileTail } from "./fs-utils";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { filterLogRecords } from "./log-records";
 
 export function sanitizeLogContent(content: string): string {
     return sanitizeString(content);
@@ -40,24 +41,11 @@ const SESSION_TAG_PATTERN = /\[eidnara\]\[([^\]]+)\]/;
  */
 const NON_SESSION_TAGS: ReadonlySet<string> = new Set(["pi", "pi-status", "global"]);
 
-/** Every record the plugin logger writes starts with a bracketed ISO timestamp. */
-const RECORD_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T[^\]]+\] /;
-
-/**
- * Filters logical records, not physical lines: an `Error` is serialized with
- * its stack on continuation lines that carry no tag, so those lines inherit
- * the decision made for the record's first line.
- */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
-    let keepRecord = true;
-    return lines.filter((line) => {
-        if (RECORD_START_PATTERN.test(line)) {
-            const tagged = SESSION_TAG_PATTERN.exec(line)?.[1];
-            keepRecord =
-                tagged === undefined || tagged === sessionId || NON_SESSION_TAGS.has(tagged);
-        }
-        return keepRecord;
+    return filterLogRecords(lines, (firstLine) => {
+        const tagged = SESSION_TAG_PATTERN.exec(firstLine)?.[1];
+        return tagged === undefined || tagged === sessionId || NON_SESSION_TAGS.has(tagged);
     });
 }
 

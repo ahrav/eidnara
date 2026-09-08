@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
 const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
+const originalPath = process.env.PATH;
 
 function makeTempRoot(prefix = "eidnara-pi-diagnostics-"): string {
     const root = mkdtempSync(join(tmpdir(), prefix));
@@ -35,6 +36,8 @@ afterEach(() => {
     else process.env.XDG_CACHE_HOME = originalCacheHome;
     if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = originalConfigHome;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
 
     for (const root of tempRoots.splice(0)) {
         rmSync(root, { recursive: true, force: true });
@@ -161,6 +164,44 @@ describe("collectDiagnostics Pi path resolution", () => {
                 lastActiveAt: report.recentSessions[0]?.lastActiveAt,
             },
         ]);
+    });
+
+    it("reports a local checkout as the registered package and normalizes the Pi version", async () => {
+        const root = makeTempRoot();
+        const home = join(root, "home");
+        const cwd = join(root, "workspace");
+        const agentDir = join(root, "agent");
+        process.env.HOME = home;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_DATA_HOME = join(root, "data");
+        process.env.XDG_CACHE_HOME = join(root, "cache");
+        process.env.XDG_CONFIG_HOME = join(root, "config");
+        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(join(process.env.XDG_CONFIG_HOME, "eidnara"), { recursive: true });
+        const checkout = join(root, "eidnara-pi-checkout");
+        mkdirSync(checkout, { recursive: true });
+        writeFileSync(join(checkout, "package.json"), JSON.stringify({ name: "@eidnara/pi" }));
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: ["./../eidnara-pi-checkout", "npm:other-pi-extension"] }),
+        );
+        const binDir = join(root, "bin");
+        mkdirSync(binDir, { recursive: true });
+        const pi = join(binDir, "pi");
+        writeFileSync(
+            pi,
+            `#!/bin/sh\necho "warning: config at ${home}/.pi/agent token=abc123"\necho 0.74.0\n`,
+        );
+        chmodSync(pi, 0o755);
+        process.env.PATH = binDir;
+
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.settings.hasEidnaraPackage).toBe(true);
+        expect(report.conflicts.otherPiExtensions).toEqual(["npm:other-pi-extension"]);
+        expect(report.piVersion).toBe("0.74.0");
+        expect(renderDiagnosticsMarkdown(report)).not.toContain("abc123");
     });
 
     it("sanitizes config parse errors so the issue body does not carry local paths", async () => {
