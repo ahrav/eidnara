@@ -365,6 +365,18 @@ describe("Pi status dialog", () => {
         expect(text()).toContain("0 memories (0 injected, unavailable:daemon_absent)");
     });
 
+    it("forwards the command's abort signal to the memory read", async () => {
+        const sessionId = "ses-status-signal";
+        const fake = fakeKernelResolver();
+        const signal = new AbortController().signal;
+        const { ctx } = renderingContext(sessionId, 90);
+
+        await showStatusDialog(fakePi, { ...ctx, signal } as never, deps(fake.kernelClient));
+
+        expect(fake.transport.calls).toHaveLength(1);
+        expect(fake.transport.calls[0]?.signal).toBe(signal);
+    });
+
     it("marks a truncated read's memory count as a lower bound", async () => {
         const sessionId = "ses-status-truncated";
         const fake = fakeKernelResolver();

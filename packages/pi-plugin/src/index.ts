@@ -22,8 +22,8 @@ import {
     configureManagedDemandStart,
     createHostModuleClient,
     createLazyManagedDemandStart,
+    type HostModuleClient,
 } from "@eidnara/opencode/hooks/context/module-transport";
-import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/rust-mode-transform";
 import { normalizeTodoStateJson } from "@eidnara/opencode/hooks/context/todo-view";
 import { setHarness } from "@eidnara/opencode/shared/harness";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
@@ -333,7 +333,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     }
 
     // The connection file is user-tier configuration, so one daemon client serves every project in this process.
-    const moduleClient: RustModeModuleClient = createHostModuleClient(config.subc?.connection_file);
+    const moduleClient: HostModuleClient = createHostModuleClient(config.subc?.connection_file);
     const rustToolBackends = createPiRustToolBackends(moduleClient);
     // Each command routes on its own `ctx.cwd`, so the deps carry no project root.
     const daemonSessionDeps: DaemonSessionDeps = {
@@ -657,6 +657,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         } catch {
             // best-effort cleanup
         }
+        // `session_shutdown` ends this runtime: the next runtime builds its own client from its own configuration, so the transport this one dialed is torn down here or its socket, poller, and ring mappings stay cached for the process lifetime. commentlint: allow(JUDGE)
+        moduleClient.disconnect();
         // `session_shutdown` with reason `reload` fires before `/reload` re-imports the extension.
         clearPiEidnaraActive();
     });

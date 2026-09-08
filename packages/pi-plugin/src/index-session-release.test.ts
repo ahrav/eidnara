@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { HostModuleTransport } from "@eidnara/opencode/hooks/context/module-transport";
 import { createCountingPi } from "./__tests__/test-utils";
 import eidnaraPiExtension, { __test } from "./index";
 import {
@@ -82,5 +83,37 @@ describe("Pi fork token caches across session lifecycle events", () => {
         await beforeSwitch({ reason: "resume" }, contextFor("ses-fork"));
 
         expect(piSessionTokenCacheForTest("ses-fork")).toBeDefined();
+    });
+});
+
+describe("Pi daemon transport across runtime teardown", () => {
+    it("disconnects the runtime's transport on session_shutdown, for a reload and for a quit", async () => {
+        for (const reason of ["reload", "quit"]) {
+            const disconnect = spyOn(
+                HostModuleTransport.prototype,
+                "disconnect",
+            ).mockImplementation(() => undefined);
+            try {
+                const { shutdown } = await registeredHandlers();
+                expect(disconnect).not.toHaveBeenCalled();
+                await shutdown({ reason }, contextFor(`ses-${reason}`));
+                expect(disconnect).toHaveBeenCalledTimes(1);
+            } finally {
+                disconnect.mockRestore();
+            }
+        }
+    });
+
+    it("keeps the transport connected across a session switch", async () => {
+        const disconnect = spyOn(HostModuleTransport.prototype, "disconnect").mockImplementation(
+            () => undefined,
+        );
+        try {
+            const { beforeSwitch } = await registeredHandlers();
+            await beforeSwitch({ reason: "resume" }, contextFor("ses-switch"));
+            expect(disconnect).not.toHaveBeenCalled();
+        } finally {
+            disconnect.mockRestore();
+        }
     });
 });
