@@ -432,7 +432,10 @@ describe("Pi doctor", () => {
         expect(report).not.toContain("line from an older session");
     });
 
-    it("excludes session-tagged records when session discovery failed and the user declines all sessions", async () => {
+    it.each([
+        "unavailable",
+        "ok",
+    ] as const)("excludes session-tagged records when discovery is %s with no sessions and the user declines all sessions", async (sessionDiscovery) => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
         const agentDir = setEnv(root, cwd);
@@ -484,7 +487,7 @@ describe("Pi doctor", () => {
             conflicts: { knownConflicts: [], otherPiExtensions: [] },
             logFile: { path: logPath, exists: true, sizeKb: 1 },
             recentSessions: [],
-            sessionDiscovery: "unavailable",
+            sessionDiscovery,
             historianDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
@@ -611,7 +614,7 @@ describe("Pi doctor", () => {
         console.log = () => {};
         const prompts = new MockPrompts({
             texts: [`Crash in ${root}/private token=abc123`, "Description"],
-            confirms: [true],
+            confirms: [false, true],
         });
         const diagnosticReport: PiDiagnosticReport = {
             timestamp: "2026-04-28T12:34:56.000Z",

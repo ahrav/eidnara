@@ -1,4 +1,3 @@
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -6,6 +5,7 @@ import {
     renderDiagnosticsMarkdown,
     sanitizeString,
 } from "./diagnostics-pi";
+import { writeNewFile } from "./fs-utils";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
 import { readLogTailLines } from "./log-tail";
@@ -131,25 +131,4 @@ export async function bundleIssueReport(
     const stem = join(cwd, `eidnara-pi-issue-${formatTimestamp(options.now ?? new Date())}`);
     const path = writeNewFile(stem, `${bodyMarkdown}\n`);
     return { path, bodyMarkdown };
-}
-
-const MAX_BUNDLE_NAME_ATTEMPTS = 100;
-
-/**
- * The timestamp has one-second resolution, so a second bundle in the same
- * second takes a numbered suffix instead of replacing the first.
- */
-function writeNewFile(stem: string, data: string): string {
-    for (let attempt = 1; attempt <= MAX_BUNDLE_NAME_ATTEMPTS; attempt++) {
-        const path = attempt === 1 ? `${stem}.md` : `${stem}-${attempt}.md`;
-        try {
-            writeFileSync(path, data, { flag: "wx" });
-            return path;
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        }
-    }
-    throw new Error(
-        `Could not find a free bundle name after ${MAX_BUNDLE_NAME_ATTEMPTS} tries at ${stem}`,
-    );
 }

@@ -38,7 +38,9 @@ const NON_LOCAL_SOURCE_PREFIXES = ["npm:", "git:", "github:", "http:", "https:",
 function resolveLocalPackagePath(source: string, baseDir: string): string {
     const trimmed = source.trim();
     if (trimmed === "~") return homedir();
-    if (trimmed.startsWith("~/")) return join(homedir(), trimmed.slice(2));
+    if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+        return join(homedir(), trimmed.slice(2));
+    }
     if (/^file:\/\//.test(trimmed)) return fileURLToPath(trimmed);
     return resolve(baseDir, trimmed);
 }

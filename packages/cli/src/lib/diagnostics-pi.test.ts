@@ -78,6 +78,26 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
         });
     });
 
+    it("redacts a numeric PIN under a password-shaped key but keeps token budgets", () => {
+        expect(
+            sanitizeValue({
+                password: 123456,
+                db_secret: 42,
+                credential: 7,
+                max_tokens: 4096,
+                api_key: 4096,
+                enabled: true,
+            }),
+        ).toEqual({
+            password: "<REDACTED>",
+            db_secret: "<REDACTED>",
+            credential: "<REDACTED>",
+            max_tokens: 4096,
+            api_key: 4096,
+            enabled: true,
+        });
+    });
+
     it("redacts every credential-shaped key the shared vocabulary knows, plus cookies", () => {
         expect(
             sanitizeValue({
@@ -277,6 +297,61 @@ describe("renderDiagnosticsMarkdown", () => {
         expect(markdown).toContain("- lone ## Log (last");
         expect(markdown.match(/(^|\r)## Log \(last/gm)).toBeNull();
         expect(markdown).toContain("- Pi installed: true");
+    });
+
+    it("includes sanitized historian dump metadata", () => {
+        const home = process.env.HOME ?? "/home/tester";
+        const report: PiDiagnosticReport = {
+            timestamp: "2026-07-07T12:00:00.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: "/usr/bin/pi",
+            piVersion: "0.80.2",
+            settings: {
+                path: "/x/settings.json",
+                exists: true,
+                hasEidnaraPackage: true,
+                packages: [],
+            },
+            configPaths: { agentDir: "/x", userConfig: "/x/u.jsonc", projectConfig: "/x/p.jsonc" },
+            userConfig: { path: "/x/u.jsonc", exists: false, flags: {} },
+            projectConfig: { path: "/x/p.jsonc", exists: false, flags: {} },
+            loadedConfigPaths: [],
+            loadWarnings: [],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: "/x/eidnara.log", exists: false, sizeKb: 0 },
+            recentSessions: [],
+            sessionDiscovery: "ok",
+            historianDumps: {
+                byProject: [
+                    {
+                        directory: `${home}/private-project`,
+                        primarySessionId: "ses_1",
+                        sessionIds: ["ses_1"],
+                        count: 1,
+                        recent: [
+                            {
+                                name: "dump-1.xml",
+                                ageMinutes: 5,
+                                sizeKb: 12,
+                                parseError: `unexpected close tag in ${home}/private-project/dump-1.xml`,
+                            },
+                        ],
+                    },
+                ],
+                legacyDumps: { dir: `${home}/legacy`, count: 0, recent: [] },
+            },
+        };
+
+        const markdown = renderDiagnosticsMarkdown(report);
+
+        expect(markdown).toContain("### Historian dumps");
+        expect(markdown).toContain('"count": 1');
+        expect(markdown).toContain('"name": "dump-1.xml"');
+        expect(markdown).not.toContain(home);
     });
 });
 

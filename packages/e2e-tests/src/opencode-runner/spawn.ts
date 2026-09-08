@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
-import { isSecretKey } from "@eidnara/opencode/shared/redaction";
+import { isSecretKey, keepsScalarValue } from "@eidnara/opencode/shared/redaction";
 import { waitForChildExit } from "../process-exit";
 import {
     buildDirectHostFixture,
@@ -285,8 +285,9 @@ const ENV_PLACEHOLDER = /^\{env:\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}$/;
  * `assertConfigHasNoCredentials` refuses a credential-shaped key name anywhere in a config channel.
  * The diagnostic names the key path and never the value, so a refusal never puts a secret in a log.
  *
- * Key shape is the only rule: a credential under an innocuous name still reaches `opencode.json`,
- * which leaves `extraEnv` the only channel governed by shape rather than by recognition.
+ * Key shape is the rule for every string value: a credential under an innocuous name still
+ * reaches `opencode.json`, which leaves `extraEnv` the only channel governed by shape rather
+ * than by recognition. Numbers are the one exception, judged by `keepsScalarValue`.
  */
 function assertConfigHasNoCredentials(value: unknown, label: string): void {
     const seen = new WeakSet<object>();
@@ -298,6 +299,8 @@ function assertConfigHasNoCredentials(value: unknown, label: string): void {
             /** A placeholder is not a credential: what reaches disk is the token, and the value it stands for is resolved from the environment after the file is read. Only a name the sensitive-key rule recognizes is an approved channel; any other placeholder falls through to the key rule. */
             const placeholder = typeof child === "string" ? ENV_PLACEHOLDER.exec(child) : null;
             if (placeholder !== null && isSensitiveEnvKey(placeholder[1] as string)) continue;
+            // A count under a `token`/`key`-suffixed name (`maxTokens: 4096`) is not a credential; a number under `password` still is.
+            if (typeof child === "number" && keepsScalarValue(key, String(child))) continue;
             if (!Array.isArray(current) && isSecretKey(key)) {
                 throw new Error(
                     `config contains credential-shaped key: ${childPath}; ` +

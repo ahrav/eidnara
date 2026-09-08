@@ -8,6 +8,7 @@ import {
     rmSync,
     writeFileSync,
 } from "node:fs";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
@@ -542,6 +543,46 @@ describe("doctor OpenCode read-only checks", () => {
             expect(untouched.compaction?.auto).toBe(true);
         } finally {
             restore();
+        }
+    });
+});
+
+describe("doctor OpenCode without any home directory", () => {
+    it("reports unavailable user-level paths and still checks the project config", async () => {
+        installIsolatedHome();
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        mkdirSync(join(cwd, ".eidnara"), { recursive: true });
+        writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), '{ "enabled": true, \n');
+        delete process.env.HOME;
+        delete process.env.XDG_CONFIG_HOME;
+        delete process.env.XDG_DATA_HOME;
+        const homedirSpy = spyOn(os, "homedir").mockImplementation(() => {
+            throw Object.assign(new Error("uv_os_homedir returned ENOENT"), {
+                code: "ERR_SYSTEM_ERROR",
+            });
+        });
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            const code = await runDoctor({ cwd });
+
+            expect(code).toBe(1);
+            expect(
+                errors.some((message) =>
+                    message.startsWith("User-level configuration paths are unavailable"),
+                ),
+            ).toBe(true);
+            expect(successes.some((message) => message.startsWith("Eidnara project config:"))).toBe(
+                true,
+            );
+            expect(
+                errors.some((message) =>
+                    message.startsWith("Eidnara project eidnara.jsonc parse failed"),
+                ),
+            ).toBe(true);
+        } finally {
+            restore();
+            homedirSpy.mockRestore();
         }
     });
 });

@@ -335,6 +335,32 @@ describe("sanitizeConfigValue unqualified password keys", () => {
     });
 });
 
+describe("sanitizeConfigValue dynamic keys", () => {
+    test("sanitizes object keys that carry paths or secrets, not only their values", () => {
+        expect(
+            sanitizeConfigValue({
+                historian: {
+                    permission: {
+                        bash: {
+                            "/home/alice/private-project/*": "allow",
+                            "curl -H 'Authorization: Bearer abcdef0123456789'": "deny",
+                        },
+                    },
+                },
+            }),
+        ).toEqual({
+            historian: {
+                permission: {
+                    bash: {
+                        "/home/<USER>/private-project/*": "allow",
+                        "curl -H 'Authorization: Bearer <REDACTED:bearer>'": "deny",
+                    },
+                },
+            },
+        });
+    });
+});
+
 describe("redactSecretText — passphrases and CLI arguments", () => {
     test("a bare colon value ends at whitespace; quoting consumes a multiword value whole", () => {
         expect(redactSecretText("token: abc123 refreshed for bob")).toBe(

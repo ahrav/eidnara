@@ -373,7 +373,7 @@ async function collectRecentSessions(): Promise<SessionDiscovery> {
  * With `HOME` and `XDG_CONFIG_HOME` unset for a UID without a passwd entry, every user-level path
  * resolution throws; the report then carries empty user-level paths and the error text.
  */
-function resolveUserLevelPaths(): { configPaths: ConfigPaths; error?: string } {
+export function resolveUserLevelPaths(): { configPaths: ConfigPaths; error?: string } {
     try {
         return { configPaths: detectConfigPaths() };
     } catch (error) {

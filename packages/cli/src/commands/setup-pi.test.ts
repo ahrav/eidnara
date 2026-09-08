@@ -941,4 +941,32 @@ describe("runSetup", () => {
             "Pi 0.69.0 is older than the required 0.80.2",
         );
     });
+
+    it("asks for the same confirmation when Pi reports no version, and stops when declined", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
+            getPiVersion: () => null,
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [false] });
+
+        const code = await runSetup({ prompts, env });
+
+        expect(code).toBe(1);
+        const log = prompts.messages.join("\n");
+        expect(log).toContain(
+            "Pi did not report a version, so the required 0.80.2 cannot be verified",
+        );
+        expect(log).toContain("outro:Setup cancelled");
+        expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(false);
+        expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
+    });
 });

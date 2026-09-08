@@ -7,6 +7,7 @@ import {
     sensitiveRootsFor,
 } from "@eidnara/opencode/shared/host-lifecycle";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import { TERMINAL_CONTROL_CHARS } from "../lib/terminal-text";
 
 const ACTIONS = new Set<LifecycleCommand>(["start", "stop", "restart", "status", "doctor"]);
 
@@ -15,17 +16,6 @@ export const PARENT_PACKAGE_NAME = "@eidnara/cli";
 
 /** Bounds redacted version text so a peer cannot flood the terminal or the JSON result. */
 const MAX_VERSION_TEXT_LEN = 128;
-
-/**
- * Replacing C0 and C1 controls prevents peer-supplied version text from moving
- * the cursor, erasing lines, or forging terminal output; the Unicode ranges
- * cover zero-width and bidi marks, line and paragraph separators, bidi
- * overrides and isolates, and the BOM, which can reorder or hide the rest of
- * the rendered line.
- */
-const CONTROL_CHARS =
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: the security boundary intentionally matches C0/C1 ranges
-    /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 
 interface DaemonPolicy {
     start(): Promise<DaemonResultV1>;
@@ -102,7 +92,7 @@ function redactResult(
                 if (parse(sensitiveRoot).root === sensitiveRoot) continue;
                 redacted = redacted.split(sensitiveRoot).join("<data-root>");
             }
-            redacted = sanitizeDiagnosticText(redacted).replace(CONTROL_CHARS, " ");
+            redacted = sanitizeDiagnosticText(redacted).replace(TERMINAL_CONTROL_CHARS, " ");
             return redacted.length > MAX_VERSION_TEXT_LEN
                 ? redacted.slice(0, MAX_VERSION_TEXT_LEN)
                 : redacted;

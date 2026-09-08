@@ -57,7 +57,7 @@ function isNonSecretScalarValue(value: string): boolean {
 
 // A number under `password`, `secret`, or `credential` is a PIN or numeric token and is redacted;
 // `api_key`, `token`, and `key` keep numeric values (`max_tokens: 4096`, and the fixture-pinned `"api_key": "4096"`).
-function keepsScalarValue(key: string, value: string): boolean {
+export function keepsScalarValue(key: string, value: string): boolean {
     if (!isNonSecretScalarValue(value)) return false;
     const v = value.trim();
     if (v === "true" || v === "false" || v === "null" || v === "undefined") return true;
@@ -482,9 +482,10 @@ export function sanitizeConfigValue(value: unknown, keyPath: string[] = []): unk
         return value.map((entry, index) => sanitizeConfigValue(entry, [...keyPath, String(index)]));
     }
     if (value && typeof value === "object") {
+        // Dynamic-key records such as `permission.bash` carry user text (paths, commands) in the key itself.
         return Object.fromEntries(
             Object.entries(value).map(([entryKey, entry]) => [
-                entryKey,
+                sanitizeDiagnosticText(entryKey),
                 sanitizeConfigValue(entry, [...keyPath, entryKey]),
             ]),
         );

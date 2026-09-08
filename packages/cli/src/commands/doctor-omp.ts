@@ -17,6 +17,7 @@ import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { collectPiHistorianDumps, collectPiRecentSessions } from "../lib/diagnostics-pi";
 import { projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import { writeNewFile } from "../lib/fs-utils";
 import { describeHistorianDumps } from "../lib/historian-dumps";
 import { capBodyToGithubLimit } from "../lib/issue-body";
 import { readJsoncLenient } from "../lib/jsonc-config";
@@ -522,8 +523,10 @@ async function runIssueFlow(options: {
                 `- ${result.status.toUpperCase()}: ${sanitizeDiagnosticText(result.message)}`,
         ),
     ].join("\n");
-    const path = join(options.cwd, `eidnara-omp-issue-${timestamp(options.deps.now())}.md`);
-    writeFileAtomic(path, `${capBodyToGithubLimit(body)}\n`);
+    const path = writeNewFile(
+        join(options.cwd, `eidnara-omp-issue-${timestamp(options.deps.now())}`),
+        `${capBodyToGithubLimit(body)}\n`,
+    );
     options.prompts.log.success(`Sanitized report written to ${path}`);
     try {
         options.deps.execFileSync("gh", ["--version"], { stdio: "ignore" });

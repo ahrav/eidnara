@@ -301,10 +301,17 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             : `${host.displayName} detected at ${binary.path}`,
     );
 
-    if (version && host.minimumVersion && compareVersionStrings(version, host.minimumVersion) < 0) {
+    const minimum = host.minimumVersion;
+    const versionTooOld =
+        minimum !== undefined && version !== null && compareVersionStrings(version, minimum) < 0;
+    // An unreadable version leaves the minimum unverified, so it takes the same confirmation as an old one.
+    const versionUnknown = minimum !== undefined && version === null;
+    if (minimum !== undefined && (versionTooOld || versionUnknown)) {
         prompts.log.warn(
-            host.versionWarning?.(version, host.minimumVersion) ??
-                `${host.displayName} ${version} is older than required ${host.minimumVersion}.`,
+            version !== null
+                ? (host.versionWarning?.(version, minimum) ??
+                      `${host.displayName} ${version} is older than required ${minimum}.`)
+                : `${host.displayName} did not report a version, so the required ${minimum} cannot be verified.`,
         );
         const proceed = await prompts.confirm(
             "Continue with setup anyway? (subagents may fail at runtime)",
@@ -312,7 +319,11 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         );
         if (!proceed) {
             // A non-zero code keeps the dispatcher from printing next steps after nothing was written.
-            prompts.outro(`Setup cancelled — upgrade ${host.displayName} and try again.`);
+            prompts.outro(
+                version !== null
+                    ? `Setup cancelled — upgrade ${host.displayName} and try again.`
+                    : `Setup cancelled — check the ${host.displayName} installation and try again.`,
+            );
             return 1;
         }
     }

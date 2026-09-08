@@ -448,11 +448,12 @@ async function runIssueFlow(options: {
 
         // A lone discovered session still filters: the append-only log can hold older sessions' records.
         let sessionFilter: string | null = report.recentSessions[0]?.sessionId ?? null;
-        if (report.recentSessions.length === 0 && report.sessionDiscovery === "unavailable") {
-            // Discovery failed rather than found nothing, so cross-session records
-            // are excluded unless the user opts in explicitly.
+        if (report.recentSessions.length === 0) {
+            // Without a discovered session, cross-session records are excluded unless the user opts in.
             const includeAll = await options.prompts.confirm(
-                "The Pi sessions directory could not be read, so log records cannot be attributed to this session. Include records from every session in the report?",
+                report.sessionDiscovery === "unavailable"
+                    ? "The Pi sessions directory could not be read, so log records cannot be attributed to this session. Include records from every session in the report?"
+                    : "No Pi sessions were found, so log records cannot be attributed to this session. Include records from every session in the report?",
                 false,
             );
             if (!includeAll) sessionFilter = EXCLUDE_SESSION_RECORDS;

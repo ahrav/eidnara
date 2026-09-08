@@ -1,4 +1,3 @@
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import {
@@ -6,6 +5,7 @@ import {
     describeProbeText,
     renderDiagnosticsMarkdown,
 } from "./diagnostics-opencode";
+import { writeNewFile } from "./fs-utils";
 import { capBodyToGithubLimit, codeFenceFor, extractRecentErrors } from "./issue-body";
 import { filterLogRecords } from "./log-records";
 import { readLogTailLines } from "./log-tail";
@@ -191,25 +191,9 @@ export async function bundleIssueReport(
 
     const bodyMarkdown = capBodyToGithubLimit(rawBodyMarkdown);
 
-    const path = writeBundleExclusively(
+    const path = writeNewFile(
         join(process.cwd(), `eidnara-issue-${formatTimestamp(new Date())}`),
         `${bodyMarkdown}\n`,
     );
     return { path, bodyMarkdown };
-}
-
-/**
- * Two bundles created in the same second share a timestamp; exclusive creation plus a
- * numeric suffix keeps the earlier one intact.
- */
-function writeBundleExclusively(basePath: string, contents: string): string {
-    for (let attempt = 0; ; attempt += 1) {
-        const path = attempt === 0 ? `${basePath}.md` : `${basePath}-${attempt + 1}.md`;
-        try {
-            writeFileSync(path, contents, { flag: "wx" });
-            return path;
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        }
-    }
 }

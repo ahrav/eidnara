@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -224,6 +225,18 @@ describe("isEidnaraPiPackageEntry", () => {
         expect(isEidnaraPiPackageEntry("./checkout", root)).toBe(true);
         expect(isEidnaraPiPackageEntry(pathToFileURL(dir).href, "/elsewhere")).toBe(true);
         expect(isEidnaraPiPackageEntry({ source: dir }, "/elsewhere")).toBe(true);
+    });
+
+    it("expands a home-relative entry written with either separator", () => {
+        const { root } = checkoutOf("@eidnara/pi");
+        // Bun's `homedir()` ignores runtime `HOME` changes, so the module function is replaced.
+        const spy = spyOn(os, "homedir").mockImplementation(() => root);
+        try {
+            expect(isEidnaraPiPackageEntry("~/checkout", "/elsewhere")).toBe(true);
+            expect(isEidnaraPiPackageEntry("~\\checkout", "/elsewhere")).toBe(true);
+        } finally {
+            spy.mockRestore();
+        }
     });
 
     it("rejects local checkouts of other packages, git sources, and unknown shapes", () => {

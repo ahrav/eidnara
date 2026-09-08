@@ -9,7 +9,12 @@ import {
 } from "@eidnara/opencode/config/config-paths";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
-import { escapeRegex, isSecretKey, redactSecretText } from "@eidnara/opencode/shared/redaction";
+import {
+    escapeRegex,
+    isSecretKey,
+    keepsScalarValue,
+    redactSecretText,
+} from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import {
     type HistorianDumpMeta,
@@ -226,7 +231,10 @@ function redactProse(value: unknown): unknown {
 }
 
 export function sanitizeValue(value: unknown, key = ""): unknown {
-    if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+    if (value === null || typeof value === "boolean") return value;
+    if (typeof value === "number") {
+        return shouldRedactKey(key) && !keepsScalarValue(key, String(value)) ? "<REDACTED>" : value;
+    }
     if (shouldRedactKey(key)) return "<REDACTED>";
     if (isPromptKey(key)) return redactProse(value);
     if (typeof value === "string") return sanitizeString(value);
@@ -552,6 +560,7 @@ function oneLine(value: string): string {
 export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
     const configPaths = sanitizeValue(report.configPaths);
     const settings = sanitizeValue(report.settings);
+    const historianDumps = sanitizeValue(report.historianDumps);
 
     return [
         `- Timestamp: ${report.timestamp}`,
@@ -598,6 +607,13 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         "No known conflicting Pi extensions are currently registered. Other Pi packages are informational only.",
         "```json",
         JSON.stringify(report.conflicts, null, 2),
+        "```",
+        "",
+        "### Historian dumps",
+        "(Metadata only — XML content is not included in this report.)",
+        "Dumps are stored per-project under `<project>/.eidnara/context/historian/`.",
+        "```json",
+        JSON.stringify(historianDumps, null, 2),
         "```",
         "",
         "### Log file",
