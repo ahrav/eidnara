@@ -24,7 +24,8 @@ interface WakePlaneStatusCache {
 }
 
 let cachedStatus: WakePlaneStatusCache | null = null;
-let inFlightProbe: Promise<WakePlaneStatus> | null = null;
+/** The in-flight probe records the publication it is bound to so only same-publication callers coalesce onto it. */
+let inFlight: { probe: Promise<WakePlaneStatus>; publication: string | null } | null = null;
 let catalogProbe: CatalogProbe = probeWakePlaneCatalog;
 let readPublication: PublicationReader = readDaemonPublication;
 let now = () => Date.now();
@@ -102,12 +103,14 @@ function isRetainedAnswerUsable(cache: WakePlaneStatusCache): boolean {
 export async function wakePlaneStatus(): Promise<WakePlaneStatus> {
     const cached = cachedStatus;
     if (cached && now() < cached.expiresAt && isRetainedAnswerUsable(cached)) return cached.status;
-    if (inFlightProbe) return await inFlightProbe;
+
+    // The pre-probe publication binds the result to the daemon observed before probing.
+    const publication = readPublication();
+    // Coalesce only onto a probe bound to the same publication; the settle handler below
+    // answers `unknown` for any other, which would leave both planes evaluating this cycle.
+    if (inFlight && inFlight.publication === publication) return await inFlight.probe;
 
     const startedAt = now();
-    // The pre-probe publication binds the result to the daemon observed before probing.
-    // produced it.
-    const publication = readPublication();
     const probe = probeStatus().then((status) => {
         // Stale publications must be rejected before the probe settles so coalesced callers cannot receive stale results.
         // A stale result can describe a daemon that no longer serves requests.
@@ -116,7 +119,8 @@ export async function wakePlaneStatus(): Promise<WakePlaneStatus> {
         //
         // The function returns `unknown` because the result cannot be bound to a publication.
         if (readPublication() !== publication) {
-            cachedStatus = null;
+            // A newer probe may already have cached an answer for the current daemon.
+            if (cachedStatus?.publication === publication) cachedStatus = null;
             return "unknown" as WakePlaneStatus;
         }
         // The cache does not retain `present` when `publication` is `null` because no daemon identity is available.
@@ -126,18 +130,18 @@ export async function wakePlaneStatus(): Promise<WakePlaneStatus> {
                 : { status, expiresAt: startedAt + WAKE_PLANE_STATUS_TTL_MS, publication };
         return status;
     });
-    inFlightProbe = probe;
+    inFlight = { probe, publication };
     try {
         return await probe;
     } finally {
-        if (inFlightProbe === probe) inFlightProbe = null;
+        if (inFlight?.probe === probe) inFlight = null;
     }
 }
 
 export const __wakePlaneTest = {
     reset(): void {
         cachedStatus = null;
-        inFlightProbe = null;
+        inFlight = null;
         catalogProbe = probeWakePlaneCatalog;
         readPublication = readDaemonPublication;
         now = () => Date.now();
