@@ -1,3 +1,4 @@
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { escalationBands, MAX_EXECUTE_THRESHOLD } from "../../shared/escalation-bands";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { log, sessionLog } from "../../shared/logger";
@@ -105,8 +106,19 @@ export interface ExecuteThresholdDetail {
     configuredValue?: number;
 }
 
-// Clamp-warning deduplication is scoped by the session ID, model key, configured token value, and cap, with sentinels for missing session IDs and model keys.
-const clampWarnSeen = new Set<string>();
+// Eviction re-logs an old key's warning once; that is the price of a bound under session churn.
+const CLAMP_WARN_DEDUPE_MAX_ENTRIES = 1000;
+const clampWarnSeen = new BoundedSessionMap<true>(CLAMP_WARN_DEDUPE_MAX_ENTRIES);
+
+function warnClampOnce(dedupeKey: string, sessionId: string | undefined, msg: string): void {
+    if (clampWarnSeen.has(dedupeKey)) return;
+    clampWarnSeen.set(dedupeKey, true);
+    if (sessionId) {
+        sessionLog(sessionId, `WARN: ${msg}`);
+    } else {
+        log(`[eidnara] WARN: ${msg}`);
+    }
+}
 
 function isFinitePositive(v: unknown): v is number {
     return typeof v === "number" && Number.isFinite(v) && v > 0;
@@ -132,16 +144,11 @@ export function resolveExecuteThresholdDetail(
             const cap = contextLimit * (MAX_EXECUTE_THRESHOLD / 100);
             const effectiveTokens = Math.min(tokenMatch.value, cap);
             if (effectiveTokens < tokenMatch.value) {
-                const dedupeKey = `${options.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${tokenMatch.value}|${cap}`;
-                if (!clampWarnSeen.has(dedupeKey)) {
-                    clampWarnSeen.add(dedupeKey);
-                    const msg = `execute_threshold_tokens clamped: ${tokenMatch.value} → ${effectiveTokens} (${MAX_EXECUTE_THRESHOLD}% of ${contextLimit}) for ${modelKey ?? "default"}`;
-                    if (options.sessionId) {
-                        sessionLog(options.sessionId, `WARN: ${msg}`);
-                    } else {
-                        log(`[eidnara] WARN: ${msg}`);
-                    }
-                }
+                warnClampOnce(
+                    `${options.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${tokenMatch.value}|${cap}`,
+                    options.sessionId,
+                    `execute_threshold_tokens clamped: ${tokenMatch.value} → ${effectiveTokens} (${MAX_EXECUTE_THRESHOLD}% of ${contextLimit}) for ${modelKey ?? "default"}`,
+                );
             }
             const percentage = (effectiveTokens / contextLimit) * 100;
             const detail: ExecuteThresholdDetail = {
@@ -193,16 +200,11 @@ export function resolveExecuteThresholdDetail(
     const cappedPercentage = Math.min(resolved, MAX_EXECUTE_THRESHOLD);
     const percentageClamped = cappedPercentage < resolved;
     if (percentageClamped) {
-        const dedupeKey = `pct|${options?.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${resolved}`;
-        if (!clampWarnSeen.has(dedupeKey)) {
-            clampWarnSeen.add(dedupeKey);
-            const msg = `execute_threshold clamped ${resolved}% → ${MAX_EXECUTE_THRESHOLD}% for ${modelKey ?? "default"} (capped against the output-reserved safe window; 10% remains for mid-turn growth before the absolute 95% wall)`;
-            if (options?.sessionId) {
-                sessionLog(options.sessionId, `WARN: ${msg}`);
-            } else {
-                log(`[eidnara] WARN: ${msg}`);
-            }
-        }
+        warnClampOnce(
+            `pct|${options?.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${resolved}`,
+            options?.sessionId,
+            `execute_threshold clamped ${resolved}% → ${MAX_EXECUTE_THRESHOLD}% for ${modelKey ?? "default"} (capped against the output-reserved safe window; 10% remains for mid-turn growth before the absolute 95% wall)`,
+        );
     }
     const detail: ExecuteThresholdDetail = {
         percentage: cappedPercentage,
