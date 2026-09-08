@@ -2,19 +2,20 @@ import {
     chmodSync,
     lstatSync,
     mkdirSync,
+    readlinkSync,
     realpathSync,
     renameSync,
     statSync,
     writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 
 /**
  * When targetPath names a file and chmodSync succeeds, writeFileAtomic copies its 0o777 permission bits to tmpPath.
  *
  * Callers need not create the parent directory.
  *
- * A non-dangling symlink resolves before renameSync, preserving the symlink.
+ * A symlink resolves to its target before renameSync, preserving the symlink.
  */
 export function writeFileAtomic(targetPath: string, data: string): void {
     const destination = resolveSymlinkTarget(targetPath);
@@ -32,12 +33,16 @@ export function writeFileAtomic(targetPath: string, data: string): void {
     renameSync(tmpPath, destination);
 }
 
-/** A dangling symlink resolves to itself; the rename then replaces the link like any other missing target. */
+/** `realpathSync` cannot resolve a dangling symlink, so the fallback resolves its link text and the write creates that target. commentlint: allow(JUDGE) */
 function resolveSymlinkTarget(path: string): string {
     try {
         if (!lstatSync(path).isSymbolicLink()) return path;
-        return realpathSync(path);
     } catch {
         return path;
+    }
+    try {
+        return realpathSync(path);
+    } catch {
+        return resolve(dirname(path), readlinkSync(path));
     }
 }
