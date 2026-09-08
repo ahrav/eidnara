@@ -242,14 +242,10 @@ describe("createCtxSearchTools", () => {
         );
     });
 
-    it("keeps a comma-joined id list over the filter bound on filtered reads so an old id beyond the row cap resolves", async () => {
+    it("rejects a comma-joined id list over the operand bound before any daemon round trip", async () => {
         const harness = kernelHarness();
-        const count = MAX_READ_OBJECT_IDS + 1;
-        seedMany(harness.kernel, count, (index) => `Row ${index}.`);
-        // The unfiltered snapshot would drop the oldest row; every named id must still resolve.
-        harness.kernel.readRowCap = MAX_READ_OBJECT_IDS;
         const ids = Array.from(
-            { length: count },
+            { length: MAX_READ_OBJECT_IDS + 1 },
             (_, index) => `mem_${String(index).padStart(32, "0")}`,
         );
         const execution = await executeCtxSearch(
@@ -257,19 +253,9 @@ describe("createCtxSearchTools", () => {
             { query: ids.join(","), limit: 50 },
             toolContext(),
         );
-        expect(execution.status).toBe("complete");
-        if (execution.status !== "complete") return;
-        expect(execution.prePack.map((hit) => hit.publicClaimId)).toEqual(ids.slice(0, 50));
-        expect(execution.text).not.toContain("unresolved");
-        expect(execution.text).not.toContain("truncated");
-        const idReads = harness.transport.calls.map(
-            (call) => (call.body as { object_ids?: string[] }).object_ids ?? [],
-        );
-        expect(idReads.map((read) => read.length).sort((a, b) => a - b)).toEqual([
-            1,
-            MAX_READ_OBJECT_IDS,
-        ]);
-        expect(idReads.flat().sort()).toEqual([...ids].sort());
+        expect(execution.status).toBe("invalid");
+        expect(execution.text).toStartWith("Error: query is too complex:");
+        expect(harness.transport.calls).toHaveLength(0);
     });
 
     it("honors the requested limit for a multi-id query", async () => {
