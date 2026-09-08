@@ -970,7 +970,7 @@ describe("ctx_memory anti-memory", () => {
         expect(Number(match?.[1])).toBeLessThanOrEqual(Date.now() + ninetyDays + day);
     });
 
-    test("get by id returns an expired anti-memory", async () => {
+    test("get reads an expired anti-memory as missing, like search does", async () => {
         const tool = harness();
         const expired = {
             trigger: "Choosing a cache backend",
@@ -988,7 +988,8 @@ describe("ctx_memory anti-memory", () => {
         const got = parseJson<ReadJson>(
             await tool.execute({ action: "get", objectIds: [objectId] }, "call-anti-expired-get"),
         );
-        expect(got.memories).toHaveLength(1);
+        expect(got.memories).toHaveLength(0);
+        expect(got.missingObjectIds).toEqual([objectId]);
     });
 
     test("creates typed anti-memory, reads it back parsed, and rejects cross-arm shapes", async () => {
@@ -1111,12 +1112,13 @@ describe("ctx_memory anti-memory", () => {
         expect(kernel.objects.get("mem_anti_broken")?.invalidated_commit_seq).toBeNull();
     });
 
-    test("merge inherits from the caller's first target, not store order", async () => {
+    test("merge inherits category and reason from the caller's first target, not store order", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({
             object_id: "mem_first_in_store",
             decision_kind: "ARCHITECTURE",
             summary: "Stored earlier.",
+            rationale: "earlier why",
         });
         kernel.seedDecision({
             object_id: "mem_second_in_store",
@@ -1127,14 +1129,34 @@ describe("ctx_memory anti-memory", () => {
         const tool = harness(kernel);
         const merged = parseJson<CommitJson>(
             await tool.execute(
-                { action: "merge", objectIds: ["mem_second_in_store", "mem_first_in_store"] },
+                {
+                    action: "merge",
+                    objectIds: ["mem_second_in_store", "mem_first_in_store"],
+                    content: "Stored, combined.",
+                },
                 "call-merge-order",
             ),
         );
         const survivor = kernel.objects.get(merged.objectId as string);
         expect(survivor?.decision?.decision_kind).toBe("ARCHITECTURE");
-        expect(survivor?.decision?.payload.summary).toBe("Stored later.");
+        expect(survivor?.decision?.payload.summary).toBe("Stored, combined.");
         expect(survivor?.decision?.payload.rationale).toBe("why");
+    });
+
+    test("merge without survivor content is rejected before any target is retired", async () => {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({ object_id: "mem_a", decision_kind: "NAMING", summary: "A." });
+        kernel.seedDecision({ object_id: "mem_b", decision_kind: "NAMING", summary: "B." });
+        const tool = harness(kernel);
+        const text = await tool.execute(
+            { action: "merge", objectIds: ["mem_a", "mem_b"] },
+            "call-merge-no-content",
+        );
+        expect(text).toStartWith(
+            "Error: merge requires content (with category) or antiMemory for the survivor",
+        );
+        expect(kernel.liveRows()).toHaveLength(2);
+        expect(tool.transport.calls.some((call) => call.method === "kernel.commit")).toBeFalse();
     });
 });
 
