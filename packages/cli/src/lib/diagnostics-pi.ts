@@ -160,7 +160,9 @@ function decodeQuotedKey(raw: string): string {
     );
 }
 
-/** Index just past the bracket closing the structure opened at `start`, or the text length when unbalanced. */
+const LINE_END_PATTERN = /\r?\n|$/g;
+
+/** Index just past the bracket closing the structure opened at `start`; an unbalanced structure ends with its line. */
 function structuredValueEnd(text: string, start: number): number {
     let depth = 0;
     for (let at = start; at < text.length; at++) {
@@ -174,7 +176,8 @@ function structuredValueEnd(text: string, start: number): number {
             if (depth === 0) return at + 1;
         }
     }
-    return text.length;
+    LINE_END_PATTERN.lastIndex = start;
+    return LINE_END_PATTERN.exec(text)?.index ?? text.length;
 }
 
 // The key may be quoted, as in a JSON object literal: `{"password": 123456}`.

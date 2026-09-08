@@ -227,6 +227,13 @@ describe("sanitizeString home handling", () => {
         expect(
             sanitizeString('{"credentials":{"value": `}` ,"other":"opaque-live"}, "retries": 3}'),
         ).toBe('{"credentials":"<REDACTED>", "retries": 3}');
+        // An unclosed bracket redacts only to the end of its line.
+        expect(sanitizeString('{"credentials": {"pin": 1\n"retries": 3')).toBe(
+            '{"credentials": "<REDACTED>"\n"retries": 3',
+        );
+        expect(sanitizeString('{"credentials": [1, 2\r\n"retries": 3')).toBe(
+            '{"credentials": "<REDACTED>"\r\n"retries": 3',
+        );
         // A non-secret outer key still exposes its nested keys to classification.
         expect(sanitizeString('{"config": {"password": 123456, "retries": 3}}')).toBe(
             '{"config": {"password": "<REDACTED>", "retries": 3}}',
