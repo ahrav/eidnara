@@ -1,8 +1,8 @@
 import { escalationBands, MAX_EXECUTE_THRESHOLD } from "../../shared/escalation-bands";
-import { modelRefLookupOrder, piModelRefToCanonical } from "../../shared/harness-provider-map";
+import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { log, sessionLog } from "../../shared/logger";
 import { getSdkContextLimit, getSdkWindowGeometry } from "../../shared/models-dev-cache";
-import { resolveModelConfigOrDefault } from "../../shared/prompt-surface";
+import { modelKeyLookupOrder, resolveModelConfigOrDefault } from "../../shared/prompt-surface";
 
 export { escalationBands, MAX_EXECUTE_THRESHOLD };
 export const DEFAULT_CONTEXT_LIMIT = 128_000;
@@ -113,32 +113,6 @@ function isFinitePositive(v: unknown): v is number {
 }
 
 /**
- * `modelKeyLookupOrder` yields progressively less-specific lookup keys for each model key.
- *
- * Derived model IDs may append `-`-delimited segments to a base model ID.
- * For example, `gpt-5.4-fast` derives from base model `gpt-5.4`.
- * `modelKeyLookupOrder` returns keys from most to least specific so resolution selects the most specific match.
- *
- *   "openai/gpt-5.4-fast"  (exact)
- */
-function* modelKeyLookupOrder(modelKey: string): Generator<string> {
-    const slash = modelKey.indexOf("/");
-    const providerRefs = slash >= 0 ? modelRefLookupOrder(modelKey) : [];
-    let modelId = slash >= 0 ? modelKey.slice(slash + 1) : modelKey;
-
-    while (modelId.length > 0) {
-        for (const providerRef of providerRefs) {
-            const providerSlash = providerRef.indexOf("/");
-            yield `${providerRef.slice(0, providerSlash)}/${modelId}`;
-        }
-        yield modelId;
-        const lastDash = modelId.lastIndexOf("-");
-        if (lastDash <= 0) break;
-        modelId = modelId.slice(0, lastDash);
-    }
-}
-
-/**
  * `resolveExecuteThresholdDetail` returns the effective percentage and authoritative config source.
  * Callers that need only the percentage can use `resolveExecuteThreshold`.
  * Callers that display `mode` must use `resolveExecuteThresholdDetail`.
@@ -192,10 +166,10 @@ export function resolveExecuteThresholdDetail(
         resolved = config;
     } else if (modelKey) {
         let matched: number | undefined;
-        for (const candidate of modelKeyLookupOrder(modelKey)) {
-            if (typeof config[candidate] === "number") {
-                matched = config[candidate];
-                matchedKey = candidate;
+        for (const { key } of modelKeyLookupOrder(modelKey)) {
+            if (typeof config[key] === "number") {
+                matched = config[key];
+                matchedKey = key;
                 break;
             }
         }
@@ -264,10 +238,10 @@ function resolveTokensMatchWithKey(
     }
 
     if (modelKey) {
-        for (const candidate of modelKeyLookupOrder(modelKey)) {
-            const value = tokensConfig[candidate];
+        for (const { key } of modelKeyLookupOrder(modelKey)) {
+            const value = tokensConfig[key];
             if (typeof value === "number") {
-                return { value, matchedKey: candidate };
+                return { value, matchedKey: key };
             }
         }
     }

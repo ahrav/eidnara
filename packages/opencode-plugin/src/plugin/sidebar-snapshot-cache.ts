@@ -40,25 +40,32 @@ export function applyStickySnapshotCache(
         cache.delete(sessionId);
         return fresh;
     }
-    //
-    //
+    // A memory count is evidence of a reset only when the read behind it is complete:
+    // a non-`available` state carries no rows, and a truncated read is a lower bound,
+    // so a decrease in either case does not prove state was deleted.
+    const memoryCountIsEvidence =
+        fresh.memoryState === "available" && fresh.memoryTruncated !== true;
     const stateSurvived =
         fresh.compartmentCount >= cached.snapshot.compartmentCount &&
-        fresh.memoryCount >= cached.snapshot.memoryCount;
+        (!memoryCountIsEvidence || fresh.memoryCount >= cached.snapshot.memoryCount);
     if (!hasInFlightEvidence(fresh) && !stateSurvived) {
         cache.delete(sessionId);
         return fresh;
     }
 
-    // stale counts.
+    // Cached token fields restore one internally consistent token breakdown while
+    // live state, counts, and cumulative work metrics remain fresh.
     return {
         ...fresh,
         usagePercentage: cached.snapshot.usagePercentage,
+        native_context_usage_percentage: cached.snapshot.native_context_usage_percentage,
         inputTokens: cached.snapshot.inputTokens,
         systemPromptTokens: cached.snapshot.systemPromptTokens,
         compartmentTokens: cached.snapshot.compartmentTokens,
         factTokens: cached.snapshot.factTokens,
         memoryTokens: cached.snapshot.memoryTokens,
+        docsTokens: cached.snapshot.docsTokens,
+        profileTokens: cached.snapshot.profileTokens,
         conversationTokens: cached.snapshot.conversationTokens,
         toolCallTokens: cached.snapshot.toolCallTokens,
         toolDefinitionTokens: cached.snapshot.toolDefinitionTokens,
