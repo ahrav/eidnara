@@ -357,8 +357,13 @@ export function asStringArray(value: unknown): string[] {
  * tuple options as well as names. `OPENCODE_DISABLE_PROJECT_CONFIG` yields an empty list because
  * the host loads none of these files then.
  */
+/** Mirrors the host: `OPENCODE_DISABLE_PROJECT_CONFIG=true|1` removes every project config layer. */
+export function projectConfigDisabled(): boolean {
+    return hostFlagEnabled("OPENCODE_DISABLE_PROJECT_CONFIG");
+}
+
 export function projectPluginEntries(directory: string): unknown[] {
-    if (hostFlagEnabled("OPENCODE_DISABLE_PROJECT_CONFIG")) return [];
+    if (projectConfigDisabled()) return [];
     const entries: unknown[] = [];
     for (const configPath of projectOpenCodeConfigPaths(directory)) {
         const config = readJsoncFile<unknown>(configPath);

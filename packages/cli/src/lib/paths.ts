@@ -117,20 +117,21 @@ export function detectConfigPaths(): ConfigPaths {
 
 /**
  * The home the harnesses themselves resolve: `os.homedir()` on Windows (which reads `USERPROFILE`),
- * `HOME` first elsewhere. `os.homedir()` throws for a UID without a passwd entry; an empty string
- * then yields no home-relative paths instead of aborting detection.
+ * `HOME` first elsewhere. Throws when neither yields a directory (a UID with no passwd entry and
+ * no `HOME`): every caller builds config or binary paths from the result, and a cwd-relative
+ * `.pi/bin/pi` would let a checkout supply the binary setup runs.
  */
 export function envFirstHomeDir(): string {
-    const osHome = () => {
-        try {
-            return os.homedir();
-        } catch {
-            return "";
-        }
-    };
-    if (process.platform === "win32") return osHome();
-    const home = process.env.HOME?.trim();
-    return home || osHome();
+    const home = process.platform === "win32" ? undefined : process.env.HOME?.trim();
+    if (home) return home;
+    try {
+        return os.homedir();
+    } catch (error) {
+        throw new Error(
+            "No home directory: set HOME to an absolute path so harness paths can be resolved.",
+            { cause: error },
+        );
+    }
 }
 
 /* */

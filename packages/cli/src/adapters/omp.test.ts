@@ -87,7 +87,9 @@ fi
     }
 
     /** The fake reports no Eidnara plugin until `plugin install` runs, then reports it enabled. */
-    function makeInstallFake(options: { installFails: boolean }): { commandLog: string } {
+    function makeInstallFake(options: { installFails: boolean; listFailsAfterInstall?: boolean }): {
+        commandLog: string;
+    } {
         const root = mkdtempSync(join(tmpdir(), "eidnara-omp-adapter-"));
         roots.push(root);
         const bin = join(root, "bin");
@@ -99,6 +101,7 @@ fi
             `#!/bin/sh
 if [ "$1 $2 $3" = "plugin list --json" ]; then
   if [ -f "${installed}" ]; then
+    if ${options.listFailsAfterInstall ? "true" : "false"}; then echo "list failed" >&2; exit 1; fi
     printf '%s' '{"npm":[{"name":"@eidnara/pi","version":"0.33.0","enabled":true}],"marketplace":[]}'
   else
     printf '%s' '{"npm":[],"marketplace":[]}'
@@ -127,6 +130,23 @@ fi
         expect(result.ok).toBe(true);
         expect(result.action).toBe("added");
         expect(readFileSync(commandLog, "utf-8").trim()).toBe("plugin install @eidnara/pi");
+    });
+
+    it("uninstalls again when the install cannot be verified", async () => {
+        const { commandLog } = makeInstallFake({
+            installFails: false,
+            listFailsAfterInstall: true,
+        });
+
+        const result = await new OmpAdapter().ensurePluginEntry();
+
+        expect(result.ok).toBe(false);
+        expect(result.message).toContain("could not verify the plugin state");
+        expect(result.message).toContain("removed it again");
+        expect(readFileSync(commandLog, "utf-8").trim().split("\n")).toEqual([
+            "plugin install @eidnara/pi",
+            "plugin uninstall @eidnara/pi",
+        ]);
     });
 
     it("reports a failed install without running enable", async () => {
