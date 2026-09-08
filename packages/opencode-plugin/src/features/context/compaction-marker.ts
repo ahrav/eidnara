@@ -307,7 +307,8 @@ export function getOpenCodeMessageById(
     return row ?? null;
 }
 
-interface CompactionMarkerState {
+export interface CompactionMarkerState {
+    sessionId: string;
     boundaryMessageId: string;
     summaryMessageId: string;
     compactionPartId: string;
@@ -527,6 +528,7 @@ export function injectCompactionMarker(
         );
 
         return {
+            sessionId: args.sessionId,
             boundaryMessageId: boundary.id,
             summaryMessageId: summaryMsgId,
             compactionPartId,
@@ -726,6 +728,14 @@ export function listSessionCompactionMarkers(sessionId: string): SessionCompacti
 }
 
 /**
+ * `"retained"` means a surviving `tail_start_id` references a row the removal would delete; the
+ * marker is left in place and a retry will not change the outcome until that reference is gone.
+ * `"failed"` means opening or executing the transaction threw (including SQLITE_BUSY) and the
+ * removal can be retried.
+ */
+export type MarkerRemovalOutcome = "removed" | "retained" | "failed";
+
+/**
  *
  * `filterCompacted` requires a compaction part to break, so deleting that part stops it from ignoring the marker.
  * Deleting summary rows prevents stale `[Compacted by eidnara]` messages from remaining in fork history.
@@ -733,21 +743,15 @@ export function listSessionCompactionMarkers(sessionId: string): SessionCompacti
  * `protectedSummaryMessageId` identifies the caller-owned summary message that cleanup must retain.
  *
  * The tail-reference preflight and the deletes run under one `BEGIN IMMEDIATE` transaction.
- * `"retained"` means a surviving `tail_start_id` references a row the removal would delete; the
- * marker is left in place and a retry will not change the outcome until that reference is gone.
- * `"failed"` means opening or executing the transaction threw (including SQLITE_BUSY) and the
- * removal can be retried.
  */
-export type ForeignMarkerRemovalOutcome = "removed" | "retained" | "failed";
-
 export function removeForeignCompactionMarker(
     sessionId: string,
     marker: SessionCompactionMarkerRows,
     protectedSummaryMessageId: string | null,
-): ForeignMarkerRemovalOutcome {
+): MarkerRemovalOutcome {
     try {
         const db = getWritableOpenCodeDb();
-        return runImmediate(db, (): ForeignMarkerRemovalOutcome => {
+        return runImmediate(db, (): MarkerRemovalOutcome => {
             const summaryIds = marker.summaryMessageIds.filter(
                 (id) => id !== protectedSummaryMessageId,
             );
@@ -995,19 +999,36 @@ function removeEidnaraOwnedCompactionMarkersLocked(
     };
 }
 
-export function removeCompactionMarker(state: CompactionMarkerState): boolean {
+/** The tail-reference preflight and deletes run in one `BEGIN IMMEDIATE` transaction. */
+export function removeCompactionMarker(state: CompactionMarkerState): MarkerRemovalOutcome {
     try {
         const db = getWritableOpenCodeDb();
-        db.transaction(() => {
-            db.prepare("DELETE FROM part WHERE id = ?").run(state.summaryPartId);
-            db.prepare("DELETE FROM message WHERE id = ?").run(state.summaryMessageId);
-            db.prepare("DELETE FROM part WHERE id = ?").run(state.compactionPartId);
-        })();
-        return true;
+        return runImmediate(db, (): MarkerRemovalOutcome => {
+            const rowsToDelete = new Set([
+                state.summaryPartId,
+                state.summaryMessageId,
+                state.compactionPartId,
+            ]);
+            const index = loadTailReferenceIndex(db, state.sessionId);
+            if (survivingTailReferences(index, rowsToDelete, new Set([state.compactionPartId]))) {
+                log(
+                    `[eidnara] compaction-marker: removal RETAINED (${state.sessionId}, part ${state.compactionPartId}) — a surviving tail_start_id references a row the removal would delete`,
+                );
+                return "retained";
+            }
+            const deletePart = db.prepare("DELETE FROM part WHERE session_id = ? AND id = ?");
+            deletePart.run(state.sessionId, state.summaryPartId);
+            db.prepare("DELETE FROM message WHERE session_id = ? AND id = ?").run(
+                state.sessionId,
+                state.summaryMessageId,
+            );
+            deletePart.run(state.sessionId, state.compactionPartId);
+            return "removed";
+        });
     } catch (error) {
         log(
             `[eidnara] compaction-marker: removal failed: ${error instanceof Error ? error.message : String(error)}`,
         );
-        return false;
+        return "failed";
     }
 }

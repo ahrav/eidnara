@@ -13,6 +13,7 @@ import {
     generateMessageId,
     injectCompactionMarker,
     listSessionCompactionMarkers,
+    removeCompactionMarker,
     removeEidnaraOwnedCompactionMarkers,
     removeForeignCompactionMarker,
 } from "./compaction-marker";
@@ -695,6 +696,61 @@ describe("removeEidnaraOwnedCompactionMarkers", () => {
             removedRows: 0,
             retainedLineages: 1,
         });
+        expect(countRows(dataHome, "message")).toBe(4);
+        expect(countRows(dataHome, "part")).toBe(3);
+    });
+});
+
+describe("removeCompactionMarker", () => {
+    it("removes the injected lineage by state and leaves the rest of the session", () => {
+        const dataHome = useTempDataHome("marker-remove-direct-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_target", "assistant", 200);
+        closeQuietly(db);
+
+        const injected = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!injected) throw new Error("injection returned null");
+
+        expect(removeCompactionMarker(injected)).toBe("removed");
+        expect(countRows(dataHome, "message")).toBe(2);
+        expect(countRows(dataHome, "part")).toBe(0);
+        expect(removeCompactionMarker(injected)).toBe("removed");
+    });
+
+    it("retains the lineage when a surviving tail_start_id references its summary", () => {
+        const dataHome = useTempDataHome("marker-remove-direct-retained-");
+        const db = createOpenCodeTestDb(dataHome);
+        insertMessage(db, "msg_001_user", "user", 100);
+        insertMessage(db, "msg_002_target", "assistant", 200);
+        closeQuietly(db);
+
+        const injected = injectCompactionMarker({
+            sessionId: "ses-1",
+            endOrdinal: 2,
+            endMessageId: "msg_002_target",
+            summaryText: "summary placeholder",
+            directory: dataHome,
+        });
+        if (!injected) throw new Error("injection returned null");
+
+        const native = new Database(join(dataHome, "opencode", "opencode.db"));
+        insertMessage(native, "msg_005_user", "user", 500);
+        insertPart(native, "prt_005_native", "msg_005_user", 500, {
+            type: "compaction",
+            auto: true,
+            tail_start_id: injected.summaryMessageId,
+        });
+        closeQuietly(native);
+        closeCompactionMarkerDb();
+
+        expect(removeCompactionMarker(injected)).toBe("retained");
         expect(countRows(dataHome, "message")).toBe(4);
         expect(countRows(dataHome, "part")).toBe(3);
     });
