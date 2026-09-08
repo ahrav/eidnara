@@ -32,8 +32,30 @@ const PAYLOAD_TARBALL = ["LICENSE", "NOTICE", "README.md", "package.json", ...PA
     .sort();
 const TEST_FILE = /\.test\./;
 type Pattern = string | RegExp;
-const TARBALL_RULES: Record<string, { ships: Pattern[]; omits: RegExp[] }> = {
+interface TarballRule {
+    /** Every entry must match one of these; anything else is a stray release artifact. */
+    allows: Pattern[];
+    /** Each of these must match at least one entry. */
+    ships: Pattern[];
+    /** None of these may match any entry. */
+    omits: RegExp[];
+}
+// npm adds these from the package root whatever `files` says.
+const NPM_ALWAYS = /^package\/(README|LICENSE|LICENCE|NOTICE)[^/]*$/i;
+const TARBALL_RULES: Record<string, TarballRule> = {
     "@eidnara/opencode": {
+        allows: [
+            NPM_ALWAYS,
+            "package/package.json",
+            /^package\/dist\/[^/]+\.js$/,
+            /^package\/dist\/.+\.d\.ts(\.map)?$/,
+            /^package\/src\/tui\/./,
+            /^package\/src\/tui-compiled\/./,
+            "package/src/features/context/defaults.ts",
+            /^package\/src\/shared\/./,
+            /^package\/src\/config\/./,
+            /^package\/src\/agents\/./,
+        ],
         ships: [
             "package/dist/index.js",
             "package/src/tui/entry.mjs",
@@ -45,6 +67,8 @@ const TARBALL_RULES: Record<string, { ships: Pattern[]; omits: RegExp[] }> = {
         ],
         omits: [
             /^package\/dist\/tui\//,
+            /^package\/dist\/tui-compiled\//,
+            /^package\/dist\/testing\//,
             TEST_FILE,
             /\.typecheck\./,
             /^package\/src\/__tests__\//,
@@ -52,11 +76,17 @@ const TARBALL_RULES: Record<string, { ships: Pattern[]; omits: RegExp[] }> = {
         ],
     },
     "@eidnara/pi": {
+        allows: [NPM_ALWAYS, "package/package.json", /^package\/dist\/[^/]+\.js$/],
         ships: ["package/dist/index.js", "package/dist/subagent-entry.js"],
         omits: [TEST_FILE],
     },
-    "@eidnara/cli": { ships: ["package/dist/index.js"], omits: [TEST_FILE] },
+    "@eidnara/cli": {
+        allows: [NPM_ALWAYS, "package/package.json", "package/dist/index.js"],
+        ships: ["package/dist/index.js"],
+        omits: [TEST_FILE],
+    },
     "@eidnara/shm-native": {
+        allows: [NPM_ALWAYS, "package/package.json", "package/index.js", "package/index.ts"],
         ships: ["package/index.js", "package/index.ts", "package/package.json"],
         omits: [],
     },
@@ -76,9 +106,22 @@ const PREDECESSOR_TOKENS = new RegExp(
         '|"(source_)?repo"\\s*:\\s*"(primitives|host)"',
     "i",
 );
-const IMPORT_PROBE =
-    'const a = await import("@eidnara/opencode"); const t = await import("@eidnara/opencode/tui"); ' +
-    'const p = await import("@eidnara/pi"); console.log(typeof a.default, typeof t, typeof p.default)';
+// Exits non-zero unless each package exposes the entry point its host loads.
+// OpenCode reads `{ id, server }` from the root export and `{ id, tui }` from `./tui`.
+// Pi calls the default export with its extension API.
+const IMPORT_PROBE = [
+    'const a = await import("@eidnara/opencode");',
+    'const t = await import("@eidnara/opencode/tui");',
+    'const p = await import("@eidnara/pi");',
+    "const problems = [];",
+    'if (typeof a.default?.id !== "string" || typeof a.default?.server !== "function")',
+    '    problems.push("@eidnara/opencode default lacks { id, server }");',
+    'if (typeof t.default?.id !== "string" || typeof t.default?.tui !== "function")',
+    '    problems.push("@eidnara/opencode/tui default lacks { id, tui }");',
+    'if (typeof p.default !== "function") problems.push("@eidnara/pi default is not callable");',
+    "if (problems.length > 0) { console.error(problems.join(\"\\n\")); process.exit(1); }",
+    'console.log("opencode, opencode/tui, pi");',
+].join("\n");
 const START_TIMEOUT_MS = 180_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
 
@@ -177,14 +220,25 @@ function matches(entry: string, pattern: Pattern): boolean {
     return typeof pattern === "string" ? entry === pattern : pattern.test(entry);
 }
 
-function assertEntries(name: string, entries: string[], ships: Pattern[], omits: RegExp[]): void {
-    for (const pattern of ships) {
+function assertEntries(name: string, entries: string[], rule: Partial<TarballRule>): void {
+    if (rule.allows !== undefined) {
+        const allows = rule.allows;
+        const strays = entries.filter(
+            (entry) => !allows.some((pattern) => matches(entry, pattern)),
+        );
+        assert(
+            strays.length === 0,
+            `${name} ships only allowlisted files`,
+            strays.slice(0, 5).join(", "),
+        );
+    }
+    for (const pattern of rule.ships ?? []) {
         assert(
             entries.some((entry) => matches(entry, pattern)),
             `${name} ships ${pattern}`,
         );
     }
-    for (const pattern of omits) {
+    for (const pattern of rule.omits ?? []) {
         const hits = entries.filter((entry) => pattern.test(entry));
         assert(hits.length === 0, `${name} omits ${pattern}`, hits.slice(0, 5).join(", "));
     }
@@ -241,8 +295,9 @@ function parseBunLock(path: string): Record<string, unknown[]> {
     return lock.packages ?? {};
 }
 
+/** Runs the installed bin as a user would: through its mode bits and `#!/usr/bin/env node`. */
 function daemon(cli: string, project: string, action: string, timeoutMs = DEFAULT_TIMEOUT_MS) {
-    const result = run(["node", cli, "daemon", action, "--json"], { cwd: project, timeoutMs });
+    const result = run([cli, "daemon", action, "--json"], { cwd: project, timeoutMs });
     let parsed: Record<string, unknown> = {};
     try {
         parsed = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
@@ -291,7 +346,9 @@ function main(): void {
         mkdirSync(dir, { recursive: true });
     }
     const cli = join(project, "node_modules", ".bin", "eidnara");
-    let started = false;
+    // A start that times out after `eidnara-host` has spawned leaves a daemon
+    // behind with no result to report, so cleanup keys off the attempt, not the outcome.
+    let startAttempted = false;
     let stopped = false;
     try {
         const build = run(["bun", "run", "build"], {
@@ -327,7 +384,7 @@ function main(): void {
             listings[name] = listed.stdout.split("\n").filter((line) => line.length > 0);
         }
         for (const [name, rule] of Object.entries(TARBALL_RULES)) {
-            assertEntries(name, listings[name] ?? [], rule.ships, rule.omits);
+            assertEntries(name, listings[name] ?? [], rule);
         }
         const payloadEntries = [...(listings[PAYLOAD_PACKAGE] ?? [])].sort();
         assert(
@@ -335,7 +392,9 @@ function main(): void {
             `${PAYLOAD_PACKAGE} ships exactly the payload files`,
             payloadEntries.join(", "),
         );
-        assertEntries("all tarballs", Object.values(listings).flat(), [], FORBIDDEN_EVERYWHERE);
+        assertEntries("all tarballs", Object.values(listings).flat(), {
+            omits: FORBIDDEN_EVERYWHERE,
+        });
 
         for (const [name, path] of Object.entries(tarballs)) {
             const dest = join(extractedDir, name.slice("@eidnara/".length));
@@ -406,18 +465,21 @@ function main(): void {
         const imports = run(["bun", "-e", IMPORT_PROBE], { cwd: project });
         assert(
             imports.code === 0,
-            `bun imports the installed plugins (${imports.stdout.trim()})`,
+            `bun imports the installed plugins with usable entry points (${imports.stdout.trim()})`,
             describe(imports),
         );
 
-        const version = run(["node", cli, "--version"], { cwd: project });
+        // statSync follows the .bin symlink, so this is the mode of the shipped dist/index.js.
+        const cliMode = statSync(cli).mode & 0o777;
+        assert((cliMode & 0o111) !== 0, "installed eidnara bin is executable", cliMode.toString(8));
+        const version = run([cli, "--version"], { cwd: project });
         assert(
             version.code === 0 && version.stdout.trim() === VERSION,
             `eidnara --version prints ${VERSION}`,
             describe(version),
         );
+        startAttempted = true;
         const start = daemon(cli, project, "start", START_TIMEOUT_MS);
-        started = start.result.code === 0;
         assertDaemon("start", start, 0, {
             schema: "eidnara.daemon/v1",
             command: "start",
@@ -440,7 +502,7 @@ function main(): void {
             reason: "not_running",
         });
     } finally {
-        if (started && !stopped) run(["node", cli, "daemon", "stop", "--json"], { cwd: project });
+        if (startAttempted && !stopped) run([cli, "daemon", "stop", "--json"], { cwd: project });
         if (keep) console.log(`kept ${tmpRoot}`);
         else rmSync(tmpRoot, { recursive: true, force: true });
     }

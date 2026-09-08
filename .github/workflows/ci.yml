@@ -25,7 +25,7 @@ jobs:
   gates:
     name: gates
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       # actions/checkout v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -193,16 +193,6 @@ jobs:
 
       - name: Rust toolchain
         run: rustup toolchain install 1.98 --profile minimal --component rustfmt
-
-      # Swatinem/rust-cache v2.9.2
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-
-      - name: Payload and tarball smoke
-        run: |
-          cargo +1.98 build -p daemon --bin eidnara-host --locked
-          bun run --cwd packages/shm-native build:native
-          bun run payload:dev
-          bun run smoke:tarballs
 
       - name: Rust format
         run: |
@@ -429,7 +419,7 @@ jobs:
   native-addon:
     name: native addon package (Bun)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       # The claimed-target flag makes an addon-load failure fail the suite
       # instead of skipping the tests that need the artifact.
@@ -464,6 +454,12 @@ jobs:
           bun run --cwd packages/shm-native test
           bun run --cwd packages/shm-native test:capability:bun
           bun run --cwd packages/opencode-plugin test src/shared/host-client
+
+      - name: Payload and tarball smoke
+        run: |
+          cargo +1.98 build -p daemon --bin eidnara-host --locked
+          bun run payload:dev
+          bun run smoke:tarballs
 
   unlocked-deps:
     name: pinned toolchain with unlocked latest dependencies
