@@ -31,6 +31,9 @@ export interface SubstituteResult {
 
 const ENV_PATTERN = /\{env:([^}]+)\}/g;
 const FILE_PATTERN = /\{file:([^}]+)\}/g;
+/** A file token whose path may embed complete `{env:...}` groups; `FILE_PATTERN` only needs to detect the token's presence. */
+const NESTED_FILE_PATTERN = /\{file:((?:[^{}]|\{(?!env:)|\{env:[^{}]*\})+)\}/g;
+const PLACEHOLDER_PATTERN = /\uE000eidnara:(\d+)\uE000/g;
 
 /** `path.relative` applies the platform's separator and case rules, so a descendant is detected on Windows as well as POSIX. commentlint: allow(JUDGE) */
 function isWithinDirectory(dir: string, candidate: string): boolean {
@@ -97,95 +100,90 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
     // Strip JSONC comments before substitution to prevent tokens in comments from triggering environment or file reads.
     text = stripJsonComments(text);
 
-    text = text.replace(ENV_PATTERN, (_, rawName: string, offset: number, source: string) => {
+    // Substituted values go in as placeholders and come back out in one final pass, so replacement text is never rescanned: an environment value that spells `{file:...}` stays a value, and file contents that spell `{env:...}` stay contents. The delimiter is a private-use code point. commentlint: allow(JUDGE)
+    const substitutions: string[] = [];
+    const placeholder = (value: string): string => {
+        substitutions.push(value);
+        return `\uE000eidnara:${substitutions.length - 1}\uE000`;
+    };
+
+    const envValue = (rawName: string): string | undefined => {
         const varName = rawName.trim();
         const value = varName ? process.env[varName] : undefined;
         if (value === undefined || value === "") {
             warnings.push(
                 `Environment variable ${varName} is not set (referenced via {env:${varName}}); using empty string`,
             );
-            return "";
+            return undefined;
         }
-
-        // Inside a still-open `{file:` token the value is a path fragment the file pass reads verbatim, so JSON escaping there would turn a `"` or `\` in a directory name into a path that does not exist. commentlint: allow(JUDGE)
-        const fileTokenStart = source.lastIndexOf("{file:", offset);
-        const insideFileToken =
-            fileTokenStart !== -1 && !source.slice(fileTokenStart, offset).includes("}");
-        if (insideFileToken) return value;
-
-        return JSON.stringify(value).slice(1, -1);
-    });
-
-    const fileMatches = Array.from(text.matchAll(FILE_PATTERN));
-    if (fileMatches.length === 0) {
-        return { text, warnings };
-    }
+        return value;
+    };
 
     const configDir = input.configPath ? dirname(input.configPath) : process.cwd();
 
-    let output = "";
-    let cursor = 0;
+    // A file token's path may embed `{env:...}` groups, and each group's value is a raw path fragment that may itself contain `}`; matching the groups as units keeps such a value from ending the token early. commentlint: allow(JUDGE)
+    text = text.replace(
+        NESTED_FILE_PATTERN,
+        (token, rawPath: string, index: number, source: string) => {
+            const lineStart = source.lastIndexOf("\n", index - 1) + 1;
+            const prefix = source.slice(lineStart, index).trimStart();
+            if (prefix.startsWith("//")) return token;
 
-    for (const match of fileMatches) {
-        const token = match[0];
-        const rawPath = match[1] ?? "";
-        const index = match.index ?? 0;
+            let filePath = rawPath
+                .replace(ENV_PATTERN, (_, rawName: string) => envValue(rawName) ?? "")
+                .trim();
+            if (filePath.startsWith("~/")) {
+                filePath = resolve(homedir(), filePath.slice(2));
+            } else if (!isAbsolute(filePath)) {
+                filePath = resolve(configDir, filePath);
+            }
 
-        output += text.slice(cursor, index);
-        cursor = index + token.length;
+            // Inlining a sensitive file exposes its contents in the substituted config.
+            const sensitiveReason = sensitiveFilePathReason(filePath);
+            if (sensitiveReason) {
+                warnings.push(
+                    `${token} resolves to a sensitive path (${sensitiveReason}: ${filePath}); ` +
+                        "inlining its contents into config — make sure this is intentional.",
+                );
+            }
 
-        const lineStart = text.lastIndexOf("\n", index - 1) + 1;
-        const prefix = text.slice(lineStart, index).trimStart();
-        if (prefix.startsWith("//")) {
-            output += token;
-            continue;
-        }
+            if (!existsSync(filePath)) {
+                warnings.push(
+                    `File not found for ${token} (resolved to ${filePath}); using empty string`,
+                );
+                return "";
+            }
 
-        let filePath = rawPath.trim();
-        if (filePath.startsWith("~/")) {
-            filePath = resolve(homedir(), filePath.slice(2));
-        } else if (!isAbsolute(filePath)) {
-            filePath = resolve(configDir, filePath);
-        }
+            let contents: string;
+            try {
+                contents = readFileSync(filePath, "utf-8").trim();
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                warnings.push(
+                    `Failed to read file for ${token} (${filePath}): ${message}; using empty string`,
+                );
+                return "";
+            }
 
-        // Inlining a sensitive file exposes its contents in the substituted config.
-        // Inlining a sensitive file exposes its contents in the substituted config.
-        const sensitiveReason = sensitiveFilePathReason(filePath);
-        if (sensitiveReason) {
-            warnings.push(
-                `${token} resolves to a sensitive path (${sensitiveReason}: ${filePath}); ` +
-                    "inlining its contents into config — make sure this is intentional.",
-            );
-        }
+            if (contents === "") {
+                warnings.push(`File for ${token} (${filePath}) is empty; using empty string`);
+                return "";
+            }
 
-        if (!existsSync(filePath)) {
-            warnings.push(
-                `File not found for ${token} (resolved to ${filePath}); using empty string`,
-            );
-            continue;
-        }
+            // JSON-escape substitutions so quotes, backslashes, and line breaks survive JSONC parsing.
+            // `slice(1, -1)` removes `JSON.stringify`'s outer quotes so the substitution remains inside the caller's string literal.
+            return placeholder(JSON.stringify(contents).slice(1, -1));
+        },
+    );
 
-        let contents: string;
-        try {
-            contents = readFileSync(filePath, "utf-8").trim();
-        } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            warnings.push(
-                `Failed to read file for ${token} (${filePath}): ${message}; using empty string`,
-            );
-            continue;
-        }
+    text = text.replace(ENV_PATTERN, (_, rawName: string) => {
+        const value = envValue(rawName);
+        return value === undefined ? "" : placeholder(JSON.stringify(value).slice(1, -1));
+    });
 
-        if (contents === "") {
-            warnings.push(`File for ${token} (${filePath}) is empty; using empty string`);
-            continue;
-        }
-
-        // JSON-escape substitutions so quotes, backslashes, and line breaks survive JSONC parsing.
-        // `slice(1, -1)` removes `JSON.stringify`'s outer quotes so the substitution remains inside the caller's string literal.
-        output += JSON.stringify(contents).slice(1, -1);
-    }
-
-    output += text.slice(cursor);
-    return { text: output, warnings };
+    text = text.replace(
+        PLACEHOLDER_PATTERN,
+        (_, index: string) => substitutions[Number(index)] ?? "",
+    );
+    return { text, warnings };
 }

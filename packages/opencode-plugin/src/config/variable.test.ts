@@ -320,6 +320,44 @@ describe("substituteConfigVariables", () => {
             );
             expect(result.warnings).toHaveLength(0);
         });
+
+        it("a closing brace in an env-supplied directory does not end the {file:} token early", () => {
+            const bracedDir = join(tmpDir, "a}b");
+            mkdirSync(bracedDir);
+            writeFileSync(join(bracedDir, "secret.txt"), "braced-dir-value");
+            process.env.EIDNARA_FILE_DIR = bracedDir;
+
+            const input = `{ "api_key": "{file:{env:EIDNARA_FILE_DIR}/secret.txt}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "braced-dir-value" }`);
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("an env value that spells a {file:} token is inlined as text, never read as a file", () => {
+            const keyFile = join(tmpDir, "must-not-be-read.txt");
+            writeFileSync(keyFile, "leaked");
+            process.env.EIDNARA_TEST_KEY = `{file:${keyFile}}`;
+
+            const input = `{ "api_key": "{env:EIDNARA_TEST_KEY}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "{file:${keyFile}}" }`);
+            expect(result.text).not.toContain("leaked");
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("file contents that spell an {env:} token are inlined as text, never expanded", () => {
+            process.env.EIDNARA_TEST_KEY = "must-not-expand";
+            const keyFile = join(tmpDir, "template.txt");
+            writeFileSync(keyFile, "{env:EIDNARA_TEST_KEY}");
+
+            const input = `{ "template": "{file:${keyFile}}" }`;
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "template": "{env:EIDNARA_TEST_KEY}" }`);
+            expect(result.warnings).toHaveLength(0);
+        });
     });
 
     describe("no-op cases", () => {

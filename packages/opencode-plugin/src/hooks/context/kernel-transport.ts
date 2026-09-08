@@ -135,15 +135,24 @@ function liveTransport(connectionFile: string | undefined): KernelTransport {
     };
 }
 
+/** Writes through the view touch the project first, so a bucket a retained client fills in a replacement state is tracked by `tokenProjectOrder` and stays subject to `MAX_TOKEN_CACHE_PROJECTS`. commentlint: allow(JUDGE) */
 function liveTokenStore(connectionFile: string | undefined): TokenStore {
+    const writable = (root: string): TokenCache => {
+        const state = liveState(connectionFile);
+        touchTokenProject(state, root);
+        return state.tokens;
+    };
     return {
-        remember: (root, rows, knownAsOf) =>
-            liveState(connectionFile).tokens.remember(root, rows, knownAsOf),
+        remember: (root, rows, knownAsOf) => writable(root).remember(root, rows, knownAsOf),
         rememberTokens: (root, tokens, knownAsOf) =>
-            liveState(connectionFile).tokens.rememberTokens(root, tokens, knownAsOf),
+            writable(root).rememberTokens(root, tokens, knownAsOf),
         get: (root, objectId) => liveState(connectionFile).tokens.get(root, objectId),
         knownAsOfFor: (root) => liveState(connectionFile).tokens.knownAsOfFor(root),
-        dropProject: (root) => liveState(connectionFile).tokens.dropProject(root),
+        dropProject: (root) => {
+            const state = liveState(connectionFile);
+            state.tokenProjectOrder.delete(root);
+            state.tokens.dropProject(root);
+        },
         size: (root) => liveState(connectionFile).tokens.size(root),
     };
 }
@@ -216,6 +225,13 @@ export function kernelClientResolver(config: KernelClientConfig): KernelClientRe
     return ({ sessionId, projectRoot }) => createKernelClient({ sessionId, projectRoot, config });
 }
 
+/** Releases every route the shared transport for `config` holds for `sessionId`. Each session's first call opens a host route per project root, and the host's route capacity is finite and shared across connections, so a long-lived process that serves many sessions must release them at session end rather than at connection teardown. A connection file with no live shared state has no routes to release. commentlint: allow(JUDGE) */
+export function closeKernelSession(config: KernelClientConfig, sessionId: string): void {
+    sharedByConnectionFile
+        .get(connectionFileKey(config.subc?.connection_file))
+        ?.module.closeSession(sessionId);
+}
+
 /** Disconnects every shared transport and drops the shared token caches between test cases; a test that dialed would otherwise leave its socket and route cache to the next one. commentlint: allow(JUDGE) */
 export function resetKernelClientsForTest(): void {
     for (const shared of sharedByConnectionFile.values()) shared.module.disconnect();
@@ -225,4 +241,9 @@ export function resetKernelClientsForTest(): void {
 /** `sharedByConnectionFile` orders live connection-file states from least to most recently resolved. */
 export function sharedConnectionFilesForTest(): string[] {
     return [...sharedByConnectionFile.keys()];
+}
+
+/** The live shared transport for `config`, or `undefined` when no enabled client has resolved it. */
+export function sharedModuleForTest(config: KernelClientConfig): HostModuleTransport | undefined {
+    return sharedByConnectionFile.get(connectionFileKey(config.subc?.connection_file))?.module;
 }

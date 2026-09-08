@@ -10,12 +10,14 @@ import {
     TokenCache,
 } from "../../shared/kernel-client";
 import {
+    closeKernelSession,
     createKernelClient,
     createKernelTransport,
     MAX_CONNECTION_FILE_STATES,
     MAX_TOKEN_CACHE_PROJECTS,
     resetKernelClientsForTest,
     sharedConnectionFilesForTest,
+    sharedModuleForTest,
 } from "./kernel-transport";
 import { HostModuleTransport, type ManagedDemandStart } from "./module-transport";
 
@@ -255,6 +257,62 @@ describe("shared transport eviction", () => {
         });
         const result = await disabled.read({ surface: "auto_inject" });
         expect(result.state).toEqual({ kind: "disabled" });
+    });
+
+    test("buckets a retained client fills in a replacement state stay under the project cap", () => {
+        const roots = Array.from(
+            { length: MAX_TOKEN_CACHE_PROJECTS + 1 },
+            (_, index) => `/repo/retained-${index}`,
+        );
+        const retained = roots.map((root) =>
+            createKernelClient({
+                sessionId: SESSION,
+                projectRoot: root,
+                config: config(files[0] as string),
+            }),
+        );
+        // Evict the state every retained client was resolved against.
+        for (const file of files.slice(1)) {
+            createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: config(file) });
+        }
+        // Each retained client's write recreates and fills the replacement state through its view, never through `createKernelClient`.
+        retained.forEach((client, index) => {
+            client.tokens.rememberTokens(
+                roots[index] as string,
+                [{ object_id: "mem", known_as_of: index + 1 }],
+                index + 1,
+            );
+        });
+        // The oldest bucket was tracked and evicted when the cap was exceeded; the newest survives.
+        expect(retained[0]?.tokens.get(roots[0] as string, "mem")).toBeUndefined();
+        expect(
+            retained[MAX_TOKEN_CACHE_PROJECTS]?.tokens.get(
+                roots[MAX_TOKEN_CACHE_PROJECTS] as string,
+                "mem",
+            ),
+        ).toEqual({ object_id: "mem", known_as_of: MAX_TOKEN_CACHE_PROJECTS + 1 });
+    });
+});
+
+describe("closeKernelSession", () => {
+    afterEach(() => {
+        resetKernelClientsForTest();
+    });
+
+    test("releases the shared transport's routes for the session and is a no-op for an unresolved connection file", () => {
+        const config = { subc: { connection_file: MISSING_CONNECTION_FILE } };
+        createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config });
+        const shared = sharedModuleForTest(config);
+        if (!shared) throw new Error("the resolved client must have a shared transport");
+        const closed: string[] = [];
+        shared.closeSession = (sessionId: string) => {
+            closed.push(sessionId);
+        };
+
+        closeKernelSession(config, SESSION);
+        closeKernelSession({ subc: { connection_file: "/tmp/never-resolved.json" } }, SESSION);
+
+        expect(closed).toEqual([SESSION]);
     });
 });
 
