@@ -232,7 +232,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
 
     const systemPromptHash = createSystemPromptHashHandler({
         promptSurface: deps.config.prompt_surface,
-        promptSurfaceRuntime: deps.promptSurfaceRuntime,
         resolveModel: resolveLiveModel,
         isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
         historyRefreshSessions,

@@ -45,8 +45,8 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
     ].join("\n");
 }
 
-function assemble(header: string, parts: readonly string[]): string {
-    return `${header}\n\n${parts.join("\n\n")}`;
+function assemble(sections: readonly string[]): string {
+    return sections.join("\n\n");
 }
 
 export type ExplicitDeliveryReason = "delivered" | "empty-results" | "packer-empty";
@@ -64,14 +64,22 @@ export interface PackedSearchResults {
 /**
  * The packer appends an omission notice when it excludes result blocks.
  * Empty results and failure to fit any block produce an empty delivery rather than an error.
+ *
+ * `preamble` renders ahead of the results and counts against `MAX_RENDERED_RESULT_TOKENS`;
+ * `tokenCount` includes `preamble` and all rendered result content.
  */
 export function packSearchResults(
     query: string,
     results: KernelMemorySearchResult[],
+    preamble?: string,
 ): PackedSearchResults {
     const boundedQuery = boundDynamicField(query);
+    const lead = preamble ? [preamble] : [];
     if (results.length === 0) {
-        const text = `No results found for "${boundedQuery}" in project memories.`;
+        const text = assemble([
+            ...lead,
+            `No results found for "${boundedQuery}" in project memories.`,
+        ]);
         return {
             text,
             delivered: [],
@@ -84,7 +92,7 @@ export function packSearchResults(
     const header = `Found ${results.length} result${results.length === 1 ? "" : "s"} for "${boundedQuery}":`;
     const blocks = results.map((result, index) => formatResult(result, index + 1));
 
-    const full = assemble(header, blocks);
+    const full = assemble([...lead, header, ...blocks]);
     const fullTokens = estimateTokens(full);
     if (fullTokens <= MAX_RENDERED_RESULT_TOKENS) {
         return {
@@ -99,7 +107,7 @@ export function packSearchResults(
     const noticeFor = (omitted: number) =>
         `(${omitted} result${omitted === 1 ? "" : "s"} omitted to fit the output budget — refine the query or lower the limit)`;
     const candidateFor = (kept: number) =>
-        assemble(header, [...blocks.slice(0, kept), noticeFor(results.length - kept)]);
+        assemble([...lead, header, ...blocks.slice(0, kept), noticeFor(results.length - kept)]);
 
     const bestIndex = binarySearchLargestFit(
         results.length - 2,
@@ -117,7 +125,7 @@ export function packSearchResults(
         };
     }
 
-    const text = assemble(header, [noticeFor(results.length)]);
+    const text = assemble([...lead, header, noticeFor(results.length)]);
     return {
         text,
         delivered: [],

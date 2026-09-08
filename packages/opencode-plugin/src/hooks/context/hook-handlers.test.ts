@@ -74,14 +74,16 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
                 }),
             },
             session: {
-                get: async () => ({ data: { agent: "build" } }),
+                get: async () => ({ data: {} }),
             },
         } as never;
         const { hook, calls } = createForwardingHook({ client });
 
+        // The hook forwards the input's agent; the SDK session payload carries none.
         await hook({
             tool: "todowrite",
             sessionID: "ses-denied-capture",
+            agent: "build",
             args: {
                 todos: [{ status: "pending", priority: "high", content: "Must not capture" }],
             },
@@ -93,6 +95,7 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
         await hook({
             tool: "mcp_Todowrite",
             sessionID: "ses-denied-capture",
+            agent: "build",
             args: {
                 todos: [{ status: "pending", priority: "high", content: "Still refuse" }],
             },
@@ -102,6 +105,7 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
         await hook({
             tool: "todowrite",
             sessionID: "ses-denied-capture",
+            agent: "build",
             args: {
                 todos: [{ status: "pending", priority: "high", content: "Capture now" }],
             },

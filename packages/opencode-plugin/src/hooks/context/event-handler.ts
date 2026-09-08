@@ -6,6 +6,7 @@ import {
     type ContextUsage,
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
+    getMessageUpdatedInfo,
     getSessionCreatedInfo,
     getSessionErrorInfo,
     getSessionProperties,
@@ -39,6 +40,18 @@ export interface EventHandlerDeps {
 
 /** Hidden Eidnara child sessions carry this title prefix at creation. */
 const INTERNAL_CHILD_TITLE_PREFIX = "eidnara-";
+
+/** Bounds retained child session IDs when deletion events are absent; matches the plugin's other per-session caps. */
+const CHILD_SESSION_CAPACITY = 1000;
+
+/** Adds `sessionId` and drops the oldest entry once the set is full; `Set` iterates in insertion order. */
+function addBoundedSession(sessions: Set<string>, sessionId: string): void {
+    if (!sessions.has(sessionId) && sessions.size >= CHILD_SESSION_CAPACITY) {
+        const oldest = sessions.values().next().value;
+        if (oldest !== undefined) sessions.delete(oldest);
+    }
+    sessions.add(sessionId);
+}
 
 function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry>): void {
     const now = Date.now();
@@ -79,9 +92,9 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
-            const isChild = info.parentID.length > 0;
-            if (isChild) {
-                deps.subagentSessions?.add(info.id);
+            const isChild = (info.parentID ?? "").length > 0;
+            if (isChild && deps.subagentSessions) {
+                addBoundedSession(deps.subagentSessions, info.id);
             }
 
             // The handler adds hidden sessions titled `eidnara-` to `internalChildSessions` so transform and system-prompt hooks exempt them; the set is not persisted across restarts.
@@ -91,7 +104,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 typeof info.title === "string" &&
                 info.title.startsWith(INTERNAL_CHILD_TITLE_PREFIX)
             ) {
-                deps.internalChildSessions.add(info.id);
+                addBoundedSession(deps.internalChildSessions, info.id);
                 sessionLog(
                     info.id,
                     `marked internal eidnara child (title="${info.title}") — exempt from transform + injection`,
@@ -114,26 +127,32 @@ export function createEventHandler(deps: EventHandlerDeps) {
         }
 
         if (input.event.type === "message.updated") {
-            const info = getMessageUpdatedAssistantInfo(input.event.properties);
-            if (!info) {
+            const updated = getMessageUpdatedInfo(input.event.properties);
+            if (!updated) {
                 const sessionId = properties ? resolveSessionId(properties) : null;
                 if (sessionId) {
                     sessionLog(
                         sessionId,
-                        "event message.updated: no assistant info extracted from event",
+                        "event message.updated: no message info extracted from event",
                     );
                 } else {
-                    log("[eidnara] event message.updated: no assistant info extracted from event");
+                    log("[eidnara] event message.updated: no message info extracted from event");
                 }
                 return;
             }
 
-            // Streaming, edited, or retried messages carry stale cached token estimates; a missing message ID widens the invalidation to the whole session.
+            // Streaming, edited, or retried messages of any role carry stale cached token estimates; a missing message ID widens the invalidation to the whole session.
             invalidateTrueRawTokenCache({
-                sessionId: info.sessionID,
-                messageId: info.messageID,
+                sessionId: updated.sessionID,
+                messageId: updated.messageID,
                 reason: "message.updated",
             });
+
+            // Usage and overflow live on assistant messages only.
+            const info = getMessageUpdatedAssistantInfo(input.event.properties);
+            if (!info) {
+                return;
+            }
 
             // OpenCode may report overflow through `session.error` or the assistant message error; either can arrive first or be absent.
             if (info.error !== undefined && info.error !== null) {

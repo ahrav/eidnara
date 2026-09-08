@@ -8,7 +8,6 @@
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import {
     isAvailable,
-    MAX_READ_OBJECT_IDS,
     type MemoryState,
     type ReadRow,
     renderToolStateText,
@@ -113,10 +112,10 @@ export async function executeCtxSearch(
         results: KernelMemorySearchResult[],
         memoryNote?: string,
     ): CtxSearchExecution => {
-        const packed = packSearchResults(query, results);
+        const packed = packSearchResults(query, results, memoryNote);
         return {
             status: "complete",
-            text: memoryNote ? `${memoryNote}\n\n${packed.text}` : packed.text,
+            text: packed.text,
             prePack: results,
             delivered: packed.delivered,
             tokenCount: packed.tokenCount,
@@ -138,19 +137,18 @@ export async function executeCtxSearch(
         sessionId: toolContext.sessionID,
         projectRoot,
     });
-    // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits on byte-budget truncation so every named id resolves or is reported unresolved by name. A pasted list over the filter bound falls back to the unfiltered snapshot instead of failing the search. commentlint: allow(JUDGE)
+    // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name. commentlint: allow(JUDGE)
     const idQuery = parseObjectIdQuery(query);
-    const filteredIds = idQuery && idQuery.length <= MAX_READ_OBJECT_IDS ? idQuery : null;
     let memoryRows: ReadRow[] = [];
     let memoryState: MemoryState | null = null;
     let memoryTruncated = false;
     let unresolvedObjectIds: string[] = [];
-    if (filteredIds) {
+    if (idQuery) {
         const read = await readObjectRowsChunked({
             client,
             surface: "explicit_search",
             gated: true,
-            objectIds: filteredIds,
+            objectIds: idQuery,
             ...(toolContext.abort ? { signal: toolContext.abort } : {}),
         });
         if (read.ok) {
