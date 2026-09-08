@@ -58,6 +58,23 @@ describe("smart-note readFile capability", () => {
         });
     });
 
+    test("keeps leading and trailing whitespace in names and rejects blank input", async () => {
+        await withTempDir(async (dir) => {
+            await writeFile(path.join(dir, "status.txt"), "plain", "utf8");
+            await writeFile(path.join(dir, " status.txt"), "leading space", "utf8");
+            await writeFile(path.join(dir, "status.txt "), "trailing space", "utf8");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.readFile("status.txt")).toBe("plain");
+            expect(await cap.readFile(" status.txt")).toBe("leading space");
+            expect(await cap.readFile("status.txt ")).toBe("trailing space");
+            expect(await cap.readFile("   ")).toBeNull();
+            expect(await cap.readFile("")).toBeNull();
+        });
+    });
+
     test("accepts in-tree names whose first component begins with dots", async () => {
         await withTempDir(async (dir) => {
             await mkdir(path.join(dir, "..generated"));
@@ -166,6 +183,19 @@ describe("smart-note git capabilities", () => {
                 signal: new AbortController().signal,
             });
             expect(await cap.gitTag()).toBe("v1.2.3");
+        });
+    });
+
+    test("gitTag is null in a repository with commits but no tags", async () => {
+        await withTempDir(async (dir) => {
+            await createTaggedRepository(dir);
+            await git(dir, "tag", "-d", "v1.2.3");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.gitTag()).toBeNull();
+            expect(await cap.gitHeadSha()).toMatch(/^[0-9a-f]{40}$/);
         });
     });
 

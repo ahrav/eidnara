@@ -164,6 +164,34 @@ describe("compiled smart-note QuickJS runner", () => {
         expect(followup).toEqual({ ok: true, result: { met: true } });
     });
 
+    test("a guest that catches the aborted host call cannot report success after the timeout", async () => {
+        const swallowing = `function check(cap) {
+            try { cap.httpGet("https://example.test/"); } catch (_) { return { met: true }; }
+            return { met: false };
+        }`;
+        const timedOut = await runCompiledSmartNoteCheck({
+            compiledCheck: swallowing,
+            capabilities: { ...fakeCap, httpGet: () => new Promise(() => {}) },
+            timeoutMs: 100,
+        });
+        expect(timedOut.ok).toBe(false);
+        if (!timedOut.ok) {
+            expect(timedOut.cancelled).toBe(false);
+            expect(timedOut.network).toBe(true);
+        }
+
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new Error("sweep budget exhausted")), 20);
+        const cancelled = await runCompiledSmartNoteCheck({
+            compiledCheck: swallowing,
+            capabilities: { ...fakeCap, httpGet: () => new Promise(() => {}) },
+            signal: controller.signal,
+            timeoutMs: 1_000,
+        });
+        expect(cancelled.ok).toBe(false);
+        if (!cancelled.ok) expect(cancelled.cancelled).toBe(true);
+    });
+
     test("external cancellation of a directly supplied capability reports cancelled", async () => {
         const controller = new AbortController();
         setTimeout(() => controller.abort(new Error("sweep budget exhausted")), 20);

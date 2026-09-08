@@ -170,7 +170,10 @@ async function runCompiledSmartNoteCheckLocked(
     try {
         throwIfRunAborted(controller.signal);
         const capabilities = resolveCapabilitiesForRun(options, controller.signal);
-        const deadline = Date.now() + timeoutMs;
+        // The timer cannot fire while a synchronous guest loop holds the thread, so the interrupt
+        // predicate is the only stop for that loop; a monotonic clock keeps a wall-clock step from
+        // stretching the budget.
+        const deadline = performance.now() + timeoutMs;
         const quickjs = await getAsyncModule();
         throwIfRunAborted(controller.signal);
         const context = quickjs.newContext();
@@ -178,11 +181,13 @@ async function runCompiledSmartNoteCheckLocked(
             context.runtime.setMemoryLimit(options.heapLimitBytes ?? DEFAULT_HEAP_LIMIT_BYTES);
             context.runtime.setMaxStackSize(options.stackLimitBytes ?? DEFAULT_STACK_LIMIT_BYTES);
             context.runtime.setInterruptHandler(
-                () => controller.signal.aborted || Date.now() > deadline,
+                () => controller.signal.aborted || performance.now() > deadline,
             );
             installCapabilityObject(context, capabilities, controller.signal);
             disableAmbientDynamicCode(context);
             const result = await evalCheck(context, options.compiledCheck);
+            // A guest `try/catch` around a host call can swallow the abort and return a value.
+            if (controller.signal.aborted) throw smartNoteAbortError(controller.signal);
             const checkResult = result as { met?: unknown } | null;
             if (!checkResult || typeof checkResult.met !== "boolean") {
                 return failureResult("check() must return { met: boolean }", false);

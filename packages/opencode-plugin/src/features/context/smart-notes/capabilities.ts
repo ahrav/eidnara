@@ -70,12 +70,9 @@ export function createSmartNoteCapabilities(
             guardedReadFile(projectRoot, repoRelativePath, options.signal, fileLimitBytes),
         gitHeadSha: () => runGitScalar(projectRoot, ["rev-parse", "HEAD"], options.signal),
         // `--dirty[=<mark>]` appends `<mark>` to the tag when the worktree is dirty, so any value corrupts the tag; omit it.
+        // `--always` would substitute the commit id when no tag exists; an untagged repository yields `null`.
         gitTag: () =>
-            runGitScalar(
-                projectRoot,
-                ["describe", "--tags", "--abbrev=0", "--always"],
-                options.signal,
-            ),
+            runGitScalar(projectRoot, ["describe", "--tags", "--abbrev=0"], options.signal),
         gitLog: (opts) => guardedGitLog(projectRoot, opts, options.signal),
         httpGet: (url) =>
             guardedSmartNoteHttpGet(url, { signal: options.signal, resolver: options.resolver }),
@@ -118,8 +115,9 @@ export function isSecretDeniedPath(repoRelativePath: string): boolean {
 }
 
 export function normalizeRepoPath(repoRelativePath: string): string {
-    const slash = repoRelativePath.replace(/\\/g, "/").trim();
-    if (!slash || slash.startsWith("/") || /^[a-zA-Z]:\//.test(slash)) return "";
+    // Leading and trailing whitespace are part of a valid name; only a blank input is rejected.
+    const slash = repoRelativePath.replace(/\\/g, "/");
+    if (!slash.trim() || slash.startsWith("/") || /^[a-zA-Z]:\//.test(slash)) return "";
     const normalized = path.posix.normalize(slash);
     if (normalized === "." || normalized.startsWith("../") || normalized === "..") return "";
     return normalized;
