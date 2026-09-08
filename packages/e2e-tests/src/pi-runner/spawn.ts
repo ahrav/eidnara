@@ -254,11 +254,23 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
     writeFileSync(userConfigPath, JSON.stringify(eidnara, null, 2));
 }
 
+/**
+ * Markers a parent Eidnara process leaves in the environment.
+ * `EIDNARA_PI_SUBAGENT=1` prevents tool registration.
+ * `EIDNARA_MODULE_ID` and `EIDNARA_LAUNCH_NONCE` cause host identity rejection.
+ */
+const INHERITED_ROLE_MARKERS = new Set([
+    "EIDNARA_PI_SUBAGENT",
+    "EIDNARA_MODULE_ID",
+    "EIDNARA_LAUNCH_NONCE",
+]);
+
 export function childEnv(env: PiIsolatedEnv): Record<string, string> {
     const result: Record<string, string> = {};
     for (const [key, value] of Object.entries(process.env)) {
         if (value === undefined) continue;
         if (key === "NODE_ENV") continue;
+        if (INHERITED_ROLE_MARKERS.has(key)) continue;
         result[key] = value;
     }
     result.PI_CODING_AGENT_DIR = env.agentDir;

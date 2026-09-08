@@ -274,6 +274,10 @@ export class PiRpcClient {
         child.stderr?.on("data", (chunk: Buffer) => {
             this.stderr += chunk.toString();
         });
+        // A write to a pipe whose reader has exited emits an asynchronous `error` on `stdin`; without a listener, Node treats it as unhandled.
+        child.stdin?.on("error", (error: Error) => {
+            this.protocol.rejectPending(this.stdinWriteError(error));
+        });
         if (!child.stdout) throw new Error("Pi RPC process has no stdout pipe");
         this.stopReadingStdout = attachStrictJsonlReader(child.stdout, (line) => {
             this.protocol.dispatchLine(line);
@@ -319,11 +323,25 @@ export class PiRpcClient {
         if (child.exitCode !== null || child.signalCode !== null) {
             throw this.exitError ?? this.processExitError(child.exitCode, child.signalCode);
         }
-        return this.protocol.sendCommand<T>((line) => stdin.write(line), method, params, opts);
+        // Reject pending requests when a stdin write fails because no pending command can complete after the pipe closes.
+        return this.protocol.sendCommand<T>(
+            (line) => {
+                stdin.write(line, (error) => {
+                    if (error) this.protocol.rejectPending(this.stdinWriteError(error));
+                });
+            },
+            method,
+            params,
+            opts,
+        );
     }
 
     getStderr(): string {
         return this.stderr;
+    }
+
+    private stdinWriteError(error: Error): Error {
+        return new Error(`Pi RPC stdin write failed: ${error.message}\n${this.stderr}`);
     }
 
     /** Both fields are `null` while the child is alive; either one is set once it has exited. */
