@@ -317,12 +317,14 @@ function nearestLastKnownGitIdentity(
     canonical: string,
 ): { identity: string; source: string } | undefined {
     const visited = new Set<string>();
+    // The walk stops at the directory's own Git root: an ancestor above it belongs to an enclosing repository whose identity is not this one's.
     const walk = (start: string): { identity: string; source: string } | undefined => {
         let current = start;
         while (!visited.has(current)) {
             visited.add(current);
             const cached = lastKnownGitIdentity(current);
             if (cached !== undefined) return { identity: cached, source: current };
+            if (existsSync(path.join(current, ".git"))) break;
             const parent = path.dirname(current);
             if (parent === current) break;
             current = parent;

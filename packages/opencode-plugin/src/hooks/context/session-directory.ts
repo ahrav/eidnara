@@ -58,7 +58,12 @@ export async function resolveSessionDirectory(
     return pin(deps, sessionId, fallback);
 }
 
+/** The first resolution to reach `pin` wins; later resolutions return its cached directory. */
 function pin(deps: SessionDirectoryDeps, sessionId: string, directory: string): string {
-    deps.sessionDirectoryBySession?.set(sessionId, directory);
+    const cache = deps.sessionDirectoryBySession;
+    if (!cache) return directory;
+    const installed = cache.get(sessionId);
+    if (installed !== undefined) return installed;
+    cache.set(sessionId, directory);
     return directory;
 }

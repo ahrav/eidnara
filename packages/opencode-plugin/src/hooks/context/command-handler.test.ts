@@ -9,6 +9,7 @@ import {
 import { createEidnaraCommandHandler } from "./command-handler";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
 import type { RustModeModuleClient } from "./rust-mode-transform";
+import { __ignoredNotificationTest } from "./send-session-notification";
 
 interface RecordedCall {
     method: string;
@@ -630,6 +631,50 @@ describe("createEidnaraCommandHandler", () => {
             expect(failure).toBeDefined();
             expect(failure).toContain("session is busy");
             expect(failure).toContain("Ship the migration");
+        });
+
+        it("reports an unconfirmed delivery instead of a lost prompt when the send times out", async () => {
+            const sidekickClient = {
+                session: {
+                    create: mock(async () => ({ data: { id: "sidekick-child" } })),
+                    prompt: mock(async () => undefined),
+                    promptAsync: mock(() => new Promise<never>(() => {})),
+                    messages: mock(async () => ({
+                        data: [
+                            {
+                                info: { role: "assistant", time: { created: Date.now() } },
+                                parts: [{ type: "text", text: "Use Bun for commands" }],
+                            },
+                        ],
+                    })),
+                    delete: mock(async () => ({ data: undefined })),
+                },
+            };
+            const { run, texts } = setup(undefined, {
+                sidekick: {
+                    config: { timeout_ms: 5_000 },
+                    projectPath: "/repo/project",
+                    resolveSessionDirectory: () => "/repo/project",
+                    client: sidekickClient as never,
+                },
+            });
+            __ignoredNotificationTest.setSendTimeoutMs(20);
+            try {
+                await expectSentinel(
+                    run("ctx-aug", "ses-aug-slow", "Ship the migration"),
+                    "ctx-aug",
+                );
+            } finally {
+                __ignoredNotificationTest.reset();
+            }
+
+            const notice = texts().find((text) =>
+                text.startsWith("## /ctx-aug — Delivery unconfirmed"),
+            );
+            expect(notice).toBeDefined();
+            expect(notice).toContain("may still arrive");
+            expect(notice).toContain("Ship the migration");
+            expect(texts().some((text) => text.startsWith("## /ctx-aug — Failed"))).toBe(false);
         });
     });
 

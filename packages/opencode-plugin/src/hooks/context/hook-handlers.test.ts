@@ -114,6 +114,27 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
         expect(calls[0]?.stateJson).toContain("Capture now");
     });
 
+    test("a permission read that never settles falls back to the cached verdict within the deadline", async () => {
+        const client = {
+            app: { agents: () => new Promise<never>(() => {}) },
+            session: { get: async () => ({ data: {} }) },
+        } as never;
+        const { hook, calls } = createForwardingHook({ client });
+
+        const startedAt = performance.now();
+        await hook({
+            tool: "todowrite",
+            sessionID: "ses-permission-hung",
+            agent: "build",
+            args: { todos: [{ status: "pending", priority: "high", content: "Capture anyway" }] },
+        });
+        const elapsedMs = performance.now() - startedAt;
+
+        expect(calls).toHaveLength(1);
+        expect(elapsedMs).toBeGreaterThanOrEqual(1_500);
+        expect(elapsedMs).toBeLessThan(10_000);
+    });
+
     test("multiple todowrite calls forward each snapshot in order", async () => {
         const { hook, calls } = createForwardingHook();
 

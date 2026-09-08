@@ -854,6 +854,13 @@ export function createRustModeTransform(
     const callModule = (args: Parameters<RustModeModuleClient["call"]>[0]): Promise<unknown> =>
         options.moduleClient.call(args);
 
+    /** Thrown before a send when `clearSession` ran during this pass's preflight; the pass serves its input unchanged without counting a failure. */
+    class SessionClearedDuringPass extends Error {
+        constructor(sessionId: string) {
+            super(`rust session ${sessionId} was cleared during the pass`);
+        }
+    }
+
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
         state.consecutiveFailures += 1;
         state.failureCount += 1;
@@ -1354,6 +1361,9 @@ export function createRustModeTransform(
                 );
                 let response: Record<string, unknown> | undefined;
                 for (const [index, { page, bytes }] of pages.entries()) {
+                    // A `session.deleted` that landed during preflight or an earlier page has already queued the daemon-side delete; sending now would recreate the session's durable state.
+                    if (states.get(sessionId) !== state)
+                        throw new SessionClearedDuringPass(sessionId);
                     const transportStartedAt = performance.now();
                     let moduleResponse: unknown;
                     try {
@@ -1610,9 +1620,14 @@ export function createRustModeTransform(
             finishPass(true);
         } catch (error) {
             servedFrom = "raw";
-            if (decision.toLowerCase() !== "need_full_sync") decision = "error";
             materializeReason = "none";
-            markFailure(sessionId, state, error);
+            if (error instanceof SessionClearedDuringPass) {
+                decision = "cleared";
+                sessionLog(sessionId, error.message);
+            } else {
+                if (decision.toLowerCase() !== "need_full_sync") decision = "error";
+                markFailure(sessionId, state, error);
+            }
             replaceMessagesInPlace(output, messages);
             finishPass(false);
             return;

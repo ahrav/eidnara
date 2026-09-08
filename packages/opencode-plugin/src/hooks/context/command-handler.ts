@@ -11,6 +11,7 @@ import {
     type WireTailHygieneBaseline,
 } from "../../shared/tail-hygiene-status";
 import { formatWindowDerivationLine } from "../../shared/window-geometry";
+import { TimeoutError } from "../../shared/with-timeout";
 import { resolveContextWindowGeometry } from "./event-resolvers";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
 import type { RustModeModuleClient } from "./rust-mode-transform";
@@ -331,11 +332,12 @@ async function executeAugmentation(
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         sessionLog(sessionId, `/ctx-aug: failed to send augmented prompt: ${reason}`);
-        await deps.sendNotification(
-            sessionId,
-            `## /ctx-aug — Failed\n\nThe augmented prompt was not sent to the session: ${reason}\n\nYour original prompt was not sent either. Send it again, with or without /ctx-aug:\n\n${prompt}`,
-            {},
-        );
+        // A timed-out send may still have enqueued the turn, so the notice asks the user to look before resending instead of telling them the prompt was lost.
+        const notice =
+            error instanceof TimeoutError
+                ? `## /ctx-aug — Delivery unconfirmed\n\nOpenCode did not confirm the augmented prompt in time: ${reason}\n\nThe prompt may still arrive. If it does not appear in this session, send it again, with or without /ctx-aug:\n\n${prompt}`
+                : `## /ctx-aug — Failed\n\nThe augmented prompt was not sent to the session: ${reason}\n\nYour original prompt was not sent either. Send it again, with or without /ctx-aug:\n\n${prompt}`;
+        await deps.sendNotification(sessionId, notice, {});
     }
 
     throwSentinel("CTX-AUG");

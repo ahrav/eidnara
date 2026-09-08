@@ -88,6 +88,31 @@ describe("resolveSessionDirectory", () => {
         expect([...subagentSessions]).toEqual(["ses-child"]);
     });
 
+    it("keeps the first pin when concurrent first-time callers finish in the other order", async () => {
+        let settleSlow: ((value: { data: { directory: string } }) => void) | undefined;
+        let calls = 0;
+        const get = mock(() => {
+            calls += 1;
+            if (calls === 1) {
+                return new Promise<{ data: { directory: string } }>((resolve) => {
+                    settleSlow = resolve;
+                });
+            }
+            return Promise.resolve({ data: { directory: "/from/sdk" } });
+        });
+        const deps = {
+            client: { session: { get } } as never,
+            directory: "/launch",
+            sessionDirectoryBySession: new Map<string, string>(),
+        };
+        const slow = resolveSessionDirectory(deps, "ses-race");
+        const fast = await resolveSessionDirectory(deps, "ses-race");
+        expect(fast).toBe("/from/sdk");
+        settleSlow?.({ data: { directory: "/other/root" } });
+        expect(await slow).toBe("/from/sdk");
+        expect(deps.sessionDirectoryBySession.get("ses-race")).toBe("/from/sdk");
+    });
+
     it("uses the launch directory when no client is available", async () => {
         expect(await resolveSessionDirectory({ directory: "/launch" }, "ses-none")).toBe("/launch");
         expect(knownSessionDirectory({}, "ses-none")).toBe(process.cwd());

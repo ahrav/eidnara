@@ -195,6 +195,27 @@ describe("project identity", () => {
         expect(resolveProjectIdentity(link)).toBe(expectedDirIdentity(target));
     });
 
+    it("does not reuse an enclosing repository's identity for a nested repository during a transient failure", () => {
+        const outer = makeRepoWithGitMetadata("project-identity-outer-");
+        const nested = join(outer, "vendor", "child");
+        mkdirSync(join(nested, ".git"), { recursive: true });
+        let failNested = false;
+        const execMock = mock((_file: string, _args: string[], options: { cwd?: string }) => {
+            if (options.cwd === realpathSync.native(nested) || options.cwd === nested) {
+                if (failNested) throw makeGitFailure({ code: "ETIMEDOUT" });
+                return `${SECOND_ROOT_COMMIT}\n`;
+            }
+            return `${FIRST_ROOT_COMMIT}\n`;
+        });
+        __setProjectIdentityTestHooks({ execFileSync: execMock as unknown as typeof execFileSync });
+
+        expect(resolveProjectIdentity(outer)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        failNested = true;
+
+        expect(resolveProjectIdentity(nested)).not.toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(resolveProjectIdentity(nested)).toBe(expectedDirIdentity(nested));
+    });
+
     it("reuses the last successful git identity during transient failures and cooldown", () => {
         const directory = makeRepoWithGitMetadata("project-identity-last-known-");
         let now = 1_000;
