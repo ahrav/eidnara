@@ -1,5 +1,6 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 
+import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import {
     compileSurfaceCondition,
     conditionCompileReplySuffix,
@@ -167,8 +168,24 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 },
             );
             const sessionId = toolContext.sessionID;
+            // The schema fallback keeps raw arguments, so a non-string `content` or `surface_condition` would throw at `.trim()` before the backend `try` can turn it into a tool error.
+            for (const field of ["content", "surface_condition"] as const) {
+                const value = (args as Record<string, unknown>)[field];
+                if (value !== undefined && value !== null && typeof value !== "string") {
+                    return `Error: '${field}' must be a string.`;
+                }
+            }
             // A string-only check would classify empty content as write and reject it.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
+            // The command id is the daemon ledger's replay key for a redelivered mutation, so
+            // mutations require a host tool-call identity. `read` has no ledger entry.
+            const callId = toolCallIdFromContext(toolContext);
+            if (action !== "read" && !callId) {
+                const outcome =
+                    action === "write" ? "written" : action === "update" ? "updated" : "dismissed";
+                return `Error: ctx_note ${action} requires a stable tool-call identity from the host; the note was not ${outcome}.`;
+            }
+            const commandId = callId ? boundedCommandId(callId) : undefined;
             // When `wakePlaneStatus()` returns `"present"`, scheduled wakes evaluate `surface_condition`.
             const wakePlaneActive =
                 (action === "write" || action === "update") &&
@@ -205,18 +222,17 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             if (!rustNote) {
                 return "Error: Rust notes authority is active, but this module transport does not support ctx_note.";
             }
-            const callId = toolCallIdFromContext(toolContext);
-            const commandId = callId ? boundedCommandId(callId) : undefined;
             let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
-            if ((action === "write" || action === "update") && surfaceCondition) {
-                if (deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true) {
-                    compilation = await compileSurfaceCondition(surfaceCondition, {
-                        projectPath: toolContext.directory,
-                    });
-                } else if (!commandId) {
-                    return "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not written.";
-                }
-                // The idempotency ledger replays recorded responses and rejects first-time mutations that reuse a recorded message.
+            // Only a live local evaluator compiles the condition; the daemon's `refuse_conditioned_note_without_evaluator` owns the uncompiled case. commentlint: allow(JUDGE)
+            if (
+                (action === "write" || action === "update") &&
+                surfaceCondition &&
+                deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true
+            ) {
+                // Resolve relative paths and default repository predicates against the repository root.
+                compilation = await compileSurfaceCondition(surfaceCondition, {
+                    projectPath: resolveProjectRootDirectory(toolContext.directory),
+                });
             }
             const request: RustNoteToolRequest = {
                 ...(commandId ? { commandId } : {}),

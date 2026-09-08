@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { access, readFile, stat } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { access, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import { ProviderError } from "./errors";
 import { resolveAndFenceProviderPath, revalidateProviderPath } from "./path-fence";
@@ -10,6 +10,7 @@ export { ProviderError } from "./errors";
 
 const execFileAsync = promisify(execFile);
 const SCALAR_VERSION = 1;
+const FILE_CONTAINS_CHUNK_BYTES = 64 * 1024;
 
 interface PredicateAudit {
     /** resolved_path_exists is false when the source was relative or absent at write time. */
@@ -130,8 +131,7 @@ async function evaluatePredicate(
 ): Promise<EvaluatedPredicate> {
     switch (predicate.kind) {
         case "file_contains": {
-            const content = await readUtf8(await pathAtUse());
-            const contains = content.includes(predicate.needle);
+            const contains = await fileContains(await pathAtUse(), predicate.needle);
             return evaluateBooleanState(
                 contains,
                 predicate.absent ? !contains : contains,
@@ -190,7 +190,9 @@ async function evaluatePredicate(
             };
         }
         case "git_tag_matching": {
-            const tagsOutput = await git(pathAtUse, ["tag", "--list", predicate.pattern]);
+            // `--` ends option parsing so a pattern such as `--format=%(objectname)` is
+            // matched as a glob instead of changing what `git tag` prints.
+            const tagsOutput = await git(pathAtUse, ["tag", "--list", "--", predicate.pattern]);
             const above = predicate.above ? parseSemver(predicate.above) : undefined;
             const tags = tagsOutput
                 .split("\n")
@@ -234,11 +236,30 @@ function evaluateBooleanState(
     };
 }
 
-async function readUtf8(path: string): Promise<string> {
+/**
+ * Streams the file so memory is bounded by one chunk plus the needle regardless of file size.
+ * `tail` retains the last `needle.length - 1` characters so matches spanning chunks are found;
+ * the stream's UTF-8 decoder keeps multibyte characters whole across chunk boundaries.
+ */
+async function fileContains(path: string, needle: string): Promise<boolean> {
+    if (needle.length === 0) return true;
+    const overlap = needle.length - 1;
+    const stream = createReadStream(path, {
+        encoding: "utf8",
+        highWaterMark: FILE_CONTAINS_CHUNK_BYTES,
+    });
+    let tail = "";
     try {
-        return await readFile(path, "utf8");
+        for await (const chunk of stream) {
+            const window = tail + (chunk as string);
+            if (window.includes(needle)) return true;
+            tail = overlap > 0 ? window.slice(-overlap) : "";
+        }
+        return false;
     } catch (error) {
         throw fsError(path, error);
+    } finally {
+        stream.destroy();
     }
 }
 
@@ -330,27 +351,34 @@ async function gitIsAncestor(
     }
 }
 
+/** Numeric components are `bigint` so identifiers beyond 2^53 keep their exact ordering. */
 interface Semver {
-    major: number;
-    minor: number;
-    patch: number;
-    prerelease: Array<number | string>;
+    major: bigint;
+    minor: bigint;
+    patch: bigint;
+    prerelease: Array<bigint | string>;
 }
 
+// The SemVer 2.0.0 grammar: numeric identifiers carry no leading zeros, alphanumeric
+// identifiers contain at least one non-digit, and no identifier is empty.
+const SEMVER_IDENTIFIER = String.raw`(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)`;
+const SEMVER_PATTERN = new RegExp(
+    String.raw`^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)` +
+        String.raw`(?:-(${SEMVER_IDENTIFIER}(?:\.${SEMVER_IDENTIFIER})*))?` +
+        String.raw`(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`,
+);
+
 function parseSemver(value: string): Semver {
-    const match =
-        /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(
-            value,
-        );
+    const match = SEMVER_PATTERN.exec(value);
     if (!match) {
         throw new ProviderError("invalid_config", `Invalid semantic version: ${value}`);
     }
     return {
-        major: Number(match[1]),
-        minor: Number(match[2]),
-        patch: Number(match[3]),
+        major: BigInt(match[1]),
+        minor: BigInt(match[2]),
+        patch: BigInt(match[3]),
         prerelease: match[4]
-            ? match[4].split(".").map((part) => (/^\d+$/.test(part) ? Number(part) : part))
+            ? match[4].split(".").map((part) => (/^\d+$/.test(part) ? BigInt(part) : part))
             : [],
     };
 }
@@ -363,10 +391,14 @@ function tryParseSemver(value: string): Semver | null {
     }
 }
 
+function compareOrdered<T extends bigint | string>(left: T, right: T): number {
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function compareSemver(left: Semver, right: Semver): number {
     for (const key of ["major", "minor", "patch"] as const) {
         if (left[key] !== right[key]) {
-            return left[key] - right[key];
+            return compareOrdered(left[key], right[key]);
         }
     }
     if (left.prerelease.length === 0 || right.prerelease.length === 0) {
@@ -386,16 +418,18 @@ function compareSemver(left: Semver, right: Semver): number {
         if (leftPart === rightPart) {
             continue;
         }
-        if (typeof leftPart === "number" && typeof rightPart === "number") {
-            return leftPart - rightPart;
+        if (typeof leftPart === "bigint" && typeof rightPart === "bigint") {
+            return compareOrdered(leftPart, rightPart);
         }
-        if (typeof leftPart === "number") {
+        if (typeof leftPart === "bigint") {
             return -1;
         }
-        if (typeof rightPart === "number") {
+        if (typeof rightPart === "bigint") {
             return 1;
         }
-        return leftPart.localeCompare(rightPart);
+        // SemVer orders alphanumeric identifiers by ASCII code, so `Z` sorts before `a`;
+        // the identifier grammar admits only ASCII, so code-unit comparison is that order.
+        return compareOrdered(leftPart, rightPart);
     }
     return 0;
 }

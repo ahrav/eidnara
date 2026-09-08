@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
     compileSurfaceCondition,
@@ -12,8 +15,9 @@ import {
 import type { RustNoteToolRequest, RustToolBackends } from "../../plugin/rust-tool-backends";
 import { createCtxNoteTools } from "./tools";
 
+// OpenCode passes the model's tool-call id to plugin tools as `callID`.
 const toolContext = (sessionID = "ses-note", directory = "/workspace/project-a") =>
-    ({ sessionID, directory }) as never;
+    ({ sessionID, directory, callID: `call-${sessionID}` }) as never;
 
 const resolveProjectPath = (directory: string) =>
     directory.includes("project-b") ? "git:project-b" : "git:project-a";
@@ -436,8 +440,8 @@ describe("createCtxNoteTools", () => {
         expect(result).toContain("Retina compile refused: fenced path");
     });
 
-    it("rejects module smart-note writes when evaluation is unavailable", async () => {
-        const { requests, note } = recordingNote("must not be called");
+    it("forwards a conditioned write uncompiled, with its command id, when local evaluation is unavailable", async () => {
+        const { requests, note } = recordingNote("Error: no live note evaluator");
         const tools = createCtxNoteTools({
             resolveProjectPath,
             rustToolBackends: {
@@ -454,8 +458,70 @@ describe("createCtxNoteTools", () => {
             },
             toolContext(),
         );
-        expect(result).toContain("evaluation is unavailable");
+        // The daemon owns the refusal so a redelivered call replays the recorded response by command id.
+        expect(result).toBe("Error: no live note evaluator");
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({
+            action: "write",
+            commandId: "call-ses-note",
+            surfaceCondition: "when release exists",
+        });
+        expect(requests[0]).not.toHaveProperty("compileStatus");
+        expect(requests[0]).not.toHaveProperty("compiledConfig");
+    });
+
+    it("refuses a mutation when the host supplies no tool-call id, before any backend call", async () => {
+        const { requests, note } = recordingNote("must not be called");
+        let authorityProbes = 0;
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: {
+                authorityState: async () => {
+                    authorityProbes += 1;
+                    return "MODULE";
+                },
+                note,
+                noteEvaluationAvailable: () => true,
+            },
+        });
+        const noCallId = { sessionID: "ses-note", directory: "/workspace/project-a" } as never;
+
+        const write = await tools.ctx_note.execute(
+            { action: "write", content: "would duplicate on redelivery" },
+            noCallId,
+        );
+        const update = await tools.ctx_note.execute(
+            { action: "update", note_id: 3, content: "changed" },
+            noCallId,
+        );
+        const dismiss = await tools.ctx_note.execute({ action: "dismiss", note_id: 3 }, noCallId);
+
+        expect(write).toBe(
+            "Error: ctx_note write requires a stable tool-call identity from the host; the note was not written.",
+        );
+        expect(update).toContain("ctx_note update requires a stable tool-call identity");
+        expect(update).toContain("the note was not updated.");
+        expect(dismiss).toContain("the note was not dismissed.");
         expect(requests).toHaveLength(0);
+        expect(authorityProbes).toBe(0);
+    });
+
+    it("serves a read without a tool-call id and sends no command id", async () => {
+        const { requests, note } = recordingNote("## Notes");
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "MODULE", note },
+        });
+
+        const result = await tools.ctx_note.execute({ action: "read" }, {
+            sessionID: "ses-note",
+            directory: "/workspace/project-a",
+        } as never);
+
+        expect(result).toBe("## Notes");
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.action).toBe("read");
+        expect(requests[0]).not.toHaveProperty("commandId");
     });
 
     it("keeps an explicit read's controls instead of replaying a reduced-call summary", async () => {
@@ -542,5 +608,72 @@ describe("createCtxNoteTools", () => {
         expect(requests[0]?.action).toBe("read");
         expect(requests[0]?.surfaceCondition).toBe("");
         expect(result).toBe("## Notes\n\nNo session notes or smart notes.");
+    });
+});
+
+describe("ctx_note raw argument fallback", () => {
+    it("returns a tool error for a non-string content instead of throwing", async () => {
+        const { requests, note } = recordingNote();
+        const tools = createCtxNoteTools({
+            resolveProjectPath,
+            rustToolBackends: { authorityState: async () => "MODULE", note },
+        });
+        const result = await tools.ctx_note.execute(
+            { action: "write", content: 123 } as never,
+            toolContext(),
+        );
+        expect(result).toBe("Error: 'content' must be a string.");
+        expect(requests).toHaveLength(0);
+
+        const conditionResult = await tools.ctx_note.execute(
+            { action: "write", content: "ok", surface_condition: { not: "a string" } } as never,
+            toolContext(),
+        );
+        expect(conditionResult).toBe("Error: 'surface_condition' must be a string.");
+        expect(requests).toHaveLength(0);
+    });
+});
+
+describe("ctx_note smart-note compile root", () => {
+    it("resolves a relative file condition against the repository root, not the nested working directory", async () => {
+        const root = realpathSync(mkdtempSync(join(tmpdir(), "ctx-note-root-")));
+        try {
+            mkdirSync(join(root, ".git"));
+            mkdirSync(join(root, "packages", "foo"), { recursive: true });
+            mkdirSync(join(root, "nested", "deeper"), { recursive: true });
+            writeFileSync(join(root, "packages", "foo", "flag.txt"), "pending\n");
+
+            const { requests, note } = recordingNote({
+                content: [{ type: "text", text: "Created smart note #1." }],
+            });
+            const tools = createCtxNoteTools({
+                resolveProjectPath,
+                rustToolBackends: {
+                    authorityState: async () => "MODULE",
+                    noteEvaluationAvailable: () => true,
+                    note,
+                },
+            });
+
+            await tools.ctx_note.execute(
+                {
+                    action: "write",
+                    content: "Wait for the flag to flip.",
+                    surface_condition: "when file packages/foo/flag.txt contains done",
+                },
+                toolContext("ses-note", join(root, "nested", "deeper")),
+            );
+
+            expect(requests).toHaveLength(1);
+            expect(requests[0]?.compileStatus).toBe("compiled");
+            const config = JSON.parse(requests[0]?.compiledConfig ?? "{}") as {
+                kind?: string;
+                path?: string;
+            };
+            expect(config.kind).toBe("file_contains");
+            expect(config.path).toBe(join(root, "packages", "foo", "flag.txt"));
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });

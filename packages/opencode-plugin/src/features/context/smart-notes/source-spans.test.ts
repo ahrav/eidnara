@@ -1,0 +1,135 @@
+import { describe, expect, test } from "bun:test";
+
+import { decodeStringLiteral, maskSourceSpans, scanSourceSpans } from "./source-spans";
+
+const NON_CODE = new Set(["comment", "string", "template"] as const);
+
+function kinds(source: string): string[] {
+    return scanSourceSpans(source).map(
+        (span) => `${span.kind}:${source.slice(span.start, span.end)}`,
+    );
+}
+
+describe("scanSourceSpans", () => {
+    test("separates comments and quoted literals from code", () => {
+        expect(kinds(`a // line "x"\n/* block 'y' */ "s\\"q" 'p' b`)).toEqual([
+            "code:a ",
+            `comment:// line "x"`,
+            "code:\n",
+            "comment:/* block 'y' */",
+            "code: ",
+            `string:"s\\"q"`,
+            "code: ",
+            "string:'p'",
+            "code: b",
+        ]);
+    });
+
+    test("exposes template expressions as code between template pieces", () => {
+        const source = 'x = `a ${ f("}", `${y}`) } b`; z';
+        expect(kinds(source)).toEqual([
+            "code:x = ",
+            "template:`a ${",
+            "code: f(",
+            'string:"}"',
+            "code:, ",
+            "template:`${",
+            "code:y",
+            "template:}`",
+            "code:) ",
+            "template:} b`",
+            "code:; z",
+        ]);
+    });
+
+    test("does not start a string inside a regular-expression literal", () => {
+        expect(kinds(`if (/"/.test(s)) { a = 1 / 2; b = x / y / z; }`)).toEqual([
+            "code:if (",
+            `string:/"/`,
+            "code:.test(s)) { a = 1 / 2; b = x / y / z; }",
+        ]);
+    });
+
+    test("recognizes a regular-expression literal after a control-flow head", () => {
+        expect(kinds(`if (text) /require/.test(text); while (a) /x/.exec(b)`)).toEqual([
+            "code:if (text) ",
+            "string:/require/",
+            "code:.test(text); while (a) ",
+            "string:/x/",
+            "code:.exec(b)",
+        ]);
+        expect(kinds(`(a) / (b) / c; f(x) / 2`)).toEqual(["code:(a) / (b) / c; f(x) / 2"]);
+    });
+
+    test("treats a slash after a postfix operator as division", () => {
+        expect(kinds(`n++ / (get = cap.httpGet) / 1; m-- / 2`)).toEqual([
+            "code:n++ / (get = cap.httpGet) / 1; m-- / 2",
+        ]);
+        expect(kinds(`x = a + /re/.test(b)`)).toEqual([
+            "code:x = a + ",
+            "string:/re/",
+            "code:.test(b)",
+        ]);
+    });
+
+    test("treats a slash after an object literal as division and after a block as a regex", () => {
+        expect(kinds(`const n = {} / (get = cap.httpGet) / 1; const m = { a: 1 } / 2`)).toEqual([
+            "code:const n = {} / (get = cap.httpGet) / 1; const m = { a: 1 } / 2",
+        ]);
+        expect(kinds(`if (x) { y(); } /re/.test(s); const f = () => { return 1; } /q/`)).toEqual([
+            "code:if (x) { y(); } ",
+            "string:/re/",
+            "code:.test(s); const f = () => { return 1; } ",
+            "string:/q/",
+        ]);
+        expect(kinds(`return {} / 2; f({ a: [{}] } / 3)`)).toEqual([
+            "code:return {} / 2; f({ a: [{}] } / 3)",
+        ]);
+    });
+
+    test("treats a slash after a function or class expression as division", () => {
+        for (const source of [
+            `const n = function(){} / (get = cap.httpGet) / 1`,
+            `const n = function named(){} / 2`,
+            `const n = async function*(){} / 2`,
+            `x = (function(){}) / 2`,
+            `return function(){} / 2`,
+            `const c = class {} / 2; const d = class X extends Y {} / 3`,
+            `const n = class X extends (class {}) {} / (get = cap.httpGet) / 1`,
+            `const m = class extends (mixin(Base)) {} / 2`,
+        ]) {
+            expect(kinds(source)).toEqual([`code:${source}`]);
+        }
+        expect(kinds(`function decl() {} /re/.test(s)`)).toEqual([
+            "code:function decl() {} ",
+            "string:/re/",
+            "code:.test(s)",
+        ]);
+        expect(kinds(`class Decl {} /re/.test(s)`)).toEqual([
+            "code:class Decl {} ",
+            "string:/re/",
+            "code:.test(s)",
+        ]);
+    });
+
+    test("closes an unterminated string at the end of its line", () => {
+        expect(kinds(`a = "oops\nb = 1`)).toEqual(["code:a = ", `string:"oops`, "code:\nb = 1"]);
+    });
+});
+
+describe("maskSourceSpans", () => {
+    test("blanks interiors while keeping offsets, newlines, and delimiters", () => {
+        const source = `f("ab") // c\ng('d')`;
+        const masked = maskSourceSpans(source, NON_CODE);
+        expect(masked).toHaveLength(source.length);
+        expect(masked).toBe(`f("  ")     \ng(' ')`);
+    });
+});
+
+describe("decodeStringLiteral", () => {
+    test("decodes escape sequences the way the JavaScript parser does", () => {
+        expect(decodeStringLiteral(String.raw`a\"b\'c\\d\/e`)).toBe(`a"b'c\\d/e`);
+        expect(decodeStringLiteral(String.raw`\n\t\r\0\x41\u0042\u{1F600}`)).toBe("\n\t\r\0AB😀");
+        expect(decodeStringLiteral("line\\\ncontinued")).toBe("linecontinued");
+    });
+});

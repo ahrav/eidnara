@@ -58,6 +58,10 @@ flagged AS (
   FROM ordered
 ),
 phase_peaks AS (
+  -- A zero-prompt row is an aborted or errored assistant message. Its drop opens a
+  -- phase whose first row repeats the context that preceded the abort, so that row
+  -- is excluded and an abort followed by one resumed turn counts that context once.
+  -- phase_id = 0 admits the first row, whose LAG default is also 0.
   SELECT agent, phase_id, MAX(cur_prompt) AS phase_peak
   FROM flagged
   WHERE prev_prompt > 0 OR phase_id = 0
@@ -160,6 +164,8 @@ export function emptyWorkMetricsCarry(): WorkMetricsCarry {
  * A row with `prompt < prevPrompt` starts a new phase.
  * The dropping row belongs to the new phase.
  *  - phase peak counts only QUALIFYING rows (prevPrompt > 0 OR phase_id == 0).
+ *    The row after a zero-prompt (aborted) row repeats the pre-abort context, so it
+ *    does not qualify; see the `phase_peaks` comment in OPEN_CODE_WORK_METRICS_SQL.
  *  - metric A = Σ deltas + Σ (last output per agent); metric B = Σ phase peaks.
  */
 export function foldWorkMetricsRows(

@@ -129,6 +129,24 @@ describe("createCtxSearchTools", () => {
         expect(misspelled).not.toContain("No results found");
     });
 
+    it("bounds the unknown sources echoed in the validation error", async () => {
+        const tools = createCtxSearchTools(kernelHarness().deps);
+        // Schema parsing fails on unknown names, so the raw array reaches the executor unbounded.
+        const unknown = Array.from({ length: 50 }, (_, index) => `s${index}-${"x".repeat(4096)}`);
+
+        const result = await tools.ctx_search.execute(
+            { query: "appear", sources: unknown as unknown as ["memory"] },
+            toolContext(),
+        );
+
+        expect(result).toStartWith("Error: unknown sources: ");
+        expect(result).toContain(", and 47 more. Supported sources: memory.");
+        expect(result).not.toContain("s3-");
+        // Three field-bounded values plus the fixed wording stay far below the raw input.
+        expect(Buffer.byteLength(String(result), "utf8")).toBeLessThan(4 * 1024);
+        expect(result).not.toContain("x".repeat(1025));
+    });
+
     it('treats sources: ["memory"] like an omitted sources argument', async () => {
         const harness = kernelHarness();
         seed(harness.kernel, OBJECT_A, "The cache must stay offline.", "CONSTRAINTS");

@@ -9,15 +9,23 @@ import {
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
+import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
-import type { SmartNoteCapabilityFactory } from "./capabilities";
+import type { SmartNoteCapabilityApi, SmartNoteCapabilityFactory } from "./capabilities";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./compiler-prompt";
 import { runCompiledSmartNoteCheck } from "./sandbox-runner";
-import type {
-    SmartNoteCapabilityName,
-    SmartNoteCheckManifest,
-    SmartNoteCheckResult,
+import {
+    decodeStringLiteral,
+    maskSourceSpans,
+    type SourceSpanKind,
+    scanSourceSpans,
+} from "./source-spans";
+import {
+    type SmartNoteCapabilityName,
+    type SmartNoteCheckManifest,
+    type SmartNoteCheckResult,
+    SmartNoteNetworkError,
 } from "./types";
 
 interface CompileSmartNoteArgs {
@@ -39,7 +47,9 @@ export interface CompileSmartNoteSuccess {
     manifest: SmartNoteCheckManifest;
     checkCron: string;
     checkHash: string;
-    dryRun: SmartNoteCheckResult;
+    /** Null when a declared URL is unreachable during compilation. */
+    dryRun: SmartNoteCheckResult | null;
+    dryRunNetworkError?: string;
 }
 
 export interface CompileSmartNoteFailure {
@@ -64,6 +74,30 @@ const MAX_MANIFEST_BYTES = 32 * 1024;
 /** The module limits cron expressions to NOTE_EVALUATOR_MAX_CRON_BYTES (256 bytes). */
 const MAX_CRON_BYTES = 256;
 const MAX_COMPILER_ERROR_CHARS = 2 * 1024;
+const MAX_REJECTED_ARGUMENT_CHARS = 120;
+const DRY_RUN_TIMEOUT_MS = 2_000;
+/** Cleanup runs after the deadline may have passed, so it carries its own short bound. */
+const SESSION_CLEANUP_TIMEOUT_MS = 3_000;
+const DEADLINE_EXPIRED_ERROR = "smart-note compile deadline expired";
+const NON_CODE_SPANS: ReadonlySet<SourceSpanKind> = new Set(["comment", "string", "template"]);
+const CHECK_SIGNATURE = /\bfunction\s+check\s*\(\s*cap\s*\)/;
+const DIRECT_CAPABILITY_CALL = /^\s*\.\s*(?:readFile|httpGet|gitHeadSha|gitTag|gitLog)\s*\(/;
+
+type LiteralCapabilityMethod = "readFile" | "httpGet";
+
+interface CapabilityCallSite {
+    method: LiteralCapabilityMethod;
+    /** Decoded string value, or null when the argument is anything other than one string literal. */
+    literal: string | null;
+}
+
+interface ValidatedCompilerOutput {
+    compiledCheck: string;
+    manifest: SmartNoteCheckManifest;
+    checkCron: string;
+    dryRun: SmartNoteCheckResult | null;
+    dryRunNetworkError?: string;
+}
 
 export async function compileSmartNoteCheck(
     args: CompileSmartNoteArgs,
@@ -71,6 +105,17 @@ export async function compileSmartNoteCheck(
     if (!args.note.surfaceCondition) {
         return { ok: false, cancelled: false, error: "note has no surface condition" };
     }
+    if (args.signal.aborted) {
+        return { ok: false, cancelled: true, error: "smart-note compile cancelled" };
+    }
+    const remainingMs = args.deadline - Date.now();
+    if (remainingMs <= 0) {
+        return { ok: false, cancelled: false, error: DEADLINE_EXPIRED_ERROR };
+    }
+    // The retry helper budgets `timeoutMs` per attempt, so a fallback that starts late would
+    // otherwise receive a fresh full budget. Aborting the signal at the absolute deadline
+    // bounds session creation, every prompt attempt, and every dry run together.
+    const signal = AbortSignal.any([args.signal, AbortSignal.timeout(remainingMs)]);
     const prompt = `Compile this smart note condition into a sandbox check.
 
 Project identity: ${args.projectIdentity}
@@ -87,6 +132,7 @@ Remember: output only the JSON object described by the system prompt.`;
             parentSessionId: args.parentSessionId,
             title: `eidnara-smart-note-compile-${args.note.id}`,
             directory: args.sessionDirectory ?? args.projectIdentity,
+            signal,
         });
         const created = shared.normalizeSDKResponse(
             createResponse,
@@ -98,7 +144,6 @@ Remember: output only the JSON object described by the system prompt.`;
         childSessionId = typeof created?.id === "string" ? created.id : null;
         if (!childSessionId) throw new Error("Could not create smart-note compiler session");
 
-        const remainingMs = Math.max(1_000, args.deadline - Date.now());
         const run = await shared.promptSyncWithValidatedOutputRetry(
             args.client,
             {
@@ -113,7 +158,7 @@ Remember: output only the JSON object described by the system prompt.`;
             },
             {
                 timeoutMs: remainingMs,
-                signal: args.signal,
+                signal,
                 fallbackModels: args.fallbackModels,
                 callContext: "smart-note-compiler",
                 fetchOutput: childSessionMessagesFetcher(
@@ -121,45 +166,151 @@ Remember: output only the JSON object described by the system prompt.`;
                     childSessionId as string,
                     args.sessionDirectory ?? args.projectIdentity,
                     20,
+                    signal,
                 ),
                 validateOutput: (messages) =>
-                    parseCompilerOutput(extractLatestAssistantText(messages)),
+                    validateCompilerOutput(
+                        extractLatestAssistantText(messages),
+                        args.note.id,
+                        args.capabilityFactory,
+                        signal,
+                    ),
             },
         );
-        const response = run.validated;
-        const compiledCheck = normalizeCompiledCheck(response.compiled_check);
-        const manifest = normalizeManifest(response.manifest);
-        const checkCron = normalizeCron(response.check_cron);
-        for (const warning of manifestAdvisoryWarnings(compiledCheck, manifest)) {
-            log(`[smart-notes] smart note #${args.note.id}: manifest advisory — ${warning}`);
-        }
-        const dryRun = await runCompiledSmartNoteCheck({
-            compiledCheck,
-            capabilityFactory: args.capabilityFactory,
-            signal: args.signal,
-            timeoutMs: 2_000,
-        });
-        if (!dryRun.ok) {
-            const error = boundedError(`dry-run failed: ${dryRun.error}`);
-            return { ok: false, cancelled: dryRun.cancelled, error };
-        }
+        const { compiledCheck, manifest, checkCron, dryRun, dryRunNetworkError } = run.validated;
         return {
             ok: true,
             compiledCheck,
             manifest,
             checkCron,
             checkHash: hashCheck(args.note.surfaceCondition, compiledCheck, manifest, checkCron),
-            dryRun: dryRun.result,
+            dryRun,
+            ...(dryRunNetworkError === undefined ? {} : { dryRunNetworkError }),
         };
     } catch (error) {
         const cancelled = args.signal.aborted;
-        const message = boundedError(error instanceof Error ? error.message : String(error));
+        const message = boundedError(
+            !cancelled && signal.aborted
+                ? DEADLINE_EXPIRED_ERROR
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
+        );
         return { ok: false, cancelled, error: message };
     } finally {
-        if (childSessionId) {
-            await deleteChildSession(args.client, childSessionId).catch(() => {});
+        if (childSessionId && !shouldKeepSubagents()) {
+            await deleteChildSession(
+                args.client,
+                childSessionId,
+                AbortSignal.timeout(SESSION_CLEANUP_TIMEOUT_MS),
+            ).catch(() => {});
         }
     }
+}
+
+async function validateCompilerOutput(
+    output: string | null,
+    noteId: number,
+    capabilityFactory: SmartNoteCapabilityFactory,
+    signal: AbortSignal,
+): Promise<ValidatedCompilerOutput> {
+    const response = parseCompilerOutput(output);
+    const compiledCheck = normalizeCompiledCheck(response.compiled_check);
+    const manifest = normalizeManifest(response.manifest);
+    const checkCron = normalizeCron(response.check_cron);
+    for (const warning of manifestAdvisoryWarnings(compiledCheck, manifest)) {
+        log(`[smart-notes] smart note #${noteId}: manifest advisory — ${warning}`);
+    }
+    const bound = await bindDeclaredRequests(compiledCheck, capabilityFactory, signal);
+    const dryRun = await runCompiledSmartNoteCheck({
+        compiledCheck,
+        capabilityFactory: bound.factory,
+        signal,
+        timeoutMs: DRY_RUN_TIMEOUT_MS,
+    });
+    if (dryRun.ok) {
+        return { compiledCheck, manifest, checkCron, dryRun: dryRun.result };
+    }
+    // A dry run remains pending only when the check propagates a served network failure
+    // unchanged; a check that catches it and then fails for another reason is not waived.
+    const escaped = bound
+        .servedNetworkFailures()
+        .find((message) => dryRun.error === `${SmartNoteNetworkError.name}: ${message}`);
+    if (!dryRun.cancelled && escaped !== undefined) {
+        return {
+            compiledCheck,
+            manifest,
+            checkCron,
+            dryRun: null,
+            dryRunNetworkError: boundedError(escaped),
+        };
+    }
+    throw new Error(`dry-run failed: ${dryRun.error}`);
+}
+
+type BoundResponse =
+    | { ok: true; value: { status: number; body: string } }
+    | { ok: false; error: SmartNoteNetworkError };
+
+export interface BoundRequests {
+    factory: SmartNoteCapabilityFactory;
+    /** Messages of the prefetch network failures the guest's `httpGet` has received. */
+    servedNetworkFailures(): readonly string[];
+}
+
+/**
+ * Host requests depend only on the literal URLs in the check source, never on file contents
+ * or control flow inside the sandbox, so a check cannot encode repository data in its choice
+ * of which literal URL to request.
+ *
+ * A non-network prefetch failure aborts binding even if the guest does not request its URL. A
+ * network failure is transient, so it is stored and rethrown from the guest's call instead.
+ */
+export async function bindDeclaredRequests(
+    compiledCheck: string,
+    factory: SmartNoteCapabilityFactory,
+    signal: AbortSignal,
+): Promise<BoundRequests> {
+    const readFiles = new Set(literalCalls(compiledCheck, "readFile"));
+    const urls = [...new Set(literalCalls(compiledCheck, "httpGet"))];
+    if (urls.length > MAX_MANIFEST_ENTRIES) {
+        throw new Error(`compiled_check declares more than ${MAX_MANIFEST_ENTRIES} URLs`);
+    }
+    const fetcher = factory(signal);
+    const responses = new Map<string, BoundResponse>();
+    await Promise.all(
+        urls.map(async (url) => {
+            try {
+                responses.set(url, { ok: true, value: await fetcher.httpGet(url) });
+            } catch (error) {
+                if (!(error instanceof SmartNoteNetworkError)) throw error;
+                responses.set(url, { ok: false, error });
+            }
+        }),
+    );
+    const served: string[] = [];
+    return {
+        servedNetworkFailures: () => served,
+        factory: (runSignal) => {
+            const cap: SmartNoteCapabilityApi = factory(runSignal);
+            return {
+                readFile: (repoRelativePath) =>
+                    readFiles.has(repoRelativePath)
+                        ? cap.readFile(repoRelativePath)
+                        : Promise.reject(nonLiteralArgumentError("readFile", repoRelativePath)),
+                httpGet: (url) => {
+                    const bound = responses.get(url);
+                    if (!bound) return Promise.reject(nonLiteralArgumentError("httpGet", url));
+                    if (bound.ok) return Promise.resolve(bound.value);
+                    served.push(bound.error.message);
+                    return Promise.reject(bound.error);
+                },
+                gitHeadSha: () => cap.gitHeadSha(),
+                gitTag: () => cap.gitTag(),
+                gitLog: (opts) => cap.gitLog(opts),
+            };
+        },
+    };
 }
 
 export function parseCompilerOutput(output: string | null): CompilerResponse {
@@ -188,15 +339,47 @@ export function normalizeCompiledCheck(source: string): string {
     let code = source.trim();
     const fence = code.match(/^```(?:javascript|js)?\s*([\s\S]*?)```$/i);
     if (fence) code = fence[1].trim();
-    code = code.replace(/export\s+function\s+check\s*\(/, "function check(");
-    if (/\basync\s+function\s+check\s*\(/.test(code)) {
+    // Mask comments and literals so textual `require` or `export function check(` remains valid.
+    const exported = /\bexport\s+(?=function\s+check\s*\()/.exec(
+        maskSourceSpans(code, NON_CODE_SPANS),
+    );
+    if (exported) {
+        code = code.slice(0, exported.index) + code.slice(exported.index + exported[0].length);
+    }
+    const codeOnly = maskSourceSpans(code, NON_CODE_SPANS);
+    if (/\basync\s+function\s+check\s*\(/.test(codeOnly)) {
         throw new Error("compiled_check must be synchronous");
     }
-    if (!/\bfunction\s+check\s*\(/.test(code) && !/module\.exports\.check\s*=/.test(code)) {
-        throw new Error("compiled_check must define check(cap)");
+    const signature = CHECK_SIGNATURE.exec(codeOnly);
+    if (!signature) {
+        throw new Error("compiled_check must define function check(cap)");
     }
-    if (/\b(?:import|require)\b/.test(code)) {
+    // The runner uses the final `check` binding, so redeclaration or reassignment can replace
+    // the validated function.
+    if ((codeOnly.match(/\bfunction\s+check\s*\(/g) ?? []).length !== 1) {
+        throw new Error("compiled_check must define check exactly once");
+    }
+    if (/\bcheck\s*=(?![=>])/.test(codeOnly)) {
+        throw new Error("compiled_check must not reassign check");
+    }
+    if (/\b(?:import|require)\b/.test(codeOnly)) {
         throw new Error("compiled_check must not import modules");
+    }
+    if (/\barguments\b/.test(codeOnly)) {
+        throw new Error("compiled_check must not use arguments");
+    }
+    // Outside literals and comments a backslash can only begin an identifier escape such as
+    // `c\u0061p`, which would hide `cap` or `arguments` from the identifier scans below.
+    if (codeOnly.includes("\\")) {
+        throw new Error("compiled_check must not use escape sequences in identifiers");
+    }
+    const misuse = capabilityMisuse(code, codeOnly, signature.index + signature[0].indexOf("cap"));
+    if (misuse !== null) {
+        throw new Error(`cap may only be called directly as cap.<capability>(...): ${misuse}`);
+    }
+    const computed = capabilityCallSites(code).find((site) => site.literal === null);
+    if (computed) {
+        throw new Error(`cap.${computed.method} argument must be a single string literal`);
     }
     if (Buffer.byteLength(code, "utf8") > MAX_COMPILED_CHECK_BYTES) {
         throw new Error("compiled_check exceeds 64 KiB");
@@ -204,15 +387,36 @@ export function normalizeCompiledCheck(source: string): string {
     return code;
 }
 
+function capabilityMisuse(code: string, codeOnly: string, parameterIndex: number): string | null {
+    const identifier = /(?<![\w$.])cap(?![\w$])/g;
+    for (const match of codeOnly.matchAll(identifier)) {
+        const index = match.index ?? 0;
+        if (index === parameterIndex) continue;
+        if (DIRECT_CAPABILITY_CALL.test(codeOnly.slice(index + 3))) continue;
+        return JSON.stringify(
+            code.slice(index, index + MAX_REJECTED_ARGUMENT_CHARS).split("\n")[0],
+        );
+    }
+    return null;
+}
+
+function nonLiteralArgumentError(method: "readFile" | "httpGet", argument: string): Error {
+    return new Error(
+        `cap.${method} argument is not a string literal in compiled_check: ${JSON.stringify(
+            argument.slice(0, MAX_REJECTED_ARGUMENT_CHARS),
+        )}`,
+    );
+}
+
 export function normalizeManifest(manifest: SmartNoteCheckManifest): SmartNoteCheckManifest {
     const capabilities = Array.isArray(manifest.capabilities)
         ? unique(
               manifest.capabilities
                   .slice(0, MAX_MANIFEST_ENTRIES)
-                  .filter((cap): cap is SmartNoteCapabilityName =>
-                      ["readFile", "gitHeadSha", "gitTag", "gitLog", "httpGet"].includes(
-                          String(cap),
-                      ),
+                  .filter(
+                      (cap): cap is SmartNoteCapabilityName =>
+                          typeof cap === "string" &&
+                          ["readFile", "gitHeadSha", "gitTag", "gitLog", "httpGet"].includes(cap),
                   ),
           )
         : [];
@@ -231,8 +435,6 @@ export function normalizeManifest(manifest: SmartNoteCheckManifest): SmartNoteCh
     return normalized;
 }
 
-/**
- */
 export function manifestAdvisoryWarnings(code: string, manifest: SmartNoteCheckManifest): string[] {
     const warnings: string[] = [];
     const declared = new Set(manifest.capabilities);
@@ -284,7 +486,8 @@ export function hashCheck(
 }
 
 function extractJsonObject(output: string): string {
-    const fenced = output.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    // Only a fence around the whole response is Markdown; backticks inside the JSON are data.
+    const fenced = output.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
     const text = fenced ? fenced[1] : output;
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
@@ -295,28 +498,108 @@ function extractJsonObject(output: string): string {
 function capabilityUses(code: string): Set<SmartNoteCapabilityName> {
     const uses = new Set<SmartNoteCapabilityName>();
     const regex = /\bcap\s*\.\s*(readFile|gitHeadSha|gitTag|gitLog|httpGet)\s*\(/g;
-    for (const match of code.matchAll(regex)) uses.add(match[1] as SmartNoteCapabilityName);
+    const codeOnly = maskSourceSpans(code, NON_CODE_SPANS);
+    for (const match of codeOnly.matchAll(regex)) uses.add(match[1] as SmartNoteCapabilityName);
     return uses;
 }
 
-function literalCalls(code: string, method: "readFile" | "httpGet"): string[] {
-    const regex = new RegExp(
-        `\\bcap\\s*\\.\\s*${method}\\s*\\(\\s*(["'])((?:\\\\.|(?!\\1)[^\\\\])*)\\1`,
-        "g",
-    );
+/**
+ * Call sites are located in code with comments and literal interiors blanked, so text inside a
+ * comment or another string cannot add a call site or a literal; the argument value is then
+ * read from the original source at the literal span that starts at the argument position.
+ */
+function capabilityCallSites(code: string): CapabilityCallSite[] {
+    const spans = scanSourceSpans(code);
+    const codeOnly = maskSourceSpans(code, NON_CODE_SPANS);
+    const sites: CapabilityCallSite[] = [];
+    const regex = /\bcap\s*\.\s*(readFile|httpGet)\s*\(\s*/g;
+    for (const match of codeOnly.matchAll(regex)) {
+        const method = match[1] as LiteralCapabilityMethod;
+        const argumentStart = (match.index ?? 0) + match[0].length;
+        const span = spans.find(
+            (candidate) =>
+                candidate.start === argumentStart &&
+                (candidate.kind === "string" || candidate.kind === "template"),
+        );
+        if (!span) {
+            sites.push({ method, literal: null });
+            continue;
+        }
+        const quote = code[span.start];
+        const body = code.slice(span.start + 1, span.end - 1);
+        // A template segment ending at `${` has no closing backtick.
+        const terminated = span.end - span.start >= 2 && code[span.end - 1] === quote;
+        const isRegexLiteral = quote === "/";
+        const closesCall = /^\s*\)/.test(codeOnly.slice(span.end));
+        sites.push({
+            method,
+            literal: terminated && !isRegexLiteral && closesCall ? decodeStringLiteral(body) : null,
+        });
+    }
+    return sites;
+}
+
+function literalCalls(code: string, method: LiteralCapabilityMethod): string[] {
     const values: string[] = [];
-    for (const match of code.matchAll(regex)) {
-        values.push(match[2].replace(/\\([\\"'])/g, "$1"));
+    for (const site of capabilityCallSites(code)) {
+        if (site.method === method && site.literal !== null) values.push(site.literal);
     }
     return values;
 }
 
 export function normalizeCron(cron: string): string {
     const normalized = cron.trim() || "0 * * * *";
-    // The daemon validates the 5-field syntax on receipt; this module enforces only the byte bound.
     if (Buffer.byteLength(normalized, "utf8") > MAX_CRON_BYTES)
         throw new Error("check_cron exceeds 256 bytes");
+    // The daemon rejects cron expressions outside its grammar; reject them before creating the artifact.
+    if (!isValidSmartNoteCron(normalized)) {
+        throw new Error("check_cron must be a valid 5-field numeric cron expression");
+    }
     return normalized;
+}
+
+const CRON_FIELD_BOUNDS: ReadonlyArray<readonly [min: number, max: number]> = [
+    [0, 59],
+    [0, 23],
+    [1, 31],
+    [1, 12],
+    [0, 7],
+];
+
+/**
+ * Accepts the daemon's cron grammar (`parse_cron` in `smart_note_evaluation.rs`): five numeric
+ * fields, each a comma list of `*`, `n`, `lo-hi`, or any of those with `/step`; no names or
+ * macros; day-of-week `7` represents Sunday.
+ */
+export function isValidSmartNoteCron(expression: string): boolean {
+    const tokens = expression.trim().split(/\s+/);
+    if (tokens.length !== 5 || tokens.some((token) => token.length === 0)) return false;
+    return tokens.every((token, field) => {
+        const [min, max] = CRON_FIELD_BOUNDS[field];
+        return token.split(",").every((piece) => {
+            const [rangePart, stepPart, extra] = piece.split("/");
+            if (piece.length === 0 || extra !== undefined) return false;
+            if (stepPart !== undefined && (!/^\d+$/.test(stepPart) || Number(stepPart) < 1)) {
+                return false;
+            }
+            let lo: number;
+            let hi: number;
+            if (rangePart === "*") {
+                [lo, hi] = [min, max];
+            } else if (rangePart.includes("-")) {
+                const bounds = rangePart.split("-");
+                if (bounds.length !== 2 || !bounds.every((bound) => /^\d+$/.test(bound))) {
+                    return false;
+                }
+                [lo, hi] = [Number(bounds[0]), Number(bounds[1])];
+            } else {
+                if (!/^\d+$/.test(rangePart)) return false;
+                lo = Number(rangePart);
+                hi = stepPart !== undefined ? max : lo;
+            }
+            return lo >= min && lo <= max && hi >= min && hi <= max && lo <= hi;
+        });
+    });
 }
 
 function unique<T>(items: T[]): T[] {

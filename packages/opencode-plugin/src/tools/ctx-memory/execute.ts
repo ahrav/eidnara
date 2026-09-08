@@ -11,6 +11,7 @@ import {
     deriveObjectId,
     isAvailable,
     isMemoryDecisionRow,
+    isServedMemoryDecisionRow,
     type KernelClient,
     MEMORY_DOMAIN_ID,
     type MemoryState,
@@ -136,6 +137,29 @@ function packMemoryViews(
         usedBytes += cost;
     }
     return { views, elidedRows: [] };
+}
+
+/**
+ * Echoes caller-supplied ids while their serialized bytes fit `remainingBytes`, each field-bounded
+ * first, and counts the rest. The count lets the caller learn how many ids went unserved without
+ * the response repeating arbitrarily long input.
+ */
+function packEchoedIds(
+    ids: readonly string[],
+    remainingBytes: number,
+): { ids: string[]; elidedCount: number; usedBytes: number } {
+    const echoed: string[] = [];
+    let usedBytes = 0;
+    for (const [index, id] of ids.entries()) {
+        const bounded = boundedText(id, MAX_RENDER_FIELD_BYTES);
+        const cost = Buffer.byteLength(JSON.stringify(bounded), "utf8") + 1;
+        if (usedBytes + cost > remainingBytes) {
+            return { ids: echoed, elidedCount: ids.length - index, usedBytes };
+        }
+        echoed.push(bounded);
+        usedBytes += cost;
+    }
+    return { ids: echoed, elidedCount: 0, usedBytes };
 }
 
 /** Tool text for a state other than `available`; a conflict names the object to re-read. */
@@ -554,16 +578,30 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         }
         const read = await readMemoryRows(client, signal, wanted);
         if (!read.ok) return renderCtxMemoryStateText(read.state, []);
-        const found = read.rows.filter((row) => wanted.includes(row.object.object_id));
+        // An expired anti-memory reads as missing, the same served-row rule list, search, and status apply, so `get` cannot resurface a rejected strategy past its horizon. commentlint: allow(JUDGE)
+        const nowMs = Date.now();
+        const returnedIds = new Set(read.rows.map((row) => row.object.object_id));
+        const found = read.rows.filter(
+            (row) => wanted.includes(row.object.object_id) && isServedMemoryDecisionRow(row, nowMs),
+        );
         const foundIds = new Set(found.map((row) => row.object.object_id));
-        // Ids the read did not serve echo back as the caller wrote them, so each is field-bounded: they are caller input the packer never measures, and the daemon caps their count but not their length. commentlint: allow(JUDGE)
-        const notFound = wanted
-            .filter((id) => !foundIds.has(id))
-            .map((id) => boundedText(id, MAX_RENDER_FIELD_BYTES));
         // Each named id serializes complete when it fits; ids past the response byte budget are elided by name so the caller can re-request them in smaller batches. commentlint: allow(JUDGE)
         const packed = packMemoryViews(found, memoryView);
         const elidedObjectIds = packed.elidedRows.map((row) => row.object.object_id);
-        // A truncated read cannot prove absent ids are missing — they can live beyond the daemon's row cap — so those ids report as unresolved rather than missing. commentlint: allow(JUDGE)
+        // Ids the read did not serve echo back as the caller wrote them. They are caller input the packer never measures and the daemon caps their count but not their length, so the echo shares the response budget with the packed views: each id is field-bounded, and ids past the remaining budget are counted instead of named. commentlint: allow(JUDGE)
+        const notServed = wanted.filter((id) => !foundIds.has(id));
+        // A truncated read cannot prove an absent id is missing — it can live beyond the daemon's row cap — so such ids report as unresolved. An id the daemon did return and the served-row filter hid is known missing even on a truncated read. commentlint: allow(JUDGE)
+        const hidden = notServed.filter((id) => returnedIds.has(id));
+        const absent = notServed.filter((id) => !returnedIds.has(id));
+        let remainingBytes =
+            CTX_MEMORY_RESPONSE_BUDGET_BYTES -
+            packed.views.reduce((total, view) => total + serializedBytes(view), 0);
+        const missing = packEchoedIds(read.truncated ? hidden : notServed, remainingBytes);
+        remainingBytes -= missing.usedBytes;
+        const unresolved = read.truncated
+            ? packEchoedIds(absent, remainingBytes)
+            : { ids: [], elidedCount: 0, usedBytes: 0 };
+        const elidedRequestedIdCount = missing.elidedCount + unresolved.elidedCount;
         return JSON.stringify({
             action,
             knownAsOf: read.knownAsOf,
@@ -574,12 +612,16 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
                       elisionNote: `response byte budget reached; re-request ${elidedObjectIds.length} elided id${elidedObjectIds.length === 1 ? "" : "s"} in smaller batches`,
                   }
                 : {}),
-            ...(read.truncated
-                ? { truncated: true, missingObjectIds: [], unresolvedObjectIds: notFound }
-                : { missingObjectIds: notFound }),
+            missingObjectIds: missing.ids,
+            ...(read.truncated ? { truncated: true, unresolvedObjectIds: unresolved.ids } : {}),
+            ...(elidedRequestedIdCount > 0
+                ? {
+                      elidedRequestedIdCount,
+                      elidedRequestedIdNote: `${elidedRequestedIdCount} requested id${elidedRequestedIdCount === 1 ? "" : "s"} not served and too long to echo within the response budget`,
+                  }
+                : {}),
         });
     }
-
     if (action === "create") {
         // The executor is the last check before the kernel commits: the generic client accepts any decision kind, so taxonomy membership and positive/anti-memory exclusivity are enforced here regardless of which harness wrapper called. commentlint: allow(JUDGE)
         assertCtxMemoryWriteShape({ ...args, action: "create" });
@@ -716,6 +758,13 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
     }
     if (targets.length < 2) {
         throw new ClaimOperationInputError("merge requires at least two objectIds");
+    }
+    // Revise may inherit its predecessor's payload, but a merge survivor that inherited only
+    // `predecessors[0]` would retire every other target and silently discard their content.
+    if (args.content == null && args.antiMemory == null) {
+        throw new ClaimOperationInputError(
+            "merge requires content (with category) or antiMemory for the survivor; the targets' payloads are not combined automatically",
+        );
     }
     // The successor id rides in the filter so redelivery recovery sees the row this identity already wrote. commentlint: allow(JUDGE)
     const read = await readMemoryRowsChunked(

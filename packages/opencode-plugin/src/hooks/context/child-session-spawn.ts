@@ -29,6 +29,7 @@ interface ChildSessionSpawnArgs {
     parentSessionId?: string;
     title: string;
     directory?: string;
+    signal?: AbortSignal;
 }
 
 export async function createChildSession(args: ChildSessionSpawnArgs): Promise<unknown> {
@@ -39,6 +40,7 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
                 title: args.title,
             },
             query: { directory: args.directory },
+            ...(args.signal ? { signal: args.signal } : {}),
         } as never),
     );
     try {
@@ -70,9 +72,15 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
 export async function deleteChildSession(
     client: ChildSessionDeleteClient,
     sessionId: string,
+    signal?: AbortSignal,
 ): Promise<void> {
     await withTimeout(
-        Promise.resolve(client.session.delete({ path: { id: sessionId } } as never)),
+        Promise.resolve(
+            client.session.delete({
+                path: { id: sessionId },
+                ...(signal ? { signal } : {}),
+            } as never),
+        ),
         childSessionLifecycleTimeoutMs,
         "child session delete timed out",
     );
@@ -93,6 +101,7 @@ export function childSessionMessagesFetcher(
     sessionId: string,
     directory: string | undefined,
     limit: number,
+    signal?: AbortSignal,
 ): () => Promise<unknown[]> {
     return async () => {
         const messagesResponse = await withTimeout(
@@ -100,6 +109,7 @@ export function childSessionMessagesFetcher(
                 client.session.messages({
                     path: { id: sessionId },
                     query: { directory, limit },
+                    ...(signal ? { signal } : {}),
                 } as never),
             ),
             HOST_SDK_READ_TIMEOUT_MS,

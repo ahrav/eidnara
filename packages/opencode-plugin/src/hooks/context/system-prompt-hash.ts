@@ -30,24 +30,38 @@ interface SessionTracking {
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
 
 /**
- * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`.
- * Matching that shape leaves prose that merely mentions the phrase unfrozen and untouched by the rewrite.
+ * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`. commentlint: allow(JUDGE)
+ * Matches only complete date lines, excluding prose mentions and date-shaped examples mid-sentence.
+ * The lookarounds keep the matched text to the phrase itself, so the rewrite preserves indentation.
  */
-const DATE_LINE = /Today's date: [A-Z][a-z]{2} [A-Z][a-z]{2} \d{2} \d{4}/;
+const DATE_LINE =
+    /(?<=(?:^|\n)[ \t]*)Today's date: [A-Z][a-z]{2} [A-Z][a-z]{2} \d{2} \d{4}(?=[ \t]*(?:\n|$))/;
 const DATE_LINE_ALL = new RegExp(DATE_LINE.source, "g");
 
+/**
+ * OpenCode joins the agent prompt first into one system segment (`session/llm/request.ts`), so a
+ * built-in prompt's opening line is the opening of a segment. Only match segment openings so
+ * custom agents quoting a signature are not classified as internal.
+ */
+function segmentOpensWith(
+    systemSegments: readonly string[],
+    signatures: readonly string[],
+): boolean {
+    return systemSegments.some((segment) => {
+        const opening = segment.trimStart();
+        return signatures.some((signature) => opening.startsWith(signature));
+    });
+}
+
 /** Title, summary, and compaction calls share the main session id; tracking their hash would flush the main agent's cache. commentlint: allow(JUDGE) */
-function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
-    return INTERNAL_OPENCODE_AGENT_SIGNATURES.some((signature) =>
-        systemPromptContent.includes(signature),
-    );
+function isInternalOpenCodeAgent(systemSegments: readonly string[]): boolean {
+    return segmentOpensWith(systemSegments, INTERNAL_OPENCODE_AGENT_SIGNATURES);
 }
 
 /** Hidden child agents use fixed prompts, so their hashes must not enter primary-session tracking. */
-export function isEidnaraInternalAgent(systemPromptContent: string): boolean {
-    return EIDNARA_INTERNAL_AGENT_SIGNATURES.some((signature) =>
-        systemPromptContent.includes(signature),
-    );
+export function isEidnaraInternalAgent(systemSegments: readonly string[] | string): boolean {
+    const segments = typeof systemSegments === "string" ? [systemSegments] : systemSegments;
+    return segmentOpensWith(segments, EIDNARA_INTERNAL_AGENT_SIGNATURES);
 }
 
 export function createSystemPromptHashHandler(deps: {
@@ -93,7 +107,7 @@ export function createSystemPromptHashHandler(deps: {
         if (!sessionId) return;
 
         const fullPromptForDetection = output.system.join("\n");
-        if (isInternalOpenCodeAgent(fullPromptForDetection)) {
+        if (isInternalOpenCodeAgent(output.system)) {
             sessionLog(
                 sessionId,
                 "system-prompt-hash skipped (OpenCode internal agent: title/summary/compaction)",
@@ -101,10 +115,7 @@ export function createSystemPromptHashHandler(deps: {
             return;
         }
 
-        if (
-            deps.internalChildSessions?.has(sessionId) ||
-            isEidnaraInternalAgent(fullPromptForDetection)
-        ) {
+        if (deps.internalChildSessions?.has(sessionId) || isEidnaraInternalAgent(output.system)) {
             sessionLog(sessionId, "system-prompt-hash skipped (Eidnara internal child)");
             return;
         }
@@ -143,10 +154,10 @@ export function createSystemPromptHashHandler(deps: {
         const previousState = tracked.prompt;
         const previousHash = previousState?.systemPromptHash ?? "";
         const hasPersistedHash = previousHash !== "" && previousHash !== "0";
-        // A failed lookup keeps the last recorded classification instead of demoting a known subagent to primary.
+        // Parentage is immutable, so a recorded subagent stays one even when the lookup later fails or no longer knows the session.
         let isSubagent = previousState?.isSubagent ?? false;
         try {
-            isSubagent = isSubagentSession(sessionId);
+            isSubagent = isSubagent || isSubagentSession(sessionId);
         } catch (error) {
             sessionLog(sessionId, "system-prompt-hash subagent lookup failed:", error);
         }
