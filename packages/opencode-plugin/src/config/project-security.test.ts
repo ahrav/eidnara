@@ -227,13 +227,136 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(raw).toEqual({ sidekick: { model: "x" }, memory: { enabled: true } });
     });
 
-    it("ignores non-object agent blocks", () => {
-        const raw: Record<string, unknown> = { sidekick: true, historian: "x" };
-        expect(stripUnsafeProjectConfigFields(raw)).toHaveLength(0);
+    it("discards non-object protected blocks so the raw merge keeps the user's block", () => {
+        const raw: Record<string, unknown> = {
+            sidekick: true,
+            historian: "x",
+            compaction: null,
+            models: [],
+            storage: 0,
+            memory: { enabled: true },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect(raw).toEqual({ memory: { enabled: true } });
+        expect(warnings).toHaveLength(5);
+        for (const block of ["sidekick", "historian", "compaction", "models", "storage"]) {
+            expect(
+                warnings.some((w) => w.startsWith(`Ignoring ${block} from project config`)),
+            ).toBe(true);
+        }
+    });
+
+    it("discards a non-object experimental.mural block but keeps its siblings", () => {
+        const raw: Record<string, unknown> = {
+            experimental: { mural: null, other: 1 },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect(raw).toEqual({ experimental: { other: 1 } });
+        expect(warnings).toEqual([
+            expect.stringContaining("experimental.mural from project config"),
+        ]);
     });
 });
 
 describe("constrainProjectThresholdOverrides", () => {
+    it("ignores a schema-valid project percentage above 80 that is below the user's threshold", () => {
+        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 85 };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: 85 },
+            trustedBaseConfig: { execute_threshold_percentage: 90 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage")]);
+    });
+
+    it("applies a project percentage of exactly 90, the schema maximum", () => {
+        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 90 };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: 90 },
+            trustedBaseConfig: { execute_threshold_percentage: 65 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toHaveLength(0);
+    });
+
+    it.each([
+        ["above the schema maximum", 95],
+        ["below the schema minimum", 10],
+        ["non-numeric", "abc"],
+        ["null", null],
+        ["an array", [70]],
+    ] as Array<
+        [string, unknown]
+    >)("restores the trusted percentage when the project value is %s", (_title, projectValue) => {
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: projectValue,
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: projectValue },
+            trustedBaseConfig: { execute_threshold_percentage: 90 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toEqual([expect.stringContaining("invalid value")]);
+    });
+
+    it("restores the trusted percentage object when the project object's default is invalid", () => {
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { default: 5 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { default: 5 } },
+            trustedBaseConfig: { execute_threshold_percentage: { default: 90 } },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toBe(90);
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage.default")]);
+    });
+
+    it("keeps valid per-model raises while dropping invalid entries from the same project object", () => {
+        const mergedRaw: Record<string, unknown> = {
+            execute_threshold_percentage: { default: 60, "p/valid": 88, "p/bad": 1 },
+        };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_percentage: { "p/valid": 88, "p/bad": 1 } },
+            trustedBaseConfig: { execute_threshold_percentage: 60 },
+        });
+
+        expect(mergedRaw.execute_threshold_percentage).toEqual({ default: 60, "p/valid": 88 });
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage.p/bad")]);
+    });
+
+    it("restores the trusted token thresholds when the project value is not an object", () => {
+        const mergedRaw: Record<string, unknown> = { execute_threshold_tokens: 7 };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_tokens: 7 },
+            trustedBaseConfig: { execute_threshold_tokens: { default: 50_000 } },
+        });
+
+        expect(mergedRaw.execute_threshold_tokens).toEqual({ default: 50_000 });
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_tokens")]);
+    });
+
+    it("restores the trusted token thresholds when the project object's default is out of range", () => {
+        const mergedRaw: Record<string, unknown> = { execute_threshold_tokens: { default: 1 } };
+        const warnings = constrainProjectThresholdOverrides({
+            mergedRaw,
+            projectRaw: { execute_threshold_tokens: { default: 1 } },
+            trustedBaseConfig: { execute_threshold_tokens: { default: 50_000 } },
+        });
+
+        expect(mergedRaw.execute_threshold_tokens).toEqual({ default: 50_000 });
+        expect(warnings).toEqual([expect.stringContaining("execute_threshold_tokens.default")]);
+    });
+
     it("drops lower project token thresholds and warns", () => {
         const mergedRaw: Record<string, unknown> = {
             execute_threshold_tokens: { default: 9_000 },

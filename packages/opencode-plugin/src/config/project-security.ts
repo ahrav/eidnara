@@ -1,4 +1,8 @@
-import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "./schema/eidnara";
+import {
+    DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+    MAX_EXECUTE_THRESHOLD_PERCENTAGE,
+    MIN_EXECUTE_THRESHOLD_PERCENTAGE,
+} from "./schema/eidnara";
 
 /**
  *
@@ -14,6 +18,26 @@ import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "./schema/eidnara";
 const HIDDEN_AGENT_KEYS = ["historian", "sidekick"] as const;
 const HISTORIAN_USER_ONLY_FIELDS = ["model", "fallback_models"] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
+
+/**
+ * Nested blocks that carry at least one user-only field.
+ *
+ * Raw merge replaces a user block atomically when the project value is not a plain object.
+ * Schema recovery then drops the merged non-object and installs the block's defaults.
+ * That path lets a repository reset `compaction.enabled=false` or `historian.disable=true` without naming the field.
+ * Discarding the non-object project value keeps the trusted user block in the merge.
+ */
+const PROTECTED_NESTED_BLOCKS = [
+    "compaction",
+    "models",
+    "storage",
+    "prompt_surface",
+    "pi",
+    "historian",
+    "sidekick",
+    "mural",
+    "experimental",
+] as const;
 
 /**
  * An untrusted repository must not set these hidden-agent fields because they can escalate privileges or execute code.
@@ -33,6 +57,9 @@ const TOKEN_THRESHOLD_REASON =
     "security: a repository may only raise execute_threshold_tokens above the user's trusted token threshold; it cannot force earlier historian work or cloned-repo cost escalation.";
 const TOKEN_THRESHOLD_INTRODUCTION_REASON =
     "security: a repository cannot introduce a new execute_threshold_tokens override when the user has no trusted token threshold for that key; that could force earlier historian work or cloned-repo cost escalation.";
+const INVALID_PERCENTAGE_THRESHOLD_REASON = `invalid value: execute_threshold_percentage must be a number between ${MIN_EXECUTE_THRESHOLD_PERCENTAGE} and ${MAX_EXECUTE_THRESHOLD_PERCENTAGE}, or an object of such numbers with a "default" key; the user's trusted threshold stays in effect.`;
+const INVALID_TOKEN_THRESHOLD_REASON =
+    "invalid value: execute_threshold_tokens must be an object of numbers between 5000 and 2000000; the user's trusted threshold stays in effect.";
 
 interface PercentageThresholdConfig {
     defaultValue: number;
@@ -49,7 +76,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isValidPercentageThreshold(value: unknown): value is number {
-    return typeof value === "number" && Number.isFinite(value) && value >= 20 && value <= 80;
+    return (
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= MIN_EXECUTE_THRESHOLD_PERCENTAGE &&
+        value <= MAX_EXECUTE_THRESHOLD_PERCENTAGE
+    );
 }
 
 function isValidTokenThreshold(value: unknown): value is number {
@@ -196,6 +228,26 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
 export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknown>): string[] {
     const warnings: string[] = [];
 
+    for (const block of PROTECTED_NESTED_BLOCKS) {
+        if (!(block in projectRaw) || isPlainObject(projectRaw[block])) continue;
+        delete projectRaw[block];
+        warnings.push(
+            `Ignoring ${block} from project config (security: a non-object value would replace the user's ${block} block and reset its user-level fields to defaults).`,
+        );
+    }
+
+    const experimental = projectRaw.experimental;
+    if (
+        isPlainObject(experimental) &&
+        "mural" in experimental &&
+        !isPlainObject(experimental.mural)
+    ) {
+        delete experimental.mural;
+        warnings.push(
+            "Ignoring experimental.mural from project config (security: a non-object value would replace the user's experimental.mural block and reset its user-level fields to defaults).",
+        );
+    }
+
     if ("fail_closed_blocking" in projectRaw) {
         delete projectRaw.fail_closed_blocking;
         warnings.push(
@@ -315,7 +367,6 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
     }
 
     // model check.
-    const experimental = projectRaw.experimental;
     const legacyMural = isPlainObject(experimental) ? experimental.mural : undefined;
     if (isPlainObject(legacyMural) && "model" in legacyMural) {
         delete legacyMural.model;
@@ -346,6 +397,8 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
 }
 
 /**
+ * `mergedRaw` holds the project's threshold value in place of the user's on entry.
+ * The constrained result is written back whenever the project supplies the key, including for rejected values, so the trusted user threshold is what schema validation sees.
  */
 export function constrainProjectThresholdOverrides(args: {
     mergedRaw: Record<string, unknown>;
@@ -365,9 +418,9 @@ export function constrainProjectThresholdOverrides(args: {
 
     if ("execute_threshold_percentage" in args.projectRaw) {
         const projectValue = args.projectRaw.execute_threshold_percentage;
+        const constrained = clonePercentageThresholds(basePercentage);
 
         if (isValidPercentageThreshold(projectValue)) {
-            const constrained = clonePercentageThresholds(basePercentage);
             constrained.defaultValue = Math.max(basePercentage.defaultValue, projectValue);
             for (const [modelKey, threshold] of basePercentage.overrides) {
                 const raisedThreshold = Math.max(threshold, projectValue);
@@ -377,7 +430,6 @@ export function constrainProjectThresholdOverrides(args: {
                     constrained.overrides.set(modelKey, raisedThreshold);
                 }
             }
-            setMergedPercentageThreshold(args.mergedRaw, constrained);
             if (percentageThresholdsEqual(constrained, basePercentage)) {
                 warnings.push(
                     makeProjectThresholdWarning(
@@ -387,12 +439,15 @@ export function constrainProjectThresholdOverrides(args: {
                 );
             }
         } else if (isPlainObject(projectValue)) {
-            const constrained = clonePercentageThresholds(basePercentage);
-            let touchedValidEntry = false;
-
-            if (isValidPercentageThreshold(projectValue.default)) {
-                touchedValidEntry = true;
-                if (projectValue.default > basePercentage.defaultValue) {
+            if ("default" in projectValue) {
+                if (!isValidPercentageThreshold(projectValue.default)) {
+                    warnings.push(
+                        makeProjectThresholdWarning(
+                            "execute_threshold_percentage.default",
+                            INVALID_PERCENTAGE_THRESHOLD_REASON,
+                        ),
+                    );
+                } else if (projectValue.default > basePercentage.defaultValue) {
                     constrained.defaultValue = projectValue.default;
                 } else {
                     warnings.push(
@@ -406,8 +461,15 @@ export function constrainProjectThresholdOverrides(args: {
 
             for (const [modelKey, rawValue] of Object.entries(projectValue)) {
                 if (modelKey === "default") continue;
-                if (!isValidPercentageThreshold(rawValue)) continue;
-                touchedValidEntry = true;
+                if (!isValidPercentageThreshold(rawValue)) {
+                    warnings.push(
+                        makeProjectThresholdWarning(
+                            `execute_threshold_percentage.${modelKey}`,
+                            INVALID_PERCENTAGE_THRESHOLD_REASON,
+                        ),
+                    );
+                    continue;
+                }
                 const baseValue =
                     basePercentage.overrides.get(modelKey) ?? basePercentage.defaultValue;
                 if (rawValue > baseValue) {
@@ -425,75 +487,96 @@ export function constrainProjectThresholdOverrides(args: {
                     );
                 }
             }
-
-            if (touchedValidEntry) {
-                setMergedPercentageThreshold(args.mergedRaw, constrained);
-            }
+        } else {
+            warnings.push(
+                makeProjectThresholdWarning(
+                    "execute_threshold_percentage",
+                    INVALID_PERCENTAGE_THRESHOLD_REASON,
+                ),
+            );
         }
+
+        setMergedPercentageThreshold(args.mergedRaw, constrained);
     }
 
-    if (
-        "execute_threshold_tokens" in args.projectRaw &&
-        isPlainObject(args.projectRaw.execute_threshold_tokens)
-    ) {
+    if ("execute_threshold_tokens" in args.projectRaw) {
         const projectValue = args.projectRaw.execute_threshold_tokens;
         const constrained = cloneTokenThresholds(baseTokens);
-        let touchedValidEntry = false;
 
-        if (isValidTokenThreshold(projectValue.default)) {
-            touchedValidEntry = true;
-            if (baseTokens.defaultValue === undefined) {
-                warnings.push(
-                    makeProjectThresholdWarning(
-                        "execute_threshold_tokens.default",
-                        TOKEN_THRESHOLD_INTRODUCTION_REASON,
-                    ),
-                );
-            } else if (projectValue.default > baseTokens.defaultValue) {
-                constrained.defaultValue = projectValue.default;
-            } else {
-                warnings.push(
-                    makeProjectThresholdWarning(
-                        "execute_threshold_tokens.default",
-                        TOKEN_THRESHOLD_REASON,
-                    ),
-                );
-            }
-        }
-
-        for (const [modelKey, rawValue] of Object.entries(projectValue)) {
-            if (modelKey === "default") continue;
-            if (!isValidTokenThreshold(rawValue)) continue;
-            touchedValidEntry = true;
-            const baseValue = baseTokens.overrides.get(modelKey) ?? baseTokens.defaultValue;
-            if (baseValue === undefined) {
-                warnings.push(
-                    makeProjectThresholdWarning(
-                        `execute_threshold_tokens.${modelKey}`,
-                        TOKEN_THRESHOLD_INTRODUCTION_REASON,
-                    ),
-                );
-                continue;
-            }
-            if (rawValue > baseValue) {
-                if (rawValue === constrained.defaultValue) {
-                    constrained.overrides.delete(modelKey);
+        if (isPlainObject(projectValue)) {
+            if ("default" in projectValue) {
+                if (!isValidTokenThreshold(projectValue.default)) {
+                    warnings.push(
+                        makeProjectThresholdWarning(
+                            "execute_threshold_tokens.default",
+                            INVALID_TOKEN_THRESHOLD_REASON,
+                        ),
+                    );
+                } else if (baseTokens.defaultValue === undefined) {
+                    warnings.push(
+                        makeProjectThresholdWarning(
+                            "execute_threshold_tokens.default",
+                            TOKEN_THRESHOLD_INTRODUCTION_REASON,
+                        ),
+                    );
+                } else if (projectValue.default > baseTokens.defaultValue) {
+                    constrained.defaultValue = projectValue.default;
                 } else {
-                    constrained.overrides.set(modelKey, rawValue);
+                    warnings.push(
+                        makeProjectThresholdWarning(
+                            "execute_threshold_tokens.default",
+                            TOKEN_THRESHOLD_REASON,
+                        ),
+                    );
                 }
-            } else {
-                warnings.push(
-                    makeProjectThresholdWarning(
-                        `execute_threshold_tokens.${modelKey}`,
-                        TOKEN_THRESHOLD_REASON,
-                    ),
-                );
             }
+
+            for (const [modelKey, rawValue] of Object.entries(projectValue)) {
+                if (modelKey === "default") continue;
+                if (!isValidTokenThreshold(rawValue)) {
+                    warnings.push(
+                        makeProjectThresholdWarning(
+                            `execute_threshold_tokens.${modelKey}`,
+                            INVALID_TOKEN_THRESHOLD_REASON,
+                        ),
+                    );
+                    continue;
+                }
+                const baseValue = baseTokens.overrides.get(modelKey) ?? baseTokens.defaultValue;
+                if (baseValue === undefined) {
+                    warnings.push(
+                        makeProjectThresholdWarning(
+                            `execute_threshold_tokens.${modelKey}`,
+                            TOKEN_THRESHOLD_INTRODUCTION_REASON,
+                        ),
+                    );
+                    continue;
+                }
+                if (rawValue > baseValue) {
+                    if (rawValue === constrained.defaultValue) {
+                        constrained.overrides.delete(modelKey);
+                    } else {
+                        constrained.overrides.set(modelKey, rawValue);
+                    }
+                } else {
+                    warnings.push(
+                        makeProjectThresholdWarning(
+                            `execute_threshold_tokens.${modelKey}`,
+                            TOKEN_THRESHOLD_REASON,
+                        ),
+                    );
+                }
+            }
+        } else {
+            warnings.push(
+                makeProjectThresholdWarning(
+                    "execute_threshold_tokens",
+                    INVALID_TOKEN_THRESHOLD_REASON,
+                ),
+            );
         }
 
-        if (touchedValidEntry) {
-            setMergedTokenThreshold(args.mergedRaw, constrained);
-        }
+        setMergedTokenThreshold(args.mergedRaw, constrained);
     }
 
     return warnings;

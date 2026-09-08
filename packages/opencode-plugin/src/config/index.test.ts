@@ -82,7 +82,7 @@ function loadDetailedWithUserConfig(configText: string) {
     }
 }
 
-function loadWithUserAndProjectConfig(
+function loadDetailedWithUserAndProjectConfig(
     userConfigText: string,
     projectConfigText: string,
     extraEnv: Record<string, string> = {},
@@ -105,7 +105,7 @@ function loadWithUserAndProjectConfig(
     process.env.XDG_CONFIG_HOME = xdg;
 
     try {
-        return loadPluginConfig(projectDir);
+        return loadPluginConfigDetailed(projectDir);
     } finally {
         if (origXdg === undefined) {
             delete process.env.XDG_CONFIG_HOME;
@@ -127,6 +127,14 @@ function loadWithUserAndProjectConfig(
             /* */
         }
     }
+}
+
+function loadWithUserAndProjectConfig(
+    userConfigText: string,
+    projectConfigText: string,
+    extraEnv: Record<string, string> = {},
+) {
+    return loadDetailedWithUserAndProjectConfig(userConfigText, projectConfigText, extraEnv).config;
 }
 
 describe("loadPluginConfig — transform mode resolution", () => {
@@ -229,9 +237,24 @@ describe("loadPluginConfig — secret redaction", () => {
 
         expect(combined).not.toContain("secret-xyz");
         expect(combined).not.toContain("also-secret");
-        expect(combined).toContain("object with keys");
-        expect(combined).toContain("nested");
-        expect(combined).toContain("apiKey");
+        expect(combined).toContain("object with 2 keys");
+        expect(combined).not.toContain("nested");
+        expect(combined).not.toContain("apiKey");
+    });
+
+    it("withholds object keys because substitution can resolve a secret into a key", () => {
+        const config = JSON.stringify({
+            historian_timeout_ms: { "{env:EIDNARA_TEST_KEY_SECRET}": 1 },
+        });
+
+        const result = loadWithUserConfig(config, {
+            EIDNARA_TEST_KEY_SECRET: "key-secret-that-must-not-leak",
+        });
+        const combined = (result.configWarnings ?? []).join("\n");
+
+        expect(combined).toContain("historian_timeout_ms");
+        expect(combined).toContain("object with 1 key");
+        expect(combined).not.toContain("key-secret-that-must-not-leak");
     });
 
     it("preserves sidekick.enabled=false migration after nested-field recovery", () => {
@@ -372,6 +395,66 @@ describe("loadPluginConfig — legacy agent enabled migration", () => {
         expect(result.configWarnings?.join("\n")).toContain(
             'Removed invalid "historian.enabled" in-memory (run doctor to persist).',
         );
+    });
+
+    it("reports each legacy migration once when an unrelated field enters schema recovery", () => {
+        const result = loadWithUserConfig(
+            JSON.stringify({
+                sidekick: { enabled: false },
+                historian: { enabled: true },
+                language: 42,
+            }),
+        );
+
+        const warnings = result.configWarnings ?? [];
+        expect(warnings.filter((w) => w.includes("sidekick.enabled=false"))).toHaveLength(1);
+        expect(warnings.filter((w) => w.includes('"historian.enabled"'))).toHaveLength(1);
+        expect(warnings.some((w) => w.includes('"language"'))).toBe(true);
+        expect(result.sidekick?.disable).toBe(true);
+    });
+});
+
+describe("loadPluginConfigDetailed — non-object top level", () => {
+    it.each([
+        ["null", "null"],
+        ["an array", "[]"],
+        ["a number", "42"],
+        ["a string", '"hello"'],
+        ["a boolean", "true"],
+    ] as Array<
+        [string, string]
+    >)("treats a user config whose top level is %s as a parse error and falls back to defaults", (_title, text) => {
+        const result = loadDetailedWithUserConfig(text);
+
+        expect(result.sources.userConfig).toBe("project-file-parse-error");
+        expect(result.loadOutcome).toBe("project-file-parse-error");
+        expect(result.config.configWarnings?.join("\n")).toContain(
+            "config top level must be a JSON object",
+        );
+        expect(result.config.configWarnings?.join("\n")).not.toContain("__proto__");
+    });
+
+    it("treats a null project config as a parse error without discarding the user config", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ language: "tr" }),
+            "null",
+        );
+
+        expect(result.sources.projectConfig).toBe("project-file-parse-error");
+        expect(result.config.language).toBe("tr");
+    });
+});
+
+describe("loadPluginConfigDetailed — combined outcome", () => {
+    it("propagates a source-level schema-recovery from a rejected prototype-pollution key", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({}),
+            '{"__proto__": {"polluted": true}, "smart_drops": true}',
+        );
+
+        expect(result.sources.projectConfig).toBe("schema-recovery");
+        expect(result.recoveredTopLevelKeys).toEqual([]);
+        expect(result.loadOutcome).toBe("schema-recovery");
     });
 });
 
@@ -519,6 +602,80 @@ describe("loadPluginConfig — project compaction trust boundary", () => {
         );
 
         expect(result.execute_threshold_tokens).toEqual({ default: 18_000 });
+    });
+
+    it("ignores a schema-valid project percentage above 80 that is below the user's threshold", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ execute_threshold_percentage: 90 }),
+            JSON.stringify({ execute_threshold_percentage: 85 }),
+        );
+
+        expect(result.execute_threshold_percentage).toBe(90);
+        expect(result.configWarnings?.join("\n")).toContain(
+            "Ignoring execute_threshold_percentage",
+        );
+    });
+
+    it("keeps the user's threshold when the project value is outside the schema range", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ execute_threshold_percentage: 90 }),
+            JSON.stringify({ execute_threshold_percentage: "abc" }),
+        );
+
+        expect(result.config.execute_threshold_percentage).toBe(90);
+        expect(result.recoveredTopLevelKeys).toEqual([]);
+        expect(result.config.configWarnings?.join("\n")).toContain("invalid value");
+    });
+
+    it("keeps the whole user config when a project threshold object has an invalid default", () => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ execute_threshold_percentage: { default: 90 }, language: "fr" }),
+            JSON.stringify({ execute_threshold_percentage: { default: 5 } }),
+        );
+
+        expect(result.config.execute_threshold_percentage).toBe(90);
+        expect(result.config.language).toBe("fr");
+        expect(result.recoveredTopLevelKeys).toEqual([]);
+        expect(result.config.configWarnings?.join("\n") ?? "").not.toContain(
+            "Config recovery failed",
+        );
+    });
+
+    it.each([
+        ["null", "null"],
+        ["an array", "[]"],
+        ["a string", '"x"'],
+    ] as Array<
+        [string, string]
+    >)("keeps user compaction.enabled=false when the project compaction block is %s", (_title, projectBlock) => {
+        const result = loadDetailedWithUserAndProjectConfig(
+            JSON.stringify({ compaction: { enabled: false } }),
+            `{"compaction": ${projectBlock}}`,
+        );
+
+        expect(result.config.compaction).toEqual({ enabled: false });
+        expect(result.recoveredTopLevelKeys).toEqual([]);
+        expect(result.config.configWarnings?.join("\n")).toContain(
+            "Ignoring compaction from project config",
+        );
+    });
+
+    it("keeps user historian.disable=true when the project historian block is null", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ historian: { disable: true } }),
+            JSON.stringify({ historian: null }),
+        );
+
+        expect(result.historian?.disable).toBe(true);
+    });
+
+    it("keeps user storage.enforce_private_permissions when the project storage block is null", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ storage: { enforce_private_permissions: false } }),
+            JSON.stringify({ storage: null }),
+        );
+
+        expect(result.storage?.enforce_private_permissions).toBe(false);
     });
 });
 

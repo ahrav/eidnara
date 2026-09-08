@@ -7,6 +7,7 @@ import {
 } from "../shared/jsonc-parser";
 import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
+import { isRecord } from "../shared/record-type-guard";
 import { setWindowOverlayPath } from "../shared/window-geometry";
 import { isCompactionEnabled, migrateLegacyAgentEnabledInMemory } from "./agent-disable";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
@@ -97,9 +98,16 @@ function loadConfigFileDetailed(
             isProjectConfig: source === "project",
         });
         const rejectedKeyPaths: string[] = [];
-        const config = parseConfigJsonc<Record<string, unknown>>(substituted.text, {
+        const parsed: unknown = parseConfigJsonc(substituted.text, {
             onRejectedKey: (path) => rejectedKeyPaths.push(path.join(".")),
         });
+        // The generic parser returns whatever JSON value the file holds; a `null`, array, or scalar top level would throw inside `parsePluginConfig`, outside this try.
+        if (!isRecord(parsed)) {
+            throw new Error(
+                `config top level must be a JSON object, got ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed}`,
+            );
+        }
+        const config: Record<string, unknown> = parsed;
         const unsafeKeyWarnings = rejectedKeyPaths.map(
             (path) =>
                 `Ignored unsafe config key "${path}" (security: prototype-pollution keys are not allowed).`,
@@ -191,8 +199,7 @@ function deepMergeRawConfig(
 /**
  * Warning rendering never exposes values resolved by `{env:...}` or `{file:...}` substitution.
  *
- * The renderer reports string lengths and object and array shapes.
- * `<missing>`.
+ * Object keys are withheld because substitution runs on the raw text, so a key can hold a resolved secret as readily as a value.
  */
 function redactConfigValue(value: unknown): string {
     if (value === undefined) return "<missing>";
@@ -203,8 +210,8 @@ function redactConfigValue(value: unknown): string {
     if (typeof value === "boolean") return `boolean ${value}`;
     if (Array.isArray(value)) return `array, ${value.length} item${value.length === 1 ? "" : "s"}`;
     if (typeof value === "object") {
-        const keys = Object.keys(value as Record<string, unknown>);
-        return `object with keys [${keys.join(", ")}]`;
+        const count = Object.keys(value as Record<string, unknown>).length;
+        return `object with ${count} key${count === 1 ? "" : "s"}`;
     }
     return typeof value;
 }
@@ -320,7 +327,8 @@ function parsePluginConfig(
         );
     }
 
-    const retryMigrated = migrateLegacyAgentEnabledInMemory(patched, preMigrationWarnings);
+    // `patched` derives from `rawConfig` by deleting or pruning keys, so any legacy `enabled` field the retry migrates was already migrated and reported by the first pass.
+    const retryMigrated = migrateLegacyAgentEnabledInMemory(patched, []);
     const retryParsed = EidnaraConfigSchema.safeParse(retryMigrated);
     if (retryParsed.success) {
         return {
@@ -401,7 +409,10 @@ function combinedOutcome(args: {
     const sourceOutcomes = Object.values(args.sources);
     if (sourceOutcomes.includes("project-file-parse-error")) return "project-file-parse-error";
     if (sourceOutcomes.includes("project-file-io-error")) return "project-file-io-error";
-    if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
+    // A rejected prototype-pollution key never reaches Zod, so it appears only as a source outcome, not in `recoveredTopLevelKeys`.
+    if (sourceOutcomes.includes("schema-recovery") || args.recoveredTopLevelKeys.length > 0) {
+        return "schema-recovery";
+    }
     if (args.substitutionFailures.length > 0) return "substitution-failure";
     return "ok";
 }
