@@ -362,6 +362,25 @@ describe("opencode child lifecycle", () => {
         );
     });
 
+    it("withholds parent OpenCode control variables and the Broca-child guard from the child", () => {
+        const { isInheritableEnvKey } = __spawnOpencodeTest;
+        for (const key of [
+            "EIDNARA_BROCA_CHILD",
+            "OPENCODE_DB",
+            "OPENCODE_CONFIG",
+            "OPENCODE_CONFIG_CONTENT",
+            "EIDNARA_MODULE_ID",
+            "EIDNARA_LAUNCH_NONCE",
+            "OPENCODE_SERVER_PASSWORD",
+            "NODE_ENV",
+        ]) {
+            expect(isInheritableEnvKey(key)).toBe(false);
+        }
+        for (const key of ["PATH", "HOME", "OPENCODE_DISABLE_AUTOUPDATE"]) {
+            expect(isInheritableEnvKey(key)).toBe(true);
+        }
+    });
+
     it("escalates a SIGTERM-ignoring child and waits for exit", async () => {
         const child = new FakeChild();
         let exitObserved = false;

@@ -8,6 +8,7 @@ describe("shared-memory soak runner", () => {
         expect(invocation.command).toEqual([
             "cargo",
             "test",
+            "--locked",
             "-p",
             "host-runtime",
             "--test",
@@ -19,6 +20,7 @@ describe("shared-memory soak runner", () => {
 
     it("selects the release soak and converts hours to seconds", () => {
         const invocation = soakInvocation(["--hours", "5"]);
+        expect(invocation.command).toContain("--locked");
         expect(invocation.command).toContain("--release");
         expect(invocation.command).toContain(
             "long_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded",

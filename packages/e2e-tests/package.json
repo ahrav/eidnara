@@ -9,6 +9,7 @@
         "lint:fix": "biome check --write .",
         "test": "bun run ensure:plugin-dist && bun test scripts src",
         "test:rust": "bun run ensure:plugin-dist && bun scripts/run-test-selection.ts --mode rust --timeout 600000 --max-concurrency 1",
+        "test:fixture-contract": "bun test src/rust-runner/hermetic-host.test.ts",
         "validate-mode-manifest": "bun scripts/validate-mode-manifest.ts --mode rust",
         "validate:shm-hardening-matrix": "bun scripts/validate-shm-hardening-matrix.ts",
         "soak:shm": "bun scripts/run-shm-soak.ts",

@@ -452,6 +452,12 @@ function isInheritableEnvKey(key: string): boolean {
     // The harness clears `EIDNARA_MODULE_ID` and `EIDNARA_LAUNCH_NONCE` because an inherited supervisor identity makes the plugin send a nonce the hermetic host rejects.
     // The hermetic host rejects an inherited supervisor identity whose nonce does not match a supervised launch.
     if (key === "EIDNARA_MODULE_ID" || key === "EIDNARA_LAUNCH_NONCE") return false;
+    // `EIDNARA_BROCA_CHILD=1` makes the bundled plugin return before installing any hook, so an inherited value would run the suite without the Rust transform.
+    if (key === "EIDNARA_BROCA_CHILD") return false;
+    // These point OpenCode at a database or configuration outside the isolated `env`; the child must read and mutate only the state this harness provisions.
+    if (key === "OPENCODE_DB" || key === "OPENCODE_CONFIG" || key === "OPENCODE_CONFIG_CONTENT") {
+        return false;
+    }
     // Ambient secrets are never forwarded.
     // Ambient secrets would be exposed through the unauthenticated API to any process that reaches the port.
     // The child uses the mock provider; credentialed spawns pass credentials through `extraEnv`.

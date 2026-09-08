@@ -496,13 +496,15 @@ export class RustTestHarness {
         try {
             await this.host.stop();
         } catch {
-            // ignore
+            // A failed teardown keeps `dataDir` and its PID record for the next run's reaper.
         }
         try {
             await this.mock.stop();
         } catch {
             // ignore
         }
+        // A successful host teardown removes `dataDir` itself, so its presence marks a leaked fixture whose PID record must survive.
+        if (existsSync(this.env.dataDir)) return;
         try {
             rmSync(join(this.env.dataDir, ".."), {
                 recursive: true,

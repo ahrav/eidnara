@@ -63,13 +63,12 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: fold under pressure", () => {
         }
         await Bun.sleep(500);
 
-        const foldedWire = h.lastMainWireSerialized();
         const foldedWireBytes = h.lastMainWireBytes();
 
         expect(foldedWireBytes).toBeLessThan(peakWireBytes);
 
-        expect(foldedWire).toContain("Rust fold e2e chunk");
-        const firstMessage = h.lastMainMessages()[0];
-        expect(JSON.stringify(firstMessage)).toContain("<session-history>");
+        const firstMessage = JSON.stringify(h.lastMainMessages()[0]);
+        expect(firstMessage).toContain("<session-history>");
+        expect(firstMessage).not.toContain("<session-history></session-history>");
     }, 300_000);
 });

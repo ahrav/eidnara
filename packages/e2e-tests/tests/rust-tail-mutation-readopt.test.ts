@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { RustTestHarness } from "../src/rust-harness";
 import { driveToSteadyState, rustPrereqs } from "../src/rust-scenario-support";
 
+const INJECTED_MARKER = "[REMINDER: injected wrapper content, same message id, changed content]";
+
 function mutateNewestUserTailInPlace(h: RustTestHarness, sessionId: string): string {
     const ocPath = join(h.env.dataDir, "opencode", "opencode.db");
     const db = new Database(ocPath);
@@ -29,7 +31,7 @@ function mutateNewestUserTailInPlace(h: RustTestHarness, sessionId: string): str
             .get(newestUser.id) as { id: string; data: string } | undefined;
         if (!part) throw new Error("no text part to mutate");
         const parsed = JSON.parse(part.data) as { text?: string };
-        parsed.text = `${parsed.text ?? ""} [REMINDER: injected wrapper content, same message id, changed content]`;
+        parsed.text = `${parsed.text ?? ""} ${INJECTED_MARKER}`;
         db.prepare("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify(parsed), part.id);
         return newestUser.id;
     } finally {
@@ -56,6 +58,10 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: tail mutation re-ado
         await driveToSteadyState(h, sessionId, 3);
 
         const beforeCount = h.readRustPasses().length;
+        const requestsBefore = h.mainRequests().length;
+        expect(
+            h.mainRequests().some((r) => JSON.stringify(r.body.messages).includes(INJECTED_MARKER)),
+        ).toBe(false);
         mutateNewestUserTailInPlace(h, sessionId);
         await Bun.sleep(500);
 
@@ -74,6 +80,15 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: tail mutation re-ado
 
         const all = await h.waitForRustPasses(beforeCount + 4);
         const after = all.slice(beforeCount);
+
+        // The provider view carries the changed text only if OpenCode re-read the mutated row.
+        const postMutationRequests = h.mainRequests().slice(requestsBefore);
+        expect(postMutationRequests.length).toBeGreaterThan(0);
+        expect(
+            postMutationRequests.some((r) =>
+                JSON.stringify(r.body.messages).includes(INJECTED_MARKER),
+            ),
+        ).toBe(true);
 
         expect(after.some((p) => p.servedFrom === "transform")).toBe(true);
     }, 300_000);

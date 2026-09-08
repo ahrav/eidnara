@@ -33,10 +33,12 @@ function pathCommand(command: string, pathEnv: string | undefined): string | und
 }
 
 function cargoMetadata(cargo: string, repoRoot: string, env: NodeJS.ProcessEnv): boolean {
+    // `--locked` makes a stale or missing `Cargo.lock` a detection failure instead of a lockfile rewrite.
     const result = spawnSync(
         cargo,
         [
             "metadata",
+            "--locked",
             "--no-deps",
             "--format-version",
             "1",

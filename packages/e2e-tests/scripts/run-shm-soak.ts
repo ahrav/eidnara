@@ -33,12 +33,14 @@ export function soakInvocation(args: string[]): SoakInvocation {
         }
     }
 
+    // `--locked` keeps both soak variants on the committed dependency graph instead of resolving a new one.
     return {
         command: smoke
-            ? ["cargo", "test", "-p", "host-runtime", "--test", "shm_soak", SHORT_SOAK]
+            ? ["cargo", "test", "--locked", "-p", "host-runtime", "--test", "shm_soak", SHORT_SOAK]
             : [
                   "cargo",
                   "test",
+                  "--locked",
                   "--release",
                   "-p",
                   "host-runtime",

@@ -228,10 +228,12 @@ export function detectRustModePrereqs(): RustModePrereqs {
         return { ok: false, skipReason: "cargo is not available on PATH" };
     }
     // `cargo metadata` resolves the whole workspace and identifies the target to build.
+    // `--locked` makes a stale or missing `Cargo.lock` a detection failure instead of a lockfile rewrite.
     const metadata = spawnSync(
         "cargo",
         [
             "metadata",
+            "--locked",
             "--no-deps",
             "--format-version",
             "1",
