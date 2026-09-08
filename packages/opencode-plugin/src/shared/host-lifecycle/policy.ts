@@ -399,10 +399,11 @@ export class HostLifecyclePolicy {
         // would launch a second native start that only collides with the
         // first on the transaction lock.
         const rootKey = rootResolution.ok ? rootResolution.root : "\u0000no-root";
-        const key = `${rootKey}\u0000${envelopeIdentity(request.startupEnvelope)}`;
+        const startupEnvelope = request.startupEnvelope ?? this.defaultStartupEnvelope;
+        const key = `${rootKey}\u0000${envelopeIdentity(startupEnvelope)}`;
         let shared = this.inflightStarts.get(key);
         if (!shared) {
-            shared = this.start(request.startupEnvelope);
+            shared = this.start(startupEnvelope);
             this.inflightStarts.set(key, shared);
             void shared
                 .catch(() => {})
@@ -427,23 +428,30 @@ export class HostLifecyclePolicy {
         if (compatibilityProbe === undefined) {
             return { result: unprovenCompatibility(result), storage: null };
         }
+        const compatibilityAggregateMs = this.compatibilityAggregateMs();
+        const compatibilityCallerBound =
+            remainingMs !== undefined && remainingMs <= compatibilityAggregateMs;
+        const compatibilityBudget = compatibilityCallerBound
+            ? remainingMs
+            : compatibilityAggregateMs;
         let snapshot: CompatibilitySnapshot;
         try {
             snapshot = await this.raceDetached(
-                this.sharedCompatibility(
-                    compatibilityProbe,
-                    rootKey,
-                    this.compatibilityAggregateMs(),
-                ),
+                this.sharedCompatibility(compatibilityProbe, rootKey, compatibilityAggregateMs),
                 request.signal,
-                remainingMs,
+                compatibilityBudget,
             );
         } catch (error) {
             // Detachment is the caller's own deadline or signal and stays a
             // thrown control outcome. Any other probe failure is an unproven
             // compatibility claim, so it becomes a typed closed result rather
             // than an unclassified rejection callers cannot act on.
-            if (error instanceof WaiterDetachedError) throw error;
+            if (
+                error instanceof WaiterDetachedError &&
+                (error.cause_kind === "aborted" || compatibilityCallerBound)
+            ) {
+                throw error;
+            }
             return { result: unprovenCompatibility(result), storage: null };
         }
         const applied = this.applyCompatibility(result, snapshot);

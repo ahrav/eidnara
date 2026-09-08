@@ -1251,6 +1251,40 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     });
 
+    test("a compatibility probe that ignores its budget is bounded by the policy aggregate", async () => {
+        const root = tempDir("eidnara-policy-probe-hang-");
+        const { binary, invocationLog } = fakeBinary(root);
+        let storageProbes = 0;
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 750,
+                compatibilityProbe: () => new Promise<never>(() => {}),
+                storageProbe: async () => {
+                    storageProbes += 1;
+                    return "ready";
+                },
+            });
+            const startedAt = performance.now();
+            // No caller deadline: the policy's own aggregate must end the wait,
+            // and expiring it is an unproven claim rather than a detachment.
+            const outcome = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+            expect(performance.now() - startedAt).toBeLessThan(750 + 1_000);
+            expect(outcome.result.ok).toBe(false);
+            expect(outcome.result.reason).toBe("native_probe_unavailable");
+            expect(outcome.authenticatedDaemonId).toBeUndefined();
+            expect(outcome.storage).toBeNull();
+            expect(storageProbes).toBe(0);
+            expect(invocations(invocationLog)).toEqual(["start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("a failed compatibility probe becomes a typed closed result, not a raw rejection", async () => {
         const root = tempDir("eidnara-policy-probe-failure-");
         const { binary, invocationLog } = fakeBinary(root);
@@ -1456,6 +1490,32 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(b.result.reason).toBe("started");
             expect(c.result.reason).toBe("started");
             expect(invocations(invocationLog)).toEqual(["start", "start"]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("an omitted envelope coalesces with an explicit copy of the default", async () => {
+        const root = tempDir("eidnara-policy-coalesce-default-envelope-");
+        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                defaultStartupEnvelope: { schema: 1, credentials: { KEY: "default" } },
+                storageProbe: async () => "ready",
+            });
+            const [a, b] = await Promise.all([
+                policy.demandStart({ origin: "managed-default", capability: "context" }),
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: { schema: 1, credentials: { KEY: "default" } },
+                }),
+            ]);
+            expect(a.result.reason).toBe("started");
+            expect(b.result.reason).toBe("started");
+            expect(invocations(invocationLog)).toEqual(["start"]);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
