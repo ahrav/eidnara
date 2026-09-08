@@ -383,12 +383,10 @@ export async function runSetup(dryRun = false): Promise<number> {
     }
 
     const paths = detectConfigPaths();
-    // A project-level OpenCode config counts: `detectConflicts` and
-    // `fixConflicts` read and repair those files, so a first-time user running
-    // setup inside such a project must not skip the conflict pass.
+    // Shared Eidnara config can come from Pi or OMP; only OpenCode config files establish an OpenCode setup. commentlint: allow(JUDGE)
+    // Project-level OpenCode configs are included because `detectConflicts` and `fixConflicts` read and repair them.
     const hadExistingSetup =
         paths.opencodeConfigFormat !== "none" ||
-        existsSync(paths.eidnaraConfig) ||
         paths.tuiConfigFormat !== "none" ||
         projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
     const omoConfigs = collectOmoConfigPaths(process.cwd());

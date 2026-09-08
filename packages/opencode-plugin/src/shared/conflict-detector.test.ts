@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     detectConflicts,
+    hasOmoPlugin,
     projectOpenCodeConfigPaths,
     resolveCompactionForBoot,
 } from "./conflict-detector";
@@ -80,6 +81,23 @@ describe("detectConflicts", () => {
     function writeProjectConfig(plugins: Array<string | [string, unknown]>): void {
         writeFileSync(join(projectDir, "opencode.json"), JSON.stringify({ plugin: plugins }));
     }
+
+    describe("effective config per directory", () => {
+        it("ignores a plugin entry that lives only in a shadowed .json sibling", () => {
+            writeFileSync(join(projectDir, "opencode.jsonc"), JSON.stringify({ plugin: [] }));
+            writeProjectConfig(["oh-my-opencode", "@tarquinen/opencode-dcp"]);
+
+            expect(hasOmoPlugin(projectDir)).toBe(false);
+            const result = detectConflicts(projectDir);
+            expect(result.conflicts.dcpPlugin).toBe(false);
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(false);
+        });
+
+        it("reads the .json sibling when no .jsonc exists", () => {
+            writeProjectConfig(["oh-my-opencode"]);
+            expect(hasOmoPlugin(projectDir)).toBe(true);
+        });
+    });
 
     describe("DCP detection", () => {
         it("matches the canonical @tarquinen/opencode-dcp package", () => {
