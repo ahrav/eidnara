@@ -1343,6 +1343,55 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         );
     });
 
+    it("retries the translated form when the cached canonical form loses its credentials", async () => {
+        const first = createMockChild();
+        const second = createMockChild();
+        const third = createMockChild();
+        const fourth = createMockChild();
+        const { runner, spawnImpl } = runnerWith([first, second, third, fourth]);
+
+        const firstRun = runner.run({ ...baseOptions, model: "openai/gpt-5.5" });
+        first.writeStderr("No API key found for openai-codex. Use /login to authenticate.");
+        first.emitClose(1);
+        await nextTick();
+        second.writeStdoutLine(
+            agentEnd([
+                {
+                    role: "assistant",
+                    content: [{ type: "text", text: "direct" }],
+                    stopReason: "stop",
+                },
+            ]),
+        );
+        second.emitClose(0);
+        await firstRun;
+
+        const secondRun = runner.run({ ...baseOptions, model: "openai/gpt-5.5" });
+        third.writeStderr("No API key found for openai. Use /login to authenticate.");
+        third.emitClose(1);
+        await nextTick();
+        fourth.writeStdoutLine(
+            agentEnd([
+                {
+                    role: "assistant",
+                    content: [{ type: "text", text: "codex success" }],
+                    stopReason: "stop",
+                },
+            ]),
+        );
+        fourth.emitClose(0);
+
+        const result = await secondRun;
+        expect(result.ok).toBe(true);
+        expect(spawnImpl).toHaveBeenCalledTimes(4);
+        expect(spawnImpl.mock.calls[2]?.[1]).toEqual(
+            expect.arrayContaining(["--model", "openai/gpt-5.5"]),
+        );
+        expect(spawnImpl.mock.calls[3]?.[1]).toEqual(
+            expect.arrayContaining(["--model", "openai-codex/gpt-5.5"]),
+        );
+    });
+
     it("does not provider-retry an unrelated stderr failure", async () => {
         const first = createMockChild();
         const { runner, spawnImpl } = runnerWith(first);
@@ -2175,6 +2224,39 @@ describe("PiSubagentRunner spawn lifecycle", () => {
             durationMs: expect.any(Number),
             meta: { stderr: "process reported late noise" },
         });
+    });
+
+    it("keeps the host default model as the first attempt when model is omitted", async () => {
+        const first = createMockChild();
+        const second = createMockChild();
+        const { runner, spawnImpl } = runnerWith([first, second]);
+
+        const resultPromise = runner.run({
+            ...baseOptions,
+            model: undefined,
+            fallbackModels: ["anthropic/fallback"],
+        });
+        first.writeStderr("default model exploded");
+        first.emitClose(1);
+        await nextTick();
+        second.writeStdoutLine(
+            agentEnd([
+                {
+                    role: "assistant",
+                    content: [{ type: "text", text: "fallback success" }],
+                    stopReason: "stop",
+                },
+            ]),
+        );
+        second.emitClose(0);
+
+        const result = await resultPromise;
+        expect(result.ok).toBe(true);
+        expect(spawnImpl).toHaveBeenCalledTimes(2);
+        expect(spawnImpl.mock.calls[0]?.[1]).not.toContain("--model");
+        expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
+            expect.arrayContaining(["--model", "anthropic/fallback"]),
+        );
     });
 
     it("retries fallback models by spawning fresh children", async () => {

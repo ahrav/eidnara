@@ -274,8 +274,8 @@ type RunState = {
     deadline: number | undefined;
     /**
      * `providerForms` records each canonical provider's settled form for one `run` call.
-     * A missing-key exit records the canonical form so the isolated retry of the same
-     * model and later fallbacks on the same provider skip the form that has no credentials.
+     * A missing-key exit records the alternate form so the isolated retry of the same model
+     * and later fallbacks on the same provider skip the form that has no credentials.
      */
     providerForms: Map<string, string>;
 };
@@ -306,9 +306,11 @@ const PI_PROVIDER_FORM_CACHE = new Map<string, string>();
 type ProviderModelAttempt = {
     canonicalRef: string;
     canonicalProvider: string;
+    /** `canonicalRef` prefixed by `attemptedProvider`. */
     modelRef: string;
     attemptedProvider: string;
-    translated: boolean;
+    /** The other provider form for the same canonical provider, tried after a missing-key exit. */
+    alternateProvider: string;
 };
 
 /**
@@ -387,7 +389,7 @@ export class PiSubagentRunner implements SubagentRunner {
     }
 
     /**
-     * Spawns `options.model` first, then each fallback in order, one child per attempt.
+     * Spawns `options.model` first (Pi's default model when omitted), then each fallback in order, one child per attempt.
      *
      * A loaded user extension can start its own agent turn before the child's prompt runs.
      * A loaded user extension can make `pi --print` exit 0 with no protocol output.
@@ -400,8 +402,10 @@ export class PiSubagentRunner implements SubagentRunner {
         options: SubagentRunOptions,
         startTime: number,
     ): Promise<SubagentRunResult> {
-        const models = [options.model, ...(options.fallbackModels ?? [])].filter(isModelRef);
-        const attempts: (string | undefined)[] = models.length > 0 ? models : [undefined];
+        const attempts: (string | undefined)[] = [
+            isModelRef(options.model) ? options.model : undefined,
+            ...(options.fallbackModels ?? []).filter(isModelRef),
+        ];
         const sessionId = options.accountingSessionId ?? "pi-subagent";
         const state: RunState = {
             runMode: { disableDiscoveredExtensions: false },
@@ -433,11 +437,7 @@ export class PiSubagentRunner implements SubagentRunner {
         return result as SubagentRunResult;
     }
 
-    /**
-     * Spawns one model in its attempted provider form and, after a missing-key exit for a
-     * translated form, once more in the canonical form. The form that succeeds is cached for
-     * later runs; the form that lacked credentials is recorded for the rest of this run.
-     */
+    /** `runModelAttempt` retries a provider credential failure once with the alternate provider form. */
     private async runModelAttempt(
         options: SubagentRunOptions,
         state: RunState,
@@ -462,16 +462,20 @@ export class PiSubagentRunner implements SubagentRunner {
 
         state.providerForms.set(
             providerAttempt.canonicalProvider,
-            providerAttempt.canonicalProvider,
+            providerAttempt.alternateProvider,
         );
-        const canonical = await this.runOnce(canonicalOptions, state, providerAttempt.canonicalRef);
-        if (canonical.ok) {
+        const alternate = await this.runOnce(
+            canonicalOptions,
+            state,
+            replaceProviderPrefix(providerAttempt.canonicalRef, providerAttempt.alternateProvider),
+        );
+        if (alternate.ok) {
             PI_PROVIDER_FORM_CACHE.set(
                 providerAttempt.canonicalProvider,
-                providerAttempt.canonicalProvider,
+                providerAttempt.alternateProvider,
             );
         }
-        return canonical;
+        return alternate;
     }
 
     private spawnUsesNoExtensions(runMode: PiRunMode): boolean {
@@ -1087,23 +1091,21 @@ function resolveProviderModelAttempt(
 
     const translatedRef = resolveModelRefForHost(canonicalRef);
     const translatedProvider = providerPrefix(translatedRef);
-    // A form settled earlier in this run outranks the form cached from previous runs.
-    const settledProvider =
-        runProviderForms.get(canonicalProvider) ?? PI_PROVIDER_FORM_CACHE.get(canonicalProvider);
-    if (
-        !translatedProvider ||
-        (translatedProvider === canonicalProvider && settledProvider === undefined)
-    ) {
-        return undefined;
-    }
+    // A provider with one form has nothing to retry.
+    if (!translatedProvider || translatedProvider === canonicalProvider) return undefined;
 
-    const attemptedProvider = settledProvider ?? translatedProvider;
+    // A form settled earlier in this run outranks the form cached from previous runs.
+    const attemptedProvider =
+        runProviderForms.get(canonicalProvider) ??
+        PI_PROVIDER_FORM_CACHE.get(canonicalProvider) ??
+        translatedProvider;
     return {
         canonicalRef,
         canonicalProvider,
         modelRef: replaceProviderPrefix(canonicalRef, attemptedProvider),
         attemptedProvider,
-        translated: attemptedProvider !== canonicalProvider,
+        alternateProvider:
+            attemptedProvider === canonicalProvider ? translatedProvider : canonicalProvider,
     };
 }
 
@@ -1112,7 +1114,6 @@ function isProviderCredentialFailure(
     attempt: ProviderModelAttempt,
 ): result is FailedRunResult {
     return (
-        attempt.translated &&
         !result.ok &&
         result.reason === "non_zero_exit" &&
         getResultStderr(result).includes(`No API key found for ${attempt.attemptedProvider}`)
