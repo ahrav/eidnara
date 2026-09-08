@@ -28,7 +28,10 @@ export interface MutationInventorySync {
     records: number;
 }
 
-/** Matching claims retain their existing rationale and family links; non-mutation items remain unchanged. */
+/**
+ * Matching claims retain their existing rationale and family links; non-mutation items remain unchanged.
+ * Existing mutation rows keep their positions and new rows are appended, because the accepted-snapshot comparison rejects an insertion before accepted history.
+ */
 export function syncMutationInventory(
     e2eRoot: string = E2E_ROOT,
     repoRoot: string = REPO_ROOT,
@@ -51,7 +54,8 @@ export function syncMutationInventory(
         records: scanned.reduce((total, item) => total + item.claims.length, 0),
     };
 
-    const mutationItems: InventoryItem[] = scanned.map((item) => {
+    const nextById = new Map<string, InventoryItem>();
+    for (const item of scanned) {
         const previous = existing.get(item.id);
         const previousClaims = new Map(
             (previous?.claims ?? []).map((claim) => [claim.id, claim] as const),
@@ -70,16 +74,25 @@ export function syncMutationInventory(
         };
         if (!previous) result.added.push(item.id);
         else if (JSON.stringify(previous) !== JSON.stringify(next)) result.updated.push(item.id);
-        return next;
-    });
+        nextById.set(item.id, next);
+    }
     for (const id of existing.keys()) {
-        if (!scanned.some((item) => item.id === id)) result.removed.push(id);
+        if (!nextById.has(id)) result.removed.push(id);
     }
 
-    inventory.items = [
-        ...inventory.items.filter((item) => !item.id.startsWith("src-mutation-")),
-        ...mutationItems,
-    ];
+    const retained: InventoryItem[] = [];
+    for (const item of inventory.items) {
+        if (!item.id.startsWith("src-mutation-")) {
+            retained.push(item);
+            continue;
+        }
+        const next = nextById.get(item.id);
+        if (next) {
+            retained.push(next);
+            nextById.delete(item.id);
+        }
+    }
+    inventory.items = [...retained, ...nextById.values()];
     writeFileSync(path, `${JSON.stringify(inventory, null, 4)}\n`);
     return result;
 }

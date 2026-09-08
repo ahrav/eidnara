@@ -23,6 +23,7 @@ import {
     verifyThinkingDroppedShell,
     verifyThinkingImageSurvival,
     verifyThinkingNudgeAnchor,
+    wireCarriesTagOverlay,
 } from "./source-linked-regressions";
 
 const MODULE_PATH = "src/incident-pool/scenarios/source-linked-regressions.ts";
@@ -35,6 +36,7 @@ function a1Observation(
         bustCount: 0,
         bustReport: "",
         uncachedTransitionCount: 0,
+        transformRenderedRequestCount: 6,
         rustPassCount: 6,
         transformServedPassCount: 6,
         ...overrides,
@@ -51,6 +53,7 @@ function a3Observation(
         bustReport: "",
         finalWireHasCtxReduce: true,
         uncachedTransitionCount: 0,
+        transformRenderedRequestCount: 9,
         rustPassCount: 9,
         transformServedPassCount: 9,
         ...overrides,
@@ -109,7 +112,9 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         expect(busted.verdict).toBe("assertion_fail");
         expect(failedCheckIds(busted)).toEqual(["check-a1-zero-prefix-busts"]);
 
-        const thin = verifyFirstRenderPureDeferStability(a1Observation({ mainRequestCount: 5 }));
+        const thin = verifyFirstRenderPureDeferStability(
+            a1Observation({ mainRequestCount: 5, transformRenderedRequestCount: 5 }),
+        );
         expect(failedCheckIds(thin)).toEqual(["check-a1-defer-request-floor"]);
     });
 
@@ -131,6 +136,28 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
                 ),
             ),
         ).toEqual(["check-a1-transform-served"]);
+        // Internal-agent passes can pad the pass counts; a main request without the tag overlay still fails.
+        expect(
+            failedCheckIds(
+                verifyFirstRenderPureDeferStability(
+                    a1Observation({
+                        transformRenderedRequestCount: 5,
+                        rustPassCount: 7,
+                        transformServedPassCount: 7,
+                    }),
+                ),
+            ),
+        ).toEqual(["check-a1-transform-served"]);
+        expect(
+            wireCarriesTagOverlay({
+                messages: [{ role: "user", content: [{ type: "text", text: "§4§ A1 turn 4" }] }],
+            }),
+        ).toBe(true);
+        expect(
+            wireCarriesTagOverlay({
+                messages: [{ role: "user", content: [{ type: "text", text: "A1 turn 4" }] }],
+            }),
+        ).toBe(false);
         expect(
             failedCheckIds(
                 verifyAgedCtxReduceSurvival(a3Observation({ uncachedTransitionCount: 1 })),
@@ -162,32 +189,31 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
             tools: [{ name: "ctx_reduce" }],
             messages: [{ role: "user", content: "continue" }],
         };
-        expect(hasCtxReducePair(declarationOnly, callId)).toBe(false);
-        expect(
-            hasCtxReducePair(
+        expect(hasCtxReducePair(declarationOnly, callId, "99999")).toBe(false);
+        const pairWithDrop = (drop: unknown) => ({
+            ...declarationOnly,
+            messages: [
                 {
-                    ...declarationOnly,
-                    messages: [
+                    role: "assistant",
+                    content: [
                         {
-                            role: "assistant",
-                            content: [
-                                {
-                                    type: "tool_use",
-                                    id: callId,
-                                    name: "ctx_reduce",
-                                    input: { drop: "99999" },
-                                },
-                            ],
-                        },
-                        {
-                            role: "user",
-                            content: [{ type: "tool_result", tool_use_id: callId, content: "ok" }],
+                            type: "tool_use",
+                            id: callId,
+                            name: "ctx_reduce",
+                            input: drop === undefined ? {} : { drop },
                         },
                     ],
                 },
-                callId,
-            ),
-        ).toBe(true);
+                {
+                    role: "user",
+                    content: [{ type: "tool_result", tool_use_id: callId, content: "ok" }],
+                },
+            ],
+        });
+        expect(hasCtxReducePair(pairWithDrop("99999"), callId, "99999")).toBe(true);
+        // A pair whose input was rewritten or stripped is not the retained fixture payload.
+        expect(hasCtxReducePair(pairWithDrop("1"), callId, "99999")).toBe(false);
+        expect(hasCtxReducePair(pairWithDrop(undefined), callId, "99999")).toBe(false);
     });
 
     it("rejects a vanished ctx_reduce call, a bust, and a never-on-wire call", () => {
@@ -204,7 +230,11 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         ).toEqual(["check-a3-reduce-on-wire"]);
         // Eight prompts produce nine main requests because the ctx_reduce tool_use adds a continuation.
         expect(
-            failedCheckIds(verifyAgedCtxReduceSurvival(a3Observation({ mainRequestCount: 8 }))),
+            failedCheckIds(
+                verifyAgedCtxReduceSurvival(
+                    a3Observation({ mainRequestCount: 8, transformRenderedRequestCount: 8 }),
+                ),
+            ),
         ).toEqual(["check-a3-defer-request-floor"]);
     });
 });

@@ -87,6 +87,13 @@ describe("mutation inventory sync", () => {
             expect(added.claims.map((c) => [c.id, c.disposition])).toEqual([
                 ["claim-mutation-fm-oc-2-rung-deletion", "verifier_evidence"],
             ]);
+            // Accepted rows keep their order and the new row is appended, although "fm-oc-2" sorts before "goldens-*".
+            expect(after.items.map((i) => i.id)).toEqual([
+                "src-parity-findings-s2",
+                "src-mutation-goldens-dg-1",
+                "src-mutation-goldens-dg-2",
+                "src-mutation-fm-oc-2",
+            ]);
             verifySourceCompleteness(
                 parseSourceInventory(JSON.parse(readFileSync(inventoryPath, "utf8"))),
                 scanSources(REPO_ROOT, temp),

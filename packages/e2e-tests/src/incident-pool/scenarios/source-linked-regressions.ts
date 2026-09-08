@@ -77,24 +77,37 @@ export const FIRST_RENDER_A3_CHECKS = [
 
 /** Fields shared by the A1 and A3 observations that prove the zero-bust result is not vacuous. */
 export interface CacheStabilityEvidence extends Record<string, JsonValue> {
+    mainRequestCount: number;
     bustCount: number;
     bustReport: string;
     /** Transitions whose previous request carried no `cache_control` breakpoint; the oracle cannot report a bust on them. */
     uncachedTransitionCount: number;
+    /** Main requests whose wire carries the transform's `§N§` tag overlay; a raw-served request carries none, and internal-agent passes cannot stand in for it. */
+    transformRenderedRequestCount: number;
     /** `rust pass:` lines the plugin logged during the drive. */
     rustPassCount: number;
     /** Passes whose `served_from` is `transform`; the plugin labels the fail-open fallback `raw`. */
     transformServedPassCount: number;
 }
 
-export interface FirstRenderDeferObservation extends CacheStabilityEvidence {
-    mainRequestCount: number;
-}
+export interface FirstRenderDeferObservation extends CacheStabilityEvidence {}
 
 export interface AgedCtxReduceObservation extends CacheStabilityEvidence {
-    mainRequestCount: number;
     sawReduceOnWire: boolean;
     finalWireHasCtxReduce: boolean;
+}
+
+const TAG_OVERLAY_RE = /§\d+§ /u;
+
+/** The transform prefixes every taggable block with `§N§ ` as it renders a request, so a served request shows the overlay on its user text. */
+export function wireCarriesTagOverlay(body: Record<string, unknown>): boolean {
+    return messagesOf(body).some(
+        (message) =>
+            Array.isArray(message.content) &&
+            message.content.some(
+                (block) => typeof block.text === "string" && TAG_OVERLAY_RE.test(block.text),
+            ),
+    );
 }
 
 /** The plugin writes each pass line after the provider response is captured, so the pass floor is awaited rather than read once. */
@@ -107,6 +120,10 @@ async function collectCacheStabilityEvidence(
     const comparisons = analyzePasses(requests);
     const busts = comparisons.filter((comparison) => comparison.verdict === "BUST");
     return {
+        mainRequestCount: requests.length,
+        transformRenderedRequestCount: requests.filter((request) =>
+            wireCarriesTagOverlay(request.body),
+        ).length,
         bustCount: busts.length,
         bustReport: busts.length > 0 ? formatBustReport(busts) : "",
         uncachedTransitionCount: comparisons.filter(
@@ -134,6 +151,7 @@ function cacheStabilityChecks(
         served: {
             id: `check-${prefix}-transform-served`,
             passed:
+                observation.transformRenderedRequestCount === observation.mainRequestCount &&
                 observation.rustPassCount >= requestFloor &&
                 observation.transformServedPassCount === observation.rustPassCount,
         },
@@ -149,10 +167,7 @@ export async function driveFirstRenderPureDeferStability(
         await h.sendPrompt(sessionId, `A1 turn ${i}: low-pressure cache-stability probe.`);
     }
     const requests = mainAgentRequests(h.mock.requests());
-    return {
-        mainRequestCount: requests.length,
-        ...(await collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A1_FIXTURE.turns)),
-    };
+    return collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A1_FIXTURE.turns);
 }
 
 export function verifyFirstRenderPureDeferStability(
@@ -170,6 +185,10 @@ export function verifyFirstRenderPureDeferStability(
     ]);
 }
 
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function messageBlocks(message: unknown): Array<Record<string, unknown>> {
     if (!message || typeof message !== "object") return [];
     const content = (message as { content?: unknown }).content;
@@ -181,7 +200,12 @@ function messageBlocks(message: unknown): Array<Record<string, unknown>> {
 }
 
 /** The check requires the emitted `ctx_reduce` use/result pair, not its tool declaration. */
-export function hasCtxReducePair(body: Record<string, unknown>, callId: string): boolean {
+/** `drop` pins the tool input the fixture sent, so a pair whose payload the transform rewrote or stripped does not count as retained. */
+export function hasCtxReducePair(
+    body: Record<string, unknown>,
+    callId: string,
+    drop: string,
+): boolean {
     if (!Array.isArray(body.messages)) return false;
     for (let index = 0; index < body.messages.length - 1; index += 1) {
         const assistant = body.messages[index];
@@ -201,7 +225,9 @@ export function hasCtxReducePair(body: Record<string, unknown>, callId: string):
                 block.type === "tool_use" &&
                 block.id === callId &&
                 typeof block.name === "string" &&
-                /ctx_reduce/.test(block.name),
+                /ctx_reduce/.test(block.name) &&
+                isRecordLike(block.input) &&
+                block.input.drop === drop,
         );
         const result = messageBlocks(user).some(
             (block) => block.type === "tool_result" && block.tool_use_id === callId,
@@ -259,7 +285,10 @@ export async function driveAgedCtxReduceSurvival(
         h.mock.setDefault({ text: `A3 defer reply ${i}`, usage: DEFER_USAGE });
         await h.sendPrompt(sessionId, `A3 turn ${i}: defer growth ages the ctx_reduce call.`);
         const body = h.mock.lastRequest()?.body;
-        if (body && hasCtxReducePair(body, FIRST_RENDER_A3_FIXTURE.callId)) {
+        if (
+            body &&
+            hasCtxReducePair(body, FIRST_RENDER_A3_FIXTURE.callId, FIRST_RENDER_A3_FIXTURE.drop)
+        ) {
             sawReduceOnWire = true;
         }
     }
@@ -267,10 +296,14 @@ export async function driveAgedCtxReduceSurvival(
     const requests = mainAgentRequests(h.mock.requests());
     const finalBody = requests.at(-1)?.body;
     return {
-        mainRequestCount: requests.length,
         sawReduceOnWire,
         finalWireHasCtxReduce:
-            finalBody !== undefined && hasCtxReducePair(finalBody, FIRST_RENDER_A3_FIXTURE.callId),
+            finalBody !== undefined &&
+            hasCtxReducePair(
+                finalBody,
+                FIRST_RENDER_A3_FIXTURE.callId,
+                FIRST_RENDER_A3_FIXTURE.drop,
+            ),
         ...(await collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A3_FIXTURE.mainRequests)),
     };
 }
@@ -921,43 +954,40 @@ function booleanField(observation: Record<string, JsonValue>, field: string): bo
 }
 
 const CACHE_STABILITY_FIELDS = {
+    mainRequestCount: "number",
     bustCount: "number",
     bustReport: "string",
     uncachedTransitionCount: "number",
+    transformRenderedRequestCount: "number",
     rustPassCount: "number",
     transformServedPassCount: "number",
 } as const;
 
 function cacheStabilityFields(value: Record<string, JsonValue>): CacheStabilityEvidence {
     return {
+        mainRequestCount: numberField(value, "mainRequestCount"),
         bustCount: numberField(value, "bustCount"),
         bustReport: stringField(value, "bustReport"),
         uncachedTransitionCount: numberField(value, "uncachedTransitionCount"),
+        transformRenderedRequestCount: numberField(value, "transformRenderedRequestCount"),
         rustPassCount: numberField(value, "rustPassCount"),
         transformServedPassCount: numberField(value, "transformServedPassCount"),
     };
 }
 
 function normalizeFirstRenderA1(raw: JsonValue): FirstRenderDeferObservation {
-    const value = exactPrimitiveObservation(raw, "parity-a1", {
-        mainRequestCount: "number",
-        ...CACHE_STABILITY_FIELDS,
-    });
-    return {
-        mainRequestCount: numberField(value, "mainRequestCount"),
-        ...cacheStabilityFields(value),
-    };
+    return cacheStabilityFields(
+        exactPrimitiveObservation(raw, "parity-a1", CACHE_STABILITY_FIELDS),
+    );
 }
 
 function normalizeFirstRenderA3(raw: JsonValue): AgedCtxReduceObservation {
     const value = exactPrimitiveObservation(raw, "parity-a3", {
-        mainRequestCount: "number",
         sawReduceOnWire: "boolean",
         finalWireHasCtxReduce: "boolean",
         ...CACHE_STABILITY_FIELDS,
     });
     return {
-        mainRequestCount: numberField(value, "mainRequestCount"),
         sawReduceOnWire: booleanField(value, "sawReduceOnWire"),
         finalWireHasCtxReduce: booleanField(value, "finalWireHasCtxReduce"),
         ...cacheStabilityFields(value),

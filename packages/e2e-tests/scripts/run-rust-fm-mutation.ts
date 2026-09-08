@@ -10,6 +10,8 @@ type MutationCase = {
     source: string;
     oldText: string;
     replacement: string;
+    /** The `it(...)` title Bun prints on the `(fail)` line when the mutation reaches the drill's assertion. */
+    expectedFailingTest: string;
 };
 
 type CommandResult = {
@@ -32,6 +34,7 @@ const mutations: Record<string, MutationCase[]> = {
             oldText:
                 'sessionLog(sessionId, "rust transform failed; serving the input unchanged:", error);',
             replacement: "",
+            expectedFailingTest: "continues through the outage with a loud module failure",
         },
     ],
     "3": [
@@ -40,6 +43,8 @@ const mutations: Record<string, MutationCase[]> = {
             source: pluginTransform,
             oldText: "if (needFullSync || nativeContentOmitted) {",
             replacement: "if (nativeContentOmitted) {",
+            expectedFailingTest:
+                "serves passes from transform again after the host restarts, without restarting the session",
         },
     ],
     "5": [
@@ -48,6 +53,7 @@ const mutations: Record<string, MutationCase[]> = {
             source: pluginTransform,
             oldText: 'servedFrom = "raw";',
             replacement: 'servedFrom = "transform";',
+            expectedFailingTest: "continues through a transport timeout and recovers after SIGCONT",
         },
     ],
 };
@@ -117,6 +123,15 @@ for (const mutation of mutations[drill]) {
     const revertedRerun = runBuildAndDrill(drill);
     if (observedFailure.exit_status === 0) {
         throw new Error(`${mutation.name}: mutation did not redden the drill`);
+    }
+    // A failed plugin build or harness start also exits nonzero; only the drill's own test failing proves the mutation reached its assertion.
+    const failedTests = [
+        ...observedFailure.output.matchAll(/^\(fail\) (.+?)(?: \[[\d.]+m?s\])?$/gmu),
+    ].map((match) => match[1] ?? "");
+    if (!failedTests.some((test) => test.includes(mutation.expectedFailingTest))) {
+        throw new Error(
+            `${mutation.name}: mutated run went red without failing "${mutation.expectedFailingTest}" (failed: ${failedTests.join("; ") || "none reported"})`,
+        );
     }
     if (revertedRerun.exit_status !== 0) {
         throw new Error(`${mutation.name}: reverted rerun did not pass`);

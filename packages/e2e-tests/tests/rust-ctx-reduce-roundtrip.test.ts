@@ -105,6 +105,22 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: ctx_reduce round-trip", () => 
             });
             await h.sendPrompt(sessionId, `ctx_reduce pressure turn ${i}: ${h.ballast(2_500)}`);
             await Bun.sleep(200);
+            if (i === 5) {
+                // The first producer-backed bust must consume the drop; a later pressure turn draining it would hide a stalled ledger.
+                const deadline = Date.now() + 10_000;
+                let pending = -1;
+                while (Date.now() < deadline) {
+                    const status = (await h.host.primaryStatus(
+                        sessionId,
+                        h.env.workdir,
+                        "session.status",
+                    )) as ModuleStatus;
+                    pending = status.pending_drop_count ?? -1;
+                    if (pending === 0) break;
+                    await Bun.sleep(100);
+                }
+                expect(pending).toBe(0);
+            }
         }
         await Bun.sleep(800);
 
