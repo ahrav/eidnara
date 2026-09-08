@@ -77,6 +77,7 @@ export function addPluginToOpenCodeConfig(
 ): void {
     const existsAtCommit = existsSync(configPath);
     const existing = existsAtCommit ? readJsoncConfigForUpdate(configPath) : {};
+    assertPluginListValue(configPath, existing.plugin);
     if (!existsAtCommit) {
         ensureDir(dirname(configPath));
         const created: Record<string, unknown> = { plugin: [PLUGIN_NAME] };
@@ -159,6 +160,7 @@ export function addPluginToOpenCodeConfig(
 export function addPluginToTuiConfig(configPath: string, _format: "json" | "jsonc" | "none"): void {
     const existsAtCommit = existsSync(configPath);
     const existing = existsAtCommit ? readJsoncConfigForUpdate(configPath) : {};
+    assertPluginListValue(configPath, existing.plugin);
     if (!existsAtCommit) {
         ensureDir(dirname(configPath));
         writeFileAtomic(configPath, `${stringifyJsonc({ plugin: [PLUGIN_NAME] }, null, 2)}\n`);
@@ -368,12 +370,16 @@ export function preflightConfigPaths(
  */
 export function assertPluginListShape(configPaths: readonly string[]): void {
     for (const configPath of configPaths) {
-        const plugin = readJsoncLenient(configPath).value.plugin;
-        if (plugin !== undefined && !Array.isArray(plugin)) {
-            throw new Error(
-                `Refusing to overwrite ${configPath}: "plugin" must be an array of plugin entries, found ${JSON.stringify(plugin)}`,
-            );
-        }
+        assertPluginListValue(configPath, readJsoncLenient(configPath).value.plugin);
+    }
+}
+
+/** The writers repeat this check on the value they re-read at commit time, since a file can change while prompts are open. */
+function assertPluginListValue(configPath: string, plugin: unknown): void {
+    if (plugin !== undefined && !Array.isArray(plugin)) {
+        throw new Error(
+            `Refusing to overwrite ${configPath}: "plugin" must be an array of plugin entries, found ${JSON.stringify(plugin)}`,
+        );
     }
 }
 

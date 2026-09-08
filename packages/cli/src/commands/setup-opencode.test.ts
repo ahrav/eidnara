@@ -373,6 +373,14 @@ describe("setup-opencode plugin list shape", () => {
         expect(() => assertPluginListShape([scalar])).toThrow(/"plugin" must be an array/);
         expect(() => assertPluginListShape([object])).toThrow(/object\.json/);
         expect(() => assertPluginListShape([array, join(root, "missing.json")])).not.toThrow();
+
+        // The writers repeat the check on the value they re-read at commit time.
+        expect(() => addPluginToOpenCodeConfig(scalar, "json")).toThrow(
+            /"plugin" must be an array/,
+        );
+        expect(() => addPluginToTuiConfig(object, "json")).toThrow(/"plugin" must be an array/);
+        expect(readFileSync(scalar, "utf-8")).toBe(`{"plugin":"@other/plugin"}`);
+        expect(readFileSync(object, "utf-8")).toBe(`{"plugin":{"name":"@other/plugin"}}`);
     });
 });
 
