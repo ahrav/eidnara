@@ -244,6 +244,49 @@ describe("compileSmartNoteCheck", () => {
         if (!result.ok) expect(result.error).toContain("dry-run failed");
     });
 
+    test("does not waive a check that catches the network failure and then fails otherwise", async () => {
+        const httpGet = mock(async () => {
+            throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: connect ECONNREFUSED");
+        });
+        for (const body of [
+            `try { cap.httpGet("https://down.example/"); } catch (e) { throw new Error("wrapped " + e.message); }`,
+            `try { cap.httpGet("https://down.example/"); } catch (e) { return { met: "nope" }; }`,
+        ]) {
+            const client = createCompilerClient([
+                compilerOutput(`function check(cap) { ${body} return { met: true }; }`),
+            ]);
+
+            const result = await compileSmartNoteCheck(
+                compileArgs(client, { capabilityFactory: () => ({ ...fakeCap, httpGet }) }),
+            );
+
+            expect(result.ok).toBe(false);
+            if (!result.ok) expect(result.error).toContain("dry-run failed");
+        }
+    });
+
+    test("bounds child-session deletion so a stalled delete cannot hold the result", async () => {
+        const client = createCompilerClient([compilerOutput(VALID_CHECK)]);
+        client.session.delete = mock(
+            (input: { signal?: AbortSignal }) =>
+                new Promise((_, reject) => {
+                    input.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+                        once: true,
+                    });
+                }),
+        ) as typeof client.session.delete;
+
+        const startedAt = Date.now();
+        const result = await compileSmartNoteCheck(compileArgs(client));
+
+        expect(result.ok).toBe(true);
+        expect(Date.now() - startedAt).toBeLessThan(10_000);
+        const deleteCall = (
+            client.session.delete.mock.calls as unknown as Array<[{ signal?: unknown }]>
+        )[0][0];
+        expect(deleteCall.signal).toBeInstanceOf(AbortSignal);
+    });
+
     test("returns cancelled without creating a session when the signal is already aborted", async () => {
         const controller = new AbortController();
         controller.abort();
@@ -329,7 +372,9 @@ describe("compileSmartNoteCheck", () => {
     test("deletes the compiler child session unless keep_subagents is set", async () => {
         const deleted = createCompilerClient([compilerOutput(VALID_CHECK)]);
         await compileSmartNoteCheck(compileArgs(deleted));
-        expect(deleted.session.delete).toHaveBeenCalledWith({ path: { id: "compile-child" } });
+        expect(deleted.session.delete).toHaveBeenCalledWith(
+            expect.objectContaining({ path: { id: "compile-child" } }),
+        );
 
         setKeepSubagents(true);
         const kept = createCompilerClient([compilerOutput(VALID_CHECK)]);

@@ -75,6 +75,8 @@ const MAX_CRON_BYTES = 256;
 const MAX_COMPILER_ERROR_CHARS = 2 * 1024;
 const MAX_REJECTED_ARGUMENT_CHARS = 120;
 const DRY_RUN_TIMEOUT_MS = 2_000;
+/** Cleanup runs after the deadline may have passed, so it carries its own short bound. */
+const SESSION_CLEANUP_TIMEOUT_MS = 3_000;
 const DEADLINE_EXPIRED_ERROR = "smart-note compile deadline expired";
 const NON_CODE_SPANS: ReadonlySet<SourceSpanKind> = new Set(["comment", "string", "template"]);
 const CHECK_SIGNATURE = /\bfunction\s+check\s*\(\s*cap\s*\)/;
@@ -195,7 +197,12 @@ Remember: output only the JSON object described by the system prompt.`;
         return { ok: false, cancelled, error: message };
     } finally {
         if (childSessionId && !shouldKeepSubagents()) {
-            await args.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
+            await args.client.session
+                .delete({
+                    path: { id: childSessionId },
+                    signal: AbortSignal.timeout(SESSION_CLEANUP_TIMEOUT_MS),
+                })
+                .catch(() => {});
         }
     }
 }
@@ -223,10 +230,14 @@ async function validateCompilerOutput(
     if (dryRun.ok) {
         return { compiledCheck, manifest, checkCron, dryRun: dryRun.result };
     }
-    // Only a network failure the host observed and served to the guest leaves the dry run
-    // pending; guest code cannot fake one by throwing an error with the marker text.
+    // A dry run remains pending only when the check propagates its served network failure
+    // unchanged; a check that catches it and then fails for another reason is not waived.
     const servedNetworkFailure = bound.servedNetworkFailure();
-    if (!dryRun.cancelled && servedNetworkFailure !== null) {
+    if (
+        !dryRun.cancelled &&
+        servedNetworkFailure !== null &&
+        dryRun.error === `${SmartNoteNetworkError.name}: ${servedNetworkFailure}`
+    ) {
         return {
             compiledCheck,
             manifest,
