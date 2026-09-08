@@ -378,6 +378,29 @@ export function hasExistingOpenCodeSetup(
     );
 }
 
+/**
+ * Re-detects conflicts after a repair and reports any that remain. The fixer edits only files
+ * that exist and that its editor accepts, so an accepted repair can leave a conflict in place (an
+ * OMO plugin entry with no OMO config file, or a config the editor refused). Returns whether any
+ * conflict remains.
+ */
+export function reportRemainingConflicts(
+    directory: string,
+    compactionEnabled: boolean,
+    output: Pick<typeof log, "warn" | "message"> = log,
+): boolean {
+    const remaining = detectConflicts(directory, { compactionEnabled });
+    if (!remaining.hasConflict) return false;
+    output.warn(
+        "Conflicts remain after the automatic fixes; Eidnara stays disabled until they are resolved:",
+    );
+    for (const reason of remaining.reasons) output.message(`  • ${reason}`);
+    output.message(
+        "For oh-my-opencode without a config file, add `disabled_hooks` (context-window-monitor, preemptive-compaction, anthropic-context-window-limit-recovery) to its config, then rerun setup.",
+    );
+    return true;
+}
+
 export function preflightConfigPaths(
     paths: ConfigPaths & { eidnaraConfig: string },
     directory: string,
@@ -643,18 +666,8 @@ export async function runSetup(dryRun = false): Promise<number> {
                 } else {
                     log.info("No additional conflict changes were needed");
                 }
-                // The fixer edits only files that exist, so an accepted repair can leave a conflict in place
-                // (an OMO plugin entry with no OMO config file, for example); re-detect and say so.
-                const remaining = detectConflicts(process.cwd(), { compactionEnabled });
-                if (remaining.hasConflict) {
+                if (reportRemainingConflicts(process.cwd(), compactionEnabled)) {
                     repairIncomplete = true;
-                    log.warn(
-                        "Conflicts remain after the automatic fixes; Eidnara stays disabled until they are resolved:",
-                    );
-                    for (const reason of remaining.reasons) log.message(`  • ${reason}`);
-                    log.message(
-                        "For oh-my-opencode without a config file, add `disabled_hooks` (context-window-monitor, preemptive-compaction, anthropic-context-window-limit-recovery) to its config, then rerun setup.",
-                    );
                 }
             }
 
@@ -685,6 +698,11 @@ export async function runSetup(dryRun = false): Promise<number> {
                 );
                 if (actions.includes("Disabled conflicting oh-my-opencode hooks")) {
                     log.success("Hooks disabled in oh-my-opencode config");
+                }
+                // The editor refuses some parseable files (duplicate keys, for one), in which case the
+                // accepted repair wrote nothing; re-detect so the run does not report success.
+                if (reportRemainingConflicts(process.cwd(), compactionEnabled)) {
+                    repairIncomplete = true;
                 }
             }
         } catch (error) {

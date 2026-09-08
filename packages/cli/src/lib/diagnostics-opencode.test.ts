@@ -514,6 +514,7 @@ describe("collectDiagnostics without any home directory", () => {
             expect(report.eidnaraConfig.exists).toBe(false);
             expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
             expect(report.projectDirectory).toBe(cwd);
+            expect(report.pluginRegisteredInLoadedLayers).toBe(false);
             expect(renderDiagnosticsMarkdown(report)).toContain("- User-level paths unavailable: ");
             expect(root).toBeTruthy();
         } finally {

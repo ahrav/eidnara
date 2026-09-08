@@ -18,6 +18,7 @@ import {
     hasAnthropicModel,
     hasExistingOpenCodeSetup,
     preflightConfigPaths,
+    reportRemainingConflicts,
     withClaudeMaxCacheTtl,
     withoutDcpConflict,
     writeEidnaraConfig,
@@ -362,6 +363,58 @@ describe("hasExistingOpenCodeSetup", () => {
             if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
             else process.env.XDG_CONFIG_HOME = savedXdg;
         }
+    });
+});
+
+describe("reportRemainingConflicts", () => {
+    const isolatedKeys = ["OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "HOME"] as const;
+    const savedEnv = new Map<string, string | undefined>();
+    beforeEach(() => {
+        for (const key of isolatedKeys) savedEnv.set(key, process.env[key]);
+        process.env.OPENCODE_CONFIG_DIR = join(tempDir(), "opencode");
+        process.env.XDG_CONFIG_HOME = tempDir();
+        process.env.HOME = tempDir();
+    });
+    afterEach(() => {
+        for (const key of isolatedKeys) {
+            const value = savedEnv.get(key);
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    });
+
+    it("reports OMO hooks that a refused repair left enabled, and stays quiet once they are off", () => {
+        const root = tempDir();
+        mkdirSync(join(root, ".opencode"), { recursive: true });
+        writeFileSync(
+            join(root, ".opencode", "opencode.json"),
+            JSON.stringify({ plugin: ["oh-my-opencode"] }),
+        );
+        const omo = join(root, ".opencode", "oh-my-opencode.json");
+        writeFileSync(omo, JSON.stringify({ disabled_hooks: [] }));
+        const messages: string[] = [];
+        const output = {
+            warn: (message: string) => messages.push(`warn:${message}`),
+            message: (message: string) => messages.push(`message:${message}`),
+        };
+
+        expect(reportRemainingConflicts(root, true, output)).toBe(true);
+        expect(messages.join("\n")).toContain("warn:Conflicts remain after the automatic fixes");
+        expect(messages.join("\n")).toContain("oh-my-opencode");
+
+        writeFileSync(
+            omo,
+            JSON.stringify({
+                disabled_hooks: [
+                    "context-window-monitor",
+                    "preemptive-compaction",
+                    "anthropic-context-window-limit-recovery",
+                ],
+            }),
+        );
+        messages.length = 0;
+        expect(reportRemainingConflicts(root, true, output)).toBe(false);
+        expect(messages).toEqual([]);
     });
 });
 
