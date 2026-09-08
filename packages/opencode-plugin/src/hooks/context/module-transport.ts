@@ -386,6 +386,20 @@ function isStaleRouteHandleFailure(error: unknown): boolean {
 }
 
 /** Attach a bounded cleanup ticket when caller abort can race a possible send. */
+/** Rejects with the signal's reason as soon as it aborts; `operation` itself keeps running. */
+function untilAborted<T>(operation: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+    if (!signal) return operation;
+    const abortError = (): unknown => signal.reason ?? new Error("module transport call aborted");
+    if (signal.aborted) return Promise.reject(abortError());
+    return new Promise<T>((resolve, reject) => {
+        const onAbort = (): void => reject(abortError());
+        signal.addEventListener("abort", onAbort, { once: true });
+        operation.then(resolve, reject).finally(() => {
+            signal.removeEventListener("abort", onAbort);
+        });
+    });
+}
+
 function cleanupTicketOf(error: unknown): Promise<void> | null {
     if (!isRecord(error) || error.name !== "HostCallError") return null;
     const cleanup = (error as { cleanup?: unknown }).cleanup;
@@ -791,13 +805,16 @@ export class HostModuleTransport {
                         // A possible send invalidates the route without resending the body.
                         // A post-write abort relies on the bounded cleanup ticket instead of resending a possibly sent body.
                         // After a possible send, a post-write abort uses Cancel and the cleanup ticket rather than resending the body.
+                        let teardown: Promise<void>;
                         if (ensuredRoute) {
                             this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
-                            this.invalidateConnection(ensuredRoute.client);
+                            teardown = this.invalidateConnection(ensuredRoute.client);
                         } else {
-                            this.invalidateConnection();
+                            teardown = this.invalidateConnection();
                         }
                         turnedOver = true;
+                        // A body that may have reached the daemon has no cleanup ticket of its own, so the superseded connection's teardown fences the lane until the daemon has seen the connection go.
+                        if (!provenNotSent) cleanupTicket = teardown;
                     }
                     if (replayEligible && args.generationSensitive && !callerAborted) {
                         // Recovery does not cross a route or connection generation.
@@ -856,13 +873,13 @@ export class HostModuleTransport {
             if (client) {
                 void client.closeRoute(cachedRoute.route).catch((error: unknown) => {
                     if (this.client === client && isConnectionFailure(error)) {
-                        this.invalidateConnection(client);
+                        void this.invalidateConnection(client);
                     }
                 });
             }
         }
         if (routes.length === 0 && !closedOpenings && this.sessionLanes.get(sessionId)?.active) {
-            this.invalidateConnection(client);
+            void this.invalidateConnection(client);
         }
     }
 
@@ -900,7 +917,7 @@ export class HostModuleTransport {
         }
         const opening = this.routeOpenings.get(routeKey);
         if (opening?.client === client && opening.generation === generation) {
-            return await opening.promise;
+            return await untilAborted(opening.promise, signal);
         }
 
         const state = { closed: false };
@@ -935,13 +952,15 @@ export class HostModuleTransport {
         })();
         const routeOpening: OpeningRoute = { client, generation, state, promise };
         this.routeOpenings.set(routeKey, routeOpening);
-        try {
-            return await routeOpening.promise;
-        } finally {
-            if (this.routeOpenings.get(routeKey) === routeOpening) {
-                this.routeOpenings.delete(routeKey);
-            }
-        }
+        // The opening outlives an aborted waiter: its settlement, not the waiter's, retires the map entry, so a late success is cached rather than duplicated by the next caller.
+        void promise
+            .catch(() => undefined)
+            .finally(() => {
+                if (this.routeOpenings.get(routeKey) === routeOpening) {
+                    this.routeOpenings.delete(routeKey);
+                }
+            });
+        return await untilAborted(routeOpening.promise, signal);
     }
 
     /** The connection file the transport dials; its absence means no daemon can be reached. */
@@ -951,7 +970,7 @@ export class HostModuleTransport {
 
     /** Tears down the live connection, its routes, and cached capabilities so an owner evicting this transport does not strand a socket, channel poller, or ring mappings for the process lifetime. A later call on this instance redials. commentlint: allow(JUDGE) */
     disconnect(): void {
-        this.invalidateConnection();
+        void this.invalidateConnection();
     }
 
     canDemandStart(): boolean {
@@ -1109,7 +1128,7 @@ export class HostModuleTransport {
                     return { client: cached, expectedDaemonId: expected };
                 }
             }
-            this.invalidateConnection(cached);
+            void this.invalidateConnection(cached);
         }
         const joinable = this.connectionPromise;
         if (joinable) {
@@ -1156,7 +1175,7 @@ export class HostModuleTransport {
                 expectedDaemonId !== undefined &&
                 !sameDaemonId(joined.client.authenticated?.daemonId, expectedDaemonId)
             ) {
-                this.invalidateConnection(joined.client);
+                void this.invalidateConnection(joined.client);
                 throw this.connectionChangedError(
                     "daemon changed after lifecycle compatibility validation",
                 );
@@ -1193,7 +1212,7 @@ export class HostModuleTransport {
                 this.nextProbeMs = 0;
                 return { client: candidate, ...certification };
             } catch (error) {
-                if (generation === this.connectionGeneration) this.invalidateConnection();
+                if (generation === this.connectionGeneration) void this.invalidateConnection();
                 this.nextProbeMs = performance.now() + this.backoffMs;
                 this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
                 throw error;
@@ -1217,8 +1236,9 @@ export class HostModuleTransport {
         return error;
     }
 
-    private invalidateConnection(client: HostClient | null = this.client): void {
-        if (client && this.client !== client) return;
+    /** Returns the superseded connection's bounded teardown: cache eviction, then `closeAsync`. */
+    private invalidateConnection(client: HostClient | null = this.client): Promise<void> {
+        if (client && this.client !== client) return Promise.resolve();
         this.connectionGeneration += 1;
         this.connectionCertification = null;
         const superseded = this.client;
@@ -1229,11 +1249,12 @@ export class HostModuleTransport {
         this.routeOpenings.clear();
         // A retained entry holds a resolved client whose channel owns a polling interval and two ring mappings, and `handshakeTimeoutMs` is deadline-derived, so reconnects do not reuse one entry.
         if (superseded && supersededOptions) {
-            void evictProcessHostClient(supersededOptions, superseded).then(
+            return evictProcessHostClient(supersededOptions, superseded).then(
                 () => superseded.closeAsync().catch(() => undefined),
                 () => undefined,
             );
         }
+        return Promise.resolve();
     }
 }
 

@@ -7,6 +7,7 @@ import {
     __moduleWireTest,
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
+    MODULE_ITEM_CONTINUATION_KEY,
     MODULE_PAGE_MAX_BYTES,
     resolveOrdinalsForModule,
 } from "./module-wire";
@@ -393,6 +394,31 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
         expect(kinds[2]).not.toHaveProperty("arc");
         expect(kinds[3]).not.toHaveProperty("arc");
+    });
+
+    it("carries the daemon's message origin from provider and model ids", () => {
+        const [nested, flat, none] = encodeOpenCodeMessagesToCk([
+            {
+                info: {
+                    id: "m1",
+                    role: "assistant",
+                    model: { providerID: "anthropic", modelID: "claude" },
+                },
+                parts: [],
+            },
+            {
+                info: { id: "m2", role: "assistant", providerID: "openai", modelID: "gpt" },
+                parts: [],
+            },
+            { info: { id: "m3", role: "user" }, parts: [] },
+        ]);
+        expect(nested.ck.origin).toEqual({
+            api: "anthropic",
+            provider: "anthropic",
+            model: "claude",
+        });
+        expect(flat.ck.origin).toEqual({ api: "openai", provider: "openai", model: "gpt" });
+        expect(none.ck).not.toHaveProperty("origin");
     });
 
     it("encodes file and image parts as media blocks", () => {
@@ -1051,6 +1077,37 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         expect(pages).toHaveLength(1);
         expect(pages[0]?.page).toBe(body);
         expect(pages[0]?.bytes).toBe(Buffer.byteLength(JSON.stringify(body)));
+    });
+
+    it("sends an item carrying the reserved continuation key as a continuation", () => {
+        const carrier = {
+            mid: "carrier",
+            ordinal: 1,
+            [MODULE_ITEM_CONTINUATION_KEY]: {
+                field: "input",
+                item_index: 9,
+                chunk_index: 0,
+                chunk_total: 1,
+            },
+        };
+        const body = {
+            method: "transform",
+            session_id: "ses-reserved",
+            input: [
+                carrier,
+                ...Array.from({ length: 80 }, (_, index) => ({
+                    mid: `m${index}`,
+                    ordinal: index + 2,
+                    ck: { text: "x".repeat(8_000) },
+                })),
+            ],
+        };
+        const pages = buildPagedModuleTransformPayloads(body);
+        const units = pages.flatMap(({ page }) => page.input as Array<Record<string, unknown>>);
+        expect(units.filter((unit) => unit.mid === "carrier")).toHaveLength(0);
+        const marker = units[0]?.[MODULE_ITEM_CONTINUATION_KEY] as Record<string, unknown>;
+        expect(marker).toEqual({ field: "input", item_index: 0, chunk_index: 0, chunk_total: 1 });
+        expect(JSON.parse(units[0]?.chunk as string)).toEqual(carrier);
     });
 
     it("returns paging sizes that match a later stringify of each page", () => {
