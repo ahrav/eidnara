@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveOmpPaths } from "./paths";
+import { envFirstHomeDir, resolveOmpPaths } from "./paths";
 
 const ENV_KEYS = [
     "HOME",
@@ -39,6 +39,18 @@ afterEach(() => {
 });
 
 const xdgPlatform = process.platform === "linux" || process.platform === "darwin";
+
+describe("envFirstHomeDir", () => {
+    it.if(process.platform !== "win32")("prefers HOME over the passwd entry on POSIX", () => {
+        setEnv("HOME", "/virt/other-home");
+        expect(envFirstHomeDir()).toBe("/virt/other-home");
+    });
+
+    it.if(process.platform === "win32")("ignores HOME and follows os.homedir() on Windows", () => {
+        setEnv("HOME", "C:\\msys64\\home\\fox");
+        expect(envFirstHomeDir()).toBe(homedir());
+    });
+});
 
 describe("resolveOmpPaths", () => {
     it.skipIf(!xdgPlatform)("uses an absolute XDG_DATA_HOME whose omp directory exists", () => {

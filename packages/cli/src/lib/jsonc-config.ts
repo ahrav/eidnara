@@ -1,5 +1,9 @@
-import { readFileSync, statSync } from "node:fs";
-import { sanitizeParsedJson } from "@eidnara/opencode/shared/jsonc-parser";
+import {
+    isCommentJsonObjectRoot,
+    parseJsoncTree,
+    sanitizeParsedJson,
+} from "@eidnara/opencode/shared/jsonc-parser";
+import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse as parseCommentJson } from "comment-json";
 
 export type JsoncReadResult =
@@ -70,29 +74,21 @@ function containsLossyNumber(value: unknown): boolean {
  * a non-object root, rejects the whole file.
  */
 function readJsoncDocument(path: string): JsoncDocumentResult {
-    // `statSync` follows symlinks, so a link to a regular file reads normally.
-    // A FIFO is refused before the read because reading one blocks until a writer appears.
-    let entry: ReturnType<typeof statSync> | undefined;
-    try {
-        entry = statSync(path, { throwIfNoEntry: false });
-    } catch (error) {
-        return { kind: "parse-error", error: new ConfigParseError(path, "", error) };
-    }
-    if (entry === undefined) return { kind: "missing" };
-    if (!entry.isFile()) {
-        return {
-            kind: "parse-error",
-            error: new ConfigParseError(path, "", new Error("not a regular file")),
-        };
-    }
-
     // The read stays inside the failure boundary: a path that exists but
-    // cannot be read (permissions, deleted between the stat and the read)
-    // reports as parse-error instead of throwing, so lenient diagnostic
+    // cannot be read (permissions, a FIFO or directory, deleted before the
+    // open) reports as parse-error instead of throwing, so lenient diagnostic
     // callers can explain the bad file rather than abort.
     let content = "";
     try {
-        content = readFileSync(path, "utf-8");
+        content = readRegularFileSync(path);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+        return { kind: "parse-error", error: new ConfigParseError(path, "", error) };
+    }
+    try {
+        // The shared parser rejects what `comment-json` accepts but the daemon's reader does not,
+        // such as an unpaired surrogate escape inside a string.
+        parseJsoncTree(content);
         const tree = parseCommentJson(content);
         const rejectedKeyPaths: string[] = [];
         const plain = sanitizeParsedJson(tree, {
@@ -101,12 +97,13 @@ function readJsoncDocument(path: string): JsoncDocumentResult {
         if (rejectedKeyPaths.length > 0) {
             throw new Error(`unsafe prototype-pollution key at ${rejectedKeyPaths.join(", ")}`);
         }
-        if (tree === null || typeof tree !== "object" || Array.isArray(tree)) {
+        // A scalar root parses to a boxed primitive, which is an object but not a plain one.
+        if (!isCommentJsonObjectRoot(tree)) {
             throw new Error("expected a JSON object at the document root");
         }
         return {
             kind: "parsed",
-            tree: tree as Record<string, unknown>,
+            tree,
             plain: plain as Record<string, unknown>,
             lossyNumber: containsLossyNumber(plain),
         };

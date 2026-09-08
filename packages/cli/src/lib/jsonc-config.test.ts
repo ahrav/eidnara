@@ -43,6 +43,23 @@ describe("readJsoncConfigForUpdate", () => {
         }
     });
 
+    it("rejects a scalar document root and a malformed string escape", () => {
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-scalar-"));
+        const scalarRoot = join(directory, "scalar.json");
+        const surrogate = join(directory, "surrogate.json");
+        writeFileSync(scalarRoot, `"disabled"`);
+        writeFileSync(surrogate, `{"label": "\\ud800"}`);
+
+        try {
+            expect(() => readJsoncConfigForUpdate(scalarRoot)).toThrow(
+                "expected a JSON object at the document root",
+            );
+            expect(() => readJsoncConfigForUpdate(surrogate)).toThrow("Invalid JSONC");
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
     it("refuses to rewrite a file whose integer literal parsing rounded", () => {
         const directory = mkdtempSync(join(tmpdir(), "eidnara-cli-jsonc-update-"));
         const path = join(directory, "big.json");

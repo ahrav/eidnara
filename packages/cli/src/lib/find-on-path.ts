@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
+import { envFirstHomeDir } from "./paths";
 
 /**
  *
@@ -77,7 +77,7 @@ export function packageManagerBinCandidates(
 export function findBunRuntime(): string | null {
     const onPath = findOnPath("bun");
     if (onPath) return onPath;
-    const home = process.env.HOME?.trim() || homedir();
+    const home = envFirstHomeDir();
     const candidates = packageManagerBinCandidates(
         "bun",
         process.platform,

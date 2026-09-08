@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
+import { envFirstHomeDir } from "./paths";
 export type OpenCodeInstallSource = "PATH" | "home-bin" | "desktop" | "app";
 export interface OpenCodeInstallation {
     /** CLI installs execute `path`; all installations display `path`. */
@@ -54,7 +54,7 @@ function defaultDeps(): DetectDeps {
     return {
         exists: existsSync,
         isExecutable: isExecutableFile,
-        home: process.env.HOME?.trim() || homedir(),
+        home: envFirstHomeDir(),
         platform: process.platform,
         env: process.env,
         onPath: findOnPath,

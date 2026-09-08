@@ -1,7 +1,6 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, userInfo } from "node:os";
-import { basename, isAbsolute, join, parse } from "node:path";
+import { isAbsolute, join, parse } from "node:path";
 
 import {
     eidnaraProjectConfigBasePath,
@@ -9,7 +8,12 @@ import {
 } from "@eidnara/opencode/config/config-paths";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
-import { escapeRegex, isSecretKey, redactSecretText } from "@eidnara/opencode/shared/redaction";
+import {
+    escapeRegex,
+    isSecretKey,
+    redactSecretText,
+    sanitizePathString,
+} from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import {
     type HistorianDumpMeta,
@@ -124,31 +128,12 @@ function getSelfVersion(): string {
     return "unknown";
 }
 
-function currentHome(): string {
-    if (process.env.HOME) return process.env.HOME;
-    try {
-        return homedir();
-    } catch {
-        return "";
-    }
-}
-
-function currentUsername(): string | undefined {
-    try {
-        const username = userInfo().username;
-        if (username) return username;
-    } catch {}
-    const home = currentHome();
-    const fromHome = home ? basename(home) : "";
-    return fromHome || undefined;
-}
-
-/** Text like `client_secret: value` is judged by the shared key vocabulary; numbers and booleans stay. */
+/** Text like `client_secret: value` is judged by the shared key vocabulary; booleans and null stay, a number may be a PIN. */
 function redactKeyedText(value: string): string {
     return value.replace(
         /\b([A-Za-z][A-Za-z0-9_.-]*)(\s*[:=]\s*)("(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s&;,]+)/g,
         (full, key: string, separator: string, secret: string) =>
-            isSecretKey(key) && !/^(?:true|false|null|[+-]?\d+(?:\.\d+)?)$/i.test(secret)
+            isSecretKey(key) && !/^(?:true|false|null)$/i.test(secret)
                 ? `${key}${separator}<REDACTED>`
                 : full,
     );
@@ -173,33 +158,22 @@ function redactSecretString(value: string): string {
 }
 
 /**
- * `sanitizeString` redacts paths, usernames, and secret material before issue reports are written.
- * Home roots are not redacted because they would match every path separator.
+ * `sanitizeString` redacts secret material, then the home directory, profile
+ * paths, and account name, before issue reports are written.
+ *
+ * `HOME` from the environment is replaced first because the user config tier
+ * is resolved from it, while the shared sanitizer reads the passwd home.
  */
 export function sanitizeString(value: string): string {
-    const home = currentHome();
-    const username = currentUsername();
-    // Windows paths compare case-insensitively, so home and account matches do too there.
-    const flags = process.platform === "win32" ? "gi" : "g";
     let sanitized = redactSecretString(value);
-    // Both replacements stop at an identifier boundary so a short account name such as `a`
-    // or a home that prefixes another directory does not rewrite unrelated text.
-    if (home && parse(home).root !== home) {
+    const envHome = process.env.HOME?.trim();
+    if (envHome && isAbsolute(envHome) && parse(envHome).root !== envHome) {
         sanitized = sanitized.replace(
-            new RegExp(`${escapeRegex(home)}(?![A-Za-z0-9_.-])`, flags),
-            "<HOME>",
+            new RegExp(`${escapeRegex(envHome)}(?![A-Za-z0-9_.-])`, "g"),
+            "~",
         );
     }
-    sanitized = sanitized.replace(/(\/Users\/)[^/\s"'`]+/gi, "$1<USER>");
-    sanitized = sanitized.replace(/(\/home\/)[^/\s"'`]+/gi, "$1<USER>");
-    sanitized = sanitized.replace(/[A-Za-z]:[\\/]Users[\\/][^\\/\s"'`]+/gi, "C:\\Users\\<USER>");
-    if (username) {
-        sanitized = sanitized.replace(
-            new RegExp(`(?<![A-Za-z0-9_])${escapeRegex(username)}(?![A-Za-z0-9_])`, flags),
-            "<USER>",
-        );
-    }
-    return sanitized;
+    return sanitizePathString(sanitized);
 }
 
 function shouldRedactKey(key: string): boolean {

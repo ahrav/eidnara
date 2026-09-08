@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as stringifyJsonc } from "comment-json";
-import { writeFileAtomic } from "../lib/atomic-write";
+import { resolveLinkTarget, writeFileAtomic } from "../lib/atomic-write";
 import { ensureParentDir } from "../lib/fs-utils";
 import { readJsoncConfig, readJsoncConfigForUpdate } from "../lib/jsonc-config";
 import { detectOpenCode } from "../lib/opencode-detect";
@@ -49,6 +49,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
         const paths = detectConfigPaths();
         const target = paths.opencodeConfig;
         try {
+            const file = resolveLinkTarget(target);
             const exists = paths.opencodeConfigFormat !== "none";
             if (!exists) {
                 const initial = {
@@ -56,7 +57,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     plugin: [PLUGIN_NAME],
                 };
                 ensureParentDir(target);
-                writeFileAtomic(target, `${JSON.stringify(initial, null, 4)}\n`);
+                writeFileAtomic(file, `${JSON.stringify(initial, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "added",
@@ -65,7 +66,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                 };
             }
 
-            const cfg = readJsoncConfigForUpdate(target);
+            const cfg = readJsoncConfigForUpdate(file);
 
             const plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
             const existingIdx = plugin.findIndex((e) => matchesPluginEntry(e, PLUGIN_NAME));
@@ -75,7 +76,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
             if (existingIdx === -1 && existingDevIdx === -1) {
                 plugin.push(PLUGIN_NAME);
                 cfg.plugin = plugin;
-                writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
+                writeFileAtomic(file, `${stringifyJsonc(cfg, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "added",

@@ -1,5 +1,4 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import {
     type CommandInvocation,
@@ -7,6 +6,7 @@ import {
     invocationSpawnOptions,
 } from "./command-invocation";
 import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
+import { envFirstHomeDir } from "./paths";
 
 export interface PiBinaryInfo {
     path: string;
@@ -42,7 +42,7 @@ export function detectPiBinary(): PiBinaryInfo | null {
     const fromPath = findOnPath("pi");
     if (fromPath) return { path: fromPath, source: "path" };
 
-    const home = process.env.HOME?.trim() || homedir();
+    const home = envFirstHomeDir();
     const candidates = getPiFallbackCandidates(process.platform, home, process.env.APPDATA);
     const candidate = candidates.find((path) => isExecutableFile(path));
     return candidate ? { path: candidate, source: "home" } : null;

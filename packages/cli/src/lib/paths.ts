@@ -111,8 +111,8 @@ export function detectConfigPaths(): ConfigPaths {
 // Pi paths
 // ============================================================================
 
-function envFirstHomeDir(): string {
-    // Pi and OMP derive their defaults from os.homedir(), which reads USERPROFILE on Windows.
+/** The home the harnesses themselves resolve: `os.homedir()` on Windows (which reads `USERPROFILE`), `HOME` first elsewhere. */
+export function envFirstHomeDir(): string {
     if (process.platform === "win32") return homedir();
     const home = process.env.HOME?.trim();
     return home || homedir();
