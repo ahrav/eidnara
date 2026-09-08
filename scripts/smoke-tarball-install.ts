@@ -27,6 +27,18 @@ const PAYLOAD_FILES = [
     "payload/bin/eidnara-host",
     "payload/native/shm_native.node",
 ];
+/** Packages an operator installs directly. */
+const PARENT_PACKAGES = ["@eidnara/opencode", "@eidnara/pi", "@eidnara/cli"];
+/** The `@eidnara/*` edges each packed manifest must declare, all pinned to VERSION. */
+const LEAF_EDGES: Record<string, { dependencies: string[]; optionalDependencies: string[] }> = {
+    "@eidnara/opencode": {
+        dependencies: ["@eidnara/shm-native"],
+        optionalDependencies: [PAYLOAD_PACKAGE],
+    },
+    "@eidnara/pi": { dependencies: ["@eidnara/shm-native"], optionalDependencies: [PAYLOAD_PACKAGE] },
+    "@eidnara/cli": { dependencies: ["@eidnara/shm-native"], optionalDependencies: [PAYLOAD_PACKAGE] },
+    "@eidnara/shm-native": { dependencies: [], optionalDependencies: [PAYLOAD_PACKAGE] },
+};
 const PAYLOAD_TARBALL = ["LICENSE", "NOTICE", "README.md", "package.json", ...PAYLOAD_FILES]
     .map((path) => `package/${path}`)
     .sort();
@@ -216,6 +228,22 @@ function readJson(path: string): Record<string, unknown> {
     return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
 
+function assertLeafEdges(name: string, manifest: Record<string, unknown>): void {
+    const edges = LEAF_EDGES[name];
+    if (edges === undefined) throw new Error(`no leaf edges declared for ${name}`);
+    for (const field of ["dependencies", "optionalDependencies"] as const) {
+        const declared = Object.entries((manifest[field] ?? {}) as Record<string, string>)
+            .filter(([dep]) => dep.startsWith("@eidnara/"))
+            .sort();
+        const expected = [...edges[field]].sort().map((dep) => [dep, VERSION]);
+        assert(
+            JSON.stringify(declared) === JSON.stringify(expected),
+            `${name} ${field} pin ${expected.map(([dep]) => dep).join(", ") || "no @eidnara/* package"}`,
+            declared.map(([dep, range]) => `${dep}@${range}`).join(", ") || "none declared",
+        );
+    }
+}
+
 function matches(entry: string, pattern: Pattern): boolean {
     return typeof pattern === "string" ? entry === pattern : pattern.test(entry);
 }
@@ -402,6 +430,10 @@ function main(): void {
             const extract = run(["tar", "-xzf", path, "-C", dest], { timeoutMs: 300_000 });
             assert(extract.code === 0, `extract ${name}`, describe(extract));
         }
+        for (const name of Object.keys(LEAF_EDGES)) {
+            const packed = join(extractedDir, name.slice("@eidnara/".length), "package");
+            assertLeafEdges(name, readJson(join(packed, "package.json")));
+        }
         const cliEntry = readFileSync(
             join(extractedDir, "cli", "package", "dist", "index.js"),
             "utf8",
@@ -422,11 +454,15 @@ function main(): void {
         );
         // The Pi extension declares its host packages as optional peers because Pi provides them at load time; the smoke project stands in for Pi, so it installs the pinned versions the package develops against.
         const piPeers = readPiPeerVersions(rootDir);
+        // The leaves are absent from `dependencies` so a parent that forgets to declare one fails here.
         const manifest = {
             name: "eidnara-smoke",
             private: true,
             type: "module",
-            dependencies: { ...fileDeps, ...piPeers },
+            dependencies: {
+                ...Object.fromEntries(PARENT_PACKAGES.map((name) => [name, fileDeps[name]])),
+                ...piPeers,
+            },
             overrides: {
                 "@eidnara/shm-native": fileDeps["@eidnara/shm-native"],
                 [PAYLOAD_PACKAGE]: fileDeps[PAYLOAD_PACKAGE],
