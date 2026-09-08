@@ -75,10 +75,22 @@ interface CachedMessageEstimate {
 
 interface ToolSignal {
     callId: string;
+    toolName: string;
     hasInput: boolean;
     hasOutput: boolean;
+    /** Provider-executed tools run on the provider's side, so they never form an in-flight local arc. */
+    providerExecuted: boolean;
     inputText: string;
     outputText: string;
+    /** Image and file blocks inside a tool result, counted through the image heuristic instead of as text. */
+    outputMedia: readonly Record<string, unknown>[];
+    /** `state.metadata.description`, which the tool-call summaries display when the input carries no description. */
+    metadataDescription: string;
+}
+
+interface ToolResultContent {
+    text: string;
+    media: Record<string, unknown>[];
 }
 
 const MAX_MESSAGE_CACHE_ENTRIES = 100_000;
@@ -87,6 +99,8 @@ const FNV1A_32_OFFSET = 0x811c9dc5;
 const FNV1A_32_PRIME = 0x01000193;
 const messageEstimateCache = new Map<string, CachedMessageEstimate>();
 let messageEstimateCacheBytes = 0;
+const imageHeuristicIds = new WeakMap<(part: unknown) => number, number>();
+let nextImageHeuristicId = 1;
 
 const EMPTY_BREAKDOWN: TrueRawTokenBreakdown = {
     text: 0,
@@ -126,29 +140,68 @@ function firstStringField(
     return null;
 }
 
+/** An empty string is a present value here: an empty text block is empty output, not a serialized record. */
+function firstStringFieldAllowEmpty(
+    record: Record<string, unknown>,
+    fields: readonly string[],
+): string | null {
+    for (const field of fields) {
+        const value = record[field];
+        if (typeof value === "string") return value;
+    }
+    return null;
+}
+
 function stringValue(value: unknown): string {
     if (typeof value === "string") return value;
     if (value === undefined || value === null) return "";
     return stableStringify(value);
 }
 
-function textFromToolResultContent(content: unknown): string {
-    if (typeof content === "string") return content;
+function isMediaResultBlock(entry: Record<string, unknown>): boolean {
+    const type = partType(entry);
+    return (
+        type === "image" ||
+        type === "file" ||
+        hasOwn(entry, "mime") ||
+        hasOwn(entry, "mimeType") ||
+        looksImageLike(entry)
+    );
+}
+
+function mergeToolResultContent(a: ToolResultContent, b: ToolResultContent): ToolResultContent {
+    return {
+        text: [a.text, b.text].filter((text) => text.length > 0).join("\n"),
+        media: [...a.media, ...b.media],
+    };
+}
+
+/**
+ * Image and file blocks are separated from text so a base64 payload is never tokenized as text.
+ */
+function toolResultContent(content: unknown): ToolResultContent {
+    if (typeof content === "string") return { text: content, media: [] };
     if (Array.isArray(content)) {
         const pieces: string[] = [];
+        const media: Record<string, unknown>[] = [];
         for (const entry of content) {
             if (typeof entry === "string") {
                 pieces.push(entry);
             } else if (isRecord(entry)) {
-                const text = firstStringField(entry, ["text", "content", "value"]);
+                if (isMediaResultBlock(entry)) {
+                    media.push(entry);
+                    continue;
+                }
+                const text = firstStringFieldAllowEmpty(entry, ["text", "content", "value"]);
                 pieces.push(text ?? stableStringify(entry));
             } else if (entry !== null && entry !== undefined) {
                 pieces.push(String(entry));
             }
         }
-        return pieces.join("\n");
+        return { text: pieces.join("\n"), media };
     }
-    return stringValue(content);
+    if (isRecord(content) && isMediaResultBlock(content)) return { text: "", media: [content] };
+    return { text: stringValue(content), media: [] };
 }
 
 function looksImageLike(part: Record<string, unknown>): boolean {
@@ -182,6 +235,14 @@ function partType(part: Record<string, unknown>): string {
 
 function hasOwn(record: Record<string, unknown>, key: string): boolean {
     return Object.hasOwn(record, key);
+}
+
+/** Presence, not value, decides a match: an own `null` or `undefined` field is a present field. */
+function firstOwnKey(record: Record<string, unknown>, keys: readonly string[]): string | null {
+    for (const key of keys) {
+        if (hasOwn(record, key)) return key;
+    }
+    return null;
 }
 
 function recursiveByteLength(value: unknown): number {
@@ -247,13 +308,63 @@ function rawPartVersion(part: Record<string, unknown>): unknown {
     );
 }
 
+const TOOL_CALL_ID_FIELDS = [
+    "callID",
+    "callId",
+    "toolCallId",
+    "tool_call_id",
+    "tool_use_id",
+    "toolUseId",
+    "id",
+] as const;
+
 function callIdFromPart(part: Record<string, unknown>): string {
-    const direct = firstStringField(part, ["callID", "callId", "toolCallId", "tool_call_id", "id"]);
+    const direct = firstStringField(part, TOOL_CALL_ID_FIELDS);
     if (direct) return direct;
     const state = isRecord(part.state) ? part.state : null;
-    return state
-        ? (firstStringField(state, ["callID", "callId", "toolCallId", "tool_call_id", "id"]) ?? "")
-        : "";
+    return state ? (firstStringField(state, TOOL_CALL_ID_FIELDS) ?? "") : "";
+}
+
+function toolNameFromPart(part: Record<string, unknown>): string {
+    return firstStringField(part, ["tool", "toolName", "name"]) ?? "";
+}
+
+/** OpenCode persists the flag either at the top level or under `metadata`. */
+function providerExecutedFromPart(part: Record<string, unknown>): boolean {
+    if (part.providerExecuted === true) return true;
+    const metadata = isRecord(part.metadata) ? part.metadata : null;
+    return metadata !== null && metadata.providerExecuted === true;
+}
+
+const TERMINAL_TOOL_STATUSES = new Set(["completed", "error"]);
+
+/** A terminal `status` marks a completed call even when no output payload is stored. */
+function toolStatusIsTerminal(
+    part: Record<string, unknown>,
+    state: Record<string, unknown> | null,
+): boolean {
+    const status =
+        (state ? firstStringField(state, ["status"]) : null) ?? firstStringField(part, ["status"]);
+    return status !== null && TERMINAL_TOOL_STATUSES.has(status);
+}
+
+function emptyToolResultContent(): ToolResultContent {
+    return { text: "", media: [] };
+}
+
+function toolAttachments(
+    part: Record<string, unknown>,
+    state: Record<string, unknown> | null,
+): ToolResultContent {
+    const attachments =
+        state && Array.isArray(state.attachments) ? state.attachments : part.attachments;
+    if (!Array.isArray(attachments)) return emptyToolResultContent();
+    return toolResultContent(attachments.filter(isRecord));
+}
+
+function metadataDescriptionFromState(state: Record<string, unknown> | null): string {
+    const metadata = state && isRecord(state.metadata) ? state.metadata : null;
+    return metadata ? (firstStringField(metadata, ["description"]) ?? "") : "";
 }
 
 function toolSignalFromPart(part: unknown): ToolSignal | null {
@@ -262,61 +373,80 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
     const state = isRecord(part.state) ? part.state : null;
     const callId = callIdFromPart(part);
     if (!callId && type !== "tool") return null;
+    const toolName = toolNameFromPart(part);
 
     if (type === "tool") {
-        const hasInput = state !== null && hasOwn(state, "input");
-        const outputKey = state
-            ? hasOwn(state, "output")
-                ? "output"
-                : hasOwn(state, "error")
-                  ? "error"
-                  : hasOwn(state, "result")
-                    ? "result"
-                    : null
-            : null;
-        const hasOutput = outputKey !== null;
-        const outputValue = outputKey && state ? state[outputKey] : undefined;
-        const providerExecuted = part.providerExecuted === true;
+        const inputOwner = state && hasOwn(state, "input") ? state : part;
+        const inputKey = firstOwnKey(inputOwner, ["input", "args"]);
+        const hasInput = inputKey !== null;
+        const outputOwner =
+            state && firstOwnKey(state, ["output", "error", "result"]) !== null ? state : part;
+        const outputKey = firstOwnKey(outputOwner, ["output", "error", "result"]);
+        const hasOutput = outputKey !== null || toolStatusIsTerminal(part, state);
+        const output = mergeToolResultContent(
+            outputKey ? toolResultContent(outputOwner[outputKey]) : emptyToolResultContent(),
+            toolAttachments(part, state),
+        );
+        const providerExecuted = providerExecutedFromPart(part);
         const openInvocation = !providerExecuted && !hasOutput;
         return {
             callId,
+            toolName,
             hasInput: hasInput || openInvocation,
             hasOutput,
-            inputText: hasInput && state ? stringValue(state.input) : "",
-            outputText: hasOutput ? stringValue(outputValue) : "",
+            providerExecuted,
+            inputText: inputKey ? stringValue(inputOwner[inputKey]) : "",
+            outputText: output.text,
+            outputMedia: output.media,
+            metadataDescription: metadataDescriptionFromState(state),
         };
     }
 
     if (type === "tool-invocation") {
-        const args = part.args ?? part.input;
+        const argsKey = firstOwnKey(part, ["args", "input"]);
+        const outputKey = firstOwnKey(part, ["result", "output"]);
+        const output = outputKey ? toolResultContent(part[outputKey]) : emptyToolResultContent();
         return {
             callId,
-            hasInput: args !== undefined,
-            hasOutput: false,
-            inputText: args !== undefined ? stringValue(args) : "",
-            outputText: "",
+            toolName,
+            hasInput: argsKey !== null,
+            hasOutput: outputKey !== null,
+            providerExecuted: false,
+            inputText: argsKey ? stringValue(part[argsKey]) : "",
+            outputText: output.text,
+            outputMedia: output.media,
+            metadataDescription: "",
         };
     }
 
     if (type === "tool_use") {
-        const input = part.input;
+        const hasInput = hasOwn(part, "input");
         return {
             callId,
-            hasInput: input !== undefined,
+            toolName,
+            hasInput,
             hasOutput: false,
-            inputText: input !== undefined ? stringValue(input) : "",
+            providerExecuted: false,
+            inputText: hasInput ? stringValue(part.input) : "",
             outputText: "",
+            outputMedia: [],
+            metadataDescription: "",
         };
     }
 
     if (type === "tool_result") {
-        const content = part.content ?? part.output ?? part.result;
+        const contentKey = firstOwnKey(part, ["content", "output", "result"]);
+        const output = contentKey ? toolResultContent(part[contentKey]) : emptyToolResultContent();
         return {
             callId,
+            toolName,
             hasInput: false,
-            hasOutput: content !== undefined,
+            hasOutput: contentKey !== null,
+            providerExecuted: false,
             inputText: "",
-            outputText: content !== undefined ? textFromToolResultContent(content) : "",
+            outputText: output.text,
+            outputMedia: output.media,
+            metadataDescription: "",
         };
     }
 
@@ -327,18 +457,38 @@ function partCheapFingerprint(part: unknown): string {
     if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
     const version = rawPartVersion(part);
     const type = typeof part.type === "string" ? part.type : "";
-    return `${type}:${String(version)}:${recursiveByteLength(part)}`;
+    const byteLength = recursiveByteLength(part);
+    if (version !== "") return `${type}:${String(version)}:${byteLength}`;
+    return `${type}:h${contentStringsHash([stableStringify(part)])}:${byteLength}`;
 }
 
+/**
+ * The estimate cache is process-local, so a heuristic's function identity distinguishes its
+ * entries. Callers that want cache hits across builds must pass the same function reference.
+ */
+function imageHeuristicCacheKey(heuristic: TrueRawEstimateOptions["imageTokenHeuristic"]): string {
+    if (!heuristic) return "image:default";
+    let id = imageHeuristicIds.get(heuristic);
+    if (id === undefined) {
+        id = nextImageHeuristicId;
+        nextImageHeuristicId += 1;
+        imageHeuristicIds.set(heuristic, id);
+    }
+    return `image:${id}`;
+}
+
+/** `invalidateTrueRawTokenCache` matches session and message IDs only as `\0`-delimited segments. */
 function messageCacheKey(
+    sessionId: string,
     message: RawMessage,
-    options: TrueRawTokenIndexBuildOptions | TrueRawEstimateOptions,
+    options: TrueRawTokenIndexBuildOptions,
 ): string {
-    const namespace = "cacheNamespace" in options ? options.cacheNamespace : "estimate";
     const cheapFingerprint = message.parts.map(partCheapFingerprint).join("|");
     return [
-        namespace,
+        options.cacheNamespace,
+        sessionId,
         options.providerShapeVersion,
+        imageHeuristicCacheKey(options.imageTokenHeuristic),
         message.id || `ordinal:${message.ordinal}`,
         message.role,
         message.parts.length,
@@ -368,106 +518,133 @@ function cloneBreakdown(value: TrueRawTokenBreakdown): TrueRawTokenBreakdown {
     return { ...value };
 }
 
-function estimateNonToolPart(
-    part: unknown,
-    options: TrueRawEstimateOptions,
-    breakdown: TrueRawTokenBreakdown,
-): boolean {
-    if (!isRecord(part)) {
-        if (part !== null && part !== undefined)
-            addBreakdown(breakdown, "other", estimateStructured(part));
-        return true;
-    }
+type NonToolPartContent =
+    | { kind: "skip" }
+    | { kind: "text"; text: string }
+    | { kind: "reasoning"; text: string }
+    | { kind: "image"; altText: string | null }
+    | { kind: "structured" };
+
+/**
+ * Invariant: `estimateNonToolPart` and `partContentFingerprint` must both classify through this
+ * function. A second classifier lets the fingerprint miss content the tokenizer counts.
+ * commentlint: allow(JUDGE)
+ */
+function classifyNonToolPart(part: Record<string, unknown>): NonToolPartContent {
     const type = partType(part);
     if (
         type === "step-start" ||
         type === "step-finish" ||
         (type === "meta" && Object.keys(part).length <= 1)
     ) {
-        return true;
+        return { kind: "skip" };
     }
     if (type === "text") {
         const text = firstStringField(part, ["text", "content"]);
-        if (text) addBreakdown(breakdown, "text", estimateTokens(text));
-        return true;
+        return text ? { kind: "text", text } : { kind: "skip" };
     }
     if (type === "reasoning" || type === "thinking" || type === "redacted_thinking") {
         const text = firstStringField(part, ["thinking", "text", "content", "reasoning"]);
-        if (text) {
-            addBreakdown(breakdown, "reasoning", estimateTokens(text));
-        } else {
-            addBreakdown(breakdown, "other", estimateStructured(part));
-        }
-        return true;
+        return text ? { kind: "reasoning", text } : { kind: "structured" };
     }
-    const reasoningText = firstStringField(part, ["thinking", "reasoning"]);
-    if (reasoningText && type.length === 0) {
-        addBreakdown(breakdown, "reasoning", estimateTokens(reasoningText));
-        return true;
+    if (type.length === 0) {
+        const reasoningText = firstStringField(part, ["thinking", "reasoning"]);
+        if (reasoningText) return { kind: "reasoning", text: reasoningText };
     }
     if (looksImageLike(part)) {
-        addBreakdown(
-            breakdown,
-            "image",
-            options.imageTokenHeuristic?.(part) ?? defaultImageTokenHeuristic(part),
-        );
-        const altText = firstStringField(part, ["alt", "text", "description"]);
-        if (altText) addBreakdown(breakdown, "text", estimateTokens(altText));
-        return true;
+        return { kind: "image", altText: firstStringField(part, ["alt", "text", "description"]) };
     }
     if (type.includes("file") || type === "source") {
         const content = firstStringField(part, ["content", "text", "source"]);
-        if (content) addBreakdown(breakdown, "text", estimateTokens(content));
-        else addBreakdown(breakdown, "other", estimateStructured(part));
-        return true;
+        return content ? { kind: "text", text: content } : { kind: "structured" };
     }
-    return false;
+    return { kind: "structured" };
 }
 
+function estimateNonToolPart(
+    part: unknown,
+    options: TrueRawEstimateOptions,
+    breakdown: TrueRawTokenBreakdown,
+): void {
+    if (!isRecord(part)) {
+        if (part !== null && part !== undefined)
+            addBreakdown(breakdown, "other", estimateStructured(part));
+        return;
+    }
+    const content = classifyNonToolPart(part);
+    switch (content.kind) {
+        case "skip":
+            return;
+        case "text":
+            addBreakdown(breakdown, "text", estimateTokens(content.text));
+            return;
+        case "reasoning":
+            addBreakdown(breakdown, "reasoning", estimateTokens(content.text));
+            return;
+        case "image":
+            addBreakdown(breakdown, "image", imageTokensFor(part, options));
+            if (content.altText) addBreakdown(breakdown, "text", estimateTokens(content.altText));
+            return;
+        case "structured":
+            addBreakdown(breakdown, "other", estimateStructured(part));
+            return;
+    }
+}
+
+function imageTokensFor(part: unknown, options: TrueRawEstimateOptions): number {
+    return options.imageTokenHeuristic?.(part) ?? defaultImageTokenHeuristic(part);
+}
+
+/** Each part is serialized independently; `buildToolArcs` queues parts with the same call id separately, so each must be counted. */
 export function estimateTrueRawMessageTokens(
     message: RawMessage,
     options: TrueRawEstimateOptions,
 ): TrueRawTokenBreakdown {
     const breakdown = cloneBreakdown(EMPTY_BREAKDOWN);
-    const countedInput = new Set<string>();
-    const countedOutput = new Set<string>();
-    let ordinalToolIndex = 0;
 
     for (const part of message.parts) {
         const signal = toolSignalFromPart(part);
         if (signal) {
-            const localKey = `${signal.callId || "tool"}:${message.ordinal}:${ordinalToolIndex}`;
-            ordinalToolIndex += 1;
             if (signal.hasInput) {
-                const key = `${signal.callId}:input:${message.ordinal}`;
-                if (!countedInput.has(key)) {
-                    countedInput.add(key);
-                    addBreakdown(breakdown, "toolInput", estimateTokens(signal.inputText));
-                }
+                addBreakdown(breakdown, "toolInput", estimateTokens(signal.inputText));
             }
             if (signal.hasOutput) {
-                const key = `${signal.callId}:output:${message.ordinal}:${localKey}`;
-                if (!countedOutput.has(key)) {
-                    countedOutput.add(key);
-                    addBreakdown(breakdown, "toolOutput", estimateTokens(signal.outputText));
+                addBreakdown(breakdown, "toolOutput", estimateTokens(signal.outputText));
+                for (const media of signal.outputMedia) {
+                    addBreakdown(breakdown, "image", imageTokensFor(media, options));
                 }
             }
             continue;
         }
-        if (!estimateNonToolPart(part, options, breakdown)) {
-            addBreakdown(breakdown, "other", estimateStructured(part));
-        }
+        estimateNonToolPart(part, options, breakdown);
     }
     return breakdown;
+}
+
+/**
+ * An OpenCode `tool` part with no call id still describes one call, so it needs an identity for its arc.
+ * The ordinal and part index make two adjacent idless parts distinct.
+ */
+function synthesizedToolCallId(ordinal: number, partIndex: number, signal: ToolSignal): string {
+    return `synth-tool-${ordinal}-${partIndex}-${signal.toolName || "tool"}-${contentStringsHash([signal.inputText])}`;
 }
 
 export function buildToolArcs(messages: readonly RawMessage[]): ToolArc[] {
     const openQueues = new Map<string, number[]>();
     const arcs: ToolArc[] = [];
     for (const message of messages) {
-        for (const part of message.parts) {
-            const signal = toolSignalFromPart(part);
-            if (!signal || signal.callId.length === 0) continue;
+        for (const [partIndex, part] of message.parts.entries()) {
+            const rawSignal = toolSignalFromPart(part);
+            if (!rawSignal) continue;
+            // Provider-executed calls cannot leave a local invocation for the fence to protect.
+            if (rawSignal.providerExecuted) continue;
+            const signal =
+                rawSignal.callId.length > 0
+                    ? rawSignal
+                    : {
+                          ...rawSignal,
+                          callId: synthesizedToolCallId(message.ordinal, partIndex, rawSignal),
+                      };
             if (signal.hasInput && signal.hasOutput) {
                 arcs.push({
                     callId: signal.callId,
@@ -505,39 +682,82 @@ export function buildToolArcs(messages: readonly RawMessage[]): ToolArc[] {
     );
 }
 
+interface CompletedToolArc {
+    invOrdinal: number;
+    resOrdinal: number;
+}
+
+/**
+ * Overlapping completed arcs form one atomic interval.
+ * When that interval crosses `candidate`, the fence returns its first invocation, keeping the whole interval in the protected tail.
+ * The fence returns the ordinal after the interval's last result only when its first invocation is below `publicationFloorOrdinal`, where nothing can be protected.
+ */
+function fenceBoundaryForCompletedToolArcs(
+    candidate: number,
+    arcs: readonly ToolArc[],
+    publicationFloorOrdinal: number,
+): number {
+    const completed: CompletedToolArc[] = [];
+    for (const arc of arcs) {
+        if (arc.resOrdinal !== null) {
+            completed.push({ invOrdinal: arc.invOrdinal, resOrdinal: arc.resOrdinal });
+        }
+    }
+    const component = completed.filter((arc) =>
+        completedToolArcCrossesBoundary(arc.invOrdinal, arc.resOrdinal, candidate),
+    );
+    if (component.length === 0) return candidate;
+
+    for (let pass = 0; pass <= completed.length; pass += 1) {
+        const minInvocation = Math.min(...component.map((arc) => arc.invOrdinal));
+        const maxResult = Math.max(...component.map((arc) => arc.resOrdinal));
+        const previousLength = component.length;
+        for (const arc of completed) {
+            if (
+                arc.invOrdinal <= maxResult &&
+                arc.resOrdinal >= minInvocation &&
+                !component.includes(arc)
+            ) {
+                component.push(arc);
+            }
+        }
+        if (component.length === previousLength) break;
+    }
+
+    const minInvocation = Math.min(...component.map((arc) => arc.invOrdinal));
+    const maxResult = Math.max(...component.map((arc) => arc.resOrdinal));
+    return minInvocation < publicationFloorOrdinal ? maxResult + 1 : minInvocation;
+}
+
+/** `lastCompartmentEndOrdinal + 1` is the publication floor: the first ordinal the fence can still protect. */
 export function fenceBoundaryForToolArcs(
     candidate: number,
     arcs: readonly ToolArc[],
     lastCompartmentEndOrdinal: number,
     recentOpenArcCutoff: number,
 ): number {
-    let boundary = candidate;
+    const publicationFloorOrdinal = lastCompartmentEndOrdinal + 1;
+    let boundary = fenceBoundaryForCompletedToolArcs(candidate, arcs, publicationFloorOrdinal);
     for (const arc of arcs) {
-        if (arc.resOrdinal !== null) {
-            if (completedToolArcCrossesBoundary(arc.invOrdinal, arc.resOrdinal, boundary)) {
-                boundary = arc.resOrdinal + 1;
-            }
-            continue;
-        }
         // The historian protects only open arcs inside the live protected-tail window.
         // Protecting stale open arcs can block compaction of the eligible region.
         // Compaction emits no dangling `tool_use`.
-        if (arc.invOrdinal < recentOpenArcCutoff) continue;
-        if (arc.invOrdinal >= lastCompartmentEndOrdinal + 1 && arc.invOrdinal < boundary) {
-            return arc.invOrdinal;
-        }
-        if (arc.invOrdinal >= boundary) {
-            return arc.invOrdinal;
+        if (arc.resOrdinal !== null || arc.invOrdinal < recentOpenArcCutoff) continue;
+        if (arc.invOrdinal >= publicationFloorOrdinal || arc.invOrdinal >= boundary) {
+            boundary = arc.invOrdinal;
+            break;
         }
     }
-    return boundary;
+    // An open-arc boundary can land inside an overlapping completed arc, so the completed fence runs again.
+    return fenceBoundaryForCompletedToolArcs(boundary, arcs, publicationFloorOrdinal);
 }
 
 function tokenForMessage(
+    sessionId: string,
     message: RawMessage,
     options: TrueRawTokenIndexBuildOptions,
 ): TrueRawTokenBreakdown {
-    const key = messageCacheKey(message, options);
+    const key = messageCacheKey(sessionId, message, options);
     const cached = messageEstimateCache.get(key);
     if (cached) return cloneBreakdown(cached.breakdown);
     const breakdown = estimateTrueRawMessageTokens(message, options);
@@ -574,7 +794,7 @@ export function buildTrueRawTokenIndex(
         const total =
             stored !== undefined && stored !== null
                 ? stored
-                : tokenForMessage(message, options).total;
+                : tokenForMessage(sessionId, message, options).total;
         tokensByOrdinal.set(message.ordinal, total);
         idsByOrdinal.set(message.ordinal, message.id);
         const relative = message.ordinal - firstOrdinal + 1;
@@ -603,7 +823,7 @@ export function buildTrueRawTokenIndex(
             return prefix[ordinalSpan] - prefix[ordinalToIndex(ordinal)];
         },
         rangeTokens(startInclusive: number, endExclusive: number): number {
-            const start = Math.max(firstOrdinal, startInclusive);
+            const start = Math.max(firstOrdinal, Math.min(terminalOrdinal + 1, startInclusive));
             const end = Math.max(start, Math.min(terminalOrdinal + 1, endExclusive));
             return prefix[end - firstOrdinal] - prefix[start - firstOrdinal];
         },
@@ -654,18 +874,47 @@ export function buildTrueRawTokenIndex(
 }
 
 /**
- *
- * The fingerprint hashes only the content-bearing fields counted by the tokenizer.
- * The fingerprint excludes the JSON envelope and `updated-at` metadata.
+ * `imageTokenHeuristic` receives the whole part and may read any field, so the media
+ * fingerprint hashes the whole part rather than a guessed field list.
+ */
+function mediaFingerprintFields(media: Record<string, unknown>): string[] {
+    return ["media", stableStringify(media)];
+}
+
+/**
+ * The fingerprint hashes the content the tokenizer counts for each part.
+ * Text-bearing parts contribute only their counted text, so `updated-at` metadata cannot perturb them.
+ * Tool fingerprints include fields consumed by `buildToolArcs` and tool-call summaries, so topology and displayed-name changes invalidate them.
  */
 function partContentFingerprint(part: unknown): string {
     if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
     const tool = toolSignalFromPart(part);
     if (tool) {
-        return contentStringsHash([tool.inputText, tool.outputText]);
+        return contentStringsHash([
+            "tool",
+            tool.callId,
+            tool.toolName,
+            tool.hasInput ? "in" : "",
+            tool.hasOutput ? "out" : "",
+            tool.providerExecuted ? "provider" : "",
+            tool.inputText,
+            tool.outputText,
+            tool.metadataDescription,
+            ...tool.outputMedia.flatMap(mediaFingerprintFields),
+        ]);
     }
-    const text = firstStringField(part, ["text", "thinking", "reasoning", "content", "url"]) ?? "";
-    return contentStringsHash([text]);
+    const content = classifyNonToolPart(part);
+    switch (content.kind) {
+        case "skip":
+            return contentStringsHash(["skip"]);
+        case "text":
+        case "reasoning":
+            return contentStringsHash([content.kind, content.text]);
+        case "image":
+            return contentStringsHash(mediaFingerprintFields(part));
+        case "structured":
+            return contentStringsHash(["structured", stableStringify(part)]);
+    }
 }
 
 export function computeRawRangeFingerprint(
@@ -695,7 +944,7 @@ export function invalidateTrueRawTokenCache(args: {
         | "provider.unregistered"
         | "schema.migration";
 }): void {
-    const sessionNeedle = args.sessionId ? `${args.sessionId}` : null;
+    const sessionNeedle = args.sessionId ? `\0${args.sessionId}\0` : null;
     const messageNeedle = args.messageId ? `\0${args.messageId}\0` : null;
     for (const [key, value] of messageEstimateCache) {
         const sessionMatches = sessionNeedle === null || key.includes(sessionNeedle);
@@ -733,7 +982,7 @@ export function buildTrueRawTokenIndexFromTokenCountsForTest(
             return prefix[rawMessageCount] - prefix[ordinal - 1];
         },
         rangeTokens(startInclusive: number, endExclusive: number): number {
-            const start = Math.max(1, startInclusive);
+            const start = Math.max(1, Math.min(rawMessageCount + 1, startInclusive));
             const end = Math.max(start, Math.min(rawMessageCount + 1, endExclusive));
             return prefix[end - 1] - prefix[start - 1];
         },
