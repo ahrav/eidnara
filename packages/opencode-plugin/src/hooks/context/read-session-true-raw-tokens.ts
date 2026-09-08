@@ -158,13 +158,20 @@ function stringValue(value: unknown): string {
     return stableStringify(value);
 }
 
-/** Typed blocks require an image/file type or image-like fields; untyped OpenCode attachments use MIME presence. */
-function isMediaResultBlock(entry: Record<string, unknown>): boolean {
+/**
+ * Content blocks dispatch on their explicit type; MIME presence matters only when untyped.
+ * OpenCode attachments are media whenever they carry a MIME field, whatever their type.
+ */
+type ResultBlockOrigin = "content" | "attachment";
+
+function isMediaResultBlock(entry: Record<string, unknown>, origin: ResultBlockOrigin): boolean {
     const type = partType(entry);
     if (type === "image" || type === "file") return true;
     if (type === "text") return false;
+    const hasMime = hasOwn(entry, "mime") || hasOwn(entry, "mimeType");
+    if (origin === "attachment") return hasMime || looksImageLike(entry);
     if (type.length > 0) return looksImageLike(entry);
-    return hasOwn(entry, "mime") || hasOwn(entry, "mimeType") || looksImageLike(entry);
+    return hasMime || looksImageLike(entry);
 }
 
 function mergeToolResultContent(a: ToolResultContent, b: ToolResultContent): ToolResultContent {
@@ -176,8 +183,12 @@ function mergeToolResultContent(a: ToolResultContent, b: ToolResultContent): Too
 
 /**
  * Image and file blocks are separated from text so a base64 payload is never tokenized as text.
+ * A block with an explicit type other than `text` is opaque and contributes its whole serialized form.
  */
-function toolResultContent(content: unknown): ToolResultContent {
+function toolResultContent(
+    content: unknown,
+    origin: ResultBlockOrigin = "content",
+): ToolResultContent {
     if (typeof content === "string") return { text: content, media: [] };
     if (Array.isArray(content)) {
         const pieces: string[] = [];
@@ -186,11 +197,15 @@ function toolResultContent(content: unknown): ToolResultContent {
             if (typeof entry === "string") {
                 pieces.push(entry);
             } else if (isRecord(entry)) {
-                if (isMediaResultBlock(entry)) {
+                if (isMediaResultBlock(entry, origin)) {
                     media.push(entry);
                     continue;
                 }
-                const text = firstStringFieldAllowEmpty(entry, ["text", "content", "value"]);
+                const type = partType(entry);
+                const text =
+                    type === "text" || type.length === 0
+                        ? firstStringFieldAllowEmpty(entry, ["text", "content", "value"])
+                        : null;
                 pieces.push(text ?? stableStringify(entry));
             } else if (entry !== null && entry !== undefined) {
                 pieces.push(String(entry));
@@ -198,7 +213,9 @@ function toolResultContent(content: unknown): ToolResultContent {
         }
         return { text: pieces.join("\n"), media };
     }
-    if (isRecord(content) && isMediaResultBlock(content)) return { text: "", media: [content] };
+    if (isRecord(content) && isMediaResultBlock(content, origin)) {
+        return { text: "", media: [content] };
+    }
     return { text: stringValue(content), media: [] };
 }
 
@@ -347,7 +364,7 @@ function toolAttachments(
     const attachments =
         state && Array.isArray(state.attachments) ? state.attachments : part.attachments;
     if (!Array.isArray(attachments)) return emptyToolResultContent();
-    return toolResultContent(attachments.filter(isRecord));
+    return toolResultContent(attachments.filter(isRecord), "attachment");
 }
 
 function metadataDescriptionFromState(state: Record<string, unknown> | null): string {
@@ -382,9 +399,10 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (type === "tool") {
         const inputOwner = state && hasOwn(state, "input") ? state : part;
         const inputKey = firstOwnKey(inputOwner, ["input", "args"]);
+        // The OpenCode decoder reads only `output` and `error`; a `result` field is not decoded output.
         const outputOwner =
-            state && firstOwnKey(state, ["output", "error", "result"]) !== null ? state : part;
-        const outputKey = firstOwnKey(outputOwner, ["output", "error", "result"]);
+            state && firstOwnKey(state, ["output", "error"]) !== null ? state : part;
+        const outputKey = firstOwnKey(outputOwner, ["output", "error"]);
         const hasOutput = outputKey !== null || toolStatusIsTerminal(part, state);
         const output = mergeToolResultContent(
             outputKey ? toolResultContent(outputOwner[outputKey]) : emptyToolResultContent(),
@@ -457,8 +475,13 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
     return null;
 }
 
+/** Primitive and array parts are tokenized as their serialized form, so they fingerprint the same way. */
+function nonRecordPartFingerprint(part: unknown): string {
+    return `${typeof part}:h${contentStringsHash([stringValue(part)])}`;
+}
+
 function partCheapFingerprint(part: unknown): string {
-    if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
+    if (!isRecord(part)) return nonRecordPartFingerprint(part);
     const version = rawPartVersion(part);
     const type = typeof part.type === "string" ? part.type : "";
     const byteLength = recursiveByteLength(part);
@@ -844,8 +867,8 @@ export function buildTrueRawTokenIndex(
         Math.max(0, Math.min(ordinalSpan, ordinal - firstOrdinal));
     const representedOrdinals = ordered.map((message) => message.ordinal);
     // Malformed rows consume ordinals without yielding messages, so the span can contain holes.
-    // A head that ends at a hole may contain no message at all.
-    const firstRepresentedAtOrAfter = (ordinal: number): number | null => {
+    // A head end must sit right after a real message: never on a hole, never past a hole.
+    const lowerBound = (ordinal: number): number => {
         let lo = 0;
         let hi = representedOrdinals.length;
         while (lo < hi) {
@@ -853,7 +876,15 @@ export function buildTrueRawTokenIndex(
             if (representedOrdinals[mid] < ordinal) lo = mid + 1;
             else hi = mid;
         }
-        return lo < representedOrdinals.length ? representedOrdinals[lo] : null;
+        return lo;
+    };
+    const firstRepresentedAtOrAfter = (ordinal: number): number | null => {
+        const index = lowerBound(ordinal);
+        return index < representedOrdinals.length ? representedOrdinals[index] : null;
+    };
+    const lastRepresentedBefore = (ordinal: number): number | null => {
+        const index = lowerBound(ordinal);
+        return index > 0 ? representedOrdinals[index - 1] : null;
     };
     return {
         sessionId,
@@ -915,6 +946,9 @@ export function buildTrueRawTokenIndex(
                 }
             }
             let bestEnd = firstOrdinal + bestEndIndex;
+            // The dense prefix includes zero-token holes, so end at the last represented message that fits.
+            const lastIncluded = lastRepresentedBefore(bestEnd);
+            bestEnd = lastIncluded !== null && lastIncluded >= start ? lastIncluded + 1 : start;
             // The head must contain at least the first represented message at or after `start`,
             // even when that message alone exceeds the cap.
             const firstMessage = firstRepresentedAtOrAfter(start);
@@ -940,7 +974,7 @@ function mediaFingerprintFields(media: Record<string, unknown>): string[] {
  * Tool fingerprints include fields consumed by `buildToolArcs` and tool-call summaries, so topology and displayed-name changes invalidate them.
  */
 function partContentFingerprint(part: unknown): string {
-    if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
+    if (!isRecord(part)) return nonRecordPartFingerprint(part);
     const tool = toolSignalFromPart(part);
     if (tool) {
         return contentStringsHash([

@@ -101,6 +101,28 @@ describe("true raw token indexes with continued ordinals", () => {
         expect(index.findHeadEndForCap(101, 104, 5)).toBe(102);
         expect(index.rangeTokens(101, index.findHeadEndForCap(101, 104, 100))).toBe(10);
     });
+
+    it("ends a head cap right after the last fitting message, not after a trailing hole", () => {
+        const messages: RawMessage[] = [
+            { id: "a", role: "user", parts: [], ordinal: 7 },
+            { id: "b", role: "user", parts: [], ordinal: 9 },
+        ];
+        const totals = new Map([
+            ["a", 13],
+            ["b", 15],
+        ]);
+        const index = buildTrueRawTokenIndex("trailing-hole", messages, {
+            providerShapeVersion: "opencode-v1",
+            cacheNamespace: "trailing-hole-test",
+            absoluteMessageCount: 9,
+            storedTotalForMessage: (message) => totals.get(message.id) ?? null,
+        });
+
+        const end = index.findHeadEndForCap(7, 10, 24);
+        expect(end).toBe(8);
+        expect(index.messageIdAtOrdinal(end - 1)).toBe("a");
+        expect(index.findHeadEndForCap(7, 10, 100)).toBe(10);
+    });
 });
 
 describe("tool arcs", () => {
@@ -669,6 +691,59 @@ describe("tool token accounting", () => {
         expect(breakdown.image).toBe(0);
     });
 
+    it("serializes a typed opaque result block whole even when it carries a text field", () => {
+        const block = (data: string) => ({
+            type: "tool_result",
+            tool_use_id: "c",
+            content: [{ type: "opaque", text: "ok", data }],
+        });
+        const breakdown = estimateTrueRawMessageTokens(
+            singlePartMessage(block("Q".repeat(10_000))),
+            {
+                providerShapeVersion: "pi-folded-v1",
+            },
+        );
+        expect(breakdown.toolOutput).toBeGreaterThan(1000);
+        expect(fingerprintOf(block("A".repeat(100)))).not.toBe(
+            fingerprintOf(block("B".repeat(5000))),
+        );
+    });
+
+    it("treats a typed OpenCode attachment with a MIME field as media", () => {
+        const message = singlePartMessage({
+            type: "tool",
+            callID: "c",
+            tool: "read",
+            state: {
+                status: "completed",
+                input: {},
+                output: "",
+                attachments: [
+                    { type: "attachment", mime: "application/pdf", data: "P".repeat(20_000) },
+                ],
+            },
+        });
+        const breakdown = estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+            imageTokenHeuristic: () => 400,
+        });
+        expect(breakdown.image).toBe(400);
+        expect(breakdown.toolOutput).toBe(0);
+    });
+
+    it("ignores a result field on OpenCode tool parts", () => {
+        const message = singlePartMessage({
+            type: "tool",
+            callID: "c",
+            tool: "x",
+            state: { status: "completed", input: {}, result: "R".repeat(10_000) },
+        });
+        expect(
+            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" })
+                .toolOutput,
+        ).toBe(0);
+    });
+
     it("counts an empty text block in a tool result as empty output", () => {
         const result = (text: string): RawMessage => ({
             id: "r",
@@ -1004,5 +1079,27 @@ describe("raw range fingerprints", () => {
         expect(computeRawRangeFingerprint(message("user"), 1, 2)).not.toBe(
             computeRawRangeFingerprint(message("assistant"), 1, 2),
         );
+    });
+
+    it("hashes primitive and array parts by content", () => {
+        expect(fingerprintOf("hello world!")).not.toBe(fingerprintOf("HELLO WORLD?"));
+        expect(fingerprintOf([1, 2, 3])).not.toBe(fingerprintOf([4, 5, 6]));
+        const options = {
+            providerShapeVersion: "opencode-v1" as const,
+            cacheNamespace: "primitive-parts-test",
+        };
+        const message = (part: unknown): RawMessage => ({
+            id: "x",
+            role: "user",
+            parts: [part],
+            ordinal: 1,
+        });
+        buildTrueRawTokenIndex("s", [message("hello world!")], options);
+        const cjk = buildTrueRawTokenIndex("s", [message("日本語日本語日本語日本語")], options);
+        const fresh = buildTrueRawTokenIndex("s", [message("日本語日本語日本語日本語")], {
+            ...options,
+            cacheNamespace: "primitive-parts-fresh-test",
+        });
+        expect(cjk.tokenForOrdinal(1)).toBe(fresh.tokenForOrdinal(1));
     });
 });
