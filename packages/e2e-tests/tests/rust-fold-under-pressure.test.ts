@@ -1,0 +1,91 @@
+/**
+ * Sessions past the execute threshold must materialize a fold:
+ * the served wire shrinks and a materialized m0 leads the messages array.
+ */
+
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { RustTestHarness } from "../src/rust-harness";
+import {
+    FOLD_SKIP_REASON,
+    foldInfraEnabled,
+    printSkip,
+    rustPrereqs,
+} from "../src/rust-scenario-support";
+
+const active = rustPrereqs.ok && foldInfraEnabled();
+
+describe.skipIf(!rustPrereqs.ok)("rust invariant: fold under pressure", () => {
+    it.skipIf(active)("is gated on a historian-capable qualification runner", () => {
+        printSkip("fold-under-pressure", FOLD_SKIP_REASON);
+        expect(foldInfraEnabled()).toBe(false);
+    });
+
+    let h: RustTestHarness;
+
+    beforeEach(async () => {
+        if (!active) return;
+        // A 30,000-token context limit and 25% execute threshold force the test session past the execute threshold.
+        h = await RustTestHarness.create({
+            modelContextLimit: 30_000,
+            eidnaraConfig: {
+                execute_threshold_percentage: 25,
+                protected_tags: 1,
+                compressor: { enabled: false },
+            },
+        });
+    });
+
+    afterEach(async () => {
+        await h?.dispose();
+    });
+
+    it.skipIf(!active)(
+        "lands a fold when the session grows past the execute threshold (wire shrinks, m0 present)",
+        async () => {
+            const sessionId = await h.createSession();
+
+            let peakWireBytes = 0;
+            for (let i = 1; i <= 10; i += 1) {
+                h.mock.setDefault({
+                    text: `assistant ${i}`,
+                    usage: {
+                        input_tokens: 3_000 * i,
+                        output_tokens: 20,
+                        cache_creation_input_tokens: 2_000,
+                    },
+                });
+                await h.sendPrompt(sessionId, `fold-under-pressure turn ${i}: ${h.ballast(2_500)}`);
+                peakWireBytes = Math.max(peakWireBytes, h.lastMainWireBytes());
+                await Bun.sleep(200);
+            }
+
+            // The daemon reports every fold plan as `HARD` on the wire.
+            const passes = await h.waitForRustPasses(5);
+            const foldPass = passes.find((p) => p.decision.toUpperCase() === "HARD");
+            expect(foldPass).toBeDefined();
+
+            for (let i = 11; i <= 13; i += 1) {
+                h.mock.setDefault({
+                    text: `post-fold ${i}`,
+                    usage: {
+                        input_tokens: 8_000,
+                        output_tokens: 20,
+                        cache_creation_input_tokens: 2_000,
+                    },
+                });
+                await h.sendPrompt(sessionId, `fold-under-pressure turn ${i}: ${h.ballast(300)}`);
+                await Bun.sleep(200);
+            }
+            await Bun.sleep(500);
+
+            const foldedWireBytes = h.lastMainWireBytes();
+
+            expect(foldedWireBytes).toBeLessThan(peakWireBytes);
+
+            const firstMessage = JSON.stringify(h.lastMainMessages()[0]);
+            expect(firstMessage).toContain("<session-history>");
+            expect(firstMessage).not.toContain("<session-history></session-history>");
+        },
+        300_000,
+    );
+});

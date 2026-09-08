@@ -1,0 +1,60 @@
+{
+    "schema": 1,
+    "header": "Every entry runs through the rust-mode direct-host fixture. Suites skip themselves when Cargo or the fixture is unavailable.",
+    "entries": [
+        {
+            "path": "tests/cache-stability.test.ts",
+            "tier": "rust-only",
+            "rationale": "defer-pass byte-stability of the system block and the retained message prefix",
+            "contract_refs": ["U5-PORT"]
+        },
+        {
+            "path": "tests/rust-duplicate-tool-use-id.test.ts",
+            "tier": "rust-only",
+            "rationale": "served messages arrays keep tool_use ids unique when a queued drop is consumed",
+            "contract_refs": ["U5-PORT"]
+        },
+        {
+            "path": "tests/rust-fold-under-pressure.test.ts",
+            "tier": "rust-only",
+            "rationale": "content pressure past the execute threshold lands a fold whose m0 shrinks the provider wire",
+            "contract_refs": ["U5-PORT"]
+        },
+        {
+            "path": "tests/rust-multi-frame-delta-perf.test.ts",
+            "tier": "rust-only",
+            "rationale": "large provider-visible tail stays intact across one-page reuse and bounded multi-page retransmission",
+            "contract_refs": ["U5-PORT"]
+        },
+        {
+            "path": "tests/rust-park-self-heal.test.ts",
+            "tier": "rust-only",
+            "rationale": "passes are served from transform again after a host restart or crash",
+            "contract_refs": ["U5-PORT"]
+        },
+        {
+            "path": "tests/rust-removal-self-heal.test.ts",
+            "tier": "rust-only",
+            "rationale": "passes are served from transform again after a mid-session message is reverted",
+            "contract_refs": ["U5-PORT"]
+        },
+        {
+            "path": "tests/rust-smoke.test.ts",
+            "tier": "rust-only",
+            "rationale": "rust mode boots and transforms a real session through the host transport",
+            "contract_refs": ["U5-PORT"]
+        },
+        {
+            "path": "tests/rust-steady-state-byte-identity.test.ts",
+            "tier": "rust-only",
+            "rationale": "retained wire messages are byte-identical across defer passes",
+            "contract_refs": ["U5-PORT"]
+        },
+        {
+            "path": "tests/rust-tail-mutation-readopt.test.ts",
+            "tier": "rust-only",
+            "rationale": "passes are served from transform again after the newest user message is mutated in place",
+            "contract_refs": ["U5-PORT"]
+        }
+    ]
+}

@@ -32,6 +32,19 @@
         "@eidnara/host-linux-x64-gnu": "0.1.0",
       },
     },
+    "packages/e2e-tests": {
+      "name": "@eidnara/e2e-tests",
+      "version": "0.1.0",
+      "dependencies": {
+        "@eidnara/shm-native": "0.1.0",
+        "@opencode-ai/sdk": "^1.17.11",
+      },
+      "devDependencies": {
+        "@types/bun": "1.3.14",
+        "@types/node": "^22.20.0",
+        "typescript": "5.9.3",
+      },
+    },
     "packages/host-linux-x64-gnu": {
       "name": "@eidnara/host-linux-x64-gnu",
       "version": "0.1.0",
@@ -272,6 +285,8 @@
     "@earendil-works/pi-tui": ["@earendil-works/pi-tui@0.80.2", "", { "dependencies": { "get-east-asian-width": "1.6.0", "marked": "18.0.5" } }, "sha512-OvOAMIbXiC9OSse17YMiXIsI9AS5XM/ZV8N/k+UzdlRpPILDQYmLElevgGW92kkXR8qHBClIdzhCjuzlBGvphA=="],
 
     "@eidnara/cli": ["@eidnara/cli@workspace:packages/cli"],
+
+    "@eidnara/e2e-tests": ["@eidnara/e2e-tests@workspace:packages/e2e-tests"],
 
     "@eidnara/host-linux-x64-gnu": ["@eidnara/host-linux-x64-gnu@workspace:packages/host-linux-x64-gnu"],
 
