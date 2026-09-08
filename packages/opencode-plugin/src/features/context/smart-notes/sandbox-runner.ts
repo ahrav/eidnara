@@ -163,7 +163,23 @@ export async function runCompiledSmartNoteCheck(
     }
     // The lock initializes each check's timeout and host-capability controller.
     // A queued check's timeout starts after it acquires the lock.
-    return withSandboxLock(() => runCompiledSmartNoteCheckLocked(options));
+    let acquired = false;
+    const run = withSandboxLock(() => {
+        acquired = true;
+        return runCompiledSmartNoteCheckLocked(options);
+    });
+    const signal = options.signal;
+    if (!signal) return run;
+    // The active run may hold the lock for its whole budget. A caller that cancels a queued check gets
+    // its answer now; the queued slot still executes and returns cancelled at once, so the chain
+    // stays serialized.
+    return new Promise<RunCompiledSmartNoteCheckResult>((resolve, reject) => {
+        const onAbort = () => {
+            if (!acquired) resolve(cancelledResult(signal.reason));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        run.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    });
 }
 
 async function runCompiledSmartNoteCheckLocked(
@@ -199,11 +215,13 @@ async function runCompiledSmartNoteCheckLocked(
             context.runtime.setInterruptHandler(
                 () => controller.signal.aborted || performance.now() > deadline,
             );
-            installCapabilityObject(context, capabilities, controller.signal);
+            const hostCalls = installCapabilityObject(context, capabilities, controller.signal);
             disableAmbientDynamicCode(context);
             const result = await evalCheck(context, options.compiledCheck);
-            // A guest `try/catch` around a host call can swallow the abort and return a value.
+            // A guest `try/catch` around a host call can swallow the abort or the host's refusal and
+            // return a value computed without the input.
             if (controller.signal.aborted) throw smartNoteAbortError(controller.signal);
+            if (hostCalls.rejected) throw hostCalls.reason;
             const checkResult = result as { met?: unknown } | null;
             if (!checkResult || typeof checkResult.met !== "boolean") {
                 return failureResult("check() must return { met: boolean }", false);
@@ -242,35 +260,60 @@ function truncate(value: string): string {
     return value.slice(0, MAX_SANDBOX_ERROR_CHARS);
 }
 
+// Capabilities resolve `null`, `[]`, or a status for ordinary misses and reject only when the host
+// refused or could not supply the input (abort, network, security). The first rejection is kept so the
+// run fails even when guest code catches the exception.
+interface HostCallLedger {
+    rejected: boolean;
+    reason: unknown;
+}
+
 function installCapabilityObject(
     context: QuickJSAsyncContext,
     cap: SmartNoteCapabilityApi,
     signal: AbortSignal,
-): void {
+): HostCallLedger {
+    const ledger: HostCallLedger = { rejected: false, reason: undefined };
+    const guard = <T>(call: () => Promise<T>) => guardHostCall(call, signal, ledger);
     const capObject = context.newObject();
     try {
         installAsyncStringFunction(context, capObject, "__readFile", async (arg) => {
-            const value = await raceWithAbort(cap.readFile(arg), signal);
+            const value = await guard(() => cap.readFile(arg));
             return value === null ? null : value;
         });
         installAsyncStringFunction(context, capObject, "__httpGet", async (arg) =>
-            JSON.stringify(await raceWithAbort(cap.httpGet(arg), signal)),
+            JSON.stringify(await guard(() => cap.httpGet(arg))),
         );
         installAsyncNoArgFunction(context, capObject, "__gitHeadSha", () =>
-            raceWithAbort(cap.gitHeadSha(), signal),
+            guard(() => cap.gitHeadSha()),
         );
-        installAsyncNoArgFunction(context, capObject, "__gitTag", () =>
-            raceWithAbort(cap.gitTag(), signal),
-        );
+        installAsyncNoArgFunction(context, capObject, "__gitTag", () => guard(() => cap.gitTag()));
         installAsyncStringFunction(context, capObject, "__gitLog", async (arg) => {
             const opts = arg
                 ? (JSON.parse(arg) as { maxCount?: number; path?: string; since?: string })
                 : undefined;
-            return JSON.stringify(await raceWithAbort(cap.gitLog(opts), signal));
+            return JSON.stringify(await guard(() => cap.gitLog(opts)));
         });
         context.setProp(context.global, "__eidnaraHostCap", capObject);
     } finally {
         capObject.dispose();
+    }
+    return ledger;
+}
+
+async function guardHostCall<T>(
+    call: () => Promise<T>,
+    signal: AbortSignal,
+    ledger: HostCallLedger,
+): Promise<T> {
+    try {
+        return await raceWithAbort(call(), signal);
+    } catch (error) {
+        if (!ledger.rejected) {
+            ledger.rejected = true;
+            ledger.reason = error;
+        }
+        throw error;
     }
 }
 

@@ -99,9 +99,11 @@ export function isSecretDeniedPath(repoRelativePath: string): boolean {
     if (!normalized) return true;
     const segments = normalized.split("/");
     if (segments.includes(".git") || segments.includes("secrets")) return true;
+    // Dotenv material may live in a directory (`.env/`, `.env.production/`), so every segment is checked.
+    if (segments.some((segment) => segment.startsWith(".env"))) return true;
     const basename = segments.at(-1) ?? "";
 
-    if (basename === ".npmrc" || basename.startsWith(".env")) return true;
+    if (basename === ".npmrc") return true;
     if (basename === ".pgpass" || basename === ".netrc") return true;
     if (SECRET_KEY_EXTENSIONS.some((extension) => basename.endsWith(extension))) return true;
     if (

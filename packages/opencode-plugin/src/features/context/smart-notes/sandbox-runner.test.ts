@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { createSmartNoteCapabilities, type SmartNoteCapabilityApi } from "./capabilities";
 import { runCompiledSmartNoteCheck } from "./sandbox-runner";
-import { SmartNoteNetworkError } from "./types";
+import { SmartNoteNetworkError, SmartNoteSecurityError } from "./types";
 
 const fakeCap: SmartNoteCapabilityApi = {
     readFile: async (path) => (path === "ready.txt" ? "ready" : null),
@@ -217,6 +217,91 @@ describe("compiled smart-note QuickJS runner", () => {
         });
         expect(cancelled.ok).toBe(false);
         if (!cancelled.ok) expect(cancelled.cancelled).toBe(true);
+    });
+
+    test("a guest that catches a host refusal cannot report success without the input", async () => {
+        const swallowing = `function check(cap) {
+            try { cap.httpGet("https://example.test/"); } catch (_) { return { met: true }; }
+            return { met: false };
+        }`;
+        const network = await runCompiledSmartNoteCheck({
+            compiledCheck: swallowing,
+            capabilities: {
+                ...fakeCap,
+                httpGet: async () => {
+                    throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: transient HTTP 503");
+                },
+            },
+        });
+        expect(network).toEqual({
+            ok: false,
+            cancelled: false,
+            error: "SmartNoteNetworkError: SMART_NOTE_NETWORK: transient HTTP 503",
+            network: true,
+        });
+
+        const security = await runCompiledSmartNoteCheck({
+            compiledCheck: swallowing,
+            capabilities: {
+                ...fakeCap,
+                httpGet: async () => {
+                    throw new SmartNoteSecurityError(
+                        "URL resolves to a non-global/internal address",
+                    );
+                },
+            },
+        });
+        expect(security).toEqual({
+            ok: false,
+            cancelled: false,
+            error: "SmartNoteSecurityError: URL resolves to a non-global/internal address",
+            network: false,
+        });
+    });
+
+    test("cancelling a queued check settles it before the active run releases the lock", async () => {
+        const holdMs = 600;
+        const active = runCompiledSmartNoteCheck({
+            compiledCheck: `function check(cap) { cap.httpGet("https://example.test/"); return { met: false }; }`,
+            capabilityFactory: (signal) => ({
+                ...fakeCap,
+                httpGet: () =>
+                    new Promise((_resolve, reject) => {
+                        const abort = () =>
+                            reject(new SmartNoteNetworkError("SMART_NOTE_NETWORK: aborted"));
+                        if (signal.aborted) abort();
+                        else signal.addEventListener("abort", abort, { once: true });
+                    }),
+            }),
+            timeoutMs: holdMs,
+        });
+
+        const controller = new AbortController();
+        const startedAt = Date.now();
+        const queued = runCompiledSmartNoteCheck({
+            compiledCheck: `function check() { return { met: true }; }`,
+            capabilities: fakeCap,
+            signal: controller.signal,
+        });
+        setTimeout(() => controller.abort(new Error("sweep deadline")), 50);
+        const queuedResult = await queued;
+        const elapsed = Date.now() - startedAt;
+
+        expect(queuedResult).toEqual({
+            ok: false,
+            cancelled: true,
+            error: "sweep deadline",
+            network: false,
+        });
+        expect(elapsed).toBeLessThan(holdMs / 2);
+
+        const activeResult = await active;
+        expect(activeResult.ok).toBe(false);
+        const followup = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check() { return { met: true }; }`,
+            capabilities: fakeCap,
+        });
+        expect(followup).toEqual({ ok: true, result: { met: true } });
     });
 
     test("external cancellation of a directly supplied capability reports cancelled", async () => {

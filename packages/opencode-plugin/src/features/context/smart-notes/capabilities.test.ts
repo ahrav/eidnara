@@ -121,6 +121,10 @@ describe("smart-note readFile capability", () => {
             await writeFile(path.join(dir, "id_ed25519"), "key", "utf8");
             await writeFile(path.join(dir, "cert.pem"), "pem", "utf8");
             await writeFile(path.join(dir, "secrets", "value.txt"), "secret", "utf8");
+            await mkdir(path.join(dir, ".env.production"));
+            await writeFile(path.join(dir, ".env.production", "token"), "secret", "utf8");
+            await mkdir(path.join(dir, "config", ".env"), { recursive: true });
+            await writeFile(path.join(dir, "config", ".env", "token"), "secret", "utf8");
             const cap = createSmartNoteCapabilities({
                 projectRoot: dir,
                 signal: new AbortController().signal,
@@ -135,6 +139,8 @@ describe("smart-note readFile capability", () => {
                 "id_ed25519",
                 "cert.pem",
                 "secrets/value.txt",
+                ".env.production/token",
+                "config/.env/token",
             ]) {
                 expect(await cap.readFile(file)).toBeNull();
             }
