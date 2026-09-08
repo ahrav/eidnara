@@ -22,6 +22,7 @@ import {
     buildSidebarSnapshot,
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
+    clearRustSessionStatus,
     clearWorkMetricsCarry,
     clearWorkMetricsCarryIfFolded,
     type RustSessionStatus,
@@ -296,6 +297,54 @@ describe("registerRpcHandlers", () => {
         expect(calls).toBe(1);
         expect(snapshot.compartmentCount).toBe(4);
         expect(detail.compartmentCount).toBe(4);
+    });
+
+    test("clearRustSessionStatus forgets the cached status and fences a request in flight", async () => {
+        const sessionId = "ses-handler-status-cleared";
+        let calls = 0;
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const handlers = new Map<string, Handler>();
+        const server = {
+            handle(method: string, handler: Handler) {
+                handlers.set(method, handler);
+            },
+        } as unknown as EidnaraRpcServer;
+        registerRpcHandlers(server, {
+            directory: process.cwd(),
+            config: EidnaraConfigSchema.parse({
+                transform_mode: "rust",
+                subc: { connection_file: MISSING_CONNECTION_FILE },
+            }),
+            client: null,
+            liveSessionState: createLiveSessionState(),
+            rustModeModuleClient: {
+                async call() {
+                    calls += 1;
+                    if (calls === 3) await gate;
+                    return { ok: true, result: DAEMON_STATUS };
+                },
+            },
+        });
+
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toBe(1);
+        // Within the TTL a poll would reuse the cache; the clear forces a fresh daemon read.
+        clearRustSessionStatus(sessionId);
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toBe(2);
+
+        // A clear while a request is in flight keeps its late answer out of the cache.
+        clearRustSessionStatus(sessionId);
+        const pending = handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toBe(3);
+        clearRustSessionStatus(sessionId);
+        release?.();
+        await pending;
+        await handlers.get("sidebar-snapshot")?.({ sessionId });
+        expect(calls).toBe(4);
     });
 
     test("sidebar-snapshot reports disabled memory and rejects an empty session id", async () => {
@@ -938,10 +987,35 @@ describe("clearWorkMetricsCarry", () => {
                 id,
                 role: "assistant",
                 agent: "build",
+                providerID: "test-provider",
+                modelID: "test-model",
+                time: { created: timeCreated, completed: timeCreated + 5 },
                 tokens: { input: inputTokens, output: 10, cache: { read: 0, write: 0 } },
             }),
         );
     }
+
+    test("usage lost from memory is recovered from the newest persisted response", () => {
+        const sessionId = "ses-usage-recovered";
+        const db = openTempOpenCodeDb();
+        insertAssistantRow(db, sessionId, "a", 1, 10_000);
+        insertAssistantRow(db, sessionId, "b", 2, 64_000);
+        closeQuietly(db);
+
+        // No live model and no live usage: both come back from the database.
+        const live = createLiveSessionState();
+        const snapshot = buildSidebarSnapshot(sessionId, process.cwd(), live);
+        expect(snapshot.inputTokens).toBe(64_000);
+        expect(snapshot.usagePercentage).toBe(50);
+        const recovered = live.contextUsageBySession.get(sessionId);
+        expect(recovered?.messageID).toBe("b");
+        expect(recovered?.model).toEqual({ providerID: "test-provider", modelID: "test-model" });
+        expect(recovered?.lastResponseTime).toBe(7);
+
+        // The recovered entry is cached, so the dialog's countdown starts from the persisted response time.
+        const detail = buildStatusDetail(sessionId, process.cwd(), undefined, undefined, live);
+        expect(detail.lastResponseTime).toBe(7);
+    });
 
     test("a retained carry survives row deletion until the session is cleared", () => {
         const sessionId = "ses-carry-clear";
