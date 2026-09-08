@@ -387,6 +387,49 @@ describe("Rust mode transform request", () => {
         expect(bodies[0]?.todo_tool_present).toBe(false);
     });
 
+    it("seeds the ctx_reduce verdict from the live message array before the first user row persists", async () => {
+        const sessionId = `rust-ctx-reduce-from-messages-${Date.now()}`;
+        installAvailabilityDb(sessionId);
+        installRawRows(sessionId, rawRows(1));
+        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const messages = makeMessages(sessionId);
+        (messages[0]!.info as { tools?: Record<string, boolean> }).tools = { ctx_reduce: true };
+
+        await transform.run(sessionId, messages, { messages: messages as unknown[] });
+
+        expect(bodies).toHaveLength(1);
+        expect(bodies[0]?.tool_present).toBe(true);
+    });
+
+    it("omits usage when the host holds no context-usage sample", async () => {
+        const sessionId = `rust-usage-absent-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const { client, bodies } = recordingClient(() => ({ native_messages: [] }));
+        const deps = makeDeps();
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+
+        const first = makeMessages(sessionId);
+        await transform.run(sessionId, first, { messages: [...first] });
+        expect("usage" in bodies[0]!).toBe(false);
+
+        deps.contextUsageMap.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 64_000 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+        });
+        const second = makeMessages(sessionId);
+        await transform.run(sessionId, second, { messages: [...second] });
+        expect(bodies[1]?.usage).toEqual({
+            input_tokens: 64_000,
+            limit: 128_000,
+            current_total_input_tokens: 64_000,
+            context_limit_tokens: 128_000,
+        });
+    });
+
     it("sends the combined todowrite map and live-permission verdict", async () => {
         const sessionId = `rust-todo-permission-denied-${Date.now()}`;
         installAvailabilityDb(sessionId, {});
@@ -720,6 +763,39 @@ describe("Rust mode transform transport", () => {
         expect(ordinalsOf(bodies[1])).toEqual([11, 12]);
         expect(transform.getState(sessionId).idOrdinalMemo.get("m-1")).toBe(11);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+    });
+
+    it("evicts the least recently used session's wire cache and sends its next pass in full", async () => {
+        const capacity = __rustModeTransformTest.WIRE_CACHE_SESSION_CAPACITY;
+        const stamp = Date.now();
+        const sessionIdAt = (index: number): string => `rust-wire-cache-lru-${stamp}-${index}`;
+        const bodiesBySession = new Map<string, Record<string, unknown>[]>();
+        const client: RustModeModuleClient = {
+            call: async ({ sessionId, body }) => {
+                const list = bodiesBySession.get(sessionId) ?? [];
+                list.push(body as Record<string, unknown>);
+                bodiesBySession.set(sessionId, list);
+                return { native_messages: [] };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        for (let index = 0; index <= capacity; index += 1) {
+            const sessionId = sessionIdAt(index);
+            installRawRows(sessionId, rawRows(1));
+            const input = makeMessages(sessionId);
+            await transform.run(sessionId, input, { messages: [...input] });
+        }
+
+        const newest = sessionIdAt(capacity);
+        const newestInput = makeMessages(newest);
+        await transform.run(newest, newestInput, { messages: [...newestInput] });
+        expect(bodiesBySession.get(newest)?.[1]?.tail_delta).toBeDefined();
+
+        const evicted = sessionIdAt(0);
+        const evictedInput = makeMessages(evicted);
+        await transform.run(evicted, evictedInput, { messages: [...evictedInput] });
+        expect(bodiesBySession.get(evicted)?.[1]?.tail_delta).toBeUndefined();
+        expect(bodiesBySession.get(evicted)?.[1]?.native_messages).toEqual(evictedInput);
     });
 
     it("keeps a multi-frame tail delta paged instead of rebuilding the full wire", async () => {

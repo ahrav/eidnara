@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
 import type { PluginContext } from "../../plugin/types";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import {
@@ -14,6 +15,7 @@ import type { WindowGeometryResult } from "../../shared/window-geometry";
 import {
     cachedToolPermissionDenied,
     resolveCtxReduceAvailability,
+    resolveCtxReduceAvailabilityFromMessages,
     resolveTodowriteAvailability,
     resolveTodowriteAvailabilityFromMessages,
     type ToolAvailabilityVerdict,
@@ -112,6 +114,9 @@ export interface RustModeModuleClient {
 }
 
 type ContentSnapshotField = string | number | boolean | symbol;
+
+/** Wire caches hold a session's content snapshots and its last native output, so the LRU bound is sized to the sessions one OpenCode process keeps active. An evicted session sends its next pass as a full array. */
+const WIRE_CACHE_SESSION_CAPACITY = 64;
 
 const SNAPSHOT_ARRAY = Symbol("array");
 const SNAPSHOT_OBJECT = Symbol("object");
@@ -614,8 +619,11 @@ function getSessionDirectory(
     });
 }
 
-function loadContextUsage(deps: RustModeTransformDeps, sessionId: string): ContextUsage {
-    return deps.contextUsageMap.get(sessionId)?.usage ?? { percentage: 0, inputTokens: 0 };
+function loadContextUsage(
+    deps: RustModeTransformDeps,
+    sessionId: string,
+): ContextUsage | undefined {
+    return deps.contextUsageMap.get(sessionId)?.usage;
 }
 
 function resolveHistoryBudgetTokens(
@@ -755,7 +763,7 @@ function buildTransformBody(args: {
     input: unknown[];
     nativeMessages: unknown[];
     passInputs: Record<string, unknown>;
-    usage: Record<string, number | boolean>;
+    usage?: Record<string, number | boolean>;
     geometry?: TransformGeometryWire;
     modelKey: string | null;
     providerId: string | null;
@@ -801,7 +809,7 @@ function buildTransformBody(args: {
                   },
               }
             : {}),
-        usage: args.usage,
+        ...(args.usage ? { usage: args.usage } : {}),
         ...(args.geometry ? { geometry: args.geometry } : {}),
         mid_turn: args.midTurn,
         prev_response_completed_at_ms: args.prevResponseCompletedAtMs,
@@ -846,7 +854,7 @@ export function createRustModeTransform(
     getState: (sessionId: string) => Readonly<RustSessionState>;
 } {
     const states = new Map<string, RustSessionState>();
-    const wireCaches = new Map<string, RustWireCache>();
+    const wireCaches = new BoundedSessionMap<RustWireCache>(WIRE_CACHE_SESSION_CAPACITY);
 
     const logStage = (
         sessionId: string,
@@ -1044,6 +1052,8 @@ export function createRustModeTransform(
                 if (detail) sessionLog(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
+        // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
+        resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
         const reduceAvailability = resolveCtxReduceAvailability(sessionId);
         // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
         // Synthesis fails closed when host evidence is provisional or missing.
@@ -1063,7 +1073,7 @@ export function createRustModeTransform(
             const contextLimit =
                 resolvedContextLimit && resolvedContextLimit > 0
                     ? resolvedContextLimit
-                    : usage.percentage > 0
+                    : usage && usage.percentage > 0
                       ? Math.round(usage.inputTokens / (usage.percentage / 100))
                       : 128_000;
             const threshold = resolveExecuteThreshold(
@@ -1074,7 +1084,7 @@ export function createRustModeTransform(
             );
             const historyBudgetTokens = resolveHistoryBudgetTokens(
                 deps.historyBudgetPercentage,
-                usage,
+                usage ?? { percentage: 0, inputTokens: 0 },
                 deps.executeThresholdPercentage,
                 modelKey ?? undefined,
                 deps.executeThresholdTokens,
@@ -1314,7 +1324,8 @@ export function createRustModeTransform(
             const transformBodyBase = {
                 sessionId,
                 passInputs,
-                usage: passUsage(usage, contextLimit),
+                // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.
+                usage: usage ? passUsage(usage, contextLimit) : undefined,
                 geometry: transformGeometry,
                 modelKey: modelKey ?? null,
                 providerId: model?.providerID ?? null,
@@ -1657,6 +1668,7 @@ export function createRustModeTransform(
 }
 
 export const __rustModeTransformTest = {
+    WIRE_CACHE_SESSION_CAPACITY,
     applyNativeMessagesVerbatim,
     contentSnapshotsFor,
     snapshotTags: {
