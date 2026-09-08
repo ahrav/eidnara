@@ -344,11 +344,8 @@ const NOT_A_REPOSITORY = /^fatal: not a git repository/m;
 // corruption, and git reports it with the same message.
 async function isExpectedGitMiss(projectRoot: string, stderr: string): Promise<boolean> {
     if (NOT_A_REPOSITORY.test(stderr)) {
-        const gitEntry = await lstat(path.join(projectRoot, ".git")).then(
-            () => true,
-            () => false,
-        );
-        return !gitEntry;
+        // Only a missing entry means absence; EACCES or EIO on an existing entry propagates.
+        return (await lstat(path.join(projectRoot, ".git")).catch(nullIfMissing)) === null;
     }
     return EXPECTED_GIT_MISS.some((pattern) => pattern.test(stderr));
 }
