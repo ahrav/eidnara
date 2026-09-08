@@ -974,7 +974,7 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
         }
     });
 
-    test("staging temps left by dead processes are reclaimed; live and foreign ones are kept", () => {
+    test("staging temps left by dead or reused pids are reclaimed; live and foreign ones are kept", () => {
         const dir = tempDir("eidnara-stage-reclaim-");
         try {
             const source = path.join(dir, "launcher");
@@ -982,12 +982,17 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
             writeFileSync(source, bytes, { mode: 0o755 });
             const store = path.join(dir, "store");
             mkdirSync(store, { mode: 0o700 });
+            const procStat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+            const ownStart = procStat.slice(procStat.lastIndexOf(")") + 2).split(" ")[19];
 
             // A pid above the kernel's maximum can never name a live process.
             const dead = path.join(store, ".staging-4194305-1-1");
             writeFileSync(dead, "partial");
-            // This process is alive, so a temp bearing its pid is another stager's work in progress.
-            const live = path.join(store, `.staging-${process.pid}-1-1`);
+            // This pid is alive but the start ticks belong to an earlier incarnation of it.
+            const reused = path.join(store, `.staging-${process.pid}-1-1`);
+            writeFileSync(reused, "from a previous life");
+            // Matching pid and start ticks name this process, which is alive.
+            const live = path.join(store, `.staging-${process.pid}-${ownStart}-1`);
             writeFileSync(live, "in flight");
             // A directory under the prefix is not a staging temp this code produced.
             const foreign = path.join(store, ".staging-4194305-2-2");
@@ -1005,6 +1010,7 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
             closeSync(staged.fd);
 
             expect(existsSync(dead)).toBe(false);
+            expect(existsSync(reused)).toBe(false);
             expect(existsSync(live)).toBe(true);
             expect(existsSync(foreign)).toBe(true);
             expect(existsSync(unrelated)).toBe(true);

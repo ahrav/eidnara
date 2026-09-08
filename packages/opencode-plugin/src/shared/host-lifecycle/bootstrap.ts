@@ -18,6 +18,7 @@ import {
     mkdirSync,
     openSync,
     readdirSync,
+    readFileSync,
     readSync,
     realpathSync,
     renameSync,
@@ -637,11 +638,28 @@ export function revalidateRetainedBootstrap(
 }
 
 const STAGING_TEMP_PREFIX = ".staging-";
-const STAGING_TEMP_NAME = /^\.staging-(\d+)-\d+-\d+$/;
+const STAGING_TEMP_NAME = /^\.staging-(\d+)-(\d+)-\d+$/;
 
 /**
- * `kill(pid, 0)` returns `ESRCH` only when no process has that PID, so an active stager's copy is not removed.
- * A reused PID delays reclamation until its process exits.
+ * `/proc/<pid>/stat` field 22 is the process start time in clock ticks since boot.
+ * A PID alone does not identify a process because PIDs can be reused.
+ * Start ticks distinguish a reused PID from its prior process.
+ * `comm` may contain spaces and parentheses, so split fields after the last `)`.
+ */
+function processStartTicks(pid: number): bigint | null {
+    let stat: string;
+    try {
+        stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    } catch {
+        return null;
+    }
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    const ticks = stat.slice(close + 2).split(" ")[19];
+    return ticks !== undefined && /^\d+$/.test(ticks) ? BigInt(ticks) : null;
+}
+
+/**
  * Only regular, single-link, owner-owned entries qualify, so a foreign object
  * planted under the prefix is left alone.
  */
@@ -650,19 +668,22 @@ function reclaimStaleStagingTemps(destDir: string, uid: number): void {
         const match = STAGING_TEMP_NAME.exec(name);
         if (!match) continue;
         const pid = Number.parseInt(match[1] as string, 10);
-        if (!Number.isSafeInteger(pid) || pid < 1 || pid === process.pid) continue;
+        if (!Number.isSafeInteger(pid) || pid < 1) continue;
+        const started = BigInt(match[2] as string);
         const tempPath = path.join(destDir, name);
+        let stat: ReturnType<typeof lstatSync>;
         try {
-            const stat = lstatSync(tempPath);
-            if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid) continue;
-            process.kill(pid, 0);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
-            try {
-                unlinkSync(tempPath);
-            } catch {
-                // Another stager may have reclaimed the same temp first.
-            }
+            stat = lstatSync(tempPath);
+        } catch {
+            continue;
+        }
+        if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid) continue;
+        // Matching start ticks name a live stager, including this process.
+        if (processStartTicks(pid) === started) continue;
+        try {
+            unlinkSync(tempPath);
+        } catch {
+            // Another stager may have reclaimed the same temp first.
         }
     }
 }
@@ -733,9 +754,12 @@ export function stageBootstrap(options: {
 }): RetainedBootstrap {
     const { sourcePath, destDir, expectedSha256 } = options;
     if (!SHA256_HEX.test(expectedSha256)) throw invalid("expected digest is noncanonical");
-    // The uid is resolved before the first filesystem effect so a host that
-    // cannot report one fails without creating the destination or a temp.
+    // Resolve uid and process identity before filesystem effects so unavailable identity fails without creating destination or temp.
     const uid = currentUid();
+    const ownStart = processStartTicks(process.pid);
+    if (ownStart === null) {
+        throw new BootstrapError("unsupported_platform", "cannot determine process start time");
+    }
     let sourceFd: number;
     try {
         sourceFd = openSync(
@@ -775,7 +799,7 @@ export function stageBootstrap(options: {
         if (!capacity.ok) throw new BootstrapError(capacity.reason, capacity.detail);
         tempPath = path.join(
             destDir,
-            `${STAGING_TEMP_PREFIX}${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`,
+            `${STAGING_TEMP_PREFIX}${process.pid}-${ownStart}-${Math.floor(Math.random() * 1e9)}`,
         );
         const outFd = openSync(
             tempPath,
@@ -829,8 +853,20 @@ export function stageBootstrap(options: {
         }
         throw invalid(`staging failed: ${code ?? "unknown filesystem error"}`);
     } finally {
-        closeSync(sourceFd);
-        if (destFd !== null) closeSync(destFd);
+        // A close error escaping here would replace a successful return with a
+        // raw error and skip the remaining cleanup.
+        try {
+            closeSync(sourceFd);
+        } catch {
+            // best-effort
+        }
+        if (destFd !== null) {
+            try {
+                closeSync(destFd);
+            } catch {
+                // best-effort
+            }
+        }
         if (tempPath !== null) {
             try {
                 unlinkSync(tempPath);
