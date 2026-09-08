@@ -254,6 +254,8 @@ export function writeEidnaraConfig(
     if (options.historianModel) {
         const historian = asPlainRecord(config.historian);
         historian.model = options.historianModel;
+        delete historian.disable;
+        delete historian.enabled;
         config.historian = historian;
     }
 
@@ -394,18 +396,17 @@ export async function runSetup(dryRun = false): Promise<number> {
         paths.tuiConfigFormat !== "none" ||
         projectOpenCodeConfigPaths(process.cwd()).some((path) => existsSync(path));
 
-    if (!dryRun) {
-        try {
-            assertJsoncConfigsParseable(
-                preflightConfigPaths(paths, process.cwd(), {
-                    firstTimeOmoRepair: paths.omoConfig !== null && !hadExistingSetup,
-                }),
-            );
-        } catch (error) {
-            log.error(error instanceof Error ? error.message : String(error));
-            outro("Setup stopped — fix the malformed config and rerun setup.");
-            return 1;
-        }
+    // The preflight is read-only, so a dry run performs it too and predicts the refusal a real run would make.
+    try {
+        assertJsoncConfigsParseable(
+            preflightConfigPaths(paths, process.cwd(), {
+                firstTimeOmoRepair: paths.omoConfig !== null && !hadExistingSetup,
+            }),
+        );
+    } catch (error) {
+        log.error(error instanceof Error ? error.message : String(error));
+        outro("Setup stopped — fix the malformed config and rerun setup.");
+        return 1;
     }
 
     const dcpDecision: DcpDecision = dryRun

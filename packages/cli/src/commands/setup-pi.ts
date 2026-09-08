@@ -213,6 +213,8 @@ export function writeEidnaraConfig(
         ...((config.historian as Record<string, unknown> | undefined) ?? {}),
         model: toCanonical(options.historianModel),
         thinking_level: options.historianThinkingLevel,
+        disable: undefined,
+        enabled: undefined,
     });
 
     const sidekick = {

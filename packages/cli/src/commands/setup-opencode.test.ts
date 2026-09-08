@@ -97,6 +97,25 @@ describe("setup-opencode config safety", () => {
         });
     });
 
+    it("clears a historian opt-out when a historian model is chosen", () => {
+        const path = join(tempDir(), "eidnara.jsonc");
+        writeFileSync(
+            path,
+            `{"historian":{"disable":true,"enabled":false,"model":"old"},"sidekick":{"disable":true}}`,
+        );
+
+        writeEidnaraConfig(path, {
+            historianModel: "anthropic/claude-haiku-4-5",
+            sidekickEnabled: false,
+            sidekickModel: null,
+            claudeMax: false,
+        });
+
+        const written = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
+        expect(written.historian).toEqual({ model: "anthropic/claude-haiku-4-5" });
+        expect(written.sidekick).toEqual({ disable: true });
+    });
+
     it("replaces schema-invalid agent blocks instead of throwing on them", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(path, `{"historian":"old-model","sidekick":["stale"]}`);
