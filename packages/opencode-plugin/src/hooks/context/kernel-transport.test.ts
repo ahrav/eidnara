@@ -9,8 +9,10 @@ import {
 import {
     createKernelClient,
     createKernelTransport,
+    MAX_CONNECTION_FILE_STATES,
     MAX_TOKEN_CACHE_PROJECTS,
     resetKernelClientsForTest,
+    sharedConnectionFilesForTest,
 } from "./kernel-transport";
 import { HostModuleTransport, type ManagedDemandStart } from "./module-transport";
 
@@ -86,6 +88,90 @@ describe("createKernelTransport reachability gate", () => {
         const result = await client(transport).read({ surface: "auto_inject" });
         expect(result.state).toEqual({ kind: "unavailable", reason: "daemon_absent" });
         expect(calls).toEqual([]);
+    });
+});
+
+describe("createKernelTransport method guard", () => {
+    test("a body whose encoded method differs from the checked method is refused before any dial", async () => {
+        const transport = createKernelTransport(managedTransport());
+        await expect(
+            transport.call({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                method: "kernel.read",
+                body: { method: "session.delete", v: 1, session_id: SESSION },
+            }),
+        ).rejects.toThrow(/encoded method is not kernel\.read/);
+        await expect(
+            transport.call({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                method: "kernel.read",
+                body: "not a record",
+            }),
+        ).rejects.toThrow(/encoded method is not kernel\.read/);
+    });
+
+    test("a non-kernel method is refused before any dial", async () => {
+        const transport = createKernelTransport(managedTransport());
+        await expect(
+            transport.call({
+                sessionId: SESSION,
+                projectRoot: PROJECT,
+                method: "session.delete",
+                body: { method: "session.delete", v: 1, session_id: SESSION },
+            }),
+        ).rejects.toThrow(/refuses non-kernel method session\.delete/);
+    });
+});
+
+describe("createKernelTransport store lifecycle translation", () => {
+    function storageTransport(storage: "starting" | "unavailable"): HostModuleTransport {
+        return new HostModuleTransport({
+            demandStart: async () => ({ ok: true, reason: "ready", storage }),
+        });
+    }
+
+    test("a managed daemon whose store is starting reads as unavailable:store_starting", async () => {
+        const result = await client(createKernelTransport(storageTransport("starting"))).read({
+            surface: "auto_inject",
+        });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "store_starting" });
+    });
+
+    test("a managed daemon whose store is unavailable reads as unavailable:store_unavailable", async () => {
+        const result = await client(createKernelTransport(storageTransport("unavailable"))).read({
+            surface: "auto_inject",
+        });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "store_unavailable" });
+    });
+});
+
+describe("shared transport eviction", () => {
+    afterEach(() => {
+        resetKernelClientsForTest();
+    });
+
+    test("a client that outlives its shared state's eviction re-resolves through the map instead of redialing outside the cap", async () => {
+        const files = Array.from(
+            { length: MAX_CONNECTION_FILE_STATES + 1 },
+            (_, index) => `/tmp/kernel-transport-test-missing-${index}.json`,
+        );
+        const config = (file: string) => ({ subc: { connection_file: file } });
+        const stale = createKernelClient({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            config: config(files[0] as string),
+        });
+        for (const file of files.slice(1)) {
+            createKernelClient({ sessionId: SESSION, projectRoot: PROJECT, config: config(file) });
+        }
+        expect(sharedConnectionFilesForTest()).toEqual(files.slice(1));
+
+        const result = await stale.read({ surface: "auto_inject" });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "daemon_absent" });
+        // The stale client's call recreated its connection file's state through the map, so the cap evicted the next-oldest entry rather than a ninth transport living on outside it.
+        expect(sharedConnectionFilesForTest()).toEqual([...files.slice(2), files[0]]);
     });
 });
 
