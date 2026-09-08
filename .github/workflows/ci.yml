@@ -283,9 +283,9 @@ jobs:
 
       - name: Incident history and verifier gates
         # Both validators use the pull request base SHA or protected push `before` SHA.
-        # An unprotected push has no trusted base, so the step is skipped there.
+        # An unprotected push, a scheduled run, and a manual dispatch have no trusted base, so the step is skipped there.
         # The validators import `typescript`, so the install above must have run: a path-filtered pull request without TypeScript changes installs here instead.
-        if: github.event_name == 'pull_request' || github.ref_protected
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_protected)
         run: |
           if [ ! -d node_modules ]; then bun install --frozen-lockfile; fi
           bun run --cwd packages/e2e-tests validate:incident-history:ci

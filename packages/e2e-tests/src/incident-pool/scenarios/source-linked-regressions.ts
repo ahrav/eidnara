@@ -200,11 +200,12 @@ function messageBlocks(message: unknown): Array<Record<string, unknown>> {
 }
 
 /** The check requires the emitted `ctx_reduce` use/result pair, not its tool declaration. */
-/** `drop` pins the tool input the fixture sent, so a pair whose payload the transform rewrote or stripped does not count as retained. */
+/** `toolName` and `drop` pin the tool use the fixture emitted, so a pair whose name or payload the transform rewrote does not count as retained. */
 export function hasCtxReducePair(
     body: Record<string, unknown>,
     callId: string,
     drop: string,
+    toolName: string,
 ): boolean {
     if (!Array.isArray(body.messages)) return false;
     for (let index = 0; index < body.messages.length - 1; index += 1) {
@@ -224,8 +225,7 @@ export function hasCtxReducePair(
             (block) =>
                 block.type === "tool_use" &&
                 block.id === callId &&
-                typeof block.name === "string" &&
-                /ctx_reduce/.test(block.name) &&
+                block.name === toolName &&
                 isRecordLike(block.input) &&
                 block.input.drop === drop,
         );
@@ -238,8 +238,14 @@ export function hasCtxReducePair(
 }
 
 /* */
-function emitCtxReduceOnce(h: RustTestHarness, drop: string, callId: string): void {
+/** `emittedName` reports the published tool name the `tool_use` carried, or null while no request has published a `ctx_reduce` tool. */
+function emitCtxReduceOnce(
+    h: RustTestHarness,
+    drop: string,
+    callId: string,
+): { emittedName: () => string | null } {
     let emitted = false;
+    let emittedName: string | null = null;
     h.mock.addMatcher((body) => {
         if (emitted) return null;
         const sys = JSON.stringify(body.system ?? "");
@@ -250,6 +256,7 @@ function emitCtxReduceOnce(h: RustTestHarness, drop: string, callId: string): vo
             .find((n) => typeof n === "string" && /ctx_reduce/.test(n)) as string | undefined;
         if (!name) return null;
         emitted = true;
+        emittedName = name;
         return {
             content: [
                 {
@@ -263,6 +270,7 @@ function emitCtxReduceOnce(h: RustTestHarness, drop: string, callId: string): vo
             usage: DEFER_USAGE,
         };
     });
+    return { emittedName: () => emittedName };
 }
 
 export async function driveAgedCtxReduceSurvival(
@@ -272,12 +280,26 @@ export async function driveAgedCtxReduceSurvival(
     h.mock.setDefault({ text: "A3 reply 1", usage: DEFER_USAGE });
     await h.sendPrompt(sessionId, "A3 turn 1: establish baseline content.");
 
-    emitCtxReduceOnce(h, FIRST_RENDER_A3_FIXTURE.drop, FIRST_RENDER_A3_FIXTURE.callId);
+    const reduce = emitCtxReduceOnce(
+        h,
+        FIRST_RENDER_A3_FIXTURE.drop,
+        FIRST_RENDER_A3_FIXTURE.callId,
+    );
     h.mock.setDefault({
         text: "A3 reply 2 (after ctx_reduce tool call)",
         usage: DEFER_USAGE,
     });
     await h.sendPrompt(sessionId, "A3 turn 2: this turn issues a ctx_reduce call.");
+    // The pair is matched against the exact name the fixture emitted; an unpublished tool makes every later check false.
+    const toolName = reduce.emittedName() ?? "";
+    const retainedPair = (body: Record<string, unknown>): boolean =>
+        toolName.length > 0 &&
+        hasCtxReducePair(
+            body,
+            FIRST_RENDER_A3_FIXTURE.callId,
+            FIRST_RENDER_A3_FIXTURE.drop,
+            toolName,
+        );
 
     // Pure-defer growth ages the `ctx_reduce` call past the protected window.
     let sawReduceOnWire = false;
@@ -285,10 +307,7 @@ export async function driveAgedCtxReduceSurvival(
         h.mock.setDefault({ text: `A3 defer reply ${i}`, usage: DEFER_USAGE });
         await h.sendPrompt(sessionId, `A3 turn ${i}: defer growth ages the ctx_reduce call.`);
         const body = h.mock.lastRequest()?.body;
-        if (
-            body &&
-            hasCtxReducePair(body, FIRST_RENDER_A3_FIXTURE.callId, FIRST_RENDER_A3_FIXTURE.drop)
-        ) {
+        if (body && retainedPair(body)) {
             sawReduceOnWire = true;
         }
     }
@@ -297,13 +316,7 @@ export async function driveAgedCtxReduceSurvival(
     const finalBody = requests.at(-1)?.body;
     return {
         sawReduceOnWire,
-        finalWireHasCtxReduce:
-            finalBody !== undefined &&
-            hasCtxReducePair(
-                finalBody,
-                FIRST_RENDER_A3_FIXTURE.callId,
-                FIRST_RENDER_A3_FIXTURE.drop,
-            ),
+        finalWireHasCtxReduce: finalBody !== undefined && retainedPair(finalBody),
         ...(await collectCacheStabilityEvidence(h, requests, FIRST_RENDER_A3_FIXTURE.mainRequests)),
     };
 }

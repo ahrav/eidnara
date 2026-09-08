@@ -189,7 +189,7 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
             tools: [{ name: "ctx_reduce" }],
             messages: [{ role: "user", content: "continue" }],
         };
-        expect(hasCtxReducePair(declarationOnly, callId, "99999")).toBe(false);
+        expect(hasCtxReducePair(declarationOnly, callId, "99999", "ctx_reduce")).toBe(false);
         const pairWithDrop = (drop: unknown) => ({
             ...declarationOnly,
             messages: [
@@ -210,10 +210,16 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
                 },
             ],
         });
-        expect(hasCtxReducePair(pairWithDrop("99999"), callId, "99999")).toBe(true);
+        expect(hasCtxReducePair(pairWithDrop("99999"), callId, "99999", "ctx_reduce")).toBe(true);
         // A pair whose input was rewritten or stripped is not the retained fixture payload.
-        expect(hasCtxReducePair(pairWithDrop("1"), callId, "99999")).toBe(false);
-        expect(hasCtxReducePair(pairWithDrop(undefined), callId, "99999")).toBe(false);
+        expect(hasCtxReducePair(pairWithDrop("1"), callId, "99999", "ctx_reduce")).toBe(false);
+        expect(hasCtxReducePair(pairWithDrop(undefined), callId, "99999", "ctx_reduce")).toBe(
+            false,
+        );
+        // A rewritten name that still contains the canonical name is not the emitted tool.
+        expect(
+            hasCtxReducePair(pairWithDrop("99999"), callId, "99999", "ctx_reduce_corrupted"),
+        ).toBe(false);
     });
 
     it("rejects a vanished ctx_reduce call, a bust, and a never-on-wire call", () => {
