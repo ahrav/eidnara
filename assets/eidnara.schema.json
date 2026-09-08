@@ -29,7 +29,7 @@
         "model": {
           "description": "Model for the compress-cues task that compresses each memory into a mural cue. The mural image itself is rendered deterministically (no author model).",
           "type": "string",
-          "minLength": 1
+          "pattern": "\\S"
         }
       }
     },
@@ -372,7 +372,7 @@
       "properties": {
         "window_overlay_path": {
           "type": "string",
-          "minLength": 1
+          "pattern": "\\S"
         }
       }
     },
@@ -546,7 +546,7 @@
         "connection_file": {
           "description": "Path to the owner-only subc connection file.",
           "type": "string",
-          "minLength": 1
+          "pattern": "\\S"
         }
       },
       "required": [
@@ -625,7 +625,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "pattern": "\\S"
           }
         }
       }

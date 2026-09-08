@@ -18,7 +18,7 @@ import {
 
 /** These hidden agents run with elevated or autonomous capability. */
 const HIDDEN_AGENT_KEYS = ["historian", "sidekick"] as const;
-const HISTORIAN_USER_ONLY_FIELDS = ["model", "fallback_models"] as const;
+const HISTORIAN_USER_ONLY_FIELDS = ["model", "fallback_models", "disallowed_tools"] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
 
 /**
@@ -201,6 +201,7 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  * Rust activation requires user-level `transform_mode` or trusted user-level `subc` configuration.
  * Rust can demand-start the managed native-host lifecycle only after user-tier consent.
  * Only user config may set `historian.model` or `historian.fallback_models` to prevent repositories from forcing compaction cost.
+ * Only user config may set `historian.disallowed_tools`: the project tier merges over the user tier, so a project array would replace the user's removals and restore the historian's default tools.
  * Only user config may set `mural.model` so repositories cannot select a provider for project memory.
  * Project config must not set `pi.subagent_extensions` because it controls extensions loaded by Pi child processes.
  * A repository may select a reviewed `prompt_surface` preset but may not set arbitrary prompt text.
@@ -315,7 +316,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         if (removed.length > 0) {
             warnings.push(
                 `Ignoring historian.${removed.join("/")} from project config ` +
-                    "(security: historian model selection is user-level only; a repository cannot force extra compaction cost).",
+                    "(security: historian model selection and tool restrictions are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
             );
         }
     }

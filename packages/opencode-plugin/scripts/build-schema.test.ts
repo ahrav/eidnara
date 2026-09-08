@@ -47,11 +47,24 @@ describe("eidnara JSON schema", () => {
     });
 
     test("runtime string constraints are published as JSON Schema patterns", () => {
-        // `z.toJSONSchema` drops `.refine` callbacks, so these constraints must stay
-        // expressed as `.regex` checks or editors accept values the loader rejects.
+        // `z.toJSONSchema` drops `.refine` callbacks and publishes `.trim().min(1)` as a bare
+        // `minLength: 1`, so these constraints must stay expressed as `.regex` checks or
+        // editors accept values the loader rejects.
         const schema = buildSchema() as {
             properties: {
                 language: { pattern?: string };
+                mural: { properties: { model: { pattern?: string; minLength?: number } } };
+                models: {
+                    properties: { window_overlay_path: { pattern?: string; minLength?: number } };
+                };
+                subc: {
+                    properties: { connection_file: { pattern?: string; minLength?: number } };
+                };
+                pi: {
+                    properties: {
+                        subagent_extensions: { items: { pattern?: string; minLength?: number } };
+                    };
+                };
                 prompt_surface: {
                     properties: {
                         models: { propertyNames: { pattern?: string } };
@@ -73,5 +86,16 @@ describe("eidnara JSON schema", () => {
         expect(promptSurface.guidance_override_path.pattern).toBe("\\S");
         expect(promptSurface.tool_descriptions.propertyNames.pattern).toBe("\\S");
         expect(promptSurface.tool_descriptions.additionalProperties.pattern).toBe("\\S");
+
+        // Trimmed-then-non-empty strings: `minLength: 1` alone would admit "   ".
+        for (const field of [
+            schema.properties.mural.properties.model,
+            schema.properties.models.properties.window_overlay_path,
+            schema.properties.subc.properties.connection_file,
+            schema.properties.pi.properties.subagent_extensions.items,
+        ]) {
+            expect(field.pattern).toBe("\\S");
+            expect(field.minLength).toBeUndefined();
+        }
     });
 });

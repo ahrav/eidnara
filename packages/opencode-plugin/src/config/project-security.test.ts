@@ -123,6 +123,19 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("historian.model/fallback_models"))).toBe(true);
     });
 
+    it("strips historian.disallowed_tools so a project cannot undo the user's tool removals", () => {
+        for (const disallowed_tools of [[], ["aft_search"]]) {
+            const raw: Record<string, unknown> = {
+                historian: { disallowed_tools, temperature: 0.2 },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw.historian).toEqual({ temperature: 0.2 });
+            expect(warnings).toEqual([expect.stringContaining("historian.disallowed_tools")]);
+        }
+    });
+
     it("strips mural.model from project config but keeps the feature switch", () => {
         const raw: Record<string, unknown> = {
             mural: { enabled: true, model: "repo-controlled-model" },
