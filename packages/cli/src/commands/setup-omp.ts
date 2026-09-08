@@ -43,14 +43,7 @@ const OMP_HOST: PiCompatibleSetupHost = {
         "Upgrade with `omp update` before enabling Eidnara.",
     modelRefToCanonical: ompModelRefToCanonical,
     ensurePluginEntry: async () => new OmpAdapter().ensurePluginEntry(),
-    beforeWrite: async ({
-        binaryPath,
-        cwd,
-        prompts,
-        dryRun,
-        configureHost,
-        eidnaraCompactionEnabled,
-    }) => {
+    beforeWrite: async ({ binaryPath, cwd, prompts, dryRun, configureHost, eidnara }) => {
         if (!configureHost) {
             const plugins = listOmpPlugins(binaryPath);
             if (plugins === null) {
@@ -90,7 +83,7 @@ const OMP_HOST: PiCompatibleSetupHost = {
             from: string;
             to: string;
         }> = [];
-        if (compaction === true && !eidnaraCompactionEnabled) {
+        if (compaction === true && !eidnara.compactionEnabled) {
             prompts.log.info(
                 "Eidnara compaction is off in the shared config; leaving OMP native compaction enabled as the context-window owner.",
             );
@@ -105,7 +98,11 @@ const OMP_HOST: PiCompatibleSetupHost = {
             }
             changes.push({ key: "compaction.enabled", from: "true", to: "false" });
         }
-        if (memoryBackend !== "off") {
+        if (memoryBackend !== "off" && !eidnara.memoryEnabled) {
+            prompts.log.info(
+                `Eidnara memory is off in the shared config; leaving OMP memory backend "${memoryBackend}" enabled.`,
+            );
+        } else if (memoryBackend !== "off") {
             const disable = await prompts.confirm(
                 `Disable OMP memory backend "${memoryBackend}"? Running two automatic memory injectors duplicates context and writes.`,
                 true,

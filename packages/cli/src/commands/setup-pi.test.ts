@@ -443,6 +443,58 @@ describe("runSetup", () => {
         expect(log).toContain("outro:Setup stopped — Fake changes were only partly rolled back");
     });
 
+    it("passes the shared config's compaction and memory modes to the host hook", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const configPath = join(root, ".config", "eidnara", "eidnara.jsonc");
+        mkdirSync(join(root, ".config", "eidnara"), { recursive: true });
+        writeFileSync(
+            configPath,
+            JSON.stringify({ compaction: { enabled: false }, memory: { enabled: false } }),
+        );
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        let seen: { compactionEnabled: boolean; memoryEnabled: boolean } | undefined;
+        const host: PiCompatibleSetupHost = {
+            displayName: "Fake",
+            cliName: "fake",
+            packageSource: "npm:fake",
+            ensurePluginEntry: async () => ({
+                ok: true,
+                action: "already_present",
+                message: "present",
+                configPath: "unused",
+            }),
+            beforeWrite: async ({ eidnara }) => {
+                seen = eidnara;
+                return async () => {};
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [true, false] });
+
+        const code = await runSetup({ prompts, env, host });
+
+        expect(code).toBe(0);
+        expect(seen).toEqual({ compactionEnabled: false, memoryEnabled: false });
+        const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
+            compaction?: { enabled?: boolean };
+            memory?: { enabled?: boolean };
+        };
+        expect(config.compaction?.enabled).toBe(false);
+        expect(config.memory?.enabled).toBe(false);
+    });
+
     it("persists a sidekick thinking level for GitHub Copilot models", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");

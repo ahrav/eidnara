@@ -163,7 +163,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnaraCompactionEnabled: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -185,7 +185,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: false,
-            eidnaraCompactionEnabled: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -207,7 +207,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnaraCompactionEnabled: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
         });
         expect(typeof rollback).toBe("function");
         if (typeof rollback !== "function") return;
@@ -233,7 +233,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnaraCompactionEnabled: false,
+            eidnara: { compactionEnabled: false, memoryEnabled: true },
         });
         expect(typeof rollback).toBe("function");
         expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
@@ -247,6 +247,27 @@ describe("OMP setup transaction", () => {
             compaction: true,
             memory: "mnemopi",
         });
+    });
+
+    it("leaves the OMP memory backend on when Eidnara memory is off", async () => {
+        const { root, binary, state } = makeFakeOmp();
+        const prompts = new MockPrompts([true]);
+        const rollback = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd: root,
+            prompts,
+            dryRun: false,
+            configureHost: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: false },
+        });
+        expect(typeof rollback).toBe("function");
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: false,
+            memory: "mnemopi",
+        });
+        expect(prompts.messages.join("\n")).toContain(
+            'leaving OMP memory backend "mnemopi" enabled',
+        );
     });
 
     it("reports a failed plugin rollback instead of discarding the result", async () => {
@@ -292,7 +313,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnaraCompactionEnabled: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
         });
         expect(typeof rollback).toBe("function");
         expect(fetchCalls).toEqual([]);
@@ -318,7 +339,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnaraCompactionEnabled: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -339,7 +360,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: false,
-            eidnaraCompactionEnabled: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
         });
         expect(typeof rollback).toBe("function");
         expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
@@ -362,7 +383,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnaraCompactionEnabled: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);
@@ -386,7 +407,7 @@ describe("OMP setup transaction", () => {
             prompts,
             dryRun: false,
             configureHost: true,
-            eidnaraCompactionEnabled: true,
+            eidnara: { compactionEnabled: true, memoryEnabled: true },
         });
 
         expect(result).toBe(false);

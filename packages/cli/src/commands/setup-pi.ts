@@ -35,6 +35,16 @@ export interface SetupEnvironment {
 /** Throw when a restoration did not take effect so the caller reports a partial rollback. */
 export type SetupRollback = () => Promise<void>;
 
+/**
+ * Shared-config modes a host hook reads before disabling a native manager.
+ * A false flag means the host's native manager stays the owner of that
+ * concern, so the hook must leave it enabled.
+ */
+export interface EidnaraModes {
+    compactionEnabled: boolean;
+    memoryEnabled: boolean;
+}
+
 export interface PiCompatibleSetupHost {
     displayName: string;
     cliName: string;
@@ -50,8 +60,7 @@ export interface PiCompatibleSetupHost {
         prompts: PromptIO;
         dryRun: boolean;
         configureHost: boolean;
-        /** False delegates window compaction to the host's native compaction. */
-        eidnaraCompactionEnabled: boolean;
+        eidnara: EidnaraModes;
     }) => Promise<SetupRollback | false>;
     /**
      * Undo a successful `ensurePluginEntry`. Throw when the undo did not take
@@ -276,12 +285,15 @@ async function pickCopilotThinkingLevel(
 }
 
 /**
- * Compaction-off mode in the shared config delegates compaction to the host.
  * The read is lenient because dry runs skip config validation; an unreadable
- * config resolves to the schema default (enabled).
+ * config resolves to the schema defaults (both enabled).
  */
-function readEidnaraCompactionEnabled(configPath: string): boolean {
-    return isCompactionEnabled(readJsoncLenient(configPath).value);
+function readEidnaraModes(configPath: string): EidnaraModes {
+    const config = readJsoncLenient(configPath).value;
+    return {
+        compactionEnabled: isCompactionEnabled(config),
+        memoryEnabled: !isRecord(config.memory) || config.memory.enabled !== false,
+    };
 }
 
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
@@ -382,7 +394,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             prompts,
             dryRun,
             configureHost,
-            eidnaraCompactionEnabled: readEidnaraCompactionEnabled(configPath),
+            eidnara: readEidnaraModes(configPath),
         })) ?? (async () => {});
     if (rollbackHost === false) {
         prompts.outro(`Setup stopped — could not configure ${host.displayName}.`);
