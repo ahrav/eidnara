@@ -10,6 +10,7 @@ import {
 } from "../src/incident-pool/contract";
 import {
     boundVerifierDigests,
+    type EvidenceView,
     loadMutationEvidence,
     REPO_ROOT,
 } from "../src/incident-pool/evidence";
@@ -151,8 +152,38 @@ export function catalogBindings(catalog: IncidentCatalog): Record<string, string
     return bindings;
 }
 
+/** Rebinding one record to another verifier while sibling records keep the old path leaves every path digest unchanged, so the gate also compares each accepted record's own binding. */
+export function assertMutationBindingsUnchanged(
+    acceptedBindings: Record<string, string>,
+    currentBindings: Record<string, string>,
+): void {
+    const { changed, unbound } = digestDrift(acceptedBindings, currentBindings);
+    if (unbound.length > 0) {
+        throw new Error(`accepted mutation records vanished: ${unbound.join(", ")}`);
+    }
+    if (changed.length > 0) {
+        throw new Error(
+            `mutation records rebound their verifier without recorded replay support: ${changed.join(", ")}`,
+        );
+    }
+}
+
+/** One canonical string per evidence record: verifier path, sorted included fixtures, and the replay command. */
+export function mutationBindings(view: EvidenceView): Record<string, string> {
+    const bindings: Record<string, string> = {};
+    for (const record of view.records) {
+        bindings[record.evidenceId] = [
+            record.verifierPath,
+            ...[...record.fixturePaths].sort(),
+            record.replayCommand,
+        ].join("\n");
+    }
+    return bindings;
+}
+
 interface TrustedVerifierState {
     mutationDigests: Record<string, string>;
+    mutationBindings: Record<string, string>;
     catalogBoundDigests: Record<string, string>;
     catalogBindings: Record<string, string>;
 }
@@ -170,11 +201,12 @@ function readVerifierState(worktree: string, repoRoot: string): TrustedVerifierS
     const catalogBoundDigests = catalog ? boundVerifierDigests(catalog, e2eRoot) : {};
     // Without mutations/, mutation records bind no verifiers.
     // Deleting the current directory leaves every accepted mutation-bound verifier without a counterpart, which `assertBoundVerifierBytesUnchanged` rejects.
-    const mutationDigests = existsSync(resolve(e2eRoot, "mutations"))
-        ? loadMutationEvidence(e2eRoot, repoRoot).verifierDigests
-        : {};
+    const evidence = existsSync(resolve(e2eRoot, "mutations"))
+        ? loadMutationEvidence(e2eRoot, repoRoot)
+        : null;
     return {
-        mutationDigests,
+        mutationDigests: evidence?.verifierDigests ?? {},
+        mutationBindings: evidence ? mutationBindings(evidence) : {},
         catalogBoundDigests,
         catalogBindings: catalog ? catalogBindings(catalog) : {},
     };
@@ -220,6 +252,7 @@ export function validateIncidentVerifiers(baseCommit: string): number {
     const accepted = loadTrustedEvidence(baseCommit);
     const current = readVerifierState(REPO_ROOT, REPO_ROOT);
     assertBoundVerifierBytesUnchanged(accepted.mutationDigests, current.mutationDigests);
+    assertMutationBindingsUnchanged(accepted.mutationBindings, current.mutationBindings);
     assertCatalogBoundVerifierBytesUnchanged(
         accepted.catalogBoundDigests,
         current.catalogBoundDigests,

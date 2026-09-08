@@ -11,7 +11,7 @@ import {
     type FirstRenderDeferObservation,
     failedCheckIds,
     hasCtxReducePair,
-    hasPublishedHistoryRange,
+    publishedHistoryCovers,
     THINKING_DROPPED_SHELL_CHECKS,
     THINKING_IMAGE_SURVIVAL_CHECKS,
     THINKING_NUDGE_ANCHOR_CHECKS,
@@ -255,14 +255,16 @@ describe("thinking-block successor verifiers", () => {
 
     it("passes clean image-survival observations and rejects a stripped image", () => {
         // The daemon emits the wrapper even with no history, so the wrapper alone does not prove coverage.
-        expect(hasPublishedHistoryRange("§3§ <session-history></session-history>")).toBe(false);
-        expect(hasPublishedHistoryRange("<session-history>\n\n</session-history>")).toBe(false);
-        expect(
-            hasPublishedHistoryRange(
-                "<session-history>\n## 1-4 · Screenshot triage\n user shared bug.png\n</session-history>",
-            ),
-        ).toBe(true);
-        expect(hasPublishedHistoryRange("## 1-4 · outside the wrapper")).toBe(false);
+        expect(publishedHistoryCovers("§3§ <session-history></session-history>", 1)).toBe(false);
+        expect(publishedHistoryCovers("<session-history>\n\n</session-history>", 1)).toBe(false);
+        const published =
+            "<session-history>\n## 1-4 · Screenshot triage\n user shared bug.png\n## 7-9 · Later\n more\n</session-history>";
+        expect(publishedHistoryCovers(published, 1)).toBe(true);
+        expect(publishedHistoryCovers(published, 4)).toBe(true);
+        expect(publishedHistoryCovers(published, 8)).toBe(true);
+        // A range published for other turns does not cover the image turn.
+        expect(publishedHistoryCovers(published, 5)).toBe(false);
+        expect(publishedHistoryCovers("## 1-4 · outside the wrapper", 1)).toBe(false);
 
         const raw = verifyThinkingImageSurvival(imageObservation());
         expect(raw.verdict).toBe("pass");

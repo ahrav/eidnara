@@ -60,18 +60,17 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-3: self-heal aft
             await h.sendPrompt(sessionId, `FM-OC-3 recovery turn ${i}: ${h.ballast(400)}`);
         }
 
-        const passes = await h.waitFor(
-            () => {
-                const observed = h.readRustPasses();
-                return observed.slice(recoveryStart).some((pass) => pass.servedFrom === "transform")
-                    ? observed
-                    : undefined;
-            },
-            { label: "FM-OC-3 recovered transform" },
-        );
+        // Every recovery prompt has returned, so its pass line is due; waiting for all of them keeps a late raw fallback observable.
+        const passes = await h.waitForRustPasses(recoveryStart + RECOVERY_PASSES);
         const recovery = passes.slice(recoveryStart);
         expect(recovery.length).toBeLessThanOrEqual(RECOVERY_PASSES);
-        expect(recovery.some((pass) => pass.servedFrom === "transform")).toBe(true);
+        const firstRecovered = recovery.findIndex((pass) => pass.servedFrom === "transform");
+        expect(firstRecovered).toBeGreaterThanOrEqual(0);
+        // Self-healing holds only if no pass falls back to raw after the transform first serves one.
+        expect(
+            recovery.slice(firstRecovered).every((pass) => pass.servedFrom === "transform"),
+        ).toBe(true);
+        expect(recovery.at(-1)?.servedFrom).toBe("transform");
 
         // Recovery row versions must continue the healthy session's persisted lineage.
         const recoveryVersions = recovery

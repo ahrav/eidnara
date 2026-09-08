@@ -2,13 +2,15 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseIncidentCatalog } from "../src/incident-pool/contract";
-import { boundVerifierFiles, E2E_ROOT } from "../src/incident-pool/evidence";
+import { boundVerifierFiles, E2E_ROOT, loadMutationEvidence } from "../src/incident-pool/evidence";
 import { builtinIncidentCaseRegistry } from "../src/incident-pool/registry";
 import {
     assertBoundVerifierBytesUnchanged,
     assertCatalogBindingsUnchanged,
     assertCatalogBoundVerifierBytesUnchanged,
+    assertMutationBindingsUnchanged,
     catalogBindings,
+    mutationBindings,
 } from "./validate-incident-verifiers";
 
 function committedCatalog() {
@@ -151,5 +153,44 @@ describe("per-variant binding gate", () => {
             assertCatalogBindingsUnchanged(accepted, { ...accepted, "var-new": "b" }),
         ).not.toThrow();
         expect(() => assertCatalogBindingsUnchanged({}, { "var-new": "b" })).not.toThrow();
+    });
+});
+
+describe("per-record mutation binding gate", () => {
+    it("derives one binding per committed evidence record with its verifier, fixture, and command", () => {
+        const bindings = mutationBindings(loadMutationEvidence());
+        expect(Object.keys(bindings).sort()).toEqual([
+            "ev-dg-1-one-byte-input",
+            "ev-dg-2-one-byte-input",
+            "ev-dg-3-one-byte-input",
+        ]);
+        for (const binding of Object.values(bindings)) {
+            expect(binding).toContain("crates/daemon/src/differential_goldens.rs");
+            expect(binding).toContain("crates/daemon/testdata/differential-golden.json");
+            expect(binding).toContain("cargo test -p daemon --lib dg_goldens_");
+        }
+    });
+
+    it("blocks rebinding one record while its siblings keep the accepted path", () => {
+        const golden =
+            "crates/daemon/src/differential_goldens.rs\ncrates/daemon/testdata/differential-golden.json\ncargo test -p daemon --lib dg_goldens_match_ts_wire_surface_and_gate_labels --locked";
+        const accepted = { "ev-dg-1": golden, "ev-dg-2": golden, "ev-dg-3": golden };
+        const rebound = {
+            ...accepted,
+            "ev-dg-1":
+                "crates/daemon/src/weaker.rs\ncargo test -p daemon --lib weaker::tests::always_green --locked",
+        };
+        expect(() => assertMutationBindingsUnchanged(accepted, rebound)).toThrow(
+            /rebound their verifier without recorded replay support: ev-dg-1/,
+        );
+        const recommanded = { ...accepted, "ev-dg-2": golden.replace("--locked", "") };
+        expect(() => assertMutationBindingsUnchanged(accepted, recommanded)).toThrow(/ev-dg-2/);
+        expect(() =>
+            assertMutationBindingsUnchanged(accepted, { "ev-dg-2": golden, "ev-dg-3": golden }),
+        ).toThrow(/accepted mutation records vanished: ev-dg-1/);
+        expect(() =>
+            assertMutationBindingsUnchanged(accepted, { ...accepted, "ev-new": "x" }),
+        ).not.toThrow();
+        expect(() => assertMutationBindingsUnchanged({}, { "ev-new": "x" })).not.toThrow();
     });
 });

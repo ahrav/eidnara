@@ -416,10 +416,19 @@ function emitThinkingCtxReduceOnce(h: RustTestHarness, tag: number): () => boole
 }
 
 /** The helper resolves the public §N§ handle for the message containing `needle`. */
-/** The daemon always emits the `<session-history>` wrapper, empty or not, so only a compartment heading inside it shows that a history range replaced covered turns. */
-export function hasPublishedHistoryRange(text: string): boolean {
+/**
+ * The daemon always emits the `<session-history>` wrapper, empty or not, and a compartment heading `## <start>-<end> ·` names the raw message ordinals it replaced.
+ * Raw ordinals are 1-based over the session's user and assistant messages, so a driver knows the ordinal of a turn from its position in the prompts it sent.
+ */
+export function publishedHistoryCovers(text: string, ordinal: number): boolean {
     const block = text.match(/<session-history>([\s\S]*?)<\/session-history>/u);
-    return block !== null && /^\s*## \d+-\d+ /mu.test(block[1] ?? "");
+    if (block === null) return false;
+    for (const heading of (block[1] ?? "").matchAll(/^\s*## (\d+)-(\d+) /gmu)) {
+        const start = Number(heading[1]);
+        const end = Number(heading[2]);
+        if (start <= ordinal && ordinal <= end) return true;
+    }
+    return false;
 }
 
 function tagForText(body: Record<string, unknown>, needle: string): number {
@@ -651,8 +660,8 @@ export async function driveThinkingDroppedShell(
 
     const allUserText = userText(body);
     const pasteBodyAbsent = !allUserText.includes("ERROR: call_failed at line 42.");
-    // The transform replaces covered turns with one published history summary.
-    const shellPreserved = allUserText.includes("<session-history>");
+    // The transform replaces covered turns with one published history summary; the paste is the third raw message (prompt, reply, paste).
+    const shellPreserved = publishedHistoryCovers(allUserText, 3);
 
     // Historical reasoning is cleared, so no signed thinking block may survive on the wire.
     const signedReplayIntact = findThinkingBlocks(body).length === 0;
@@ -794,7 +803,8 @@ export async function driveThinkingImageSurvival(
     return {
         dropEmitted: reduced.dropEmitted,
         droppedTextAbsent: !allUserText.includes("see this screenshot for the bug"),
-        coveredByRustHistory: hasPublishedHistoryRange(allUserText),
+        // The image prompt is the session's first raw message.
+        coveredByRustHistory: publishedHistoryCovers(allUserText, 1),
         imageBlockCount: imageBlocks.length,
         imagePayloadPreserved,
         placeholderPresent: /\[dropped \u00a7\d+\u00a7\]/.test(allUserText),

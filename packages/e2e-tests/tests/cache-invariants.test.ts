@@ -107,8 +107,9 @@ describe.skipIf(!rustPrereqs.ok)("cache invariants — replay class", () => {
                 ).toBeGreaterThanOrEqual(4);
 
                 // `analyzePasses` evaluates only the post-execute DEFER window.
+                // Turns 4 through 8 are five main requests: the execute baseline plus four defer passes; a filtered request would hide a transition.
                 const deferRequests = mainAgentRequests(h.mock.requests().slice(firstDeferIndex));
-                expect(deferRequests.length).toBeGreaterThanOrEqual(4);
+                expect(deferRequests.length).toBe(5);
                 const comparisons = analyzePasses(deferRequests);
                 expect(comparisons.slice(1).every((c) => c.prevHadBreakpoint)).toBe(true);
                 const busts = comparisons.filter((c) => c.verdict === "BUST");
