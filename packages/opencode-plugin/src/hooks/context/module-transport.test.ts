@@ -13,6 +13,7 @@ import { join } from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import productionInputs from "../../../../../release/production-inputs.lock.json";
 import {
+    BROCA_CREDENTIAL_NAMES,
     Deadline,
     HostCallError,
     type HostClient,
@@ -268,6 +269,73 @@ describe("route opening observes the caller's abort", () => {
         await Bun.sleep(0);
         const cached = await transport.ensureRoute("s", "/tmp", Deadline.start(10_000));
         expect(cached).toMatchObject({ route });
+    });
+
+    test("a joiner of a shared opening times out on its own deadline", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const client = {
+            routeOpen: () => new Promise<RouteHandle>(() => {}),
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+
+        const controller = new AbortController();
+        const first = transport.ensureRoute("s", "/tmp", Deadline.start(30_000), controller.signal);
+        controller.abort(new Error("first gave up"));
+        await first.catch(() => undefined);
+
+        const joined = await Promise.race([
+            transport.ensureRoute("s", "/tmp", Deadline.start(20)).catch((error: unknown) => error),
+            Bun.sleep(500).then(() => "still_waiting"),
+        ]);
+        expect(joined).toMatchObject({ code: "ETIMEDOUT" });
+    });
+
+    test("an opening bound under older credentials is fenced, not joined", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const opens: Array<(route: RouteHandle) => void> = [];
+        const closed: RouteHandle[] = [];
+        const client = {
+            routeOpen: () =>
+                new Promise<RouteHandle>((resolve) => {
+                    opens.push(resolve);
+                }),
+            closeRoute: async (route: RouteHandle) => {
+                closed.push(route);
+            },
+        } as unknown as HostClient;
+        transport.client = client;
+        transport.ensureConnected = async () => ({ client });
+        const credentialName = BROCA_CREDENTIAL_NAMES[0] as string;
+        const previous = process.env[credentialName];
+        try {
+            const controller = new AbortController();
+            const first = transport.ensureRoute(
+                "s",
+                "/tmp",
+                Deadline.start(10_000),
+                controller.signal,
+            );
+            controller.abort(new Error("first gave up"));
+            await first.catch(() => undefined);
+            expect(opens).toHaveLength(1);
+
+            process.env[credentialName] = `${previous ?? ""}rotated`;
+            const second = transport.ensureRoute("s", "/tmp", Deadline.start(10_000));
+            await Bun.sleep(0);
+            expect(opens).toHaveLength(2);
+
+            const staleRoute = { channel: 1, epoch: 1 } as unknown as RouteHandle;
+            const freshRoute = { channel: 2, epoch: 1 } as unknown as RouteHandle;
+            opens[0]?.(staleRoute);
+            opens[1]?.(freshRoute);
+            expect(await second).toMatchObject({ route: freshRoute });
+            await Bun.sleep(0);
+            expect(closed).toEqual([staleRoute]);
+        } finally {
+            if (previous === undefined) delete process.env[credentialName];
+            else process.env[credentialName] = previous;
+        }
     });
 });
 

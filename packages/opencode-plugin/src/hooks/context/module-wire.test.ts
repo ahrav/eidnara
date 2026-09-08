@@ -396,6 +396,21 @@ describe("encodeOpenCodeMessagesToCk", () => {
         expect(kinds[3]).not.toHaveProperty("arc");
     });
 
+    it("falls back to the daemon's message id chain and stable hash", () => {
+        const [topLevel, hashed] = encodeOpenCodeMessagesToCk([
+            { info: { role: "user" }, id: "top-level-id", parts: [] },
+            {
+                info: { role: "user", time: { created: 1700000000000 } },
+                parts: [{ type: "text", text: "hi" }],
+                absolute_ordinal: 3,
+            },
+        ]);
+        expect(topLevel.mid).toBe("top-level-id");
+        // `opencode-hash-` plus `stable_hash_prefix(raw_message, 24)` from the daemon.
+        expect(hashed.mid).toBe("opencode-hash-8f8b01a55552065a9c8c32bd");
+        expect(hashed.ck.meta).toMatchObject({ harness_id: hashed.mid });
+    });
+
     it("carries the daemon's message origin from provider and model ids", () => {
         const [nested, flat, none] = encodeOpenCodeMessagesToCk([
             {

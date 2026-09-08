@@ -843,8 +843,11 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                 ? (raw.info as Record<string, unknown>)
                 : raw;
         const id =
-            (typeof info.id === "string" && info.id.length > 0 && info.id) ||
-            `opencode-${crypto.createHash("sha256").update(JSON.stringify(message)).digest("hex").slice(0, 24)}`;
+            typeof info.id === "string"
+                ? info.id
+                : typeof raw.id === "string"
+                  ? raw.id
+                  : `opencode-hash-${stableHashPrefix(message, 24)}`;
         const ordinal =
             wireOrdinal(raw.absolute_ordinal) ?? wireOrdinal(info.absolute_ordinal) ?? index + 1;
         const role = typeof info.role === "string" ? info.role : "user";

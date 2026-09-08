@@ -470,6 +470,7 @@ interface SerialLane {
 interface OpeningRoute {
     client: HostClient;
     generation: number;
+    credentialSourceVersion?: string;
     state: {
         /** `closeSession` sets `closed` during an in-flight open; the open then skips caching its route. */
         closed: boolean;
@@ -917,7 +918,17 @@ export class HostModuleTransport {
         }
         const opening = this.routeOpenings.get(routeKey);
         if (opening?.client === client && opening.generation === generation) {
-            return await untilAborted(opening.promise, signal);
+            if ((opening.credentialSourceVersion ?? "") === (credentialSourceVersion ?? "")) {
+                // A joiner keeps its own deadline and signal; the shared open runs on.
+                return await this.beforeDeadline(
+                    untilAborted(opening.promise, signal),
+                    deadline,
+                    "opening the module route",
+                );
+            }
+            // An open bound under older credentials must not be reused; its late success closes the route instead of caching it.
+            opening.state.closed = true;
+            this.routeOpenings.delete(routeKey);
         }
 
         const state = { closed: false };
@@ -938,7 +949,8 @@ export class HostModuleTransport {
                 this.client !== client ||
                 generation !== this.connectionGeneration
             ) {
-                await client.closeRoute(route).catch(() => undefined);
+                // `closeRoute` flushes under the facade's shutdown deadline; the error is returned without waiting on it.
+                void client.closeRoute(route).catch(() => undefined);
                 throw this.connectionChangedError(
                     "daemon connection changed while opening module route",
                 );
@@ -950,7 +962,13 @@ export class HostModuleTransport {
             });
             return { client, route, routeKey, generation, ...fence };
         })();
-        const routeOpening: OpeningRoute = { client, generation, state, promise };
+        const routeOpening: OpeningRoute = {
+            client,
+            generation,
+            ...(credentialSourceVersion === undefined ? {} : { credentialSourceVersion }),
+            state,
+            promise,
+        };
         this.routeOpenings.set(routeKey, routeOpening);
         // The opening outlives an aborted waiter: its settlement, not the waiter's, retires the map entry, so a late success is cached rather than duplicated by the next caller.
         void promise
