@@ -27,30 +27,79 @@ function yieldToEventLoop(): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** Shortest round-trip digits of a finite double; the value is `0.digits` times `10^pointIndex`. */
+function shortestDecimal(value: number): { negative: boolean; digits: string; pointIndex: number } {
+    const text = String(Math.abs(value));
+    const exponentIndex = text.indexOf("e");
+    const mantissa = exponentIndex === -1 ? text : text.slice(0, exponentIndex);
+    const exponent = exponentIndex === -1 ? 0 : Number(text.slice(exponentIndex + 1));
+    const [integerDigits = "", fractionDigits = ""] = mantissa.split(".");
+    let digits = integerDigits + fractionDigits;
+    let pointIndex = integerDigits.length + exponent;
+    while (digits.startsWith("0") && digits.length > 1) {
+        digits = digits.slice(1);
+        pointIndex -= 1;
+    }
+    while (digits.endsWith("0") && digits.length > 1) digits = digits.slice(0, -1);
+    return { negative: value < 0, digits, pointIndex };
+}
+
+const I64_MIN = -(2n ** 63n);
+const U64_MAX = 2n ** 64n - 1n;
+
+/**
+ * The positional integer text `JSON.stringify` puts on the wire for an integer-valued double
+ * below 1e21, when `serde_json` parses that text as `i64` or `u64` rather than `f64`.
+ */
+function wireIntegerText(value: number): string | undefined {
+    const text = String(value);
+    if (text.includes("e")) return undefined;
+    const wire = BigInt(text);
+    return wire >= I64_MIN && wire <= U64_MAX ? text : undefined;
+}
+
 /**
  * Render a number as the daemon's `canonical_number` does, in positional decimal notation.
- * `JSON.stringify` uses exponent notation below 1e-6 and at or above 1e21. An integer-valued
- * double prints its exact value (`1e23` is `99999999999999991611392`), matching Rust's
- * `format!("{f:.0}")`.
+ * `JSON.stringify` uses exponent notation below 1e-6 and at or above 1e21. A double that
+ * `serde_json` parses as `f64` prints its exact integer value when integer-valued (`1e23` is
+ * `99999999999999991611392`), matching Rust's `format!("{f:.0}")`.
  */
 function canonicalNumber(value: number): string {
     if (!Number.isFinite(value)) return "null";
-    if (Number.isInteger(value)) return BigInt(value).toString();
-    const text = String(value);
-    const exponentIndex = text.indexOf("e");
-    if (exponentIndex === -1) return text;
-    const negative = text.startsWith("-");
-    const mantissa = text.slice(negative ? 1 : 0, exponentIndex);
-    const exponent = Number(text.slice(exponentIndex + 1));
-    const [integerDigits = "", fractionDigits = ""] = mantissa.split(".");
-    const digits = integerDigits + fractionDigits;
-    const pointIndex = integerDigits.length + exponent;
+    if (Number.isInteger(value)) return wireIntegerText(value) ?? BigInt(value).toString();
+    const { negative, digits, pointIndex } = shortestDecimal(value);
     let positional: string;
     if (pointIndex <= 0) positional = `0.${"0".repeat(-pointIndex)}${digits}`;
     else if (pointIndex >= digits.length)
         positional = digits + "0".repeat(pointIndex - digits.length);
     else positional = `${digits.slice(0, pointIndex)}.${digits.slice(pointIndex)}`;
     return negative ? `-${positional}` : positional;
+}
+
+/**
+ * Render a number as `serde_json::to_string` does. Integers print as parsed; a value parsed
+ * as `f64` follows ryu's layout: fixed notation with a trailing `.0` for integer values up to
+ * 16 digits, fixed notation down to `0.00001`, and `d.ddde±x` elsewhere.
+ */
+function serdeJsonNumber(value: number): string {
+    if (!Number.isFinite(value)) return "null";
+    if (Number.isInteger(value)) {
+        const wire = wireIntegerText(value);
+        if (wire !== undefined) return wire;
+    }
+    const { negative, digits, pointIndex } = shortestDecimal(value);
+    const trailingZeros = pointIndex - digits.length;
+    let text: string;
+    if (trailingZeros >= 0 && pointIndex <= 16) text = `${digits}${"0".repeat(trailingZeros)}.0`;
+    else if (pointIndex > 0 && pointIndex <= 16)
+        text = `${digits.slice(0, pointIndex)}.${digits.slice(pointIndex)}`;
+    else if (pointIndex > -5 && pointIndex <= 0) text = `0.${"0".repeat(-pointIndex)}${digits}`;
+    else {
+        const exponent = pointIndex - 1;
+        const fraction = digits.length > 1 ? `.${digits.slice(1)}` : "";
+        text = `${digits[0]}${fraction}e${exponent < 0 ? "-" : "+"}${Math.abs(exponent)}`;
+    }
+    return negative ? `-${text}` : text;
 }
 
 /**
@@ -152,6 +201,52 @@ function mediaBlockFromPart(part: Record<string, unknown>): Record<string, unkno
 
 /** The daemon's `opaque_block` source for OpenCode-origin blocks. */
 const OPAQUE_SOURCE = { type: "harness", harness: "opencode" } as const;
+
+/** `serde_json::to_string` of the value `JSON.stringify` would put on the wire. */
+function serdeJsonCompact(value: unknown): string {
+    if (Array.isArray(value)) {
+        return `[${value.map((item) => (item === undefined ? "null" : serdeJsonCompact(item))).join(",")}]`;
+    }
+    if (value !== null && typeof value === "object") {
+        const record = value as Record<string, unknown>;
+        return `{${Object.keys(record)
+            .filter((key) => record[key] !== undefined)
+            .sort(compareCodePoints)
+            .map((key) => `${JSON.stringify(key)}:${serdeJsonCompact(record[key])}`)
+            .join(",")}}`;
+    }
+    if (typeof value === "number") return serdeJsonNumber(value);
+    const encoded = JSON.stringify(value);
+    return encoded === undefined ? "null" : encoded;
+}
+
+/** The daemon's `stable_hash_prefix`: leading hex of the SHA-256 of `serde_json::to_vec`. */
+function stableHashPrefix(value: unknown, chars: number): string {
+    return crypto
+        .createHash("sha256")
+        .update(serdeJsonCompact(value))
+        .digest("hex")
+        .slice(0, chars);
+}
+
+/** The daemon's `find_signature`: the first string `signature` key in a depth-first walk. */
+function findSignature(value: unknown): string | undefined {
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const signature = findSignature(item);
+            if (signature !== undefined) return signature;
+        }
+        return undefined;
+    }
+    if (value === null || typeof value !== "object") return undefined;
+    const record = value as Record<string, unknown>;
+    if (typeof record.signature === "string") return record.signature;
+    for (const key of Object.keys(record).sort(compareCodePoints)) {
+        const signature = findSignature(record[key]);
+        if (signature !== undefined) return signature;
+    }
+    return undefined;
+}
 
 function toolOutput(
     part: Record<string, unknown>,
@@ -647,6 +742,8 @@ export const __moduleWireTest = {
     encodeOpenCodeMessagesToCk,
     moduleWireBodyBytes,
     resolveOrdinalsForModule,
+    serdeJsonCompact,
+    stableHashPrefix,
     toFlatModuleWireBody,
 };
 
@@ -673,7 +770,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
         const parts = Array.isArray(raw.parts) ? raw.parts : [];
         const synthetic = isSyntheticMessageParts(parts);
         const content: Record<string, unknown>[] = [];
-        for (const partValue of parts) {
+        for (const [partIndex, partValue] of parts.entries()) {
             if (partValue === null || typeof partValue !== "object") continue;
             const part = partValue as Record<string, unknown>;
             const type = typeof part.type === "string" ? part.type : "unknown";
@@ -682,7 +779,9 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                     kind: { type: "text", text: typeof part.text === "string" ? part.text : "" },
                 });
             } else if (type === "reasoning" || type === "thinking") {
-                const signature = typeof part.signature === "string" ? part.signature : undefined;
+                const signature =
+                    findSignature(part.metadata) ??
+                    (typeof part.signature === "string" ? part.signature : undefined);
                 content.push({
                     kind: {
                         type: "reasoning",
@@ -726,13 +825,27 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                     part.state !== null && typeof part.state === "object"
                         ? (part.state as Record<string, unknown>)
                         : {};
+                const toolName =
+                    typeof part.tool === "string"
+                        ? part.tool
+                        : typeof part.toolName === "string"
+                          ? part.toolName
+                          : typeof part.name === "string"
+                            ? part.name
+                            : "tool";
+                const input =
+                    state.input !== undefined
+                        ? state.input
+                        : part.input !== undefined
+                          ? part.input
+                          : part.args !== undefined
+                            ? part.args
+                            : {};
                 const callId =
                     (typeof part.callID === "string" && part.callID) ||
                     (typeof part.callId === "string" && part.callId) ||
                     (typeof part.id === "string" && part.id) ||
-                    `${id}#${content.length}`;
-                const toolName = typeof part.tool === "string" ? part.tool : "unknown";
-                const input = state.input ?? part.input ?? part.args ?? {};
+                    `synth-tool-${ordinal}-${partIndex}-${toolName}-${stableHashPrefix(input, 12)}`;
                 const metadata =
                     part.metadata !== null && typeof part.metadata === "object"
                         ? (part.metadata as Record<string, unknown>)

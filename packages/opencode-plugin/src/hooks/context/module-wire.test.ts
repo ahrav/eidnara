@@ -92,6 +92,92 @@ describe("encodeOpenCodeMessagesToCk", () => {
         expect(kinds[3]).not.toHaveProperty("provider_executed");
     });
 
+    it("honors the daemon's tool-name aliases and default", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_tool_names", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        toolName: "todowrite",
+                        callID: "c1",
+                        state: { status: "pending" },
+                    },
+                    {
+                        type: "tool",
+                        name: "ctx_reduce",
+                        callID: "c2",
+                        state: { status: "pending" },
+                    },
+                    { type: "tool", callID: "c3", state: { status: "pending" } },
+                ],
+            },
+        ]);
+        const names = (encoded.ck.content as Array<{ kind: { name: string } }>).map(
+            (block) => block.kind.name,
+        );
+        expect(names).toEqual(["todowrite", "ctx_reduce", "tool"]);
+    });
+
+    it("synthesizes the daemon's deterministic id for a tool part without one", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_no_call_id", role: "assistant" },
+                absolute_ordinal: 7,
+                parts: [
+                    { type: "text", text: "lead" },
+                    {
+                        type: "tool",
+                        tool: "read",
+                        state: {
+                            status: "completed",
+                            input: { path: "/tmp/x", limit: 10 },
+                            output: "ok",
+                        },
+                    },
+                ],
+            },
+        ]);
+        const kinds = (encoded.ck.content as Array<{ kind: Record<string, unknown> }>).map(
+            (block) => block.kind,
+        );
+        // `synth-tool-{ordinal}-{part_index}-{tool_name}-{stable_hash_prefix(input, 12)}`
+        expect(kinds[1]).toMatchObject({
+            type: "tool_call",
+            id: "synth-tool-7-1-read-aac27fab24fb",
+        });
+        expect(kinds[2]).toMatchObject({
+            type: "tool_result",
+            id: "synth-tool-7-1-read-aac27fab24fb",
+        });
+    });
+
+    it("reads a reasoning signature nested under metadata", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_signed_reasoning", role: "assistant" },
+                parts: [
+                    {
+                        type: "reasoning",
+                        text: "thinking...",
+                        metadata: { anthropic: { signature: "sig-nested" } },
+                    },
+                    { type: "reasoning", text: "adapter", signature: "sig-top-level" },
+                    {
+                        type: "reasoning",
+                        text: "both",
+                        signature: "sig-top-level",
+                        metadata: { openai: { signature: "sig-metadata" } },
+                    },
+                ],
+            },
+        ]);
+        const signatures = (encoded.ck.content as Array<{ kind: { signature?: string } }>).map(
+            (block) => block.kind.signature,
+        );
+        expect(signatures).toEqual(["sig-nested", "sig-top-level", "sig-metadata"]);
+    });
+
     it("reads completion status and output from top-level tool fields", () => {
         const [encoded] = encodeOpenCodeMessagesToCk([
             {
@@ -338,6 +424,9 @@ describe("transform page digest canonical JSON", () => {
             [1e21, "1000000000000000000000"],
             [1e23, "99999999999999991611392"],
             [9007199254740992, "9007199254740992"],
+            [2 ** 60, "1152921504606847000"],
+            [2 ** 63, "9223372036854776000"],
+            [-(2 ** 63), "-9223372036854775808"],
             [2 ** 64, "18446744073709551616"],
             [-(2 ** 63) - 2048, "-9223372036854777856"],
         ];
@@ -347,6 +436,75 @@ describe("transform page digest canonical JSON", () => {
         expect(__moduleWireTest.canonicalJson({ b: [1e-7, "x"], a: null })).toBe(
             '{"a":null,"b":[0.0000001,"x"]}',
         );
+    });
+
+    it("serializes values the way serde_json::to_string does", () => {
+        // Expected strings match `serde_json::to_string` over the wire text `JSON.stringify` emits.
+        const numbers: Array<[number, string]> = [
+            [1, "1"],
+            [-1, "-1"],
+            [0, "0"],
+            [100, "100"],
+            [1.5, "1.5"],
+            [0.1, "0.1"],
+            [0.00001, "0.00001"],
+            [0.000001, "1e-6"],
+            [1e-7, "1e-7"],
+            [1.5e-10, "1.5e-10"],
+            [12345.678, "12345.678"],
+            [0.30000000000000004, "0.30000000000000004"],
+            [-2.5, "-2.5"],
+            [1e15, "1000000000000000"],
+            [1e16, "10000000000000000"],
+            [1e21, "1e+21"],
+            [1e23, "1e+23"],
+            [1.5e300, "1.5e+300"],
+            [5e-324, "5e-324"],
+            [2 ** 60, "1152921504606847000"],
+            [2 ** 63, "9223372036854776000"],
+            [-(2 ** 63), "-9.223372036854776e+18"],
+            [2 ** 64, "1.8446744073709552e+19"],
+            [-(2 ** 63) - 2048, "-9.223372036854778e+18"],
+        ];
+        for (const [value, expected] of numbers) {
+            expect(__moduleWireTest.serdeJsonCompact(value)).toBe(expected);
+        }
+        expect(
+            __moduleWireTest.serdeJsonCompact({
+                b: [1, 2, { z: true, a: null }],
+                a: 'x"y\n\u0001\u007f\u2028é😀',
+                "😀": 2,
+                "\uE000": 3,
+            }),
+        ).toBe(
+            '{"a":"x\\"y\\n\\u0001\u007f\u2028é😀","b":[1,2,{"a":null,"z":true}],"\uE000":3,"😀":2}',
+        );
+        expect(__moduleWireTest.serdeJsonCompact({ cost: 0.000001, big: 2 ** 64, f: 1.5 })).toBe(
+            '{"big":1.8446744073709552e+19,"cost":1e-6,"f":1.5}',
+        );
+    });
+
+    it("hashes tool inputs the way the daemon's stable_hash_prefix does", () => {
+        // Expected prefixes match `stable_hash_prefix(value, 12)`.
+        const cases: Array<[unknown, string]> = [
+            [{}, "44136fa355b3"],
+            [{ path: "/tmp/x", limit: 10 }, "aac27fab24fb"],
+            [
+                {
+                    b: [1, 2, { z: true, a: null }],
+                    a: 'x"y\n\u0001\u007f\u2028é😀',
+                    "😀": 2,
+                    "\uE000": 3,
+                },
+                "966855a51ac8",
+            ],
+            [{ cost: 0.000001, big: 2 ** 64, f: 1.5 }, "1d5924c4d45c"],
+            ["just a string", "3fe01def54b1"],
+            [[1, "two", null], "597be421a7a1"],
+        ];
+        for (const [value, expected] of cases) {
+            expect(__moduleWireTest.stableHashPrefix(value, 12)).toBe(expected);
+        }
     });
 
     it("orders object keys by Unicode code point like Rust strings", () => {
