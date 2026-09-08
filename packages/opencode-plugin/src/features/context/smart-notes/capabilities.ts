@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { type FileHandle, lstat, open, realpath } from "node:fs/promises";
+import { type FileHandle, lstat, open, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -169,15 +169,28 @@ async function guardedReadFileBody(
     try {
         throwIfAborted(signal);
         const stat = await handle.stat();
-        // `O_NOFOLLOW` protects only the final path component; a parent-directory symlink swap can redirect `open`.
-        // The opened inode must match the one `lstat` saw. Node exposes no `openat`, so a swap before
-        // `lstat` yields a self-consistent inode and passes the comparison.
         if (stat.dev !== targetStat.dev || stat.ino !== targetStat.ino) return null;
         if (!stat.isFile() || stat.size > fileLimitBytes) return null;
+        if (!(await openedPathIs(handle, canonicalTarget))) return null;
         return (await readToEof(handle, stat.size, signal)).toString("utf8");
     } finally {
         await handle.close().catch(() => {});
     }
+}
+
+// `O_NOFOLLOW` protects only the final path component; a parent-directory symlink swap redirects a
+// pathname-based `open` to another file, and Node exposes no `openat` to bind the open to a checked
+// directory descriptor. Linux publishes the opened dentry's path under procfs; that path must equal the
+// validated canonical path. Elsewhere the caller's `dev`/`ino` comparison is the only ancestry check.
+async function openedPathIs(handle: FileHandle, canonicalTarget: string): Promise<boolean> {
+    if (process.platform !== "linux") return true;
+    let opened: string;
+    try {
+        opened = await readlink(`/proc/self/fd/${handle.fd}`);
+    } catch {
+        return true;
+    }
+    return opened === canonicalTarget;
 }
 
 // `read(2)` may return fewer bytes than requested before EOF even on regular files.
@@ -205,7 +218,10 @@ async function closeLateOpenOnAbort(
 
 function isPathInside(root: string, target: string): boolean {
     const relative = path.relative(root, target);
-    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+    if (relative === "") return true;
+    if (path.isAbsolute(relative)) return false;
+    // Only a whole `..` component escapes; a name such as `..generated` is an ordinary entry.
+    return relative !== ".." && !relative.startsWith(`..${path.sep}`);
 }
 
 function isNoFollowOrMissing(error: unknown): boolean {

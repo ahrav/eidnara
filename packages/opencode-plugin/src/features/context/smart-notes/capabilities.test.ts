@@ -49,6 +49,22 @@ describe("smart-note readFile capability", () => {
         });
     });
 
+    test("accepts in-tree names whose first component begins with dots", async () => {
+        await withTempDir(async (dir) => {
+            await mkdir(path.join(dir, "..generated"));
+            await writeFile(path.join(dir, "..generated", "out.txt"), "generated", "utf8");
+            await writeFile(path.join(dir, "..notes"), "dotted", "utf8");
+            const cap = createSmartNoteCapabilities({
+                projectRoot: dir,
+                signal: new AbortController().signal,
+            });
+            expect(await cap.readFile("..generated/out.txt")).toBe("generated");
+            expect(await cap.readFile("..notes")).toBe("dotted");
+            expect(await cap.readFile("../outside.txt")).toBeNull();
+            expect(await cap.readFile("..")).toBeNull();
+        });
+    });
+
     test("denies secrets by path pattern", async () => {
         await withTempDir(async (dir) => {
             await mkdir(path.join(dir, "secrets"));

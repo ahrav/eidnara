@@ -70,6 +70,10 @@ function withSandboxLock<T>(fn: () => Promise<T>): Promise<T> {
     return run;
 }
 
+/**
+ * The runner installs every capability the API exposes and enforces no manifest.
+ * The caller gates a compiled check against its manifest before invoking the runner.
+ */
 export interface RunCompiledSmartNoteCheckOptions {
     compiledCheck: string;
     capabilities?: SmartNoteCapabilityApi;
@@ -292,10 +296,39 @@ function installAsyncNoArgFunction(
 
 // Function literals expose dynamic-code constructors through their prototype chains.
 // Poisoning all four prototypes' `constructor` closes `(function () {}).constructor("...")()`.
-const POISON_FUNCTION_CONSTRUCTORS = `
+//
+// A check must evaluate identically on every run with the same capability inputs. Reading the clock or
+// the PRNG is the only way a check can flip without an external signal. `Date.now`, `Date()`, and
+// `new Date()` throw; `Date.parse`, `Date.UTC`, and `new Date(value)` stay available for `authorDate`
+// arithmetic. The native constructor is unreachable: the replacement owns `Date.prototype.constructor`.
+const SANDBOX_PRELUDE = `
 for (const fn of [function () {}, async function () {}, function* () {}, async function* () {}]) {
   Object.defineProperty(Object.getPrototypeOf(fn), "constructor", {
     value: undefined, writable: false, enumerable: false, configurable: false,
+  });
+}
+{
+  const frozen = Object.freeze;
+  const poison = (name) => frozen(function () {
+    throw new TypeError(name + " is nondeterministic and disabled in smart-note checks");
+  });
+  const nativeDate = globalThis.Date;
+  const guardedDate = function Date(...args) {
+    if (new.target === undefined || args.length === 0) poison("Date()")();
+    return Reflect.construct(nativeDate, args, new.target);
+  };
+  guardedDate.prototype = nativeDate.prototype;
+  guardedDate.parse = nativeDate.parse;
+  guardedDate.UTC = nativeDate.UTC;
+  guardedDate.now = poison("Date.now");
+  Object.defineProperty(nativeDate.prototype, "constructor", {
+    value: guardedDate, writable: false, enumerable: false, configurable: false,
+  });
+  Object.defineProperty(globalThis, "Date", {
+    value: frozen(guardedDate), writable: false, enumerable: false, configurable: false,
+  });
+  Object.defineProperty(Math, "random", {
+    value: poison("Math.random"), writable: false, enumerable: false, configurable: false,
   });
 }`;
 
@@ -303,11 +336,7 @@ function disableAmbientDynamicCode(context: QuickJSAsyncContext): void {
     context.setProp(context.global, "eval", context.undefined);
     context.setProp(context.global, "Function", context.undefined);
     context
-        .unwrapResult(
-            context.evalCode(POISON_FUNCTION_CONSTRUCTORS, "sandbox-prelude.js", {
-                type: "global",
-            }),
-        )
+        .unwrapResult(context.evalCode(SANDBOX_PRELUDE, "sandbox-prelude.js", { type: "global" }))
         .dispose();
 }
 

@@ -213,6 +213,38 @@ describe("compiled smart-note QuickJS runner", () => {
         expect(result).toEqual({ ok: true, result: { met: true } });
     });
 
+    test("disables the clock and the PRNG while keeping deterministic Date arithmetic", async () => {
+        const throws = (expression: string) =>
+            `(() => { try { ${expression}; return false; } catch (e) { return e instanceof TypeError; } })()`;
+        const result = await runCompiledSmartNoteCheck({
+            compiledCheck: `function check() {
+                const epoch = 1767225600000;
+                const parsed = new Date("2026-01-01T00:00:00Z");
+                const fnProto = Object.getPrototypeOf(function () {});
+                class Later extends Date {}
+                return {
+                    met:
+                        ${throws("Date.now()")} &&
+                        ${throws("new Date()")} &&
+                        ${throws("Date()")} &&
+                        ${throws("new Later()")} &&
+                        ${throws("Math.random()")} &&
+                        parsed.getTime() === epoch &&
+                        Date.parse("2026-01-01T00:00:00Z") === epoch &&
+                        Date.UTC(2026, 0, 1) === epoch &&
+                        new Later(0).getTime() === 0 &&
+                        parsed instanceof Date &&
+                        parsed.constructor === Date &&
+                        Date.name === "Date" &&
+                        Object.getPrototypeOf(Date) === fnProto &&
+                        Date.prototype.constructor === Date,
+                };
+            }`,
+            capabilities: fakeCap,
+        });
+        expect(result).toEqual({ ok: true, result: { met: true } });
+    });
+
     test("rejects a project FIFO without wedging the shared sandbox lock", async () => {
         const dir = await mkdtemp(path.join(tmpdir(), "eidnara-smart-note-fifo-"));
         try {
