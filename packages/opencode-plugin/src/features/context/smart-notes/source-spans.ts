@@ -228,6 +228,8 @@ function regexCanStart(source: string, slash: number, lastCloseParenWasControl: 
     if (index < 0) return true;
     const previous = source[index];
     if (previous === ")") return lastCloseParenWasControl;
+    // A postfix `++` or `--` ends an operand, so the slash that follows divides.
+    if ((previous === "+" || previous === "-") && source[index - 1] === previous) return false;
     if (/[(,=:[!&|?{};+\-*%<>~^]/.test(previous)) return true;
     if (/[\w$]/.test(previous)) {
         return REGEX_PRECEDING_KEYWORDS.has(wordBefore(source, index + 1));

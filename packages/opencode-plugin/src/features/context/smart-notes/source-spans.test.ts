@@ -61,6 +61,17 @@ describe("scanSourceSpans", () => {
         expect(kinds(`(a) / (b) / c; f(x) / 2`)).toEqual(["code:(a) / (b) / c; f(x) / 2"]);
     });
 
+    test("treats a slash after a postfix operator as division", () => {
+        expect(kinds(`n++ / (get = cap.httpGet) / 1; m-- / 2`)).toEqual([
+            "code:n++ / (get = cap.httpGet) / 1; m-- / 2",
+        ]);
+        expect(kinds(`x = a + /re/.test(b)`)).toEqual([
+            "code:x = a + ",
+            "string:/re/",
+            "code:.test(b)",
+        ]);
+    });
+
     test("closes an unterminated string at the end of its line", () => {
         expect(kinds(`a = "oops\nb = 1`)).toEqual(["code:a = ", `string:"oops`, "code:\nb = 1"]);
     });
