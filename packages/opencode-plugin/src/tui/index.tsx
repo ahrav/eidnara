@@ -1054,8 +1054,6 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     }
 
     initRpcClient(directory);
-    // `EidnaraRpcClient.call` retries discovery for 13.5 s when no server is up; registration does not wait on it.
-    void refreshToastDurationMs();
 
     const sidebarSlot = createSidebarContentSlot(api);
     api.slots.register(sidebarSlot);
@@ -1123,6 +1121,8 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     startNotificationSocket({
         getSessionId: () => getSessionId(api),
         onNotification: handleNotification,
+        // The socket opens only once the server is reachable, so the configured duration loads then and again after each reconnect.
+        onConnected: () => void refreshToastDurationMs(),
     });
 
     api.lifecycle.onDispose(() => {

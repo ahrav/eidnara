@@ -25,6 +25,8 @@ interface NotificationSocketOptions {
     /** The callback returns `true` only after the notification is fully consumed and can be acknowledged.
      * Dialog handlers await, so `onNotification` may return a Promise. */
     onNotification: (notification: SocketNotification) => boolean | Promise<boolean>;
+    /** Runs on every socket open, so RPC-backed preferences can be (re)loaded once the server is reachable. */
+    onConnected?: () => void;
 }
 
 const RECONNECT_BASE_MS = 500;
@@ -196,6 +198,7 @@ async function connect(): Promise<void> {
         }
         reconnectAttempt = 0;
         sendHello(ws, endpoint.token);
+        opts?.onConnected?.();
     });
 
     ws.addEventListener("message", (event) => {
