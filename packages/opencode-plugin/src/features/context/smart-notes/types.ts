@@ -66,8 +66,10 @@ export function parseSmartNoteManifest(json: string | null): SmartNoteCheckManif
     try {
         const parsed = JSON.parse(json) as Partial<SmartNoteCheckManifest>;
         const capabilities = Array.isArray(parsed.capabilities)
-            ? parsed.capabilities.filter((c): c is SmartNoteCapabilityName =>
-                  ["readFile", "gitHeadSha", "gitTag", "gitLog", "httpGet"].includes(String(c)),
+            ? parsed.capabilities.filter(
+                  (c): c is SmartNoteCapabilityName =>
+                      typeof c === "string" &&
+                      ["readFile", "gitHeadSha", "gitTag", "gitLog", "httpGet"].includes(c),
               )
             : [];
         return {

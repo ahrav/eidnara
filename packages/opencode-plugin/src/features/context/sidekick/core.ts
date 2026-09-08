@@ -34,9 +34,7 @@ export function stripThinkingBlocks(text: string): string {
         .trim();
 }
 
-/**
- *
- */
+/** Matches the exact no-result reply the system prompt requests, tolerating case and trailing punctuation. */
 export function isEmptySidekickResult(text: string): boolean {
     const trimmed = text
         .trim()

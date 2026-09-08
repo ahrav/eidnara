@@ -135,6 +135,20 @@ describe("surface-condition compiler", () => {
         });
     });
 
+    // An empty path would otherwise resolve to the project root and compile to a predicate that is already true.
+    test.each([
+        'when path "" exists',
+        "when path '' is gone",
+        'when file "" contains READY',
+        'when "" changes',
+        'when repo "" has a commit after abcdef1',
+        'when a tag matching v1.* appears in repo ""',
+    ])("leaves an empty quoted path plain: %s", async (condition) => {
+        await expect(compileSurfaceCondition(condition, pureOptions())).resolves.toEqual({
+            status: "plain",
+        });
+    });
+
     test.each([
         ["when file /tmp/state contains no ERROR", "ambiguous negation"],
         ["when file /tmp/state contains ERROR since yesterday", "temporal suffix"],
