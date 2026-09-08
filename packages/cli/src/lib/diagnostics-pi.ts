@@ -348,6 +348,7 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
                     // Opening a FIFO with no writer blocks, so only a regular file is a candidate.
                     if (!stat.isFile()) continue;
                     const sessionId = name.replace(/\.jsonl$/, "");
+                    if (!sessionId) continue;
                     candidates.push({ sessionId, file, slugDirectory, mtime: stat.mtimeMs });
                 } catch {}
             }

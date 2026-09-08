@@ -327,12 +327,16 @@ describe("collectDiagnostics Pi path resolution", () => {
             join(rootSlugDir, "2026-07-07T12-00-00-000Z_root.jsonl"),
             '{"type":"session"}\n',
         );
+        writeFileSync(join(rootSlugDir, ".jsonl"), '{"type":"session"}\n');
         const logDir = join(cwd, "log-as-directory");
         mkdirSync(logDir);
         process.env.EIDNARA_LOG_PATH = logDir;
 
         const report = await collectDiagnostics(cwd);
 
+        expect(report.recentSessions.map((session) => session.sessionId)).toEqual([
+            "2026-07-07T12-00-00-000Z_root",
+        ]);
         expect(report.recentSessions.map((session) => session.directory)).toEqual(["/"]);
         expect(report.logFile).toEqual({ path: logDir, exists: false, sizeKb: 0 });
     });
