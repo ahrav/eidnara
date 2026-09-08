@@ -5,7 +5,8 @@
 
 use std::sync::OnceLock;
 
-use crate::memory_render::{MirroredClaimMemory, render_claim_memory_block};
+use crate::canonical_memory::CanonicalMemory;
+use crate::memory_render::render_memory_block;
 use memory_store::StoredCompartment;
 use serde::Deserialize;
 
@@ -334,9 +335,9 @@ pub fn build_reference_blocks_from_stored(
     build_reference_blocks(session_id, chunk_start, &refs)
 }
 
-/// Project memory uses the host's claim-native block format.
-pub fn render_historian_claim_block(claims: &[MirroredClaimMemory]) -> String {
-    render_claim_memory_block(claims, "project-memory")
+/// Project memory uses the same block format as the m0 `<project-memory>` block.
+pub fn render_historian_memory_block(memories: &[CanonicalMemory]) -> String {
+    render_memory_block(memories, "project-memory")
 }
 
 /// Assemble the historian user prompt in its required section order.
@@ -446,16 +447,11 @@ mod tests {
         prompt_cases: Vec<PromptCase>,
     }
 
-    fn claim(row: &GoldenMemory) -> MirroredClaimMemory {
-        let public_claim_id = format!("mcm_{:032x}", row.id);
-        MirroredClaimMemory {
-            revision_locator: format!("{public_claim_id}/r1/{}", "a".repeat(64)),
-            public_claim_id,
-            project_id: 1,
+    fn memory(row: &GoldenMemory) -> CanonicalMemory {
+        CanonicalMemory {
+            object_id: format!("mcm_{:032x}", row.id),
             category: row.category.clone(),
             content: row.content.clone(),
-            importance: 50,
-            provenance_label: None,
         }
     }
 
@@ -466,15 +462,11 @@ mod tests {
     }
 
     #[test]
-    fn claim_historian_context_uses_public_identity() {
-        let block = render_historian_claim_block(&[MirroredClaimMemory {
-            public_claim_id: format!("mcm_{}", "a".repeat(32)),
-            revision_locator: format!("mcm_{}/r1/{}", "a".repeat(32), "b".repeat(64)),
-            project_id: 1,
+    fn memory_historian_context_uses_object_identity() {
+        let block = render_historian_memory_block(&[CanonicalMemory {
+            object_id: format!("mcm_{}", "a".repeat(32)),
             category: "CONSTRAINTS".to_string(),
             content: "Use the public contract.".to_string(),
-            importance: 80,
-            provenance_label: None,
         }]);
         assert!(block.contains("mcm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         assert!(!block.contains("#1"));
@@ -542,8 +534,8 @@ mod tests {
                 case.label
             );
 
-            let claims: Vec<MirroredClaimMemory> = case.memories.iter().map(claim).collect();
-            let project_memory = render_historian_claim_block(&claims);
+            let memories: Vec<CanonicalMemory> = case.memories.iter().map(memory).collect();
+            let project_memory = render_historian_memory_block(&memories);
             assert_eq!(
                 project_memory, case.project_memory,
                 "project memory mismatch in '{}'",

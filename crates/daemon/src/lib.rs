@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boundary;
+pub mod canonical_memory;
 pub mod caveman;
 pub(crate) mod chunk_text;
 pub mod classify;
@@ -120,8 +121,8 @@ pub mod bench_internals {
     use std::collections::HashSet;
     use std::sync::Mutex;
 
+    use crate::canonical_memory::CanonicalMemory;
     pub use crate::config::CacheTtlProvenance;
-    pub use crate::memory_render::MirroredClaimMemory;
     use crate::transform::{
         ProducerContext, SerializedOutputCache, TransformError, TransformRequest,
         TransformWithProjection,
@@ -151,10 +152,10 @@ pub mod bench_internals {
         (measurement.u, measurement.t)
     }
 
-    /// Returns how many leading claims fit the supplied token budget.
-    pub fn trim_claims_to_budget(claims: &[MirroredClaimMemory], budget_tokens: f64) -> usize {
-        crate::m0_compose::trim_claims_to_budget(
-            claims,
+    /// Returns how many leading memories fit the supplied token budget.
+    pub fn trim_memories_to_budget(memories: &[CanonicalMemory], budget_tokens: f64) -> usize {
+        crate::m0_compose::trim_memories_to_budget(
+            memories,
             budget_tokens,
             crate::token_cache::cached_estimate_tokens,
         )
@@ -4818,6 +4819,19 @@ impl Handler {
         }
     }
 
+    /// The historian's canonical memory read; `None` when memory is disabled,
+    /// so a disabled deployment never touches the kernel store for it.
+    fn historian_project_memory(
+        &self,
+        binding: &SessionBinding,
+        cfg: &DaemonConfig,
+        now_ms: i64,
+    ) -> Option<canonical_memory::CanonicalMemoryRead> {
+        cfg.memory_enabled.then(|| {
+            canonical_memory::read_project_memory(&self.kernel, &binding.kernel_project, now_ms)
+        })
+    }
+
     fn prepare_historian_fire(
         &self,
         store: Arc<MemoryStore>,
@@ -5091,11 +5105,7 @@ impl Handler {
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary,
                 memory_enabled: cfg.memory_enabled,
-                claim_snapshot_vector: parsed
-                    .claim_lane
-                    .as_ref()
-                    .filter(|lane| lane.enabled)
-                    .and_then(|lane| lane.snapshot_vector.clone()),
+                project_memory: self.historian_project_memory(binding, &cfg, now),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
@@ -5246,15 +5256,11 @@ impl Handler {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
+                project_memory: self.historian_project_memory(binding, &cfg, now),
                 model_chain: cfg.model_chain,
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary: boundary.clone(),
                 memory_enabled: cfg.memory_enabled,
-                claim_snapshot_vector: parsed
-                    .claim_lane
-                    .as_ref()
-                    .filter(|lane| lane.enabled)
-                    .and_then(|lane| lane.snapshot_vector.clone()),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
@@ -6113,13 +6119,17 @@ impl Handler {
         let short_session = session_id.chars().take(12).collect::<String>();
         let age = format_traffic_age(newest_pass_at, now_ms());
         // Structured fields let reconciliation determine completion without parsing the summary or issuing another operation.
-        let m1_signal = match crate::m1_compose::m1_revision_signal_parts_for_claims_timed(
+        let m1_signal = match crate::m1_compose::m1_revision_signal_timed(
             &store,
             &binding.project_root.to_string_lossy(),
             &session_id,
             loaded.meta.user_profile_version,
             !loaded.meta.memory_disabled,
-            loaded.meta.claim_snapshot_vector.as_ref(),
+            loaded
+                .meta
+                .project_memory
+                .as_ref()
+                .and_then(memory_store::ProjectMemoryComposition::revision),
             None,
         ) {
             Ok(signal) => Some(signal),
@@ -7991,6 +8001,10 @@ impl Handler {
         let trace_received_started_at = Instant::now();
         let _ = store.trace_pass_received(&parsed.session_id, pass_now);
         let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
+        // One canonical read per pass: every memory surface of the pass, and every
+        // attempt the closure below makes, composes from the same pinned snapshot.
+        let project_memory =
+            canonical_memory::read_project_memory(&self.kernel, &binding.kernel_project, pass_now);
         let run_transform = || {
             let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
                 || {
@@ -8004,7 +8018,7 @@ impl Handler {
                 },
             );
             let producer_ctx = transform::ProducerContext {
-                claim_lane: parsed.claim_lane.as_ref(),
+                project_memory: project_memory.clone(),
                 project_path: &project_path,
                 note_project_path: &note_project_path,
                 project_directory: &route_project_root,
@@ -29837,7 +29851,13 @@ mod tests {
             &baseline_store,
             &expected_request,
             &transform::ProducerContext {
-                claim_lane: None,
+                project_memory: canonical_memory::CanonicalMemoryRead::Available(
+                    canonical_memory::CanonicalMemorySnapshot {
+                        known_as_of: 0,
+                        truncated: false,
+                        rows: Vec::new(),
+                    },
+                ),
                 project_path: &baseline_project_path,
                 note_project_path: &baseline_project_path,
                 project_directory: &baseline_project_path,

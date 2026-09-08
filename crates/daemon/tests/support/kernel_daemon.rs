@@ -15,7 +15,7 @@ use host_runtime::{
 use serde_json::{Value, json};
 use storage::StorageDescriptor;
 
-const SESSION: &str = "stage1-session";
+pub const SESSION: &str = "stage1-session";
 pub const DOMAIN: &str = "stage1-domain";
 
 pub struct KernelDaemon {

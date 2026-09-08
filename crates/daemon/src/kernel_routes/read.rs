@@ -61,15 +61,15 @@ impl ReadRequest {
 }
 
 pub(crate) struct ReadResponse {
-    known_as_of: i64,
-    tip: i64,
-    rows: Vec<VisibleRow>,
+    pub(crate) known_as_of: i64,
+    pub(crate) tip: i64,
+    pub(crate) rows: Vec<VisibleRow>,
     /// Whether rows beyond [`MAX_READ_ROWS`] were dropped. Byte-budget truncation happens at serialization, so the response's flag can be `true` while `truncated` here is `false`. commentlint: allow(JUDGE)
-    truncated: bool,
+    pub(crate) truncated: bool,
     /// Decision rows keyed by `object_id`, looked up at `known_as_of`. Total
     /// over the visible decision-kind rows in `rows`: a missing entry fails
     /// the read, so a `None` lookup during rendering means a non-decision row.
-    decisions: HashMap<String, DecisionRow>,
+    pub(crate) decisions: HashMap<String, DecisionRow>,
 }
 
 /// Orders rows for a max-heap whose maximum is the serving-order-last row: an older `created_commit_seq` ranks greater, and among rows of one commit the greater `object_id` ranks greater, so the heap's peek is exactly the row a full newest-first sort then truncate drops first. commentlint: allow(JUDGE)

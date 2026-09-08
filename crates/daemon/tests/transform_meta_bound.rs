@@ -11,6 +11,7 @@ mod corpus;
 
 use context_core::redaction::RedactionErrorKind;
 use daemon::bench_internals::{self, CacheTtlProvenance, transform_cached};
+use daemon::canonical_memory::{CanonicalMemoryRead, CanonicalMemorySnapshot};
 use daemon::transform::{ProducerContext, TransformError, TransformRequest};
 use memory_store::{MemoryStore, MemoryStoreError};
 
@@ -34,7 +35,11 @@ fn first_hard_pass_meta_respects_the_store_durable_text_bound() {
         .expect("transform request");
         let project_directory = dir.path().to_str().expect("utf8 dir");
         let ctx = ProducerContext {
-            claim_lane: None,
+            project_memory: CanonicalMemoryRead::Available(CanonicalMemorySnapshot {
+                known_as_of: 0,
+                truncated: false,
+                rows: Vec::new(),
+            }),
             project_path: "git:meta-bound",
             note_project_path: "git:meta-bound",
             project_directory,

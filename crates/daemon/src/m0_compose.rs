@@ -1,5 +1,5 @@
 //! This module reads a session's durable state.
-//! The durable state includes compartments, memories or the workspace union, the user profile, and project docs.
+//! The durable state includes compartments, the user profile, and project docs; the caller supplies the pass's canonical memory rows.
 //! This module composes frozen m0 bytes and watermarks that HARD persists.
 //!
 //! This module produces bytes but does not classify HARD versus SOFT.
@@ -7,17 +7,16 @@
 //! This module returns identical bytes for identical store contents, `now_ms`, and `budget`.
 //! The caller supplies frozen `now_ms`; this module never reads a live clock.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
-use context_core::claim_operation::SnapshotVector;
 use memory_store::{MemoryStore, MemoryStoreError};
 use sha2::{Digest, Sha256};
 
+use crate::canonical_memory::CanonicalMemory;
 use crate::compartment_coverage::{CoverageError, resolve_coverage};
 use crate::decay_render::{DecayRenderCompartment, extract_m0_block};
 use crate::memory_render::{
-    M0Inputs, MirroredClaimMemory, is_positive_memory_category, render_claim_memory_block,
-    render_claim_memory_line, render_m0,
+    M0Inputs, is_positive_memory_category, render_m0, render_memory_block, render_memory_line,
 };
 use crate::project_docs::read_project_docs_canonical;
 
@@ -55,10 +54,6 @@ pub struct M0Composition {
     pub first_covered_ordinal: Option<u64>,
     /// `folded_compartment_seq` advances only on a HARD.
     pub folded_compartment_seq: i64,
-    /// Revision locators for claims included in `m0_bytes`.
-    pub rendered_revision_locators: Vec<String>,
-    /// The claim rows supply this generation vector.
-    pub claim_snapshot_vector: Option<SnapshotVector>,
     /// `docs_hash` records the project-docs version included in m0; it does not trigger HARD.
     /// The next natural HARD re-reads current docs.
     pub docs_hash: String,
@@ -131,75 +126,33 @@ pub(crate) fn resolved_mural(input: Option<&M0MuralInput>) -> Option<M0MuralBloc
     })
 }
 
-pub(crate) fn trim_claims_to_budget(
-    claims: &[MirroredClaimMemory],
+/// Keeps the memories whose rendered lines fit `budget_tokens`, in the supplied
+/// serving order, charging each category's wrapper once. A row that does not
+/// fit is skipped, so a later smaller row can still be admitted. Only positive
+/// categories are charged, matching what the renderer emits.
+pub(crate) fn trim_memories_to_budget(
+    memories: &[CanonicalMemory],
     budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
-) -> Vec<MirroredClaimMemory> {
+) -> Vec<CanonicalMemory> {
     let budget = budget_tokens.max(1.0);
-    // `rendered_revision_locators` includes only claims rendered by `render_claim_memory_block`.
-    let mut ordered = claims
-        .iter()
-        .filter(|claim| is_positive_memory_category(&claim.category))
-        .cloned()
-        .collect::<Vec<_>>();
-    ordered.sort_by(|left, right| {
-        right
-            .importance
-            .cmp(&left.importance)
-            .then_with(|| left.public_claim_id.cmp(&right.public_claim_id))
-    });
-    let project_count = ordered
-        .iter()
-        .map(|claim| claim.project_id)
-        .collect::<HashSet<_>>()
-        .len()
-        .max(1);
-    let floor = budget / project_count as f64;
     let mut selected = Vec::new();
-    let mut selected_ids = HashSet::new();
-    let mut categories = HashSet::<String>::new();
+    let mut categories = HashSet::<&str>::new();
     let mut used = estimate_tokens("<project-memory>\n</project-memory>") as f64;
-    for project_id in ordered
+    for memory in memories
         .iter()
-        .map(|claim| claim.project_id)
-        .collect::<BTreeSet<_>>()
+        .filter(|memory| is_positive_memory_category(&memory.category))
     {
-        let mut member_used = 0.0;
-        for claim in ordered
-            .iter()
-            .filter(|claim| claim.project_id == project_id)
-        {
-            let mut cost = estimate_tokens(&(render_claim_memory_line(claim) + "\n"));
-            if !categories.contains(&claim.category) {
-                cost += estimate_tokens(&format!("<{}>\n</{}>\n", claim.category, claim.category));
-            }
-            let cost = cost as f64;
-            if member_used + cost > floor || used + cost > budget {
-                continue;
-            }
-            member_used += cost;
-            used += cost;
-            categories.insert(claim.category.clone());
-            selected_ids.insert(claim.public_claim_id.clone());
-            selected.push(claim.clone());
-        }
-    }
-    for claim in ordered {
-        if selected_ids.contains(&claim.public_claim_id) {
-            continue;
-        }
-        let mut cost = estimate_tokens(&(render_claim_memory_line(&claim) + "\n"));
-        if !categories.contains(&claim.category) {
-            cost += estimate_tokens(&format!("<{}>\n</{}>\n", claim.category, claim.category));
+        let mut cost = estimate_tokens(&(render_memory_line(memory) + "\n"));
+        if !categories.contains(memory.category.as_str()) {
+            cost += estimate_tokens(&format!("<{}>\n</{}>\n", memory.category, memory.category));
         }
         if used + cost as f64 > budget {
             continue;
         }
         used += cost as f64;
-        categories.insert(claim.category.clone());
-        selected_ids.insert(claim.public_claim_id.clone());
-        selected.push(claim);
+        categories.insert(memory.category.as_str());
+        selected.push(memory.clone());
     }
     selected
 }
@@ -262,20 +215,11 @@ fn render_m0_with_decay_pressure_retry(
     m0_bytes
 }
 
-/// Composes m0 from durable state and a frozen claim-mirror snapshot.
-pub fn compose_m0_from_claim_mirror(
+/// Composes m0 from durable state and the pass's pinned canonical memory rows.
+pub fn compose_m0(
     store: &MemoryStore,
     inputs: &M0ComposeInputs<'_>,
-    claims: &[MirroredClaimMemory],
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
-) -> Result<M0Composition, M0ComposeError> {
-    compose_m0(store, inputs, claims, estimate_tokens)
-}
-
-fn compose_m0(
-    store: &MemoryStore,
-    inputs: &M0ComposeInputs<'_>,
-    claims: &[MirroredClaimMemory],
+    memories: &[CanonicalMemory],
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<M0Composition, M0ComposeError> {
     let compartments = store.load_compartments(inputs.session_id)?;
@@ -291,15 +235,11 @@ fn compose_m0(
             None => (String::new(), None, None, 0),
         };
 
-    let selected_claims = if inputs.memory_enabled {
-        trim_claims_to_budget(claims, inputs.memory_budget_tokens, estimate_tokens)
+    let selected_memories = if inputs.memory_enabled {
+        trim_memories_to_budget(memories, inputs.memory_budget_tokens, estimate_tokens)
     } else {
         Vec::new()
     };
-    let rendered_revision_locators = selected_claims
-        .iter()
-        .map(|claim| claim.revision_locator.clone())
-        .collect();
 
     let user_profile = if inputs.memory_enabled {
         store.load_active_user_memories()?
@@ -340,10 +280,10 @@ fn compose_m0(
         },
         estimate_tokens,
     );
-    let claim_memory = render_claim_memory_block(&selected_claims, "project-memory");
-    if !claim_memory.is_empty() {
+    let project_memory = render_memory_block(&selected_memories, "project-memory");
+    if !project_memory.is_empty() {
         m0_bytes.push_str("\n\n");
-        m0_bytes.push_str(&claim_memory);
+        m0_bytes.push_str(&project_memory);
     }
     if mural.is_some() {
         m0_bytes.push_str("\n\n");
@@ -357,8 +297,6 @@ fn compose_m0(
         coverage_ordinal,
         first_covered_ordinal,
         folded_compartment_seq,
-        rendered_revision_locators,
-        claim_snapshot_vector: None,
         docs_hash: docs.canonical_hash,
     })
 }

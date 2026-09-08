@@ -128,6 +128,27 @@ impl KernelOutcome {
     pub const fn is_available(&self) -> bool {
         matches!(self, Self::Available)
     }
+
+    /// The state key the TypeScript client indexes guidance by: the serde `kind`
+    /// tag, followed by `:` and the reason for the reasoned variants.
+    pub fn state_key(&self) -> String {
+        fn snake(value: &impl Serialize) -> String {
+            // Every variant here is a unit variant with `rename_all = "snake_case"`, so
+            // its serde form is one JSON string.
+            serde_json::to_value(value)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default()
+        }
+        match self {
+            Self::Available => "available".to_string(),
+            Self::Stale { .. } => "stale".to_string(),
+            Self::Abstained { .. } => "abstained".to_string(),
+            Self::Unavailable { reason } => format!("unavailable:{}", snake(reason)),
+            Self::Conflict { reason } => format!("conflict:{}", snake(reason)),
+            Self::Invalid { reason } => format!("invalid:{}", snake(reason)),
+        }
+    }
 }
 
 /// Every [`UnavailableReason`], in declaration order.
@@ -450,6 +471,32 @@ mod tests {
         outcomes.extend(ALL_CONFLICT.iter().copied().map(KernelOutcome::conflict));
         outcomes.extend(ALL_INVALID.iter().copied().map(KernelOutcome::invalid));
         outcomes
+    }
+
+    #[test]
+    fn state_key_joins_kind_and_reason_with_a_colon() {
+        assert_eq!(KernelOutcome::Available.state_key(), "available");
+        assert_eq!(
+            KernelOutcome::Abstained {
+                lag_positions: 3,
+                oldest_unconsumed_age_ms: 4,
+            }
+            .state_key(),
+            "abstained"
+        );
+        assert_eq!(
+            KernelOutcome::unavailable(UnavailableReason::StoreStarting).state_key(),
+            "unavailable:store_starting"
+        );
+        assert_eq!(
+            KernelOutcome::invalid(InvalidReason::ProjectMismatch).state_key(),
+            "invalid:project_mismatch"
+        );
+        let keys: std::collections::HashSet<String> = all_outcomes()
+            .iter()
+            .map(KernelOutcome::state_key)
+            .collect();
+        assert_eq!(keys.len(), all_outcomes().len(), "state keys are distinct");
     }
 
     #[test]

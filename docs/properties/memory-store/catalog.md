@@ -997,7 +997,8 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the transform no longer reads the claim mirror. `claim_snapshot_for_context`, the double-read vector fence, and the commit-time vector check in `commit_transform` were deleted when the transform moved to canonical kernel rows (`crates/daemon/src/canonical_memory.rs`), and the historian's full-state fence went with `historian_claim_block`. No production read compares a snapshot vector, so the subject of this record is unreachable. The replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon transform catalog.
 Exercised: not yet - nothing constructs a mirror mutation that changes
 `acked_effect_id` without changing a generation, which is the only case that would
 distinguish the two fence strengths.
@@ -1226,16 +1227,17 @@ Required faults and enabling state: A seeded mirror plus a source that stops
 delivering receipts, for example because a receipt was refused with
 `CheckpointMismatch` and the lane wedged. Then read through `list_committed_claims`.
 Confidence: high - [evidence](evidence/mirror-staleness-undetectable-on-memory-tool-read-path.md).
-Enumerated the production read sites: `lib.rs:7368-7377` (atomic, in-transaction),
-`transform.rs:1978-2011` (optimistic double-read against an expected vector),
-`historian_chunk.rs:563-608` (same, stronger comparison), and `memory_tool.rs:57-67`
-(no comparison). Verified `updated_at_ms` is written but never selected.
+Enumerated the production read sites: `lib.rs:7368-7377` (atomic, in-transaction)
+and `memory_tool.rs:57-67` (no comparison). The transform and historian read sites
+the evidence file cites were deleted when both moved to canonical kernel rows
+(`crates/daemon/src/canonical_memory.rs`), which leaves the memory tool as the only
+unfenced mirror reader. Verified `updated_at_ms` is written but never selected.
 Existing check: none for the unfenced path. The fenced paths are mechanisms, not
 checks.
 Impact: `list_committed_claims` can surface committed claim memory from a wedged
-mirror indefinitely, with no error and no signal to the caller, while the two assembly
-paths correctly go quiet. The system degrades inconsistently: some surfaces notice,
-one does not.
+mirror indefinitely, with no error and no signal to the caller, while the transform
+and historian, which compose from canonical kernel rows, are unaffected by mirror
+staleness. The system degrades inconsistently: one surface still trusts the mirror.
 Open questions:
 
 - Is `list_committed_claims` a tool-facing read where the caller already knows the

@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use cache_stability::CoreState;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use daemon::bench_internals::{self, CacheTtlProvenance, MirroredClaimMemory, transform_cached};
+use daemon::bench_internals::{self, CacheTtlProvenance, transform_cached};
+use daemon::canonical_memory::{CanonicalMemory, CanonicalMemoryRead, CanonicalMemorySnapshot};
 use daemon::transform::{ProducerContext, TransformRequest};
 use daemon::wire::{IngressMessage, project_messages};
 use memory_store::MemoryStore;
@@ -112,38 +113,32 @@ fn bench_tail_hygiene(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_m0_trim_claims(c: &mut Criterion) {
+fn bench_m0_trim_memories(c: &mut Criterion) {
     warm_tokenizer();
-    let mut group = c.benchmark_group("m0/trim_claims_to_budget");
+    let mut group = c.benchmark_group("m0/trim_memories_to_budget");
     for &count in &[8usize, 64, 256] {
         let mut rng = Rng::new(CORPUS_SEED ^ 0xC1A1);
-        let claims: Vec<MirroredClaimMemory> = (0..count)
-            .map(|index| MirroredClaimMemory {
-                public_claim_id: format!("mcm_{index:032}"),
-                revision_locator: format!("mcm_{index:032}/r1/deadbeef"),
-                project_id: 1,
+        let memories: Vec<CanonicalMemory> = (0..count)
+            .map(|index| CanonicalMemory {
+                object_id: format!("mem_{index:032}"),
                 category: "ARCHITECTURE_DECISIONS".to_string(),
                 content: corpus::text(ContentClass::Prose, 300, &mut rng),
-                importance: (rng.next() % 100) as i64,
-                provenance_label: None,
             })
             .collect();
-        // A category outside POSITIVE_MEMORY_CATEGORIES is filtered before any
-        // tokenization, so the cell would time an empty eligible set.
-        let retained = bench_internals::trim_claims_to_budget(&claims, 8_000.0);
+        let retained = bench_internals::trim_memories_to_budget(&memories, 8_000.0);
         assert!(
             retained > 0,
-            "m0 fixture filtered out entirely at {count} claims: check the claim category"
+            "m0 fixture trimmed to nothing at {count} memories: check the budget"
         );
         assert!(
             count < 256 || retained < count,
-            "the {count}-claim cell must exceed the budget and trim, retained {retained}"
+            "the {count}-memory cell must exceed the budget and trim, retained {retained}"
         );
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{count}claims_8k_budget")),
-            &claims,
-            |b, claims| {
-                b.iter(|| bench_internals::trim_claims_to_budget(black_box(claims), 8_000.0))
+            BenchmarkId::from_parameter(format!("{count}memories_8k_budget")),
+            &memories,
+            |b, memories| {
+                b.iter(|| bench_internals::trim_memories_to_budget(black_box(memories), 8_000.0))
             },
         );
     }
@@ -167,7 +162,11 @@ fn request(session: &str, messages: &[IngressMessage], caveman: bool) -> Transfo
 
 fn producer_ctx(dir: &str) -> ProducerContext<'_> {
     ProducerContext {
-        claim_lane: None,
+        project_memory: CanonicalMemoryRead::Available(CanonicalMemorySnapshot {
+            known_as_of: 0,
+            truncated: false,
+            rows: Vec::new(),
+        }),
         project_path: "git:bench",
         note_project_path: "git:bench",
         project_directory: dir,
@@ -338,7 +337,7 @@ criterion_group!(
     bench_tokenizer,
     bench_projection,
     bench_tail_hygiene,
-    bench_m0_trim_claims,
+    bench_m0_trim_memories,
     bench_e2e_first_hard,
     bench_e2e_steady,
     bench_e2e_steady_output_cache,
