@@ -3,12 +3,26 @@ import {
     lstatSync,
     mkdirSync,
     readlinkSync,
-    realpathSync,
     renameSync,
     statSync,
     writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+
+const MAX_SYMLINK_HOPS = 40;
+
+/**
+ * Resolve link text instead of calling `realpathSync`: dangling links' missing
+ * targets remain writable without replacing the link.
+ */
+function resolveWriteTarget(targetPath: string): string {
+    let current = targetPath;
+    for (let hops = 0; hops < MAX_SYMLINK_HOPS; hops++) {
+        if (!lstatSync(current, { throwIfNoEntry: false })?.isSymbolicLink()) return current;
+        current = resolve(dirname(current), readlinkSync(current));
+    }
+    throw new Error(`Too many levels of symbolic links: ${targetPath}`);
+}
 
 /**
  * When targetPath names a file and chmodSync succeeds, writeFileAtomic copies its 0o777 permission bits to tmpPath.
@@ -18,45 +32,18 @@ import { dirname, resolve } from "node:path";
  * A symlink resolves to its target before renameSync, preserving the symlink.
  */
 export function writeFileAtomic(targetPath: string, data: string): void {
-    const destination = resolveSymlinkTarget(targetPath);
-    mkdirSync(dirname(destination), { recursive: true });
-    const tmpPath = `${destination}.tmp`;
+    mkdirSync(dirname(targetPath), { recursive: true });
+    const resolvedTarget = resolveWriteTarget(targetPath);
+    mkdirSync(dirname(resolvedTarget), { recursive: true });
+    const tmpPath = `${resolvedTarget}.tmp`;
     writeFileSync(tmpPath, data, { encoding: "utf-8" });
     try {
-        if (statSync(destination, { throwIfNoEntry: false })?.isFile()) {
-            const mode = statSync(destination).mode & 0o777;
+        if (statSync(resolvedTarget, { throwIfNoEntry: false })?.isFile()) {
+            const mode = statSync(resolvedTarget).mode & 0o777;
             chmodSync(tmpPath, mode);
         }
     } catch {
-        // If statSync or chmodSync throws, writeFileAtomic still attempts renameSync(tmpPath, destination).
+        // If statSync or chmodSync throws, writeFileAtomic still attempts renameSync(tmpPath, resolvedTarget).
     }
-    renameSync(tmpPath, destination);
-}
-
-/** Mirrors the kernel's symlink-following limit so a link cycle terminates instead of looping. */
-const MAX_SYMLINK_HOPS = 40;
-
-/** `realpathSync` cannot resolve a dangling symlink, so the fallback follows link text hop by hop and the write creates the final target. commentlint: allow(JUDGE) */
-function resolveSymlinkTarget(path: string): string {
-    try {
-        if (!lstatSync(path).isSymbolicLink()) return path;
-    } catch {
-        return path;
-    }
-    try {
-        return realpathSync(path);
-    } catch {
-        let current = path;
-        for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
-            let isLink: boolean;
-            try {
-                isLink = lstatSync(current).isSymbolicLink();
-            } catch {
-                return current;
-            }
-            if (!isLink) return current;
-            current = resolve(dirname(current), readlinkSync(current));
-        }
-        throw new Error(`Too many levels of symbolic links: ${path}`);
-    }
+    renameSync(tmpPath, resolvedTarget);
 }

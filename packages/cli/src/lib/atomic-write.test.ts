@@ -6,12 +6,13 @@ import {
     mkdirSync,
     mkdtempSync,
     readFileSync,
+    readlinkSync,
     rmSync,
     statSync,
     symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic-write";
 
 const roots: string[] = [];
@@ -126,5 +127,56 @@ describe("writeFileAtomic", () => {
         writeFileAtomic(target, '{"created":true}\n');
         expect(readFileSync(target, "utf-8")).toBe('{"created":true}\n');
         expect(existsSync(`${target}.tmp`)).toBe(false);
+    });
+
+    it.if(process.platform !== "win32")(
+        "writes through a symlink and keeps the link pointing at its target",
+        () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-symlink-"));
+            roots.push(root);
+            const dotfiles = join(root, "dotfiles", "opencode.jsonc");
+            const link = join(root, "config", "opencode.jsonc");
+            writeFileAtomic(dotfiles, "v1\n");
+            mkdirSync(dirname(link), { recursive: true });
+            symlinkSync(dotfiles, link);
+
+            writeFileAtomic(link, "v2\n");
+
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(readlinkSync(link)).toBe(dotfiles);
+            expect(readFileSync(dotfiles, "utf-8")).toBe("v2\n");
+            expect(existsSync(`${dotfiles}.tmp`)).toBe(false);
+            expect(existsSync(`${link}.tmp`)).toBe(false);
+        },
+    );
+
+    it.if(process.platform !== "win32")(
+        "creates the missing target of a dangling relative symlink and keeps the link",
+        () => {
+            const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-dangling-"));
+            roots.push(root);
+            const link = join(root, "config", "opencode.jsonc");
+            const target = join(root, "dotfiles", "opencode.jsonc");
+            mkdirSync(dirname(link), { recursive: true });
+            symlinkSync(join("..", "dotfiles", "opencode.jsonc"), link);
+            expect(existsSync(target)).toBe(false);
+
+            writeFileAtomic(link, "v1\n");
+
+            expect(lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(readFileSync(target, "utf-8")).toBe("v1\n");
+            expect(readFileSync(link, "utf-8")).toBe("v1\n");
+        },
+    );
+
+    it.if(process.platform !== "win32")("refuses a symlink loop instead of spinning", () => {
+        const root = mkdtempSync(join(tmpdir(), "eidnara-atomic-loop-"));
+        roots.push(root);
+        const a = join(root, "a.jsonc");
+        const b = join(root, "b.jsonc");
+        symlinkSync(b, a);
+        symlinkSync(a, b);
+        expect(() => writeFileAtomic(a, "x\n")).toThrow(/symbolic links/);
+        expect(lstatSync(a).isSymbolicLink()).toBe(true);
     });
 });

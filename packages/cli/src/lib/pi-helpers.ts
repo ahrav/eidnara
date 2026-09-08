@@ -1,7 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { extname, join } from "node:path";
-import { findOnPath, isExecutableFile } from "./find-on-path";
+import { join } from "node:path";
+import {
+    type CommandInvocation,
+    getCommandInvocation,
+    invocationSpawnOptions,
+} from "./command-invocation";
+import { findOnPath, isExecutableFile, packageManagerBinCandidates } from "./find-on-path";
 
 export interface PiBinaryInfo {
     path: string;
@@ -10,21 +15,27 @@ export interface PiBinaryInfo {
 
 export const PI_PACKAGE_SOURCE = "npm:@eidnara/pi";
 
-export interface PiCommandInvocation {
-    command: string;
-    args: string[];
+/** A pinned source such as `npm:@eidnara/pi@0.1.0` still names the plugin package. */
+export function matchesPiPackageSource(entry: unknown): boolean {
+    if (typeof entry !== "string") return false;
+    return entry === PI_PACKAGE_SOURCE || entry.startsWith(`${PI_PACKAGE_SOURCE}@`);
 }
 
-export function getPiCommandInvocation(piPath: string, args: string[]): PiCommandInvocation {
-    const extension = extname(piPath).toLowerCase();
-    if (extension !== ".cmd" && extension !== ".bat") {
-        return { command: piPath, args };
-    }
+const PI_BINARY_ENV = "EIDNARA_PI_BINARY";
 
-    // `.cmd` and `.bat` files must run through a command interpreter.
-    // Passing separate argv entries preserves argument boundaries.
-    const command = process.env.ComSpec?.trim() || process.env.COMSPEC?.trim() || "cmd.exe";
-    return { command, args: ["/d", "/s", "/c", piPath, ...args] };
+export function getPiCommandInvocation(piPath: string, args: string[]): CommandInvocation {
+    return getCommandInvocation(piPath, args, PI_BINARY_ENV);
+}
+
+/** The installer's `~/.pi/bin` comes first; the package-manager launchers follow. */
+export function getPiFallbackCandidates(
+    platform: NodeJS.Platform,
+    home: string,
+    appData?: string,
+): string[] {
+    const installerBinary =
+        platform === "win32" ? join(home, ".pi", "bin", "pi.cmd") : join(home, ".pi", "bin", "pi");
+    return [installerBinary, ...packageManagerBinCandidates("pi", platform, home, appData)];
 }
 
 export function detectPiBinary(): PiBinaryInfo | null {
@@ -32,22 +43,20 @@ export function detectPiBinary(): PiBinaryInfo | null {
     if (fromPath) return { path: fromPath, source: "path" };
 
     const home = process.env.HOME?.trim() || homedir();
-    const homeCandidate =
-        process.platform === "win32"
-            ? join(home, ".pi", "bin", "pi.cmd")
-            : join(home, ".pi", "bin", "pi");
-    if (isExecutableFile(homeCandidate)) return { path: homeCandidate, source: "home" };
-
-    return null;
+    const candidates = getPiFallbackCandidates(process.platform, home, process.env.APPDATA);
+    const candidate = candidates.find((path) => isExecutableFile(path));
+    return candidate ? { path: candidate, source: "home" } : null;
 }
 
-export function getPiVersion(piPath: string): string | null {
+export function getPiVersion(piPath: string, timeout = 10_000): string | null {
     try {
         const invocation = getPiCommandInvocation(piPath, ["--version"]);
         const result = spawnSync(invocation.command, invocation.args, {
             encoding: "utf-8",
-            timeout: 10_000,
+            timeout,
+            ...invocationSpawnOptions(invocation),
         });
+        if (result.error || result.status !== 0) return null;
         const stdout = result.stdout?.trim();
         if (stdout) return stdout;
         const stderr = result.stderr?.trim();
@@ -65,6 +74,7 @@ export function runPiCommand(piPath: string, args: string[], timeout = 20_000): 
             encoding: "utf-8",
             stdio: ["ignore", "pipe", "ignore"],
             timeout,
+            ...invocationSpawnOptions(invocation),
         }).trim();
     } catch {
         return null;
@@ -76,7 +86,8 @@ function stripAnsi(text: string): string {
 }
 
 const PROVIDER_TOKEN = /^[a-z0-9][a-z0-9._-]*$/i;
-const MODEL_TOKEN = /^[a-z0-9][a-z0-9._:/-]*$/i;
+// A leading `@` admits scoped model identifiers such as `@modal/qwen/model-v1`.
+const MODEL_TOKEN = /^[a-z0-9@][a-z0-9._:/@-]*$/i;
 const SIZE_TOKEN = /^(?:\d+(?:\.\d+)?[kmgt]?|-)$/i;
 const CAPABILITY_TOKEN = /^(?:yes|no|true|false|-)$/i;
 
@@ -117,13 +128,12 @@ export function parseModelListOutput(output: string): string[] {
     return [...models];
 }
 
+/** The probe order avoids starting a second process when `--list-models` returns models. */
+const MODEL_LIST_PROBES: readonly string[][] = [["--list-models"], ["models", "list"]];
+
 export function getAvailableModels(piPath: string): string[] {
-    // forward/backward compat.
-    const outputs = [
-        runPiCommand(piPath, ["--list-models"]),
-        runPiCommand(piPath, ["models", "list"]),
-    ];
-    for (const output of outputs) {
+    for (const args of MODEL_LIST_PROBES) {
+        const output = runPiCommand(piPath, args);
         if (!output) continue;
         const models = parseModelListOutput(output);
         if (models.length > 0) return models;

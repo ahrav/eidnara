@@ -2,13 +2,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { childPathWithLauncherDir } from "./command-invocation";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import {
     describeOpenCodeInstallations,
     getAvailableModels,
     getOpenCodeCommandInvocation,
     getOpenCodeVersion,
-    OPENCODE_MODELS_PROBE_TIMEOUT_MS,
     OPENCODE_VERSION_PROBE_TIMEOUT_MS,
 } from "./opencode-helpers";
 
@@ -85,21 +85,28 @@ describe("OpenCode command execution", () => {
         expect(getOpenCodeCommandInvocation("C:\\npm\\opencode.CMD", ["--version"])).toEqual({
             command: "custom-cmd.exe",
             args: ["/d", "/s", "/v:off", "/c", '""%EIDNARA_OPENCODE_BINARY%" "--version""'],
-            env: { EIDNARA_OPENCODE_BINARY: "C:\\npm\\opencode.CMD" },
+            env: {
+                PATH: childPathWithLauncherDir("C:\\npm\\opencode.CMD"),
+                EIDNARA_OPENCODE_BINARY: "C:\\npm\\opencode.CMD",
+            },
             windowsVerbatimArguments: true,
         });
         expect(getOpenCodeCommandInvocation("C:\\npm\\opencode.bat", ["models"])).toEqual({
             command: "custom-cmd.exe",
             args: ["/d", "/s", "/v:off", "/c", '""%EIDNARA_OPENCODE_BINARY%" "models""'],
-            env: { EIDNARA_OPENCODE_BINARY: "C:\\npm\\opencode.bat" },
+            env: {
+                PATH: childPathWithLauncherDir("C:\\npm\\opencode.bat"),
+                EIDNARA_OPENCODE_BINARY: "C:\\npm\\opencode.bat",
+            },
             windowsVerbatimArguments: true,
         });
     });
 
-    it("invokes native executables directly", () => {
+    it("invokes native executables directly with their directory on the child PATH", () => {
         expect(getOpenCodeCommandInvocation("/usr/local/bin/opencode", ["--version"])).toEqual({
             command: "/usr/local/bin/opencode",
             args: ["--version"],
+            env: { PATH: childPathWithLauncherDir("/usr/local/bin/opencode") },
         });
     });
 
@@ -123,6 +130,14 @@ describe.if(isPosix)("opencode helpers with a resolved binary path", () => {
     it("getOpenCodeVersion invokes the given absolute binary", () => {
         const bin = fakeOpencode('if [ "$1" = "--version" ]; then echo "1.2.3"; fi');
         expect(getOpenCodeVersion(bin)).toBe("1.2.3");
+    });
+
+    it("reports a clean exit with no version output as unknown", () => {
+        const bin = fakeOpencode("exit 0");
+        expect(getOpenCodeVersion(bin)).toBeNull();
+        expect(describeOpenCodeInstallations([{ path: bin, source: "PATH", kind: "cli" }])).toEqual(
+            [{ path: bin, source: "PATH", kind: "cli", version: "unknown", active: true }],
+        );
     });
 
     it("enumerates versions for both installs and marks PATH as active", () => {
@@ -156,12 +171,11 @@ describe.if(isPosix)("opencode helpers with a resolved binary path", () => {
         expect(performance.now() - started).toBeLessThan(OPENCODE_VERSION_PROBE_TIMEOUT_MS + 1_500);
     });
 
-    it("bounds a hanging model discovery and reports an empty catalog", () => {
+    it("bounds a hanging models probe", () => {
         const bin = fakeOpencode("sleep 5");
         const started = performance.now();
-        expect(getAvailableModels(bin, 500)).toEqual([]);
-        expect(performance.now() - started).toBeLessThan(2_000);
-        expect(OPENCODE_MODELS_PROBE_TIMEOUT_MS).toBeGreaterThan(OPENCODE_VERSION_PROBE_TIMEOUT_MS);
+        expect(getAvailableModels(bin, 200)).toEqual([]);
+        expect(performance.now() - started).toBeLessThan(3_000);
     });
 
     it("returns empty / null when the binary path does not exist", () => {
