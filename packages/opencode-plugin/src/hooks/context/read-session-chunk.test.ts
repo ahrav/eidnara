@@ -223,6 +223,46 @@ describe("readSessionChunk", () => {
         expect(chunk.text).not.toContain("tool call");
     });
 
+    it("keeps a media-only user turn as a placeholder instead of noise", () => {
+        useTempDataHome("read-session-media-turn-");
+        createOpenCodeDbWithMessages("ses-media", [
+            {
+                id: "m-1",
+                role: "user",
+                part: { type: "file", mime: "image/png", filename: "screen.png", url: "data:..." },
+            },
+            { id: "m-2", role: "assistant", part: { type: "text", text: "I see the screenshot" } },
+        ]);
+
+        const chunk = readSessionChunk("ses-media", 10_000, 1);
+
+        expect(chunk.text).toContain("[1] U: [media:image image/png screen.png]");
+        expect(chunk.text).toContain("[2] A: I see the screenshot");
+        expect(chunk.toolOnlyRanges).toEqual([]);
+    });
+
+    it("drops ignored text from a turn that also carries real text", () => {
+        useTempDataHome("read-session-mixed-ignored-");
+        const mixed: RawMessage[] = [
+            {
+                id: "m-1",
+                ordinal: 1,
+                role: "user",
+                parts: [
+                    { type: "text", text: "## Eidnara Status", ignored: true },
+                    { type: "text", text: "please fix the auth bug" },
+                ],
+                createdAt: 1,
+                version: null,
+            },
+        ];
+        withRawMessageProvider("ses-mixed", { readMessages: () => mixed }, () => {
+            const chunk = readSessionChunk("ses-mixed", 10_000, 1);
+            expect(chunk.text).toContain("please fix the auth bug");
+            expect(chunk.text).not.toContain("Eidnara Status");
+        });
+    });
+
     it("reuses cached raw messages within nested cache scopes and clears afterward", () => {
         useTempDataHome("read-session-cache-scope-");
         createOpenCodeDbWithMessages("ses-cache", [

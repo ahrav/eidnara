@@ -172,6 +172,16 @@ describe("tool-drop-target", () => {
             ).toBe(false);
         });
 
+        it("keeps a running OpenCode tool part open even with partial streamed output", () => {
+            expect(
+                partHasCompletedResult({
+                    type: "tool",
+                    callID: "c",
+                    state: { status: "running", output: "partial…", input: {} },
+                }),
+            ).toBe(false);
+        });
+
         it("keeps a pending OpenCode tool part open", () => {
             expect(
                 partHasCompletedResult({ type: "tool", callID: "c", state: { status: "pending" } }),

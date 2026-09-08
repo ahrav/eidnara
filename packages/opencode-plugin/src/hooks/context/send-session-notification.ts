@@ -214,8 +214,14 @@ async function deliverIgnoredMessage(
             const resolved = await resolvePromptContext(client, sessionId);
             if (resolved) {
                 agent = agent ?? resolved.agent;
+                // A variant belongs to one model, so it carries over only when the model does too.
+                const sameModel =
+                    model === undefined ||
+                    (resolved.model !== undefined &&
+                        model.providerID === resolved.model.providerID &&
+                        model.modelID === resolved.model.modelID);
                 model = model ?? resolved.model;
-                variant = variant ?? resolved.variant;
+                if (sameModel) variant = variant ?? resolved.variant;
             }
         } catch {
             // If resolution fails, use caller-supplied params without blocking the notification.

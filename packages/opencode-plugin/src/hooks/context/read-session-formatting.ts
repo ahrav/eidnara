@@ -26,6 +26,7 @@ export function hasMeaningfulUserText(parts: unknown[]): boolean {
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const candidate = part as Record<string, unknown>;
+        if (isMediaPart(candidate)) return true;
         if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
         if (candidate.ignored === true) continue;
 
@@ -41,11 +42,44 @@ export function hasMeaningfulUserText(parts: unknown[]): boolean {
     return false;
 }
 
+function isMediaPart(part: Record<string, unknown>): boolean {
+    return part.type === "file" || part.type === "image";
+}
+
+function mediaKind(mediaType: string): string {
+    if (mediaType.startsWith("image/")) return "image";
+    if (mediaType.startsWith("audio/")) return "audio";
+    if (mediaType.startsWith("video/")) return "video";
+    if (mediaType === "application/pdf") return "document";
+    return "file";
+}
+
+// Field precedence and output format match `media_placeholder` in `crates/daemon/src/historian_chunk.rs`.
+function mediaPlaceholder(part: Record<string, unknown>): string {
+    const mediaType =
+        (typeof part.mime === "string" && part.mime) ||
+        (typeof part.mimeType === "string" && part.mimeType) ||
+        "application/octet-stream";
+    const filename =
+        (typeof part.filename === "string" && part.filename) ||
+        (typeof part.name === "string" && part.name) ||
+        null;
+    const kind = mediaKind(mediaType);
+    return filename === null
+        ? `[media:${kind} ${mediaType}]`
+        : `[media:${kind} ${mediaType} ${filename}]`;
+}
+
 export function extractTexts(parts: unknown[]): string[] {
     const texts: string[] = [];
     for (const part of parts) {
         if (part === null || typeof part !== "object") continue;
         const p = part as Record<string, unknown>;
+        if (isMediaPart(p)) {
+            texts.push(mediaPlaceholder(p));
+            continue;
+        }
+        if (p.ignored === true) continue;
         if (p.type === "text" && typeof p.text === "string" && p.text.trim().length > 0) {
             texts.push(p.text.trim());
         }

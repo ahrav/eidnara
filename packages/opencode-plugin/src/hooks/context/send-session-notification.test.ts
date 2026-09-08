@@ -360,4 +360,27 @@ describe("sendIgnoredMessage", () => {
         expect(body.variant).toBe("high");
         expect(session.messages).not.toHaveBeenCalled();
     });
+
+    it("does not inherit the resolved variant when the caller overrides the model", async () => {
+        const session = titledClientWithLastTurn();
+        await sendIgnoredMessage({ session }, "ses-titled", "explicit model", {
+            providerId: "openai",
+            modelId: "gpt-5.5",
+        });
+        const body = lastPromptBody(session.prompt);
+        expect(body.agent).toBe("build");
+        expect(body.model).toEqual({ providerID: "openai", modelID: "gpt-5.5" });
+        expect(body.variant).toBeUndefined();
+    });
+
+    it("inherits the resolved variant when the caller names the same model", async () => {
+        const session = titledClientWithLastTurn();
+        await sendIgnoredMessage({ session }, "ses-titled", "same model", {
+            providerId: "anthropic",
+            modelId: "claude-opus-4-8",
+        });
+        const body = lastPromptBody(session.prompt);
+        expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-8" });
+        expect(body.variant).toBe("thinking");
+    });
 });

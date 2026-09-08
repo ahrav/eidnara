@@ -315,7 +315,10 @@ export function partHasCompletedResult(part: unknown): boolean {
     if (!isRecord(part)) return false;
     if (part.type === "tool") {
         const fields = toolPartFields(part);
-        if (fields.status === "completed" || fields.status === "error") return true;
+        // A `running` tool may already hold partial streamed output.
+        if (fields.status !== undefined) {
+            return fields.status === "completed" || fields.status === "error";
+        }
         return fields.result.key === "output" && typeof readRef(fields.result) === "string";
     }
     return part.type === "tool_result";
