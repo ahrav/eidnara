@@ -1,7 +1,7 @@
 import { execFileSync, execSync } from "node:child_process";
 import { extname } from "node:path";
 import type { OpenCodeInstallation } from "./opencode-detect";
-import { firstSemver } from "./semver";
+import { standaloneVersion } from "./semver";
 
 export interface OpenCodeCommandInvocation {
     command: string;
@@ -79,7 +79,7 @@ export function describeOpenCodeInstallations(
         // Only the parsed semver enters the report; a wrapper's stdout can carry warnings naming paths or credentials.
         version:
             installation.kind === "cli"
-                ? (firstSemver(getOpenCodeVersion(installation.path)) ?? "unknown")
+                ? (standaloneVersion(getOpenCodeVersion(installation.path)) ?? "unknown")
                 : "unknown",
         active: index === 0,
     }));

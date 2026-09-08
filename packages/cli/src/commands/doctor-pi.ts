@@ -16,6 +16,7 @@ import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics, sanitizeString } from "../lib/diagnostics-pi";
 import { readFileTail } from "../lib/fs-utils";
 import { readJsoncLenient } from "../lib/jsonc-config";
+import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
 import { bundleIssueReport } from "../lib/logs-pi";
 import { getEidnaraLogPath, getPiAgentDir, getPiUserExtensionsPath } from "../lib/paths";
 import {
@@ -26,6 +27,7 @@ import {
     type PiBinaryInfo,
 } from "../lib/pi-helpers";
 import { isPromptCancelledError, type PromptIO, promptIO } from "../lib/prompts";
+import { standaloneVersion } from "../lib/semver";
 import { writePiSettingsPackage } from "./setup-pi";
 
 // Pi 0.74.0 changed the package scope from `@mariozechner/pi-coding-agent` to `@earendil-works/pi-coding-agent`; older Pi versions cannot load this extension because its peerDependency uses the new scope.
@@ -188,17 +190,19 @@ async function runHealthChecks(options: {
     if (!pi) {
         add(results, "fail", "Pi binary not found on PATH or at ~/.pi/bin/pi");
     } else {
-        const version = options.deps.getPiVersion(pi.path);
+        const output = options.deps.getPiVersion(pi.path);
+        // `getPiVersion` returns the raw `pi --version` output; only a line
+        // that is nothing but a version counts, so a warning that quotes some
+        // other tool's version cannot pass as Pi's.
+        const version = standaloneVersion(output);
         const compare = compareSemver(version, MIN_PI_VERSION);
-        if (version === null) {
+        if (output === null) {
             add(results, "fail", `Pi CLI was found at ${pi.path} but could not be executed`);
-        } else if (compare === null) {
-            // `getPiVersion` returns the raw `pi --version` output, stderr
-            // included; only a parseable semver counts as a detected version.
+        } else if (version === null || compare === null) {
             add(
                 results,
                 "fail",
-                `Pi CLI at ${pi.path} printed unrecognized version output: ${describeVersionOutput(version)}`,
+                `Pi CLI at ${pi.path} printed unrecognized version output: ${describeVersionOutput(output)}`,
             );
         } else if (compare < 0) {
             add(results, "pass", `Pi ${version} detected at ${pi.path}`);
@@ -465,6 +469,15 @@ async function runIssueFlow(options: {
 
         // A lone discovered session still filters: the append-only log can hold older sessions' records.
         let sessionFilter: string | null = report.recentSessions[0]?.sessionId ?? null;
+        if (report.recentSessions.length === 0 && report.sessionDiscovery === "unavailable") {
+            // Discovery failed rather than found nothing, so cross-session records
+            // are excluded unless the user opts in explicitly.
+            const includeAll = await options.prompts.confirm(
+                "The Pi sessions directory could not be read, so log records cannot be attributed to this session. Include records from every session in the report?",
+                false,
+            );
+            if (!includeAll) sessionFilter = EXCLUDE_SESSION_RECORDS;
+        }
         if (report.recentSessions.length > 1) {
             const choice = await options.prompts.selectOne(
                 "Which Pi session is this issue about? (filters log lines from other sessions)",

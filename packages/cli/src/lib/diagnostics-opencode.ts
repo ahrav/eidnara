@@ -83,6 +83,11 @@ export interface DiagnosticReport {
      */
     recentSessions: RecentSessionSummary[];
     /**
+     * `unavailable` when the OpenCode database exists but could not be opened
+     * or queried, so an empty `recentSessions` is a failure, not an absence.
+     */
+    sessionDiscovery: "ok" | "unavailable";
+    /**
      * `historianDumps` groups historian dumps by project directory.
      * `legacyDumps` contains dumps from the harness-scoped tmp directory.
      */
@@ -223,13 +228,17 @@ function collectHistorianDumps(
  * The session list groups project directories and powers the `--issue` flow's session picker.
  *
  */
-async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
+type SessionDiscovery =
+    | { status: "ok"; sessions: RecentSessionSummary[] }
+    | { status: "unavailable"; sessions: [] };
+
+async function collectRecentSessions(): Promise<SessionDiscovery> {
     // Runtime `XDG_DATA_HOME` or `HOME` overrides determine the database path.
     // Node's `homedir()` honors runtime `HOME` overrides; Bun's does not.
     const dataHome =
         process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), ".local", "share");
     const opencodeDbPath = join(dataHome, "opencode", "opencode.db");
-    if (!existsSync(opencodeDbPath)) return [];
+    if (!existsSync(opencodeDbPath)) return { status: "ok", sessions: [] };
 
     // The shared module picks `bun:sqlite` or `node:sqlite` for the running
     // runtime and loads it at import time, so the import stays lazy: a Node
@@ -239,7 +248,7 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
     try {
         DatabaseClass = (await import("@eidnara/opencode/shared/sqlite")).Database;
     } catch {
-        return [];
+        return { status: "unavailable", sessions: [] };
     }
 
     let db: InstanceType<typeof DatabaseClass> | null = null;
@@ -259,7 +268,7 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
             title: unknown;
             time_updated: unknown;
         }>;
-        return rows.flatMap((row) => {
+        const sessions = rows.flatMap((row) => {
             const sessionId = typeof row.id === "string" ? row.id : null;
             const directory = typeof row.directory === "string" ? row.directory : null;
             if (!sessionId || !directory) return [];
@@ -270,8 +279,9 @@ async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
                     : "";
             return [{ sessionId, title, directory, lastActiveAt }];
         });
+        return { status: "ok", sessions };
     } catch {
-        return [];
+        return { status: "unavailable", sessions: [] };
     } finally {
         try {
             db?.close();
@@ -302,7 +312,8 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         );
     }
     const conflictResult = detectConflicts(process.cwd(), { compactionEnabled });
-    const recentSessions = await collectRecentSessions();
+    const discovery = await collectRecentSessions();
+    const recentSessions = discovery.sessions;
     const opencodeInstallations = describeOpenCodeInstallations(detectOpenCodeInstallations());
     const activeInstallation = opencodeInstallations[0];
     let openCodeInstallKind: "cli" | "desktop" | "none" = "none";
@@ -347,6 +358,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             sizeKb: Math.round(logFileSize / 1024),
         },
         recentSessions,
+        sessionDiscovery: discovery.status,
         historianDumps: collectHistorianDumps(recentSessions),
     };
 }

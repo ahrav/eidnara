@@ -376,6 +376,7 @@ describe("bundleIssueReport secret redaction", () => {
                 },
                 logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
                 recentSessions: [],
+                sessionDiscovery: "ok",
                 historianDumps: {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
@@ -466,6 +467,7 @@ describe("bundleIssueReport secret redaction", () => {
                         lastActiveAt: "2026-05-11T12:00:00.000Z",
                     },
                 ],
+                sessionDiscovery: "ok",
                 historianDumps: {
                     byProject: [],
                     legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
@@ -665,6 +667,7 @@ function baseReport(root: string): DiagnosticReport {
         },
         logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
         recentSessions: [],
+        sessionDiscovery: "ok",
         historianDumps: {
             byProject: [],
             legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },

@@ -233,6 +233,7 @@ describe("Pi doctor", () => {
                 sizeKb: 1,
             },
             recentSessions: [],
+            sessionDiscovery: "ok",
             historianDumps: {
                 byProject: [],
                 legacyDumps: {
@@ -335,6 +336,7 @@ describe("Pi doctor", () => {
                     lastActiveAt: "2026-04-28T12:00:00.000Z",
                 },
             ],
+            sessionDiscovery: "ok",
             historianDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
@@ -356,6 +358,82 @@ describe("Pi doctor", () => {
         const report = readFileSync(join(cwd, "eidnara-pi-issue-20260428-123456.md"), "utf-8");
         expect(report).toContain("line from the only session");
         expect(report).not.toContain("line from an older session");
+    });
+
+    it("excludes session-tagged records when session discovery failed and the user declines all sessions", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const logPath = join(root, "eidnara.log");
+        writeFileSync(
+            logPath,
+            [
+                "[2026-04-28T12:00:00.000Z] [eidnara][some-session] tagged line",
+                "[2026-04-28T12:00:01.000Z] untagged startup line",
+            ].join("\n"),
+        );
+        const originalConsoleLog = console.log;
+        console.log = () => {};
+        // The single confirm answered here is the include-all-sessions question.
+        const prompts = new MockPrompts({ texts: ["Title", "Description"], confirms: [false] });
+        const diagnosticReport: PiDiagnosticReport = {
+            timestamp: "2026-04-28T12:34:56.000Z",
+            platform: "linux",
+            arch: "x64",
+            nodeVersion: "v24.0.0",
+            pluginVersion: "0.1.0",
+            piInstalled: true,
+            piPath: join(root, ".pi", "bin", "pi"),
+            piVersion: "0.74.0",
+            settings: {
+                path: join(agentDir, "settings.json"),
+                exists: true,
+                hasEidnaraPackage: true,
+                packages: ["npm:@eidnara/pi"],
+            },
+            configPaths: {
+                agentDir,
+                userConfig: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                projectConfig: join(cwd, ".eidnara", "eidnara.jsonc"),
+            },
+            userConfig: {
+                path: join(root, ".config", "eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            projectConfig: {
+                path: join(cwd, ".eidnara", "eidnara.jsonc"),
+                exists: true,
+                flags: {},
+            },
+            loadedConfigPaths: [],
+            loadWarnings: [],
+            conflicts: { knownConflicts: [], otherPiExtensions: [] },
+            logFile: { path: logPath, exists: true, sizeKb: 1 },
+            recentSessions: [],
+            sessionDiscovery: "unavailable",
+            historianDumps: {
+                byProject: [],
+                legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+            },
+        };
+
+        const options = baseOptions(root, cwd, prompts);
+        try {
+            const code = await runDoctor({
+                ...options,
+                issue: true,
+                deps: { ...options.deps, collectDiagnostics: async () => diagnosticReport },
+            });
+            expect(code).toBe(0);
+        } finally {
+            console.log = originalConsoleLog;
+        }
+
+        const report = readFileSync(join(cwd, "eidnara-pi-issue-20260428-123456.md"), "utf-8");
+        expect(report).toContain("untagged startup line");
+        expect(report).not.toContain("tagged line");
     });
 
     it("sanitizes the issue title before passing it to gh issue create", async () => {
@@ -405,6 +483,7 @@ describe("Pi doctor", () => {
             conflicts: { knownConflicts: [], otherPiExtensions: [] },
             logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
             recentSessions: [],
+            sessionDiscovery: "ok",
             historianDumps: {
                 byProject: [],
                 legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
@@ -494,6 +573,34 @@ describe("Pi doctor", () => {
         expect(stderr.join("\n")).toContain("FAIL Pi CLI at");
         expect(stderr.join("\n")).toContain("printed unrecognized version output");
         expect(stderr.join("\n")).not.toContain("\n  throw err;");
+    });
+
+    it("compares Pi's own version line, not a warning that quotes another version", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("eidnara-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const prompts = new MockPrompts();
+        const options = baseOptions(root, cwd, prompts);
+        const stderr: string[] = [];
+        const originalConsoleError = console.error;
+        console.error = (...args: unknown[]) => {
+            stderr.push(args.map(String).join(" "));
+        };
+
+        let code: number;
+        try {
+            code = await runDoctor({
+                ...options,
+                deps: { ...options.deps, getPiVersion: () => "Node 24.15.0 is deprecated\n0.70.0" },
+            });
+        } finally {
+            console.error = originalConsoleError;
+        }
+
+        expect(code).toBe(1);
+        expect(prompts.messages.join("\n")).toContain("PASS Pi 0.70.0 detected");
+        expect(stderr.join("\n")).toContain("Pi 0.70.0 is older than required 0.74.0");
     });
 
     it("does not write a default eidnara.jsonc over an existing eidnara.json in --force mode", async () => {

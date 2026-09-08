@@ -23,7 +23,7 @@ import {
     getSharedUserConfigPath,
 } from "./paths";
 import { detectPiBinary, getPiVersion, isEidnaraPiPackageEntry } from "./pi-helpers";
-import { firstSemver } from "./semver";
+import { standaloneVersion } from "./semver";
 
 /** Pi-named aliases of the shared historian-dump shapes. */
 export type PiHistorianDumpMeta = HistorianDumpMeta;
@@ -78,6 +78,11 @@ export interface PiDiagnosticReport {
      * Pi wraps each session slug in `--`.
      */
     recentSessions: PiRecentSessionSummary[];
+    /**
+     * `unavailable` when the sessions directory exists but could not be read,
+     * so an empty `recentSessions` is a failure, not an absence.
+     */
+    sessionDiscovery: "ok" | "unavailable";
     /** The report keeps legacy tmp-dir dumps separate from project-grouped dumps. */
     historianDumps: PiHistorianDumpsReport;
 }
@@ -276,9 +281,13 @@ export function piSessionIdFromFileName(fileName: string): string {
  *
  * The session reader returns an empty array when `~/.pi/agent/sessions/` does not exist.
  */
-function collectPiRecentSessions(): PiRecentSessionSummary[] {
+type PiSessionDiscovery =
+    | { status: "ok"; sessions: PiRecentSessionSummary[] }
+    | { status: "unavailable"; sessions: [] };
+
+function collectPiRecentSessions(): PiSessionDiscovery {
     const sessionsRoot = getPiSessionsRoot();
-    if (!existsSync(sessionsRoot)) return [];
+    if (!existsSync(sessionsRoot)) return { status: "ok", sessions: [] };
     try {
         const slugs = readdirSync(sessionsRoot, { withFileTypes: true })
             .filter((entry) => entry.isDirectory())
@@ -313,7 +322,7 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
 
         candidates.sort((a, b) => b.mtime - a.mtime);
         // Headers are read only for the sessions that are reported.
-        return candidates.slice(0, 5).map((entry) => {
+        const sessions = candidates.slice(0, 5).map((entry) => {
             let directory = entry.slugDirectory;
             try {
                 directory = readSessionHeaderCwd(entry.path) ?? directory;
@@ -324,8 +333,9 @@ function collectPiRecentSessions(): PiRecentSessionSummary[] {
                 lastActiveAt: new Date(entry.mtime).toISOString(),
             };
         });
+        return { status: "ok", sessions };
     } catch {
-        return [];
+        return { status: "unavailable", sessions: [] };
     }
 }
 
@@ -379,7 +389,8 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const otherPiExtensions = packages
         .filter((entry) => !isEidnaraPiPackageEntry(entry, getPiAgentDir()))
         .map(describePackageEntry);
-    const recentSessions = collectPiRecentSessions();
+    const discovery = collectPiRecentSessions();
+    const recentSessions = discovery.sessions;
     const historianDumps = collectPiHistorianDumps(recentSessions);
 
     return {
@@ -392,7 +403,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         piPath: pi?.path ?? null,
         // Only the parsed semver enters the report; `pi --version` output can
         // carry warnings that name paths or credentials.
-        piVersion: pi ? firstSemver(getPiVersion(pi.path)) : null,
+        piVersion: pi ? standaloneVersion(getPiVersion(pi.path)) : null,
         settings: {
             path: settingsPath,
             exists: existsSync(settingsPath),
@@ -421,6 +432,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             sizeKb: Math.round(logFileSize / 1024),
         },
         recentSessions,
+        sessionDiscovery: discovery.status,
         historianDumps,
     };
 }

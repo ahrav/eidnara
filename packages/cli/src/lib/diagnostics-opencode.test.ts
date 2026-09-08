@@ -89,4 +89,24 @@ describe("collectDiagnostics", () => {
         expect(report.conflicts.compactionEnabled).toBe(false);
         expect(report.conflicts.hasConflict).toBe(false);
     });
+
+    it("reports session discovery as unavailable when the database cannot be read", async () => {
+        const { root } = isolate();
+        mkdirSync(join(root, "data", "opencode"), { recursive: true });
+        writeFileSync(join(root, "data", "opencode", "opencode.db"), "not a sqlite database");
+
+        const report = await collectDiagnostics();
+
+        expect(report.recentSessions).toEqual([]);
+        expect(report.sessionDiscovery).toBe("unavailable");
+    });
+
+    it("reports session discovery as ok when no database exists", async () => {
+        isolate();
+
+        const report = await collectDiagnostics();
+
+        expect(report.recentSessions).toEqual([]);
+        expect(report.sessionDiscovery).toBe("ok");
+    });
 });

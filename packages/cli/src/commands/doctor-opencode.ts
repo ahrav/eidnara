@@ -21,6 +21,7 @@ import {
 } from "../adapters/opencode";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
 import { compactionEnabledFor } from "../lib/eidnara-modes";
+import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
 import { bundleIssueReport } from "../lib/logs-opencode";
 import { detectOpenCodeInstallations } from "../lib/opencode-detect";
 import {
@@ -117,6 +118,15 @@ async function runIssueFlow(): Promise<number> {
 
         // A lone discovered session still filters: the append-only log can hold older sessions' records.
         let sessionFilter: string | null = report.recentSessions[0]?.sessionId ?? null;
+        if (report.recentSessions.length === 0 && report.sessionDiscovery === "unavailable") {
+            // Discovery failed rather than found nothing, so cross-session records
+            // are excluded unless the user opts in explicitly.
+            const includeAll = await confirm(
+                "The OpenCode session database could not be read, so log records cannot be attributed to this session. Include records from every session in the report?",
+                false,
+            );
+            if (!includeAll) sessionFilter = EXCLUDE_SESSION_RECORDS;
+        }
         if (report.recentSessions.length > 1) {
             const choice = await selectOne(
                 "Which session is this issue about? (filters log lines from other sessions)",

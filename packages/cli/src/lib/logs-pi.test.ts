@@ -45,6 +45,7 @@ function makeReport(root: string, logPath: string): PiDiagnosticReport {
         recentSessions: [
             { sessionId: SELECTED, directory: "/work/a", lastActiveAt: "2026-05-11T12:00:00.000Z" },
         ],
+        sessionDiscovery: "ok",
         historianDumps: {
             byProject: [],
             legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
