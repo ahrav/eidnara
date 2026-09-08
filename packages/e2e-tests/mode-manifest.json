@@ -1,6 +1,6 @@
 {
     "schema": 1,
-    "header": "Every entry runs through the rust-mode direct-host fixture. Suites skip themselves when Cargo or the fixture is unavailable.",
+    "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-smoke` runs the Pi RPC process under Node and skips itself when Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure.",
     "entries": [
         {
             "path": "tests/cache-invariants.test.ts",
@@ -22,6 +22,14 @@
             "path": "tests/incident-pool-green.test.ts",
             "tier": "rust-only",
             "rationale": "baseline-green incident variants executed in isolation through the incident-pool runner",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/pi-smoke.test.ts",
+            "tier": "pi-smoke",
+            "rationale": "the Pi RPC process loads the built extension, completes one mock turn with ctx_search, ctx_memory, and ctx_note registered, and leaves no storage file in the isolated data directory",
             "contract_refs": [
                 "U5-PORT"
             ]
