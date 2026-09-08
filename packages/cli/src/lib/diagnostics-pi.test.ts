@@ -49,6 +49,26 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
         });
     });
 
+    it("redacts every credential-shaped key the shared vocabulary knows, plus cookies", () => {
+        expect(
+            sanitizeValue({
+                credential: "c",
+                auth: "a",
+                private_key: "p",
+                access_key: "k",
+                cookie: "session=abc",
+                injection_budget_tokens: 4000,
+            }),
+        ).toEqual({
+            credential: "<REDACTED>",
+            auth: "<REDACTED>",
+            private_key: "<REDACTED>",
+            access_key: "<REDACTED>",
+            cookie: "<REDACTED>",
+            injection_budget_tokens: 4000,
+        });
+    });
+
     it("keeps only presence and length for prompt prose", () => {
         expect(
             sanitizeValue({

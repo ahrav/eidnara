@@ -10,7 +10,7 @@ import {
 } from "@eidnara/opencode/config/config-paths";
 import { getProjectEidnaraHistorianDir } from "@eidnara/opencode/shared/data-path";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
-import { escapeRegex, redactSecretText } from "@eidnara/opencode/shared/redaction";
+import { escapeRegex, isSecretKey, redactSecretText } from "@eidnara/opencode/shared/redaction";
 import { loadPiConfig } from "@eidnara/pi/config";
 import {
     type HistorianDumpMeta,
@@ -181,7 +181,7 @@ export function sanitizeString(value: string): string {
 }
 
 function shouldRedactKey(key: string): boolean {
-    return /api[_-]?key|token|secret|password|authorization|cookie/i.test(key);
+    return isSecretKey(key) || /cookie/i.test(key);
 }
 
 /** Prompt fields hold arbitrary private prose; the report keeps only presence and length. */
@@ -393,6 +393,10 @@ function statLogFile(path: string): PiDiagnosticReport["logFile"] {
     }
 }
 
+function sanitizeOptional(value: string | null): string | null {
+    return value === null ? null : sanitizeString(value);
+}
+
 export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnosticReport> {
     const pi = detectPiBinary();
     const settingsPath = getPiUserExtensionsPath();
@@ -416,7 +420,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         pluginVersion: getSelfVersion(),
         piInstalled: pi !== null,
         piPath: pi?.path ?? null,
-        piVersion: pi ? getPiVersion(pi.path) : null,
+        piVersion: pi ? sanitizeOptional(getPiVersion(pi.path)) : null,
         settings: {
             path: settingsPath,
             exists: existsSync(settingsPath),

@@ -56,7 +56,7 @@ const ENTRY_START_PATTERN = /^\[\d{4}-\d{2}-\d{2}T[^\]]*\]/;
 
 /**
  * `sessionId` may end with `_<uuid>` because log tags contain bare UUIDs.
- * The filter keeps an entry only if every tag matches `sessionId`.
+ * The filter keeps an entry only if it has tags and every tag matches `sessionId`.
  * Continuation lines retain the preceding entry's keep decision; lines before the first entry are excluded.
  */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
@@ -66,7 +66,7 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     return lines.filter((line) => {
         if (ENTRY_START_PATTERN.test(line)) {
             const tags = [...line.matchAll(TAG_PATTERN)].map((match) => match[1] ?? "");
-            keep = tags.every(isWanted);
+            keep = tags.length > 0 && tags.every(isWanted);
         }
         return keep;
     });
