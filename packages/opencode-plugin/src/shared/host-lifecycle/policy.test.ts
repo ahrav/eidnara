@@ -410,17 +410,16 @@ describe("native invocation mapping", () => {
         const root = tempDir("eidnara-policy-fallback-budget-");
         const invocationLog = path.join(root, "budget-invocations.log");
         const binary = path.join(root, "budget-eidnara-host.sh");
-        // The first invocation reports the payload missing after burning a
-        // second; the second (with --payload-dir) succeeds immediately.
+        // The retry's two seconds fit a fresh aggregate but not the residual.
         writeFileSync(
             binary,
             `#!/bin/sh\necho "$*" >> ${invocationLog}\n` +
                 `if [ "$2" != "--payload-dir" ]; then sleep 1; echo '${missingPayloadResultJson()}'; exit 1; fi\n` +
-                `echo '${startResultJson("start")}'\nexit 0\n`,
+                `sleep 2\necho '${startResultJson("start")}'\nexit 0\n`,
         );
         chmodSync(binary, 0o700);
         const LOOKUP_MS = 500;
-        const AGGREGATE_MS = 20_000;
+        const AGGREGATE_MS = 3_000;
         try {
             const policy = policyFor({
                 env: { XDG_DATA_HOME: root },
@@ -441,14 +440,15 @@ describe("native invocation mapping", () => {
             const result = await policy.start();
             const elapsed = Date.now() - started;
 
-            expect(result.reason).toBe("started");
             // Both invocations happened, so the retry really did run.
             expect(readFileSync(invocationLog, "utf8").trim().split("\n")).toEqual([
                 "start",
                 "start --payload-dir /qualified/package",
             ]);
-            // The whole command stayed inside one aggregate rather than two.
-            expect(elapsed).toBeLessThan(AGGREGATE_MS);
+            // A fresh aggregate would let the retry return `started` after about 3.5 seconds.
+            expect(result.reason).toBe("startup_timeout");
+            expect(elapsed).toBeGreaterThanOrEqual(AGGREGATE_MS - 100);
+            expect(elapsed).toBeLessThan(AGGREGATE_MS + 500);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -905,6 +905,73 @@ describe("native invocation mapping", () => {
             rmSync(root, { recursive: true, force: true });
         }
     }, 20_000);
+
+    test("a readiness probe whose synchronous prefix outlasts the aggregate is dropped", async () => {
+        const root = tempDir("eidnara-policy-readiness-sync-prefix-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                outerAggregateMs: 750,
+                readinessProbe: (budgetMs) => {
+                    const until = performance.now() + budgetMs + 200;
+                    while (performance.now() < until) {
+                        // spin
+                    }
+                    return Promise.resolve({
+                        ...compatibleObservation(),
+                        readiness: {
+                            transport: { state: "ready", reason: "healthy" },
+                            storage: { state: "unavailable", reason: "storage_unavailable" },
+                        },
+                    });
+                },
+            });
+            for (const command of ["status", "doctor"] as const) {
+                const result = await policy[command]();
+                // The stale observation is refused; the native probe's verdict stands alone.
+                expect(result.ok).toBe(true);
+                expect(result.reason).toBe("healthy");
+                expect(
+                    result.checks.find((check) => check.id === "readiness.storage"),
+                ).toBeUndefined();
+            }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a compatibility verdict beyond the reported stage still fails status and doctor", async () => {
+        const root = tempDir("eidnara-policy-verdict-beyond-stage-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                readinessProbe: async () => ({
+                    ...compatibleObservation(),
+                    // The daemon stage passed and the probe stopped there, yet the
+                    // snapshot carries mismatched epochs.
+                    epochs: { ...compatibleObservation().epochs, tagger: 99 },
+                    evaluatedThrough: "daemon" as const,
+                    readiness: { transport: { state: "ready", reason: "healthy" } },
+                }),
+            });
+            for (const result of [await policy.status(), await policy.doctor()]) {
+                expect(result.ok).toBe(false);
+                expect(result.reason).toBe("incompatible_epochs");
+                expect(result.remediation).toBe("align_versions");
+                // The unreached stage is still not asserted as a check.
+                expect(
+                    result.checks.find((check) => check.id === "compatibility.epochs"),
+                ).toBeUndefined();
+                expect(() => parseDaemonResult(JSON.stringify(result))).not.toThrow();
+            }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
 
     test("restart resolves the certified payload before one native transaction", async () => {
         const root = tempDir("eidnara-policy-restart-payload-");
@@ -1548,6 +1615,9 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(outcome.result.ok).toBe(false);
             expect(outcome.result.reason).toBe("native_probe_unavailable");
             expect(outcome.result.remediation).toBe("run_daemon_restart");
+            // The native start's `proof: "current"` is withdrawn with its success.
+            expect(outcome.result.versions.proof).toBeNull();
+            expect(() => parseDaemonResult(JSON.stringify(outcome.result))).not.toThrow();
             expect(outcome.authenticatedDaemonId).toBeUndefined();
             expect(outcome.storage).toBeNull();
             expect(storageProbes).toBe(0);
@@ -2123,6 +2193,40 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                     origin: "managed-default",
                     capability: "context",
                     deadlineMs: 1_000,
+                }),
+            ).rejects.toMatchObject({
+                name: "WaiterDetachedError",
+                cause_kind: "deadline",
+            });
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
+    test("a storage probe that answers after the caller deadline still detaches", async () => {
+        const root = tempDir("eidnara-policy-storage-at-deadline-");
+        const { binary } = fakeBinary(root);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                // The probe blocks the event loop past its deadline so its resolution microtask runs before the policy deadline timer.
+                storageProbe: (budgetMs) =>
+                    new Promise((resolve) => {
+                        const budgetEndsAt = performance.now() + budgetMs;
+                        setTimeout(() => {
+                            while (performance.now() < budgetEndsAt + 30) {
+                                // spin
+                            }
+                            resolve("starting");
+                        }, budgetMs - 20);
+                    }),
+            });
+            await expect(
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    deadlineMs: 800,
                 }),
             ).rejects.toMatchObject({
                 name: "WaiterDetachedError",

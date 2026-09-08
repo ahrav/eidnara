@@ -168,18 +168,19 @@ async function probeManagedStorage(
             // An abort means no waiter remains; the observation is left indeterminate rather than polled to the deadline. commentlint: allow(JUDGE)
             if (state !== "starting" || monotonicNow() >= deadline || signal?.aborted) return state;
             await new Promise<void>((resolve) => {
+                const onAbort = (): void => {
+                    clearTimeout(timer);
+                    resolve();
+                };
                 const timer = setTimeout(
-                    resolve,
-                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
-                );
-                signal?.addEventListener(
-                    "abort",
                     () => {
-                        clearTimeout(timer);
+                        // `once` removes the listener only when abort fires; the timer path must remove it too or every poll iteration leaves one behind. commentlint: allow(JUDGE)
+                        signal?.removeEventListener("abort", onAbort);
                         resolve();
                     },
-                    { once: true },
+                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
                 );
+                signal?.addEventListener("abort", onAbort, { once: true });
             });
             if (signal?.aborted) return "starting";
         }

@@ -264,6 +264,7 @@ function unprovenCompatibility(result: DaemonResultV1): DaemonResultV1 {
         ok: false,
         reason: "native_probe_unavailable",
         remediation: remediationForReason("native_probe_unavailable"),
+        versions: { ...result.versions, proof: null },
     };
 }
 
@@ -619,6 +620,11 @@ export class HostLifecyclePolicy {
             shared.then(
                 (value) => {
                     if (settled) return;
+                    // Reject values delivered at or after `deadlineAt` even if their microtask runs before the timer.
+                    if (deadlineAt !== undefined && monotonicNow() >= deadlineAt) {
+                        detach("deadline");
+                        return;
+                    }
                     settled = true;
                     if (timer !== null) clearTimeout(timer);
                     signal?.removeEventListener("abort", onAbort);
@@ -880,17 +886,19 @@ export class HostLifecyclePolicy {
                     const candidate = reasonPrecedence(check.reason) ?? Number.MAX_SAFE_INTEGER;
                     return candidate < winning ? check : winner;
                 }, undefined);
-            const state =
-                failed === undefined
-                    ? compatible.state
-                    : (fixedStateForReason(failed.reason) ?? compatible.state);
+            const reason = compatible.ok ? (failed?.reason ?? "healthy") : compatible.reason;
+            const remediation = compatible.ok
+                ? (failed?.remediation ?? null)
+                : compatible.remediation;
+            const ok = compatible.ok && failed === undefined;
+            const state = ok ? compatible.state : (fixedStateForReason(reason) ?? compatible.state);
             return {
                 ...compatible,
                 command,
-                ok: failed === undefined,
+                ok,
                 state,
-                reason: failed?.reason ?? "healthy",
-                remediation: failed?.remediation ?? null,
+                reason,
+                remediation,
                 readiness: observed.readiness,
                 checks,
             };
