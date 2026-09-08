@@ -246,7 +246,7 @@ export interface PersistedAssistantUsage {
     respondedAt: number;
 }
 
-/** Recovers persisted assistant usage after a restart or idle eviction. */
+/** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary are skipped, so a compacted session reports no usage until a post-compaction response lands. commentlint: allow(JUDGE) */
 export function findLastAssistantUsageFromOpenCodeDb(
     sessionId: string,
 ): PersistedAssistantUsage | null {
@@ -264,14 +264,21 @@ export function findLastAssistantUsageFromOpenCodeDb(
                             json_extract(data, '$.time.completed') as completedAt,
                             time_created as timeCreated
                      FROM message
-                     WHERE session_id = ?
+                     WHERE session_id = ?1
                        AND json_extract(data, '$.role') = 'assistant'
+                       AND COALESCE(json_extract(data, '$.summary'), 0) <> 1
+                       AND time_created > (
+                         SELECT COALESCE(MAX(time_created), -1)
+                         FROM message
+                         WHERE session_id = ?1
+                           AND COALESCE(json_extract(data, '$.summary'), 0) = 1
+                       )
                        AND json_extract(data, '$.providerID') IS NOT NULL
                        AND json_extract(data, '$.modelID') IS NOT NULL
                        AND COALESCE(json_extract(data, '$.tokens.input'), 0)
                          + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
                          + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) > 0
-                     ORDER BY time_created DESC
+                     ORDER BY time_created DESC, id DESC
                      LIMIT 1`,
                 )
                 .get(sessionId) as {
