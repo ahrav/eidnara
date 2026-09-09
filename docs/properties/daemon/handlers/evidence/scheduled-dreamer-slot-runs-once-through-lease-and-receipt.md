@@ -15,29 +15,33 @@ billable runs.
 Verified at HEAD. References are to `crates/daemon/src/dreamer_scheduler.rs`
 unless stated.
 
-- `DreamerScheduler::tick` (`:236`) reads the clock once for due-ness, asks the
+- `DreamerScheduler::tick` (`:235`) reads the clock once for due-ness, asks the
   host for its scheduled projects, and runs those due at or before that
-  instant oldest first (`due_projects`, `:256`). After a run the project's
-  next instant is recomputed from the tick instant (`advance`, `:289`), so
-  slots missed while the daemon was down are not back-filled. When the host
-  returns `Err`, `tick` returns one `TickEvent::Deferred` (`:240`) before the
-  due table is reconciled, so no project is dropped and no due instant moves.
+  instant oldest first (`due_projects`, `:255`). After a run the project's
+  next instant is recomputed from the clock as the run returns (`advance`,
+  `:288`, called at `:246`), so slots missed while the daemon was down are not
+  back-filled, and a slot that came due while the run itself was in progress
+  is not back-filled either: the loop waits for the next instant after the
+  run rather than re-ticking at once on an instant already in the past. When
+  the host returns `Err`, `tick` returns one `TickEvent::Deferred` (`:239`)
+  before the due table is reconciled, so no project is dropped and no due
+  instant moves.
 - `run` (`:161`) logs every `Skipped` and `Deferred` event to stderr and, after
   a deferred tick, waits the idle poll instead of the distance to the earliest
   due instant, which would otherwise be zero and re-tick at once against a
   failing store.
-- `run_slot` (`:304`) leases before it runs:
+- `run_slot` (`:303`) leases before it runs:
   `acquire_dreamer_task` with acquisition id `slot_command_id(task, due_at_ms)`,
   the scheduler's instance and slot, the registration generation, the task id,
   and the due instant as the claim's `source_revision`. Every acquisition
   decision other than `Claim` is a `Skipped` event with no run, and `tick`
   advances the project past the slot. A store `Err` from the generation lookup
   or from the acquisition is not a decision: `run_slot` returns
-  `TickEvent::Retained` (`:316`), `tick` leaves that project's
-  due instant in place (`:246`), and `run` waits the idle poll
+  `TickEvent::Retained` (`:315`), `tick` leaves that project's
+  due instant in place (`:245`), and `run` waits the idle poll
   before the next tick retries the same slot under the same acquisition id.
 - The command id the run is dispatched under is derived from the returned
-  claim's `source_revision` (`:358`), not from the slot that came due. The
+  claim's `source_revision` (`:357`), not from the slot that came due. The
   shared protocol rebinds a live claim held by the same instance and slot under
   an older registration generation (`crates/memory-store/src/task_lease.rs`,
   slot recovery in `acquire_task_lease`), and a rebound claim keeps its
@@ -51,7 +55,7 @@ unless stated.
   not used, so a clock step backwards cannot rank the successor below its
   predecessor.
 - Lease and completion instants are read from the clock as each operation
-  happens (`:333`, `:379`), so a long run for one project does not shorten the
+  happens (`:332`, `:378`), so a long run for one project does not shorten the
   lease of the project behind it in the same tick.
 - `SchedulerBridge::scheduled_projects` (`crates/daemon/src/lib.rs:13789`)
   takes the most recently bound binding on each route root
@@ -133,7 +137,9 @@ through `activate_module_authority`, so the root resolves to the other project
 at an equal generation. For binding selection:
 twelve routes bound on one root with distinct schedules and harnesses, so a
 pick by map order almost never matches the newest bind, then a rebind of the
-oldest channel and a newest binding with no schedule. For the per-project
+oldest channel and a newest binding with no schedule. For the post-run
+advance: a scripted host that moves the manual clock twelve minutes during a
+run on a five-minute schedule. For the per-project
 collapse: a second route root bound to the same authority project through
 `bind_authority_route` with a different schedule, then a third with none.
 

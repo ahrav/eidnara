@@ -228,9 +228,8 @@ impl DreamerScheduler {
 
     /// One evaluation at the clock's current instant. Projects due at or
     /// before it run in order of their due instant, then project name, so a
-    /// backlog drains oldest first; a project's next instant is recomputed
-    /// from that instant after it runs, so slots missed while the daemon was
-    /// down are not back-filled. Lease operations read the clock immediately
+    /// backlog drains oldest first. A project's next instant is recomputed
+    /// from the clock after its run returns. Lease operations read the clock immediately
     /// before each lease, so a long-running project does not shorten a later
     /// project's lease.
     pub(crate) async fn tick(&mut self, host: &dyn SchedulerHost) -> Vec<TickEvent> {
@@ -244,7 +243,7 @@ impl DreamerScheduler {
         for (due_at_ms, project) in due {
             let event = self.run_slot(host, project, due_at_ms).await;
             if !matches!(event, TickEvent::Retained { .. }) {
-                self.advance(project, now_ms);
+                self.advance(project, self.clock.now_ms());
             }
             events.push(event);
         }
@@ -752,6 +751,45 @@ mod tests {
                 "{identity}"
             );
         }
+        assert_eq!(
+            scheduler.next_due["git:a"].1,
+            T0 + 45 * MINUTE_MS,
+            "a's run crossed the 30-minute slot; its next instant counts from the post-run clock"
+        );
+        assert_eq!(
+            scheduler.next_due["git:b"].1,
+            T0 + 60 * MINUTE_MS,
+            "b's run crossed the 45-minute slot"
+        );
+    }
+
+    /// The scheduler waits for the next post-run instant instead of re-ticking an elapsed slot.
+    #[tokio::test]
+    async fn a_run_that_crosses_the_next_slot_does_not_back_fill_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut host = scripted(&store, vec![project(&store, "git:a", "*/5 * * * *")]);
+        host.run_takes = Some((Arc::clone(&clock), 12 * MINUTE));
+        let mut scheduler = DreamerScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+
+        clock.advance(5 * MINUTE);
+        let first = T0 + 5 * MINUTE_MS;
+        assert_eq!(ran(&scheduler.tick(&host).await), vec![("git:a", first)]);
+        assert_eq!(clock.now_ms(), first + 12 * MINUTE_MS + 1_000);
+        assert_eq!(
+            scheduler.earliest_due(),
+            Some(T0 + 20 * MINUTE_MS),
+            "the slots at 10 and 15 minutes fell inside the run"
+        );
+        assert!(scheduler.tick(&host).await.is_empty());
+        clock.advance(3 * MINUTE);
+        assert_eq!(
+            ran(&scheduler.tick(&host).await),
+            vec![("git:a", T0 + 20 * MINUTE_MS)]
+        );
+        assert_eq!(host.runs.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

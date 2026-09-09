@@ -654,7 +654,8 @@ this HEAD a due slot ends `dreamer_task_not_runnable` without a dispatch.
 Status: active
 Exercised: yes - `dreamer_scheduler::tests` in
 `crates/daemon/src/dreamer_scheduler.rs` drive `tick` with a manual clock over
-a real store: due-ness, oldest-first backlog with no back-fill, per-acquisition
+a real store: due-ness, oldest-first backlog with no back-fill, a run that
+outlasts its period leaving the crossed slot unfilled, per-acquisition
 lease instants, schedule change and removal, a deferred tick that keeps the
 pending slot when the host cannot report its projects, a retained slot when the
 ledger cannot answer the lease, recovery of a
@@ -702,11 +703,14 @@ slot_command_id(task, due_at_ms)))` has at most one attempt row that is not
 slot; the lease is what serialises schedulers and the receipt is what
 serialises retries, and the property holds only when both keys agree.
 Fault/timing angle: The scheduler leases before it runs (`run_slot`,
-`dreamer_scheduler.rs:304`) and derives the command id from the claim's
-`source_revision`, not the slot that came due (`:358`), so a claim rebound from
+`dreamer_scheduler.rs:303`) and derives the command id from the claim's
+`source_revision`, not the slot that came due (`:357`), so a claim rebound from
 a predecessor names the predecessor's slot. Lease and completion instants are
 read from the clock as each happens, so a long run does not shorten the next
-project's lease. A daemon that dies between `acquire` and `complete` leaves a
+project's lease. The next instant is recomputed from the clock after the run
+returns (`:246`), so a run that outlasts its period skips the slot it crossed
+instead of re-ticking at once on an instant already in the past. A daemon that
+dies between `acquire` and `complete` leaves a
 live claim; the successor's registration generation comes from
 `next_dreamer_scheduler_generation` (`memory-store:3966`), above every
 generation the instance recorded, so the shared protocol rebinds the claim to
@@ -716,11 +720,11 @@ receipt then waits for a request with its command id, which no scheduler
 issues, and stays `in_progress`. A store failure inside
 `SchedulerBridge::scheduled_projects` is an `Err`, not an empty list
 (`memories_authority_for_route`, `lib.rs:13726`, shared with the wire route);
-`tick` returns `TickEvent::Deferred` (`:240`) without reconciling the due
+`tick` returns `TickEvent::Deferred` (`:239`) without reconciling the due
 table, and `run` waits the idle poll before retrying (`:161`). A store failure
 from the generation lookup or from `acquire_dreamer_task` is
-`TickEvent::Retained` (`run_slot`, `:316`): `tick` does not advance that
-project (`:246`), so the slot stays due, and `run` waits the idle poll as after
+`TickEvent::Retained` (`run_slot`, `:315`): `tick` does not advance that
+project (`:245`), so the slot stays due, and `run` waits the idle poll as after
 a deferred tick. Every other acquisition outcome is a ledger decision and
 consumes the slot. Bindings freeze configuration at bind, so `RouteBindings`
 (`lib.rs:235`) stamps each bind with a sequence and the bridge collapses roots
