@@ -9560,6 +9560,9 @@ impl Handler {
             "items": expected_ids,
             "model_chain": model_chain,
             "timeout_ms": timeout_ms,
+            "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
+            // Canonical JSON refuses fractional floats; the display form is stable.
+            "temperature": CLASSIFY_TEMPERATURE.to_string(),
             "prompt_template_version": CLASSIFY_PROMPT_TEMPLATE_VERSION,
             "schema_version": CLASSIFY_SCHEMA_VERSION,
             "system_prompt_hash": system_prompt_hash,
@@ -9732,13 +9735,15 @@ impl Handler {
                 Err(_) if start_not_sent => DreamerTerminalKind::NotSent,
                 Err(_) => DreamerTerminalKind::Failed,
             };
-            if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
+            let finished = store.finish_dreamer_attempt(
                 receipt_key,
                 generation,
                 attempt_index,
                 attempt_terminal,
                 now_ms(),
-            )) {
+            );
+            let attempt_fenced = matches!(finished, Ok(DreamerTransition::Fenced));
+            if let Err(stop) = ledger_stop(finished) {
                 // A usable result in hand is a known outcome even though its attempt
                 // row cannot record one, so it is offered as the receipt's terminal
                 // response first.
@@ -9759,9 +9764,12 @@ impl Handler {
                         return read_dream_task_response(&store, receipt_key);
                     }
                 }
-                // The model was dispatched but the ledger cannot follow it, so the
-                // request settles as unknown rather than staying open forever.
-                let _ = producer.purge_session(&child_session).await;
+                // Child session IDs are not generation-scoped; only the owning
+                // generation purges one, since a successor may be running under it.
+                // commentlint: allow(JUDGE)
+                if !attempt_fenced {
+                    let _ = producer.purge_session(&child_session).await;
+                }
                 return settle_dispatched_attempt_as_unknown(
                     &store,
                     receipt_key,
@@ -27031,6 +27039,66 @@ mod tests {
         let retried = harness.classify(payload, "cross-incarnation").await;
         assert_eq!(error_code_of(&retried), "dreamer_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// Child session ids do not carry the receipt generation, so a run that
+    /// learns it was fenced while awaiting the model must not delete the
+    /// session: the successor may be running under the same id.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced() {
+        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: claim_manifest(&claims),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer);
+        let operation_key = dreamer_operation_key("ses", "fenced-mid-run");
+        let hook_store = Arc::clone(&harness.store);
+        let hook_key = operation_key.clone();
+        *producer.on_await_output.lock().unwrap() = Some(Box::new(move || {
+            let transition = hook_store
+                .take_over_dreamer_receipt(
+                    DreamerReceiptKey {
+                        project: "git:identity",
+                        producer: DREAMER_RECEIPT_PRODUCER,
+                        operation_key: &hook_key,
+                    },
+                    1,
+                    now_ms(),
+                )
+                .unwrap();
+            assert_eq!(transition, DreamerTransition::Applied);
+        }));
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let outcome = harness.classify(payload, "fenced-mid-run").await;
+        assert_eq!(error_code_of(&outcome), "dreamer_ledger_fenced");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert!(
+            producer.purges.lock().unwrap().is_empty(),
+            "a fenced run must not delete a child session the successor may own"
+        );
+        let receipt = harness.receipt("fenced-mid-run");
+        assert_eq!(
+            receipt.state,
+            DreamerReceiptState::InProgress { generation: 2 }
+        );
+        let attempts = harness
+            .store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].generation, 1);
+        assert_eq!(attempts[0].terminal_kind, None::<DreamerTerminalKind>);
     }
 
     /// A start that the producer proves never queued a request ends the attempt

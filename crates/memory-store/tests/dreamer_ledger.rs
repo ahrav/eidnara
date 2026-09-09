@@ -234,6 +234,48 @@ fn an_attempt_that_was_never_sent_is_recorded_but_not_counted_as_a_dispatch() {
 }
 
 #[test]
+fn a_flagged_command_id_is_refused_only_when_no_receipt_exists_for_it() {
+    use context_core::redaction::RedactionErrorKind;
+    use memory_store::MemoryStoreError;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let mut flagged = binding("prompt");
+    flagged.command_id = ["password=", "dreamer-fixture"].concat();
+
+    assert!(matches!(
+        store.begin_dreamer_receipt(key(), &flagged, 1),
+        Err(MemoryStoreError::Redaction(
+            RedactionErrorKind::SecretDetected
+        ))
+    ));
+    assert_eq!(store.lookup_dreamer_receipt(key()).unwrap(), None);
+
+    // A retained receipt whose stored id a later detector flags still replays.
+    store
+        .execute_tag_sql_for_test(&format!(
+            "INSERT INTO dreamer_receipts (
+                 project, producer, operation_key, database_incarnation_id,
+                 authority_generation, request_encoding_version, request_digest,
+                 ledger_session, command_id, state, generation, terminal_kind,
+                 result_json, created_at_ms, updated_at_ms
+             ) VALUES (
+                 '{PROJECT}', '{PRODUCER}', '{OPERATION_KEY}', '{INCARNATION}',
+                 3, 1, '{}', 'ses-1', '{}', 'complete', 1, 'complete', '{{}}', 2, 3
+             )",
+            flagged.request_digest, flagged.command_id
+        ))
+        .unwrap();
+    assert_eq!(
+        store.begin_dreamer_receipt(key(), &flagged, 4).unwrap(),
+        DreamerBeginOutcome::Complete {
+            generation: 1,
+            terminal_kind: DreamerTerminalKind::Complete,
+            result_json: "{}".to_string(),
+        }
+    );
+}
+
+#[test]
 fn a_different_incarnation_or_authority_generation_is_a_binding_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let store = MemoryStore::open(&descriptor(dir.path())).unwrap();

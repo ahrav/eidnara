@@ -1320,8 +1320,11 @@ omission rather than a design choice.
 Grouped by shared mechanism rather than by the section headings above, because
 several of the sharpest relationships cross groups. Every dominance statement
 below is a **hypothesis** about which oracle subsumes which, offered to guide
-ordering, not a verified claim; none of them has been tested, because none of
-these records has an executing check.
+ordering, not a verified claim; none of them has been tested. The Dreamer record
+is the exception to the "no executing check" state the rest of this map assumes:
+the tests named under its Exercised field drive its guarantee under injected
+store faults. Every other record keeps the status its own Exercised and Existing
+check fields state.
 
 - **An earlier transaction commits and a later step fails.**
   [h4c-recomp-reset-precedes-its-ledger-row](#h4c-recomp-reset-precedes-its-ledger-row),
@@ -1345,12 +1348,15 @@ these records has an executing check.
   Three records whose shared consequence is that the caller's view and the store's
   state can differ with nothing reporting it. They do not dominate one another,
   because each breaks a different signal: guidance withholds a persistence field,
-  the dreamer discards a write result on the one path a retry depends on, and the
+  the dreamer once discarded a write result on the one path a retry depends on
+  (resolved at HEAD, where every receipt write is matched and the receipt is the
+  retry contract; the record stays in this group for its mechanism), and the
   transform discards three counters the store computed. They are grouped because
   the guidance no-row arm and the side-channel drain both already have a driving
-  test, so two of the three are half-built, and because METHOD.md's
-  effect-accounting rule is the common lens: attempted and acknowledged must be
-  tracked separately, and in all three the module has the numbers and drops them.
+  test, and the dreamer's receipt writes are driven under injected faults, and
+  because METHOD.md's effect-accounting rule is the common lens: attempted and
+  acknowledged must be tracked separately, and in all three the module has the
+  numbers; two of them still drop them.
 - **Identity, or its absence, on a repeat delivery.**
   [h4c-session-delete-has-no-caller-supplied-operation-identity](#h4c-session-delete-has-no-caller-supplied-operation-identity),
   [h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write](#h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write).

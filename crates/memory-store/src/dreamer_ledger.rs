@@ -289,8 +289,11 @@ impl MemoryStore {
         write.existing_identity("project", key.project)?;
         write.identity("producer", key.producer)?;
         write.identity("operation_key", key.operation_key)?;
-        write.identity("ledger_session", &binding.ledger_session)?;
-        write.identity("command_id", &binding.command_id)?;
+        // A flagged `ledger_session` or `command_id` blocks only insertion; an
+        // exact retry can still read the existing durable receipt.
+        write.existing_identity("ledger_session", &binding.ledger_session)?;
+        write.existing_identity("command_id", &binding.command_id)?;
+        let identities_flagged = write.recorded_detections(&["ledger_session", "command_id"]);
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             let existing = tx
@@ -339,6 +342,13 @@ impl MemoryStore {
                     }
                 };
                 return Ok(WriteDisposition::Replay(outcome));
+            }
+            if identities_flagged {
+                coordinated
+                    .prepared
+                    .borrow()
+                    .reject_recorded_identities(&["ledger_session", "command_id"])
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             }
             tx.execute(
                 "INSERT INTO dreamer_receipts (
