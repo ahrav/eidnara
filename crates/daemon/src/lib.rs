@@ -9684,12 +9684,13 @@ impl DreamerRuntime {
             }
         };
         // The pool is read only once a dispatch is owed: replays and resumes
-        // never touch the kernel. An object the bound project does not hold
-        // ends the command as a recorded request failure, so a retry of that
-        // command replays the failure instead of rendering again.
+        // never touch the kernel. A request failure is recorded on the receipt
+        // and replayed; a `PoolFailure::Kernel` leaves the receipt open so a
+        // retry reads the pool again.
         let pool = match self.render_pool(route.kernel_project, expected_ids).await {
             Ok(pool) => pool,
-            Err(rejection) => {
+            Err(PoolFailure::Kernel(outcome)) => return outcome,
+            Err(PoolFailure::Request(rejection)) => {
                 return match store.complete_dreamer_receipt(
                     receipt_key,
                     generation,
@@ -12705,11 +12706,24 @@ pub mod kernel_route_fixtures {
         kind: &str,
         summary: &str,
     ) {
+        commit_verified_memory_with_rationale(store, key, object_id, scope_id, kind, summary, "");
+    }
+
+    pub fn commit_verified_memory_with_rationale(
+        store: &KernelStore,
+        key: &str,
+        object_id: &str,
+        scope_id: &str,
+        kind: &str,
+        summary: &str,
+        rationale: &str,
+    ) {
         store
             .commit(intent(key), |envelope| {
                 ensure_domain(envelope, MEMORY_DOMAIN)?;
-                envelope
-                    .insert_decision(memory_decision_spec(object_id, scope_id, kind, summary))?;
+                let mut spec = memory_decision_spec(object_id, scope_id, kind, summary);
+                spec.payload.rationale = rationale.to_string();
+                envelope.insert_decision(spec)?;
                 verify_decision(envelope, object_id)?;
                 Ok(String::new())
             })
@@ -13760,6 +13774,18 @@ struct ClassifyPool {
     known_as_of: i64,
 }
 
+/// Why a pool could not be rendered, split by what a retry can change.
+enum PoolFailure {
+    /// A property of the request or of the rows it names: an id the project
+    /// does not hold, a non-memory decision, a pool past the byte bound. The
+    /// receipt records it, so a retry replays the refusal without a read.
+    Request(Value),
+    /// The kernel could not answer: not yet open, unavailable, or busy. The
+    /// receipt stays open with no attempt, so a retry takes it over and reads
+    /// again once the kernel can.
+    Kernel(PreparedOutcome),
+}
+
 /// What a classification commit is keyed and stamped by.
 struct ClassifyWriteIdentity<'a> {
     /// The receipt's operation key, reused as the kernel operation key.
@@ -13772,31 +13798,31 @@ struct ClassifyWriteIdentity<'a> {
 }
 
 /// What the kernel recorded for one run's classifications.
+#[derive(Debug)]
 struct ClassifyCommit {
     commit_seq: i64,
     classified: usize,
 }
 
 impl DreamerRuntime {
-    /// Reads the named memories' canonical rows at the kernel tip and renders
-    /// the prompt. Every id must resolve to a decision row the bound project
-    /// serves; an id that does not, whether missing, invisible, or another
-    /// project's, is one request failure naming no id, so the answer does not
-    /// distinguish the three. The error is the reply the receipt records.
+    /// Reads canonical memory rows at the kernel tip and renders the prompt.
+    ///
+    /// Missing, invisible, and cross-project IDs return the same request failure.
     async fn render_pool(
         &self,
         project: &kernel_routes::ProjectBinding,
         object_ids: &BTreeSet<String>,
-    ) -> Result<ClassifyPool, Value> {
-        let failure =
-            |code: &str, message: String| json!({"ok": false, "code": code, "message": message});
+    ) -> Result<ClassifyPool, PoolFailure> {
+        let request_failure = |code: &str, message: String| {
+            PoolFailure::Request(json!({"ok": false, "code": code, "message": message}))
+        };
         let kernel = self
             .kernel
             .kernel_store()
-            .map_err(|state| failure("kernel_unavailable", format!("{state:?}")))?;
+            .map_err(|state| kernel_unavailable(&state))?;
         let ids: Vec<String> = object_ids.iter().cloned().collect();
         let project = project.clone();
-        let read = kernel_routes::blocking(move || {
+        let read = match kernel_routes::blocking(move || {
             kernel_routes::read::read_visible(
                 &kernel,
                 &project,
@@ -13806,8 +13832,30 @@ impl DreamerRuntime {
             )
         })
         .await
-        .map_err(|state| failure("kernel_unavailable", format!("{state:?}")))?
-        .map_err(|error| failure("kernel_read_failed", error.to_string()))?;
+        .map_err(|state| kernel_unavailable(&state))?
+        {
+            Ok(read) => read,
+            // `KernelOutcome` distinguishes unavailable kernels from request failures.
+            Err(error) => {
+                let message = error.to_string();
+                return Err(match kernel_routes::KernelOutcome::from(error) {
+                    state @ kernel_routes::KernelOutcome::Unavailable { .. } => {
+                        kernel_unavailable(&state)
+                    }
+                    _ => request_failure("kernel_read_failed", message),
+                });
+            }
+        };
+        // `read_visible` drops rows past `MAX_READ_ROW_BYTES` instead of failing; a dropped row would otherwise look like an object the project lacks. commentlint: allow(JUDGE)
+        if read.truncated {
+            return Err(request_failure(
+                "payload_too_large",
+                format!(
+                    "the named memories exceed the {} byte kernel read budget",
+                    kernel_routes::read::MAX_READ_ROW_BYTES
+                ),
+            ));
+        }
         let mut rows = Vec::with_capacity(object_ids.len());
         for id in object_ids {
             // A visible decision from another domain is not a memory, whatever
@@ -13818,7 +13866,7 @@ impl DreamerRuntime {
                         && row.object.domain_id == canonical_memory::MEMORY_DOMAIN_ID
                 })
             }) else {
-                return Err(failure(
+                return Err(request_failure(
                     "invalid_params",
                     "classify object_ids must name memories the bound project holds".to_string(),
                 ));
@@ -13830,7 +13878,7 @@ impl DreamerRuntime {
             });
         }
         let Some(prompt) = render_classify_prompt(&rows) else {
-            return Err(failure(
+            return Err(request_failure(
                 "payload_too_large",
                 format!("the rendered classify pool exceeds {MAX_CLASSIFY_PROMPT_BYTES} bytes"),
             ));
@@ -13841,12 +13889,11 @@ impl DreamerRuntime {
         })
     }
 
-    /// Records `classifications` as one observation per memory in the memory
-    /// domain, each depending on the memory it classifies, admitted under the
-    /// Dreamer source and taint classes this code path stands for. The commit
-    /// is keyed by the receipt's operation key and digest under the project's
-    /// namespace, so a repeat under the same receipt replays the kernel's
-    /// receipt and writes nothing new.
+    /// Records `classifications` as one observation per memory in the memory domain.
+    /// Each recorded classification depends on the memory it classifies.
+    /// Each is admitted under the Dreamer source and taint classes.
+    /// Each retires that memory's earlier classification in the same commit.
+    /// The commit is keyed by the receipt's operation key and digest under the project's namespace, so a repeat under the same receipt replays the kernel's receipt and writes nothing new.
     async fn record_classifications(
         &self,
         project: &kernel_routes::ProjectBinding,
@@ -13856,7 +13903,7 @@ impl DreamerRuntime {
         let kernel = self
             .kernel
             .kernel_store()
-            .map_err(|state| format!("kernel unavailable: {state:?}"))?;
+            .map_err(|state| format!("kernel unavailable: {}", state.state_key()))?;
         // The kernel keys receipts store-wide, the Dreamer ledger per project:
         // the project's digest joins the key so two projects' commands with
         // one session and command id stay two kernel receipts.
@@ -13878,13 +13925,16 @@ impl DreamerRuntime {
         let known_as_of = identity.known_as_of;
         let classified = classifications.len();
         let receipt = kernel_routes::blocking(move || {
-            kernel.commit_before(
+            // `entered` and `refused` classify post-commit conflicts.
+            let mut entered = false;
+            let mut refused = None;
+            let result = kernel.commit_before(
                 Instant::now() + CLASSIFY_KERNEL_WRITE_TIMEOUT,
                 intent,
                 |envelope| {
+                    entered = true;
                     let mut domains = HashSet::new();
                     let mut scope_ready = false;
-                    let mut refused = None;
                     kernel_routes::commit::ensure_domain(
                         envelope,
                         canonical_memory::MEMORY_DOMAIN_ID,
@@ -13906,6 +13956,19 @@ impl DreamerRuntime {
                             &mut filter,
                             &classification.object_id,
                         )?;
+                        // Retire prior classifications in this commit to maintain one live classification per memory.
+                        for prior in envelope.live_dependent_observations(
+                            &classification.object_id,
+                            CLASSIFY_DEPENDENCY_KIND,
+                            CLASSIFY_OBSERVATION_KIND,
+                        )? {
+                            kernel_routes::commit::scoped_object_state(
+                                envelope,
+                                &mut filter,
+                                &prior,
+                            )?;
+                            envelope.retire_observation(&prior)?;
+                        }
                         let observation_id =
                             classification_object_id(&operation_key, &classification.object_id);
                         envelope.insert_observation(kernel::ObservationSpec {
@@ -13968,11 +14031,25 @@ impl DreamerRuntime {
                     })
                     .to_string())
                 },
-            )
+            );
+            match result {
+                Ok(receipt) => Ok(receipt),
+                Err(kernel::KernelError::Conflict) => Err(match refused {
+                    Some(failure) => failure,
+                    None if !entered => kernel_routes::commit::CommitFailure::OperationKeyReused,
+                    None => kernel_routes::commit::CommitFailure::StorageConstraint,
+                }),
+                Err(error) => Err(kernel_routes::commit::CommitFailure::Kernel(error)),
+            }
         })
         .await
-        .map_err(|state| format!("kernel unavailable: {state:?}"))?
-        .map_err(|error| format!("kernel commit failed: {error}"))?;
+        .map_err(|state| format!("kernel unavailable: {}", state.state_key()))?
+        .map_err(|failure| {
+            format!(
+                "kernel commit refused: {}",
+                kernel_routes::KernelOutcome::from(failure).state_key()
+            )
+        })?;
         Ok(ClassifyCommit {
             commit_seq: receipt.commit_seq,
             classified,
@@ -13985,7 +14062,7 @@ const CLASSIFY_KERNEL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The object id of one memory's classification under one kernel operation
 /// key: stable for a replay of the receipt, distinct across receipts and
-/// projects, so successive runs append and never collide.
+/// projects.
 fn classification_object_id(operation_key: &str, memory_object_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(operation_key.as_bytes());
@@ -14362,6 +14439,13 @@ fn complete_receipt_as_unknown(
         Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
         Err(error) => dreamer_ledger_failed(error),
     }
+}
+
+fn kernel_unavailable(state: &kernel_routes::KernelOutcome) -> PoolFailure {
+    PoolFailure::Kernel(PreparedOutcome::Error {
+        code: "kernel_unavailable".to_string(),
+        message: state.state_key(),
+    })
 }
 
 fn read_dream_task_response(store: &MemoryStore, key: DreamerReceiptKey<'_>) -> PreparedOutcome {
@@ -27903,7 +27987,7 @@ mod tests {
     /// The `classifies` dependency target recorded for `observation_id`.
     fn kernel_dependency(kernel: &kernel::KernelStore, observation_id: &str) -> String {
         let targets = kernel
-            .observation_dependency_targets(observation_id, CLASSIFY_DEPENDENCY_KIND)
+            .observation_dependency_targets_for_test(observation_id, CLASSIFY_DEPENDENCY_KIND)
             .unwrap();
         assert_eq!(targets.len(), 1, "one classifies dependency: {targets:?}");
         targets.into_iter().next().unwrap()
@@ -29528,6 +29612,118 @@ mod tests {
         }
     }
 
+    /// Each commit retires reclassified memories' prior classifications, leaving one live classification per memory; a memory the later run did not name keeps its classification. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_retires_the_prior_classification_of_a_reclassified_memory() {
+        let (first, second, other) = (test_memory_id(1), test_memory_id(2), test_memory_id(3));
+        let producer = Arc::new(ProducerState::default());
+        {
+            let mut results = producer.await_results.lock().unwrap();
+            results.push_back(Ok(ProducerOutput {
+                text: format!(
+                    "<classify><memory id=\"{first}\" importance=\"80\" scope=\"project\" shareable=\"true\"/>\
+                     <memory id=\"{second}\" importance=\"20\" scope=\"universe\" shareable=\"false\"/>\
+                     <memory id=\"{other}\" importance=\"50\" scope=\"ecosystem\" shareable=\"true\"/></classify>"
+                ),
+                length_capped: false,
+            }));
+            results.push_back(Ok(ProducerOutput {
+                text: format!(
+                    "<classify><memory id=\"{first}\" importance=\"5\" scope=\"ecosystem\" shareable=\"false\"/>\
+                     <memory id=\"{second}\" importance=\"95\" scope=\"project\" shareable=\"true\"/></classify>"
+                ),
+                length_capped: false,
+            }));
+        }
+        let harness = DreamerHarness::start(&producer).await;
+        let all = [first.clone(), second.clone(), other.clone()];
+        let response = response_of(
+            harness
+                .classify(
+                    classify_payload(&all, TEST_CLASSIFY_TIMEOUT_MS),
+                    "first-run",
+                )
+                .await,
+        );
+        assert_eq!(response["classified"], json!(3));
+        let before = harness.classifications();
+        assert_eq!(before.len(), 3, "{before:?}");
+        let retained = before
+            .iter()
+            .find(|row| row.depends_on.as_deref() == Some(other.as_str()))
+            .cloned()
+            .expect("the third memory is classified");
+
+        let two = [first.clone(), second.clone()];
+        let response = response_of(
+            harness
+                .classify(
+                    classify_payload(&two, TEST_CLASSIFY_TIMEOUT_MS),
+                    "second-run",
+                )
+                .await,
+        );
+        assert_eq!(response["classified"], json!(2));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
+        let after = harness.classifications();
+        assert_eq!(
+            after.len(),
+            3,
+            "one live classification per memory: {after:?}"
+        );
+        let by_memory = |memory: &str| {
+            after
+                .iter()
+                .find(|row| row.depends_on.as_deref() == Some(memory))
+                .unwrap_or_else(|| panic!("{memory}: {after:?}"))
+        };
+        let second_key = harness.kernel_operation_key("second-run");
+        for (memory, importance, scope, shareable) in [
+            (&first, 5, "ecosystem", false),
+            (&second, 95, "project", true),
+        ] {
+            let row = by_memory(memory);
+            assert_eq!(row.object_id, classification_object_id(&second_key, memory));
+            assert_eq!(
+                row.detail,
+                json!({
+                    "schema_version": CLASSIFY_SCHEMA_VERSION,
+                    "importance": importance,
+                    "scope": scope,
+                    "shareable": shareable,
+                })
+            );
+        }
+        assert_eq!(by_memory(&other), &retained);
+        // Earlier classifications are invalidated at the second run's commit.
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let first_key = harness.kernel_operation_key("first-run");
+        for memory in &two {
+            let prior = classification_object_id(&first_key, memory);
+            let (_, states) = kernel.object_states(std::slice::from_ref(&prior)).unwrap();
+            let state = states[0]
+                .clone()
+                .unwrap_or_else(|| panic!("{prior} is in the store"));
+            assert_eq!(
+                state.object.invalidated_commit_seq,
+                Some(response["commit_seq"].as_i64().unwrap()),
+                "{memory}: the prior classification is retired by the reclassifying commit"
+            );
+        }
+        // A replay of the second run still writes nothing.
+        let tip = harness.kernel_tip();
+        response_of(
+            harness
+                .classify(
+                    classify_payload(&two, TEST_CLASSIFY_TIMEOUT_MS),
+                    "second-run",
+                )
+                .await,
+        );
+        assert_eq!(harness.kernel_tip(), tip);
+        assert_eq!(harness.classifications(), after);
+    }
+
     /// The kernel keys receipts store-wide; the classify commit key carries the
     /// project, so two projects whose sessions reuse a command id each write
     /// their own classifications and each replay their own.
@@ -29631,6 +29827,58 @@ mod tests {
         );
     }
 
+    /// A scope row with a different project digest rejects classification
+    /// writes, and the failure names that reason as `kernel.commit` does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_classifications_names_a_reserved_scope_in_its_failure() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let other_root = harness._dir.path().join("reserved-project");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let other = binding_with_harness(other_root.to_str().unwrap(), "pi", "ses").kernel_project;
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        // The scope row carries the other project's id but a stranger's digest.
+        let reserved = kernel_route_fixtures::project_scope_spec(
+            &other.scope_id(),
+            &kernel_route_fixtures::sha256_hex(b"/somewhere/else"),
+        );
+        kernel
+            .commit(
+                kernel_route_fixtures::intent("reserved-scope"),
+                |envelope| {
+                    kernel_route_fixtures::ensure_domain(envelope, kernel_route_fixtures::DOMAIN)?;
+                    envelope.insert_scope(reserved.clone())?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let error = harness
+            .handler
+            .dreamer
+            .record_classifications(
+                &other,
+                &ClassifyWriteIdentity {
+                    operation_key: &dreamer_operation_key("ses", "reserved"),
+                    request_digest: &"d".repeat(64),
+                    cause: "ses:reserved",
+                    generation: 1,
+                    known_as_of: 1,
+                },
+                &[Classification {
+                    object_id: test_memory_id(1),
+                    importance: 50,
+                    scope: "project".to_string(),
+                    shareable: true,
+                }],
+            )
+            .await
+            .expect_err("a reserved scope refuses the write");
+        assert!(
+            error.contains("invalid:scope_reserved"),
+            "the failure names the reserved scope: {error}"
+        );
+    }
+
     /// A visible decision from another domain is not a memory: the request is
     /// refused the same way an absent object is, and nothing is dispatched.
     #[tokio::test(flavor = "current_thread")]
@@ -29691,6 +29939,42 @@ mod tests {
             )
             .await;
         assert_eq!(error_code_of(&outcome), "payload_too_large");
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.classifications().is_empty());
+    }
+
+    /// `read_visible` truncates rows past `MAX_READ_ROW_BYTES` rather than failing, so a dropped memory must not be reported as one the project does not hold: the request is refused as too large and nothing is dispatched. commentlint: allow(JUDGE)
+    /// The stored rationales carry the bytes past `MAX_READ_ROW_BYTES`, while
+    /// the rendered summaries remain within the prompt bound.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_refuses_a_pool_over_the_kernel_read_budget_as_too_large() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
+        // Each text field is capped at the redactor's input bound, so the
+        // budget is crossed by count rather than by one row.
+        let rationale = "r".repeat(context_core::redaction::MAX_REDACTABLE_BYTES);
+        let wide = kernel_routes::read::MAX_READ_ROW_BYTES / rationale.len() + 1;
+        assert!(wide <= MAX_CLASSIFY_OBJECTS, "{wide} rows fit one request");
+        let ids: Vec<String> = (0..wide).map(|n| format!("memory:wide-{n}")).collect();
+        for id in &ids {
+            kernel_route_fixtures::commit_verified_memory_with_rationale(
+                &kernel,
+                id,
+                id,
+                &scope_id,
+                "PROJECT_RULES",
+                "a short summary",
+                &rationale,
+            );
+        }
+        let outcome = harness
+            .classify(classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS), "wide")
+            .await;
+        assert_eq!(error_code_of(&outcome), "payload_too_large", "{outcome:?}");
         assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
         assert!(harness.classifications().is_empty());
     }
@@ -29813,6 +30097,67 @@ mod tests {
                 .await;
             assert_eq!(error_code_of(&again), "invalid_params", "{why}");
         }
+    }
+
+    /// A kernel that is not open when the pool is read is a condition of the
+    /// daemon, not of the request: the command answers `kernel_unavailable`,
+    /// its receipt stays open with no attempt, and the same command runs once
+    /// the kernel opens. A daemon restart is exactly this window, since the
+    /// memory store opens before the kernel does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_leaves_the_receipt_open_while_the_kernel_is_starting() {
+        use memory_store::dreamer_ledger::DreamerReceiptState;
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(classify_manifest(&ids));
+        let predecessor = DreamerHarness::start(&producer).await;
+        let kernel_root = predecessor._dir.path().join("kernel");
+        // The predecessor lets go of the kernel lease; the successor's kernel
+        // has not opened yet.
+        predecessor
+            .handler
+            .kernel
+            .mark_unavailable(kernel_routes::UnavailableKind::Store);
+        let harness = DreamerHarness::start_with_store(&producer, &predecessor);
+        assert_eq!(
+            harness.handler.kernel.state(),
+            kernel_routes::KernelState::Starting
+        );
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
+        let outcome = harness.classify(payload.clone(), "kernel-starting").await;
+        assert_eq!(error_code_of(&outcome), "kernel_unavailable");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(
+            matches!(
+                harness.receipt("kernel-starting").state,
+                DreamerReceiptState::InProgress { .. }
+            ),
+            "a kernel that is not ready leaves the receipt open: {:?}",
+            harness.receipt("kernel-starting").state
+        );
+        assert!(harness.attempts("kernel-starting").is_empty());
+
+        harness
+            .handler
+            .kernel
+            .open(
+                kernel_root,
+                StoreOpenPolicy::default(),
+                harness.handler.cancel.clone(),
+            )
+            .await;
+        assert_eq!(
+            harness.handler.kernel.state(),
+            kernel_routes::KernelState::Ready
+        );
+        let response = response_of(harness.classify(payload, "kernel-starting").await);
+        assert_eq!(response["classified"], json!(1), "{response}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.classifications().len(), 1);
     }
 
     /// The request shape is checked before any authority state is read: a

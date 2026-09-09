@@ -718,6 +718,77 @@ fn corrections_preserve_old_rows_and_reauthor_observation_dependencies() {
 }
 
 #[test]
+fn live_dependent_observations_follow_the_dependency_edge_and_drop_retired_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("seed", 'a'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            envelope.insert_decision(decision(2))?;
+            envelope.insert_observation(observation(1, "decision-object-1"))?;
+            envelope.insert_observation(observation(2, "decision-object-1"))?;
+            envelope.insert_observation(observation(3, "decision-object-2"))?;
+            let mut other_kind = observation(4, "decision-object-1");
+            other_kind.observation_kind = "classification".to_string();
+            envelope.insert_observation(other_kind)?;
+            let mut other_edge = observation(5, "decision-object-1");
+            other_edge.dependencies[0].dependency_kind = "classifies".to_string();
+            envelope.insert_observation(other_edge)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    store
+        .commit(intent("read-and-retire", 'b'), |envelope| {
+            assert_eq!(
+                envelope.live_dependent_observations(
+                    "decision-object-1",
+                    "implements",
+                    "implementation"
+                )?,
+                ["observation-object-1", "observation-object-2"]
+            );
+            assert_eq!(
+                envelope.live_dependent_observations(
+                    "decision-object-1",
+                    "classifies",
+                    "implementation"
+                )?,
+                ["observation-object-5"]
+            );
+            assert_eq!(
+                envelope.live_dependent_observations(
+                    "decision-object-1",
+                    "implements",
+                    "classification"
+                )?,
+                ["observation-object-4"]
+            );
+            assert!(
+                envelope
+                    .live_dependent_observations(
+                        "decision-object-9",
+                        "implements",
+                        "implementation"
+                    )?
+                    .is_empty()
+            );
+            // A retirement in this envelope is visible to the next call.
+            envelope.retire_observation("observation-object-1")?;
+            assert_eq!(
+                envelope.live_dependent_observations(
+                    "decision-object-1",
+                    "implements",
+                    "implementation"
+                )?,
+                ["observation-object-2"]
+            );
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+#[test]
 fn a_secret_bearing_slice_identifier_is_refused_rather_than_redacted() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();

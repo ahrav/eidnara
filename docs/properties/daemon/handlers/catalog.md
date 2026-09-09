@@ -524,7 +524,19 @@ three bounds; the budget test also shows a changed request at exhaustion is a
 conflict, not a replay, and
 `dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted`
 shows an exhausted budget still settles an open receipt while refusing a
-takeover. Not driven by a test: a resume whose `status` answers
+takeover.
+`dreamer_run_task_leaves_the_receipt_open_while_the_kernel_is_starting` reads
+the pool against a kernel still `Starting`, shows `kernel_unavailable` with the
+receipt `in_progress` and no attempt, then opens the kernel and shows the same
+command dispatches once and writes its classifications.
+`dreamer_run_task_refuses_a_pool_over_the_kernel_read_budget_as_too_large`
+shows a read the kernel truncated at its payload budget is refused
+`payload_too_large`, not as an object the project lacks, with no connect.
+`dreamer_run_task_retires_the_prior_classification_of_a_reclassified_memory`
+runs two commands over one memory and shows one live classification per memory
+carrying the second run's values, the first run's rows invalidated at the
+second commit, and a replay of the second run writing nothing. Not driven by a
+test: a resume whose `status` answers
 `Terminal` or fails, and a settlement fenced by a later generation; both share
 the arms the tested cases drive.
 Guarantee: Every `dreamer.run_task` request that may have reached a model is
@@ -553,11 +565,11 @@ this condition.
 Fault/timing angle: `begin_dreamer_receipt` runs before any producer is
 constructed (`lib.rs`, `DreamerRuntime::run_dreamer_task`), so a `Complete`
 receipt replays and an `in_progress` one goes to `resume_dreamer_receipt`
-(`lib.rs:10035`)
+(`lib.rs:10036`)
 before any connect. The attempt row precedes the model call and the run handle
-is recorded right after `start` returns (`lib.rs:9794`); a handle write that does
+is recorded right after `start` returns (`lib.rs:9795`); a handle write that does
 not land settles the attempt and receipt `unknown` through
-`settle_dispatched_attempt_as_unknown` (`lib.rs:14323`), as does an attempt
+`settle_dispatched_attempt_as_unknown` (`lib.rs:14400`), as does an attempt
 terminal that cannot be recorded. On resume, the newest attempt at the open
 generation that is not `not_sent` is the dispatch marker: an ended one settles
 `unknown` through `complete_receipt_as_unknown`, keeping its own terminal; an
@@ -607,7 +619,7 @@ Reachability: explicit-config-only - the scheduler runs on every daemon once
 the store opens (`lib.rs:3606`), but it has a project to run only when the user
 tier sets `/dreamer/tasks/review-user-memories/schedule`, a `UserOnly` key
 (`config.rs:663-678`) that the project tier cannot set, and the route's
-memories authority is `MODULE` (`lib.rs:14030`). No task has Rust-owned
+memories authority is `MODULE` (`lib.rs:14107`). No task has Rust-owned
 classify inputs yet (`DreamerRuntime::classify_inputs`, `lib.rs:3053`), so on
 this HEAD a due slot ends `dreamer_task_not_runnable` without a dispatch.
 Status: active

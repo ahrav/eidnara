@@ -423,6 +423,33 @@ impl Envelope<'_> {
         load_object_state(self.tx, object_id)
     }
 
+    /// Returns object IDs for live `observation_kind` observations that depend on `dependency_object_id` through `dependency_kind`, in insertion order; a following retirement acts on the rows this returned. commentlint: allow(JUDGE)
+    pub fn live_dependent_observations(
+        &self,
+        dependency_object_id: &str,
+        dependency_kind: &str,
+        observation_kind: &str,
+    ) -> Result<Vec<String>, KernelError> {
+        let mut statement = self
+            .tx
+            .prepare_cached(
+                "SELECT o.object_id FROM observation_dependencies d
+                  JOIN observations o ON o.observation_id=d.observation_id
+                  WHERE d.dependency_object_id=?1 AND d.dependency_kind=?2
+                    AND o.observation_kind=?3 AND o.invalidated_commit_seq IS NULL
+                  ORDER BY o.created_commit_seq, o.object_id",
+            )
+            .map_err(|_| KernelError::Io)?;
+        statement
+            .query_map(
+                [dependency_object_id, dependency_kind, observation_kind],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|_| KernelError::Io)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| KernelError::Io)
+    }
+
     /// The receipt `KernelStore::commit` would replay for `intent` instead of
     /// running its operation, or `None` when the identity is unrecorded;
     /// `Conflict` when the key is recorded under another digest.

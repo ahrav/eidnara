@@ -42,7 +42,7 @@ unless stated.
 - Lease and completion instants are read from the clock as each operation
   happens (`:272`, `:318`), so a long run for one project does not shorten the
   lease of the project behind it in the same tick.
-- `SchedulerBridge::scheduled_projects` (`crates/daemon/src/lib.rs:14030`)
+- `SchedulerBridge::scheduled_projects` (`crates/daemon/src/lib.rs:14107`)
   reads the schedule from each bound route's configuration, the tier-merged
   value the route was bound under, and admits a project only when
   `authority_project_for_route`, `module_authority_for_project`, and
@@ -50,11 +50,11 @@ unless stated.
   is `TierClass::UserOnly` (`crates/daemon/src/config.rs:663-678`), so a
   project tier's value is dropped with a warning during the merge and never
   reaches a binding.
-- `SchedulerBridge::run_task` (`lib.rs:14066`) refuses with `NotRunnable` when
+- `SchedulerBridge::run_task` (`lib.rs:14143`) refuses with `NotRunnable` when
   no live route is bound to the project or the task has no Rust-owned inputs
   (`DreamerRuntime::classify_inputs`, `lib.rs:3053`, `None` on this HEAD), and
   otherwise calls `run_dreamer_task` under `SCHEDULER_LEDGER_SESSION`
-  (`lib.rs:14088`). The not-runnable reply is recorded on the lease so the slot
+  (`lib.rs:14165`). The not-runnable reply is recorded on the lease so the slot
   is not retried every tick.
 
 ## Failure scenario
