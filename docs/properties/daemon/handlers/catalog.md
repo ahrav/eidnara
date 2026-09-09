@@ -487,18 +487,25 @@ Status: active
 Exercised: yes - `dreamer_run_task_*` tests in `crates/daemon/src/lib.rs`
 (`mod tests`) construct the cases below over a real store with the scripted
 producer. The three ported receipt tests use the async object-id harness.
-Symbol anchors in this record are
-checked against the final merged source. The main thread reports these checks:
+Symbol anchors use the merged source. The main thread reports these checks.
+At `c35a4ad5`:
 
 - `cargo test -p daemon --lib --all-features --locked dreamer`: 50 passed.
 - Fifty further runs of the same compiled libtest binary with the `dreamer`
   filter at default concurrency: all 50 tests passed in each of the 50 runs,
   with no retries.
-- `cargo nextest run --profile ci -p daemon -p kernel -p memory-store --all-targets --all-features --locked`:
-  2,325 passed, 5 skipped. Nextest was 0.9.140; the recommended version is
-  0.9.143.
 
-A single-context static review of the merged code found no actionable findings.
+On the working tree merging `bc007c9a` into `c35a4ad5`:
+
+- `cargo nextest run --profile ci -p daemon -p kernel -p memory-store --all-targets --all-features --locked`:
+  2,327 passed, 5 skipped. Nextest was 0.9.140; the recommended version is
+  0.9.143.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`:
+  passed.
+- `cargo fmt --all -- --check`: passed.
+
+The 50-by-50 repetition check was not rerun after `bc007c9a`. An incremental
+read-only review of the latest merge found no actionable findings.
 These execution and review results do not change the checks' `unaudited`
 adequacy status.
 
@@ -698,15 +705,17 @@ is test-only. Production `classify_inputs` therefore returns `None`: a due
 slot records `dreamer_task_not_runnable` on its lease without a receipt or
 dispatch. Scheduled model execution is exercised through the test input seam.
 Status: active
-Exercised: yes - `dreamer_scheduler::tests` in
+Exercised: yes - the working tree merging `bc007c9a` into `c35a4ad5` passed the
+nextest run recorded below. `dreamer_scheduler::tests` in
 `crates/daemon/src/dreamer_scheduler.rs` drive `tick` with a manual clock over
 a real store: due-ness, oldest-first backlog with no back-fill, per-acquisition
 lease instants, schedule change and removal, a deferred tick that keeps the
-pending slot when the host cannot report its projects, recovery of a
+pending slot when the host cannot report its projects, a retained slot when the
+ledger cannot answer the lease, recovery of a
 predecessor's live claim under its own slot with the successor's generation
 taken from the ledger, expired-versus-live predecessor leases, a not-runnable
 slot ending `applied`, cancellation of a parked loop, and the idle-poll wait
-after a deferred tick.
+after a deferred tick or a retained slot.
 `dreamer_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt`
 (`lib.rs`, `mod tests`) runs a slot through `SchedulerBridge` with scripted
 object-id inputs, reads the receipt from inside the producer's `start`, and
@@ -718,30 +727,45 @@ the loader's output for a hostile project tier and for a user tier.
 `dreamer_scheduler_bridge_reports_a_store_failure_instead_of_no_projects`,
 `dreamer_scheduler_bridge_follows_the_most_recent_binding_on_a_root`, and
 `dreamer_scheduler_bridge_reports_a_project_once_across_its_roots` cover the
-bridge's store-failure, binding-selection, and per-project collapse contracts.
-The three bridge tests use `DreamerHarness::start(&producer).await`. They are
-included in the passing `dreamer` runs and broader nextest run recorded under
+bridge's store-failure, binding-selection, and per-project collapse contracts,
+including a newest root without a schedule unscheduling a project whose older
+roots still carry one.
+`dreamer_scheduler_bridge_refuses_a_root_that_moved_to_another_project` rebinds
+the leased project's root to a second `MODULE` project at the same generation
+and shows the run is refused with no dispatch and no receipt under either.
+`a_failed_lease_acquisition_retains_the_slot_for_the_next_tick` and
+`run_waits_the_idle_poll_after_a_deferred_tick_or_a_retained_slot` cover a
+lease the ledger could not answer for: the slot stays due, runs on the next
+tick under its own command id, and the loop waits the idle poll first.
+The passing nextest, clippy, and formatting checks are recorded under
 [the receipt record](#dreamer-dispatched-attempt-always-settles-through-the-receipt).
+The 50-by-50 repetition evidence there applies only to `c35a4ad5`.
 Guarantee: For every project and claimed due instant, the scheduler uses one
 receipt identity through `DreamerRuntime::run_dreamer_task` under the command
 id `slot_command_id(task, due_at_ms)` after `acquire_dreamer_task` returns a
 claim, or records `NotRunnable` without a dispatch; a restarted scheduler handed a
 predecessor's live claim runs that claim's slot, so the interrupted receipt is
 resolved rather than a second one opened when its digest and authority binding
-still match; only projects admitted by the user-tier schedule and `MODULE`
-authority checks are considered for leasing; a store failure while
-reading the projects defers the tick and leaves every pending slot due.
+still match; the authority gate refuses a route resolving to another project
+before writing a receipt; only projects admitted by the newest root's user-tier
+schedule and `MODULE` authority checks are considered for leasing; project
+lookup errors defer the tick, while generation-lookup or lease-acquisition store
+errors retain the affected slot instead of advancing it.
 Check: `always` - at each `TickEvent::Ran { project, due_at_ms }`, correlate the
 returned `dreamer_task` claim's `note_id` and `source_revision` with the task
-and due instant. A `NotRunnable` outcome adds no receipt or attempt. For a
-runnable task, all attempts use the receipt for
+and due instant. A `NotRunnable` outcome or project-mismatch refusal adds no
+receipt or attempt. For a runnable task, all attempts use the receipt for
 `(project, "dreamer.run_task", operation_key(SCHEDULER_LEDGER_SESSION,
 slot_command_id(task, due_at_ms)))`; each `(generation, attempt_index)` starts
 at most once, and recovering a receipt with a possible dispatch adds no start.
 The original model chain may contain several attempts; an at-most-one-attempt
 check would reject valid fallback. Check attempted starts separately from
 acknowledged handles. If project lookup fails, the tick is deferred and its due
-table is unchanged. `always` applies because slot identity and recovery safety
+table is unchanged. If generation lookup or lease acquisition returns a store
+error, assert `Retained`, no task run, and no advance of that project's due
+instant; a later fault-free tick with unchanged scheduling retries the same
+slot. A newest root with no schedule excludes the project even if older roots
+have schedules. `always` applies because slot identity and recovery safety
 must hold for every run, including a rebound predecessor claim.
 Fault/timing angle: The scheduler leases before it runs (`run_slot`,
 `crates/daemon/src/dreamer_scheduler.rs`) and derives the command id from the
@@ -752,37 +776,52 @@ project's lease. A daemon that dies between `acquire` and `complete` leaves a
 live claim; the successor's registration generation comes from
 `next_dreamer_scheduler_generation` (`crates/memory-store/src/lib.rs`), above
 every retained generation the instance recorded, so the shared protocol rebinds
-the claim to the successor rather than refusing it. A lease that expired first is collected
-and the successor leases a fresh claim for its own slot; the predecessor's
-receipt then waits for a request with its command id, which no scheduler
+the claim to the successor rather than refusing it. A lease that expired first
+is collected and the successor leases a fresh claim for its own slot. The
+predecessor's receipt then waits for a request with its command id, which no scheduler
 issues, and stays `in_progress`. A store failure inside
 `SchedulerBridge::scheduled_projects` is an `Err`, not an empty list
 (`memories_authority_for_route`, `crates/daemon/src/lib.rs`, shared with the
-wire route);
-`tick` returns `TickEvent::Deferred` without reconciling the due
-table, and `run` waits the idle poll before retrying. Bindings freeze
-configuration at bind, so `RouteBindings` (`crates/daemon/src/lib.rs`) stamps
-each bind with a sequence and the bridge takes the most recently bound binding per root and
-the most recently bound scheduled root per project; `binding_for_root` also
+wire route); `tick` returns `TickEvent::Deferred` without reconciling the due
+table. A store error from registration-generation lookup or
+`acquire_dreamer_task` produces `TickEvent::Retained`: `tick` does not advance
+that project but still processes the other due projects. `run` logs either
+event and waits `IDLE_POLL` before retrying. A successful non-`Claim` acquisition
+outcome, including `Busy`, is instead `Skipped` and consumes the slot. A
+completion error after a task ran is logged; it does not retain the slot.
+Bindings freeze configuration at bind, so `RouteBindings`
+(`crates/daemon/src/lib.rs`) stamps
+each bind with a sequence. The bridge takes the newest binding per root,
+resolves its authority, and collapses all `MODULE` roots per project before
+filtering on the winner's optional schedule. A newest root without a schedule
+therefore unschedules the project. `binding_for_root` also
 uses the newest binding for the selected root. Those lookups are separate:
 a rebind between project discovery and execution can change the binding used
-for the run. Receipt recovery still uses the attempt's recorded identity.
+for the run. `SchedulerBridge::run_task` passes
+`DreamerRunRequest::leased_project = Some(&project.project)` to
+`run_dreamer_task`, which resolves the route again. If the generation matches
+but the project differs, it returns `authority_project_mismatch` before receipt
+creation; a generation mismatch also refuses the run. Receipt recovery still
+uses the attempt's recorded identity.
 Required faults and enabling state: A user-tier schedule on a bound route with
 `MODULE` memories authority; for recovery, a tick dropped between `acquire`
 and `complete` while the producer is awaiting output, and a successor started
 before the predecessor's lease expires, `DREAMER_TASK_LEASE_MS` (20 min) after
 acquisition; for the
 deferred tick, a store read failure during `scheduled_projects` while a slot
-is due.
+is due; for the retained slot, a store failure during `acquire_dreamer_task`
+while a slot is due; for the refused run, a root rebound to a second `MODULE`
+project between `scheduled_projects` and `run_task`.
 Confidence: high - [evidence](evidence/scheduled-dreamer-slot-runs-once-through-lease-and-receipt.md).
 The lease and receipt keys are derived from one value in one function; the
 recovery tests observe the ledger and the producer, not the scheduler's own
 events.
 Existing check: the tests named under Exercised; status `unaudited`. Passing
-execution and the single-context static review do not establish test adequacy.
+execution and the incremental read-only review do not establish test adequacy.
 Impact: A second billable model call for one slot after a restart, an
-unattended run a project tier switched on, or a slot silently lost to a
-transient store error.
+unattended run a project tier switched on or an older root kept on after the
+user removed the schedule, a run receipted under a project the lease does not
+name, or a slot silently lost to a transient store error.
 Open questions:
 
 - A predecessor slot whose lease expired before the successor's first slot

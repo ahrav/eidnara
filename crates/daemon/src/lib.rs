@@ -9512,6 +9512,7 @@ impl Handler {
                     ledger_session: &ledger_session,
                     command_id,
                     authority_generation,
+                    leased_project: None,
                     task: &task,
                 },
             )
@@ -9544,6 +9545,7 @@ impl DreamerRuntime {
             ledger_session,
             command_id,
             authority_generation,
+            leased_project,
             task,
         } = run;
         let expected_ids = &task.object_ids;
@@ -9574,6 +9576,16 @@ impl DreamerRuntime {
                 message: format!(
                     "authority generation is {}, request used {authority_generation}",
                     authority.generation
+                ),
+            };
+        }
+        if let Some(leased_project) = leased_project
+            && authority_project != leased_project
+        {
+            return PreparedOutcome::Error {
+                code: "authority_project_mismatch".to_string(),
+                message: format!(
+                    "the route now resolves to {authority_project}, the lease is on {leased_project}"
                 ),
             };
         }
@@ -14187,26 +14199,27 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
         &self.store
     }
 
-    /// A project qualifies only when its memories authority is `MODULE`.
+    /// The newest root speaks for a project: roots collapse by project before
+    /// the winner's schedule is read, so a newest binding without a schedule
+    /// unschedules the project. commentlint: allow(JUDGE)
     fn scheduled_projects(&self) -> Result<Vec<dreamer_scheduler::ScheduledProject>, String> {
         let store = &self.store;
-        let scheduled_roots: Vec<(u64, PathBuf, String)> = self
+        let latest_roots: Vec<(u64, PathBuf, Option<String>)> = self
             .bindings
             .lock()
             .expect("bindings mutex")
             .latest_per_root()
             .into_iter()
-            .filter_map(|(root, (seq, binding))| {
-                let schedule = binding
-                    .config
-                    .dreamer_review_user_memories_schedule
-                    .as_ref()?;
-                Some((seq, root.to_path_buf(), schedule.clone()))
+            .map(|(root, (seq, binding))| {
+                (
+                    seq,
+                    root.to_path_buf(),
+                    binding.config.dreamer_review_user_memories_schedule.clone(),
+                )
             })
             .collect();
-        let mut by_project: BTreeMap<String, (u64, dreamer_scheduler::ScheduledProject)> =
-            BTreeMap::new();
-        for (seq, route_root, schedule) in scheduled_roots {
+        let mut by_project: BTreeMap<String, (u64, PathBuf, Option<String>, u64)> = BTreeMap::new();
+        for (seq, route_root, schedule) in latest_roots {
             let root = route_root.to_string_lossy().to_string();
             let authority = match memories_authority_for_route(store, &root)
                 .map_err(|error| error.to_string())?
@@ -14214,25 +14227,29 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                 MemoriesAuthority::Module(authority) => authority,
                 MemoriesAuthority::NotModule { .. } => continue,
             };
-            let candidate = dreamer_scheduler::ScheduledProject {
-                project: authority.project.clone(),
-                route_root,
-                authority_generation: authority.generation,
-                schedule,
-            };
+            let candidate = (seq, route_root, schedule, authority.generation);
             match by_project.entry(authority.project) {
                 std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert((seq, candidate));
+                    slot.insert(candidate);
                 }
                 std::collections::btree_map::Entry::Occupied(mut slot) if seq > slot.get().0 => {
-                    slot.insert((seq, candidate));
+                    slot.insert(candidate);
                 }
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
         Ok(by_project
-            .into_values()
-            .map(|(_, project)| project)
+            .into_iter()
+            .filter_map(
+                |(project, (_, route_root, schedule, authority_generation))| {
+                    Some(dreamer_scheduler::ScheduledProject {
+                        project,
+                        route_root,
+                        authority_generation,
+                        schedule: schedule?,
+                    })
+                },
+            )
             .collect())
     }
 
@@ -14261,6 +14278,7 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                     ledger_session: dreamer_scheduler::SCHEDULER_LEDGER_SESSION,
                     command_id,
                     authority_generation: project.authority_generation,
+                    leased_project: Some(&project.project),
                     task: &inputs,
                 },
             )
@@ -14420,6 +14438,10 @@ pub(crate) struct DreamerRunRequest<'a> {
     pub(crate) ledger_session: &'a str,
     pub(crate) command_id: &'a str,
     pub(crate) authority_generation: u64,
+    /// `None` for the wire route, which holds no lease. When set, a route that
+    /// resolves to another project is refused before any receipt is written:
+    /// the lease serialises runs on one project only. commentlint: allow(JUDGE)
+    pub(crate) leased_project: Option<&'a str>,
     pub(crate) task: &'a ClassifyRequest,
 }
 
@@ -29296,6 +29318,95 @@ mod tests {
         assert_eq!(projects[0].project, "git:identity");
         assert_eq!(projects[0].route_root, worktree, "the newest root");
         assert_eq!(projects[0].schedule, "*/5 * * * *");
+
+        // The newest root has no schedule; its binding supersedes older scheduled roots.
+        let unscheduled = harness._dir.path().join("worktree-unscheduled");
+        std::fs::create_dir_all(&unscheduled).unwrap();
+        harness
+            .store
+            .bind_authority_route("context", "git:identity", unscheduled.to_str().unwrap())
+            .unwrap();
+        harness.handler.bind_route(
+            test_route(9),
+            binding_with_harness(unscheduled.to_str().unwrap(), "pi", "ses-3"),
+        );
+        assert!(
+            bridge.scheduled_projects().unwrap().is_empty(),
+            "an older root's frozen schedule does not outrank the newest root"
+        );
+    }
+
+    /// The lease names a project, so the run must execute under that project.
+    /// Both projects have equal generations, so generation checking cannot
+    /// distinguish them. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_refuses_a_root_that_moved_to_another_project() {
+        use dreamer_scheduler::SchedulerHost;
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        harness.schedule(Some("*/15 * * * *"));
+        harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
+        let bridge = harness.scheduler_bridge();
+        let projects = bridge.scheduled_projects().unwrap();
+        assert_eq!(projects[0].project, "git:identity");
+
+        activate_module_authority(
+            &harness.store,
+            "context",
+            "git:other",
+            &harness.route_root,
+            "memories",
+        );
+        let other = harness
+            .store
+            .authority_status("context", "git:other", "memories")
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.state, "MODULE");
+        assert_eq!(
+            other.generation, projects[0].authority_generation,
+            "both projects are at their first MODULE generation"
+        );
+
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "moved",
+            )
+            .await;
+        match outcome {
+            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+                assert_eq!(
+                    response["code"],
+                    json!("authority_project_mismatch"),
+                    "{response}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            0,
+            "nothing dispatched"
+        );
+        let operation_key =
+            dreamer_operation_key(dreamer_scheduler::SCHEDULER_LEDGER_SESSION, "moved");
+        for project in ["git:identity", "git:other"] {
+            assert!(
+                harness
+                    .store
+                    .lookup_dreamer_receipt(DreamerReceiptKey {
+                        project,
+                        producer: DREAMER_RECEIPT_PRODUCER,
+                        operation_key: &operation_key,
+                    })
+                    .unwrap()
+                    .is_none(),
+                "{project}: no receipt is written for a refused run"
+            );
+        }
     }
 
     /// A scheduled slot runs through the same durable protocol as the wire

@@ -3861,6 +3861,15 @@ impl MemoryStore {
         due_at_ms: i64,
         now_ms: i64,
     ) -> Result<DreamerTaskAcquireOutcome, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .dreamer_task_acquire_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected dreamer task acquire failure".to_string(),
+            )));
+        }
         self.acquire_task_lease(
             &DREAMER_TASK,
             project,
@@ -5425,6 +5434,10 @@ pub struct MemoryStore {
     /// so a caller's store-failure branch can be exercised on a healthy store.
     #[cfg(any(test, feature = "test-support"))]
     authority_route_read_fail_once: std::sync::atomic::AtomicBool,
+    /// Makes the next `acquire_dreamer_task` fail as a backend error before it
+    /// touches the ledger.
+    #[cfg(any(test, feature = "test-support"))]
+    dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool,
 }
 
 fn valid_drop_seed_block_id(block_id: &str) -> bool {
@@ -5814,6 +5827,8 @@ impl MemoryStore {
             historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
             #[cfg(any(test, feature = "test-support"))]
             authority_route_read_fail_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
         Ok(store)
@@ -6292,6 +6307,13 @@ impl MemoryStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn fail_next_authority_route_read_for_test(&self) {
         self.authority_route_read_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next `acquire_dreamer_task` fails as a backend error; later calls run normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_dreamer_task_acquire_for_test(&self) {
+        self.dreamer_task_acquire_fail_once
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
