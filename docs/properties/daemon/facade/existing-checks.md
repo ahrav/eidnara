@@ -35,8 +35,9 @@ both in `lib.rs` `mod tests`, both status `unaudited`:
 - `retired_claim_facade_names_are_unsupported` sends each of the six names
   through the `name`, `kind`, and `method` envelopes and asserts
   `facade_envelope_not_supported` or `unrecognized_request_shape`, then sends
-  `ctx_memory` `get` and `list` and asserts a tool error naming canonical
-  kernel state.
+  `ctx_memory` `get` and asserts a tool error naming canonical kernel state,
+  and sends `ctx_memory` `list` and asserts the unknown-action error, since
+  `list` is no longer an advertised action.
 - `daemon_production_source_names_no_claim_lane_identifier` walks every `.rs`
   file under `crates/daemon/src`, splits off each file's `#[cfg(test)] mod
   tests`, and asserts that no production line names a claim-mirror,

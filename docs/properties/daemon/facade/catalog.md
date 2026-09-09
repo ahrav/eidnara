@@ -100,9 +100,12 @@ the part are the eight `drive-fault` cases.
   command name falls to `unrecognized_request_error` like any unknown tool
   (`facade_envelope_not_supported`), which
   `retired_claim_facade_names_are_unsupported` (`lib.rs`, `mod tests`)
-  asserts. `ctx_memory` `get`/`list` answer a tool error naming canonical
-  kernel state as where memory is served from; its mutation actions answer a
-  tool error naming the kernel commit path. The four records in Group C and
+  asserts. `ctx_memory` advertises and delegates the five actions the host
+  memory tool serves: `get` answers a tool error naming canonical kernel state
+  as where memory is served from, and `create`, `revise`, `archive`, and
+  `merge` answer a tool error naming the kernel commit path. `list` and
+  `restore` are no longer advertised and answer the unknown-action error like
+  any other unserved name. The four records in Group C and
   Group D whose subject was a claim handler carry `Status: invalidated`; prose
   below that treats those handlers as live describes the source tree.
 
