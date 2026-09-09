@@ -28890,25 +28890,10 @@ mod tests {
     /// fails here. Examples, tests, and benches are not shipped and are not roots.
     fn crate_roots(manifest_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         let src = manifest_dir.join("src");
-        let mut roots = Vec::new();
-        for auto in ["lib.rs", "main.rs"] {
-            let path = src.join(auto);
-            if path.is_file() {
-                roots.push(path);
-            }
-        }
-        if let Ok(entries) = std::fs::read_dir(src.join("bin")) {
-            for entry in entries {
-                let path = entry.expect("directory entry").path();
-                if path.extension().is_some_and(|ext| ext == "rs") {
-                    roots.push(path);
-                } else if path.is_dir() && path.join("main.rs").is_file() {
-                    roots.push(path.join("main.rs"));
-                }
-            }
-        }
         let manifest =
             std::fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("readable manifest");
+        let mut explicit_lib = false;
+        let mut explicit: Vec<std::path::PathBuf> = Vec::new();
         let mut section = String::new();
         for line in manifest.lines() {
             let line = line.trim();
@@ -28927,9 +28912,34 @@ mod tests {
                     "Cargo target {} lies outside src/ and the audit cannot classify it",
                     target.display()
                 );
-                if !roots.contains(&target) {
-                    roots.push(target);
+                if section == "lib" {
+                    explicit_lib = true;
                 }
+                explicit.push(target);
+            }
+        }
+        let mut roots = Vec::new();
+        // An explicit `[lib] path` is the sole library target; the conventional root then
+        // plays no part in the build.
+        if !explicit_lib && src.join("lib.rs").is_file() {
+            roots.push(src.join("lib.rs"));
+        }
+        if src.join("main.rs").is_file() {
+            roots.push(src.join("main.rs"));
+        }
+        if let Ok(entries) = std::fs::read_dir(src.join("bin")) {
+            for entry in entries {
+                let path = entry.expect("directory entry").path();
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    roots.push(path);
+                } else if path.is_dir() && path.join("main.rs").is_file() {
+                    roots.push(path.join("main.rs"));
+                }
+            }
+        }
+        for target in explicit {
+            if !roots.contains(&target) {
+                roots.push(target);
             }
         }
         assert!(!roots.is_empty(), "no crate roots found");
@@ -28945,14 +28955,26 @@ mod tests {
     }
 
     fn module_tree(roots: &[std::path::PathBuf]) -> ModuleTree {
-        use quote::ToTokens;
+        /// The directory a file's out-of-line children live in: a crate root and a `mod.rs` own
+        /// their directory; any other file owns the directory named after it.
+        fn module_dir(declaring: &std::path::Path, is_root: bool) -> std::path::PathBuf {
+            let dir = declaring.parent().expect("module file has a directory");
+            let stem = declaring
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("module file has a name");
+            if is_root || stem == "mod" {
+                dir.to_path_buf()
+            } else {
+                dir.join(stem)
+            }
+        }
 
         fn child_path(
             declaring: &std::path::Path,
-            is_root: bool,
+            module_dir: &std::path::Path,
             item: &syn::ItemMod,
         ) -> Option<std::path::PathBuf> {
-            let dir = declaring.parent().expect("module file has a directory");
             let explicit = item.attrs.iter().find_map(|attr| {
                 if !attr.path().is_ident("path") {
                     return None;
@@ -28967,22 +28989,20 @@ mod tests {
                 else {
                     return None;
                 };
-                Some(dir.join(path.value()))
+                // `#[path]` is relative to the declaring file's directory.
+                Some(
+                    declaring
+                        .parent()
+                        .expect("module file has a directory")
+                        .join(path.value()),
+                )
             });
             if let Some(path) = explicit {
                 return Some(path);
             }
-            let stem = declaring.file_stem().and_then(|stem| stem.to_str())?;
-            // A crate root and a `mod.rs` own their directory; any other file owns the
-            // directory named after it.
-            let base = if is_root || stem == "mod" {
-                dir.to_path_buf()
-            } else {
-                dir.join(stem)
-            };
             let name = item.ident.to_string();
-            let flat = base.join(format!("{name}.rs"));
-            let nested = base.join(&name).join("mod.rs");
+            let flat = module_dir.join(format!("{name}.rs"));
+            let nested = module_dir.join(&name).join("mod.rs");
             if flat.is_file() {
                 Some(flat)
             } else if nested.is_file() {
@@ -28992,10 +29012,49 @@ mod tests {
             }
         }
 
+        /// Every out-of-line module declared under `items`, descending into inline modules,
+        /// whose children live under a subdirectory named for the inline module. The flag is
+        /// whether the declaration is reached only through a test-gated item.
+        fn declared_children(
+            declaring: &std::path::Path,
+            module_dir: &std::path::Path,
+            items: &[syn::Item],
+            test_only: bool,
+            into: &mut Vec<(std::path::PathBuf, bool)>,
+        ) {
+            use quote::ToTokens;
+
+            for item in items {
+                let syn::Item::Mod(module) = item else {
+                    continue;
+                };
+                let test_only = test_only || is_test_only(&module.attrs);
+                match &module.content {
+                    Some((_, inner)) => declared_children(
+                        declaring,
+                        &module_dir.join(module.ident.to_string()),
+                        inner,
+                        test_only,
+                        into,
+                    ),
+                    None => {
+                        let child =
+                            child_path(declaring, module_dir, module).unwrap_or_else(|| {
+                                panic!(
+                                    "{}: cannot resolve `{}`",
+                                    declaring.display(),
+                                    module.to_token_stream()
+                                )
+                            });
+                        into.push((child, test_only));
+                    }
+                }
+            }
+        }
+
         /// Files reachable only through a test-gated declaration, classified without being
         /// scanned, so a fixture module's own children are not reported as orphans.
         fn walk_test_only(path: &std::path::PathBuf, tree: &mut ModuleTree) {
-            let is_root = false;
             if tree.test_only.contains(path) {
                 return;
             }
@@ -29003,13 +29062,16 @@ mod tests {
             let source = std::fs::read_to_string(path).expect("readable source");
             let file: syn::File = syn::parse_str(&source)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            for item in &file.items {
-                if let syn::Item::Mod(module) = item
-                    && module.content.is_none()
-                    && let Some(child) = child_path(path, is_root, module)
-                {
-                    walk_test_only(&child, tree);
-                }
+            let mut children = Vec::new();
+            declared_children(
+                path,
+                &module_dir(path, false),
+                &file.items,
+                true,
+                &mut children,
+            );
+            for (child, _) in children {
+                walk_test_only(&child, tree);
             }
         }
 
@@ -29020,24 +29082,14 @@ mod tests {
             let source = std::fs::read_to_string(path).expect("readable source");
             let file: syn::File = syn::parse_str(&source)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            let children: Vec<(std::path::PathBuf, bool)> = file
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    syn::Item::Mod(module) if module.content.is_none() => Some(module),
-                    _ => None,
-                })
-                .map(|module| {
-                    let child = child_path(path, is_root, module).unwrap_or_else(|| {
-                        panic!(
-                            "{}: cannot resolve `{}`",
-                            path.display(),
-                            module.to_token_stream()
-                        )
-                    });
-                    (child, is_test_only(&module.attrs))
-                })
-                .collect();
+            let mut children = Vec::new();
+            declared_children(
+                path,
+                &module_dir(path, is_root),
+                &file.items,
+                false,
+                &mut children,
+            );
             tree.production.push((path.clone(), file));
             for (child, test_only) in children {
                 if test_only {
@@ -29303,6 +29355,14 @@ mod tests {
                 let literals = macro_literals(mac);
                 if mac.path.is_ident("matches") {
                     self.compared.extend(literals.iter().cloned());
+                    // `matches!(op, MURAL)` names a constant in its pattern.
+                    for tree in mac.tokens.clone() {
+                        if let proc_macro2::TokenTree::Ident(ident) = tree
+                            && let Some(held) = self.consts.get(&ident.to_string())
+                        {
+                            self.compared.extend(held.iter().cloned());
+                        }
+                    }
                 }
                 self.literals.extend(literals);
                 syn::visit::visit_macro(self, mac);
@@ -29378,7 +29438,25 @@ mod tests {
                                 })
                             })
                 });
-                if deserializable {
+                let untagged = item.attrs.iter().any(|attr| {
+                    attr.path().is_ident("serde")
+                        && attr
+                            .parse_nested_meta(|meta| {
+                                if meta.path.is_ident("untagged") {
+                                    return Err(meta.error("untagged"));
+                                }
+                                if meta.input.peek(syn::Token![=]) {
+                                    let _: syn::Expr = meta.value()?.parse()?;
+                                } else if meta.input.peek(syn::token::Paren) {
+                                    let _ = meta.parse_nested_meta(|_| Ok(()));
+                                }
+                                Ok(())
+                            })
+                            .is_err()
+                });
+                // An untagged enum is chosen by payload shape; its variant names never cross
+                // the wire.
+                if deserializable && !untagged {
                     let rule = rename_all_rule(&item.attrs);
                     for variant in &item.variants {
                         if has_serde_rename(&variant.attrs) {

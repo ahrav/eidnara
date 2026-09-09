@@ -261,6 +261,19 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             const parts = [inner.expression.expression, ...inner.arguments].map(leafText);
             return parts.every((part) => part !== undefined) ? parts.join("") : undefined;
         }
+        // `"CONTEXT.DB".toLowerCase()` and the other case conversions of a foldable receiver.
+        if (
+            ts.isCallExpression(inner) &&
+            ts.isPropertyAccessExpression(inner.expression) &&
+            inner.arguments.length === 0 &&
+            /^to(?:Locale)?(?:Lower|Upper)Case$/.test(inner.expression.name.text)
+        ) {
+            const receiver = leafText(inner.expression.expression);
+            if (receiver === undefined) return undefined;
+            return /Lower/.test(inner.expression.name.text)
+                ? receiver.toLowerCase()
+                : receiver.toUpperCase();
+        }
         // `["claim", "intent"].join(".")` with every element and the separator foldable.
         if (
             ts.isCallExpression(inner) &&
@@ -295,6 +308,8 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 )
                 // `[.]` matches exactly one character; a wider class stays as written.
                 .replace(/\[([^\]\\^])\]/g, "$1")
+                // A group without alternation matches exactly its contents.
+                .replace(/\((?:\?:)?([^()|]*)\)/g, "$1")
                 .replace(/\\(.)/g, "$1")
         );
     };
@@ -459,6 +474,8 @@ export function databaseUses(
         }
         ts.forEachChild(node, collectFactories);
     };
+    const isLoaderMember = (text: string) =>
+        text === "module.require" || /(^|\.)getBuiltinModule$/.test(text);
     const loaders = new Set<string>(["require"]);
     const collectLoaders = (node: ts.Node): void => {
         if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
@@ -467,6 +484,9 @@ export function databaseUses(
                 const factory = node.initializer.expression.getText(file).split(".").pop() ?? "";
                 if (factories.has(factory)) loaders.add(node.name.text);
             } else if (ts.isIdentifier(node.initializer) && loaders.has(node.initializer.text)) {
+                loaders.add(node.name.text);
+            } else if (isLoaderMember(node.initializer.getText(file))) {
+                // `const load = process.getBuiltinModule;` aliases a loader member.
                 loaders.add(node.name.text);
             }
         }
@@ -522,11 +542,9 @@ export function databaseUses(
         if (ts.isCallExpression(node)) {
             const callee = node.expression;
             const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
-            const calleeText = callee.getText(file);
             const isRequire =
                 (ts.isIdentifier(callee) && loaders.has(callee.text)) ||
-                calleeText === "module.require" ||
-                /(^|\.)getBuiltinModule$/.test(calleeText);
+                isLoaderMember(callee.getText(file));
             // Non-string-literal specifiers cannot be checked against the binding pattern, so they escape.
             const specifier = node.arguments[0];
             const unresolved = specifier !== undefined && !ts.isStringLiteralLike(specifier);

@@ -436,6 +436,8 @@ describe("databaseUses", () => {
                     'const ran = run("bun:sqlite");',
                     "const { require: unrelated } = someObject;",
                     'const notALoad = unrelated("bun:sqlite");',
+                    "const builtin = process.getBuiltinModule;",
+                    'const viaBuiltinAlias = builtin("node:sqlite");',
                     "",
                 ].join("\n"),
             ).escapes,
@@ -448,6 +450,7 @@ describe("databaseUses", () => {
             'const nodeSql = viaPick("node:sqlite");',
             'const bunSql = viaComputed("bun:sqlite");',
             'const ran = run("bun:sqlite");',
+            'const viaBuiltinAlias = builtin("node:sqlite");',
         ]);
     });
 
@@ -615,6 +618,14 @@ describe("operationLiteralHits", () => {
                 ),
             ).map((entry) => entry.value),
         ).toEqual(["claim.intent", "context.db", "context", ".", "db"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    'const g = /^(?:claim\\.intent)(\\.stage)$/; const h = /(a|b)\\.db/; const l = "CONTEXT.DB".toLowerCase();',
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim.intent.stage", "(a|b).db", "context.db", "CONTEXT.DB"]);
         expect(
             literalStrings(
                 parseSource(
