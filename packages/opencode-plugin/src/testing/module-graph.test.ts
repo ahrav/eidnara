@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import {
     CODE_FILE,
+    DATABASE_BINDING,
     type DatabaseUses,
     databaseBinders,
     databaseUses,
@@ -285,6 +286,20 @@ describe("databaseBinders", () => {
             "src/b/forbidden.ts",
             "src/shared/sqlite.ts",
         ]);
+    });
+
+    test("matches the adapter under any executable extension", () => {
+        for (const spelling of [
+            "../../shared/sqlite",
+            "../../shared/sqlite.ts",
+            "../../shared/sqlite.js",
+            "../../shared/sqlite.mjs",
+            "../../shared/sqlite.cts",
+        ]) {
+            expect(DATABASE_BINDING.test(spelling)).toBe(true);
+        }
+        expect(DATABASE_BINDING.test("../../shared/sqlite.json")).toBe(false);
+        expect(DATABASE_BINDING.test("../../shared/sqlite-helpers")).toBe(false);
     });
 });
 
@@ -626,6 +641,11 @@ describe("operationLiteralHits", () => {
                 ),
             ).map((entry) => entry.value),
         ).toEqual(["claim.intent.stage", "(a|b).db", "context.db", "CONTEXT.DB"]);
+        expect(
+            literalStrings(parseSource("const ci = /^CONTEXT[.]DB$/i;", "m.ts")).map(
+                (entry) => entry.value,
+            ),
+        ).toEqual(["CONTEXT.DB", "context.db"]);
         expect(
             literalStrings(
                 parseSource(

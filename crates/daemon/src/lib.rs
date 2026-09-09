@@ -29075,6 +29075,49 @@ mod tests {
             }
         }
 
+        /// Files spliced in by `include!`, which Cargo compiles like any module. A literal path
+        /// is followed; a computed one (an `OUT_DIR` build output) cannot be scanned, so it
+        /// fails the audit.
+        fn included_files(
+            declaring: &std::path::Path,
+            file: &syn::File,
+        ) -> Vec<std::path::PathBuf> {
+            use quote::ToTokens;
+
+            struct Includes<'a> {
+                declaring: &'a std::path::Path,
+                found: Vec<std::path::PathBuf>,
+            }
+            impl<'ast> syn::visit::Visit<'ast> for Includes<'_> {
+                fn visit_item(&mut self, item: &'ast syn::Item) {
+                    if !is_test_only(item_attrs(item)) {
+                        syn::visit::visit_item(self, item);
+                    }
+                }
+                fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                    if mac.path.is_ident("include") {
+                        let literal = syn::parse2::<syn::LitStr>(mac.tokens.clone());
+                        let Ok(literal) = literal else {
+                            panic!(
+                                "{}: `{}` includes a source the audit cannot read",
+                                self.declaring.display(),
+                                mac.to_token_stream()
+                            );
+                        };
+                        let dir = self.declaring.parent().expect("file has a directory");
+                        self.found.push(dir.join(literal.value()));
+                    }
+                    syn::visit::visit_macro(self, mac);
+                }
+            }
+            let mut includes = Includes {
+                declaring,
+                found: Vec::new(),
+            };
+            syn::visit::Visit::visit_file(&mut includes, file);
+            includes.found
+        }
+
         fn walk(path: &std::path::PathBuf, is_root: bool, tree: &mut ModuleTree) {
             if tree.production.iter().any(|(seen, _)| seen == path) {
                 return;
@@ -29082,6 +29125,7 @@ mod tests {
             let source = std::fs::read_to_string(path).expect("readable source");
             let file: syn::File = syn::parse_str(&source)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let included = included_files(path, &file);
             let mut children = Vec::new();
             declared_children(
                 path,
@@ -29097,6 +29141,9 @@ mod tests {
                 } else {
                     walk(&child, false, tree);
                 }
+            }
+            for spliced in included {
+                walk(&spliced, false, tree);
             }
         }
 
@@ -29189,8 +29236,8 @@ mod tests {
         }
     }
 
-    /// The string values of `const` and `static` items, keyed by name, so a comparison against a
-    /// named constant is classified by the text the constant holds.
+    /// The string values of `const`, `static`, and associated `const` items, keyed by name, so a
+    /// comparison against a named constant is classified by the text the constant holds.
     struct StringConsts(std::collections::HashMap<String, Vec<String>>);
 
     impl<'ast> syn::visit::Visit<'ast> for StringConsts {
@@ -29211,6 +29258,30 @@ mod tests {
             syn::visit::visit_item_const(self, item);
         }
 
+        fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
+            let values = string_literals_in(|c| c.visit_expr(&item.expr));
+            if !values.is_empty() {
+                self.0
+                    .entry(item.ident.to_string())
+                    .or_default()
+                    .extend(values);
+            }
+            syn::visit::visit_impl_item_const(self, item);
+        }
+
+        fn visit_trait_item_const(&mut self, item: &'ast syn::TraitItemConst) {
+            if let Some((_, default)) = &item.default {
+                let values = string_literals_in(|c| c.visit_expr(default));
+                if !values.is_empty() {
+                    self.0
+                        .entry(item.ident.to_string())
+                        .or_default()
+                        .extend(values);
+                }
+            }
+            syn::visit::visit_trait_item_const(self, item);
+        }
+
         fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
             let values = string_literals_in(|c| c.visit_expr(&item.expr));
             if !values.is_empty() {
@@ -29221,6 +29292,45 @@ mod tests {
             }
             syn::visit::visit_item_static(self, item);
         }
+    }
+
+    /// The exact text a literal-shaped regex accepts: anchors, one-character classes, and
+    /// backslash escapes removed. A class or group with alternation stays as written.
+    fn regex_text(pattern: &str) -> String {
+        let mut text = pattern
+            .trim_start_matches('^')
+            .trim_end_matches('$')
+            .to_string();
+        let mut out = String::new();
+        let mut chars = text.drain(..).peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' => {
+                    if let Some(escaped) = chars.next() {
+                        out.push(escaped);
+                    }
+                }
+                '[' => {
+                    let mut class = String::new();
+                    for inner in chars.by_ref() {
+                        if inner == ']' {
+                            break;
+                        }
+                        class.push(inner);
+                    }
+                    if class.chars().count() == 1 {
+                        out.push_str(&class);
+                    } else {
+                        out.push('[');
+                        out.push_str(&class);
+                        out.push(']');
+                    }
+                }
+                '(' | ')' if !pattern.contains('|') => {}
+                other => out.push(other),
+            }
+        }
+        out.replace("?:", "")
     }
 
     /// Literals in an expression plus the values of any string constants it names.
@@ -29275,7 +29385,7 @@ mod tests {
         const KNOWN_NON_ROUTES: [&str; 1] = ["m0-mural"];
         /// Methods that test or split a string against a pattern; a literal argument to one of
         /// them is a spelling the code routes on.
-        const COMPARISON_METHODS: [&str; 22] = [
+        const COMPARISON_METHODS: [&str; 28] = [
             "eq",
             "ne",
             "contains",
@@ -29298,6 +29408,21 @@ mod tests {
             "rfind",
             "match_indices",
             "replace",
+            "is_match",
+            "captures",
+            "find_iter",
+            "captures_iter",
+            "replace_all",
+            "shortest_match",
+        ];
+        /// Constructors whose string argument is a pattern the code later matches input against.
+        const PATTERN_CONSTRUCTORS: [&str; 6] = [
+            "Regex :: new",
+            "RegexSet :: new",
+            "RegexBuilder :: new",
+            "regex :: Regex :: new",
+            "regex :: RegexSet :: new",
+            "regex :: RegexBuilder :: new",
         ];
 
         struct ProductionLiterals {
@@ -29389,6 +29514,22 @@ mod tests {
                     }
                 }
                 syn::visit::visit_expr_method_call(self, call);
+            }
+
+            /// A regex built from a literal is a pattern the code matches input against; its
+            /// anchors, escapes, and one-character classes are removed so the text it accepts
+            /// is what gets classified.
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                let callee = call.func.to_token_stream().to_string();
+                if PATTERN_CONSTRUCTORS.contains(&callee.as_str()) {
+                    for arg in &call.args {
+                        reject_unevaluable_macros(arg);
+                        for pattern in compared_strings(arg, &self.consts) {
+                            self.compared.push(regex_text(&pattern));
+                        }
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
             }
 
             fn visit_arm(&mut self, arm: &'ast syn::Arm) {
@@ -29518,6 +29659,9 @@ mod tests {
                 .expect("macro")
                 .tokens
         ));
+        assert_eq!(regex_text(r"^mural\.render$"), "mural.render");
+        assert_eq!(regex_text(r"^(?:git[.]ingest)$"), "git.ingest");
+        assert_eq!(regex_text(r"(a|b)\.db"), "(a|b).db");
         assert_eq!(camel_words("MuralRender"), "mural_render");
         assert_eq!(serde_rename("snake_case", "MuralRender"), "mural_render");
         assert_eq!(serde_rename("kebab-case", "MuralRender"), "mural-render");
@@ -29611,14 +29755,18 @@ mod tests {
         for (_, file) in &tree.production {
             consts.visit_file(file);
         }
+        // A `pub use serde::Deserialize as Decode` in one module is a derive name in every module
+        // that imports it, so aliases are collected across the tree like constants.
+        let mut aliases = DeserializeAliases(vec!["Deserialize".to_string()]);
+        for (_, file) in &tree.production {
+            aliases.visit_file(file);
+        }
         let mut offending = Vec::new();
         for (path, file) in tree.production {
-            let mut aliases = DeserializeAliases(vec!["Deserialize".to_string()]);
-            aliases.visit_file(&file);
             let mut scan = ProductionLiterals {
                 literals: Vec::new(),
                 compared: Vec::new(),
-                deserialize_names: aliases.0,
+                deserialize_names: aliases.0.clone(),
                 consts: consts.0.clone(),
             };
             scan.visit_file(&file);

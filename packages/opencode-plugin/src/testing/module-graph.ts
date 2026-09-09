@@ -14,9 +14,9 @@ export const BUNDLE_EXTERNALS = [
     "@earendil-works/pi-tui",
 ] as const;
 
-/** Import specifiers are matched as written, so the adapter may appear with or without its extension. */
+/** Import specifiers are matched as written, so the adapter may appear with no extension or any executable one. */
 export const DATABASE_BINDING =
-    /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|(?:^|\/)shared\/sqlite(?:\.ts)?$/;
+    /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|(?:^|\/)shared\/sqlite(?:\.(?:[cm]?[jt]s|[jt]sx))?$/;
 
 /** Every executable extension the bundler accepts; the scans must read all of them. */
 export const CODE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
@@ -320,7 +320,13 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             folded.push({ line: lineOf(node), value: node.text });
         }
         if (ts.isRegularExpressionLiteral(node)) {
-            folded.push({ line: lineOf(node), value: regexBody(node.text) });
+            const body = regexBody(node.text);
+            folded.push({ line: lineOf(node), value: body });
+            // An `i` flag accepts every casing, including the case-sensitive store file names.
+            const lower = body.toLowerCase();
+            if (lower !== body && /\/[a-z]*i[a-z]*$/.test(node.text)) {
+                folded.push({ line: lineOf(node), value: lower });
+            }
         }
         if (
             (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
