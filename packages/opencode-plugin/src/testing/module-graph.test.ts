@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { type ModuleGraph, reachableModules } from "./module-graph";
+import {
+    databaseBinders,
+    type ModuleGraph,
+    OPERATION_LITERAL,
+    operationLiteralHits,
+    reachableModules,
+} from "./module-graph";
 
 const SRC = resolve(import.meta.dir, "..");
 
@@ -55,6 +61,33 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ],
 ]);
 
+/**
+ * The only retained module that writes a database, and the database it writes
+ * is the harness's own `opencode.db`, never an Eidnara product store. Every
+ * other module reaching a database binding opens it read-only.
+ */
+const HARNESS_DATABASE_WRITER = "features/context/compaction-marker.ts";
+const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"];
+
+/** File names of the Rust-owned product stores, as a path a module could open. */
+const PRODUCT_STORE_FILE =
+    /^(?!\s*(?:\/\/|\*|\/\*)).*["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)["'`]/;
+
+type ReportedGraph = Omit<ModuleGraph, "text">;
+
+function moduleGraphReport(): Record<string, ReportedGraph> {
+    const report = Bun.spawnSync({
+        cmd: ["bun", join(import.meta.dir, "module-graph-report.ts"), ...ROOTS],
+        cwd: SRC,
+        stdout: "pipe",
+        stderr: "pipe",
+    });
+    if (report.exitCode !== 0) {
+        throw new Error(`module graph report failed: ${report.stderr.toString()}`);
+    }
+    return JSON.parse(report.stdout.toString());
+}
+
 describe("module graph over the landed tree", () => {
     test("the residue pattern matches a not-ported subsystem at the source root and nested under it", () => {
         expect(NOT_PORTED.test("memory/foo.ts")).toBe(true);
@@ -67,19 +100,7 @@ describe("module graph over the landed tree", () => {
     });
 
     test("no bundle root reaches a not-ported subsystem, and every module without a consumer is named", async () => {
-        const report = Bun.spawnSync({
-            cmd: ["bun", join(import.meta.dir, "module-graph-report.ts"), ...ROOTS],
-            cwd: SRC,
-            stdout: "pipe",
-            stderr: "pipe",
-        });
-        if (report.exitCode !== 0) {
-            throw new Error(`module graph report failed: ${report.stderr.toString()}`);
-        }
-        const graphs = JSON.parse(report.stdout.toString()) as Record<
-            string,
-            { inputs: string[]; externals: string[] }
-        >;
+        const graphs = moduleGraphReport();
         const reached = new Set<string>();
         const notPorted: string[] = [];
         for (const graph of Object.values(graphs)) {
@@ -94,10 +115,59 @@ describe("module graph over the landed tree", () => {
             .sort();
         expect(orphans).toEqual([...AWAITING_CONSUMER.keys()].sort());
     }, 120_000);
+
+    test("retained modules carry no claim.* or dreamer.* operation literal", () => {
+        expect(OPERATION_LITERAL.test('"claim.intent.stage"')).toBe(true);
+        expect(OPERATION_LITERAL.test("'dreamer.run_task'")).toBe(true);
+        expect(OPERATION_LITERAL.test("`dreamer.run_task`")).toBe(true);
+        expect(OPERATION_LITERAL.test('"dreamer_inference"')).toBe(false);
+        expect(OPERATION_LITERAL.test("claim.claim_id")).toBe(false);
+        expect(operationLiteralHits(MODULES)).toEqual([]);
+    });
+
+    test("retained modules name no Eidnara product-store file", () => {
+        expect(PRODUCT_STORE_FILE.test('join(dir, "memory.sqlite")')).toBe(true);
+        expect(PRODUCT_STORE_FILE.test("`${dir}/context.db`")).toBe(true);
+        expect(PRODUCT_STORE_FILE.test("Eidnara's own context.db.")).toBe(false);
+        expect(PRODUCT_STORE_FILE.test("     * applies to its own `context.db`.")).toBe(false);
+        expect(operationLiteralHits(MODULES, PRODUCT_STORE_FILE)).toEqual([]);
+    });
+
+    test("the compaction marker is the only retained module that writes a database", () => {
+        const binders = new Set<string>();
+        for (const graph of Object.values(moduleGraphReport())) {
+            for (const binder of databaseBinders(graph)) {
+                if (!/\.test\.tsx?$/.test(binder)) binders.add(binder);
+            }
+        }
+        expect([...binders].sort()).toEqual(
+            [HARNESS_DATABASE_WRITER, ...HARNESS_DATABASE_READERS].sort(),
+        );
+        const opens = (module: string) => {
+            const source = readFileSync(join(SRC, module), "utf8");
+            expect(source).not.toMatch(/\bDatabase\s+as\b/);
+            return source.split("\n").filter((line) => /\bnew Database\(/.test(line));
+        };
+        for (const reader of HARNESS_DATABASE_READERS) {
+            expect(opens(reader)).toEqual([
+                "    const db = new Database(dbPath, { readonly: true });",
+            ]);
+        }
+        expect(opens(HARNESS_DATABASE_WRITER)).toEqual(["    const db = new Database(dbPath);"]);
+        expect(readFileSync(join(SRC, HARNESS_DATABASE_WRITER), "utf8")).toMatch(
+            /const dbPath = getOpenCodeDbPath\(\);/,
+        );
+    }, 120_000);
 });
 const graph: ModuleGraph = {
     inputs: ["src/a/forbidden.ts", "src/b/forbidden.ts", "src/c/allowed.ts"],
     externals: ["@scope/forbidden-external", "@scope/allowed-external"],
+    imports: {
+        "src/a/forbidden.ts": ["bun:sqlite"],
+        "src/b/forbidden.ts": ["../shared/sqlite"],
+        "src/c/allowed.ts": ["src/a/forbidden.ts", "@scope/allowed-external"],
+        "src/shared/sqlite.ts": ["node:sqlite"],
+    },
     text: "",
 };
 
@@ -122,5 +192,11 @@ describe("reachableModules", () => {
 
     test("rejects a sticky pattern instead of under-counting", () => {
         expect(() => reachableModules(graph, /forbidden/y)).toThrow(TypeError);
+    });
+});
+
+describe("databaseBinders", () => {
+    test("names the modules importing a binding and skips the bindings themselves", () => {
+        expect(databaseBinders(graph)).toEqual(["src/a/forbidden.ts", "src/b/forbidden.ts"]);
     });
 });

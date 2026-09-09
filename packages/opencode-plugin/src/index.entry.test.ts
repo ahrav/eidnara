@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { getEidnaraStorageDir } from "./shared/data-path";
 import { rpcPortDir } from "./shared/rpc-utils";
+import {
+    databaseBinders,
+    graphFromMetafileInputs,
+    type MetafileInput,
+    OPERATION_LITERAL,
+} from "./testing/module-graph";
 
 const SRC = resolve(import.meta.dir);
 const PACKAGE_ROOT = resolve(SRC, "..");
@@ -38,7 +44,12 @@ const EXPECTED_TOOLS = ["ctx_reduce", "ctx_search", "ctx_note", "ctx_memory"].so
 interface BuiltEntry {
     outfile: string;
     inputs: string[];
+    imports: Record<string, string[]>;
 }
+
+/** The only shipped module that writes a database; it writes the harness's own `opencode.db`. */
+const HARNESS_DATABASE_WRITER = "features/context/compaction-marker.ts";
+const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"];
 
 /**
  * The bundler runs in a child process: under `bun test`, an in-process
@@ -65,10 +76,11 @@ function buildEntry(outdir: string): BuiltEntry {
         throw new Error(`bundle failed: ${result.stderr.toString()}`);
     }
     const metafile = JSON.parse(readFileSync(metafilePath, "utf8")) as {
-        inputs?: Record<string, unknown>;
+        inputs?: Record<string, MetafileInput>;
     };
     if (!metafile.inputs) throw new Error("bundle produced no metafile inputs");
-    return { outfile: join(outdir, "index.js"), inputs: Object.keys(metafile.inputs) };
+    const { inputs, imports } = graphFromMetafileInputs(metafile.inputs);
+    return { outfile: join(outdir, "index.js"), inputs, imports };
 }
 
 function fakeClient() {
@@ -132,6 +144,18 @@ describe("plugin entry bundle", () => {
         );
         expect(built.inputs.length).toBeGreaterThan(0);
         expect(residue).toEqual([]);
+    });
+
+    test("the bundle carries no claim.* or dreamer.* operation literal", () => {
+        const text = readFileSync(built.outfile, "utf8");
+        expect(text.length).toBeGreaterThan(0);
+        expect(text).not.toMatch(OPERATION_LITERAL);
+    });
+
+    test("the compaction marker is the only shipped module that writes a database", () => {
+        expect(databaseBinders(built)).toEqual(
+            [HARNESS_DATABASE_WRITER, ...HARNESS_DATABASE_READERS].sort(),
+        );
     });
 
     test("the bundle loads and server() registers the expected hooks and tools", async () => {
