@@ -166,8 +166,11 @@ fn compartment(start: i64, end: i64, title: &str, content: &str) -> DecayRenderC
 
 /// A name belongs to an absent subsystem when one of its segments starts with a stem. Segments
 /// split on the punctuation wire names and JSON pointers use, so `digital_clock` does not match
-/// the stem `git` while `git_commit_indexing` does.
+/// the stem `git` while `git_commit_indexing` does. Segments are compared in lowercase because
+/// the dispatchers match spellings byte for byte and would route `Mural.render` as written.
 pub fn names_absent_subsystem(name: &str, stems: &[&str]) -> bool {
-    name.split(['.', '_', '-', '/', ':'])
-        .any(|segment| stems.iter().any(|stem| segment.starts_with(stem)))
+    name.split(['.', '_', '-', '/', ':']).any(|segment| {
+        let segment = segment.to_ascii_lowercase();
+        stems.iter().any(|stem| segment.starts_with(stem))
+    })
 }

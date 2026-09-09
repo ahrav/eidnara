@@ -28390,9 +28390,10 @@ mod tests {
     /// dispatchers' `match` arm patterns. Each arm must use string-literal patterns or `_`; the
     /// parser fails on a constant or binding pattern instead of skipping the route it names.
     /// The `_` arm must reject the request because delegating would route every unlisted
-    /// spelling. Outside the audited match a dispatcher may name only request-envelope fields
-    /// and may read the discriminator only where it binds it, so a route decision cannot move
-    /// ahead of the match. commentlint: allow(JUDGE)
+    /// spelling. Every other string literal in a dispatcher, before the match or inside an arm
+    /// body, must be a request-envelope field or an echo response key, and the discriminator may
+    /// be read only where the function binds it, so a route decision cannot move ahead of the
+    /// match or nest inside an arm. commentlint: allow(JUDGE)
     fn dispatcher_route_literals() -> Vec<String> {
         use quote::ToTokens;
         use syn::visit::Visit;
@@ -28403,7 +28404,8 @@ mod tests {
             ("dispatch_value_with_inbound_bytes", "method", 1),
             ("handle_facade_value", "name", 0),
         ];
-        const ENVELOPE_FIELDS: [&str; 4] = ["method", "kind", "name", "arguments"];
+        /// Request-envelope fields the dispatchers read, and the `echo` arm's response keys.
+        const NON_ROUTE_LITERALS: [&str; 6] = ["method", "kind", "name", "arguments", "ok", "echo"];
 
         fn pattern_literals(pat: &syn::Pat, literals: &mut Vec<String>) {
             match pat {
@@ -28447,7 +28449,7 @@ mod tests {
             matches: usize,
             inside_audited: usize,
             literals: Vec<String>,
-            outside_literals: Vec<String>,
+            other_literals: Vec<String>,
             outside_reads: usize,
         }
 
@@ -28472,24 +28474,28 @@ mod tests {
                         }
                         pattern_literals(&arm.pat, &mut self.literals);
                     }
+                    // Patterns are classified above; guards and bodies are walked so a literal
+                    // or a nested match inside an arm is recorded like any other non-pattern text.
                     self.inside_audited += 1;
-                }
-                syn::visit::visit_expr_match(self, expr);
-                if audited {
+                    self.visit_expr(&expr.expr);
+                    for arm in &expr.arms {
+                        if let Some((_, guard)) = &arm.guard {
+                            self.visit_expr(guard);
+                        }
+                        self.visit_expr(&arm.body);
+                    }
                     self.inside_audited -= 1;
+                } else {
+                    syn::visit::visit_expr_match(self, expr);
                 }
             }
 
             fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
-                if self.inside_audited == 0 {
-                    self.outside_literals.push(lit.value());
-                }
+                self.other_literals.push(lit.value());
             }
 
             fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-                if self.inside_audited == 0 {
-                    macro_string_literals(mac.tokens.clone(), &mut self.outside_literals);
-                }
+                macro_string_literals(mac.tokens.clone(), &mut self.other_literals);
                 syn::visit::visit_macro(self, mac);
             }
 
@@ -28521,7 +28527,7 @@ mod tests {
                         matches: 0,
                         inside_audited: 0,
                         literals: Vec::new(),
-                        outside_literals: Vec::new(),
+                        other_literals: Vec::new(),
                         outside_reads: 0,
                     };
                     dispatcher.visit_block(&function.block);
@@ -28529,15 +28535,15 @@ mod tests {
                         dispatcher.matches, 1,
                         "{name} must match on `{scrutinee}` exactly once"
                     );
-                    let routing_outside: Vec<&String> = dispatcher
-                        .outside_literals
+                    let routing_elsewhere: Vec<&String> = dispatcher
+                        .other_literals
                         .iter()
-                        .filter(|literal| !ENVELOPE_FIELDS.contains(&literal.as_str()))
+                        .filter(|literal| !NON_ROUTE_LITERALS.contains(&literal.as_str()))
                         .collect();
                     assert!(
-                        routing_outside.is_empty(),
-                        "{name} names {routing_outside:?} outside `match {scrutinee}`; \
-                         route decisions belong in the audited match"
+                        routing_elsewhere.is_empty(),
+                        "{name} names {routing_elsewhere:?} outside the arm patterns of \
+                         `match {scrutinee}`; route decisions belong in those patterns"
                     );
                     assert_eq!(
                         dispatcher.outside_reads, *binding_reads,
@@ -28582,6 +28588,9 @@ mod tests {
     #[test]
     fn dispatchers_register_no_indexing_embedding_git_or_mural_route() {
         for spelling in UNREACHABLE_ROUTE_SPELLINGS {
+            assert!(names_absent_subsystem(spelling), "{spelling}");
+        }
+        for spelling in ["Mural.render", "GIT_ingest", "Embed.Query", "models.List"] {
             assert!(names_absent_subsystem(spelling), "{spelling}");
         }
         for spelling in [
