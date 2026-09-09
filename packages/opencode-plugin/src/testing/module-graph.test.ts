@@ -17,6 +17,7 @@ import {
     parseSource,
     RETAINED_DATABASE_USES,
     reachableModules,
+    resolvesToBinding,
     TEST_FILE,
     withoutComments,
 } from "./module-graph";
@@ -138,6 +139,14 @@ function scannedSources(): string[] {
     return [...new Set([...MODULES, ...productionReached(), ...compiled])].sort();
 }
 
+/** `literalScanSources` excludes `SCAN_DEFINITIONS` because `OPERATION_LITERAL` expands to `"claim.` in that file; `productionReached` must never name it. */
+const SCAN_DEFINITIONS = join(SRC, "testing/module-graph.ts");
+
+function literalScanSources(): string[] {
+    expect(productionReached()).not.toContain(SCAN_DEFINITIONS);
+    return scannedSources().filter((file) => file !== SCAN_DEFINITIONS);
+}
+
 describe("module graph over the landed tree", () => {
     test("the residue pattern matches a not-ported subsystem at the source root and nested under it", () => {
         expect(NOT_PORTED.test("memory/foo.ts")).toBe(true);
@@ -180,7 +189,7 @@ describe("module graph over the landed tree", () => {
         expect(OPERATION_LITERAL.test("'Dreamer.Run_Task'")).toBe(true);
         expect(OPERATION_LITERAL.test('"dreamer_inference"')).toBe(false);
         expect(OPERATION_LITERAL.test("claim.claim_id")).toBe(false);
-        expect(operationLiteralHits(scannedSources())).toEqual([]);
+        expect(operationLiteralHits(literalScanSources())).toEqual([]);
     }, 120_000);
 
     test("retained modules name no Eidnara product-store file", () => {
@@ -191,7 +200,7 @@ describe("module graph over the landed tree", () => {
         expect(PRODUCT_STORE_FILE.test("`memory.sqlite.bak`")).toBe(true);
         expect(PRODUCT_STORE_FILE.test('"context.dbx"')).toBe(false);
         expect(PRODUCT_STORE_FILE.test("Eidnara's own context.db.")).toBe(false);
-        expect(operationLiteralHits(scannedSources(), PRODUCT_STORE_FILE)).toEqual([]);
+        expect(operationLiteralHits(literalScanSources(), PRODUCT_STORE_FILE)).toEqual([]);
     }, 120_000);
 
     test("the compaction marker is the only retained module that writes a database", () => {
@@ -302,6 +311,22 @@ describe("databaseBinders", () => {
         expect(DATABASE_BINDING.test("../../shared/sqlite.json")).toBe(false);
         expect(DATABASE_BINDING.test("../../shared/sqlite-helpers")).toBe(false);
     });
+
+    test("resolves a relative specifier against the importing module before matching", () => {
+        expect(resolvesToBinding("src/shared/beside.ts", "./sqlite")).toBe(true);
+        expect(resolvesToBinding("src/shared/nested/deep.ts", "../sqlite.ts")).toBe(true);
+        expect(resolvesToBinding("src/hooks/x.ts", "./sqlite")).toBe(false);
+        expect(resolvesToBinding("src/shared/beside.ts", "./sqlite-helpers")).toBe(false);
+        expect(resolvesToBinding("src/shared/beside.ts", "node:sqlite")).toBe(true);
+        expect(
+            databaseBinders({
+                imports: {
+                    "src/shared/beside.ts": ["./sqlite"],
+                    "src/shared/other.ts": ["./sqlite-helpers"],
+                },
+            }),
+        ).toEqual(["src/shared/beside.ts"]);
+    });
 });
 
 describe("databaseUses", () => {
@@ -376,6 +401,9 @@ describe("databaseUses", () => {
                 'import { join } from "node:path";',
                 'export type { Database } from "../../shared/sqlite";',
                 'export { type Database as TypeOnlyDb } from "../../shared/sqlite";',
+                'import native = require("node:sqlite");',
+                'import type NativeTypes = require("node:sqlite");',
+                'import pathModule = require("node:path");',
                 "",
             ].join("\n"),
         );
@@ -389,7 +417,24 @@ describe("databaseUses", () => {
             'export { type Database, runImmediate } from "../../shared/sqlite";',
             'const lazy = await import("node:sqlite");',
             'const legacy = require("better-sqlite3");',
+            'import native = require("node:sqlite");',
         ]);
+    });
+
+    test("recognizes the adapter imported by a sibling-relative specifier", () => {
+        const uses = databaseUses(
+            [
+                'import { Database as Sqlite } from "./sqlite";',
+                "const db = new Sqlite(dynamicPath);",
+                "",
+            ].join("\n"),
+            "shared/beside.ts",
+        );
+        expect(uses.escapes).toEqual(['import { Database as Sqlite } from "./sqlite";']);
+        expect(
+            databaseUses('import { Database as Sqlite } from "./sqlite";\n', "hooks/far.ts")
+                .escapes,
+        ).toEqual([]);
     });
 
     test("reports any constructor named like the binding as an open", () => {
@@ -627,11 +672,41 @@ describe("operationLiteralHits", () => {
         expect(
             literalStrings(
                 parseSource(
-                    "const c = /^claim[.]intent[.]stage$/; const w = /mem[a-z]+\\.sqlite/;",
+                    "const c = /^claim[.]intent[.]stage$/; const w = /mem[^.]+\\.sqlite/;",
                     "m.ts",
                 ),
             ).map((entry) => entry.value),
-        ).toEqual(["claim.intent.stage", "mem[a-z]+.sqlite"]);
+        ).toEqual(["claim.intent.stage", "mem[^.]+.sqlite"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    "const cls = /^[ck]laim[.]intent[.]stage$/; const range = /^[a-c][.]db$/; const wide = /^[a-zA-Z0-9_-]+$/;",
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual([
+            "claim.intent.stage",
+            "klaim.intent.stage",
+            "a.db",
+            "b.db",
+            "c.db",
+            "[a-zA-Z0-9_-]+",
+        ]);
+        expect(
+            literalStrings(
+                parseSource(
+                    'const ctor = new RegExp("^claim[.]intent[.]stage$"); const call = RegExp("^STORE[.]DB$", "i"); const dyn = new RegExp(pattern);',
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual([
+            "claim.intent.stage",
+            "^claim[.]intent[.]stage$",
+            "STORE.DB",
+            "store.db",
+            "^STORE[.]DB$",
+            "i",
+        ]);
         expect(
             literalStrings(
                 parseSource(

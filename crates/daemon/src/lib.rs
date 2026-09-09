@@ -28415,19 +28415,50 @@ mod tests {
             literals.push(spaced);
         }
         if mac.path.is_ident("concat") {
-            let evaluable = mac.tokens.clone().into_iter().all(|tree| match tree {
-                proc_macro2::TokenTree::Literal(_) => true,
-                proc_macro2::TokenTree::Punct(punct) => punct.as_char() == ',',
-                _ => false,
+            let value = concat_value(mac.tokens.clone()).unwrap_or_else(|| {
+                panic!(
+                    "`{}` cannot be audited: concat! arguments must be literals",
+                    mac.to_token_stream()
+                )
             });
-            assert!(
-                evaluable,
-                "`{}` cannot be audited: concat! arguments must be literals",
-                mac.to_token_stream()
-            );
-            literals.push(literals.concat());
+            literals.push(value);
         }
         literals
+    }
+
+    /// `concat!` renders an integer by value (`0x10` is `16`) and a float by its digits, so
+    /// `concat!("mu", 1, "ral.render")` is `mu1ral.render`, never `mural.render`. Byte, byte
+    /// string, and C string literals are rejected here because `concat!` rejects them.
+    fn concat_value(tokens: proc_macro2::TokenStream) -> Option<String> {
+        let mut out = String::new();
+        let mut expect_argument = true;
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Punct(punct)
+                    if punct.as_char() == ',' && !expect_argument =>
+                {
+                    expect_argument = true;
+                }
+                proc_macro2::TokenTree::Literal(literal) if expect_argument => {
+                    match syn::parse_str::<syn::Lit>(&literal.to_string()).ok()? {
+                        syn::Lit::Str(text) => out.push_str(&text.value()),
+                        syn::Lit::Char(ch) => out.push(ch.value()),
+                        syn::Lit::Int(int) => out.push_str(int.base10_digits()),
+                        syn::Lit::Float(float) => out.push_str(float.base10_digits()),
+                        _ => return None,
+                    }
+                    expect_argument = false;
+                }
+                proc_macro2::TokenTree::Ident(ident)
+                    if expect_argument && (ident == "true" || ident == "false") =>
+                {
+                    out.push_str(&ident.to_string());
+                    expect_argument = false;
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
     }
 
     /// `syn` leaves macro bodies as tokens, so their string literals are collected by hand.
@@ -28884,6 +28915,68 @@ mod tests {
         }
     }
 
+    fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+        match item {
+            syn::ImplItem::Const(i) => &i.attrs,
+            syn::ImplItem::Fn(i) => &i.attrs,
+            syn::ImplItem::Type(i) => &i.attrs,
+            syn::ImplItem::Macro(i) => &i.attrs,
+            _ => &[],
+        }
+    }
+
+    fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+        match item {
+            syn::TraitItem::Const(i) => &i.attrs,
+            syn::TraitItem::Fn(i) => &i.attrs,
+            syn::TraitItem::Type(i) => &i.attrs,
+            syn::TraitItem::Macro(i) => &i.attrs,
+            _ => &[],
+        }
+    }
+
+    /// The attributes a production build applies: each plain attribute as written, plus the
+    /// payload of every `cfg_attr` whose predicate can hold outside a test build, flattened
+    /// recursively. A `cfg_attr` behind `test` contributes nothing.
+    fn production_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
+        let mut out = Vec::new();
+        for attr in attrs {
+            if !attr.path().is_ident("cfg_attr") {
+                out.push(attr.clone());
+                continue;
+            }
+            let parsed = attr.parse_args_with(|input: syn::parse::ParseStream| {
+                let predicate: syn::Meta = input.parse()?;
+                let mut payload = Vec::new();
+                while input.peek(syn::Token![,]) {
+                    input.parse::<syn::Token![,]>()?;
+                    if input.is_empty() {
+                        break;
+                    }
+                    payload.push(input.parse::<syn::Meta>()?);
+                }
+                Ok((predicate, payload))
+            });
+            let Ok((predicate, payload)) = parsed else {
+                continue;
+            };
+            if requires_test(&predicate) {
+                continue;
+            }
+            let inner: Vec<syn::Attribute> = payload
+                .into_iter()
+                .map(|meta| syn::Attribute {
+                    pound_token: Default::default(),
+                    style: syn::AttrStyle::Outer,
+                    bracket_token: Default::default(),
+                    meta,
+                })
+                .collect();
+            out.extend(production_attrs(&inner));
+        }
+        out
+    }
+
     /// Whether a `cfg` predicate can only hold in a test build: `test` itself, or an `all(...)`
     /// with such a predicate among its operands. `any(...)` and `not(...)` do not require it.
     fn requires_test(meta: &syn::Meta) -> bool {
@@ -29059,9 +29152,8 @@ mod tests {
             }
         }
 
-        /// Every out-of-line module declared under `items`, descending into inline modules,
-        /// whose children live under a subdirectory named for the inline module. The flag is
-        /// whether the declaration is reached only through a test-gated item.
+        /// Collects out-of-line modules in `items`, including declarations inside inline modules
+        /// and function bodies. Rust permits a function-local `mod x;` only with `#[path]`.
         fn declared_children(
             declaring: &std::path::Path,
             module_dir: &std::path::Path,
@@ -29070,32 +29162,70 @@ mod tests {
             into: &mut Vec<(std::path::PathBuf, bool)>,
         ) {
             use quote::ToTokens;
+            use syn::visit::Visit;
 
-            for item in items {
-                let syn::Item::Mod(module) = item else {
-                    continue;
-                };
-                let test_only = test_only || is_test_only(&module.attrs);
-                match &module.content {
-                    Some((_, inner)) => declared_children(
-                        declaring,
-                        &module_dir.join(module.ident.to_string()),
-                        inner,
-                        test_only,
-                        into,
-                    ),
-                    None => {
-                        let child =
-                            child_path(declaring, module_dir, module).unwrap_or_else(|| {
-                                panic!(
-                                    "{}: cannot resolve `{}`",
-                                    declaring.display(),
-                                    module.to_token_stream()
-                                )
-                            });
-                        into.push((child, test_only));
+            struct Declared<'a> {
+                declaring: &'a std::path::Path,
+                module_dir: std::path::PathBuf,
+                test_only: bool,
+                into: &'a mut Vec<(std::path::PathBuf, bool)>,
+            }
+
+            impl<'ast> Visit<'ast> for Declared<'_> {
+                fn visit_item(&mut self, item: &'ast syn::Item) {
+                    let outer = self.test_only;
+                    self.test_only |= is_test_only(item_attrs(item));
+                    syn::visit::visit_item(self, item);
+                    self.test_only = outer;
+                }
+
+                fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+                    let outer = self.test_only;
+                    self.test_only |= is_test_only(impl_item_attrs(item));
+                    syn::visit::visit_impl_item(self, item);
+                    self.test_only = outer;
+                }
+
+                fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+                    let outer = self.test_only;
+                    self.test_only |= is_test_only(trait_item_attrs(item));
+                    syn::visit::visit_trait_item(self, item);
+                    self.test_only = outer;
+                }
+
+                fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+                    match &module.content {
+                        Some((_, inner)) => {
+                            let nested = self.module_dir.join(module.ident.to_string());
+                            let outer = std::mem::replace(&mut self.module_dir, nested);
+                            for item in inner {
+                                self.visit_item(item);
+                            }
+                            self.module_dir = outer;
+                        }
+                        None => {
+                            let child = child_path(self.declaring, &self.module_dir, module)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "{}: cannot resolve `{}`",
+                                        self.declaring.display(),
+                                        module.to_token_stream()
+                                    )
+                                });
+                            self.into.push((child, self.test_only));
+                        }
                     }
                 }
+            }
+
+            let mut declared = Declared {
+                declaring,
+                module_dir: module_dir.to_path_buf(),
+                test_only,
+                into,
+            };
+            for item in items {
+                declared.visit_item(item);
             }
         }
 
@@ -29283,9 +29413,85 @@ mod tests {
         }
     }
 
+    /// The last segment of every path an expression names, so `routes::MURAL` and `MURAL`
+    /// both resolve against the constant table.
+    struct PathNames(Vec<String>);
+
+    impl<'ast> syn::visit::Visit<'ast> for PathNames {
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            if let Some(segment) = path.path.segments.last() {
+                self.0.push(segment.ident.to_string());
+            }
+            syn::visit::visit_expr_path(self, path);
+        }
+    }
+
+    fn path_names(expr: &syn::Expr) -> Vec<String> {
+        let mut names = PathNames(Vec::new());
+        syn::visit::Visit::visit_expr(&mut names, expr);
+        names.0
+    }
+
     /// The string values of `const`, `static`, and associated `const` items, keyed by name, so a
-    /// comparison against a named constant is classified by the text the constant holds.
-    struct StringConsts(std::collections::HashMap<String, Vec<String>>);
+    /// comparison against a named constant is classified by the text the constant holds. An
+    /// initializer that names another constant (`const ROUTE: &str = MURAL;`) is recorded as a
+    /// reference and resolved once every file has been read.
+    struct StringConsts {
+        values: std::collections::HashMap<String, Vec<String>>,
+        references: std::collections::HashMap<String, Vec<String>>,
+    }
+
+    impl StringConsts {
+        fn record(&mut self, name: &syn::Ident, expr: &syn::Expr) {
+            use syn::visit::Visit;
+
+            let values = string_literals_in(|c| c.visit_expr(expr));
+            if !values.is_empty() {
+                self.values
+                    .entry(name.to_string())
+                    .or_default()
+                    .extend(values);
+            }
+            let references = path_names(expr);
+            if !references.is_empty() {
+                self.references
+                    .entry(name.to_string())
+                    .or_default()
+                    .extend(references);
+            }
+        }
+
+        /// `resolved` propagates string values through constant aliases until no alias gains a
+        /// value.
+        fn resolved(mut self) -> std::collections::HashMap<String, Vec<String>> {
+            loop {
+                let mut grew = false;
+                for (name, references) in &self.references {
+                    let mut gained: Vec<String> = Vec::new();
+                    for reference in references {
+                        if reference == name {
+                            continue;
+                        }
+                        if let Some(held) = self.values.get(reference) {
+                            gained.extend(held.iter().cloned());
+                        }
+                    }
+                    let own = self.values.entry(name.clone()).or_default();
+                    for value in gained {
+                        if !own.contains(&value) {
+                            own.push(value);
+                            grew = true;
+                        }
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            self.values.retain(|_, values| !values.is_empty());
+            self.values
+        }
+    }
 
     impl<'ast> syn::visit::Visit<'ast> for StringConsts {
         fn visit_item(&mut self, item: &'ast syn::Item) {
@@ -29294,60 +29500,60 @@ mod tests {
             }
         }
 
-        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
-            let values = string_literals_in(|c| c.visit_expr(&item.expr));
-            if !values.is_empty() {
-                self.0
-                    .entry(item.ident.to_string())
-                    .or_default()
-                    .extend(values);
+        fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+            if !is_test_only(impl_item_attrs(item)) {
+                syn::visit::visit_impl_item(self, item);
             }
+        }
+
+        fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+            if !is_test_only(trait_item_attrs(item)) {
+                syn::visit::visit_trait_item(self, item);
+            }
+        }
+
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            self.record(&item.ident, &item.expr);
             syn::visit::visit_item_const(self, item);
         }
 
         fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
-            let values = string_literals_in(|c| c.visit_expr(&item.expr));
-            if !values.is_empty() {
-                self.0
-                    .entry(item.ident.to_string())
-                    .or_default()
-                    .extend(values);
-            }
+            self.record(&item.ident, &item.expr);
             syn::visit::visit_impl_item_const(self, item);
         }
 
         fn visit_trait_item_const(&mut self, item: &'ast syn::TraitItemConst) {
             if let Some((_, default)) = &item.default {
-                let values = string_literals_in(|c| c.visit_expr(default));
-                if !values.is_empty() {
-                    self.0
-                        .entry(item.ident.to_string())
-                        .or_default()
-                        .extend(values);
-                }
+                self.record(&item.ident, default);
             }
             syn::visit::visit_trait_item_const(self, item);
         }
 
         fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
-            let values = string_literals_in(|c| c.visit_expr(&item.expr));
-            if !values.is_empty() {
-                self.0
-                    .entry(item.ident.to_string())
-                    .or_default()
-                    .extend(values);
-            }
+            self.record(&item.ident, &item.expr);
             syn::visit::visit_item_static(self, item);
         }
     }
 
-    /// The exact texts a literal-shaped regex accepts: anchors, one-character classes, and
-    /// backslash escapes removed, and every innermost alternation group expanded into one text
-    /// per alternative (bounded, so a pathological pattern cannot explode). A class wider than
-    /// one character stays as written.
+    /// `regex_texts` expands supported regex syntax into bounded literal texts.
+    /// Negated character classes remain unexpanded.
     fn regex_texts(pattern: &str) -> Vec<String> {
+        /// A leading `(?i)` or `(?ix)` group sets flags and matches nothing.
+        fn strip_flag_groups(pattern: &str) -> &str {
+            let mut rest = pattern;
+            while let Some(after_open) = rest.strip_prefix("(?")
+                && let Some(close) = after_open.find(')')
+                && after_open[..close]
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphabetic() || ch == '-')
+            {
+                rest = &after_open[close + 1..];
+            }
+            rest
+        }
+
         fn reduce(pattern: &str) -> String {
-            let mut text = pattern
+            let mut text = strip_flag_groups(pattern)
                 .trim_start_matches('^')
                 .trim_end_matches('$')
                 .to_string();
@@ -29361,31 +29567,72 @@ mod tests {
                             out.push(escaped);
                         }
                     }
-                    '[' => {
-                        let mut class = String::new();
-                        for inner in chars.by_ref() {
-                            if inner == ']' {
-                                break;
-                            }
-                            class.push(inner);
-                        }
-                        if class.chars().count() == 1 {
-                            out.push('\u{0}');
-                            out.push_str(&class);
-                        } else {
-                            out.push('[');
-                            out.push_str(&class);
-                            out.push(']');
-                        }
-                    }
                     other => out.push(other),
                 }
             }
             out
         }
 
-        /// Expand the innermost parenthesized group that contains `|`; a NUL marks an escaped
-        /// character so an escaped `|` or `(` is never treated as syntax.
+        /// `?:`, a flag prefix such as `?i:`, and a capture name such as `?P<name>` or
+        /// `?<name>` are group syntax that matches no text.
+        fn strip_group_prefix(inner: &str) -> &str {
+            let Some(after) = inner.strip_prefix('?') else {
+                return inner;
+            };
+            if let Some(named) = after.strip_prefix("P<").or_else(|| after.strip_prefix('<'))
+                && let Some(close) = named.find('>')
+            {
+                return &named[close + 1..];
+            }
+            match after.find(':') {
+                Some(colon)
+                    if after[..colon]
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphabetic() || ch == '-') =>
+                {
+                    &after[colon + 1..]
+                }
+                _ => inner,
+            }
+        }
+
+        /// Members are escaped so `-` and `]` remain literal.
+        fn class_members(inner: &[char]) -> Option<Vec<String>> {
+            if inner.first() == Some(&'^') {
+                return None;
+            }
+            let mut members = Vec::new();
+            let mut index = 0;
+            while index < inner.len() {
+                let mut member = inner[index];
+                if member == '\u{0}' {
+                    index += 1;
+                    member = *inner.get(index)?;
+                }
+                if inner.get(index + 1) == Some(&'-') && index + 2 < inner.len() {
+                    index += 2;
+                    let mut end = inner[index];
+                    if end == '\u{0}' {
+                        index += 1;
+                        end = *inner.get(index)?;
+                    }
+                    let (from, to) = (member as u32, end as u32);
+                    if to < from || to - from >= 16 {
+                        return None;
+                    }
+                    for point in from..=to {
+                        members.push(format!("\u{0}{}", char::from_u32(point)?));
+                    }
+                } else {
+                    members.push(format!("\u{0}{member}"));
+                }
+                index += 1;
+            }
+            (members.len() <= 16).then_some(members)
+        }
+
+        /// Expand the innermost parenthesized group, then the first enumerable class; a NUL
+        /// marks an escaped character so an escaped `|`, `(`, or `[` is never treated as syntax.
         fn expand(text: &str, out: &mut Vec<String>) {
             if out.len() >= 64 {
                 return;
@@ -29402,7 +29649,7 @@ mod tests {
                     ')' => {
                         if let Some(start) = open {
                             let inner: String = bytes[start + 1..index].iter().collect();
-                            let inner = inner.strip_prefix("?:").unwrap_or(&inner).to_string();
+                            let inner = strip_group_prefix(&inner).to_string();
                             let prefix: String = bytes[..start].iter().collect();
                             let suffix: String = bytes[index + 1..].iter().collect();
                             let alternatives: Vec<&str> = split_unescaped(&inner, '|');
@@ -29415,7 +29662,30 @@ mod tests {
                     _ => {}
                 }
             }
-            // No group left; a bare top-level alternation splits into its alternatives.
+            let mut class_open = None;
+            for (index, &ch) in bytes.iter().enumerate() {
+                let escaped = index > 0 && bytes[index - 1] == '\u{0}';
+                if escaped {
+                    continue;
+                }
+                match ch {
+                    '[' if class_open.is_none() => class_open = Some(index),
+                    ']' => {
+                        if let Some(start) = class_open
+                            && let Some(members) = class_members(&bytes[start + 1..index])
+                        {
+                            let prefix: String = bytes[..start].iter().collect();
+                            let suffix: String = bytes[index + 1..].iter().collect();
+                            for member in members {
+                                expand(&format!("{prefix}{member}{suffix}"), out);
+                            }
+                            return;
+                        }
+                        class_open = None;
+                    }
+                    _ => {}
+                }
+            }
             let alternatives = split_unescaped(text, '|');
             if alternatives.len() > 1 {
                 for alternative in alternatives {
@@ -29453,19 +29723,8 @@ mod tests {
     ) -> Vec<String> {
         use syn::visit::Visit;
 
-        struct Paths(Vec<String>);
-        impl<'ast> syn::visit::Visit<'ast> for Paths {
-            fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-                if let Some(segment) = path.path.segments.last() {
-                    self.0.push(segment.ident.to_string());
-                }
-                syn::visit::visit_expr_path(self, path);
-            }
-        }
         let mut values = string_literals_in(|c| c.visit_expr(expr));
-        let mut paths = Paths(Vec::new());
-        syn::visit::Visit::visit_expr(&mut paths, expr);
-        for name in paths.0 {
+        for name in path_names(expr) {
             if let Some(held) = consts.get(&name) {
                 values.extend(held.iter().cloned());
             }
@@ -29496,9 +29755,9 @@ mod tests {
         /// The daemon composes a request-supplied mural into the M0 block and keys that frozen
         /// unit `m0-mural`; comparing a unit key against it is not a route decision.
         const KNOWN_NON_ROUTES: [&str; 1] = ["m0-mural"];
-        /// Methods that test or split a string against a pattern; a literal argument to one of
-        /// them is a spelling the code routes on.
-        const COMPARISON_METHODS: [&str; 28] = [
+        /// Literal pattern arguments and receiver keys passed to these methods are comparison
+        /// operands.
+        const COMPARISON_METHODS: [&str; 33] = [
             "eq",
             "ne",
             "contains",
@@ -29527,6 +29786,11 @@ mod tests {
             "captures_iter",
             "replace_all",
             "shortest_match",
+            "get",
+            "get_mut",
+            "get_key_value",
+            "contains_key",
+            "binary_search",
         ];
         /// Types whose `new` takes a pattern the code later matches input against; a `use ... as`
         /// rename of one of them is collected across the tree.
@@ -29592,6 +29856,15 @@ mod tests {
                     }
                 }
             }
+
+            fn visit_attribute_owned(&mut self, attr: &syn::Attribute) {
+                let mut literals = Vec::new();
+                macro_string_literals(attr.meta.to_token_stream(), &mut literals);
+                if attr.path().is_ident("serde") {
+                    self.compared.extend(literals.iter().cloned());
+                }
+                self.literals.extend(literals);
+            }
         }
 
         impl<'ast> Visit<'ast> for ProductionLiterals {
@@ -29601,9 +29874,21 @@ mod tests {
                 }
             }
 
-            fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
-                if !is_test_only(&function.attrs) {
-                    syn::visit::visit_impl_item_fn(self, function);
+            fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+                if !is_test_only(impl_item_attrs(item)) {
+                    syn::visit::visit_impl_item(self, item);
+                }
+            }
+
+            fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+                if !is_test_only(trait_item_attrs(item)) {
+                    syn::visit::visit_trait_item(self, item);
+                }
+            }
+
+            fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+                if !is_test_only(&variant.attrs) {
+                    syn::visit::visit_variant(self, variant);
                 }
             }
 
@@ -29624,10 +29909,15 @@ mod tests {
                 self.literals.extend(literal_text(lit));
             }
 
+            /// Macros outside `VISIBLE_MACROS` may hide literal comparisons:
+            /// `route!(op, "mural")` may expand to `op == "mural"`.
             fn visit_macro(&mut self, mac: &'ast syn::Macro) {
                 let literals = macro_literals(mac);
-                if mac.path.is_ident("matches") {
+                let visible = VISIBLE_MACROS.iter().any(|name| mac.path.is_ident(name));
+                if mac.path.is_ident("matches") || !visible {
                     self.compared.extend(literals.iter().cloned());
+                }
+                if mac.path.is_ident("matches") {
                     // `matches!(op, MURAL)` names a constant in its pattern.
                     for tree in mac.tokens.clone() {
                         if let proc_macro2::TokenTree::Ident(ident) = tree
@@ -29725,9 +30015,12 @@ mod tests {
             /// derives: the identifier as written by default, the `rename_all` rule's output when
             /// the enum declares one, or the variant's own `rename` literal, which the attribute
             /// walk already collects. Nothing else is synthesized, so `GitHub` is not `git_hub`.
+            /// A derive or serde attribute from a production-active `cfg_attr` counts as a plain
+            /// attribute.
             fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
                 type Derives = syn::punctuated::Punctuated<syn::Path, syn::Token![,]>;
-                let deserializable = item.attrs.iter().any(|attr| {
+                let attrs = production_attrs(&item.attrs);
+                let deserializable = attrs.iter().any(|attr| {
                     attr.path().is_ident("derive")
                         && attr
                             .parse_args_with(Derives::parse_terminated)
@@ -29741,7 +30034,7 @@ mod tests {
                                 })
                             })
                 });
-                let untagged = item.attrs.iter().any(|attr| {
+                let untagged = attrs.iter().any(|attr| {
                     attr.path().is_ident("serde")
                         && attr
                             .parse_nested_meta(|meta| {
@@ -29760,9 +30053,13 @@ mod tests {
                 // An untagged enum is chosen by payload shape; its variant names never cross
                 // the wire.
                 if deserializable && !untagged {
-                    let rule = rename_all_rule(&item.attrs);
+                    let rule = rename_all_rule(&attrs);
                     for variant in &item.variants {
-                        if has_serde_rename(&variant.attrs) || is_skipped(&variant.attrs) {
+                        let variant_attrs = production_attrs(&variant.attrs);
+                        if is_test_only(&variant.attrs)
+                            || has_serde_rename(&variant_attrs)
+                            || is_skipped(&variant_attrs)
+                        {
                             continue;
                         }
                         let ident = variant.ident.to_string();
@@ -29782,19 +30079,18 @@ mod tests {
                 syn::visit::visit_item_enum(self, item);
             }
 
-            /// A `#[serde(rename = "...")]` or alias names a wire spelling that appears nowhere
-            /// else, and the deserializer compares input against it; doc text is prose and is
-            /// skipped.
+            /// `serde` rename and alias values define accepted wire spellings.
             fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
                 if attr.path().is_ident("doc") {
                     return;
                 }
-                let mut literals = Vec::new();
-                macro_string_literals(attr.meta.to_token_stream(), &mut literals);
-                if attr.path().is_ident("serde") {
-                    self.compared.extend(literals.iter().cloned());
+                if attr.path().is_ident("cfg_attr") {
+                    for inner in production_attrs(std::slice::from_ref(attr)) {
+                        self.visit_attribute_owned(&inner);
+                    }
+                    return;
                 }
-                self.literals.extend(literals);
+                self.visit_attribute_owned(attr);
             }
         }
 
@@ -29829,6 +30125,34 @@ mod tests {
             ["mural.read", "mural.list", "kernel.read", "kernel.list"]
         );
         assert_eq!(regex_texts(r"a\|b"), ["a|b"]);
+        assert_eq!(regex_texts(r"(?i)^mural[.]render$"), ["mural.render"]);
+        assert_eq!(regex_texts(r"^(?i:mural)\.render$"), ["mural.render"]);
+        assert_eq!(
+            regex_texts(r"^(?P<op>mural|kernel)\.read$"),
+            ["mural.read", "kernel.read"]
+        );
+        assert_eq!(
+            regex_texts(r"^[mM]ural[.]render$"),
+            ["mural.render", "Mural.render"]
+        );
+        assert_eq!(regex_texts(r"^[a-c]\.db$"), ["a.db", "b.db", "c.db"]);
+        assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
+        assert_eq!(regex_texts(r"^[a-zA-Z0-9_-]+$"), ["[a-zA-Z0-9_-]+"]);
+        assert_eq!(regex_texts(r"^\[x\]$"), ["[x]"]);
+        assert_eq!(
+            concat_value(quote::quote!("mu", 1, "ral.render")),
+            Some("mu1ral.render".into())
+        );
+        assert_eq!(
+            concat_value(quote::quote!("a", 0x10, true, 'c', 1.5)),
+            Some("a16truec1.5".into())
+        );
+        assert_eq!(concat_value(quote::quote!("a", b"b")), None);
+        assert_eq!(concat_value(quote::quote!("a", -1)), None);
+        assert_eq!(
+            concat_value(quote::quote!("mural", ".render",)),
+            Some("mural.render".into())
+        );
         assert_eq!(camel_words("MuralRender"), "mural_render");
         assert_eq!(serde_rename("snake_case", "MuralRender"), "mural_render");
         assert_eq!(serde_rename("kebab-case", "MuralRender"), "mural-render");
@@ -29918,10 +30242,14 @@ mod tests {
         // Constants are collected across the whole tree before any file is scanned, so a
         // comparison against `routes::PREFIX` resolves whichever module declares it. Names are
         // keyed by their last segment; a collision adds values and can only widen the check.
-        let mut consts = StringConsts(std::collections::HashMap::new());
+        let mut consts = StringConsts {
+            values: std::collections::HashMap::new(),
+            references: std::collections::HashMap::new(),
+        };
         for (_, file) in &tree.production {
             consts.visit_file(file);
         }
+        let consts = consts.resolved();
         // A `pub use serde::Deserialize as Decode` in one module is a derive name in every module
         // that imports it, so aliases are collected across the tree like constants.
         let mut aliases = DeserializeAliases(vec!["Deserialize".to_string()]);
@@ -29938,7 +30266,7 @@ mod tests {
                 compared: Vec::new(),
                 deserialize_names: aliases.0.clone(),
                 pattern_types: pattern_types.0.clone(),
-                consts: consts.0.clone(),
+                consts: consts.clone(),
             };
             scan.visit_file(&file);
             let relative = path

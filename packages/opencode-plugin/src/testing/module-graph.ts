@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { posix } from "node:path";
 import ts from "typescript";
 
 /** The Pi `build` script's externals; the graph stops at these package boundaries. */
@@ -17,6 +18,13 @@ export const BUNDLE_EXTERNALS = [
 /** Import specifiers are matched as written, so the adapter may appear with no extension or any executable one. */
 export const DATABASE_BINDING =
     /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|(?:^|\/)shared\/sqlite(?:\.(?:[cm]?[jt]s|[jt]sx))?$/;
+
+/** Relative specifiers resolve against the importer's directory before matching: `./sqlite` written beside the adapter names it. */
+export function resolvesToBinding(importer: string, specifier: string): boolean {
+    if (DATABASE_BINDING.test(specifier)) return true;
+    if (!specifier.startsWith("./") && !specifier.startsWith("../")) return false;
+    return DATABASE_BINDING.test(posix.normalize(posix.join(posix.dirname(importer), specifier)));
+}
 
 /** Every executable extension the bundler accepts; the scans must read all of them. */
 export const CODE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
@@ -127,7 +135,7 @@ export function reachableModules(graph: ModuleGraph, pattern: RegExp): string[] 
 
 export function databaseBinders(graph: Pick<ModuleGraph, "imports">): string[] {
     return Object.entries(graph.imports)
-        .filter(([, imports]) => imports.some((edge) => DATABASE_BINDING.test(edge)))
+        .filter(([path, imports]) => imports.some((edge) => resolvesToBinding(path, edge)))
         .map(([path]) => path)
         .sort();
 }
@@ -299,24 +307,42 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
     };
     // A regex that matches one exact string is that string with its anchors and escapes removed;
     // the literal-shaped body is what a `/^claim\.intent\.stage$/.test(op)` dispatch compares.
-    // The texts a literal-shaped regex accepts: anchors and one-character classes reduced,
-    // escapes decoded, and every innermost alternation group expanded to one text per
-    // alternative (bounded). A wider class stays as written. Escaped characters are marked with
-    // a private-use character while groups are expanded so an escaped `|` or `(` is never read as syntax.
-    const regexTexts = (text: string): string[] => {
-        const reduced = text
-            .slice(1, text.lastIndexOf("/"))
+    // A private-use marker prevents expansion from treating escaped `|`, `(`, or `[` as syntax.
+    const regexTexts = (body: string): string[] => {
+        const reduced = body
             .replace(/^\^/, "")
             .replace(/\$$/, "")
             .replace(
                 /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g,
                 (_, x, u, b) => `\uE000${String.fromCodePoint(Number.parseInt(x ?? u ?? b, 16))}`,
             )
-            // A one-character class, possibly holding an already-decoded escape.
-            .replace(/\[(\uE000?[^\]\\^])\]/g, "\uE000$1")
             .replace(/\\(.)/g, "\uE000$1");
         const out: string[] = [];
         const splitUnescaped = (value: string): string[] => value.split(/(?<!\uE000)\|/);
+        // `classMembers` marks every member as escaped so expansion treats `-` and `]` literally.
+        const classMembers = (inner: string): string[] | undefined => {
+            if (inner.startsWith("^")) return undefined;
+            const members: string[] = [];
+            const chars = [...inner];
+            for (let index = 0; index < chars.length; index++) {
+                let char = chars[index] ?? "";
+                if (char === "\uE000") char = chars[++index] ?? "";
+                if (chars[index + 1] === "-" && index + 2 < chars.length) {
+                    let end = chars[index + 2] ?? "";
+                    index += 2;
+                    if (end === "\uE000") end = chars[++index] ?? "";
+                    const from = char.codePointAt(0) ?? 0;
+                    const to = end.codePointAt(0) ?? 0;
+                    if (to < from || to - from >= 16) return undefined;
+                    for (let point = from; point <= to; point++) {
+                        members.push(`\uE000${String.fromCodePoint(point)}`);
+                    }
+                    continue;
+                }
+                members.push(`\uE000${char}`);
+            }
+            return members.length <= 16 ? members : undefined;
+        };
         const expand = (value: string): void => {
             if (out.length >= 64) return;
             const group = /\((?:\?:)?([^()]*)\)/.exec(value);
@@ -328,6 +354,16 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 }
                 return;
             }
+            const cls = /\[((?:\uE000.|[^\]\uE000])*)\]/.exec(value);
+            if (cls?.index !== undefined && !value.startsWith("\uE000", cls.index - 1)) {
+                const members = classMembers(cls[1] ?? "");
+                if (members !== undefined) {
+                    const prefix = value.slice(0, cls.index);
+                    const suffix = value.slice(cls.index + cls[0].length);
+                    for (const member of members) expand(prefix + member + suffix);
+                    return;
+                }
+            }
             const alternatives = splitUnescaped(value);
             for (const alternative of alternatives) out.push(alternative.replaceAll("\uE000", ""));
         };
@@ -336,20 +372,37 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
     };
     const lineOf = (node: ts.Node) =>
         file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
+    // An `i` flag accepts every casing, including the case-sensitive store names.
+    const pushRegex = (node: ts.Node, body: string, flags: string): void => {
+        const caseInsensitive = flags.includes("i");
+        for (const accepted of regexTexts(body)) {
+            folded.push({ line: lineOf(node), value: accepted });
+            const lower = accepted.toLowerCase();
+            if (caseInsensitive && lower !== accepted) {
+                folded.push({ line: lineOf(node), value: lower });
+            }
+        }
+    };
+    const isRegExpConstructor = (callee: ts.Expression): boolean =>
+        (ts.isIdentifier(callee) && callee.text === "RegExp") ||
+        (ts.isPropertyAccessExpression(callee) && callee.name.text === "RegExp");
     const visit = (node: ts.Node): void => {
         if ((ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)) && node.text !== "") {
             folded.push({ line: lineOf(node), value: node.text });
         }
         if (ts.isRegularExpressionLiteral(node)) {
-            const caseInsensitive = /\/[a-z]*i[a-z]*$/.test(node.text);
-            for (const accepted of regexTexts(node.text)) {
-                folded.push({ line: lineOf(node), value: accepted });
-                // An `i` flag accepts every casing, including the case-sensitive store names.
-                const lower = accepted.toLowerCase();
-                if (caseInsensitive && lower !== accepted) {
-                    folded.push({ line: lineOf(node), value: lower });
-                }
-            }
+            const close = node.text.lastIndexOf("/");
+            pushRegex(node, node.text.slice(1, close), node.text.slice(close + 1));
+        }
+        // `RegExp(pattern, flags)` behaves like `new RegExp(pattern, flags)`.
+        if (
+            (ts.isNewExpression(node) || ts.isCallExpression(node)) &&
+            isRegExpConstructor(node.expression) &&
+            node.arguments?.[0] !== undefined
+        ) {
+            const body = leafText(node.arguments[0]);
+            const flags = node.arguments[1] ? leafText(node.arguments[1]) : "";
+            if (body !== undefined) pushRegex(node, body, flags ?? "");
         }
         if (
             (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
@@ -466,7 +519,9 @@ export function databaseUses(
         uses.escapes.push(lines[index]);
     };
     const isBindingSpecifier = (node: ts.Expression | undefined) =>
-        node !== undefined && ts.isStringLiteralLike(node) && DATABASE_BINDING.test(node.text);
+        node !== undefined &&
+        ts.isStringLiteralLike(node) &&
+        resolvesToBinding(fileName, node.text);
     // `const load = createRequire(import.meta.url)` makes `load(...)` a require by another name,
     // and `import { createRequire as makeRequire }` gives the factory another name too.
     const factories = new Set<string>(["createRequire"]);
@@ -583,6 +638,16 @@ export function databaseUses(
                 !ts.isNamedExports(clause) ||
                 clause.elements.some((element) => !element.isTypeOnly);
             if (exportsValue) recordEscape(node);
+        }
+        // `import native = require("node:sqlite")` binds the whole module under one name, like a
+        // namespace import; `import type X = require(...)` is erased at runtime.
+        if (
+            ts.isImportEqualsDeclaration(node) &&
+            !node.isTypeOnly &&
+            ts.isExternalModuleReference(node.moduleReference) &&
+            isBindingSpecifier(node.moduleReference.expression)
+        ) {
+            recordEscape(node);
         }
         if (ts.isCallExpression(node)) {
             const callee = node.expression;
