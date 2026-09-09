@@ -1,5 +1,17 @@
 # mirror-read-fence-relies-on-generation-advance
 
+## Invalidated
+
+The subject of this record is gone. The transform and the historian compose
+project memory from canonical kernel rows through
+`crates/daemon/src/canonical_memory.rs`; `claim_snapshot_for_context`, the
+double-read vector fence, `historian_claim_block`, and the commit-time vector
+check in `commit_transform` no longer exist. The replacement property is
+`canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
+transform catalog. The sections below quote the deleted code as it stood when
+this record was written; their `file:line` references are historical and do not
+resolve against HEAD.
+
 ## Discovery trigger
 
 Two production consumers guard the same non-atomic read of the same mirror tables,

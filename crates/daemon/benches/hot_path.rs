@@ -162,16 +162,13 @@ fn request(session: &str, messages: &[IngressMessage], caveman: bool) -> Transfo
 
 fn producer_ctx(dir: &str) -> ProducerContext<'_> {
     ProducerContext {
-        project_memory: CanonicalMemoryRead::Available(CanonicalMemorySnapshot {
-            known_as_of: 0,
-            truncated: false,
-            rows: Vec::new(),
-        }),
+        project_memory: Some(CanonicalMemoryRead::Available(
+            CanonicalMemorySnapshot::new(0, false, Vec::new()),
+        )),
         project_path: "git:bench",
         note_project_path: "git:bench",
         project_directory: dir,
         history_budget_tokens: 60_000.0,
-        memory_budget_tokens: 8_000.0,
         user_profile_budget_tokens: 4_000.0,
         memory_enabled: true,
         inject_docs: true,

@@ -130,23 +130,17 @@ impl KernelOutcome {
     }
 
     /// The state key the TypeScript client indexes guidance by: the serde `kind`
-    /// tag, followed by `:` and the reason for the reasoned variants.
+    /// tag, followed by `:` and the `reason` when the serialized outcome has one.
+    ///
+    /// Both halves are read from the serialized form, so the key is the same
+    /// function of the wire object the client applies (`stateKey` in
+    /// `kernel-client/state.ts`) and cannot drift from a variant or reason rename.
     pub fn state_key(&self) -> String {
-        fn snake(value: &impl Serialize) -> String {
-            // Every variant here is a unit variant with `rename_all = "snake_case"`, so
-            // its serde form is one JSON string.
-            serde_json::to_value(value)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_string))
-                .unwrap_or_default()
-        }
-        match self {
-            Self::Available => "available".to_string(),
-            Self::Stale { .. } => "stale".to_string(),
-            Self::Abstained { .. } => "abstained".to_string(),
-            Self::Unavailable { reason } => format!("unavailable:{}", snake(reason)),
-            Self::Conflict { reason } => format!("conflict:{}", snake(reason)),
-            Self::Invalid { reason } => format!("invalid:{}", snake(reason)),
+        let value = serde_json::to_value(self).expect("KernelOutcome serializes");
+        let kind = value["kind"].as_str().expect("tagged with a string kind");
+        match value["reason"].as_str() {
+            Some(reason) => format!("{kind}:{reason}"),
+            None => kind.to_string(),
         }
     }
 }
@@ -497,6 +491,23 @@ mod tests {
             .map(KernelOutcome::state_key)
             .collect();
         assert_eq!(keys.len(), all_outcomes().len(), "state keys are distinct");
+    }
+
+    /// The TypeScript client derives its key from the wire object as
+    /// `kind` or `kind:reason` (`stateKey` in `kernel-client/state.ts`); the
+    /// Rust key must be the same function of the same serialized fields for
+    /// every outcome, so a variant rename moves both or neither.
+    #[test]
+    fn state_key_agrees_with_the_serialized_kind_and_reason_for_every_outcome() {
+        for outcome in all_outcomes() {
+            let wire = serde_json::to_value(&outcome).unwrap();
+            let kind = wire["kind"].as_str().unwrap();
+            let expected = match wire.get("reason").and_then(serde_json::Value::as_str) {
+                Some(reason) => format!("{kind}:{reason}"),
+                None => kind.to_string(),
+            };
+            assert_eq!(outcome.state_key(), expected, "{wire}");
+        }
     }
 
     #[test]

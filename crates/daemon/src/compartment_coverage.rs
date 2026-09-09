@@ -54,11 +54,16 @@ pub struct M0ContentEpoch {
 
 /// Any difference in `base_render_config` or an epoch field changes the returned string.
 /// The encoding length-prefixes each field so no value can forge a field boundary.
+///
+/// `ws` is a fixed empty slot. Every persisted `last_render_config` contains
+/// it, so it stays in the fold to keep stored render identities byte-identical;
+/// dropping it would refold every session on its next pass.
 pub fn fold_m0_content_epoch(base_render_config: &str, epoch: &M0ContentEpoch) -> String {
     fn part(label: &str, value: &str) -> String {
         format!("{label}:{}:{value}", value.len())
     }
     let mut parts = vec![
+        part("ws", ""),
         part("upg", &epoch.upgrade_state),
         part("mem", &epoch.memory_content_epoch),
     ];
@@ -264,6 +269,19 @@ mod tests {
         );
     }
 
+    /// Every persisted `last_render_config` carries a `ws:0:` slot, so the fold
+    /// must keep emitting it or every stored session refolds on its next pass.
+    #[test]
+    fn fold_keeps_the_fixed_workspace_slot_stored_sessions_carry() {
+        let stored_before_canonical_memory =
+            "sys0|tools0|model0|prof0|m0epoch[ws:0:;upg:0:;mem:0:]";
+        assert_eq!(
+            fold_m0_content_epoch("sys0|tools0|model0|prof0", &M0ContentEpoch::default()),
+            stored_before_canonical_memory,
+            "a default epoch must reproduce the identity stored sessions already hold"
+        );
+    }
+
     #[test]
     fn m0_content_epoch_folds_legibly_and_deterministically() {
         let base = "sys0|tools0|model0|prof0";
@@ -279,7 +297,7 @@ mod tests {
         };
         let folded = fold_m0_content_epoch(base, &epoch);
         assert_eq!(
-            folded, "sys0|tools0|model0|prof0|m0epoch[upg:2:u1;mem:3:mc1]",
+            folded, "sys0|tools0|model0|prof0|m0epoch[ws:0:;upg:2:u1;mem:3:mc1]",
             "omitted epoch-zero fields must not change existing render identities"
         );
         assert!(folded.starts_with(base));

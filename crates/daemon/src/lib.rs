@@ -3105,6 +3105,9 @@ struct HistorianPrepareContext<'a> {
     now: i64,
     snapshot_generation: u64,
     timings: &'a mut HistorianTriggerTimings,
+    /// The pass's pinned canonical memory read, so the historian prompt and the
+    /// m0 of the same pass compose from one snapshot.
+    project_memory: Option<&'a canonical_memory::CanonicalMemoryRead>,
 }
 
 #[derive(Default)]
@@ -4819,16 +4822,22 @@ impl Handler {
         }
     }
 
-    /// The historian's canonical memory read; `None` when memory is disabled,
-    /// so a disabled deployment never touches the kernel store for it.
-    fn historian_project_memory(
+    /// The canonical memory read for one pass, trimmed to the configured memory
+    /// budget; `None` when memory is disabled, so a disabled deployment never
+    /// touches the kernel store for it.
+    fn project_memory_read(
         &self,
         binding: &SessionBinding,
         cfg: &DaemonConfig,
         now_ms: i64,
     ) -> Option<canonical_memory::CanonicalMemoryRead> {
         cfg.memory_enabled.then(|| {
-            canonical_memory::read_project_memory(&self.kernel, &binding.kernel_project, now_ms)
+            canonical_memory::read_project_memory(
+                &self.kernel,
+                &binding.kernel_project,
+                now_ms,
+                cfg.memory_budget_tokens,
+            )
         })
     }
 
@@ -4845,6 +4854,7 @@ impl Handler {
             now,
             snapshot_generation,
             timings,
+            project_memory,
         } = prepare;
         let trigger_timer = HistorianTriggerTimer {
             started_at: Instant::now(),
@@ -5105,7 +5115,7 @@ impl Handler {
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary,
                 memory_enabled: cfg.memory_enabled,
-                project_memory: self.historian_project_memory(binding, &cfg, now),
+                project_memory: project_memory.cloned(),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
@@ -5256,7 +5266,7 @@ impl Handler {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
-                project_memory: self.historian_project_memory(binding, &cfg, now),
+                project_memory: self.project_memory_read(binding, &cfg, now),
                 model_chain: cfg.model_chain,
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary: boundary.clone(),
@@ -8001,10 +8011,12 @@ impl Handler {
         let trace_received_started_at = Instant::now();
         let _ = store.trace_pass_received(&parsed.session_id, pass_now);
         let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
-        // One canonical read per pass: every memory surface of the pass, and every
-        // attempt the closure below makes, composes from the same pinned snapshot.
-        let project_memory =
-            canonical_memory::read_project_memory(&self.kernel, &binding.kernel_project, pass_now);
+        // One canonical read per pass: every memory surface of the pass (m0, the
+        // m1 revision signal, and a historian firing this pass triggers), and
+        // every attempt the closure below makes, composes from the same pinned
+        // snapshot. `None` when memory is disabled, so the kernel store is not
+        // touched for a block that is never rendered.
+        let project_memory = self.project_memory_read(&binding, &binding.config, pass_now);
         let run_transform = || {
             let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
                 || {
@@ -8029,7 +8041,6 @@ impl Handler {
                 memory_enabled: binding.config.memory_enabled,
                 inject_docs: binding.config.inject_docs,
                 temporal_awareness: binding.config.temporal_awareness,
-                memory_budget_tokens: binding.config.memory_budget_tokens,
                 user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
                 now_ms: pass_now,
                 execute_threshold_percentage: parsed
@@ -8121,6 +8132,7 @@ impl Handler {
                     now: pass_now,
                     snapshot_generation,
                     timings: &mut trigger_timings,
+                    project_memory: project_memory.as_ref(),
                 },
             ) {
                 PreparedHistorianAction::Complete(diagnostics) => diagnostics,
@@ -8147,6 +8159,7 @@ impl Handler {
                                 now: pass_now,
                                 snapshot_generation,
                                 timings: &mut trigger_timings,
+                                project_memory: project_memory.as_ref(),
                             },
                         ) {
                             PreparedHistorianAction::Complete(diagnostics) => diagnostics,
@@ -8210,6 +8223,7 @@ impl Handler {
                     now: pass_now,
                     snapshot_generation,
                     timings: &mut trigger_timings,
+                    project_memory: project_memory.as_ref(),
                 },
             ) {
                 PreparedHistorianAction::Complete(diagnostics) => diagnostics,
@@ -29851,18 +29865,13 @@ mod tests {
             &baseline_store,
             &expected_request,
             &transform::ProducerContext {
-                project_memory: canonical_memory::CanonicalMemoryRead::Available(
-                    canonical_memory::CanonicalMemorySnapshot {
-                        known_as_of: 0,
-                        truncated: false,
-                        rows: Vec::new(),
-                    },
-                ),
+                project_memory: Some(canonical_memory::CanonicalMemoryRead::Available(
+                    canonical_memory::CanonicalMemorySnapshot::new(0, false, Vec::new()),
+                )),
                 project_path: &baseline_project_path,
                 note_project_path: &baseline_project_path,
                 project_directory: &baseline_project_path,
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
-                memory_budget_tokens: 8_000.0,
                 user_profile_budget_tokens: 4_000.0,
                 memory_enabled: true,
                 inject_docs: true,

@@ -31,21 +31,15 @@ solely for `database_incarnation_id`. Everything after `:67` is filtering by cla
 ID, category, and limit (`:68-80` onward). There is no second state read and no
 freshness test.
 
-**The two fenced paths, for contrast.**
+**The fenced path, for contrast.**
 
-`crates/daemon/src/transform.rs:1978-2011` takes an expected vector from
-`lane.snapshot_vector` (`:1971-1977`), compares the mirror's canonical vector against
-it at `:1988-1990`, lists claims at `:1995-1999`, re-reads state at `:2004`, and
-re-compares at `:2008-2010`. Any mismatch returns `Ok(None)`, so the caller gets no
-claim memory rather than stale claim memory.
+The transform and historian mirror reads that once bracketed
+`list_claim_mirror` with a snapshot-vector comparison were deleted when both
+moved to canonical kernel rows (`crates/daemon/src/canonical_memory.rs`), so the
+memory tool is the only remaining reader of `list_committed_claims` and the only
+production path that reads the mirror without a freshness test.
 
-`crates/daemon/src/historian_chunk.rs:563-608` does the same shape with an
-`expected: Option<&SnapshotVector>` parameter (`:563`), an early return when it is
-absent (`:564-566`), a canonical comparison at `:585-587`, and a full
-`ClaimMirrorState` equality check at `:605-607`, which is strictly stronger because
-it also covers `acked_effect_id`.
-
-The third fenced path is atomic. `crates/memory-store/src/lib.rs:7368-7377` re-reads the
+The remaining fenced path is atomic. `crates/memory-store/src/lib.rs:7368-7377` re-reads the
 vector with `claim_mirror::snapshot_vector_from_connection`
 (`claim_mirror.rs:647-681`) inside the same `with_conn_fenced` transaction as the CAS
 and converts a mismatch into `CommitOutcome::CasConflict`, so a commit cannot land

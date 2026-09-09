@@ -2,6 +2,8 @@
 //!
 //! The transform and the historian read through this module. A pass reads once
 //! and composes every memory surface of that pass from the same pinned rows.
+//! The reader trims the rows to the pass's memory budget, so a snapshot holds
+//! exactly the rows the `<project-memory>` block renders.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -11,6 +13,7 @@ use memory_store::ProjectMemoryComposition;
 
 use crate::kernel_routes::read::{ReadResponse, read_visible};
 use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding, serving};
+use crate::m0_compose::trim_memories_to_budget;
 use crate::memory_render::is_positive_memory_category;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,32 +25,63 @@ pub struct CanonicalMemory {
     pub content: String,
 }
 
-/// Injectable rows visible at one kernel snapshot, newest first.
+/// Injectable rows visible at one kernel snapshot, newest first, with the
+/// digest of the block they render computed once at construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalMemorySnapshot {
-    pub known_as_of: i64,
-    /// Whether the visible-row read dropped rows past its caps.
-    pub truncated: bool,
-    pub rows: Vec<CanonicalMemory>,
+    known_as_of: i64,
+    truncated: bool,
+    rows: Vec<CanonicalMemory>,
+    revision: u64,
 }
 
 impl CanonicalMemorySnapshot {
-    /// Digest over every input the block renders from, so two snapshots with
-    /// equal digests render identical bytes. Rows are digested in object-id
-    /// order, so the digest is a function of the row set and not of the order
-    /// the read returned it in.
-    pub fn revision(&self) -> u64 {
-        let mut rows: Vec<&CanonicalMemory> = self.rows.iter().collect();
-        rows.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+    /// Builds the snapshot and digests the rows the block renders from.
+    ///
+    /// Rows are digested in object-id order after the renderer's
+    /// positive-category filter, so the digest is a function of the rendered
+    /// row set and not of the order the read returned it in or of rows the
+    /// renderer drops. `truncated` is not digested: it does not change the
+    /// rendered bytes.
+    pub fn new(known_as_of: i64, truncated: bool, rows: Vec<CanonicalMemory>) -> Self {
+        let mut rendered: Vec<&CanonicalMemory> = rows
+            .iter()
+            .filter(|row| is_positive_memory_category(&row.category))
+            .collect();
+        rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
         let mut hasher = DefaultHasher::new();
         "eidnara-project-memory-revision-v1".hash(&mut hasher);
-        self.truncated.hash(&mut hasher);
-        for row in rows {
+        for row in rendered {
             row.object_id.hash(&mut hasher);
             row.category.hash(&mut hasher);
             row.content.hash(&mut hasher);
         }
-        hasher.finish()
+        Self {
+            known_as_of,
+            truncated,
+            rows,
+            revision: hasher.finish(),
+        }
+    }
+
+    /// The kernel commit sequence the rows were read at.
+    pub fn known_as_of(&self) -> i64 {
+        self.known_as_of
+    }
+
+    /// Whether the visible-row read dropped rows past its caps.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    pub fn rows(&self) -> &[CanonicalMemory] {
+        &self.rows
+    }
+
+    /// Digest over the rendered inputs: two snapshots with equal digests
+    /// render identical block bytes.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 }
 
@@ -66,7 +100,7 @@ impl CanonicalMemoryRead {
             Self::Available(snapshot) => ProjectMemoryComposition::Canonical {
                 known_as_of: snapshot.known_as_of,
                 truncated: snapshot.truncated,
-                revision: snapshot.revision(),
+                revision: snapshot.revision,
             },
             Self::Withheld(verdict) => ProjectMemoryComposition::Withheld {
                 state: verdict.state_key(),
@@ -77,7 +111,7 @@ impl CanonicalMemoryRead {
     /// The row digest the m1 revision signal folds in; `None` when withheld.
     pub fn revision(&self) -> Option<u64> {
         match self {
-            Self::Available(snapshot) => Some(snapshot.revision()),
+            Self::Available(snapshot) => Some(snapshot.revision),
             Self::Withheld(_) => None,
         }
     }
@@ -91,7 +125,8 @@ impl CanonicalMemoryRead {
     }
 }
 
-/// Reads the project's injectable memory at the kernel tip.
+/// Reads the project's injectable memory at the kernel tip, trimmed to
+/// `memory_budget_tokens`.
 ///
 /// The store phase, the serving decision for a tip read on the `auto_inject`
 /// surface, and the visible-row read each withhold the composition with the
@@ -100,6 +135,7 @@ pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
     now_ms: i64,
+    memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
     let store = match kernel.kernel_store() {
         Ok(store) => store,
@@ -114,7 +150,9 @@ pub(crate) fn read_project_memory(
         return CanonicalMemoryRead::Withheld(verdict);
     }
     match read_visible(&store, project, Surface::AutoInject, None, None) {
-        Ok(response) => CanonicalMemoryRead::Available(injectable_snapshot(response)),
+        Ok(response) => {
+            CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
+        }
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     }
 }
@@ -124,8 +162,12 @@ pub(crate) fn read_project_memory(
 /// live rows), resolves visible on the surface, and carries a decision whose
 /// kind is a positive memory category. Labeled rows never reach `auto_inject`;
 /// the guard keeps a label-bearing row out of a block that has no label
-/// renderer.
-fn injectable_snapshot(response: ReadResponse) -> CanonicalMemorySnapshot {
+/// renderer. The injectable rows are then trimmed to `memory_budget_tokens` in
+/// serving order, so the snapshot holds only rows the block renders.
+fn injectable_snapshot(
+    response: ReadResponse,
+    memory_budget_tokens: f64,
+) -> CanonicalMemorySnapshot {
     let ReadResponse {
         known_as_of,
         rows,
@@ -133,7 +175,7 @@ fn injectable_snapshot(response: ReadResponse) -> CanonicalMemorySnapshot {
         decisions,
         ..
     } = response;
-    let rows = rows
+    let injectable: Vec<CanonicalMemory> = rows
         .iter()
         .filter(|row| row.visibility == SurfaceVisibility::Visible)
         .filter_map(|row| decisions.get(&row.object.object_id))
@@ -144,11 +186,12 @@ fn injectable_snapshot(response: ReadResponse) -> CanonicalMemorySnapshot {
             content: decision.payload.summary.clone(),
         })
         .collect();
-    CanonicalMemorySnapshot {
-        known_as_of,
-        truncated,
-        rows,
-    }
+    let rows = trim_memories_to_budget(
+        &injectable,
+        memory_budget_tokens,
+        crate::token_cache::cached_estimate_tokens,
+    );
+    CanonicalMemorySnapshot::new(known_as_of, truncated, rows)
 }
 
 #[cfg(test)]
@@ -215,29 +258,35 @@ mod tests {
         }
     }
 
+    /// A budget no realistic block reaches, so trimming admits every row.
+    const UNBOUNDED: f64 = 1_000_000.0;
+
     #[test]
     fn injectable_rows_are_visible_decisions_in_a_positive_category() {
-        let snapshot = injectable_snapshot(response(
-            vec![
-                visible_row("rule", "decision", SurfaceVisibility::Visible),
-                visible_row("anti", "decision", SurfaceVisibility::Visible),
-                visible_row("labeled", "decision", SurfaceVisibility::Labeled),
-                visible_row("observation", "observation", SurfaceVisibility::Visible),
-            ],
-            vec![
-                decision("rule", "PROJECT_RULES", "Keep the public contract."),
-                decision(
-                    "anti",
-                    "REJECTED_APPROACH",
-                    "Do not resurrect the shelved design.",
-                ),
-                decision("labeled", "PROJECT_RULES", "Needs a label."),
-            ],
-        ));
-        assert_eq!(snapshot.known_as_of, 7);
+        let snapshot = injectable_snapshot(
+            response(
+                vec![
+                    visible_row("rule", "decision", SurfaceVisibility::Visible),
+                    visible_row("anti", "decision", SurfaceVisibility::Visible),
+                    visible_row("labeled", "decision", SurfaceVisibility::Labeled),
+                    visible_row("observation", "observation", SurfaceVisibility::Visible),
+                ],
+                vec![
+                    decision("rule", "PROJECT_RULES", "Keep the public contract."),
+                    decision(
+                        "anti",
+                        "REJECTED_APPROACH",
+                        "Do not resurrect the shelved design.",
+                    ),
+                    decision("labeled", "PROJECT_RULES", "Needs a label."),
+                ],
+            ),
+            UNBOUNDED,
+        );
+        assert_eq!(snapshot.known_as_of(), 7);
         assert_eq!(
-            snapshot.rows,
-            vec![CanonicalMemory {
+            snapshot.rows(),
+            &[CanonicalMemory {
                 object_id: "rule".to_string(),
                 category: "PROJECT_RULES".to_string(),
                 content: "Keep the public contract.".to_string(),
@@ -247,49 +296,122 @@ mod tests {
 
     #[test]
     fn revision_changes_only_when_the_rendered_inputs_change() {
-        let base = injectable_snapshot(response(
-            vec![visible_row("rule", "decision", SurfaceVisibility::Visible)],
-            vec![decision(
-                "rule",
-                "PROJECT_RULES",
-                "Keep the public contract.",
-            )],
-        ));
-        let same_rows_later_snapshot = CanonicalMemorySnapshot {
-            known_as_of: 99,
-            ..base.clone()
-        };
+        let base = injectable_snapshot(
+            response(
+                vec![visible_row("rule", "decision", SurfaceVisibility::Visible)],
+                vec![decision(
+                    "rule",
+                    "PROJECT_RULES",
+                    "Keep the public contract.",
+                )],
+            ),
+            UNBOUNDED,
+        );
+        let same_rows_later_snapshot =
+            CanonicalMemorySnapshot::new(99, base.truncated(), base.rows().to_vec());
         assert_eq!(base.revision(), same_rows_later_snapshot.revision());
-        let two = injectable_snapshot(response(
-            vec![
-                visible_row("rule", "decision", SurfaceVisibility::Visible),
-                visible_row("other", "decision", SurfaceVisibility::Visible),
-            ],
-            vec![
-                decision("rule", "PROJECT_RULES", "Keep the public contract."),
-                decision("other", "NAMING", "Name things."),
-            ],
-        ));
-        let mut reversed = two.clone();
-        reversed.rows.reverse();
+        let two = injectable_snapshot(
+            response(
+                vec![
+                    visible_row("rule", "decision", SurfaceVisibility::Visible),
+                    visible_row("other", "decision", SurfaceVisibility::Visible),
+                ],
+                vec![
+                    decision("rule", "PROJECT_RULES", "Keep the public contract."),
+                    decision("other", "NAMING", "Name things."),
+                ],
+            ),
+            UNBOUNDED,
+        );
+        let mut reversed_rows = two.rows().to_vec();
+        reversed_rows.reverse();
+        let reversed =
+            CanonicalMemorySnapshot::new(two.known_as_of(), two.truncated(), reversed_rows);
         assert_eq!(two.revision(), reversed.revision());
         assert_ne!(two.revision(), base.revision());
-        let edited = injectable_snapshot(response(
-            vec![visible_row("rule", "decision", SurfaceVisibility::Visible)],
-            vec![decision(
-                "rule",
-                "PROJECT_RULES",
-                "Keep the private contract.",
-            )],
-        ));
+        let edited = injectable_snapshot(
+            response(
+                vec![visible_row("rule", "decision", SurfaceVisibility::Visible)],
+                vec![decision(
+                    "rule",
+                    "PROJECT_RULES",
+                    "Keep the private contract.",
+                )],
+            ),
+            UNBOUNDED,
+        );
         assert_ne!(base.revision(), edited.revision());
-        let truncated = CanonicalMemorySnapshot {
-            truncated: true,
-            ..base.clone()
-        };
-        assert_ne!(base.revision(), truncated.revision());
-        let empty = injectable_snapshot(response(Vec::new(), Vec::new()));
+        let truncated =
+            CanonicalMemorySnapshot::new(base.known_as_of(), true, base.rows().to_vec());
+        assert_eq!(
+            base.revision(),
+            truncated.revision(),
+            "the read cap does not change the rendered bytes, so it must not move the revision"
+        );
+        let empty = injectable_snapshot(response(Vec::new(), Vec::new()), UNBOUNDED);
         assert_ne!(base.revision(), empty.revision());
+    }
+
+    #[test]
+    fn rows_the_renderer_drops_do_not_move_the_revision() {
+        let rule = CanonicalMemory {
+            object_id: "rule".to_string(),
+            category: "PROJECT_RULES".to_string(),
+            content: "Keep the public contract.".to_string(),
+        };
+        let anti = CanonicalMemory {
+            object_id: "anti".to_string(),
+            category: "REJECTED_APPROACH".to_string(),
+            content: "Shelved design.".to_string(),
+        };
+        let only_rule = CanonicalMemorySnapshot::new(1, false, vec![rule.clone()]);
+        let with_dropped = CanonicalMemorySnapshot::new(1, false, vec![rule, anti]);
+        assert_eq!(only_rule.revision(), with_dropped.revision());
+    }
+
+    #[test]
+    fn rows_past_the_memory_budget_are_neither_injected_nor_digested() {
+        let short = decision("short", "PROJECT_RULES", "Keep the public contract.");
+        let long_summary = "x ".repeat(2_000);
+        let long = decision("long", "PROJECT_RULES", &long_summary);
+        // Serving order is newest first; both rows are candidates, but only the
+        // short one fits a budget of a few dozen tokens.
+        let rows = || {
+            vec![
+                visible_row("long", "decision", SurfaceVisibility::Visible),
+                visible_row("short", "decision", SurfaceVisibility::Visible),
+            ]
+        };
+        let budget = 60.0;
+        let trimmed = injectable_snapshot(response(rows(), vec![long, short.clone()]), budget);
+        assert_eq!(
+            trimmed
+                .rows()
+                .iter()
+                .map(|row| row.object_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["short"],
+            "the oversized row is dropped by the budget"
+        );
+        let only_short = injectable_snapshot(
+            response(
+                vec![visible_row("short", "decision", SurfaceVisibility::Visible)],
+                vec![short.clone()],
+            ),
+            budget,
+        );
+        assert_eq!(
+            trimmed.revision(),
+            only_short.revision(),
+            "a row the budget excludes must not be digested"
+        );
+        let edited_long = decision("long", "PROJECT_RULES", &format!("{long_summary} edited"));
+        let edited = injectable_snapshot(response(rows(), vec![edited_long, short]), budget);
+        assert_eq!(
+            trimmed.revision(),
+            edited.revision(),
+            "editing a row outside the budget does not change the block, so it must not fold m0"
+        );
     }
 
     #[test]
@@ -304,8 +426,10 @@ mod tests {
                 state: "unavailable:store_starting".to_string()
             }
         );
-        let empty =
-            CanonicalMemoryRead::Available(injectable_snapshot(response(Vec::new(), Vec::new())));
+        let empty = CanonicalMemoryRead::Available(injectable_snapshot(
+            response(Vec::new(), Vec::new()),
+            UNBOUNDED,
+        ));
         assert!(empty.rows().is_empty());
         assert_ne!(withheld.composition(), empty.composition());
     }

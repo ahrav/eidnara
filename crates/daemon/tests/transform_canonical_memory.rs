@@ -359,6 +359,113 @@ async fn a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it() 
     daemon.shutdown().await;
 }
 
+/// With memory disabled no canonical read is taken: the pass records no
+/// composition at all, rather than a `canonical` record for a block it never
+/// rendered, and a store that would have withheld is never consulted.
+#[tokio::test]
+async fn a_memory_disabled_pass_takes_no_canonical_read() {
+    let daemon =
+        KernelDaemon::start_with_project_config(Some(json!({"memory": {"enabled": false}}))).await;
+    let asserted = daemon.commit("asserted", vec![insert_decision(1)]).await;
+    assert_eq!(state_kind(&asserted), "available");
+    let scope_id = daemon.read("explicit_search", None, None).await["rows"][0]["scope_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    commit_verified_memory(
+        &daemon.store(),
+        "rule",
+        "mem-rule",
+        &scope_id,
+        "PROJECT_RULES",
+        "Keep the public contract.",
+    );
+
+    let response = daemon.call(transform_request("disabled")).await;
+    assert_eq!(response["status"], "ok", "{response}");
+    assert_eq!(response["action"], "HARD", "{response}");
+    assert!(
+        !served_text(&response).contains("<project-memory>"),
+        "{response}"
+    );
+    assert!(
+        response.get("project_memory").is_none(),
+        "a disabled pass must record no composition: {response}"
+    );
+    daemon.shutdown().await;
+}
+
+/// The reader trims injectable rows to the configured memory budget before
+/// pinning them, so a row the budget cannot admit is neither rendered nor
+/// digested into the revision.
+#[tokio::test]
+async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
+    let daemon = KernelDaemon::start_with_project_config(Some(
+        json!({"memory": {"injection_budget_tokens": 60}}),
+    ))
+    .await;
+    let asserted = daemon.commit("asserted", vec![insert_decision(1)]).await;
+    assert_eq!(state_kind(&asserted), "available");
+    let scope_id = daemon.read("explicit_search", None, None).await["rows"][0]["scope_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let store = daemon.store();
+    let long_summary = "x ".repeat(2_000);
+    commit_verified_memory(
+        &store,
+        "long",
+        "mem-long",
+        &scope_id,
+        "PROJECT_RULES",
+        &long_summary,
+    );
+    commit_verified_memory(
+        &store,
+        "short",
+        "mem-short",
+        &scope_id,
+        "PROJECT_RULES",
+        "Keep the public contract.",
+    );
+
+    let first = daemon.call(transform_request("first")).await;
+    assert_eq!(first["status"], "ok", "{first}");
+    let text = served_text(&first);
+    assert!(
+        text.contains("mem-short: Keep the public contract."),
+        "{text}"
+    );
+    assert!(!text.contains("mem-long"), "{text}");
+    assert_eq!(first["project_memory"]["kind"], "canonical", "{first}");
+
+    // Editing the row the budget excludes changes no rendered byte, so the
+    // revision holds and the frozen m0 is kept.
+    store
+        .commit(intent("edit-long"), |envelope| {
+            let mut replacement = decision_spec(
+                "mem-long-2",
+                &scope_id,
+                "PROJECT_RULES",
+                &format!("{long_summary} edited"),
+            );
+            replacement.source_id = "mem-long-lineage".to_string();
+            replacement.source_revision = 2;
+            envelope.supersede_decision("mem-long", replacement)?;
+            verify(envelope, "mem-long-2")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let second = daemon.call(transform_request("second")).await;
+    assert_eq!(second["status"], "ok", "{second}");
+    assert_ne!(second["action"], "HARD", "{second}");
+    assert_eq!(
+        second["project_memory"]["revision"], first["project_memory"]["revision"],
+        "{second}"
+    );
+    daemon.shutdown().await;
+}
+
 /// The transform wire tolerates unknown top-level keys (hosts send `method`), so
 /// a retired `claim_lane` field is ignored rather than rejected, and changes
 /// nothing about the composition.

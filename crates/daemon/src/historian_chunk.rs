@@ -456,9 +456,10 @@ pub struct HistorianAssemblerConfig {
     pub token_budget: usize,
     pub boundary: BoundaryResolution,
     pub memory_enabled: bool,
-    /// The canonical memory read of this pass, `None` when memory is disabled
-    /// and no read was taken. A withheld read renders no block and is logged,
-    /// so summarization keeps running through a kernel outage.
+    /// The canonical memory read of this pass, already trimmed to the memory
+    /// budget by the reader; `None` when memory is disabled and no read was
+    /// taken. A withheld read renders no block and is logged, so summarization
+    /// keeps running through a kernel outage.
     pub project_memory: Option<CanonicalMemoryRead>,
     pub auto_promote: bool,
     pub user_memory_collection_enabled: bool,
@@ -1367,15 +1368,15 @@ mod tests {
                 oldest_unconsumed_age_ms: 0,
             });
         let served =
-            CanonicalMemoryRead::Available(crate::canonical_memory::CanonicalMemorySnapshot {
-                known_as_of: 3,
-                truncated: false,
-                rows: vec![crate::canonical_memory::CanonicalMemory {
+            CanonicalMemoryRead::Available(crate::canonical_memory::CanonicalMemorySnapshot::new(
+                3,
+                false,
+                vec![crate::canonical_memory::CanonicalMemory {
                     object_id: "mem_rule".to_string(),
                     category: "PROJECT_RULES".to_string(),
                     content: "Keep the public contract.".to_string(),
                 }],
-            });
+            ));
         let prompt = |read: CanonicalMemoryRead| match tiny_chunk_assemble_with_memory(
             false,
             true,

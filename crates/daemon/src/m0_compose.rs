@@ -94,7 +94,6 @@ pub struct M0ComposeInputs<'a> {
     pub covered_system_messages: &'a [String],
     /// Disabled memory removes both project memories and the user-profile memory block.
     pub memory_enabled: bool,
-    pub memory_budget_tokens: f64,
     pub user_profile_budget_tokens: f64,
     /// `inject_docs` matches whether the TypeScript materializer includes the project-docs block.
     pub inject_docs: bool,
@@ -216,6 +215,9 @@ fn render_m0_with_decay_pressure_retry(
 }
 
 /// Composes m0 from durable state and the pass's pinned canonical memory rows.
+///
+/// `memories` are already trimmed to the pass's memory budget by the reader
+/// that pinned them, so the block renders every row it is given.
 pub fn compose_m0(
     store: &MemoryStore,
     inputs: &M0ComposeInputs<'_>,
@@ -235,11 +237,7 @@ pub fn compose_m0(
             None => (String::new(), None, None, 0),
         };
 
-    let selected_memories = if inputs.memory_enabled {
-        trim_memories_to_budget(memories, inputs.memory_budget_tokens, estimate_tokens)
-    } else {
-        Vec::new()
-    };
+    let selected_memories: &[CanonicalMemory] = if inputs.memory_enabled { memories } else { &[] };
 
     let user_profile = if inputs.memory_enabled {
         store.load_active_user_memories()?
@@ -280,7 +278,7 @@ pub fn compose_m0(
         },
         estimate_tokens,
     );
-    let project_memory = render_memory_block(&selected_memories, "project-memory");
+    let project_memory = render_memory_block(selected_memories, "project-memory");
     if !project_memory.is_empty() {
         m0_bytes.push_str("\n\n");
         m0_bytes.push_str(&project_memory);

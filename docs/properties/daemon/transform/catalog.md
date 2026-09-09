@@ -656,30 +656,37 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
-(`transform.rs:13258`) drives a stale, an abstained, and an unavailable verdict
+(`transform.rs:13278`) drives a stale, an abstained, and an unavailable verdict
 through the compaction-off engine and compares each frozen composition with the
 empty canonical composition; `withheld_reads_record_the_verdict_and_inject_nothing`
 (`canonical_memory.rs`) pins the record-level distinction; the integration tests
 in `tests/transform_canonical_memory.rs` pin `known_as_of` and `truncated` over a
-real kernel store and reach the withheld arm through the reader with a lagging
-registered consumer. All run in CI under `cargo test --workspace`.
+real kernel store, reach the withheld arm through the reader with a lagging
+registered consumer (`:287`), and show a memory-disabled pass records no
+composition at all (`:366`). All run in CI under `cargo test --workspace`.
 Guarantee: A HARD pass whose canonical memory read was not served (stale,
 abstained, or unavailable) composes no `<project-memory>` block and records
 `ProjectMemoryComposition::Withheld { state }` in `ModuleMeta.project_memory`
 and in the response; that record is never equal to the `Canonical { .. }`
-record a served read with zero injectable rows produces.
+record a served read with zero injectable rows produces, and a pass that took
+no read because memory is disabled records `None`, not a `Canonical` record.
 Check: `always` - for every pass that freezes m0 with
-`ctx.project_memory == CanonicalMemoryRead::Withheld(_)`, the committed
+`ctx.project_memory == Some(CanonicalMemoryRead::Withheld(_))`, the committed
 `meta.project_memory` is `Some(Withheld { state })` with `state` equal to the
 verdict's `KernelOutcome::state_key()`, and the frozen m0 bytes contain no
-`<project-memory>` element. `always` because the record is written on every
-HARD (`transform.rs:2597`, `:4243`, `:4415`) from the same pinned read every
-memory surface of the pass composed from, so there is no optional path.
-Fault/timing angle: The read is taken once per pass in `lib.rs:8007` before
-the `run_transform` closure, so a store phase change or lag change after that
-point cannot split one pass between a served block and a withheld record. The
+`<project-memory>` element; with `ctx.project_memory == None` the committed
+record is `None`. `always` because the record is written on every HARD
+(`transform.rs:2618`, `:4262`, `:4433`) through one accessor
+(`ProducerContext::project_memory_composition`, `:561`) from the same pinned
+read every memory surface of the pass composed from, so there is no optional
+path.
+Fault/timing angle: The read is taken once per pass in `lib.rs:8019`, through
+`Handler::project_memory_read` (`lib.rs:4828`), before the `run_transform`
+closure, and the same value is handed to a historian firing the pass triggers
+(`lib.rs:5118`), so a store phase change or lag change after that point cannot
+split one pass between a served block and a withheld record. The
 verdict-to-record mapping is total over `KernelOutcome`
-(`canonical_memory.rs:64-75`, `state.rs` `state_key`).
+(`canonical_memory.rs:98-109`, `state.rs` `state_key`).
 Required faults and enabling state: A `KernelOpenCoordinator` phase other than
 `Ready` (store starting or unavailable), an `outbox_lag` or `read_visible`
 error, or a registered consumer past either lag threshold
@@ -688,17 +695,20 @@ tip read is served, so the withheld arm needs one of those faults; the unit
 test injects the verdict directly; the integration test registers a consumer
 and publishes 10,000 outbox positions past its checkpoint.
 Confidence: high - [evidence](evidence/canonical-read-staleness-is-distinguishable-from-emptiness.md).
-Read the three `meta.project_memory` writers, the two accessors that every
-consumer goes through (`rows()` empty and `composition()` withheld are produced
-by one `match` each), and the durable enum whose two variants have different
+Read the three `meta.project_memory` writers, the accessors every consumer goes
+through (`rows()` empty and `composition()` withheld are produced by one
+`match` each; the context accessors map `None` to empty rows, `None` revision,
+and `None` composition), and the durable enum whose two variants have different
 serde tags.
-Existing check: `transform.rs:13258`, `canonical_memory.rs` tests, and
+Existing check: `transform.rs:13278`, `canonical_memory.rs` tests, and
 `tests/transform_canonical_memory.rs` as described.
 Impact: If a withheld read were recorded as `Canonical` with zero rows, an
 operator reading a session with no memory block could not tell "this project
 has no injectable memory" from "the store was starting when m0 froze", which is
 the silent collapse the retired claim-mirror fence had
-(`mirror-read-fence-relies-on-generation-advance`, now invalidated).
+(`mirror-read-fence-relies-on-generation-advance`, now invalidated). If a
+memory-disabled pass recorded `Canonical`, the same operator could not tell
+"disabled" from "served and empty".
 Open questions: None.
 
 ## Group 2: transition integrity

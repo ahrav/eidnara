@@ -1319,7 +1319,9 @@ pub struct TailHygieneBaseline {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProjectMemoryComposition {
     /// The block was composed from canonical rows visible at `known_as_of`.
-    /// `truncated` records a row-cap cutoff, so a missing memory is distinguishable from budget cutoff.
+    /// `truncated` records the kernel read's row or byte cap over the project's
+    /// visible rows, not the token budget the block was trimmed to; `revision`
+    /// digests exactly the rows the block rendered.
     Canonical {
         known_as_of: i64,
         truncated: bool,
@@ -1485,7 +1487,8 @@ pub struct ModuleMeta {
     #[serde(default)]
     pub coverage_compartment_seq: Option<i64>,
     /// `Some` records either a pinned canonical snapshot or a withheld composition.
-    /// `None` occurs before the first HARD.
+    /// `None` occurs before the first HARD, or when memory was disabled at the
+    /// HARD and no canonical read was taken.
     /// A withheld composition differs from an empty canonical snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_memory: Option<ProjectMemoryComposition>,

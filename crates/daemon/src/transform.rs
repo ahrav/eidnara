@@ -10,7 +10,7 @@
 //! Synthetic items are stripped before boundary detection.
 //! The `eidnara_*` ID namespace is reserved so synthetic blocks cannot masquerade as the real boundary.
 
-use crate::canonical_memory::CanonicalMemoryRead;
+use crate::canonical_memory::{CanonicalMemory, CanonicalMemoryRead};
 use crate::compartment_coverage::{M0ContentEpoch, fold_m0_content_epoch, resolve_coverage};
 use crate::config::{
     CacheTtlProvenance, DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS, DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
@@ -22,7 +22,7 @@ use crate::injection::{
     InjectionOutcome, advance_injection_from_meta, capture_todo_state_on_bust,
     injection_pending_after_capture, is_synthetic_todo_id,
 };
-use crate::m0_compose::{compose_m0, trim_memories_to_budget, trim_user_profile_to_budget};
+use crate::m0_compose::{compose_m0, trim_user_profile_to_budget};
 use crate::m1_compose::{
     M1RevisionReadTimings, M1RevisionSignal, claim_and_render_notes, compose_m1,
     m1_revision_signal_timed,
@@ -503,13 +503,15 @@ pub struct ReductionDecision {
 }
 
 pub struct ProducerContext<'a> {
-    /// The canonical memory read pinned for this pass; every memory surface of the pass composes from it.
-    pub project_memory: CanonicalMemoryRead,
+    /// The canonical memory read pinned for this pass, already trimmed to the
+    /// memory budget; every memory surface of the pass composes from it. `None`
+    /// when memory is disabled and no read was taken, so a HARD then records no
+    /// composition rather than one for a block it never rendered.
+    pub project_memory: Option<CanonicalMemoryRead>,
     pub project_path: &'a str,
     pub note_project_path: &'a str,
     pub project_directory: &'a str,
     pub history_budget_tokens: f64,
-    pub memory_budget_tokens: f64,
     pub user_profile_budget_tokens: f64,
     pub memory_enabled: bool,
     pub inject_docs: bool,
@@ -538,6 +540,29 @@ pub struct ProducerContext<'a> {
     pub wrapup_active: bool,
     #[cfg(test)]
     pub injected_reductions: Vec<ReductionDecision>,
+}
+
+impl ProducerContext<'_> {
+    /// The injectable rows of the pinned read; empty when no read was taken or it was withheld.
+    fn project_memory_rows(&self) -> &[CanonicalMemory] {
+        self.project_memory
+            .as_ref()
+            .map_or(&[], CanonicalMemoryRead::rows)
+    }
+
+    /// The row digest the m1 revision signal folds in; `None` when no read was taken or it was withheld.
+    fn project_memory_revision(&self) -> Option<u64> {
+        self.project_memory
+            .as_ref()
+            .and_then(CanonicalMemoryRead::revision)
+    }
+
+    /// The composition record a HARD freezes beside its m0 bytes; `None` when no read was taken.
+    fn project_memory_composition(&self) -> Option<ProjectMemoryComposition> {
+        self.project_memory
+            .as_ref()
+            .map(CanonicalMemoryRead::composition)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1354,7 +1379,7 @@ pub struct TransformResponse {
     pub committed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_ordinal: Option<u64>,
-    /// The project-memory composition the served m0 was frozen with; absent until the first HARD.
+    /// The project-memory composition the served m0 was frozen with; absent until the first HARD and when memory is disabled.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub project_memory: Option<ProjectMemoryComposition>,
     /// The module omits `descent_edge_id` on ordinary, subagent, defer-only protocol-error, and pending-build-skew responses.
@@ -1715,7 +1740,7 @@ fn revision_signal_for_context(
         session_id,
         user_profile_version,
         memory_enabled,
-        ctx.project_memory.revision(),
+        ctx.project_memory_revision(),
         timings,
     )
 }
@@ -1726,7 +1751,7 @@ fn compose_m0_for_context(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     ctx: &ProducerContext<'_>,
 ) -> Result<crate::m0_compose::M0Composition, crate::m0_compose::M0ComposeError> {
-    compose_m0(store, inputs, ctx.project_memory.rows(), estimate_tokens)
+    compose_m0(store, inputs, ctx.project_memory_rows(), estimate_tokens)
 }
 
 /// The CAS retry reloads and reclassifies because classification depends on freshly loaded state.
@@ -2278,13 +2303,9 @@ fn compose_additive_m0(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<AdditiveM0Composition, TransformError> {
     let selected_memories = if ctx.memory_enabled {
-        trim_memories_to_budget(
-            ctx.project_memory.rows(),
-            ctx.memory_budget_tokens,
-            estimate_tokens,
-        )
+        ctx.project_memory_rows()
     } else {
-        Vec::new()
+        &[]
     };
     let user_profile = if ctx.memory_enabled {
         store.load_active_user_memories()?
@@ -2313,7 +2334,7 @@ fn compose_additive_m0(
         },
         estimate_tokens,
     );
-    let project_memory = render_memory_block(&selected_memories, "project-memory");
+    let project_memory = render_memory_block(selected_memories, "project-memory");
     if !project_memory.is_empty() {
         m0_bytes.push_str("\n\n");
         m0_bytes.push_str(&project_memory);
@@ -2594,7 +2615,7 @@ fn apply_additive_only(
             meta.coverage_compartment_seq = Some(applied_m1_signal.max_compartment_seq);
             // When compaction is off, record the current maximum sequence so pre-existing rows do not appear in `m1` as new history.
             meta.folded_compartment_seq = applied_m1_signal.max_compartment_seq;
-            meta.project_memory = Some(ctx.project_memory.composition());
+            meta.project_memory = ctx.project_memory_composition();
             meta.expiry_cutoff_ms = ctx.now_ms;
             meta.memory_disabled = !ctx.memory_enabled;
             meta.m1_revision = applied_m1_signal.revision;
@@ -4023,7 +4044,6 @@ fn apply_once(
                         history_budget_tokens: ctx.history_budget_tokens,
                         covered_system_messages: &covered_system_messages,
                         memory_enabled: ctx.memory_enabled,
-                        memory_budget_tokens: ctx.memory_budget_tokens,
                         user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                         inject_docs: ctx.inject_docs,
                         temporal_awareness: ctx.temporal_awareness,
@@ -4100,7 +4120,6 @@ fn apply_once(
                                     history_budget_tokens: ctx.history_budget_tokens,
                                     covered_system_messages: &recut_covered_system_messages,
                                     memory_enabled: ctx.memory_enabled,
-                                    memory_budget_tokens: ctx.memory_budget_tokens,
                                     user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                                     inject_docs: ctx.inject_docs,
                                     temporal_awareness: ctx.temporal_awareness,
@@ -4240,7 +4259,7 @@ fn apply_once(
                 meta.coverage_start_ordinal = comp.first_covered_ordinal;
                 meta.coverage_compartment_seq = Some(comp.folded_compartment_seq);
                 meta.folded_compartment_seq = comp.folded_compartment_seq;
-                meta.project_memory = Some(ctx.project_memory.composition());
+                meta.project_memory = ctx.project_memory_composition();
                 meta.expiry_cutoff_ms = ctx.now_ms; // FROZEN here, atomic with the m0 bytes
                 let applied_m1_signal = revision_signal_for_context(
                     store,
@@ -4311,7 +4330,6 @@ fn apply_once(
                             history_budget_tokens: ctx.history_budget_tokens,
                             covered_system_messages: &covered_system_messages,
                             memory_enabled: ctx.memory_enabled,
-                            memory_budget_tokens: ctx.memory_budget_tokens,
                             user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                             inject_docs: ctx.inject_docs,
                             temporal_awareness: ctx.temporal_awareness,
@@ -4412,7 +4430,7 @@ fn apply_once(
                     meta.coverage_start_ordinal = comp.first_covered_ordinal;
                     meta.coverage_compartment_seq = Some(comp.folded_compartment_seq);
                     meta.folded_compartment_seq = comp.folded_compartment_seq;
-                    meta.project_memory = Some(ctx.project_memory.composition());
+                    meta.project_memory = ctx.project_memory_composition();
                     meta.expiry_cutoff_ms = ctx.now_ms;
                     let applied_m1_signal = revision_signal_for_context(
                         store,
@@ -13162,7 +13180,6 @@ pub(crate) mod tests {
             note_project_path: project,
             project_directory: dir,
             history_budget_tokens: 60_000.0,
-            memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             memory_enabled: true,
             inject_docs: true,
@@ -13189,21 +13206,25 @@ pub(crate) mod tests {
     }
 
     /// A pinned canonical read with `(object_id, category, content)` rows.
-    fn canonical_read(known_as_of: i64, rows: &[(&str, &str, &str)]) -> CanonicalMemoryRead {
-        CanonicalMemoryRead::Available(crate::canonical_memory::CanonicalMemorySnapshot {
-            known_as_of,
-            truncated: false,
-            rows: rows
-                .iter()
-                .map(
-                    |(object_id, category, content)| crate::canonical_memory::CanonicalMemory {
-                        object_id: object_id.to_string(),
-                        category: category.to_string(),
-                        content: content.to_string(),
-                    },
-                )
-                .collect(),
-        })
+    fn canonical_read(
+        known_as_of: i64,
+        rows: &[(&str, &str, &str)],
+    ) -> Option<CanonicalMemoryRead> {
+        Some(CanonicalMemoryRead::Available(
+            crate::canonical_memory::CanonicalMemorySnapshot::new(
+                known_as_of,
+                false,
+                rows.iter()
+                    .map(|(object_id, category, content)| {
+                        crate::canonical_memory::CanonicalMemory {
+                            object_id: object_id.to_string(),
+                            category: category.to_string(),
+                            content: content.to_string(),
+                        }
+                    })
+                    .collect(),
+            ),
+        ))
     }
 
     fn served_bytes(response: &TransformResponse) -> String {
@@ -13242,10 +13263,9 @@ pub(crate) mod tests {
             Some(ProjectMemoryComposition::Canonical {
                 known_as_of: 42,
                 truncated: false,
-                revision: match &ctx.project_memory {
-                    CanonicalMemoryRead::Available(snapshot) => snapshot.revision(),
-                    CanonicalMemoryRead::Withheld(_) => unreachable!(),
-                },
+                revision: ctx
+                    .project_memory_revision()
+                    .expect("the injected read is available"),
             })
         );
         assert_eq!(
@@ -13300,7 +13320,7 @@ pub(crate) mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = store(dir.path());
             let mut ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
-            ctx.project_memory = CanonicalMemoryRead::Withheld(verdict);
+            ctx.project_memory = Some(CanonicalMemoryRead::Withheld(verdict));
             let withheld = transform(&store, &request, &ctx).unwrap();
             assert_eq!(withheld.action, "HARD");
             assert!(!served_bytes(&withheld).contains("<project-memory>"));
@@ -13345,10 +13365,11 @@ pub(crate) mod tests {
         assert!(!bytes.contains("First rule."));
 
         // A withheld read folds again to a served m0 without the block.
-        ctx.project_memory =
-            CanonicalMemoryRead::Withheld(crate::kernel_routes::KernelOutcome::unavailable(
+        ctx.project_memory = Some(CanonicalMemoryRead::Withheld(
+            crate::kernel_routes::KernelOutcome::unavailable(
                 crate::kernel_routes::UnavailableReason::StoreBusy,
-            ));
+            ),
+        ));
         let withheld = transform(&store, &request, &ctx).unwrap();
         assert_eq!(withheld.action, "HARD");
         assert!(!served_bytes(&withheld).contains("<project-memory>"));

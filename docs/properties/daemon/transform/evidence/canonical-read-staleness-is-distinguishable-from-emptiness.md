@@ -12,47 +12,57 @@ the replacement property named in that specification.
 
 ## Evidence trail
 
-Verified at the commit that introduces the reader.
+Verified at HEAD.
 
 - `crates/daemon/src/canonical_memory.rs`: `CanonicalMemoryRead` has two
   variants, `Available(CanonicalMemorySnapshot)` and `Withheld(KernelOutcome)`
-  (`:55-60`). `composition()` (`:64-75`) maps `Available` to
+  (`:88-94`). `composition()` (`:98-109`) maps `Available` to
   `ProjectMemoryComposition::Canonical { known_as_of, truncated, revision }` and
   `Withheld` to `ProjectMemoryComposition::Withheld { state }` with
-  `state = verdict.state_key()`. `revision()` (`:78-83`) is `None` when
-  withheld. `rows()` (`:86-91`) returns the snapshot rows or an empty slice.
+  `state = verdict.state_key()`. `revision()` (`:112-117`) is `None` when
+  withheld. `rows()` (`:120-125`) returns the snapshot rows or an empty slice.
   Each is a single `match` with no default arm.
-- `crates/daemon/src/canonical_memory.rs:99-125` (`read_project_memory`): the
+- `crates/daemon/src/canonical_memory.rs:134-158` (`read_project_memory`): the
   store phase (`KernelOpenCoordinator::kernel_store`), the `outbox_lag` read,
   the serving decision `serving::project(serving::decide_for_tip_read(&lag),
   Surface::AutoInject)`, and the `read_visible` call each return `Withheld`
-  carrying a `KernelOutcome`; only a served read constructs `Available`.
+  carrying a `KernelOutcome`; only a served read constructs `Available`, and it
+  does so through `injectable_snapshot` (`:167-195`), which filters to visible
+  positive-category decisions, trims them to the memory budget, and hands the
+  trimmed rows to `CanonicalMemorySnapshot::new` (`:46`), which digests exactly
+  those rows once.
 - `crates/daemon/src/kernel_routes/serving.rs:58-63` (`decide_for_tip_read`):
   zero registered consumers is served; otherwise `decide` applies the route's
   lag thresholds. So in a deployment with no outbox consumer, the withheld arm
   is reached only through store phase or read errors.
 - `crates/daemon/src/kernel_routes/state.rs` (`KernelOutcome::state_key`):
-  the recorded reason is the serde `kind` tag joined with the reason by `:`,
-  the same vocabulary the TypeScript client indexes guidance by.
-- `crates/memory-store/src/lib.rs:1320-1340` (`ProjectMemoryComposition`):
+  the recorded reason is the serialized `kind` tag joined with the serialized
+  `reason` by `:`, read from the same wire object the TypeScript client derives
+  its `stateKey` from, so the two cannot drift.
+- `crates/memory-store/src/lib.rs:1320-1343` (`ProjectMemoryComposition`):
   `#[serde(tag = "kind")]` with variants `canonical` and `withheld`, so the two
   records differ on the wire and in the durable blob, not only in Rust.
-- `crates/daemon/src/transform.rs:2597`, `:4243`, `:4415`: every HARD arm
+- `crates/daemon/src/transform.rs:2618`, `:4262`, `:4433`: every HARD arm
   (compaction-off, compaction-on, and the re-cut arm) writes
-  `meta.project_memory = Some(ctx.project_memory.composition())` next to the
-  frozen m0 bytes, inside the same `TransformCommit`.
-- `crates/daemon/src/transform.rs:1723-1730` (`compose_m0_for_context`) and
-  the additive path pass `ctx.project_memory.rows()` to the renderer, so a
+  `meta.project_memory = ctx.project_memory_composition()` next to the frozen
+  m0 bytes, inside the same `TransformCommit`. The accessor (`:561`) maps a
+  `None` context read to `None`, so a memory-disabled pass records no
+  composition.
+- `crates/daemon/src/transform.rs:1748-1755` (`compose_m0_for_context`) and
+  the additive path pass `ctx.project_memory_rows()` to the renderer, so a
   withheld read renders no block because it has no rows, not because a
   separate flag suppresses it.
-- `crates/daemon/src/lib.rs:8007`: the read is taken once per pass, before the
-  `run_transform` closure, and every attempt of that pass clones the same value
+- `crates/daemon/src/lib.rs:8019`: the read is taken once per pass through
+  `Handler::project_memory_read` (`lib.rs:4828`), which returns `None` when
+  memory is disabled so the kernel store is not consulted, before the
+  `run_transform` closure; every attempt of that pass clones the same value
   into its `ProducerContext`, so the m1 revision signal, m0, and additive m0
-  compose from one snapshot. The historian takes its own read
-  (`lib.rs:4831`) only when memory is enabled; a withheld verdict renders no
-  block and is logged with its state key (`historian_chunk.rs`,
-  `assemble_historian_firing`), so summarization continues through a kernel
-  outage while the log keeps the reason.
+  compose from one snapshot. A historian firing the pass triggers receives the
+  same pinned value through `HistorianPrepareContext` (`lib.rs:5118`); a
+  withheld verdict renders no block and is logged with its state key
+  (`historian_chunk.rs`, `assemble_historian_firing`), so summarization
+  continues through a kernel outage while the log keeps the reason. The
+  wrapup route takes its own read through the same helper (`lib.rs:5269`).
 
 ## Failure scenario
 
@@ -67,7 +77,7 @@ rematerialized when the store became ready.
 
 ## Timing windows and dependencies
 
-- The window between the read (`lib.rs:8007`) and the commit is closed to the
+- The window between the read (`lib.rs:8019`) and the commit is closed to the
   verdict: the read result is a value in the context, and a phase or lag change
   after it cannot alter what the pass records.
 - The property depends on the two-variant enum staying exhaustive; a third
@@ -75,12 +85,16 @@ rematerialized when the store became ready.
 - The distinction reaches the m1 revision signal through
   `ProjectMemoryComposition::revision()` (`None` when withheld), so a served
   read with rows changes the external revision and forces the HARD that
-  rematerializes m0 (`transform.rs:13322` pins this).
+  rematerializes m0 (`transform.rs:13342` pins this). The digest covers only
+  the rows the block renders, so a change to a row the budget excludes, or a
+  flip of the read cap's `truncated` flag, leaves the revision alone
+  (`canonical_memory.rs` tests `rows_past_the_memory_budget_are_neither_injected_nor_digested`
+  and `revision_changes_only_when_the_rendered_inputs_change`).
 
 ## What a test must construct
 
-1. A `ProducerContext` whose `project_memory` is `Withheld(verdict)` for each
-   of `Stale`, `Abstained`, and `Unavailable`, plus one whose `project_memory`
+1. A `ProducerContext` whose `project_memory` is `Some(Withheld(verdict))` for
+   each of `Stale`, `Abstained`, and `Unavailable`, plus one whose `project_memory`
    is `Available` with zero rows. Run one HARD pass each.
 2. Assert the frozen m0 bytes contain no `<project-memory>` element in every
    case, and that `meta.project_memory` (and the response field) is
@@ -89,7 +103,7 @@ rematerialized when the store became ready.
 3. Assert the withheld record is not equal to the empty record.
 
 `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
-(`transform.rs:13258`) constructs exactly this at the injected-context seam;
+(`transform.rs:13278`) constructs exactly this at the injected-context seam;
 `a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it`
 (`tests/transform_canonical_memory.rs`) reaches the withheld arm through the
 reader itself, with a registered consumer trailing the published outbox by the

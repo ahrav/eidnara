@@ -35,16 +35,13 @@ fn first_hard_pass_meta_respects_the_store_durable_text_bound() {
         .expect("transform request");
         let project_directory = dir.path().to_str().expect("utf8 dir");
         let ctx = ProducerContext {
-            project_memory: CanonicalMemoryRead::Available(CanonicalMemorySnapshot {
-                known_as_of: 0,
-                truncated: false,
-                rows: Vec::new(),
-            }),
+            project_memory: Some(CanonicalMemoryRead::Available(
+                CanonicalMemorySnapshot::new(0, false, Vec::new()),
+            )),
             project_path: "git:meta-bound",
             note_project_path: "git:meta-bound",
             project_directory,
             history_budget_tokens: 60_000.0,
-            memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             memory_enabled: true,
             inject_docs: true,
