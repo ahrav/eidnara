@@ -124,6 +124,28 @@ function commitReply(commitSeq: number, replayed: boolean, ...objectIds: string[
     };
 }
 
+/** A `mark_stale` preview on a labeled object: every served surface keeps its verdict. */
+function previewReply(knownAsOf: number, objectId: string) {
+    const labeled = { auto_inject: "hidden", auto_search: "hidden", explicit_search: "labeled" };
+    return {
+        state: { kind: "available" },
+        known_as_of: knownAsOf,
+        previews: [
+            {
+                object_id: objectId,
+                event: "mark_stale",
+                outcome: "deny",
+                previous_disposition: "active",
+                disposition: "stale",
+                denied: false,
+                current: labeled,
+                projected: labeled,
+                visibility_changes: false,
+            },
+        ],
+    };
+}
+
 const DIVERGED = { state: { kind: "unavailable", reason: "snapshot_diverged" } };
 
 const spec: DecisionSpecInput = {
@@ -1199,6 +1221,35 @@ describe("KernelClient mutations", () => {
         });
         const result = await client(transport).archive("o1", intent);
         expect(result.state).toEqual({ kind: "conflict", reason: "known_as_of_advanced" });
+    });
+
+    test("a connection identity refusal on a preview sends the same body once more", async () => {
+        const transport = new FakeTransport().queue(
+            new ConnectionIdentityChangedError(),
+            previewReply(4, "o1"),
+        );
+        const result = await client(transport).previewDispositions({
+            ...intent,
+            operations: [{ op: "disposition", object_id: "o1", event: "mark_stale" }],
+        });
+        expect(result.state).toEqual({ kind: "available" });
+        const bodies = transport.bodies("kernel.commit");
+        expect(bodies).toHaveLength(2);
+        expect(bodies[1]).toEqual(bodies[0]);
+        expect(bodies[0]).toMatchObject({ preview: true, tokens: [] });
+    });
+
+    test("a second connection identity refusal on a preview is returned as snapshot_diverged", async () => {
+        const transport = new FakeTransport().queue(
+            new ConnectionIdentityChangedError(),
+            new ConnectionIdentityChangedError(),
+        );
+        const result = await client(transport).previewDispositions({
+            ...intent,
+            operations: [{ op: "disposition", object_id: "o1", event: "mark_stale" }],
+        });
+        expect(result.state).toEqual({ kind: "unavailable", reason: "snapshot_diverged" });
+        expect(transport.calls).toHaveLength(2);
     });
 });
 

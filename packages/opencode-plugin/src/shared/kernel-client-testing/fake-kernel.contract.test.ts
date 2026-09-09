@@ -342,6 +342,33 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
         expect(h.kernel.objects.get("decision-object-1")?.disposition).toBe("stale");
     });
 
+    test("a seeded approval stops granting once its own disposition leaves active", async () => {
+        const h = harness();
+        await createDecisionOne(h);
+        await dispose(h, "decision-object-1", "quarantine", "quarantine");
+        h.kernel.seedApproval("approval-1", PROJECT);
+        const revoked = await dispose(h, "approval-1", "quarantine", "quarantine-approval");
+        expect(revoked).toMatchObject({
+            dispositions: [{ denied: false, disposition: "quarantined" }],
+        });
+        expect(h.kernel.approvals.has("approval-1")).toBe(true);
+        const relaxed = await h.client().commit({
+            ...intent("relax-revoked"),
+            operations: [
+                {
+                    op: "disposition",
+                    object_id: "decision-object-1",
+                    event: "mark_stale",
+                    approval_object_id: "approval-1",
+                },
+            ],
+        });
+        expect(relaxed).toMatchObject({
+            dispositions: [{ denied: true, disposition: "quarantined" }],
+        });
+        expect(h.kernel.objects.get("decision-object-1")?.disposition).toBe("quarantined");
+    });
+
     test("a preview reports every surface's verdict and writes nothing", async () => {
         const h = harness();
         await createDecisionOne(h);

@@ -19,26 +19,39 @@ function harness() {
     } as unknown as ExtensionAPI;
     const resolver = fakeKernelResolver();
     registerCtxMemoryMarkCommand(pi, { kernelClient: resolver.kernelClient });
-    const run = async (args: string, hasUI = true) => {
+    const run = async (args: string, hasUI = true, replaceSessionOnConfirm = false) => {
         const command = fake.commands.get("ctx-memory-mark") as {
             handler: (args: string, ctx: unknown) => Promise<void>;
         };
         const base = fakeContext("ses-1", CWD);
-        await command.handler(args, {
-            ...base,
-            hasUI,
-            ui: {
-                ...base.ui,
-                confirm: async (title: string, message: string) => {
-                    confirmations.push({ title, message });
-                    return answer;
+        // Pi's real `ctx` throws on every property once its session is replaced; `stale` stands in for that invalidation.
+        let stale = false;
+        const ctx = new Proxy(
+            {
+                ...base,
+                hasUI,
+                ui: {
+                    ...base.ui,
+                    confirm: async (title: string, message: string) => {
+                        confirmations.push({ title, message });
+                        if (replaceSessionOnConfirm) stale = true;
+                        return answer;
+                    },
                 },
             },
-        });
+            {
+                get(target, property, receiver) {
+                    if (stale) throw new Error("This extension ctx is stale");
+                    return Reflect.get(target, property, receiver);
+                },
+            },
+        );
+        await command.handler(args, ctx);
         return entries.at(-1) as CtxStatusEntryData;
     };
     return {
         kernel: resolver.kernel,
+        entries,
         run,
         confirmations,
         setAnswer: (value: boolean) => {
@@ -83,6 +96,22 @@ describe("Pi /ctx-memory-mark", () => {
         expect(applied.level).toBe("success");
         expect(applied.text).toContain("receipt #");
         expect(h.kernel.objects.get("mem_verified")?.disposition).toBe("quarantined");
+    });
+
+    it("writes nothing and answers nowhere when the session is replaced while the dialog is open", async () => {
+        const h = harness();
+        h.kernel.seedDecision({
+            object_id: "mem_verified",
+            decision_kind: "PROJECT_RULES",
+            summary: "v",
+            labeled: false,
+        });
+        h.setAnswer(true);
+        await h.run("quarantine mem_verified", true, true);
+        expect(h.confirmations).toHaveLength(1);
+        expect(h.kernel.receipts.size).toBe(0);
+        expect(h.kernel.objects.get("mem_verified")?.disposition).toBe("active");
+        expect(h.entries).toEqual([]);
     });
 
     it("falls back to the confirm flag when no dialog is available", async () => {

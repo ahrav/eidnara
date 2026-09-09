@@ -255,7 +255,7 @@ export class FakeKernel {
     readonly receipts = new Map<string, Receipt>();
     /** Every `decision_id` the store has held, live or retired; the daemon's `decisions` primary key refuses a second insert under any of them. commentlint: allow(JUDGE) */
     readonly decisionIds = new Set<string>();
-    /** Objects the kernel would honor as approval authority: a live `adr_accepted` decision admitted by an explicit user. Any other live object cited as an approval is valid to name but grants nothing, so a relaxation citing it is denied. commentlint: allow(JUDGE) */
+    /** Objects the kernel would honor as approval authority: a live `adr_accepted` decision admitted by an explicit user, for as long as its own disposition stays `active`. Any other live object cited as an approval is valid to name but grants nothing, so a relaxation citing it is denied. commentlint: allow(JUDGE) */
     readonly approvals = new Set<string>();
     /** Forces every read on a surface to answer with this state instead of rows. */
     readonly surfaceStates = new Map<Surface, MemoryState>();
@@ -746,7 +746,8 @@ export class FakeKernel {
             ) {
                 return { reply: invalid("not_found") };
             }
-            approved = this.approvals.has(approval);
+            // The kernel reads approval authority at use: a seeded approval whose own disposition has since left `active` grants nothing. commentlint: allow(JUDGE)
+            approved = this.approvals.has(approval) && object.disposition === "active";
         }
         const effect = EVENT_EFFECT[event as DispositionEvent];
         const relaxes = DISPOSITION_RANK[effect.disposition] < DISPOSITION_RANK[target.disposition];
