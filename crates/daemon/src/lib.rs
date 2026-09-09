@@ -9636,6 +9636,7 @@ impl Handler {
                 &authority_project,
                 &ledger_session,
                 command_id,
+                generation,
                 attempt,
                 model,
             );
@@ -9764,9 +9765,8 @@ impl Handler {
                         return read_dream_task_response(&store, receipt_key);
                     }
                 }
-                // Child session IDs are not generation-scoped; only the owning
-                // generation purges one, since a successor may be running under it.
-                // commentlint: allow(JUDGE)
+                // A fenced run no longer owns the request, and the successor may have
+                // adopted this session's run through its recorded handle. commentlint: allow(JUDGE)
                 if !attempt_fenced {
                     let _ = producer.purge_session(&child_session).await;
                 }
@@ -27041,9 +27041,9 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
-    /// Child session ids do not carry the receipt generation, so a run that
-    /// learns it was fenced while awaiting the model must not delete the
-    /// session: the successor may be running under the same id.
+    /// A run that learns it was fenced while awaiting the model must not delete
+    /// its child session: the successor may have adopted that run through the
+    /// recorded handle.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
