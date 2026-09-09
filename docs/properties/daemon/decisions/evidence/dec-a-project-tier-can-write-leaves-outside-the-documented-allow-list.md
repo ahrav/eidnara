@@ -9,7 +9,7 @@ against the classified merge. An implementation-derived allow-list cannot serve
 as the oracle for an accidental policy change.
 
 Source snapshot: working tree based on
-`735f58dcb1002505c7aeb8a96505a4d210c4782b`, verified
+`0da79d706ea40de75e76af5423dd7fc9b088d8cf`, verified
 2026-09-09. Rust references below name `crates/daemon/src/config.rs`.
 TypeScript references name files under `packages/opencode-plugin/src/config/`.
 The [PR's decisions](https://github.com/ahrav/eidnara/pull/330) establish the
@@ -38,8 +38,9 @@ catalog's configuration-table row. `smart_drops` and `temporal_awareness` are
 project-allowed (`:680-681`); a project may override either boolean direction,
 not only its default value.
 
-The ten privileged keys are named at `:627-638`, including both
-`memory.injection_budget_tokens` and its `memory.budget_tokens` alias. The
+The twelve privileged keys are named at `:627-640`. Their budget keys are
+`memory.injection_budget_tokens`, its `memory.budget_tokens` alias,
+`memory.user_profile_budget_tokens`, and `historian.context_limit_tokens`. The
 `const` assertion at `:696-708` forbids `ProjectAllowed` for a privileged key.
 It does not enforce
 the complete policy: changing a user-only key to raise-only, or changing an
@@ -82,14 +83,15 @@ Existing checks remain `unaudited`:
   threshold and budget outcomes with literal expectations.
 - `:1407-1446` asserts auto-search and caveman project overrides.
 - `:1458-1480` asserts docs-injection rejection and a temporal override;
-  `:1906-1921` asserts that project config cannot turn user docs injection off.
+  `:1916-1931` asserts that project config cannot turn user docs injection off.
 - `:1637-1666` asserts that project flags and schedules cannot open a closed
   user-memory gate, and a no-op closed gate emits no warning.
-- `:1671-1698` pins ten privileged names and rejects `ProjectAllowed` for
+- `:1671-1700` pins twelve privileged names and rejects `ProjectAllowed` for
   them, but does not pin each key's exact class.
-- `:1703-1805` supplies all 25 keys and asserts selected outputs; its warning
-  count at `:1776-1786` is derived from the implementation's classes.
-- `:1810-1845` checks pointer registration and prohibits raw `.pointer("`
+- `:1705-1815` supplies all 25 keys and asserts selected outputs, including
+  all three effective token budgets. Its warning count at `:1786-1796` is
+  derived from the implementation's classes.
+- `:1820-1855` checks pointer registration and prohibits raw `.pointer("`
   reads. It does not establish permissions or detect a `Value::get` read or a
   runtime-built pointer that bypasses the table.
 

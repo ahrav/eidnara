@@ -379,7 +379,7 @@ export const EidnaraConfigSchema = z
             .union([z.string(), z.object({ default: z.string() }).catchall(z.string())])
             .default("5m")
             .describe(
-                'Cache TTL: string (e.g. "5m", "1h", "30s") or per-model object ({ default: "5m", "model-id": "10m" }). Set to "never" for lanes kept warm by an external keepwarm proxy — disables the idle-TTL heuristic so the plugin never initiates a rebuild based on elapsed time.',
+                'Cache TTL: string (e.g. "5m", "1h", "30s") or per-model object ({ default: "5m", "model-id": "10m" }). Only user configuration can set either shape; project values are ignored with a warning. Set to "never" for lanes kept warm by an external keepwarm proxy; this disables the idle-TTL heuristic so the plugin never initiates a rebuild based on elapsed time.',
             ),
         prompt_surface: PromptSurfaceConfigSchema.default({ default: "full" }).describe(
             "Prompt-surface presets: default is full; models use bare model IDs, provider/model, or provider/* routing keys. Guidance and tool-description overrides are user-level only. On OpenCode and Pi, per-model routing applies to the guidance block only: tool descriptions are registered once per process, so they follow the default preset (a v1 plugin-surface limitation; per-model tool descriptions are planned for the OpenCode v2 plugin API once the SDK stabilizes).",
@@ -665,7 +665,7 @@ export const EidnaraConfigSchema = z
                     .max(MAX_MEMORY_INJECTION_BUDGET_TOKENS)
                     .default(4000)
                     .describe(
-                        "Token budget for memory injection on session start (min: 500, max: 20000, default: 4000)",
+                        "Token budget for memory injection on session start (min: 500, max: 20000, default: 4000). Only user configuration can set this budget; project values are ignored with a warning.",
                     ),
                 auto_promote: z
                     .boolean()

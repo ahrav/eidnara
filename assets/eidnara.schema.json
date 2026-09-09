@@ -308,7 +308,7 @@
     },
     "cache_ttl": {
       "default": "5m",
-      "description": "Cache TTL: string (e.g. \"5m\", \"1h\", \"30s\") or per-model object ({ default: \"5m\", \"model-id\": \"10m\" }). Set to \"never\" for lanes kept warm by an external keepwarm proxy — disables the idle-TTL heuristic so the plugin never initiates a rebuild based on elapsed time.",
+      "description": "Cache TTL: string (e.g. \"5m\", \"1h\", \"30s\") or per-model object ({ default: \"5m\", \"model-id\": \"10m\" }). Only user configuration can set either shape; project values are ignored with a warning. Set to \"never\" for lanes kept warm by an external keepwarm proxy; this disables the idle-TTL heuristic so the plugin never initiates a rebuild based on elapsed time.",
       "anyOf": [
         {
           "type": "string"
@@ -719,7 +719,7 @@
         },
         "injection_budget_tokens": {
           "default": 4000,
-          "description": "Token budget for memory injection on session start (min: 500, max: 20000, default: 4000)",
+          "description": "Token budget for memory injection on session start (min: 500, max: 20000, default: 4000). Only user configuration can set this budget; project values are ignored with a warning.",
           "type": "number",
           "minimum": 500,
           "maximum": 20000

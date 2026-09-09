@@ -417,7 +417,7 @@ is the same hazard 4e recorded for `tail_hygiene.rs:38`
 | --- | --- | --- | --- | --- |
 | `selection.rs` | `:1413` | **37** | `:1573`-`:3349` | `:1732` the TypeScript selector golden; `:1858`-`:2486` band, force, emergency and supersession batching; `:2537` the `region_hint` UTF-16 cap and surrogate back-off; `:2552`-`:2762` the `provider_executed`, `frozen_arc` and dynamic-protection filters; `:2836` drop beats edit marker; `:2885` payload purity; `:3107`-`:3300` the duplicate-safe-tool family; `:3349` defer produces nothing |
 | `boundary.rs` | `:1975` | **29** | `:2174`-`:3042` | `:2174` constants match TypeScript; `:2247`, `:2285`, `:2329` the three goldens; `:2473`-`:2772` the backward reasoning fence and fold-only guard; `:2809`-`:2877` wrap-up watermarks; `:2911`, `:2924` determinism and anchor monotonicity; `:2966`-`:3042` trigger and ordinal-zero edges |
-| `config.rs` | `cache_ttl_tests` at `:1084`; `tests` at `:1183` | **43** (5 + 38) | `:1089`-`:2175` | Cache-TTL parsing and routing, defaults, per-key tier permissions, sibling precedence, guidance resolution, JSONC parsing, and file-cache behavior. The classified-merge checks are enumerated below |
+| `config.rs` | `cache_ttl_tests` at `:1084`; `tests` at `:1183` | **43** (5 + 38) | `:1089`-`:2185` | Cache-TTL parsing and routing, defaults, per-key tier permissions, sibling precedence, guidance resolution, JSONC parsing, and file-cache behavior. The classified-merge checks are enumerated below |
 | `codec/opencode.rs` | `:1323` | **17** | `:1413`-`:2157` | `:1413`-`:1978` fresh-part completeness, adjacency deletion, native-extras survival, polarity round trip, reasoning exemptions; `:1860` compaction as a boundary; `:2079` the duplicate-id guard, debug-only; `:2113` incremental sidecar pins; `:2157` typed wire projection |
 | `scheduler.rs` | `:919` | **16** | `:1050`-`:1437` | `:1050` the golden; `:1206`-`:1257` band geometry and the durable-overflow arm; `:1270`-`:1397` deferral, latch lifecycle, determinism, vocabulary mapping; `:1417`-`:1437` the never-TTL family |
 | `codec/pi.rs` | `:1079` | **14** | `:1083`-`:1487` | `:1121` split-pipe ids; `:1153`-`:1231` adjacency deletion and survivor extras; `:1277`-`:1404` multi-part, image, opaque and empty-error tool results; `:1427`, `:1447`, `:1470` frozen and untouched replay; `:1487` compaction as a boundary signal |
@@ -441,11 +441,11 @@ the inventory describes assertions, not a verdict that they prove the full
 | `rust_only_budget_leaves_are_user_tier_only_and_warn_when_project_supplies_them` | `:1353-1387` | Legacy budget, user-profile budget, and historian context limit reject project overrides with key-specific warnings | unaudited |
 | `docs_injection_is_user_tier_only_and_temporal_flag_follows_project_tier` | `:1458-1480` | Project config cannot enable user-disabled docs injection, but can override the temporal flag | unaudited |
 | `project_tier_cannot_raise_the_user_memory_gate` | `:1637-1666` | Project flags and schedules cannot open a closed gate; an unchanged closed gate has no warning | unaudited |
-| `privileged_keys_are_the_model_budget_and_schedule_levers` | `:1671-1698` | Pins ten privileged names, including both budget spellings, and excludes `ProjectAllowed`, not every exact tier class | unaudited |
-| `hostile_project_tier_cannot_change_privileged_values_and_warns_per_key` | `:1703-1805` | Supplies all 25 keys, asserts selected outputs, and counts unique warnings against an implementation-derived ignored-key count | unaudited |
-| `every_consumed_pointer_is_a_classified_config_key` | `:1810-1845` | Inventories literal pointers, unique registration, and 25 keys; rejects raw `.pointer("` calls, not computed pointers or `Value::get` reads | unaudited |
-| `sibling_keys_keep_their_precedence_within_a_tier` | `:1850-1922` | Schedule/flag and standard/legacy budget precedence, malformed primary fallback, and rejection of project docs/schedule changes | unaudited |
-| `module_model_is_user_tier_only` | `:1970-1988` | Project module model and fallback are ignored with two user-only warnings | unaudited |
+| `privileged_keys_are_the_model_budget_and_schedule_levers` | `:1671-1700` | Pins twelve privileged names, including all four budget keys, and excludes `ProjectAllowed`, not every exact tier class | unaudited |
+| `hostile_project_tier_cannot_change_privileged_values_and_warns_per_key` | `:1705-1815` | Supplies all 25 keys, asserts selected outputs including all three effective token budgets, and counts unique warnings against an implementation-derived ignored-key count | unaudited |
+| `every_consumed_pointer_is_a_classified_config_key` | `:1820-1855` | Inventories literal pointers, unique registration, and 25 keys; rejects raw `.pointer("` calls, not computed pointers or `Value::get` reads | unaudited |
+| `sibling_keys_keep_their_precedence_within_a_tier` | `:1860-1932` | Schedule/flag and standard/legacy budget precedence, malformed primary fallback, and rejection of project docs/schedule changes | unaudited |
+| `module_model_is_user_tier_only` | `:1980-1998` | Project module model and fallback are ignored with two user-only warnings | unaudited |
 
 ### `#[ignore]`, `should_panic`, and property tooling
 
@@ -734,8 +734,8 @@ Ranked by the gap between what the code decides and what any check proves.
 
 11. **The classified merge lacks a complete independent per-key policy oracle.**
     Its checks are enumerated above. The hostile fixture derives the expected
-    ignored-key count from `tier_class` (`config.rs:1776-1786`), while the
-    privileged-name check (`:1671-1698`) only excludes `ProjectAllowed` for
+    ignored-key count from `tier_class` (`config.rs:1786-1796`), while the
+    privileged-name check (`:1671-1700`) only excludes `ProjectAllowed` for
     those names. Neither establishes every exact permission independently of
     the implementation table.
 

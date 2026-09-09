@@ -2,12 +2,12 @@
 //!
 //! The reader loads user and project tiers directly without a daemon config plane.
 //! Every key it consumes is a [`ConfigKey`] with one [`TierClass`]: the user
-//! tier sets any key; the project tier is applied key by key through its class,
-//! after the user tier. A privileged key (model selection, the memory injection
-//! budget, the historian cache TTL, unattended task schedules, docs injection
-//! into task input) is never project-allowed; the execute threshold and the
-//! user-memory gate may only be tightened by the project tier. No environment
-//! variable supplies a configuration value.
+//! tier sets any key; project values apply only as their class permits.
+//! Model selection, memory and user-profile budgets, historian context and cache
+//! TTL, unattended task schedules, and docs injection are user-only.
+//! Projects may only raise the execute threshold or close the user-memory gate.
+//! No environment variable supplies a configuration value.
+//!
 //! The Rust module uses stricter model-selection policy than the TypeScript implementation.
 
 use std::fs;
@@ -632,6 +632,8 @@ impl ConfigKey {
             | Self::HistorianFallbackModels
             | Self::MemoryInjectionBudgetTokens
             | Self::MemoryBudgetTokens
+            | Self::UserProfileBudgetTokens
+            | Self::HistorianContextLimitTokens
             | Self::DreamerReviewUserMemoriesSchedule
             | Self::UserMemoriesEnabled
             | Self::DreamerInjectDocs
@@ -644,9 +646,7 @@ impl ConfigKey {
             | Self::AutoSearchMinPromptChars
             | Self::CavemanEnabled
             | Self::CavemanMinChars
-            | Self::UserProfileBudgetTokens
             | Self::MemoryAutoPromote
-            | Self::HistorianContextLimitTokens
             | Self::SmartDrops
             | Self::TemporalAwareness
             | Self::PromptSurfaceGuidanceOverrideText
@@ -1683,8 +1683,10 @@ mod tests {
                 ConfigKey::HistorianFallbackModels,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
+                ConfigKey::UserProfileBudgetTokens,
                 ConfigKey::UserMemoriesEnabled,
                 ConfigKey::DreamerReviewUserMemoriesSchedule,
+                ConfigKey::HistorianContextLimitTokens,
                 ConfigKey::DreamerInjectDocs,
                 ConfigKey::CacheTtl,
             ]
@@ -1771,6 +1773,14 @@ mod tests {
         assert_eq!(
             cfg.memory_budget_tokens, user_only.memory_budget_tokens,
             "project tier must not widen the memory injection budget"
+        );
+        assert_eq!(
+            cfg.user_profile_budget_tokens, user_only.user_profile_budget_tokens,
+            "project tier must not widen the user-profile budget"
+        );
+        assert_eq!(
+            cfg.historian_context_limit_tokens, user_only.historian_context_limit_tokens,
+            "project tier must not change the historian context budget"
         );
         assert_eq!(cfg.prompt_surface_guidance_override, None);
         let ignored = ConfigKey::ALL
