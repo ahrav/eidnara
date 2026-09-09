@@ -628,9 +628,9 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - the hostile fixture at `config.rs:1703-1805` supplies all
+Exercised: partial - the hostile fixture at `config.rs:1705-1815` supplies all
 25 consumed keys and asserts selected effective values, but derives its expected
-ignored-key count from `tier_class`. The pointer inventory at `:1810-1845` checks
+ignored-key count from `tier_class`. The pointer inventory at `:1820-1855` checks
 registration, not policy. No single independent per-key oracle covers this whole
 contract.
 Guarantee: A project may override only `memory.enabled`,
@@ -662,7 +662,7 @@ gate and a lower project threshold. The production path reads project values
 from `.eidnara/eidnara.jsonc`; no injected fault is required.
 Confidence: high - [evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
 Verified against the working tree based on
-`735f58dcb1002505c7aeb8a96505a4d210c4782b`: the classifications at
+`0da79d706ea40de75e76af5423dd7fc9b088d8cf`: the classifications at
 `config.rs:657-693` match the explicit policy, and `:710-755` applies the tiers
 through them. The build-time assertion at `:696-708` rejects privileged keys
 classified as project-allowed; it does not pin the exact permissions of every
@@ -672,8 +672,8 @@ Existing check: `config.rs:1297-1302` covers raising and clamping the threshold;
 `:1317-1350` covers injection-budget rejection and the user-tier legacy fallback;
 `:1458-1480` covers docs-injection rejection and a temporal-flag override;
 `:1637-1666` covers attempts to open a closed gate and the unchanged closed gate;
-`:1671-1698` pins all ten privileged key names, including the legacy budget
-alias; `:1703-1805` and `:1810-1845` are the hostile fixture and pointer
+`:1671-1700` pins all twelve privileged key names, including all four budget
+keys; `:1705-1815` and `:1820-1855` are the hostile fixture and pointer
 inventory described above. Status `unaudited` for
 each check; their presence is not a full independent policy oracle.
 Impact: a policy regression can let repository configuration select a model,
