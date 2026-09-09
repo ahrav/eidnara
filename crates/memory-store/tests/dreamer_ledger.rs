@@ -94,6 +94,22 @@ fn a_receipt_moves_from_absent_through_in_progress_to_complete_and_replays() {
     );
     assert_eq!(
         store
+            .record_dreamer_run_handle(key(), 1, 0, "replacement-run")
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(
+        store
+            .release_dreamer_attempt_session(key(), 1, 0, 12)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(
+        store.list_dreamer_attempts(key()).unwrap()[0].session_released_at_ms,
+        None
+    );
+    assert_eq!(
+        store
             .finish_dreamer_attempt(key(), 1, 0, DreamerTerminalKind::Complete, 13)
             .unwrap(),
         DreamerTransition::Applied
@@ -142,6 +158,18 @@ fn a_receipt_moves_from_absent_through_in_progress_to_complete_and_replays() {
     assert_eq!(receipt.updated_at_ms, 15);
     assert_eq!(receipt.binding.ledger_session, "ses-1");
     assert_eq!(receipt.binding.command_id, "cmd-1");
+    assert_eq!(
+        store
+            .release_dreamer_attempt_session(key(), 1, 0, 19)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    assert_eq!(
+        store
+            .release_dreamer_attempt_session(key(), 1, 0, 20)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
 
     let attempts = store.list_dreamer_attempts(key()).unwrap();
     assert_eq!(attempts.len(), 1);
@@ -152,6 +180,7 @@ fn a_receipt_moves_from_absent_through_in_progress_to_complete_and_replays() {
         Some(DreamerTerminalKind::Complete)
     );
     assert_eq!(attempts[0].terminal_at_ms, Some(13));
+    assert_eq!(attempts[0].session_released_at_ms, Some(19));
     assert_eq!(store.count_dreamer_attempts(PROJECT, 0).unwrap(), 1);
     assert_eq!(store.count_dreamer_attempts(PROJECT, 13).unwrap(), 0);
     assert_eq!(store.count_dreamer_attempts("git:other", 0).unwrap(), 0);
@@ -216,6 +245,32 @@ fn reopening_the_store_preserves_an_in_progress_receipt_and_its_dispatch_marker(
     assert_eq!(attempts[0].dispatched_at_ms, 2);
     assert_eq!(attempts[0].run_handle.as_deref(), Some("run-1"));
     assert_eq!(attempts[0].terminal_kind, None);
+    assert_eq!(
+        reopened
+            .begin_dreamer_attempt(key(), 1, &attempt(1, "prov/model-b"), 4)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    assert_eq!(
+        reopened
+            .complete_dreamer_receipt(key(), 1, DreamerTerminalKind::Unknown, "{}", 5)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    let before = reopened.list_dreamer_attempts(key()).unwrap();
+    assert_eq!(
+        reopened
+            .record_dreamer_run_handle(key(), 1, 1, "late-run")
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(
+        reopened
+            .finish_dreamer_attempt(key(), 1, 1, DreamerTerminalKind::Complete, 6)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(reopened.list_dreamer_attempts(key()).unwrap(), before);
 }
 
 #[test]
@@ -228,6 +283,18 @@ fn a_higher_generation_takes_over_and_the_predecessor_is_fenced_on_every_transit
     store
         .begin_dreamer_attempt(key(), 1, &attempt(0, "prov/model-a"), 2)
         .unwrap();
+    assert_eq!(
+        store
+            .begin_dreamer_attempt(key(), 1, &attempt(1, "prov/model-b"), 2)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    assert_eq!(
+        store
+            .finish_dreamer_attempt(key(), 1, 1, DreamerTerminalKind::Complete, 2)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
 
     assert_eq!(
         store.take_over_dreamer_receipt(key(), 1, 3).unwrap(),
@@ -265,7 +332,19 @@ fn a_higher_generation_takes_over_and_the_predecessor_is_fenced_on_every_transit
     );
     assert_eq!(
         store
-            .release_dreamer_attempt_session(key(), 1, 0, 8)
+            .record_dreamer_run_handle(key(), 1, 0, "stale-run")
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(
+        store
+            .finish_dreamer_attempt(key(), 1, 0, DreamerTerminalKind::Complete, 8)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(
+        store
+            .release_dreamer_attempt_session(key(), 1, 1, 8)
             .unwrap(),
         DreamerTransition::Fenced
     );
@@ -276,8 +355,12 @@ fn a_higher_generation_takes_over_and_the_predecessor_is_fenced_on_every_transit
     );
     assert_eq!(receipt.updated_at_ms, 3);
     let attempts = store.list_dreamer_attempts(key()).unwrap();
-    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].run_handle, None);
+    assert_eq!(attempts[0].terminal_kind, None);
+    assert_eq!(attempts[0].terminal_at_ms, None);
     assert_eq!(attempts[0].session_released_at_ms, None);
+    assert_eq!(attempts[1].session_released_at_ms, None);
 
     // The successor proceeds: its attempt row, terminal, release, and completion land.
     assert_eq!(
@@ -315,7 +398,7 @@ fn a_higher_generation_takes_over_and_the_predecessor_is_fenced_on_every_transit
         store.take_over_dreamer_receipt(key(), 2, 14).unwrap(),
         DreamerTransition::Fenced
     );
-    assert_eq!(store.count_dreamer_attempts(PROJECT, 0).unwrap(), 2);
+    assert_eq!(store.count_dreamer_attempts(PROJECT, 0).unwrap(), 3);
 }
 
 #[test]

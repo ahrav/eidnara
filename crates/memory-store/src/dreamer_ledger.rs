@@ -438,7 +438,13 @@ impl MemoryStore {
             |write| write.identity("run_handle", run_handle).map(|_| ()),
             "UPDATE dreamer_attempts SET run_handle = ?6
               WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
-                AND generation = ?4 AND attempt_index = ?5 AND terminal_kind IS NULL",
+                AND generation = ?4 AND attempt_index = ?5
+                AND terminal_kind IS NULL AND run_handle IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM dreamer_receipts r
+                     WHERE r.project = ?1 AND r.producer = ?2 AND r.operation_key = ?3
+                       AND r.generation = ?4 AND r.state = 'in_progress'
+                )",
             params![generation, attempt_index, run_handle],
         )
     }
@@ -458,7 +464,12 @@ impl MemoryStore {
             |_| Ok(()),
             "UPDATE dreamer_attempts SET terminal_kind = ?6, terminal_at_ms = ?7
               WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
-                AND generation = ?4 AND attempt_index = ?5 AND terminal_kind IS NULL",
+                AND generation = ?4 AND attempt_index = ?5 AND terminal_kind IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM dreamer_receipts r
+                     WHERE r.project = ?1 AND r.producer = ?2 AND r.operation_key = ?3
+                       AND r.generation = ?4 AND r.state = 'in_progress'
+                )",
             params![generation, attempt_index, terminal_kind.as_str(), now_ms],
         )
     }
@@ -520,7 +531,7 @@ impl MemoryStore {
             "UPDATE dreamer_attempts SET session_released_at_ms = ?6
               WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
                 AND generation = ?4 AND attempt_index = ?5
-                AND session_released_at_ms IS NULL
+                AND terminal_kind IS NOT NULL AND session_released_at_ms IS NULL
                 AND EXISTS (
                     SELECT 1 FROM dreamer_receipts r
                      WHERE r.project = ?1 AND r.producer = ?2 AND r.operation_key = ?3

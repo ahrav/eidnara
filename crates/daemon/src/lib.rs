@@ -71,7 +71,7 @@ use lease::LeaseError;
 use memory_store::TagNumberRow;
 use memory_store::dreamer_ledger::{
     DreamerAttemptSpec, DreamerBeginOutcome, DreamerReceiptBinding, DreamerReceiptKey,
-    DreamerTerminalKind, DreamerTransition, dreamer_request_digest,
+    DreamerReceiptState, DreamerTerminalKind, DreamerTransition, dreamer_request_digest,
 };
 use memory_store::{
     AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, MemoryStore,
@@ -9508,18 +9508,15 @@ impl Handler {
             }
             model_chain.push(model.to_string());
         }
-        let deadline = {
-            let Some(ms) = payload
-                .get("timeout_ms")
-                .and_then(Value::as_u64)
-                .filter(|ms| *ms > 0)
-            else {
-                return invalid_params_error("classify payload requires a positive timeout_ms");
-            };
-            let Some(deadline) = Instant::now().checked_add(Duration::from_millis(ms)) else {
-                return invalid_params_error("classify timeout_ms is out of range");
-            };
-            deadline
+        let Some(timeout_ms) = payload
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .filter(|ms| *ms > 0)
+        else {
+            return invalid_params_error("classify payload requires a positive timeout_ms");
+        };
+        let Some(deadline) = Instant::now().checked_add(Duration::from_millis(timeout_ms)) else {
+            return invalid_params_error("classify timeout_ms is out of range");
         };
 
         //
@@ -9560,6 +9557,7 @@ impl Handler {
             "prompt_body": prompt_body,
             "items": expected_ids,
             "model_chain": model_chain,
+            "timeout_ms": timeout_ms,
             "prompt_template_version": CLASSIFY_PROMPT_TEMPLATE_VERSION,
             "schema_version": CLASSIFY_SCHEMA_VERSION,
             "system_prompt_hash": system_prompt_hash,
@@ -9629,7 +9627,6 @@ impl Handler {
                     "classify time budget exhausted before starting a producer run".to_string();
                 break;
             }
-            attempts += 1;
             let child_session = attempt_child_session_id(
                 &authority_project,
                 &ledger_session,
@@ -9640,9 +9637,27 @@ impl Handler {
             let Ok(attempt_index) = u32::try_from(attempt) else {
                 return invalid_params_error("classify model_chain is too long to record");
             };
-            // The attempt row is the dispatch marker: it exists before the model is
-            // called, so a crash between here and the terminal write leaves proof
-            // that a dispatch may have happened.
+            let mut producer = match self
+                .producer_factory
+                .connect(
+                    &binding.project_root,
+                    &binding.harness,
+                    &binding.credential_fingerprints,
+                )
+                .await
+            {
+                Ok(producer) => producer,
+                Err(error) => {
+                    last_error = error.to_string();
+                    continue;
+                }
+            };
+            if Instant::now() >= deadline {
+                last_error = "classify time budget exhausted during producer startup".to_string();
+                break;
+            }
+            // The attempt row precedes the model call, but not connection setup:
+            // its presence means a dispatch may have happened.
             if let Err(stop) = ledger_stop(store.begin_dreamer_attempt(
                 receipt_key,
                 generation,
@@ -9658,44 +9673,8 @@ impl Handler {
             )) {
                 return stop;
             }
+            attempts += 1;
             let _dreamer_run_guard = self.register_dreamer_run(&child_session);
-            let mut producer = match self
-                .producer_factory
-                .connect(
-                    &binding.project_root,
-                    &binding.harness,
-                    &binding.credential_fingerprints,
-                )
-                .await
-            {
-                Ok(producer) => producer,
-                Err(error) => {
-                    last_error = error.to_string();
-                    if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
-                        receipt_key,
-                        generation,
-                        attempt_index,
-                        DreamerTerminalKind::Failed,
-                        now_ms(),
-                    )) {
-                        return stop;
-                    }
-                    continue;
-                }
-            };
-            if Instant::now() >= deadline {
-                last_error = "classify time budget exhausted during producer startup".to_string();
-                if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
-                    receipt_key,
-                    generation,
-                    attempt_index,
-                    DreamerTerminalKind::Cancelled,
-                    now_ms(),
-                )) {
-                    return stop;
-                }
-                break;
-            }
             let started = match tokio::time::timeout(
                 classify_attempt_timeout(CLASSIFY_AWAIT_TIMEOUT, deadline),
                 producer.start_with_generation(
@@ -9766,7 +9745,7 @@ impl Handler {
                         now_ms(),
                     ) {
                         let _ = producer.purge_session(&child_session).await;
-                        return replay_dream_task_response(&response_json);
+                        return read_dream_task_response(&store, receipt_key);
                     }
                 }
                 // The model was dispatched but the ledger cannot follow it, so the
@@ -9834,10 +9813,7 @@ impl Handler {
                 &response.to_string(),
                 now_ms(),
             ) {
-                Ok(DreamerTransition::Applied) => PreparedOutcome::Error {
-                    code: "dreamer_run_failed".to_string(),
-                    message: last_error,
-                },
+                Ok(DreamerTransition::Applied) => read_dream_task_response(&store, receipt_key),
                 Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
                 Err(error) => dreamer_ledger_failed(error),
             };
@@ -9856,7 +9832,7 @@ impl Handler {
                 // The child session is deleted only once the response is durable, so a
                 // crash between the two leaves the run reattachable rather than lost.
                 let _ = producer.purge_session(&child_session).await;
-                replay_dream_task_response(&response_json)
+                read_dream_task_response(&store, receipt_key)
             }
             Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
             Err(error) => dreamer_ledger_failed(error),
@@ -13458,6 +13434,21 @@ fn settle_dispatched_attempt_as_unknown(
         now_ms(),
     ) {
         Ok(_) => stop,
+        Err(error) => dreamer_ledger_failed(error),
+    }
+}
+
+fn read_dream_task_response(store: &MemoryStore, key: DreamerReceiptKey<'_>) -> PreparedOutcome {
+    match store.lookup_dreamer_receipt(key) {
+        Ok(receipt) => match receipt.map(|receipt| receipt.state) {
+            Some(DreamerReceiptState::Complete { result_json, .. }) => {
+                replay_dream_task_response(&result_json)
+            }
+            _ => PreparedOutcome::Error {
+                code: "dreamer_ledger_corrupt".to_string(),
+                message: "completed dreamer receipt is missing or not terminal".to_string(),
+            },
+        },
         Err(error) => dreamer_ledger_failed(error),
     }
 }
@@ -26792,19 +26783,28 @@ mod tests {
     async fn dreamer_run_task_replays_from_the_receipt_and_refuses_a_changed_request() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
         let claims = [test_claim_id(1), test_claim_id(2)];
+        let sensitive_text = ["password=", "dreamer-fixture"].concat();
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
             .lock()
             .unwrap()
             .push_back(Ok(ProducerOutput {
-                text: claim_manifest(&claims),
+                text: format!("{sensitive_text}\n{}", claim_manifest(&claims)),
                 length_capped: false,
             }));
         let harness = DreamerHarness::start(&producer);
         let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
         let first = response_of(harness.classify(payload.clone(), "replayed").await);
         assert_eq!(first["ok"], json!(true));
+        assert!(!first.to_string().contains(&sensitive_text));
+        assert_eq!(
+            first["manifest_text"],
+            json!(format!(
+                "password=<REDACTED:password>\n{}",
+                claim_manifest(&claims)
+            ))
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(producer.purges.lock().unwrap().len(), 1);
 
@@ -26813,14 +26813,14 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
 
         let receipt = harness.receipt("replayed");
-        assert!(matches!(
-            receipt.state,
+        match &receipt.state {
             DreamerReceiptState::Complete {
                 generation: 1,
                 terminal_kind: DreamerTerminalKind::Complete,
-                ..
-            }
-        ));
+                result_json,
+            } => assert_eq!(serde_json::from_str::<Value>(result_json).unwrap(), first),
+            _ => panic!("the result must complete the receipt"),
+        }
         assert_eq!(receipt.binding.ledger_session, "ses");
         assert_eq!(receipt.binding.command_id, "replayed");
         assert_eq!(receipt.binding.database_incarnation_id, "context");
@@ -26844,12 +26844,79 @@ mod tests {
             first["diagnostics"]["child_session_id"].as_str().unwrap()
         );
 
-        // A changed prompt under the same command id is a different request.
-        let mut changed = payload;
-        changed["prompt_body"] = json!("classify differently");
-        let conflict = harness.classify(changed, "replayed").await;
-        assert_eq!(error_code_of(&conflict), "dreamer_request_conflict");
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        for (field, value) in [
+            ("prompt_body", json!("classify differently")),
+            ("timeout_ms", json!(TEST_CLASSIFY_TIMEOUT_MS + 1)),
+        ] {
+            let mut changed = payload.clone();
+            changed[field] = value;
+            let conflict = harness.classify(changed, "replayed").await;
+            assert_eq!(error_code_of(&conflict), "dreamer_request_conflict");
+            assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.receipt("replayed"), receipt);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_does_not_count_connection_failures_as_dispatches() {
+        for recover in [false, true] {
+            let claims = [test_claim_id(1)];
+            let producer = Arc::new(ProducerState::default());
+            producer
+                .connect_errors
+                .lock()
+                .unwrap()
+                .push_back(HistorianProducerError::Protocol(
+                    "connection refused".to_string(),
+                ));
+            producer
+                .await_results
+                .lock()
+                .unwrap()
+                .push_back(Ok(ProducerOutput {
+                    text: claim_manifest(&claims),
+                    length_capped: false,
+                }));
+            let harness = DreamerHarness::start(&producer);
+            let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+            if recover {
+                payload["model_chain"] = json!(["test/model", "test/fallback"]);
+            }
+            let outcome = harness.classify(payload, "connect-failure").await;
+            if recover {
+                let response = response_of(outcome);
+                assert_eq!(response["diagnostics"]["model"], json!("test/fallback"));
+                assert_eq!(response["diagnostics"]["attempts"], json!(1));
+            } else {
+                assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
+            }
+            let operation_key = dreamer_operation_key("ses", "connect-failure");
+            let attempts = harness
+                .store
+                .list_dreamer_attempts(DreamerReceiptKey {
+                    project: "git:identity",
+                    producer: DREAMER_RECEIPT_PRODUCER,
+                    operation_key: &operation_key,
+                })
+                .unwrap();
+            assert_eq!(attempts.len(), usize::from(recover));
+            if recover {
+                assert_eq!(attempts[0].attempt_index, 1);
+                assert_eq!(attempts[0].model, "test/fallback");
+            }
+            assert_eq!(
+                producer.connects.load(Ordering::SeqCst),
+                1 + usize::from(recover)
+            );
+            assert_eq!(producer.starts.load(Ordering::SeqCst), usize::from(recover));
+            assert_eq!(
+                harness
+                    .store
+                    .count_dreamer_attempts("git:identity", 0)
+                    .unwrap(),
+                u64::from(recover)
+            );
+        }
     }
 
     /// Each model in the fallback chain is its own attempt row under one receipt:
@@ -26960,13 +27027,14 @@ mod tests {
     async fn dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
         let claims = [test_claim_id(1)];
+        let sensitive_text = ["password=", "dreamer-fixture"].concat();
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
             .lock()
             .unwrap()
             .push_back(Ok(ProducerOutput {
-                text: claim_manifest(&claims),
+                text: format!("{sensitive_text}\n{}", claim_manifest(&claims)),
                 length_capped: false,
             }));
         let harness = DreamerHarness::start(&producer);
@@ -26981,7 +27049,14 @@ mod tests {
         let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
         let first = response_of(harness.classify(payload.clone(), "kept").await);
         assert_eq!(first["ok"], json!(true));
-        assert_eq!(first["manifest_text"], json!(claim_manifest(&claims)));
+        assert!(!first.to_string().contains(&sensitive_text));
+        assert_eq!(
+            first["manifest_text"],
+            json!(format!(
+                "password=<REDACTED:password>\n{}",
+                claim_manifest(&claims)
+            ))
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(producer.purges.lock().unwrap().len(), 1);
         let receipt = harness.receipt("kept");
@@ -27026,18 +27101,24 @@ mod tests {
     async fn dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
         let claims = [test_claim_id(1)];
+        let sensitive_text = ["password=", "dreamer-fixture"].concat();
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
             .lock()
             .unwrap()
             .push_back(Err(HistorianProducerError::Protocol(
-                "provider refused".to_string(),
+                sensitive_text.clone(),
             )));
         let harness = DreamerHarness::start(&producer);
         let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
         let failed = harness.classify(payload.clone(), "exhausted").await;
         assert_eq!(error_code_of(&failed), "dreamer_run_failed");
+        let PreparedOutcome::Error { message, .. } = &failed else {
+            unreachable!("the outcome is an error");
+        };
+        assert!(!message.contains(&sensitive_text));
+        assert!(message.contains("<REDACTED:password>"));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         let receipt = harness.receipt("exhausted");
         match &receipt.state {
@@ -27049,12 +27130,21 @@ mod tests {
                 assert_eq!(*terminal_kind, DreamerTerminalKind::Failed);
                 let recorded: Value = serde_json::from_str(result_json).unwrap();
                 assert_eq!(recorded["ok"], json!(false));
+                assert_eq!(recorded["message"], json!(message));
             }
             other => panic!("the failure must complete the receipt: {other:?}"),
         }
 
         let replayed = harness.classify(payload, "exhausted").await;
         assert_eq!(error_code_of(&replayed), "dreamer_run_failed");
+        let PreparedOutcome::Error {
+            message: replayed_message,
+            ..
+        } = &replayed
+        else {
+            unreachable!("the replay is an error");
+        };
+        assert_eq!(replayed_message, message);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
