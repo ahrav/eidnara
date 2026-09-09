@@ -249,6 +249,7 @@ describe("module graph over the landed tree", () => {
                 "        throw new TypeError(",
                 '    const probe = new Database(":memory:");',
             ],
+            openArguments: ['":memory:"'],
             escapes: RETAINED_DATABASE_USES[DATABASE_ADAPTER]?.escapes,
         });
     }, 120_000);
@@ -349,8 +350,32 @@ describe("databaseUses", () => {
     test("reports each open by its source line and no escape for imports, inline type aliases, types, and member names", () => {
         expect(databaseUses(allowed)).toEqual({
             opens: ["    const db = new Database(dbPath, { readonly: true });"],
+            openArguments: ["<parameter>"],
             escapes: [],
         });
+    });
+
+    test("pins the binding an open's path argument comes from, so a shadowing declaration changes it", () => {
+        const source = (shadow: string) =>
+            [
+                'import { Database } from "../../shared/sqlite";',
+                "function open() {",
+                "    const dbPath = getOpenCodeDbPath();",
+                shadow,
+                "    const db = new Database(dbPath);",
+                "    return db;",
+                "}",
+                'const literal = new Database("fixed.db");',
+                "",
+            ].join("\n");
+        expect(databaseUses(source("")).openArguments).toEqual([
+            "    const dbPath = getOpenCodeDbPath();",
+            '"fixed.db"',
+        ]);
+        expect(databaseUses(source("    const dbPath = productPath;")).openArguments).toEqual([
+            "    const dbPath = productPath;",
+            '"fixed.db"',
+        ]);
     });
 
     test("reports a local alias of the constructor as an escape, and the aliased open as an open", () => {
@@ -525,7 +550,7 @@ describe("databaseUses", () => {
                 ].join("\n"),
                 "shim.d.ts",
             ),
-        ).toEqual({ opens: [], escapes: [] });
+        ).toEqual({ opens: [], openArguments: [], escapes: [] });
         expect(
             databaseUses(
                 [
@@ -628,6 +653,7 @@ describe("databaseUses", () => {
             ),
         ).toEqual({
             opens: [],
+            openArguments: [],
             escapes: ["    return value instanceof Database;"],
         });
     });
@@ -741,11 +767,11 @@ describe("operationLiteralHits", () => {
         expect(
             literalStrings(
                 parseSource(
-                    "const c = /^claim[.]intent[.]stage$/; const w = /mem[^.]+\\.sqlite/;",
+                    "const c = /^claim[.]intent[.]stage$/; const w = /mem[^.]{3,}\\.sqlite/;",
                     "m.ts",
                 ),
             ).map((entry) => entry.value),
-        ).toEqual(["claim.intent.stage", "mem[^.]+.sqlite"]);
+        ).toEqual(["claim.intent.stage", "mem[^.]{3,}.sqlite"]);
         expect(
             literalStrings(
                 parseSource(
@@ -765,7 +791,12 @@ describe("operationLiteralHits", () => {
             literalStrings(
                 parseSource("const hex = /^[0-9a-f]{7,12}$/; const run = /^[ab]+$/;", "m.ts"),
             ).map((entry) => entry.value),
-        ).toEqual(["[0-9a-f]{7,12}", "[ab]+"]);
+        ).toEqual(["[0-9a-f]{7,12}", "a", "b", "aa", "ab", "ba", "bb"]);
+        expect(
+            literalStrings(parseSource("const color = /^#[0-9A-Fa-f]{6}$/;", "m.ts")).map(
+                (entry) => entry.value,
+            ),
+        ).toEqual(["#[0-9A-Fa-f]{6}"]);
         expect(
             literalStrings(
                 parseSource(
@@ -905,7 +936,12 @@ describe("operationLiteralHits", () => {
         ).map((entry) => entry.value);
         expect(wild).toContain("claim.intent");
         expect(wild).toContain("claim.read");
-        expect(wild).toContain("d+");
+        expect(wild).toContain("d");
+        expect(
+            literalStrings(
+                parseSource("const guarded = /(?<![\\w$.])claim(?![\\w$])[.]read/;", "m.ts"),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim.read"]);
         expect(
             literalStrings(parseSource("const bracketed = /^[\\w]laim[.]intent$/;", "m.ts")).map(
                 (entry) => entry.value,
@@ -941,10 +977,10 @@ describe("operationLiteralHits", () => {
             literalStrings(
                 parseSource("const run = /^[^x][^x][^x][^x][^x]+[.]intent$/;", "m.ts"),
             ).map((entry) => entry.value),
-        ).toEqual(["[^x][^x][^x][^x][^x]+.intent"]);
-        const ten = "(a|b)".repeat(10);
-        expect(literalStrings(parseSource(`const r = /^${ten}$/;`, "m.ts")).length).toBe(1024);
-        expect(() => literalStrings(parseSource(`const r = /^${ten}(a|b)$/;`, "m.ts"))).toThrow(
+        ).toEqual(["[^x][^x][^x][^x][^x]+[.]intent"]);
+        const twelve = "(a|b)".repeat(12);
+        expect(literalStrings(parseSource(`const r = /^${twelve}$/;`, "m.ts")).length).toBe(4096);
+        expect(() => literalStrings(parseSource(`const r = /^${twelve}(a|b)$/;`, "m.ts"))).toThrow(
             RangeError,
         );
     });

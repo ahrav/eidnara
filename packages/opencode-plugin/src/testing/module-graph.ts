@@ -345,6 +345,8 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
         const withWildcards = body
             .replace(/^\^/, "")
             .replace(/\$$/, "")
+            // A lookaround constrains a match without contributing characters to it.
+            .replace(/\(\?<?[=!](?:\\.|\[(?:\\.|[^\]])*\]|[^()])*\)/g, "")
             .replace(/\\.|\[(?:\\.|[^\]])*\]|\./g, (token) => {
                 if (token.startsWith("[")) {
                     // Inside a class, `\w` contributes its alphabet members alongside the others.
@@ -360,6 +362,10 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             )
             .replace(/\\(.)/g, "\uE000$1");
         const out: string[] = [];
+        // A pattern with any repetition (`*`, `+`, `{n}`, `{n,m}`) matches a run and is outside
+        // the literal-spelling contract; only a repetition-free pattern too large to enumerate
+        // fails the scan.
+        const repetitionFree = !/(?<!\uE000)[*+{]/.test(reduced);
         const splitUnescaped = (value: string): string[] => value.split(/(?<!\uE000)\|/);
         // `classMembers` marks every member as escaped so expansion treats `-` and `]` literally.
         // A negated class yields every alphabet character it does not exclude.
@@ -392,17 +398,43 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             }
             return members.length <= 32 ? members : undefined;
         };
+        const overflow = Symbol("overflow");
         const pushText = (value: string): void => {
-            if (out.length >= 1024) {
-                throw new RangeError(
-                    `regex /${body}/ expands to more than 1024 texts and cannot be audited`,
-                );
-            }
+            if (out.length >= 4096) throw overflow;
             out.push(value.replaceAll("\uE000", ""));
+        };
+        // `?:`, a capture name `?<name>`, and a flag prefix `?i:` are group syntax, not text.
+        const groupPrefix = /^\((?:\?(?::|<[A-Za-z_$][\w$]*>|[a-zA-Z-]*:))?/;
+        const isQuantifier = (char: string | undefined) =>
+            char === "?" || char === "*" || char === "+" || char === "{";
+        // `+` and `*` accept any repetition count; one and two, or zero and one, are the counts
+        // that can spell a route, so they expand like `{1,2}` and `{0,1}`.
+        const bounds = (quantifier: string, low?: string, high?: string): [number, number] =>
+            quantifier === "?" || quantifier === "*"
+                ? [0, 1]
+                : quantifier === "+"
+                  ? [1, 2]
+                  : [Number(low), Number(high ?? low)];
+        const quantifierPattern =
+            /(\((?:\?(?::|<[A-Za-z_$][\w$]*>|[a-zA-Z-]*:))?[^()]*\)|\uE000.|\[(?:\uE000.|[^\]\uE000])*\]|[^\uE000\]?*+{}()|])(\?|\*|\+|\{(\d+)(?:,(\d+))?\})/g;
+        const choicesOf = (atom: string): number | undefined =>
+            atom.startsWith("[")
+                ? classMembers(atom.slice(1, -1))?.length
+                : atom.startsWith("(")
+                  ? splitUnescaped(atom.replace(groupPrefix, "").slice(0, -1)).length
+                  : 1;
+        const variantsOf = (value: string, match: RegExpExecArray): number | undefined => {
+            const [, atom, quantifier, low, high] = match;
+            if (match.index > 0 && value.startsWith("\uE000", match.index - 1)) return undefined;
+            const [from, to] = bounds(quantifier, low, high);
+            const choices = choicesOf(atom);
+            if (choices === undefined || to < from || to > 16) return undefined;
+            let variants = 0;
+            for (let count = from; count <= to; count++) variants += choices ** count;
+            return variants;
         };
         const expand = (value: string): void => {
             // A quantified group (`(ab)?`, `(a|b){2}`) belongs to the quantifier rule below.
-            // `?:`, a capture name `?<name>`, and a flag prefix `?i:` are group syntax, not text.
             const group = /\((?:\?(?::|<[A-Za-z_$][\w$]*>|[a-zA-Z-]*:))?([^()]*)\)(?![*+?{])/.exec(
                 value,
             );
@@ -414,71 +446,22 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 }
                 return;
             }
-            // `?` and `{m,n}` on one character or an enumerable class spell out exact texts; the
-            // whole text's quantifiers must multiply to at most 64 variants, so expanding them
-            // can never trip the cap on a pattern that is not literal-shaped.
-            const quantifierPattern =
-                /(\((?:\?(?::|<[A-Za-z_$][\w$]*>|[a-zA-Z-]*:))?[^()]*\)|\uE000.|\[(?:\uE000.|[^\]\uE000])*\]|[^\uE000\]?*+{}()|])(\?|\{(\d+)(?:,(\d+))?\})/g;
-            const variantsOf = (match: RegExpExecArray): number | undefined => {
-                const [, atom, quantifier, low, high] = match;
-                if (match.index > 0 && value.startsWith("\uE000", match.index - 1))
-                    return undefined;
-                const from = quantifier === "?" ? 0 : Number(low);
-                const to = quantifier === "?" ? 1 : Number(high ?? low);
-                const choices = atom.startsWith("[")
-                    ? classMembers(atom.slice(1, -1))?.length
-                    : atom.startsWith("(")
-                      ? splitUnescaped(
-                            atom
-                                .replace(/^\((?:\?(?::|<[A-Za-z_$][\w$]*>|[a-zA-Z-]*:))?/, "")
-                                .slice(0, -1),
-                        ).length
-                      : 1;
-                if (choices === undefined || to < from || to > 16) return undefined;
-                let variants = 0;
-                for (let count = from; count <= to; count++) variants += choices ** count;
-                return variants;
-            };
-            let budget = 1;
-            let first: RegExpExecArray | undefined;
             for (const match of value.matchAll(quantifierPattern)) {
-                const variants = variantsOf(match);
-                if (variants === undefined) continue;
-                budget *= variants;
-                first ??= match;
-            }
-            if (first !== undefined && budget <= 64) {
-                const [whole, atom, quantifier, low, high] = first;
-                const from = quantifier === "?" ? 0 : Number(low);
-                const to = quantifier === "?" ? 1 : Number(high ?? low);
-                const prefix = value.slice(0, first.index);
-                const suffix = value.slice(first.index + whole.length);
+                if (variantsOf(value, match) === undefined) continue;
+                const [whole, atom, quantifier, low, high] = match;
+                const [from, to] = bounds(quantifier, low, high);
+                const prefix = value.slice(0, match.index);
+                const suffix = value.slice(match.index + whole.length);
                 for (let count = from; count <= to; count++) {
                     expand(prefix + atom.repeat(count) + suffix);
                 }
                 return;
             }
-            // A quantified class (`[0-9a-f]{7,12}`) matches a run, not one character, and stays
-            // as written. Classes multiply, so they expand only while the text's enumerable
-            // classes together stay within 64 variants.
             const classPattern = /\[((?:\uE000.|[^\]\uE000])*)\](?![*+?{])/g;
-            let classBudget = 1;
-            for (const match of value.matchAll(classPattern)) {
-                if (match.index > 0 && value.startsWith("\uE000", match.index - 1)) continue;
-                classBudget *= classMembers(match[1] ?? "")?.length ?? 1;
-            }
-            // A pattern with no quantifier accepts a finite set of texts; one too large to
-            // enumerate cannot be proved free of a forbidden spelling, so it fails the scan.
-            if (classBudget > 64 && !/(?<!\uE000)[*+?{]/.test(value)) {
-                throw new RangeError(
-                    `regex /${body}/ accepts more than 64 texts and cannot be audited`,
-                );
-            }
             for (const cls of value.matchAll(classPattern)) {
                 if (cls.index > 0 && value.startsWith("\uE000", cls.index - 1)) continue;
                 const members = classMembers(cls[1] ?? "");
-                // Past the budget only a one-member class, which adds no variant, expands.
-                if (members !== undefined && (classBudget <= 64 || members.length === 1)) {
+                if (members !== undefined) {
                     const prefix = value.slice(0, cls.index);
                     const suffix = value.slice(cls.index + cls[0].length);
                     for (const member of members) expand(prefix + member + suffix);
@@ -487,7 +470,23 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             }
             for (const alternative of splitUnescaped(value)) pushText(alternative);
         };
-        expand(reduced);
+        // A repetition-free pattern accepts a small set of texts; one too large to enumerate
+        // cannot be proved free of a forbidden spelling, so it fails the scan. A pattern with
+        // repetition that overflows stays as written, one text per top-level alternative.
+        try {
+            expand(reduced);
+        } catch (error) {
+            if (error !== overflow) throw error;
+            if (repetitionFree) {
+                throw new RangeError(
+                    `regex /${body}/ accepts more than 4096 texts and cannot be audited`,
+                );
+            }
+            out.length = 0;
+            for (const alternative of splitUnescaped(reduced)) {
+                out.push(alternative.replaceAll("\uE000", ""));
+            }
+        }
         return out;
     };
     const lineOf = (node: ts.Node) =>
@@ -578,6 +577,8 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
 export interface DatabaseUses {
     /** `opens` contains source lines for `new` expressions whose constructor text contains `Database`, or for every `new` expression under `allConstructions`. */
     opens: string[];
+    /** `openArguments` contains, for each `Database`-named open in order, the source line that binds its first argument in the nearest enclosing scope, the argument's own text when it is not an identifier, or `<parameter>` when a function parameter binds it. */
+    openArguments: string[];
     /** `escapes` contains source lines for value-position identifiers containing `Database`, for binding-module imports that bypass direct constructor matching, for `new` expressions whose constructor is not a plain identifier, and for dynamic loads whose specifier is not a string literal. */
     escapes: string[];
 }
@@ -592,14 +593,17 @@ export interface DatabaseUses {
 export const RETAINED_DATABASE_USES: Record<string, DatabaseUses> = {
     "features/context/compaction-marker.ts": {
         opens: ["    const db = new Database(dbPath);"],
+        openArguments: ["    const dbPath = getOpenCodeDbPath();"],
         escapes: [],
     },
     "hooks/context/read-session-db.ts": {
         opens: ["    const db = new Database(dbPath, { readonly: true });"],
+        openArguments: ["    const dbPath = getOpenCodeDbPath();"],
         escapes: [],
     },
     "shared/sqlite.ts": {
         opens: ['    const probe = new Database(":memory:");'],
+        openArguments: ['":memory:"'],
         escapes: [
             "    return (await import(",
             "const DatabaseImpl: typeof BetterSqlite3 = isBun",
@@ -616,6 +620,7 @@ export const RETAINED_DATABASE_USES: Record<string, DatabaseUses> = {
     },
     "shared/token-estimator.ts": {
         opens: [],
+        openArguments: [],
         escapes: [
             '        requireFromThisModule("ai-" + "tokenizer"),',
             '        requireFromThisModule("ai-tokenizer/encoding/" + "claude"),',
@@ -625,6 +630,7 @@ export const RETAINED_DATABASE_USES: Record<string, DatabaseUses> = {
     },
     "shared/opencode-database-path.ts": {
         opens: [],
+        openArguments: [],
         escapes: [
             "function listDatabaseFiles(dirPath: string, filePrefix: string): string[] {",
             "export function resolveOpenCodeDatabaseCandidates(dataDir: string = getDataDir()): string[] {",
@@ -636,6 +642,7 @@ export const RETAINED_DATABASE_USES: Record<string, DatabaseUses> = {
     },
     "tui/entry.mjs": {
         opens: [],
+        openArguments: [],
         escapes: ["    await import(runtimeProbe);"],
     },
 };
@@ -667,7 +674,38 @@ export function databaseUses(
     const lines = source.split("\n");
     const lineOf = (node: ts.Node) =>
         lines[file.getLineAndCharacterOfPosition(node.getStart(file)).line];
-    const uses: DatabaseUses = { opens: [], escapes: [] };
+    const uses: DatabaseUses = { opens: [], openArguments: [], escapes: [] };
+    // The nearest binding of `name` visible from `from`: a declaration in an enclosing block
+    // that precedes the use, or a parameter of an enclosing function.
+    const bindingLineOf = (from: ts.Node, name: string): string => {
+        for (let scope: ts.Node | undefined = from.parent; scope; scope = scope.parent) {
+            if (ts.isBlock(scope) || ts.isSourceFile(scope)) {
+                let nearest: ts.Node | undefined;
+                for (const statement of scope.statements) {
+                    if (statement.getStart(file) >= from.getStart(file)) break;
+                    if (ts.isVariableStatement(statement)) {
+                        for (const declaration of statement.declarationList.declarations) {
+                            if (
+                                ts.isIdentifier(declaration.name) &&
+                                declaration.name.text === name
+                            ) {
+                                nearest = declaration;
+                            }
+                        }
+                    }
+                }
+                if (nearest !== undefined) return lineOf(nearest);
+            }
+            if (ts.isFunctionLike(scope)) {
+                for (const parameter of scope.parameters) {
+                    if (ts.isIdentifier(parameter.name) && parameter.name.text === name) {
+                        return "<parameter>";
+                    }
+                }
+            }
+        }
+        return "<unbound>";
+    };
     const escapedLines = new Set<number>();
     const recordEscape = (node: ts.Node) => {
         const index = file.getLineAndCharacterOfPosition(node.getStart(file)).line;
@@ -848,6 +886,18 @@ export function databaseUses(
             (options.allConstructions || /Database/.test(node.expression.getText(file)))
         ) {
             uses.opens.push(lineOf(node));
+        }
+        // The argument an open receives is pinned through its binding, so a shadowing
+        // declaration between the pinned initializer and the open changes the recorded line.
+        if (ts.isNewExpression(node) && /Database/.test(node.expression.getText(file))) {
+            const argument = node.arguments?.[0];
+            uses.openArguments.push(
+                argument === undefined
+                    ? "<none>"
+                    : ts.isIdentifier(argument)
+                      ? bindingLineOf(node, argument.text)
+                      : argument.getText(file),
+            );
         }
         // `new db.constructor(path)` reopens whatever `db` is; `new Intl.DisplayNames(...)` in
         // a module with no binding specifier cannot reach a database.

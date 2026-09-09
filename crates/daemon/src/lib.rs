@@ -29849,7 +29849,7 @@ mod tests {
     const WILDCARD_ALPHABET: &str = "muralembdingtoxs._-";
 
     /// `regex_texts` expands supported regex syntax into literal texts and fails the audit past
-    /// 1024 of them rather than dropping an alternative.
+    /// 4096 of them rather than dropping an alternative.
     fn regex_texts(pattern: &str) -> Vec<String> {
         /// A leading `(?i)` or `(?ix)` group sets flags and matches nothing.
         fn strip_flag_groups(pattern: &str) -> &str {
@@ -29868,8 +29868,40 @@ mod tests {
         /// A bare `.` or a shorthand class outside a bracket class matches any character of
         /// its kind, so it becomes an explicit class over the audited alphabet; a shorthand
         /// that admits no alphabet character stays as written.
+        /// A lookaround constrains a match without contributing characters to it.
+        fn strip_lookarounds(pattern: &str) -> String {
+            let chars: Vec<char> = pattern.chars().collect();
+            let mut out = String::new();
+            let mut index = 0;
+            while index < chars.len() {
+                let rest: String = chars[index..].iter().take(4).collect();
+                let opener = ["(?=", "(?!", "(?<=", "(?<!"]
+                    .iter()
+                    .find(|opener| rest.starts_with(*opener))
+                    .map(|opener| opener.chars().count());
+                if let Some(width) = opener
+                    && let Some(close) = chars[index + width..]
+                        .iter()
+                        .position(|&ch| ch == ')' || ch == '(')
+                    && chars[index + width + close] == ')'
+                {
+                    index += width + close + 1;
+                    continue;
+                }
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    out.push(chars[index]);
+                    out.push(chars[index + 1]);
+                    index += 2;
+                    continue;
+                }
+                out.push(chars[index]);
+                index += 1;
+            }
+            out
+        }
+
         fn reduce(pattern: &str) -> String {
-            let mut text = strip_flag_groups(pattern)
+            let mut text = strip_lookarounds(strip_flag_groups(pattern))
                 .trim_start_matches('^')
                 .trim_end_matches('$')
                 .to_string();
@@ -30000,15 +30032,17 @@ mod tests {
 
         /// Expand the innermost parenthesized group, then the first enumerable class; a NUL
         /// marks an escaped character so an escaped `|`, `(`, or `[` is never treated as syntax.
-        fn push_text(pattern: &str, text: &str, out: &mut Vec<String>) {
-            assert!(
-                out.len() < 1024,
-                "`{pattern}` expands to more than 1024 texts and cannot be audited"
-            );
+        struct Overflow;
+
+        fn push_text(text: &str, out: &mut Vec<String>) -> Result<(), Overflow> {
+            if out.len() >= 4096 {
+                return Err(Overflow);
+            }
             out.push(text.replace('\u{0}', ""));
+            Ok(())
         }
 
-        fn expand(pattern: &str, text: &str, out: &mut Vec<String>) {
+        fn expand(text: &str, out: &mut Vec<String>) -> Result<(), Overflow> {
             let bytes: Vec<char> = text.chars().collect();
             let mut open = None;
             for (index, &ch) in bytes.iter().enumerate() {
@@ -30035,43 +30069,24 @@ mod tests {
                             let suffix: String = bytes[index + 1..].iter().collect();
                             let alternatives: Vec<&str> = split_unescaped(&inner, '|');
                             for alternative in alternatives {
-                                expand(pattern, &format!("{prefix}{alternative}{suffix}"), out);
+                                expand(&format!("{prefix}{alternative}{suffix}"), out)?;
                             }
-                            return;
+                            return Ok(());
                         }
                     }
                     _ => {}
                 }
             }
             // A quantified class (`[0-9a-f]{7,12}`) matches a run, not one character, and
-            // stays as written. Classes multiply, so they expand only while the text's
-            // enumerable classes together stay within 64 variants.
-            let classes = unquantified_classes(&bytes);
-            let class_budget: usize = classes
-                .iter()
-                .map(|(start, end)| class_members(&bytes[start + 1..*end]).map_or(1, |m| m.len()))
-                .try_fold(1usize, |acc, count| acc.checked_mul(count))
-                .unwrap_or(usize::MAX);
-            // A pattern with no quantifier accepts a finite set of texts; one too large to
-            // enumerate cannot be proved free of an absent spelling, so it fails the audit.
-            let quantified = bytes.iter().enumerate().any(|(index, &ch)| {
-                matches!(ch, '*' | '+' | '?' | '{') && !(index > 0 && bytes[index - 1] == '\u{0}')
-            });
-            assert!(
-                class_budget <= 64 || quantified,
-                "`{pattern}` accepts more than 64 texts and cannot be audited"
-            );
-            for (start, end) in classes {
-                // Past the budget only a one-member class, which adds no variant, expands.
-                if let Some(members) = class_members(&bytes[start + 1..end])
-                    && (class_budget <= 64 || members.len() == 1)
-                {
+            // stays as written.
+            for (start, end) in unquantified_classes(&bytes) {
+                if let Some(members) = class_members(&bytes[start + 1..end]) {
                     let prefix: String = bytes[..start].iter().collect();
                     let suffix: String = bytes[end + 1..].iter().collect();
                     for member in members {
-                        expand(pattern, &format!("{prefix}{member}{suffix}"), out);
+                        expand(&format!("{prefix}{member}{suffix}"), out)?;
                     }
-                    return;
+                    return Ok(());
                 }
             }
             // `?` and `{n,m}` on one character or an enumerable class spell out exact texts;
@@ -30091,13 +30106,14 @@ mod tests {
                 let suffix: String = bytes[first.quantifier_end..].iter().collect();
                 for count in first.from..=first.to {
                     let repeated = atom.repeat(count as usize);
-                    expand(pattern, &format!("{prefix}{repeated}{suffix}"), out);
+                    expand(&format!("{prefix}{repeated}{suffix}"), out)?;
                 }
-                return;
+                return Ok(());
             }
             for alternative in split_unescaped(text, '|') {
-                push_text(pattern, alternative, out);
+                push_text(alternative, out)?;
             }
+            Ok(())
         }
 
         /// `(open, close)` index pairs of every unescaped class not followed by a quantifier.
@@ -30176,8 +30192,11 @@ mod tests {
                 if atom_end > bytes.len() {
                     break;
                 }
+                // `+` and `*` accept any count; one and two, or zero and one, are the counts
+                // that can spell a route, so they expand like `{1,2}` and `{0,1}`.
                 let range = match bytes.get(atom_end) {
-                    Some('?') => Some((0, 1, atom_end + 1)),
+                    Some('?') | Some('*') => Some((0, 1, atom_end + 1)),
+                    Some('+') => Some((1, 2, atom_end + 1)),
                     Some('{') => {
                         bytes[atom_end..]
                             .iter()
@@ -30225,6 +30244,22 @@ mod tests {
             atoms
         }
 
+        /// A pattern with any repetition (`*`, `+`, `{n}`, `{n,m}`) matches a run and is outside
+        /// the literal-spelling contract; only a repetition-free pattern too large to enumerate
+        /// fails the audit.
+        fn is_repetition_free(pattern: &str) -> bool {
+            let chars: Vec<char> = pattern.chars().collect();
+            let mut index = 0;
+            while index < chars.len() {
+                match chars[index] {
+                    '\\' => index += 2,
+                    '*' | '+' | '{' => return false,
+                    _ => index += 1,
+                }
+            }
+            true
+        }
+
         fn split_unescaped(text: &str, separator: char) -> Vec<&str> {
             let mut parts = Vec::new();
             let mut start = 0;
@@ -30240,8 +30275,21 @@ mod tests {
             parts
         }
 
+        // A repetition-free pattern accepts a small set of texts; one too large to enumerate
+        // cannot be proved free of an absent spelling, so it fails the audit. A pattern with
+        // repetition that overflows stays as written, one text per top-level alternative.
+        let reduced = reduce(pattern);
         let mut texts = Vec::new();
-        expand(pattern, &reduce(pattern), &mut texts);
+        if expand(&reduced, &mut texts).is_err() {
+            assert!(
+                !is_repetition_free(pattern),
+                "`{pattern}` accepts more than 4096 texts and cannot be audited"
+            );
+            texts.clear();
+            for alternative in split_unescaped(&reduced, '|') {
+                texts.push(alternative.replace('\u{0}', ""));
+            }
+        }
         texts
     }
 
@@ -30595,6 +30643,34 @@ mod tests {
                                 })
                             })
                 });
+                // A `#[serde(other)]` variant accepts every unrecognized discriminator, so an
+                // enum carrying one admits any spelling and cannot be audited by name.
+                if deserializable {
+                    for variant in &item.variants {
+                        let catch_all = production_attrs(&variant.attrs).iter().any(|attr| {
+                            attr.path().is_ident("serde")
+                                && attr
+                                    .parse_nested_meta(|meta| {
+                                        if meta.path.is_ident("other") {
+                                            return Err(meta.error("other"));
+                                        }
+                                        if meta.input.peek(syn::Token![=]) {
+                                            let _: syn::Expr = meta.value()?.parse()?;
+                                        } else if meta.input.peek(syn::token::Paren) {
+                                            let _ = meta.parse_nested_meta(|_| Ok(()));
+                                        }
+                                        Ok(())
+                                    })
+                                    .is_err()
+                        });
+                        assert!(
+                            !catch_all,
+                            "enum `{}` variant `{}` is `#[serde(other)]` and accepts every \
+                             discriminator; the audit cannot classify it",
+                            item.ident, variant.ident
+                        );
+                    }
+                }
                 let variants_off_wire = attrs.iter().any(|attr| {
                     attr.path().is_ident("serde")
                         && attr
@@ -30712,16 +30788,21 @@ mod tests {
             ["claim", "klaim", "cclaim", "cklaim", "kclaim", "kklaim"]
         );
         assert_eq!(regex_texts(r"^a{2,3}$"), ["aa", "aaa"]);
+        assert!(regex_texts(r"^mu+ra*l[.]render$").contains(&"mural.render".to_string()));
         assert_eq!(regex_texts(r"^\?{2}$"), ["??"]);
         assert_eq!(regex_texts(r"^(a|b){2}$"), ["aa", "ab", "ba", "bb"]);
         assert_eq!(regex_texts(r"^(ab)?x$"), ["x", "abx"]);
-        assert_eq!(regex_texts(r"^[ab]+$"), ["[ab]+"]);
+        assert_eq!(regex_texts(r"^[ab]+$"), ["a", "b", "aa", "ab", "ba", "bb"]);
         assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
         assert!(regex_texts(r"^[^x]ural[.]render$").contains(&"mural.render".to_string()));
         assert!(!regex_texts(r"^[^m]ural[.]render$").contains(&"mural.render".to_string()));
         assert!(regex_texts(r"^mu.al[.]render$").contains(&"mural.render".to_string()));
         assert!(regex_texts(r"^mu\wal\.render$").contains(&"mural.render".to_string()));
-        assert_eq!(regex_texts(r"^\d+$"), ["d+"]);
+        assert_eq!(regex_texts(r"^\d+$"), ["d", "dd"]);
+        assert_eq!(
+            regex_texts(r"(?<![\w$.])mural(?![\w$])[.]render"),
+            ["mural.render"]
+        );
         assert!(regex_texts(r"^[\w]ural[.]render$").contains(&"mural.render".to_string()));
         assert!(
             std::panic::catch_unwind(|| regex_texts(r"^[^x][^x][^x][^x][^x][.]render$")).is_err(),
@@ -30729,15 +30810,15 @@ mod tests {
         );
         assert_eq!(
             regex_texts(r"^[^x][^x][^x][^x][^x]+[.]render$"),
-            ["[^x][^x][^x][^x][^x]+.render"]
+            ["[^x][^x][^x][^x][^x]+[.]render"]
         );
         assert_eq!(regex_texts(r"^[a-zA-Z0-9_-]+$"), ["[a-zA-Z0-9_-]+"]);
         assert_eq!(regex_texts(r"^\[x\]$"), ["[x]"]);
-        let ten = "(a|b)".repeat(10);
-        assert_eq!(regex_texts(&format!("^{ten}$")).len(), 1024);
+        let twelve = "(a|b)".repeat(12);
+        assert_eq!(regex_texts(&format!("^{twelve}$")).len(), 4096);
         assert!(
-            std::panic::catch_unwind(|| regex_texts(&format!("^{ten}(a|b)$"))).is_err(),
-            "2048 texts must fail the audit rather than truncate"
+            std::panic::catch_unwind(|| regex_texts(&format!("^{twelve}(a|b)$"))).is_err(),
+            "8192 texts must fail the audit rather than truncate"
         );
         assert_eq!(
             concat_value(quote::quote!("mu", 1, "ral.render")),
