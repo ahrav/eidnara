@@ -73,18 +73,20 @@ export async function bundleModuleGraph(entry: string): Promise<ModuleGraph> {
 }
 
 /**
- * Module and external-specifier paths matching `pattern`.
- *
- * `g` and `y` patterns are rejected: `RegExp.prototype.test` advances `lastIndex` on them, so
- * consecutive matches are checked from a stale offset and the result under-counts. The function
- * throws rather than under-counting, which would report a reachable module as unreachable.
+ * `RegExp.prototype.test` advances `lastIndex` for `g` and `y` patterns, so later inputs
+ * can be skipped. A skipped match would make a boundary proof pass vacuously.
  */
-export function reachableModules(graph: ModuleGraph, pattern: RegExp): string[] {
+function assertStatelessPattern(caller: string, pattern: RegExp): void {
     if (pattern.global || pattern.sticky) {
         throw new TypeError(
-            `reachableModules: pattern must not use the g or y flag (got /${pattern.source}/${pattern.flags})`,
+            `${caller}: pattern must not use the g or y flag (got /${pattern.source}/${pattern.flags})`,
         );
     }
+}
+
+/** Module and external-specifier paths matching `pattern`. */
+export function reachableModules(graph: ModuleGraph, pattern: RegExp): string[] {
+    assertStatelessPattern("reachableModules", pattern);
     return [...graph.inputs, ...graph.externals].filter((path) => pattern.test(path));
 }
 
@@ -103,6 +105,7 @@ export function operationLiteralHits(
     files: string[],
     pattern: RegExp = OPERATION_LITERAL,
 ): string[] {
+    assertStatelessPattern("operationLiteralHits", pattern);
     const hits: string[] = [];
     for (const file of files) {
         const lines = readFileSync(file, "utf8").split("\n");
