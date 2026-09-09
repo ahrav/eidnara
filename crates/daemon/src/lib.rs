@@ -18787,6 +18787,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn mural_is_reached_only_through_a_host_supplied_enabled_artifact() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project = project.to_str().unwrap();
+        let messages = vec![ck("tail", 1, "raw")];
+        let mut oc_request = request(messages.clone());
+        oc_request["serializer_profile"] = json!("opencode-aisdk");
+        let without = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
+        assert_eq!(without["action"], "HARD", "{without}");
+        assert!(
+            store
+                .load_project_mural_artifact(project)
+                .unwrap()
+                .is_none()
+        );
+        oc_request["mural"] = json!({
+            "enabled": false,
+            "supports_vision": true,
+            "data_url": "data:image/png;base64,YQ==",
+            "content_hash": "mural-a",
+        });
+        let disabled = call_transform_request_on_channel(&handler, 7, oc_request).await;
+        assert!(
+            store
+                .load_project_mural_artifact(project)
+                .unwrap()
+                .is_none()
+        );
+        for response in [&without, &disabled] {
+            assert!(
+                !serde_json::to_string(&response["messages"])
+                    .unwrap()
+                    .contains("data:image/"),
+                "{response}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn cc_inherits_oc_project_mural_on_a_natural_hard_without_defer_first_apply() {
         let (handler, store, _dir, project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
@@ -28294,6 +28333,48 @@ mod tests {
                 )
                 .await;
             assert_eq!(error_code(outcome), "unrecognized_request_shape", "{alias}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape() {
+        const UNREACHABLE: &[&str] = &[
+            "index.messages",
+            "message_index.sync",
+            "messages.index",
+            "embed.query",
+            "embed.batch",
+            "embed.result",
+            "embedding.ingest",
+            "models.list",
+            "git.ingest",
+            "git.retrieve",
+            "git_ingest",
+            "git_retrieval.query",
+            "mural.render",
+            "mural.get",
+            "ctx_mural",
+        ];
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+        for name in UNREACHABLE {
+            let as_method = handler
+                .dispatch_value(
+                    test_route(7),
+                    json!({ "method": name, "session_id": "ses", "project": "p" }),
+                )
+                .await;
+            assert_eq!(
+                error_code(as_method),
+                "unrecognized_request_shape",
+                "{name}"
+            );
+            let as_facade = call_facade(&handler, name, json!({ "session_id": "ses" })).await;
+            assert_eq!(
+                error_code(as_facade),
+                "facade_envelope_not_supported",
+                "{name}"
+            );
         }
     }
 
