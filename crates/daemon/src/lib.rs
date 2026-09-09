@@ -28391,9 +28391,11 @@ mod tests {
     /// parser fails on a constant or binding pattern instead of skipping the route it names.
     /// The `_` arm must reject the request because delegating would route every unlisted
     /// spelling. Every other string literal in a dispatcher, before the match or inside an arm
-    /// body, must be a request-envelope field or an echo response key, and the discriminator may
-    /// be read only where the function binds it, so a route decision cannot move ahead of the
-    /// match or nest inside an arm. commentlint: allow(JUDGE)
+    /// body, must be a request-envelope field or an echo response key; the discriminator may be
+    /// read only where the function binds it; and outside the match `request` may flow only
+    /// into an envelope `get`, the facade dispatcher, or the rejecting call. A route decision
+    /// therefore cannot move ahead of the match, nest inside an arm, or hide in a helper.
+    /// commentlint: allow(JUDGE)
     fn dispatcher_route_literals() -> Vec<String> {
         use quote::ToTokens;
         use syn::visit::Visit;
@@ -28451,6 +28453,15 @@ mod tests {
             literals: Vec<String>,
             other_literals: Vec<String>,
             outside_reads: usize,
+            request_reads: usize,
+            request_uses: usize,
+        }
+
+        fn is_request(expr: &syn::Expr) -> bool {
+            matches!(
+                expr.to_token_stream().to_string().as_str(),
+                "request" | "& request"
+            )
         }
 
         impl<'ast> Visit<'ast> for Dispatcher<'_> {
@@ -28500,11 +28511,45 @@ mod tests {
             }
 
             fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-                if self.inside_audited == 0 && path.to_token_stream().to_string() == self.scrutinee
-                {
-                    self.outside_reads += 1;
+                if self.inside_audited == 0 {
+                    let text = path.to_token_stream().to_string();
+                    if text == self.scrutinee {
+                        self.outside_reads += 1;
+                    }
+                    if text == "request" {
+                        self.request_reads += 1;
+                    }
                 }
                 syn::visit::visit_expr_path(self, path);
+            }
+
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if self.inside_audited == 0 {
+                    let method = call.method.to_string();
+                    let envelope_get = is_request(&call.receiver)
+                        && method == "get"
+                        && call.args.len() == 1
+                        && matches!(
+                            &call.args[0],
+                            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(field), .. })
+                                if NON_ROUTE_LITERALS.contains(&field.value().as_str())
+                        );
+                    if envelope_get {
+                        self.request_uses += 1;
+                    } else if DISPATCHERS.iter().any(|(f, _, _)| *f == method) {
+                        self.request_uses += call.args.iter().filter(|a| is_request(a)).count();
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if self.inside_audited == 0
+                    && call.func.to_token_stream().to_string() == "unrecognized_request_error"
+                {
+                    self.request_uses += call.args.iter().filter(|a| is_request(a)).count();
+                }
+                syn::visit::visit_expr_call(self, call);
             }
 
             fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
@@ -28529,6 +28574,8 @@ mod tests {
                         literals: Vec::new(),
                         other_literals: Vec::new(),
                         outside_reads: 0,
+                        request_reads: 0,
+                        request_uses: 0,
                     };
                     dispatcher.visit_block(&function.block);
                     assert_eq!(
@@ -28549,6 +28596,12 @@ mod tests {
                         dispatcher.outside_reads, *binding_reads,
                         "{name} reads `{scrutinee}` outside `match {scrutinee}`; \
                          route decisions belong in the audited match"
+                    );
+                    assert_eq!(
+                        dispatcher.request_reads, dispatcher.request_uses,
+                        "{name} hands `request` to something other than an envelope `get`, the \
+                         facade dispatcher, or the rejecting call outside `match {scrutinee}`; \
+                         a helper there could route on the request unaudited"
                     );
                     let slot = self
                         .functions
