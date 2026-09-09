@@ -5155,3 +5155,488 @@ async fn disposition_operations_share_the_envelope_replay_and_token_rules() {
     assert_eq!(admission_row_count(&daemon), admission_rows);
     daemon.handler.shutdown().await.unwrap();
 }
+
+// --- kernel.commit disposition preview ---
+
+fn receipt_count(daemon: &Daemon) -> i64 {
+    core_connection(daemon)
+        .query_row("SELECT COUNT(*) FROM operation_receipts", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+impl Daemon {
+    async fn preview(&self, key: &str, operations: Vec<Value>) -> Value {
+        let mut request = commit_request(&self.project, SESSION, key, operations, vec![]);
+        request["preview"] = json!(true);
+        self.call(self.route, request).await
+    }
+}
+
+fn visibilities(auto_inject: &str, auto_search: &str, explicit_search: &str) -> Value {
+    json!({
+        "auto_inject": auto_inject,
+        "auto_search": auto_search,
+        "explicit_search": explicit_search,
+    })
+}
+
+/// A preview judges the event the way the commit would and reports every
+/// surface's verdict before and after, but leaves the log, the ledger, and the
+/// receipts untouched, so the same key is still free for the real commit.
+#[tokio::test]
+async fn a_disposition_preview_reports_visibility_per_surface_and_writes_nothing() {
+    let daemon = Daemon::start().await;
+    let store = daemon.store();
+    seed_domain(&store);
+    // A route-written decision is a candidate: labeled on `explicit_search`,
+    // hidden on the automatic surfaces.
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    // A verified decision is visible on every surface.
+    store
+        .commit(intent("verified"), |envelope| {
+            envelope.insert_observation(code_observation(1, "verified-lineage"))?;
+            envelope.insert_decision(store_decision(1, &scope_id, "verified-lineage"))?;
+            envelope.record_admission(admission(
+                "store-decision-object-1",
+                EventKind::CodeObserved,
+                Some("observation-object-1"),
+                (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
+            ))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let commit_rows = commit_log_count(&daemon);
+    let admission_rows = admission_row_count(&daemon);
+    let receipts = receipt_count(&daemon);
+
+    let previewed = daemon
+        .preview(
+            "preview",
+            vec![
+                disposition("decision-object-1", "mark_stale"),
+                disposition("store-decision-object-1", "mark_stale"),
+                disposition("store-decision-object-1", "quarantine"),
+            ],
+        )
+        .await;
+    assert_state(&previewed, "available", None);
+    assert_eq!(previewed["known_as_of"], tip, "{previewed}");
+    assert!(previewed.get("receipt").is_none(), "{previewed}");
+    assert_eq!(
+        previewed["previews"],
+        json!([
+            {
+                "object_id": "decision-object-1",
+                "event": "mark_stale",
+                "outcome": "deny",
+                "previous_disposition": "active",
+                "disposition": "stale",
+                "denied": false,
+                "current": visibilities("hidden", "hidden", "labeled"),
+                "projected": visibilities("hidden", "hidden", "labeled"),
+                "visibility_changes": false,
+            },
+            {
+                "object_id": "store-decision-object-1",
+                "event": "mark_stale",
+                "outcome": "deny",
+                "previous_disposition": "active",
+                "disposition": "stale",
+                "denied": false,
+                "current": visibilities("visible", "visible", "visible"),
+                "projected": visibilities("hidden", "hidden", "labeled"),
+                "visibility_changes": true,
+            },
+            // A second operation on the same target is judged after the first,
+            // as the commit would judge it: its prior and its `current` are
+            // the first operation's result.
+            {
+                "object_id": "store-decision-object-1",
+                "event": "quarantine",
+                "outcome": "quarantine",
+                "previous_disposition": "stale",
+                "disposition": "quarantined",
+                "denied": false,
+                "current": visibilities("hidden", "hidden", "labeled"),
+                "projected": visibilities("hidden", "hidden", "hidden"),
+                "visibility_changes": true,
+            },
+        ]),
+        "{previewed}"
+    );
+    assert_matches_route_fixture(&previewed, "commit-available-disposition-preview.json");
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(commit_log_count(&daemon), commit_rows);
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    assert_eq!(receipt_count(&daemon), receipts);
+    assert_eq!(
+        stored_disposition(&daemon, "store-decision-object-1"),
+        "active"
+    );
+    assert_eq!(
+        object_ids(&daemon.read("auto_inject", None).await),
+        ["store-decision-object-1"]
+    );
+
+    // The previewed key was never recorded, so the real commit under it is a
+    // fresh write rather than a replay, and it lands what the preview said.
+    let applied = daemon
+        .commit(
+            "preview",
+            vec![disposition("store-decision-object-1", "mark_stale")],
+            vec![],
+        )
+        .await;
+    assert_state(&applied, "available", None);
+    assert_eq!(applied["receipt"]["replayed"], false, "{applied}");
+    assert_eq!(applied["dispositions"][0]["disposition"], "stale");
+    assert_eq!(
+        daemon.read("auto_inject", None).await["rows"],
+        json!([]),
+        "the previewed hide came true"
+    );
+
+    // A preview under a recorded identity answers the receipt the commit would
+    // replay, judging nothing; under the same key with other bytes it refuses
+    // the way the commit does.
+    let replayed = daemon
+        .preview(
+            "preview",
+            vec![disposition("store-decision-object-1", "mark_stale")],
+        )
+        .await;
+    assert_state(&replayed, "available", None);
+    assert_eq!(
+        replayed["receipt"],
+        json!({"commit_seq": applied["receipt"]["commit_seq"], "replayed": true}),
+        "{replayed}"
+    );
+    assert_eq!(replayed["previews"], json!([]), "{replayed}");
+    let mut reused = commit_request(
+        &daemon.project,
+        SESSION,
+        "preview",
+        vec![disposition("store-decision-object-1", "quarantine")],
+        vec![],
+    );
+    reused["intent"] = wire_intent("preview", "other-bytes");
+    reused["preview"] = json!(true);
+    let reused = daemon.call(daemon.route, reused).await;
+    assert_state(&reused, "invalid", Some("operation_key_reused"));
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// Operations in one request are judged in order against the same envelope, so
+/// a later operation on an object sees the earlier one's decision as its prior.
+/// A preview must carry that forward: `quarantine` then `mark_stale` on one
+/// active decision is a relaxation the commit denies without an approval, and
+/// the preview reports exactly the `outcome`, `previous_disposition`,
+/// `disposition`, and `denied` the commit then records for both operations.
+#[tokio::test]
+async fn a_disposition_preview_judges_later_operations_after_earlier_ones() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let operations = vec![
+        disposition("decision-object-1", "quarantine"),
+        disposition("decision-object-1", "mark_stale"),
+    ];
+
+    let previewed = daemon.preview("sequence", operations.clone()).await;
+    assert_state(&previewed, "available", None);
+    assert_eq!(
+        previewed["previews"],
+        json!([
+            {
+                "object_id": "decision-object-1",
+                "event": "quarantine",
+                "outcome": "quarantine",
+                "previous_disposition": "active",
+                "disposition": "quarantined",
+                "denied": false,
+                "current": visibilities("hidden", "hidden", "labeled"),
+                "projected": visibilities("hidden", "hidden", "hidden"),
+                "visibility_changes": true,
+            },
+            {
+                "object_id": "decision-object-1",
+                "event": "mark_stale",
+                "outcome": "deny",
+                "previous_disposition": "quarantined",
+                "disposition": "quarantined",
+                "denied": true,
+                "current": visibilities("hidden", "hidden", "hidden"),
+                "projected": visibilities("hidden", "hidden", "hidden"),
+                "visibility_changes": false,
+            },
+        ]),
+        "{previewed}"
+    );
+
+    let applied = daemon.commit("sequence", operations, vec![]).await;
+    assert_state(&applied, "available", None);
+    let judged: Vec<Value> = previewed["previews"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|preview| {
+            let mut result = preview.clone();
+            let result = result.as_object_mut().unwrap();
+            result.retain(|key, _| {
+                !matches!(key.as_str(), "current" | "projected" | "visibility_changes")
+            });
+            Value::Object(result.clone())
+        })
+        .collect();
+    assert_eq!(
+        json!(judged),
+        applied["dispositions"],
+        "the preview judged what the commit recorded: {applied}"
+    );
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "quarantined"
+    );
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A preview of a relaxation without a valid approval reports the denial the
+/// commit would record, with the disposition and every surface unchanged; a
+/// preview whose approval is out of scope, or whose target is not a live
+/// decision, refuses the way the commit does.
+#[tokio::test]
+async fn a_disposition_preview_reports_denials_and_refusals_like_the_commit() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    assert_state(
+        &daemon
+            .commit(
+                "quarantine",
+                vec![disposition("decision-object-1", "quarantine")],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let admission_rows = admission_row_count(&daemon);
+
+    let denied = daemon
+        .preview(
+            "relax-unapproved",
+            vec![disposition("decision-object-1", "mark_stale")],
+        )
+        .await;
+    assert_state(&denied, "available", None);
+    assert_eq!(
+        denied["previews"],
+        json!([{
+            "object_id": "decision-object-1",
+            "event": "mark_stale",
+            "outcome": "deny",
+            "previous_disposition": "quarantined",
+            "disposition": "quarantined",
+            "denied": true,
+            "current": visibilities("hidden", "hidden", "hidden"),
+            "projected": visibilities("hidden", "hidden", "hidden"),
+            "visibility_changes": false,
+        }]),
+        "{denied}"
+    );
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+
+    seed_approval(&daemon, "approval-1", Some(&scope_id));
+    let admission_rows = admission_row_count(&daemon);
+    let relaxed = daemon
+        .preview(
+            "relax-approved",
+            vec![disposition_with_approval(
+                "decision-object-1",
+                "mark_stale",
+                "approval-1",
+            )],
+        )
+        .await;
+    assert_state(&relaxed, "available", None);
+    assert_eq!(relaxed["previews"][0]["denied"], false, "{relaxed}");
+    assert_eq!(relaxed["previews"][0]["disposition"], "stale");
+    assert_eq!(
+        relaxed["previews"][0]["projected"],
+        visibilities("hidden", "hidden", "labeled")
+    );
+    // A hidden object newly becoming labeled is not a change to anything a
+    // surface serves today.
+    assert_eq!(relaxed["previews"][0]["visibility_changes"], false);
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "quarantined"
+    );
+
+    let unknown_approval = daemon
+        .preview(
+            "relax-unknown",
+            vec![disposition_with_approval(
+                "decision-object-1",
+                "mark_stale",
+                "no-such-approval",
+            )],
+        )
+        .await;
+    assert_state(&unknown_approval, "invalid", Some("not_found"));
+
+    let missing = daemon
+        .preview(
+            "missing",
+            vec![disposition("decision-object-9", "quarantine")],
+        )
+        .await;
+    assert_state(&missing, "invalid", Some("not_found"));
+
+    let mut with_tokens = commit_request(
+        &daemon.project,
+        SESSION,
+        "tokens",
+        vec![disposition("decision-object-1", "quarantine")],
+        vec![json!({"object_id": "decision-object-1", "known_as_of": 1})],
+    );
+    with_tokens["preview"] = json!(true);
+    let error = daemon
+        .handler
+        .dispatch_value_for_test(daemon.route, with_tokens)
+        .await;
+    assert!(
+        matches!(error, PreparedOutcome::Error { .. }),
+        "a preview with tokens is malformed: {error:?}"
+    );
+
+    let mut with_insert = commit_request(
+        &daemon.project,
+        SESSION,
+        "insert",
+        vec![insert_decision(2)],
+        vec![],
+    );
+    with_insert["preview"] = json!(true);
+    let error = daemon
+        .handler
+        .dispatch_value_for_test(daemon.route, with_insert)
+        .await;
+    assert!(
+        matches!(error, PreparedOutcome::Error { .. }),
+        "a preview of an insert is malformed: {error:?}"
+    );
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// Quarantining an approval and relaxing a decision that rests on it in one
+/// request: the commit judges the relaxation after the quarantine and denies
+/// it, while a preview would read the approval's authority from the ledger the
+/// quarantine never reached. The preview refuses the request as malformed
+/// instead; each operation previews on its own.
+#[tokio::test]
+async fn a_disposition_preview_refuses_an_operation_whose_authority_an_earlier_one_changes() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    assert_state(
+        &daemon
+            .commit(
+                "quarantine",
+                vec![disposition("decision-object-1", "quarantine")],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    seed_approval(&daemon, "approval-1", Some(&scope_id));
+    let operations = vec![
+        disposition("approval-1", "quarantine"),
+        disposition_with_approval("decision-object-1", "mark_stale", "approval-1"),
+    ];
+
+    let mut request = commit_request(
+        &daemon.project,
+        SESSION,
+        "coupled",
+        operations.clone(),
+        vec![],
+    );
+    request["preview"] = json!(true);
+    let refused = daemon
+        .handler
+        .dispatch_value_for_test(daemon.route, request)
+        .await;
+    match &refused {
+        PreparedOutcome::Error { code, message } => {
+            assert_eq!(code, "invalid_params", "{refused:?}");
+            assert!(message.contains("separate requests"), "{refused:?}");
+        }
+        other => panic!("a coupled preview is malformed: {other:?}"),
+    }
+
+    // Each operation previews alone; the relaxation is granted while the
+    // approval still holds.
+    let alone = daemon
+        .preview("approval-alone", vec![operations[0].clone()])
+        .await;
+    assert_state(&alone, "available", None);
+    assert_eq!(
+        alone["previews"][0]["disposition"], "quarantined",
+        "{alone}"
+    );
+    let alone = daemon
+        .preview("relax-alone", vec![operations[1].clone()])
+        .await;
+    assert_state(&alone, "available", None);
+    assert_eq!(alone["previews"][0]["denied"], false, "{alone}");
+    assert_eq!(alone["previews"][0]["disposition"], "stale", "{alone}");
+
+    let applied = daemon.commit("coupled", operations, vec![]).await;
+    assert_state(&applied, "available", None);
+    assert_eq!(
+        applied["dispositions"][1],
+        json!({
+            "object_id": "decision-object-1",
+            "event": "mark_stale",
+            "outcome": "deny",
+            "previous_disposition": "quarantined",
+            "disposition": "quarantined",
+            "denied": true,
+        }),
+        "the commit denies the relaxation the preview declined to judge: {applied}"
+    );
+    daemon.handler.shutdown().await.unwrap();
+}

@@ -257,6 +257,19 @@ pub struct Envelope<'tx> {
     poisoned: Option<KernelError>,
 }
 
+/// No `&mut Envelope` is reachable, so nothing lands in the log. The one mutation, [`Preview::preview_admission`], seeds the same-transaction prior cache the way `record_admission` does inside a commit, so a later operation in the same preview is judged against an earlier one's decision as the commit judges it. The authority cascade over a decision's dependents is not simulated; an operation whose authority chain an earlier operation in the preview touched is refused with [`KernelError::PreviewAuthorityChanged`] instead of being judged against stale authority. commentlint: allow(JUDGE)
+pub struct Preview<'tx> {
+    pub(super) envelope: Envelope<'tx>,
+}
+
+impl<'tx> std::ops::Deref for Preview<'tx> {
+    type Target = Envelope<'tx>;
+
+    fn deref(&self) -> &Envelope<'tx> {
+        &self.envelope
+    }
+}
+
 impl Envelope<'_> {
     /// A recorded failure is returned by every later mutation and by `commit`, so a caller that discards a mutation's `Err` cannot commit a transaction whose change set no longer describes its writes. Every public mutator on the envelope goes through this gate. commentlint: allow(JUDGE)
     pub(super) fn guarded<T>(
@@ -423,6 +436,17 @@ impl Envelope<'_> {
         load_object_state(self.tx, object_id)
     }
 
+    /// The receipt `KernelStore::commit` would replay for `intent` instead of
+    /// running its operation, or `None` when the identity is unrecorded;
+    /// `Conflict` when the key is recorded under another digest.
+    pub fn stored_receipt(
+        &self,
+        intent: CommitIntent,
+    ) -> Result<Option<CommitReceipt>, KernelError> {
+        intent.refuse_reserved_producer()?;
+        stored_receipt(self.tx, &RedactedIntent::new(intent)?)
+    }
+
     /// Succession is judged before invalidation because a superseded object is
     /// also invalidated, and advancement last because both of the others also
     /// leave a later change event.
@@ -584,11 +608,33 @@ impl KernelStore {
         &self,
         object_ids: &[String],
     ) -> Result<(i64, Vec<Option<ObjectState>>), KernelError> {
-        self.read_snapshot(0, |tx| {
+        self.read_snapshot(0, |tx, _| {
             object_ids
                 .iter()
                 .map(|object_id| load_object_state(tx, object_id))
                 .collect()
+        })
+    }
+
+    /// The envelope's `commit_seq` is the sequence the next commit would take, so `check_token` judges a token from the tip the way that commit would.
+    /// The reader is polled for until `deadline` and held for the whole of `read`, which is the caller's to bound: a pooled reader is shared with every other read path.
+    pub fn preview<T>(
+        &self,
+        deadline: Instant,
+        read: impl FnOnce(&mut Preview<'_>) -> Result<T, KernelError>,
+    ) -> Result<(i64, T), KernelError> {
+        let mut reader = self.lock_reader_within(&AcquireLimit::until(deadline))?;
+        read_snapshot_on(&mut reader, 0, |tx, tip| {
+            read(&mut Preview {
+                envelope: Envelope {
+                    tx,
+                    commit_seq: tip + 1,
+                    changes: Vec::new(),
+                    admission_ordinal: 0,
+                    admission_latest: HashMap::new(),
+                    poisoned: None,
+                },
+            })
         })
     }
 
@@ -621,7 +667,7 @@ impl KernelStore {
     }
 
     fn snapshot(&self, requested: i64, sql: &str) -> Result<KnownAsOf, KernelError> {
-        let (tip, objects) = self.read_snapshot(requested, |tx| {
+        let (tip, objects) = self.read_snapshot(requested, |tx, _| {
             let mut statement = tx.prepare(sql).map_err(map_sqlite)?;
             let objects = statement
                 .query_map([requested], object_row_from)
@@ -637,28 +683,17 @@ impl KernelStore {
         })
     }
 
+    /// `read` receives the tip the transaction observed along with the transaction.
     pub(super) fn read_snapshot<T>(
         &self,
         requested: i64,
-        read: impl FnOnce(&Transaction<'_>) -> Result<T, KernelError>,
+        read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
     ) -> Result<(i64, T), KernelError> {
         if requested < 0 {
             return Err(KernelError::InvalidInput);
         }
         let mut reader = self.lock_reader()?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(map_sqlite)?;
-        let tip = tx
-            .prepare_cached("SELECT COALESCE(MAX(commit_seq),0) FROM commit_log")
-            .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
-            .map_err(map_sqlite)?;
-        if requested > tip {
-            return Err(KernelError::FutureSnapshot);
-        }
-        let result = read(&tx)?;
-        tx.commit().map_err(map_sqlite)?;
-        Ok((tip, result))
+        read_snapshot_on(&mut reader, requested, read)
     }
 
     pub fn stage_candidate(
@@ -939,21 +974,34 @@ pub(super) fn replace_alignment_projection_tx(
     Ok(rows.len())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn commit_prepared_with_writer(
-    writer: &mut Connection,
-    lease_epoch: u64,
-    intent: RedactedIntent,
-    transaction_id: String,
-    operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
-    after_events: impl FnOnce() -> Result<(), KernelError>,
-) -> Result<CommitReceipt, KernelError> {
-    let tx = writer
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+/// The deferred transaction makes `tip` and `read` observe one snapshot.
+fn read_snapshot_on<T>(
+    reader: &mut Connection,
+    requested: i64,
+    read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
+) -> Result<(i64, T), KernelError> {
+    let tx = reader
+        .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(map_sqlite)?;
-    check_fence(&tx, lease_epoch)?;
+    let tip = tx
+        .prepare_cached("SELECT COALESCE(MAX(commit_seq),0) FROM commit_log")
+        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
+        .map_err(map_sqlite)?;
+    if requested > tip {
+        return Err(KernelError::FutureSnapshot);
+    }
+    let result = read(&tx, tip)?;
+    tx.commit().map_err(map_sqlite)?;
+    Ok((tip, result))
+}
 
-    if let Some((digest, commit_seq, result)) = tx
+/// The receipt a repeat of `intent` replays; a stored key under a different
+/// digest is `Conflict`, since the caller reused an identity for other bytes.
+fn stored_receipt(
+    tx: &Transaction<'_>,
+    intent: &RedactedIntent,
+) -> Result<Option<CommitReceipt>, KernelError> {
+    let Some((digest, commit_seq, result)) = tx
         .query_row_cached(
             "SELECT request_digest,commit_seq,result_payload FROM operation_receipts
              WHERE producer=?1 AND operation_key=?2",
@@ -968,21 +1016,41 @@ fn commit_prepared_with_writer(
         )
         .optional()
         .map_err(map_sqlite)?
-    {
-        if digest != intent.request_digest {
-            return Err(KernelError::Conflict);
-        }
-        let repair_alignment = commit_affects_alignment(&tx, commit_seq)?;
+    else {
+        return Ok(None);
+    };
+    if digest != intent.request_digest {
+        return Err(KernelError::Conflict);
+    }
+    Ok(Some(CommitReceipt {
+        commit_seq,
+        result: String::from_utf8(result).map_err(|_| KernelError::Io)?,
+        replayed: true,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_prepared_with_writer(
+    writer: &mut Connection,
+    lease_epoch: u64,
+    intent: RedactedIntent,
+    transaction_id: String,
+    operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
+    after_events: impl FnOnce() -> Result<(), KernelError>,
+) -> Result<CommitReceipt, KernelError> {
+    let tx = writer
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(map_sqlite)?;
+    check_fence(&tx, lease_epoch)?;
+
+    if let Some(receipt) = stored_receipt(&tx, &intent)? {
+        let repair_alignment = commit_affects_alignment(&tx, receipt.commit_seq)?;
         tx.commit().map_err(map_sqlite)?;
         if repair_alignment {
             // The commit is already durable, so a repair failure cannot change its outcome.
             let _ = super::slice::rebuild_alignment_with_writer(writer, lease_epoch);
         }
-        return Ok(CommitReceipt {
-            commit_seq,
-            result: String::from_utf8(result).map_err(|_| KernelError::Io)?,
-            replayed: true,
-        });
+        return Ok(receipt);
     }
 
     let recorded_at = current_time_ms();

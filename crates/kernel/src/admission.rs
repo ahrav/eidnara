@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use super::cas::{ArtifactDestination, ArtifactEgressFacts};
 use super::envelope::{
-    DomainSpec, Envelope, OBJECT_ROW_COLUMNS, ObjectRow, ObjectState, PendingChange,
+    DomainSpec, Envelope, OBJECT_ROW_COLUMNS, ObjectRow, ObjectState, PendingChange, Preview,
     load_object_states, object_row_from,
 };
 use super::object_write;
@@ -125,12 +125,11 @@ string_enum!(Surface {
     ExplicitSearch => "explicit_search",
 });
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SurfaceVisibility {
-    Hidden,
-    Visible,
-    Labeled,
-}
+string_enum!(SurfaceVisibility {
+    Hidden => "hidden",
+    Visible => "visible",
+    Labeled => "labeled",
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionEvent {
@@ -920,6 +919,21 @@ impl Envelope<'_> {
         self.guarded(|envelope| envelope.record_admission_inner(request))
     }
 
+    /// The serving rows for `ids`, the registry's live objects among them whose scope can match `scope`, keyed by object id.
+    /// Ids that `identity` rejects are omitted from the query and absent from the result.
+    pub fn served_rows_for(
+        &self,
+        ids: &[&str],
+        scope: Option<ScopeTermFilter<'_>>,
+    ) -> Result<HashMap<String, ServedRow>, KernelError> {
+        let ids: Vec<String> = ids.iter().filter_map(|id| identity(id).ok()).collect();
+        let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
+        Ok(served_classes(self.tx, self.commit_seq, Some(&ids), scope)?
+            .into_iter()
+            .map(|row| (row.object.object_id.clone(), row))
+            .collect())
+    }
+
     /// Returns the prior decision and supporting approval id from the same cache
     /// used by admission evaluation, including writes within this envelope.
     pub fn subject_admission(
@@ -961,12 +975,7 @@ impl Envelope<'_> {
         &mut self,
         request: AdmissionRequest,
     ) -> Result<AdmissionDecision, KernelError> {
-        if matches!(
-            request.event.kind,
-            EventKind::Correct | EventKind::Replace | EventKind::ApprovalRevoked
-        ) {
-            return Err(KernelError::AdmissionPolicy);
-        }
+        refuse_succession_events(&request)?;
         let subject_object_id = request.subject_object_id.clone();
         let candidate_id = request.candidate_id.clone();
         let reason = request.event.reason.clone();
@@ -1601,18 +1610,7 @@ impl Envelope<'_> {
         materialized: Option<ObjectRow>,
     ) -> Result<AdmissionDecision, KernelError> {
         let latest_key = prepared.facts.key();
-        let latest = StoredAdmission {
-            decision: PriorDecision {
-                historical_maturity: prepared.evaluation.historical_maturity,
-                effective_maturity: prepared.evaluation.effective_maturity.get(),
-                disposition: prepared.evaluation.disposition,
-                outcome: prepared.evaluation.outcome,
-                source_class: prepared.source_class,
-                taint_class: prepared.taint_class,
-                sensitivity: prepared.evaluation.sensitivity,
-            },
-            approval_object_id: prepared.supporting_approval.clone(),
-        };
+        let latest = prepared.stored();
         let admission_decision_id = format!("{}:{:020}", self.commit_seq, self.admission_ordinal);
         self.admission_ordinal = self
             .admission_ordinal
@@ -1784,6 +1782,116 @@ impl Envelope<'_> {
             sensitivity: prepared.evaluation.sensitivity,
             outcome: prepared.evaluation.outcome,
         })
+    }
+}
+
+impl Preview<'_> {
+    /// Returns the evaluation `record_admission` would persist for `request` without writing it; the same prior, approval, and trigger checks decide both. commentlint: allow(JUDGE)
+    /// The decision becomes the prior for later admissions of the same key in this preview, matching a written decision inside a commit.
+    pub fn preview_admission(
+        &mut self,
+        request: AdmissionRequest,
+    ) -> Result<Evaluation, KernelError> {
+        refuse_succession_events(&request)?;
+        let prepared = self.envelope.prepare_admission(request)?;
+        self.refuse_changed_authority(&prepared)?;
+        self.envelope
+            .admission_latest
+            .insert(prepared.facts.key(), prepared.stored());
+        Ok(prepared.evaluation)
+    }
+
+    /// `prepare_admission` validates the cited and the stored approval by SQL over the committed ledger, which a decision previewed earlier never reaches, while a commit writes that decision and runs its authority cascade before judging the next one. The cascade also rewrites the subject's lineage row when that row rests on the withdrawn authority, and the lineage row is half of what the subject serves. Refuses when any of those chains holds an object or lineage an earlier admission in this preview decided, so neither the evaluation nor the served state it is compared against rests on authority the commit would have revised. commentlint: allow(JUDGE)
+    fn refuse_changed_authority(&self, prepared: &PreparedDecision) -> Result<(), KernelError> {
+        let envelope = &self.envelope;
+        if envelope.admission_latest.is_empty() {
+            return Ok(());
+        }
+        let own = load_prior_decision(envelope, &prepared.facts)?;
+        let lineage = load_prior_for_key(
+            envelope,
+            &AdmissionKey::Lineage {
+                source_kind: prepared.facts.source_kind.clone(),
+                source_id: prepared.facts.source_id.clone(),
+                source_revision: prepared.facts.source_revision,
+            },
+        )?;
+        let mut approvals: Vec<&str> = Vec::with_capacity(3);
+        for approval in [
+            prepared.event.approval_object_id.as_deref(),
+            own.as_ref()
+                .and_then(|own| own.approval_object_id.as_deref()),
+            lineage
+                .as_ref()
+                .and_then(|lineage| lineage.approval_object_id.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !approvals.contains(&approval) {
+                approvals.push(approval);
+            }
+        }
+        for approval in approvals {
+            let members = match envelope.approval_chain_members(approval) {
+                Ok(members) => members,
+                // A chain past the authority bound validates as no authority
+                // in both paths, whatever an earlier decision did to a member.
+                Err(KernelError::AdmissionPolicy) => continue,
+                Err(error) => return Err(error),
+            };
+            for member in members {
+                if envelope
+                    .admission_latest
+                    .contains_key(&AdmissionKey::Object(member.clone()))
+                    || lineage_key(envelope, &member)?
+                        .is_some_and(|lineage| envelope.admission_latest.contains_key(&lineage))
+                {
+                    return Err(KernelError::PreviewAuthorityChanged);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn lineage_key(
+    envelope: &Envelope<'_>,
+    object_id: &str,
+) -> Result<Option<AdmissionKey>, KernelError> {
+    envelope
+        .tx
+        .query_row_cached(
+            "SELECT source_kind,source_id,source_revision FROM object_registry
+             WHERE object_id=?1",
+            [object_id],
+            |row| {
+                Ok(AdmissionKey::Lineage {
+                    source_kind: row.get(0)?,
+                    source_id: row.get(1)?,
+                    source_revision: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(map_sqlite)
+}
+
+impl PreparedDecision {
+    /// The prior a later decision on the same key reads once this one is written.
+    fn stored(&self) -> StoredAdmission {
+        StoredAdmission {
+            decision: PriorDecision {
+                historical_maturity: self.evaluation.historical_maturity,
+                effective_maturity: self.evaluation.effective_maturity.get(),
+                disposition: self.evaluation.disposition,
+                outcome: self.evaluation.outcome,
+                source_class: self.source_class,
+                taint_class: self.taint_class,
+                sensitivity: self.evaluation.sensitivity,
+            },
+            approval_object_id: self.supporting_approval.clone(),
+        }
     }
 }
 
@@ -2376,6 +2484,18 @@ fn load_approval_dependents(
     Ok(dependents)
 }
 
+/// Succession and revocation events are recorded by the envelope's own
+/// supersede, retire, and revoke paths; a caller naming one directly is refused.
+fn refuse_succession_events(request: &AdmissionRequest) -> Result<(), KernelError> {
+    if matches!(
+        request.event.kind,
+        EventKind::Correct | EventKind::Replace | EventKind::ApprovalRevoked
+    ) {
+        return Err(KernelError::AdmissionPolicy);
+    }
+    Ok(())
+}
+
 fn validate_provenance(
     source_class: SourceClass,
     taint_class: TaintClass,
@@ -2767,7 +2887,7 @@ impl KernelStore {
         let ids = ids
             .map(|ids| serde_json::to_string(ids).map_err(|_| KernelError::InvalidInput))
             .transpose()?;
-        let (tip, rows) = self.read_snapshot(requested, |tx| {
+        let (tip, rows) = self.read_snapshot(requested, |tx, _| {
             let rows = served_rows(tx, surface, requested, ids.as_deref(), scope)?
                 .into_iter()
                 .filter_map(|(object, visibility, scope_id)| match visibility {
@@ -2802,14 +2922,7 @@ impl KernelStore {
         let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
         let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
         let generation_before = self.classification_generation.load(Ordering::SeqCst);
-        let (tip, candidates) = self.read_snapshot(0, |tx| {
-            let tip = tx
-                .query_row_cached(
-                    "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(map_sqlite)?;
+        let (tip, candidates) = self.read_snapshot(0, |tx, tip| {
             // Hidden at `ExplicitSearch`, the widest surface, means hidden everywhere.
             let served: HashMap<String, ServedClass> =
                 served_rows(tx, Surface::ExplicitSearch, tip, Some(&ids), None)?
@@ -2921,6 +3034,45 @@ pub struct ServedClass {
     pub visibility: SurfaceVisibility,
 }
 
+/// `ServedRow` keeps own and lineage rows separate so callers can evaluate a hypothetical own row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedRow {
+    /// `sensitivity` is the folded serving sensitivity, not the registry column.
+    pub object: ObjectRow,
+    pub scope_id: Option<String>,
+    own: VisibilityRow,
+    lineage: Option<VisibilityRow>,
+    /// `shared_sensitivity` excludes the stored own row's class and trigger from the served sensitivity. A row that replaces the own row carries its own class and its own trigger, or none, so those two folds do not outlive it. commentlint: allow(JUDGE)
+    shared_sensitivity: Sensitivity,
+}
+
+impl ServedRow {
+    pub fn visibility(&self, surface: Surface) -> SurfaceVisibility {
+        surface_visibility(self.row_with(self.own), surface, self.object.sensitivity)
+    }
+
+    /// Returns `surface` visibility after `own` replaces the stored own row. `sensitivity` is the class the evaluator folded for that row, trigger included when it names one. commentlint: allow(JUDGE)
+    pub fn visibility_with(
+        &self,
+        own: VisibilityRow,
+        sensitivity: Sensitivity,
+        surface: Surface,
+    ) -> SurfaceVisibility {
+        surface_visibility(
+            self.row_with(own),
+            surface,
+            self.shared_sensitivity.restrictive(sensitivity),
+        )
+    }
+
+    fn row_with(&self, own: VisibilityRow) -> VisibilityRow {
+        match self.lineage {
+            Some(lineage) => served_visibility_row(Some(own), Some(lineage)),
+            None => own,
+        }
+    }
+}
+
 /// One value on one scope dimension that a served-rows read is restricted to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopeTermFilter<'a> {
@@ -2939,6 +3091,22 @@ fn served_rows(
     ids: Option<&str>,
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<(ObjectRow, SurfaceVisibility, Option<String>)>, KernelError> {
+    Ok(served_classes(tx, requested, ids, scope)?
+        .into_iter()
+        .map(|row| {
+            let visibility = row.visibility(surface);
+            (row.object, visibility, row.scope_id)
+        })
+        .collect())
+}
+
+/// `served_rows` before a surface is applied.
+fn served_classes(
+    tx: &Transaction<'_>,
+    requested: i64,
+    ids: Option<&str>,
+    scope: Option<ScopeTermFilter<'_>>,
+) -> Result<Vec<ServedRow>, KernelError> {
     // The query text embeds only constants, so it is identical on every call.
     // A per-call `format!` would allocate a string only to hash it against the
     // same `prepare_cached` entry every time. commentlint: allow(JUDGE)
@@ -3046,49 +3214,62 @@ fn served_rows(
             },
             |row| {
                 let mut object = object_row_from(row)?;
-                let (mut visibility_row_value, mut sensitivity, interpretable) = decided_row(
+                let (mut own, own_sensitivity, interpretable) = decided_row(
                     row,
                     &OWN_DECISION_COLUMNS,
                 )?
                 .unwrap_or((VisibilityRow::AuditOnly, Sensitivity::Secret, false));
+                let mut shared = object.sensitivity;
+                // An uninterpretable or inconsistent own row forces `AuditOnly` and a `Secret` shared class: the history rows that make it so stay under any row that replaces it. commentlint: allow(JUDGE)
                 if !interpretable || row.get::<_, bool>(OWN_HISTORY_INCONSISTENT_COLUMN)? {
-                    visibility_row_value = VisibilityRow::AuditOnly;
-                    sensitivity = Sensitivity::Secret;
+                    own = VisibilityRow::AuditOnly;
+                    shared = Sensitivity::Secret;
                 }
                 // Neither scope may relax the other: a restriction on one
                 // outlives a later permissive decision on the other, so the
                 // served surface is the stricter of the two.
+                let mut lineage = None;
                 if let Some((lineage_row, lineage_sensitivity, _)) =
                     decided_row(row, &LINEAGE_DECISION_COLUMNS)?
                 {
-                    visibility_row_value =
-                        served_visibility_row(Some(visibility_row_value), Some(lineage_row));
-                    sensitivity = sensitivity.restrictive(lineage_sensitivity);
+                    lineage = Some(lineage_row);
+                    shared = shared.restrictive(lineage_sensitivity);
                 }
-                sensitivity = sensitivity.restrictive(Sensitivity::from_stored(
+                shared = shared.restrictive(Sensitivity::from_stored(
                     text_column(row, HISTORY_SENSITIVITY_COLUMN)?.unwrap_or_default(),
                 ));
                 if let Some(evidence_class) = text_column(row, EVIDENCE_SENSITIVITY_COLUMN)? {
-                    sensitivity = sensitivity.restrictive(Sensitivity::from_stored(evidence_class));
+                    shared = shared.restrictive(Sensitivity::from_stored(evidence_class));
                 }
                 // A decision or observation serves no lower than the evidence it
                 // cites reads today, however it was classified when written.
                 if let Some(cited_class) = text_column(row, CITED_EVIDENCE_SENSITIVITY_COLUMN)? {
-                    sensitivity = sensitivity.restrictive(Sensitivity::from_stored(cited_class));
+                    shared = shared.restrictive(Sensitivity::from_stored(cited_class));
                 }
                 // Nor lower than the observation that admitted it and the evidence
                 // behind that observation read today.
-                for column in TRIGGER_SENSITIVITY_COLUMNS {
+                let (own_trigger, lineage_trigger) = TRIGGER_SENSITIVITY_COLUMNS.split_at(2);
+                // The lineage trigger restricts every own row; the own trigger restricts only its own row. commentlint: allow(JUDGE)
+                for &column in lineage_trigger {
                     if let Some(trigger_class) = text_column(row, column)? {
-                        sensitivity =
-                            sensitivity.restrictive(Sensitivity::from_stored(trigger_class));
+                        shared = shared.restrictive(Sensitivity::from_stored(trigger_class));
                     }
                 }
-                object.sensitivity = object.sensitivity.restrictive(sensitivity);
-                let visibility =
-                    surface_visibility(visibility_row_value, surface, object.sensitivity);
+                let mut own_fold = own_sensitivity;
+                for &column in own_trigger {
+                    if let Some(trigger_class) = text_column(row, column)? {
+                        own_fold = own_fold.restrictive(Sensitivity::from_stored(trigger_class));
+                    }
+                }
+                object.sensitivity = shared.restrictive(own_fold);
                 let scope_id = row.get::<_, Option<String>>(SCOPE_ID_COLUMN)?;
-                Ok((object, visibility, scope_id))
+                Ok(ServedRow {
+                    object,
+                    scope_id,
+                    own,
+                    lineage,
+                    shared_sensitivity: shared,
+                })
             },
         )
         .map_err(map_sqlite)?
@@ -3456,6 +3637,179 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    fn served_row(
+        own: VisibilityRow,
+        lineage: Option<VisibilityRow>,
+        sensitivity: Sensitivity,
+    ) -> ServedRow {
+        served_row_folding(own, lineage, sensitivity, sensitivity)
+    }
+
+    /// `served` is the class the stored own row serves at; `shared` is the class every own row of the object inherits. commentlint: allow(JUDGE)
+    fn served_row_folding(
+        own: VisibilityRow,
+        lineage: Option<VisibilityRow>,
+        served: Sensitivity,
+        shared: Sensitivity,
+    ) -> ServedRow {
+        ServedRow {
+            object: ObjectRow {
+                object_id: "object".to_string(),
+                object_kind: "decision".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: "repo".to_string(),
+                source_id: "lineage".to_string(),
+                source_revision: 1,
+                created_commit_seq: 1,
+                invalidated_commit_seq: None,
+                superseded_by: None,
+                sensitivity: served,
+            },
+            scope_id: None,
+            own,
+            lineage,
+            shared_sensitivity: shared,
+        }
+    }
+
+    /// The stored own row's trigger classifies what it serves today, not a row that replaces it; the registry and lineage classes bind both. commentlint: allow(JUDGE)
+    #[test]
+    fn served_row_projects_a_replaced_own_row_without_the_stored_trigger_fold() {
+        const SURFACES: [Surface; 3] = [
+            Surface::AutoInject,
+            Surface::AutoSearch,
+            Surface::ExplicitSearch,
+        ];
+        let by_trigger = served_row_folding(
+            VisibilityRow::Automatic,
+            None,
+            Sensitivity::Secret,
+            Sensitivity::Normal,
+        );
+        assert_eq!(
+            SURFACES.map(|surface| by_trigger.visibility(surface)),
+            [SurfaceVisibility::Hidden; 3]
+        );
+        assert_eq!(
+            SURFACES.map(|surface| {
+                by_trigger.visibility_with(
+                    VisibilityRow::ExplicitLabeled,
+                    Sensitivity::Normal,
+                    surface,
+                )
+            }),
+            [
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Labeled
+            ]
+        );
+        let by_registry = served_row_folding(
+            VisibilityRow::Automatic,
+            None,
+            Sensitivity::Secret,
+            Sensitivity::Secret,
+        );
+        assert_eq!(
+            SURFACES.map(|surface| {
+                by_registry.visibility_with(
+                    VisibilityRow::ExplicitLabeled,
+                    Sensitivity::Normal,
+                    surface,
+                )
+            }),
+            [SurfaceVisibility::Hidden; 3]
+        );
+    }
+
+    /// A hypothetical own row is judged the way the stored one is: the
+    /// lineage row still wins when stricter, and the folded sensitivity only
+    /// ever tightens.
+    #[test]
+    fn served_row_projects_a_replaced_own_row_under_the_stored_lineage_and_sensitivity() {
+        const SURFACES: [Surface; 3] = [
+            Surface::AutoInject,
+            Surface::AutoSearch,
+            Surface::ExplicitSearch,
+        ];
+        let all = |row: &ServedRow, own, sensitivity| {
+            SURFACES.map(|surface| row.visibility_with(own, sensitivity, surface))
+        };
+        let automatic = served_row(VisibilityRow::Automatic, None, Sensitivity::Normal);
+        assert_eq!(
+            SURFACES.map(|surface| automatic.visibility(surface)),
+            [
+                SurfaceVisibility::Visible,
+                SurfaceVisibility::Visible,
+                SurfaceVisibility::Visible
+            ]
+        );
+        assert_eq!(
+            all(
+                &automatic,
+                VisibilityRow::ExplicitLabeled,
+                Sensitivity::Normal
+            ),
+            [
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Labeled
+            ]
+        );
+        assert_eq!(
+            all(&automatic, VisibilityRow::AuditOnly, Sensitivity::Normal),
+            [SurfaceVisibility::Hidden; 3]
+        );
+        // The stricter sensitivity supplied by the evaluation hides the automatic surfaces.
+        assert_eq!(
+            all(&automatic, VisibilityRow::Automatic, Sensitivity::Sensitive),
+            [
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Visible
+            ]
+        );
+        // A secret object stays hidden however permissive the supplied classes are.
+        let secret = served_row(VisibilityRow::Automatic, None, Sensitivity::Secret);
+        assert_eq!(
+            all(&secret, VisibilityRow::Automatic, Sensitivity::Normal),
+            [SurfaceVisibility::Hidden; 3]
+        );
+        // A labeled lineage row caps a relaxed own row at labeled; an absent lineage row caps nothing.
+        let capped = served_row(
+            VisibilityRow::ExplicitLabeled,
+            Some(VisibilityRow::ExplicitLabeled),
+            Sensitivity::Normal,
+        );
+        assert_eq!(
+            all(&capped, VisibilityRow::Automatic, Sensitivity::Normal),
+            [
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Labeled
+            ]
+        );
+        let uncapped = served_row(VisibilityRow::ExplicitLabeled, None, Sensitivity::Normal);
+        assert_eq!(
+            all(&uncapped, VisibilityRow::Automatic, Sensitivity::Normal),
+            [SurfaceVisibility::Visible; 3]
+        );
+        // An audit-only lineage row hides the object whatever its own row becomes.
+        let audited = served_row(
+            VisibilityRow::Automatic,
+            Some(VisibilityRow::AuditOnly),
+            Sensitivity::Normal,
+        );
+        assert_eq!(
+            SURFACES.map(|surface| audited.visibility(surface)),
+            [SurfaceVisibility::Hidden; 3]
+        );
+        assert_eq!(
+            all(&audited, VisibilityRow::Automatic, Sensitivity::Normal),
+            [SurfaceVisibility::Hidden; 3]
+        );
+    }
 
     #[test]
     fn vocabularies_round_trip_and_reject_unknown_tokens() {

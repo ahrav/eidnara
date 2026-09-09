@@ -1,0 +1,65 @@
+{
+  "known_as_of": 3,
+  "previews": [
+    {
+      "current": {
+        "auto_inject": "hidden",
+        "auto_search": "hidden",
+        "explicit_search": "labeled"
+      },
+      "denied": false,
+      "disposition": "stale",
+      "event": "mark_stale",
+      "object_id": "decision-object-1",
+      "outcome": "deny",
+      "previous_disposition": "active",
+      "projected": {
+        "auto_inject": "hidden",
+        "auto_search": "hidden",
+        "explicit_search": "labeled"
+      },
+      "visibility_changes": false
+    },
+    {
+      "current": {
+        "auto_inject": "visible",
+        "auto_search": "visible",
+        "explicit_search": "visible"
+      },
+      "denied": false,
+      "disposition": "stale",
+      "event": "mark_stale",
+      "object_id": "store-decision-object-1",
+      "outcome": "deny",
+      "previous_disposition": "active",
+      "projected": {
+        "auto_inject": "hidden",
+        "auto_search": "hidden",
+        "explicit_search": "labeled"
+      },
+      "visibility_changes": true
+    },
+    {
+      "current": {
+        "auto_inject": "hidden",
+        "auto_search": "hidden",
+        "explicit_search": "labeled"
+      },
+      "denied": false,
+      "disposition": "quarantined",
+      "event": "quarantine",
+      "object_id": "store-decision-object-1",
+      "outcome": "quarantine",
+      "previous_disposition": "stale",
+      "projected": {
+        "auto_inject": "hidden",
+        "auto_search": "hidden",
+        "explicit_search": "hidden"
+      },
+      "visibility_changes": true
+    }
+  ],
+  "state": {
+    "kind": "available"
+  }
+}

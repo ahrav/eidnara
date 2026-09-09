@@ -280,6 +280,9 @@ impl From<KernelError> for KernelOutcome {
             | KernelError::UnsafeDestination
             | KernelError::InvalidBackup
             | KernelError::InvalidRestore => Self::invalid(InvalidReason::Internal),
+            // Only a preview raises this, and the preview route answers it as a
+            // malformed request before the outcome mapping.
+            KernelError::PreviewAuthorityChanged => Self::invalid(InvalidReason::Internal),
         }
     }
 }
@@ -346,9 +349,11 @@ mod tests {
             E::InvalidInput => KernelOutcome::invalid(InvalidReason::InvalidInput),
             E::AdmissionPolicy => KernelOutcome::invalid(InvalidReason::AdmissionPolicy),
             E::NotFound => KernelOutcome::invalid(InvalidReason::NotFound),
-            E::InvalidCheckpoint | E::UnsafeDestination | E::InvalidBackup | E::InvalidRestore => {
-                KernelOutcome::invalid(InvalidReason::Internal)
-            }
+            E::InvalidCheckpoint
+            | E::UnsafeDestination
+            | E::InvalidBackup
+            | E::InvalidRestore
+            | E::PreviewAuthorityChanged => KernelOutcome::invalid(InvalidReason::Internal),
         }
     }
 

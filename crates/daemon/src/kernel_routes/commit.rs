@@ -9,15 +9,16 @@
 //! classes, so visibility follows the kernel's admission rules rather than
 //! anything the caller asserts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use host_runtime::RouteHandle;
 use kernel::{
     ALIGNMENT_DEPENDENCY_KIND, AdmissionEvent, AdmissionRequest, CommitIntent, CommitReceipt,
-    DecisionPayload, DecisionSpec, DomainSpec, Envelope, EventKind, KernelError, KernelStore,
-    ObjectState, ObservationDependencySpec, ObservationPayload, ObservationSpec, Sensitivity,
-    SourceClass, TaintClass, TokenCheck, TokenConflict,
+    DecisionPayload, DecisionSpec, Disposition, DomainSpec, Envelope, EventKind, KernelError,
+    KernelStore, ObjectState, ObservationDependencySpec, ObservationPayload, ObservationSpec,
+    Outcome, Preview, PriorDecision, Sensitivity, ServedRow, SourceClass, Surface,
+    SurfaceVisibility, TaintClass, TokenCheck, TokenConflict, VisibilityRow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -64,6 +65,11 @@ struct CommitRequest {
     asserted_taint_class: Option<String>,
     #[serde(default)]
     deadline_ms: Option<u64>,
+    /// Judges each disposition operation without writing: no commit-log row,
+    /// no receipt, and no token check, so the intent is parsed but never
+    /// recorded. Refused for every other operation kind.
+    #[serde(default)]
+    preview: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,6 +386,56 @@ struct DispositionResult {
     denied: bool,
 }
 
+/// One `SurfaceVisibility` per `Surface`, in `Surface::ALL` order, so
+/// serialization and `changes_to` read aligned positions of one list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SurfaceVisibilities(Vec<SurfaceVisibility>);
+
+impl SurfaceVisibilities {
+    fn of(visibility: impl Fn(Surface) -> SurfaceVisibility) -> Self {
+        Self(
+            Surface::ALL
+                .iter()
+                .map(|surface| visibility(*surface))
+                .collect(),
+        )
+    }
+
+    /// Whether a surface serving the object now would show `projected`'s
+    /// verdict instead; a hidden surface changing is not a visible change.
+    fn changes_to(&self, projected: &Self) -> bool {
+        self.0
+            .iter()
+            .zip(&projected.0)
+            .any(|(now, next)| *now != SurfaceVisibility::Hidden && now != next)
+    }
+}
+
+impl Serialize for SurfaceVisibilities {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (surface, visibility) in Surface::ALL.iter().zip(&self.0) {
+            map.serialize_entry(surface.as_str(), visibility.as_str())?;
+        }
+        map.end()
+    }
+}
+
+/// What one disposition operation would do, judged at the tip without writing.
+/// `visibility_changes` is true when a surface that serves the object now
+/// (`visible` or `labeled`) would show a different verdict afterwards; a
+/// hidden surface staying hidden, or a surface newly hiding nothing it served,
+/// changes nothing a user sees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DispositionPreview {
+    #[serde(flatten)]
+    result: DispositionResult,
+    current: SurfaceVisibilities,
+    projected: SurfaceVisibilities,
+    visibility_changes: bool,
+}
+
 impl CommitResult {
     fn normalize(&mut self) {
         self.touched.sort();
@@ -502,14 +558,15 @@ fn scoped_object_state(
     Ok(state)
 }
 
-/// Records `event` on a live decision of the bound project.
-fn record_disposition(
-    envelope: &mut Envelope<'_>,
+/// The admission request `event` makes against a live decision of the bound
+/// project, once the object and every approval it would rest on are in scope.
+fn disposition_request(
+    envelope: &Envelope<'_>,
     filter: &mut ScopeFilter,
     object_id: &str,
     event: DispositionEvent,
     approval_object_id: Option<&str>,
-) -> Result<DispositionResult, KernelError> {
+) -> Result<(PriorDecision, AdmissionRequest), KernelError> {
     let state = scoped_object_state(envelope, filter, object_id)?;
     if state.object.object_kind != "decision" || state.object.invalidated_commit_seq.is_some() {
         return Err(KernelError::NotFound);
@@ -523,7 +580,7 @@ fn record_disposition(
             scoped_object_state(envelope, filter, &member)?;
         }
     }
-    let decision = envelope.record_admission(AdmissionRequest {
+    let request = AdmissionRequest {
         candidate_id: None,
         subject_object_id: Some(object_id.to_string()),
         source_class: Some(prior.source_class),
@@ -535,19 +592,161 @@ fn record_disposition(
             evidence_id: None,
             reason: ADMISSION_REASON.to_string(),
         },
-    })?;
-    let denied = event
-        .kind()
-        .requested_disposition()
-        .is_some_and(|requested| decision.disposition != requested);
-    Ok(DispositionResult {
-        object_id: object_id.to_string(),
+    };
+    Ok((prior, request))
+}
+
+impl DispositionResult {
+    fn new(
+        object_id: &str,
+        event: DispositionEvent,
+        prior: PriorDecision,
+        outcome: Outcome,
+        disposition: Disposition,
+    ) -> Self {
+        let denied = event
+            .kind()
+            .requested_disposition()
+            .is_some_and(|requested| disposition != requested);
+        Self {
+            object_id: object_id.to_string(),
+            event,
+            outcome: outcome.as_str().to_string(),
+            previous_disposition: prior.disposition.as_str().to_string(),
+            disposition: disposition.as_str().to_string(),
+            denied,
+        }
+    }
+}
+
+/// Records `event` on a live decision of the bound project.
+fn record_disposition(
+    envelope: &mut Envelope<'_>,
+    filter: &mut ScopeFilter,
+    object_id: &str,
+    event: DispositionEvent,
+    approval_object_id: Option<&str>,
+) -> Result<DispositionResult, KernelError> {
+    let (prior, request) =
+        disposition_request(envelope, filter, object_id, event, approval_object_id)?;
+    let decision = envelope.record_admission(request)?;
+    Ok(DispositionResult::new(
+        object_id,
         event,
-        outcome: decision.outcome.as_str().to_string(),
-        previous_disposition: prior.disposition.as_str().to_string(),
-        disposition: decision.disposition.as_str().to_string(),
-        denied,
-    })
+        prior,
+        decision.outcome,
+        decision.disposition,
+    ))
+}
+
+/// Carries preview state between operations: the scope filter, the targets'
+/// stored serving rows read once for the whole request, and the own row each
+/// judged operation leaves its target with, so a later operation's `current`
+/// is what the surfaces serve after the earlier one.
+struct PreviewRun {
+    filter: ScopeFilter,
+    served: HashMap<String, ServedRow>,
+    judged: HashMap<String, (VisibilityRow, Sensitivity)>,
+}
+
+impl PreviewRun {
+    fn new(preview: &Preview<'_>, plan: &CommitPlan) -> Result<Self, KernelError> {
+        let ids: Vec<&str> = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::Disposition { object_id, .. } => Some(object_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        Ok(Self {
+            filter: ScopeFilter::new(&plan.project),
+            served: preview.served_rows_for(&ids, Some(plan.project.scope_term()))?,
+            judged: HashMap::new(),
+        })
+    }
+
+    /// Judges `event` against a live decision of the bound project without
+    /// recording it, and reports what each surface serves now and would serve.
+    fn disposition(
+        &mut self,
+        preview: &mut Preview<'_>,
+        object_id: &str,
+        event: DispositionEvent,
+        approval_object_id: Option<&str>,
+    ) -> Result<DispositionPreview, KernelError> {
+        let (prior, request) = disposition_request(
+            preview,
+            &mut self.filter,
+            object_id,
+            event,
+            approval_object_id,
+        )?;
+        let evaluation = preview.preview_admission(request)?;
+        let served = self.served.get(object_id).ok_or(KernelError::NotFound)?;
+        let current = match self.judged.get(object_id) {
+            Some(&(own, sensitivity)) => {
+                SurfaceVisibilities::of(|surface| served.visibility_with(own, sensitivity, surface))
+            }
+            None => SurfaceVisibilities::of(|surface| served.visibility(surface)),
+        };
+        let projected = SurfaceVisibilities::of(|surface| {
+            served.visibility_with(evaluation.visibility, evaluation.sensitivity, surface)
+        });
+        let visibility_changes = current.changes_to(&projected);
+        self.judged.insert(
+            object_id.to_string(),
+            (evaluation.visibility, evaluation.sensitivity),
+        );
+        Ok(DispositionPreview {
+            result: DispositionResult::new(
+                object_id,
+                event,
+                prior,
+                evaluation.outcome,
+                evaluation.disposition,
+            ),
+            current,
+            projected,
+            visibility_changes,
+        })
+    }
+}
+
+/// An identity the store already holds replays its receipt instead of being
+/// judged again, the same answer the commit gives; otherwise every operation
+/// is judged at the tip, each after the ones before it.
+enum PreviewOutcome {
+    Replay(CommitReceipt),
+    Judged(Vec<DispositionPreview>),
+}
+
+/// Every operation of a preview must be a disposition; the tokens must be
+/// absent because a preview checks none.
+fn preview(store: &KernelStore, plan: &CommitPlan) -> Result<(i64, PreviewOutcome), CommitFailure> {
+    store
+        .preview(Instant::now() + plan.deadline, |preview| {
+            if let Some(receipt) = preview.stored_receipt(plan.intent.clone())? {
+                return Ok(PreviewOutcome::Replay(receipt));
+            }
+            let mut run = PreviewRun::new(preview, plan)?;
+            plan.operations
+                .iter()
+                .map(|operation| match operation {
+                    Operation::Disposition {
+                        object_id,
+                        event,
+                        approval_object_id,
+                    } => run.disposition(preview, object_id, *event, approval_object_id.as_deref()),
+                    _ => Err(KernelError::InvalidInput),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(PreviewOutcome::Judged)
+        })
+        .map_err(|error| match error {
+            KernelError::Conflict => CommitFailure::OperationKeyReused,
+            error => CommitFailure::Kernel(error),
+        })
 }
 
 /// `refused` records why `apply` returns `KernelError::Conflict`, since the
@@ -796,6 +995,46 @@ impl Handler {
             deadline,
         };
         let store = scope.store;
+        if parsed.preview {
+            if !plan.tokens.is_empty() {
+                return crate::invalid_params_error(format!(
+                    "{OPERATION} preview checks no tokens; send none"
+                ));
+            }
+            if plan
+                .operations
+                .iter()
+                .any(|operation| !matches!(operation, Operation::Disposition { .. }))
+            {
+                return crate::invalid_params_error(format!(
+                    "{OPERATION} preview supports disposition operations only"
+                ));
+            }
+            return match blocking(move || preview(&store, &plan)).await {
+                Ok(Ok((tip, PreviewOutcome::Judged(previews)))) => kernel_response(
+                    &KernelOutcome::Available,
+                    json!({"known_as_of": tip, "previews": previews}),
+                ),
+                Ok(Ok((tip, PreviewOutcome::Replay(receipt)))) => kernel_response(
+                    &KernelOutcome::Available,
+                    json!({
+                        "known_as_of": tip,
+                        "receipt": {"commit_seq": receipt.commit_seq, "replayed": true},
+                        "previews": [],
+                    }),
+                ),
+                // A malformed combination of operations, not a kernel state: each operation previews on its own. commentlint: allow(JUDGE)
+                Ok(Err(CommitFailure::Kernel(KernelError::PreviewAuthorityChanged))) => {
+                    crate::invalid_params_error(format!(
+                        "{OPERATION} preview cannot judge an operation whose approval chain an \
+                         earlier operation in the same request changes; preview them in \
+                         separate requests"
+                    ))
+                }
+                Ok(Err(failure)) => state_only(KernelOutcome::from(failure)),
+                Err(outcome) => state_only(outcome),
+            };
+        }
         let receipt = match blocking(move || run(&store, plan)).await {
             Ok(Ok(receipt)) => receipt,
             Ok(Err(failure)) => return state_only(KernelOutcome::from(failure)),
