@@ -18,6 +18,25 @@ export const BUNDLE_EXTERNALS = [
 export const DATABASE_BINDING =
     /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|(?:^|\/)shared\/sqlite(?:\.ts)?$/;
 
+/** Every executable extension the bundler accepts; the scans must read all of them. */
+export const CODE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
+
+/**
+ * First-party bundle inputs that are code go to the scans; JSON is data. Anything else is an
+ * extension no scan understands, so it is an error rather than a silent skip.
+ */
+export function firstPartyCodeInputs(graph: Pick<ModuleGraph, "inputs">): string[] {
+    const code: string[] = [];
+    for (const input of graph.inputs) {
+        if (input.includes("/node_modules/")) continue;
+        if (CODE_FILE.test(input)) code.push(input);
+        else if (!/\.json$/.test(input)) {
+            throw new Error(`bundle input ${input} has an extension the source scans do not read`);
+        }
+    }
+    return code;
+}
+
 /** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches. */
 export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/;
 
@@ -255,6 +274,18 @@ export interface DatabaseUsesOptions {
     allConstructions?: boolean;
 }
 
+function isAmbient(node: ts.Node): boolean {
+    for (let current: ts.Node | undefined = node; current; current = current.parent) {
+        if (
+            ts.canHaveModifiers(current) &&
+            ts.getModifiers(current)?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /** An alias such as `const DB = Database` evades `new Database(` text matching; the syntax tree reports it as an escape. */
 export function databaseUses(
     source: string,
@@ -329,10 +360,13 @@ export function databaseUses(
         }
         if (ts.isIdentifier(node) && /Database/.test(node.text)) {
             const parent = node.parent;
-            // `isPartOfTypeNode` accepts `implements` and rejects `extends`; declaration names and
-            // `typeof` operands are type-only positions it does not classify.
+            // `isPartOfTypeNode` accepts `implements` and rejects `extends`; declaration names,
+            // `typeof` operands, and ambient declarations are type-only positions it does not
+            // classify. An ambient declaration emits no value, in a `.d.ts` file or under `declare`.
             const isTypeUse =
                 ts.isPartOfTypeNode(node) ||
+                file.isDeclarationFile ||
+                isAmbient(node) ||
                 ts.isTypeQueryNode(parent) ||
                 ts.isQualifiedName(parent) ||
                 ((ts.isTypeAliasDeclaration(parent) ||

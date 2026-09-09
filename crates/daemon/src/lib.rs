@@ -28400,11 +28400,25 @@ mod tests {
     }
 
     /// The literals a macro invocation carries; `concat!` also contributes the string it
-    /// evaluates to, since fragments such as `"mural"` and `".render"` name nothing alone.
+    /// evaluates to, since fragments such as `"mural"` and `".render"` name nothing alone. A
+    /// `concat!` whose arguments are not all literals cannot be evaluated here, so it fails the
+    /// audit rather than yielding a spelling the compiler would never produce.
     fn macro_literals(mac: &syn::Macro) -> Vec<String> {
+        use quote::ToTokens;
+
         let mut literals = Vec::new();
         macro_string_literals(mac.tokens.clone(), &mut literals);
         if mac.path.is_ident("concat") {
+            let evaluable = mac.tokens.clone().into_iter().all(|tree| match tree {
+                proc_macro2::TokenTree::Literal(_) => true,
+                proc_macro2::TokenTree::Punct(punct) => punct.as_char() == ',',
+                _ => false,
+            });
+            assert!(
+                evaluable,
+                "`{}` cannot be audited: concat! arguments must be literals",
+                mac.to_token_stream()
+            );
             literals.push(literals.concat());
         }
         literals
@@ -28885,6 +28899,20 @@ mod tests {
         struct ProductionLiterals {
             literals: Vec<String>,
             compared: Vec<String>,
+            /// `Deserialize` and every name a `use ... as` rename gives it in the file.
+            deserialize_names: Vec<String>,
+        }
+
+        /// Renames of `Deserialize` anywhere in a file, so `use serde::Deserialize as Decode;`
+        /// still marks `#[derive(Decode)]` enums as deserializable.
+        struct DeserializeAliases(Vec<String>);
+
+        impl<'ast> Visit<'ast> for DeserializeAliases {
+            fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+                if rename.ident == "Deserialize" {
+                    self.0.push(rename.rename.to_string());
+                }
+            }
         }
 
         impl<'ast> Visit<'ast> for ProductionLiterals {
@@ -28972,13 +29000,20 @@ mod tests {
             /// `rename_all` form; both are recorded, since every rename rule derives from the
             /// same word split and the identifier itself is the default.
             fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+                type Derives = syn::punctuated::Punctuated<syn::Path, syn::Token![,]>;
                 let deserializable = item.attrs.iter().any(|attr| {
                     attr.path().is_ident("derive")
                         && attr
-                            .meta
-                            .to_token_stream()
-                            .to_string()
-                            .contains("Deserialize")
+                            .parse_args_with(Derives::parse_terminated)
+                            .is_ok_and(|paths| {
+                                paths.iter().any(|path| {
+                                    path.segments.last().is_some_and(|segment| {
+                                        self.deserialize_names
+                                            .iter()
+                                            .any(|name| segment.ident == name)
+                                    })
+                                })
+                            })
                 });
                 if deserializable {
                     for variant in &item.variants {
@@ -29094,9 +29129,12 @@ mod tests {
         );
         let mut offending = Vec::new();
         for (path, file) in tree.production {
+            let mut aliases = DeserializeAliases(vec!["Deserialize".to_string()]);
+            aliases.visit_file(&file);
             let mut scan = ProductionLiterals {
                 literals: Vec::new(),
                 compared: Vec::new(),
+                deserialize_names: aliases.0,
             };
             scan.visit_file(&file);
             let relative = path

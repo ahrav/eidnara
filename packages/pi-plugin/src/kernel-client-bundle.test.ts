@@ -6,6 +6,7 @@ import {
     type DatabaseUses,
     databaseBinders,
     databaseUses,
+    firstPartyCodeInputs,
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
@@ -112,8 +113,7 @@ describe("Pi kernel-client bundle reachability", () => {
             for (const binder of databaseBinders(graph)) {
                 expect(HARNESS_DATABASE_READERS).toContain(resolve(PACKAGE_ROOT, binder));
             }
-            for (const input of graph.inputs) {
-                if (input.includes("/node_modules/") || !/\.(?:tsx?|mjs|js)$/.test(input)) continue;
+            for (const input of firstPartyCodeInputs(graph)) {
                 sources.add(resolve(PACKAGE_ROOT, input));
             }
         }

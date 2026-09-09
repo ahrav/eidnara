@@ -3,9 +3,11 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import {
+    CODE_FILE,
     type DatabaseUses,
     databaseBinders,
     databaseUses,
+    firstPartyCodeInputs,
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
@@ -26,7 +28,7 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
         const full = join(dir, entry.name);
         if (GENERATED.has(full)) continue;
         if (entry.isDirectory()) sourceFiles(full, acc);
-        else if (/\.(?:tsx?|mjs)$/.test(entry.name)) acc.push(full);
+        else if (CODE_FILE.test(entry.name)) acc.push(full);
     }
     return acc;
 }
@@ -42,7 +44,7 @@ const ROOTS = [ENTRY, TUI_ENTRY, ...TESTS];
 
 /** Not-ported subsystems; a path under any of them reachable from a bundle root is residue. The bundler names inputs relative to `SRC`, so a subsystem directly under `src` has no leading slash and the prefix must also accept the start of the path; the file alternative accepts every extension `sourceFiles` scans. commentlint: allow(JUDGE) */
 const NOT_PORTED =
-    /(^|\/)(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.(?:tsx?|mjs)$)/;
+    /(^|\/)(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.(?:[cm]?[jt]s|[jt]sx)$)/;
 
 /**
  * Modules no bundle root reaches through a runtime import. Type-only modules
@@ -115,10 +117,7 @@ function productionReached(): string[] {
     for (const root of PRODUCTION_ROOTS) {
         const graph = graphs[root];
         if (!graph) throw new Error(`no graph for production root ${root}`);
-        for (const input of graph.inputs) {
-            if (input.includes("/node_modules/") || !/\.(?:tsx?|mjs|js)$/.test(input)) continue;
-            reached.add(resolve(SRC, input));
-        }
+        for (const input of firstPartyCodeInputs(graph)) reached.add(resolve(SRC, input));
     }
     const testNamed = [...reached].filter((file) => /\.test\.tsx?$/.test(file));
     expect(testNamed).toEqual([]);
@@ -137,6 +136,8 @@ describe("module graph over the landed tree", () => {
         expect(NOT_PORTED.test("memory.tsx")).toBe(true);
         expect(NOT_PORTED.test("memory.mjs")).toBe(true);
         expect(NOT_PORTED.test("tui/dreamer.mjs")).toBe(true);
+        expect(NOT_PORTED.test("shared/user-memory.cjs")).toBe(true);
+        expect(NOT_PORTED.test("features/memory/panel.jsx")).toBe(true);
         expect(NOT_PORTED.test("features/memory/foo.ts")).toBe(true);
         expect(NOT_PORTED.test("shared/user-memory.ts")).toBe(true);
         expect(NOT_PORTED.test("shared/memory-guard.ts")).toBe(false);
@@ -370,6 +371,32 @@ describe("databaseUses", () => {
         expect(databaseUses("const probe = new DatabaseSync(':memory:');").opens).toEqual([
             "const probe = new DatabaseSync(':memory:');",
         ]);
+    });
+
+    test("reports no escape for ambient declarations, which emit no value", () => {
+        expect(
+            databaseUses(
+                [
+                    'declare module "sqlite-shim" {',
+                    "    class Database {}",
+                    "    const DatabaseSync: typeof Database;",
+                    "    export { Database, DatabaseSync };",
+                    "}",
+                    "",
+                ].join("\n"),
+                "shim.d.ts",
+            ),
+        ).toEqual({ opens: [], escapes: [] });
+        expect(
+            databaseUses(
+                [
+                    "declare class Database {}",
+                    "declare const DatabaseImpl: typeof Database;",
+                    "const DB = Database;",
+                    "",
+                ].join("\n"),
+            ).escapes,
+        ).toEqual(["const DB = Database;"]);
     });
 
     test("reports a dynamic load with a computed specifier as an escape", () => {
