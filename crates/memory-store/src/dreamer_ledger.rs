@@ -398,6 +398,32 @@ impl MemoryStore {
         )
     }
 
+    /// Attempt rows precede every model dispatch, so their absence proves the
+    /// predecessor never called a model. The absence check and the fence move
+    /// are one statement, which keeps a concurrent first attempt from landing
+    /// between them. commentlint: allow(JUDGE)
+    pub fn take_over_undispatched_dreamer_receipt(
+        &self,
+        key: DreamerReceiptKey<'_>,
+        predecessor_generation: u64,
+        now_ms: i64,
+    ) -> Result<DreamerTransition, MemoryStoreError> {
+        let predecessor = generation_param(predecessor_generation)?;
+        let successor = generation_param(predecessor_generation.saturating_add(1))?;
+        self.guarded_transition(
+            key,
+            |_| Ok(()),
+            "UPDATE dreamer_receipts SET generation = ?4, updated_at_ms = ?5
+              WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
+                AND state = 'in_progress' AND generation = ?6
+                AND NOT EXISTS (
+                    SELECT 1 FROM dreamer_attempts a
+                     WHERE a.project = ?1 AND a.producer = ?2 AND a.operation_key = ?3
+                )",
+            params![successor, now_ms, predecessor],
+        )
+    }
+
     /// Records the dispatch marker for one model attempt ahead of the model
     /// call. The insert matches only an `IN_PROGRESS` receipt at `generation`;
     /// a fenced predecessor adds no attempt. A second call for the same

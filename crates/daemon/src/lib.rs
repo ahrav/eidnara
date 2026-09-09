@@ -9560,6 +9560,8 @@ impl Handler {
             "items": expected_ids,
             "model_chain": model_chain,
             "timeout_ms": timeout_ms,
+            "await_timeout_ms": u64::try_from(CLASSIFY_AWAIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+            "recovery_timeout_ms": u64::try_from(CLASSIFY_RECOVERY_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
             "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
             // Canonical JSON refuses fractional floats; the display form is stable.
             "temperature": CLASSIFY_TEMPERATURE.to_string(),
@@ -9587,15 +9589,25 @@ impl Handler {
             Ok(DreamerBeginOutcome::Complete { result_json, .. }) => {
                 return replay_dream_task_response(&result_json);
             }
-            // A dispatch marker from an earlier run exists and its outcome is not
-            // known here; the request fails closed rather than dispatching again.
+            // An in-progress receipt with no attempt row never reached a model;
+            // any attempt row means a dispatch may have happened. commentlint: allow(JUDGE)
             Ok(DreamerBeginOutcome::InProgress { generation }) => {
-                return PreparedOutcome::Error {
-                    code: "dreamer_outcome_unknown".to_string(),
-                    message: format!(
-                        "this command is recorded in progress at generation {generation}; its outcome is unknown and it is not dispatched again"
-                    ),
-                };
+                match store.take_over_undispatched_dreamer_receipt(
+                    receipt_key,
+                    generation,
+                    now_ms(),
+                ) {
+                    Ok(DreamerTransition::Applied) => generation.saturating_add(1),
+                    Ok(DreamerTransition::Fenced) => {
+                        return PreparedOutcome::Error {
+                            code: "dreamer_outcome_unknown".to_string(),
+                            message: format!(
+                                "this command is recorded in progress at generation {generation}; its outcome is unknown and it is not dispatched again"
+                            ),
+                        };
+                    }
+                    Err(error) => return dreamer_ledger_failed(error),
+                }
             }
             Ok(DreamerBeginOutcome::DigestConflict { .. }) => {
                 return PreparedOutcome::Error {
@@ -9678,6 +9690,22 @@ impl Handler {
                 now_ms(),
             )) {
                 return stop;
+            }
+            // The start future has not been polled. A deadline during the ledger
+            // write leaves the attempt unsent. commentlint: allow(JUDGE)
+            if Instant::now() >= deadline {
+                if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
+                    receipt_key,
+                    generation,
+                    attempt_index,
+                    DreamerTerminalKind::NotSent,
+                    now_ms(),
+                )) {
+                    return stop;
+                }
+                last_error =
+                    "classify time budget exhausted before starting a producer run".to_string();
+                break;
             }
             attempts += 1;
             let _dreamer_run_guard = self.register_dreamer_run(&child_session);
@@ -27039,6 +27067,64 @@ mod tests {
         let retried = harness.classify(payload, "cross-incarnation").await;
         assert_eq!(error_code_of(&retried), "dreamer_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A pre-dispatch ledger failure leaves an in-progress receipt without an
+    /// attempt row; a retry adopts it under the next generation and runs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_recovers_a_receipt_stranded_before_any_dispatch() {
+        use memory_store::dreamer_ledger::DreamerReceiptState;
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: claim_manifest(&claims),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer);
+        harness
+            .store
+            .execute_tag_sql_for_test(
+                "CREATE TRIGGER dreamer_attempt_insert_fault
+                 BEFORE INSERT ON dreamer_attempts
+                 BEGIN SELECT RAISE(ABORT, 'injected attempt insert fault'); END;",
+            )
+            .unwrap();
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let stranded = harness.classify(payload.clone(), "stranded").await;
+        assert_eq!(error_code_of(&stranded), "dreamer_ledger_failed");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            harness.receipt("stranded").state,
+            DreamerReceiptState::InProgress { generation: 1 }
+        );
+
+        harness
+            .store
+            .execute_tag_sql_for_test("DROP TRIGGER dreamer_attempt_insert_fault;")
+            .unwrap();
+        let recovered = response_of(harness.classify(payload.clone(), "stranded").await);
+        assert_eq!(recovered["ok"], json!(true));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        let receipt = harness.receipt("stranded");
+        assert!(matches!(
+            receipt.state,
+            DreamerReceiptState::Complete { generation: 2, .. }
+        ));
+        let operation_key = dreamer_operation_key("ses", "stranded");
+        let attempts = harness
+            .store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].generation, 2);
     }
 
     /// A run that learns it was fenced while awaiting the model must not delete

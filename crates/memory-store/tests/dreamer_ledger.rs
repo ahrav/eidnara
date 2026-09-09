@@ -276,6 +276,58 @@ fn a_flagged_command_id_is_refused_only_when_no_receipt_exists_for_it() {
 }
 
 #[test]
+fn an_undispatched_receipt_can_be_taken_over_but_one_with_an_attempt_cannot() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    store
+        .begin_dreamer_receipt(key(), &binding("prompt"), 1)
+        .unwrap();
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 1, 2)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    assert_eq!(
+        store.lookup_dreamer_receipt(key()).unwrap().unwrap().state,
+        DreamerReceiptState::InProgress { generation: 2 }
+    );
+    // Only the current generation can create an attempt.
+    assert_eq!(
+        store
+            .begin_dreamer_attempt(key(), 1, &attempt(0, "prov/model-a"), 3)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(
+        store
+            .begin_dreamer_attempt(key(), 2, &attempt(0, "prov/model-a"), 4)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    // An attempt row, terminal or not, closes the undispatched path.
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 2, 5)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    store
+        .finish_dreamer_attempt(key(), 2, 0, DreamerTerminalKind::NotSent, 6)
+        .unwrap();
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 2, 7)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(
+        store.lookup_dreamer_receipt(key()).unwrap().unwrap().state,
+        DreamerReceiptState::InProgress { generation: 2 }
+    );
+}
+
+#[test]
 fn a_different_incarnation_or_authority_generation_is_a_binding_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
