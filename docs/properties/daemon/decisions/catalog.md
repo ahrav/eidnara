@@ -1251,7 +1251,7 @@ unconditional. This is the surviving half of Part 1's
 decoded field or is retained verbatim, and here it is the second case for four
 named types.
 Fault/timing angle: none at decode. The interaction to check is with
-`remove_unretained_native_parts` (`codec/sidecar.rs:118-128`), which removes a
+`remove_unretained_native_parts` (`codec/sidecar.rs:135-145`), which removes a
 native index only when it is in `decoded_native_indices` and not in
 `retained_native_indices`. The four types never enter `decoded_native_indices`,
 so they are structurally immune to deletion compaction. That immunity is
@@ -1313,7 +1313,7 @@ Confidence: high - [evidence](evidence/codec-b-provenance-recovery-on-decode-is-
 `codec/opencode.rs:1277-1279` read at `HEAD`:
 `!parts.is_empty() && parts.iter().all(is_synthetic_part)`, so an empty-parts
 message and a mixed-parts message both classify as authentic.
-`is_synthetic_part` at `codec/sidecar.rs:331-339` accepts `synthetic` or
+`is_synthetic_part` at `codec/sidecar.rs:454-462` accepts `synthetic` or
 `syntheticTodoMarker`. Encoder side: `codec/opencode.rs:991-995` stamps
 `synthetic: true` on every part only when
 `msg.meta.synthetic && msg.role == "user"`; `render_synthetic_todo_pair` at
@@ -1331,7 +1331,7 @@ which asserts `message["meta"]["synthetic"] == true` on the native fixtures.
 Neither covers a mixed message. Status `unaudited`.
 Impact: the module's own writes can come back classified as user-authored.
 `meta.synthetic` gates `meta_for_ck`'s positional fallback
-(`codec/sidecar.rs:324-328`), so a misclassified module-authored message
+(`codec/sidecar.rs:446-450`), so a misclassified module-authored message
 becomes eligible to inherit a native envelope by position, which is the failure
 `codec/mod.rs:128-175` exists to prevent for the other direction. Pi's
 hardcoded `false` means the Pi leg has no provenance at all in either
@@ -1355,7 +1355,8 @@ composition property here. The absolute ordinal every later decision indexes on 
 harness-supplied and never validated. And the block-identity stamp is
 caller-writable while the fingerprint is computed over the typed projection only,
 so it is a change detector rather than an identity. All three live in or depend on
-`codec/sidecar.rs`, the file with no tests.
+`codec/sidecar.rs`, whose only direct tests cover greedy and linear alignment
+(`codec/sidecar.rs:487-557`) and not the stamp or fingerprint contracts.
 
 ### codec-b-decoder-output-can-violate-the-projector-precondition
 
@@ -1495,9 +1496,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - `codec/sidecar.rs` has zero `#[test]` functions.
-Everything in it is covered only incidentally through the two harness codecs'
-goldens, which supply no duplicate-content blocks and no caller-supplied stamp.
+Exercised: not yet - `codec/sidecar.rs` has three direct `#[test]` functions
+(`codec/sidecar.rs:487-557`), all of which exercise `match_block_metas` and
+`greedy_block_metas` pairing. None constructs a caller-supplied stamp or two
+byte-identical parts, so the stamp and collision halves are still covered only
+incidentally through the two harness codecs' goldens.
 Guarantee: The block-identity stamp that the encoder trusts to align a mutated
 block with its native part is authentic, and the fingerprint stored beside it
 distinguishes blocks that differ.
@@ -1518,8 +1521,8 @@ carrying `provider_extras["_eidnara_codec"]` with plausible `blockIndex`,
 `Vec<IngressMessage>` (`transform.rs:781`) and `WireBlock`'s `Deserialize`
 (`memory-store/src/lib.rs:207-221`) reads `provider_extras` verbatim.
 Confidence: high - [evidence](evidence/codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity.md).
-`codec/sidecar.rs:131-134` gives the namespace and three keys as plain string
-constants. `stamped_block_identity` at `:177-183` reads them back with no
+`codec/sidecar.rs:148-151` gives the namespace and three keys as plain string
+constants. `stamped_block_identity` at `:196-203` reads them back with no
 provenance check; `alignment_candidate` at `:204-211` returns early on a stamp
 match, never consulting `kind_matches`, so a forged stamp outranks the kind
 check. `decoded_block_fingerprint` at `:151-156` calls
@@ -1928,7 +1931,8 @@ claim. Existing checks and their execution are recorded in
   [codec-b-absolute-ordinal-is-harness-supplied-and-never-validated](#codec-b-absolute-ordinal-is-harness-supplied-and-never-validated),
   [codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity](#codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity).
   All three are properties of the seam rather than of either side, and all three
-  route through `codec/sidecar.rs`, which has no tests. Hypothesis: the projector
+  route through `codec/sidecar.rs`, whose three direct tests cover alignment
+  pairing only (`codec/sidecar.rs:487-557`). Hypothesis: the projector
   precondition record *hypothetically dominates* the ordinal record, because a
   composition check that decodes then projects and asserts the projector accepted
   would also catch an ordinal the projector rejects; it does not dominate the
