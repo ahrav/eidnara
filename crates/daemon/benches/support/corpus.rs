@@ -102,7 +102,7 @@ const IDENTIFIERS: &[&str] = &[
     "coverage_ordinal",
     "frozen_unit",
     "tail_hygiene",
-    "claim_mirror",
+    "commit_receipt",
     "render_config",
     "drain_latch",
 ];

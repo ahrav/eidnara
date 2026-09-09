@@ -13,7 +13,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod claim_mirror;
 pub mod dreamer_ledger;
 pub(crate) mod task_lease;
 
@@ -56,7 +55,6 @@ pub use {
     cache_stability::CoreState,
     context_core::claim_operation::{
         ClaimCommandIdentity, ClaimIntentAckKind, ClaimIntentBinding, ClaimIntentState,
-        SnapshotVector,
     },
     context_core::redaction::RedactionErrorKind,
     storage::{StorageDescriptor, StoreError},
@@ -2131,27 +2129,23 @@ impl PreparedWrite {
     ) -> Result<String, MemoryStoreError> {
         let mut detections = Vec::new();
         let prepared = prepare_json_content_collecting(input, policy, &mut detections)?;
-        self.record_observed_scan(field_id, detections, "substitute");
+        self.record_observed_scan(field_id, detections);
         Ok(prepared)
     }
 
     /// Records a scan from detections an earlier preparation already produced.
     ///
     /// Lets a caller that prepared its text through a JSON-aware path attach the audit
-    /// receipt without running the scanner over the same bytes a second time.
-    fn record_observed_scan(
-        &mut self,
-        field_id: &'static str,
-        detections: Vec<Detection>,
-        detection_action: &'static str,
-    ) {
+    /// receipt without running the scanner over the same bytes a second time. Every
+    /// such preparation substitutes, so the recorded action is `substitute`.
+    fn record_observed_scan(&mut self, field_id: &'static str, detections: Vec<Detection>) {
         self.scans.push(PreparedFieldScan {
             field_id,
             redaction: Redaction {
                 text: String::new(),
                 detections,
             },
-            detection_action,
+            detection_action: "substitute",
             owners: self.domain_owners.clone(),
         });
     }
@@ -2818,7 +2812,6 @@ pub enum DurableWriteFamily {
     AuthoritySeedRows,
     ProjectMuralArtifacts,
     ClaimIntents,
-    ClaimMirror,
     FacadeMutationLedger,
     LineageCopies,
     KernelCommitEnvelope,
@@ -2849,7 +2842,6 @@ impl DurableWriteFamily {
         Self::AuthoritySeedRows,
         Self::ProjectMuralArtifacts,
         Self::ClaimIntents,
-        Self::ClaimMirror,
         Self::FacadeMutationLedger,
         Self::LineageCopies,
         Self::KernelCommitEnvelope,
@@ -2878,7 +2870,6 @@ impl DurableWriteFamily {
             Self::AuthoritySeedRows => "authority_seed_rows",
             Self::ProjectMuralArtifacts => "project_mural_artifacts",
             Self::ClaimIntents => "claim_intents",
-            Self::ClaimMirror => "claim_mirror",
             Self::FacadeMutationLedger => "facade_mutation",
             Self::LineageCopies => "lineage_copies",
             Self::KernelCommitEnvelope => "kernel_commit_envelope",
@@ -2999,12 +2990,6 @@ pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
         policy: DurableFieldPolicy::Reject,
         preparation: "integrity rejection and canonical integrity JSON",
         test: "production_redaction::fresh_claim_intent_identities_and_integrity_payloads_reject",
-    },
-    DurableWriteRegistration {
-        family: DurableWriteFamily::ClaimMirror,
-        policy: DurableFieldPolicy::Reject,
-        preparation: "exact receipt replay then whole-value integrity scan",
-        test: "production_redaction::integrity_bound_claim_content_rejects_without_identity_collapse",
     },
     DurableWriteRegistration {
         family: DurableWriteFamily::FacadeMutationLedger,
@@ -3255,7 +3240,6 @@ fn prepare_json_content_collecting(
         }
         // Protected-key containers with nested text can expose it under unprotected member keys.
         // `{"credential":{"value":".."}}` reads its text under `value`.
-        // `claim_mirror::prepare_integrity_json` refuses the same shape.
         if key.is_some_and(|key| protected_json_key_label(key).is_some())
             && (value.is_object() || value.is_array())
             && contains_nonempty_text(value)
@@ -6002,11 +5986,10 @@ impl MemoryStore {
                 // The receipt reuses the detections from the preparation above; scanning
                 // `response_text` again would run the scanner over the whole payload twice on
                 // every command.
-                coordinated.prepared.borrow_mut().record_observed_scan(
-                    "response_json",
-                    response_detections,
-                    "substitute",
-                );
+                coordinated
+                    .prepared
+                    .borrow_mut()
+                    .record_observed_scan("response_json", response_detections);
                 if let Some(command_id) = command_id {
                     let created_at_ms = current_time_ms();
                     tx.execute(
@@ -13915,7 +13898,7 @@ impl MemoryStore {
         }
         if domain != "notes" {
             return Err(MemoryStoreError::Serde(
-                "project claims use claim.mirror.replace, not authority row seeds".to_string(),
+                "authority row seeds exist for the notes domain only".to_string(),
             ));
         }
         self.seed_note_snapshots(context_store_uuid, project, rows)
@@ -14144,7 +14127,7 @@ impl MemoryStore {
     ) -> Result<ChangefeedPage, MemoryStoreError> {
         if domain != "notes" {
             return Err(MemoryStoreError::Serde(
-                "project claims use the committed claim mirror protocol".to_string(),
+                "the changefeed exists for the notes domain only".to_string(),
             ));
         }
         let limit = limit.clamp(1, 1000);

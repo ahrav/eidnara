@@ -9,6 +9,17 @@ real termination; rare implementation branches need deterministic injection to b
 reachable at all; and coverage checks assert independent preconditions, never the
 violation.
 
+Reconciliation at this repository's HEAD. The claim mirror is gone from
+`crates/memory-store`, and the nine Group C records are `Status: invalidated` in
+the catalog. Every fault row, marker, and construction note below that concerns
+the mirror (`mirror_*` markers, receipt replay and conflict, the effect chain,
+generation advance, the reset cycle and rebuild grant, the accepting gate, and
+mirror staleness on the memory-tool read path) describes the source tree; at
+HEAD those faults have no subject and no harness is owed for them. Staleness on
+the canonical read path is owned by
+`canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
+transform catalog and its fault map.
+
 One framing point specific to this part. The dominant obstacle here is not a
 missing fault. It is that **no CI job executes any test in this scope**, so the
 availability column below describes what a developer can produce locally, and
