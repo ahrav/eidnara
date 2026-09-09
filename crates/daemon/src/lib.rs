@@ -28994,7 +28994,11 @@ mod tests {
                 }
                 proc_macro2::TokenTree::Ident(_) => previous_ident = true,
                 proc_macro2::TokenTree::Punct(punct) => {
-                    if previous_ident && punct.as_char() == '!' {
+                    // A macro bang is a lone `!`; a joint `!` starts `!=`.
+                    if previous_ident
+                        && punct.as_char() == '!'
+                        && punct.spacing() == proc_macro2::Spacing::Alone
+                    {
                         return true;
                     }
                     previous_ident = false;
@@ -29306,6 +29310,16 @@ mod tests {
                 "{spelling}"
             );
         }
+        assert!(nests_a_macro(
+            syn::parse_str::<syn::Macro>(r#"format!("{}", env!("X"))"#)
+                .expect("macro")
+                .tokens
+        ));
+        assert!(!nests_a_macro(
+            syn::parse_str::<syn::Macro>(r#"format!("{}", a != b)"#)
+                .expect("macro")
+                .tokens
+        ));
         assert_eq!(camel_words("MuralRender"), "mural_render");
         assert_eq!(serde_rename("snake_case", "MuralRender"), "mural_render");
         assert_eq!(serde_rename("kebab-case", "MuralRender"), "mural-render");
