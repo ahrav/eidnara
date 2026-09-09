@@ -2,145 +2,105 @@
 
 ## Discovery trigger
 
-Task 7 asks to flag contract-versus-code disagreements with both sides cited.
-`config.rs`'s own header states a per-leaf trust policy as an enumerated list,
-which makes it checkable: read the list, then read the project-tier block, and
-compare. The lists differ.
+The discovery compared a prose allow-list with a separate project-tier read
+block. The active property instead checks the explicit permissions in the
+[catalog record](../catalog.md#dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list)
+against the classified merge. An implementation-derived allow-list cannot serve
+as the oracle for an accidental policy change.
+
+Source snapshot: `eccca05ec111fdf39df3795f08b7ca31ee713d96`, verified
+2026-09-09. Rust references below name `crates/daemon/src/config.rs`.
+TypeScript references name files under `packages/opencode-plugin/src/config/`.
+The [PR's decisions](https://github.com/ahrav/eidnara/pull/330) establish the
+intended tier policy; source and tests establish implementation evidence.
+The absent source-catalog `CONFIGURATION.md` is not current evidence.
 
 ## Evidence trail
 
-The stated policy. `config.rs:1-9`:
+`ConfigKey::pointer()` (`config.rs:588-618`) names 25 consumed keys.
+`tier_class()` (`:657-693`) assigns 14 to `UserOnly`, nine to
+`ProjectAllowed`, and two to `ProjectRaiseOnly`. These counts describe the
+implementation, not the expected policy used by the check.
 
-```
-//! Thin daemon JSONC config reader for autonomous historian firing.
-//!
-//! This intentionally reads user and project tiers directly instead of depending on a
-//! daemon config plane. Per-leaf trust policy is enforced during the read: model choice
-//! is user-tier only because it affects spend; project config may only raise the execute
-//! threshold (fire less often), and may override trusted memory, auto-search, caveman, promotion,
-//! and privacy settings. User-profile and historian budgets remain user-tier only. The Rust module
-//! intentionally keeps stricter model-selection policy than the current TypeScript implementation
-//! until both implementations are deliberately aligned.
-```
+`merge_tiers_with_warnings` (`:710-755`) applies the user tier first, then
+examines each supplied project key. A user-only key warns without calling
+`apply_key`. An allowed key uses the same parser as the user tier. A raise-only
+key is applied to a candidate and accepted only when its tightening predicate
+holds. A changed but rejected candidate warns; an unchanged candidate does not.
+The effective threshold is clamped to `[1, 90]` after the merge.
 
-The enumerated project-tier permissions are: raise the execute threshold, and
-override memory, auto-search, caveman, promotion, and privacy.
+The predicates at `:682-692` require a higher threshold or a gate transition
+from open to closed. The schedule is user-only (`:667`), so a project cannot
+reopen the gate through `dreamer.tasks.review-user-memories.schedule`.
+`dreamer.inject_docs` is also user-only (`:669`), in agreement with the
+catalog's configuration-table row. `smart_drops` and `temporal_awareness` are
+project-allowed (`:680-681`); a project may override either boolean direction,
+not only its default value.
 
-The actual project-tier block, `config.rs:514-566`, leaf by leaf:
+The nine privileged keys are named at `:627-637`. The `const` assertion at
+`:696-708` forbids `ProjectAllowed` for a privileged key. It does not enforce
+the complete policy: changing a user-only key to raise-only, or changing an
+unprivileged key's class, needs an independent expected result to detect it.
 
-| Leaf | Line | In the header's list? |
-| --- | --- | --- |
-| `execute_threshold_percentage` (raise only) | `:515-519` | Yes |
-| `compaction.enabled` | `:520` | Warns and ignores. Consistent |
-| `memory.enabled` | `:521-523` | Yes ("memory") |
-| `memory.auto_search.*` | `:524` | Yes ("auto-search") |
-| `caveman_text_compression.*` | `:525` | Yes ("caveman") |
-| `memory.injection_budget_tokens` | `:526-528` | Arguably, under "memory" |
-| `memory.auto_promote` | `:529-534` | Yes ("promotion") |
-| privacy gate | `:535-537` | Yes ("privacy") |
-| `memory.budget_tokens` | `:538` | Warns and ignores. Consistent |
-| `memory.user_profile_budget_tokens` | `:539` | Warns and ignores. Consistent |
-| `historian.context_limit_tokens` | `:540` | Warns and ignores. Consistent |
-| **`smart_drops`** | **`:541-543`** | **No** |
-| **`dreamer.inject_docs`** | **`:544-549`** | **No** |
-| **`temporal_awareness`** | **`:550-555`** | **No** |
-| `prompt_surface.guidance_override_text` | `:556-560` | Warns and ignores. Consistent |
-| `prompt_surface.guidance_override_path` | `:561-565` | Warns and ignores. Consistent |
-
-Three leaves are applied from the project tier and named nowhere in the policy,
-and a fourth (`memory.injection_budget_tokens`) is only arguably covered by the
-word "memory" while being unbounded upward (see
-`dec-a-memory-injection-budget-documented-range-has-no-implementing-code`).
-
-Direction matters. Of the three unlisted leaves, two default to `true` and can only
-be turned off by a project, which is a de-escalation:
-
-- `inject_docs` defaults `true` (`config.rs:132`), documented `true`
-  (`CONFIGURATION.md:501` (source-catalog path, not present at HEAD)).
-- `temporal_awareness` defaults `true` (`config.rs:133`), documented `true`
-  (`CONFIGURATION.md:650` (source-catalog path, not present at HEAD)).
-
-One defaults `false` and can be turned **on** by a project:
-
-- `smart_drops` defaults `false` (`config.rs:135`), documented `false`
-  (`CONFIGURATION.md:752` (source-catalog path, not present at HEAD)).
-
-And the documentation is explicit that the off default is a safety posture.
-`CONFIGURATION.md:767` (source-catalog path, not present at HEAD):
-
-> **When to enable.** Turn it on if you run very long, edit-heavy sessions and
-> want to reclaim more context without losing the agent's record of what it did.
-> The default stays off while cache stability is being validated in the wild.
-> Requires a restart to take effect.
-
-What `smart_drops` gates. `config.rs:135` feeds `DaemonConfig.smart_drops`
-(`:111`), which becomes `SelectionConfig.smart_drops` and gates the supersession
-selector inside `select_reductions_with_outcome`: `selection.rs:1229` in the
-`EmergencyForce` arm and `:1236` in the `Execute` arm, both spelled
-`if cfg.smart_drops && ...`. Supersession is the selector that rewrites older
-`edit`/`write` calls into `edit_marker` payloads and drops superseded arcs, which
-changes the bytes served to the provider.
-
-`CONFIGURATION.md:756-761` (source-catalog path, not present at HEAD) describes the classes it affects, including "Superseded
-edits ... the newest edit stays in full and each older edit is compressed to a
-marker". So a repository config can switch on a byte-changing reduction path whose
-documentation says the default is off pending validation.
+The daemon reads project config itself (`:262-274`), so TypeScript filtering
+does not replace the Rust policy. TypeScript independently removes project
+`cache_ttl` (`project-security.ts:386-391`) and
+`memory.injection_budget_tokens` (`:400-406`). The guidance path is resolved
+after the merge from the user tier only (`config.rs:278-279`, `:408-419`);
+its `apply_key` arm intentionally does nothing (`:921-923`).
 
 ## Failure scenario
 
-A user clones a repository that ships `.eidnara/eidnara.jsonc` containing
-
-```
-{ "smart_drops": true }
-```
-
-The user has never enabled smart drops, has read `CONFIGURATION.md:767` (source-catalog path, not present at HEAD) and
-decided to wait, and has read `config.rs`'s policy header (or its equivalent in
-release notes) which does not list `smart_drops` as project-overridable.
-
-On the next transform pass in that project, `config.rs:541-543` applies the project
-value. `selection.rs:1236` admits the supersession selector. Older `edit` and
-`write` calls in the tail are rewritten to `edit_marker` payloads. The served byte
-sequence changes for reasons the user did not choose, in a path the documentation
-describes as still being validated.
-
-`temporal_awareness: false` and `inject_docs: false` from a project are the
-de-escalating direction, so their failure mode is a missing overlay or a missing
-`<project-docs>` block rather than an escalation. They are still outside the stated
-policy and still silent.
+A regression classifies `dreamer.inject_docs` as project-allowed and removes
+its privileged mark. A project setting it to `true` then overrides a user
+setting it to `false`. The documented user-only rule must fail even if an
+implementation-derived permission list accepts the change. This is a regression
+scenario, not observed behavior at the source snapshot.
 
 ## Timing windows and dependencies
 
-None. The tiers are merged on every config resolution
-(`config.rs:228-238`), and the project path is
-`project_root.join(".eidnara").join("eidnara.jsonc")` (`:229`), so the file
-is picked up as soon as the project root is bound.
+No injected fault is needed. Reachability is `explicit-config-only`: construct
+a project `.eidnara/eidnara.jsonc` with a value that differs from the user tier.
+`effective_with_warnings` reads that path and merges the tiers at
+`config.rs:262-274`. User-only versus user-plus-project comparisons must use
+the same user config and defaults.
 
 ## What a test must construct
 
-The policy is an enumerated list, so the test is an enumeration too. The existing
-tests already cover the intended half:
+Use the catalog's fixed key lists to construct distinct user and project values,
+including both boolean directions, both threshold directions, and the schedule
+alias. Assert final values and warning keys independently of `tier_class`,
+`privileged`, and `ALL`. Include the user-only guidance-path resolution, not
+only the in-memory merge. Unknown keys must not change the effective config.
 
-- `config.rs:913-928` `compaction_enabled_defaults_true_and_is_user_tier_only`
-- `config.rs:876-911` `rust_only_budget_leaves_are_user_tier_only_and_warn_when_project_supplies_them`
-- `config.rs:930-970` `auto_search_and_caveman_config_follow_user_then_project_tiers`
-- `config.rs:981-997` `docs_and_temporal_flags_follow_user_then_project_tiers`
-- `config.rs:1096-1117` `historian_gates_follow_tiers_but_context_limit_remains_user_tier_only`
+Existing checks remain `unaudited`:
 
-Note that `:981-997` pins `inject_docs` and `temporal_awareness` as project-tier
-overridable, so the code's behaviour is deliberate and tested; the policy header is
-the side that is out of date, or the behaviour is.
+- `config.rs:1297-1302`, `:1317-1350`, and `:1353-1387` assert specific
+  threshold and budget outcomes with literal expectations.
+- `:1407-1446` asserts auto-search and caveman project overrides.
+- `:1458-1480` asserts docs-injection rejection and a temporal override;
+  `:1905-1920` asserts that project config cannot turn user docs injection off.
+- `:1637-1666` asserts that project flags and schedules cannot open a closed
+  user-memory gate, and a no-op closed gate emits no warning.
+- `:1671-1697` pins nine privileged names and rejects `ProjectAllowed` for
+  them, but does not pin each key's exact class.
+- `:1702-1804` supplies all 25 keys and asserts selected outputs; its warning
+  count at `:1775-1785` is derived from the implementation's classes.
+- `:1809-1844` checks pointer registration and prohibits raw `.pointer("`
+  reads. It does not establish permissions or detect a `Value::get` read or a
+  runtime-built pointer that bypasses the table.
 
-The missing assertion is the closed-set one: for a project value supplied for every
-leaf of `DaemonConfig`, assert that exactly the documented set changes and every
-other leaf either keeps the user value or produces a warning. Written as a table
-test over leaf name, that is one test rather than one per leaf.
-
-The `smart_drops` case additionally deserves its own assertion because it is the
-one permissive direction: a project tier alone setting `smart_drops: true` with no
-user value, asserting the resolved value.
+These checks justify partial exercise, not a complete independent policy oracle.
 
 ## Investigation log
+
+### Historical discovery notes
+
+The two entries below retain the original investigation from the
+[pre-refresh evidence snapshot](https://github.com/ahrav/eidnara/blob/eccca05ec111fdf39df3795f08b7ca31ee713d96/docs/properties/daemon/decisions/evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
+Their line references and conclusions describe discovery-time sources, not
+the source snapshot verified above. They do not support the active confidence
+claim; the current disposition follows them.
 
 ### Q: Is `smart_drops` intended to be project-overridable?
 
@@ -174,3 +134,16 @@ user value, asserting the resolved value.
 - Conclusion: resolved with answer. Both are outside the stated policy but neither
   is an escalation, so the record's impact statement rests on `smart_drops` and
   the memory budget.
+
+### Q: Does the classified merge settle the discovery's policy questions?
+
+- Sources examined: the PR's explicit decision to retain `smart_drops` and
+  `temporal_awareness` as project-allowed; `config.rs:657-693`; the merge at
+  `:710-755`; the tests listed above.
+- Findings: the policy explicitly permits both flags, denies project docs
+  injection and schedules, and only lets a project close the user-memory gate.
+  The catalog's explicit permissions are the expected contract; the class table
+  is the implementation checked against it.
+- Missing evidence: a full independent per-key policy regression check.
+- Conclusion: resolved with answer for policy intent. Exercise remains partial;
+  existing tests are recorded as unaudited rather than claimed as full proof.
