@@ -7153,3 +7153,88 @@ fn an_object_admitted_by_a_trigger_serves_no_lower_than_that_trigger_reads_today
         "an object admitted over now-secret evidence kept serving"
     );
 }
+
+/// A preview envelope answers the readers a commit closure sees, judges an
+/// admission the way `record_admission` would, and replays the receipt a
+/// recorded intent holds, while the store stays exactly as it was.
+#[test]
+fn preview_judges_like_a_commit_and_writes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage(&store, "candidate");
+    let admitted = store
+        .commit(intent("admit"), |envelope| {
+            envelope.insert_admission_observation_for_test(
+                "observation-candidate",
+                "code_present",
+                "domain",
+                "repo",
+                "source-candidate",
+                1,
+            )?;
+            envelope.admit_domain_candidate(
+                request("candidate"),
+                AdmissionDomainSpec {
+                    domain_id: "domain".to_string(),
+                    object_id: "object".to_string(),
+                    name: "name-candidate".to_string(),
+                },
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let rows_before = inspect(directory.path(), "SELECT COUNT(*) FROM admission_decisions");
+    let commits_before = inspect(directory.path(), "SELECT COUNT(*) FROM commit_log");
+
+    let (seen_tip, ()) = store
+        .preview(|envelope| {
+            // A token minted at the tip is valid for the next commit, so the preview accepts it too.
+            assert_eq!(
+                envelope.check_token("object", tip)?,
+                kernel::TokenCheck::Unchanged
+            );
+            let stale =
+                envelope.preview_admission(subject_request("object", EventKind::MarkStale))?;
+            assert_eq!(stale.disposition, kernel::Disposition::Stale);
+            assert_eq!(stale.visibility, kernel::VisibilityRow::ExplicitLabeled);
+            // Succession events are refused before evaluation, as `record_admission` refuses them.
+            assert_eq!(
+                envelope.preview_admission(subject_request("object", EventKind::Correct)),
+                Err(KernelError::AdmissionPolicy)
+            );
+            let served = envelope
+                .served_row("object", None)?
+                .expect("admitted object is served");
+            assert_eq!(
+                served.visibility(Surface::AutoInject),
+                kernel::SurfaceVisibility::Visible
+            );
+            assert_eq!(
+                served.visibility_with(stale.visibility, stale.sensitivity, Surface::AutoInject),
+                kernel::SurfaceVisibility::Hidden
+            );
+            assert_eq!(
+                envelope
+                    .stored_receipt(intent("admit"))?
+                    .map(|receipt| receipt.commit_seq),
+                Some(admitted.commit_seq)
+            );
+            assert_eq!(envelope.stored_receipt(intent("never-committed"))?, None);
+            let mut reused = intent("admit");
+            reused.request_digest = "b".repeat(64);
+            assert_eq!(envelope.stored_receipt(reused), Err(KernelError::Conflict));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen_tip, tip);
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(
+        inspect(directory.path(), "SELECT COUNT(*) FROM admission_decisions"),
+        rows_before
+    );
+    assert_eq!(
+        inspect(directory.path(), "SELECT COUNT(*) FROM commit_log"),
+        commits_before
+    );
+}

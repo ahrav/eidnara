@@ -26,8 +26,8 @@ mod slice;
 pub use admission::{
     AdmissionDecision, AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, Disposition,
     EffectiveMaturity, EgressCandidate, EgressSnapshot, Evaluation, EvaluationInputs, EventKind,
-    Maturity, Outcome, POLICY_REVISION, PriorDecision, ScopeTermFilter, ServedClass, SourceClass,
-    Surface, SurfaceVisibility, TaintClass, VisibilityRow, VisibleAsOf, VisibleRow,
+    Maturity, Outcome, POLICY_REVISION, PriorDecision, ScopeTermFilter, ServedClass, ServedRow,
+    SourceClass, Surface, SurfaceVisibility, TaintClass, VisibilityRow, VisibleAsOf, VisibleRow,
     evaluate_admission, served_visibility_row, surface_visibility,
 };
 pub use anchor::{

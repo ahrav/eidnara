@@ -346,7 +346,7 @@ impl super::KernelStore {
     /// Stored terms of `scope_id` in ordinal order, as the write path left them:
     /// a value the redactor rewrote reads back as its placeholder.
     pub fn scope_terms(&self, scope_id: &str) -> Result<Vec<ScopeTermSpec>, KernelError> {
-        let (_, terms) = self.read_snapshot(0, |tx| load_scope_terms(tx, scope_id))?;
+        let (_, terms) = self.read_snapshot(0, |tx, _| load_scope_terms(tx, scope_id))?;
         terms.ok_or(KernelError::NotFound)
     }
 }
