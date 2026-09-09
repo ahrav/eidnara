@@ -288,28 +288,28 @@ bill for the crate.
 | [migration-and-its-version-record-commit-together](#migration-and-its-version-record-commit-together) | safety | high |
 | [recorded-schema-version-cannot-disagree-with-the-actual-schema](#recorded-schema-version-cannot-disagree-with-the-actual-schema) | safety | medium |
 | [post-migration-open-repair-is-resumable-and-effect-idempotent](#post-migration-open-repair-is-resumable-and-effect-idempotent) | safety | high |
-| [mirror-receipt-replay-applies-effects-once](#mirror-receipt-replay-applies-effects-once) | safety | invalidated |
-| [mirror-receipt-conflict-rejects-divergent-replay](#mirror-receipt-conflict-rejects-divergent-replay) | safety | invalidated |
-| [mirror-project-effect-chain-detects-omission](#mirror-project-effect-chain-detects-omission) | safety | invalidated |
-| [mirror-generation-advances-exactly-one-per-touched-project](#mirror-generation-advances-exactly-one-per-touched-project) | safety | invalidated |
-| [mirror-read-fence-relies-on-generation-advance](#mirror-read-fence-relies-on-generation-advance) | safety | invalidated |
-| [mirror-reset-cycle-requires-a-rebuild-grant](#mirror-reset-cycle-requires-a-rebuild-grant) | reachability | invalidated |
-| [mirror-clear-without-a-grant-is-never-entered](#mirror-clear-without-a-grant-is-never-entered) | reachability | invalidated |
-| [mirror-accepting-gate-is-skipped-when-control-is-absent](#mirror-accepting-gate-is-skipped-when-control-is-absent) | safety | invalidated |
-| [mirror-staleness-undetectable-on-memory-tool-read-path](#mirror-staleness-undetectable-on-memory-tool-read-path) | safety | invalidated |
-| [intent-control-transition-write-is-silently-dropped](#intent-control-transition-write-is-silently-dropped) | safety | invalidated |
-| [intent-identity-is-producer-and-operation-key](#intent-identity-is-producer-and-operation-key) | safety | invalidated |
-| [intent-terminal-state-is-entered-at-most-once](#intent-terminal-state-is-entered-at-most-once) | safety | invalidated |
-| [intent-staged-replay-produces-one-context-effect](#intent-staged-replay-produces-one-context-effect) | safety | invalidated |
+| [mirror-receipt-replay-applies-effects-once](#mirror-receipt-replay-applies-effects-once) | safety | high |
+| [mirror-receipt-conflict-rejects-divergent-replay](#mirror-receipt-conflict-rejects-divergent-replay) | safety | high |
+| [mirror-project-effect-chain-detects-omission](#mirror-project-effect-chain-detects-omission) | safety | high |
+| [mirror-generation-advances-exactly-one-per-touched-project](#mirror-generation-advances-exactly-one-per-touched-project) | safety | high |
+| [mirror-read-fence-relies-on-generation-advance](#mirror-read-fence-relies-on-generation-advance) | safety | medium |
+| [mirror-reset-cycle-requires-a-rebuild-grant](#mirror-reset-cycle-requires-a-rebuild-grant) | reachability | high |
+| [mirror-clear-without-a-grant-is-never-entered](#mirror-clear-without-a-grant-is-never-entered) | reachability | high |
+| [mirror-accepting-gate-is-skipped-when-control-is-absent](#mirror-accepting-gate-is-skipped-when-control-is-absent) | safety | high |
+| [mirror-staleness-undetectable-on-memory-tool-read-path](#mirror-staleness-undetectable-on-memory-tool-read-path) | safety | high |
+| [intent-control-transition-write-is-silently-dropped](#intent-control-transition-write-is-silently-dropped) | safety | high |
+| [intent-identity-is-producer-and-operation-key](#intent-identity-is-producer-and-operation-key) | safety | high |
+| [intent-terminal-state-is-entered-at-most-once](#intent-terminal-state-is-entered-at-most-once) | safety | high |
+| [intent-staged-replay-produces-one-context-effect](#intent-staged-replay-produces-one-context-effect) | safety | medium |
 | [core-decay-newest-compartment-tier-floor](#core-decay-newest-compartment-tier-floor) | safety | high |
 | [core-decay-tier-ladder-monotone-and-archive-agreement](#core-decay-tier-ladder-monotone-and-archive-agreement) | safety | high |
 | [core-decay-budget-pressure-range-totality](#core-decay-budget-pressure-range-totality) | safety | high |
 | [core-decay-archive-termination-bound](#core-decay-archive-termination-bound) | safety | high |
 | [core-canonical-encoding-crossruntime-parity](#core-canonical-encoding-crossruntime-parity) | safety | high |
-| [core-result-decode-acceptance-boundary](#core-result-decode-acceptance-boundary) | safety | invalidated |
-| [core-applicability-heads-order-independence](#core-applicability-heads-order-independence) | safety | invalidated |
-| [core-revision-locator-roundtrip-inverse](#core-revision-locator-roundtrip-inverse) | safety | invalidated |
-| [core-intent-ack-transition-legality-gap](#core-intent-ack-transition-legality-gap) | safety | invalidated |
+| [core-result-decode-acceptance-boundary](#core-result-decode-acceptance-boundary) | safety | high |
+| [core-applicability-heads-order-independence](#core-applicability-heads-order-independence) | safety | high |
+| [core-revision-locator-roundtrip-inverse](#core-revision-locator-roundtrip-inverse) | safety | high |
+| [core-intent-ack-transition-legality-gap](#core-intent-ack-transition-legality-gap) | safety | medium |
 | [core-pass-classifier-destructive-clear-guard](#core-pass-classifier-destructive-clear-guard) | safety | high |
 | [tokenizer-cross-process-determinism](#tokenizer-cross-process-determinism) | safety | high |
 | [tokenizer-golden-oracle-provenance](#tokenizer-golden-oracle-provenance) | safety | high |
@@ -866,7 +866,9 @@ Every record in this group is invalidated at HEAD: the claim mirror module, its
 tables, and its tests are gone from `crates/memory-store` (see Provenance), and
 the replacement for what the mirror's consumers relied on is
 `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
-transform catalog. The group is kept as the record of the source tree.
+transform catalog. The group is kept as the record of the source tree; its
+`file:line` references are host-repository citations at `eb6da6109` (see
+Provenance) and name files that no longer exist here.
 
 Nine records on a projection of an authority that lives outside this store. The
 mirror is not a cache and not a second source of truth: every mutation is push-only
@@ -892,8 +894,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:177-250` applies one receipt and
 replays the identical bytes, asserting `applied_effect_count` then `replayed`. It
 does not cover a replay interleaved with an intervening receipt, a replay after
@@ -945,8 +948,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test reuses a receipt ID with different bytes.
 `tests/claim_mirror.rs:223-232` replays identical bytes only; `:592-624` covers a
 different guard (equal revision, different content, fresh receipt).
@@ -992,8 +996,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:304-320` skips one effect and asserts
 `CheckpointMismatch`. Only the single-project, single-gap case; no multi-project
 interleave where another project occupies the intervening global effect IDs, which
@@ -1043,8 +1048,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:290-303` asserts one wrong generation is
 refused, and `:528-591` asserts untouched rows are restamped. Neither covers the
 untouched-project arm, where a receipt must present `stored + 0` for a project it
@@ -1136,8 +1142,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: yes - `tests/claim_mirror.rs:377-458` and `:482-517` drive the whole
 cycle, and `tests/claim_intent_ledger.rs:288-335` drives the grant. Every one of
 these calls `begin_claim_store_rebuild` directly from test code.
@@ -1200,8 +1207,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:461-479`
 (`u10_scenario_7_equivalent_restart_seed_is_idempotent`) seeds the same snapshot
 twice with no grant and asserts both succeed (`:470-471`), then mutates one
@@ -1266,8 +1274,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test applies a receipt while the control row says
 `draining`, and no test asserts that an absent control row permits an apply. The
 absent-row case is the production default
@@ -1324,8 +1333,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test reads through `list_committed_claims` with a mirror
 deliberately behind the authority, because nothing in the store can express "behind
 the authority".
@@ -1375,8 +1385,10 @@ Open questions:
 ## Group D: the claim intent ledger
 
 Every record in this group is invalidated at HEAD: the claim-intent ledger, its
-tables, and its tests are gone from `crates/memory-store` (see Provenance). The
-group is kept as the record of the source tree.
+tables, and its tests are gone from `crates/memory-store`. The group is kept as
+the record of the source tree; its `file:line` references are host-repository
+citations at `eb6da6109` (see Provenance) and name code that no longer exists
+here.
 
 Four records on the durable row that records a claim command staged *before* the host
 mutated `context.db`. An intent is keyed by `(producer, operation_key)` alone
@@ -1403,8 +1415,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - no test asserts that a control row appears after an authority
 transition. `tests/claim_intent_ledger.rs:178-179` and `:169-228` deliberately assert
 the *authority-row* fence instead, and the comment at `:11-15` shows the fixture was
@@ -1456,8 +1469,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:133-166` covers restart survival
 (`:148-151`), an incarnation binding mismatch (`:153-161`), and a digest conflict
 (`:162-165`). `format_epoch`, `authority_project`, and `authority_generation`
@@ -1505,8 +1519,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:85-131` walks staged to
 context-committed to acknowledged, and `:169-228` and `:346-401` reach
 terminal-rejected. No test attempts an illegal transition out of a terminal state, and
@@ -1557,8 +1572,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:337-401` proves a staged replay is
 refused once the authority is draining, which is the fence, not the effect count.
 Nothing in this crate observes the context effect, because the effect lands in a
@@ -1850,8 +1866,9 @@ Invalidated: the function this record was raised on was deleted with
 `crates/context-core/src/claim_operation.rs`; it had no consumer once the
 claim mirror, the claim-intent ledger, and the claim-lane classify request were
 gone. No successor record. The record body and its evidence file keep the
-deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `claim_operation.rs:847-877` covers 2 valid and 5 invalid fixture
 envelopes. Neither valid case has a non-canonical payload, and no case pairs an
 `applied` outcome with a non-null `staleReason`.
@@ -1900,8 +1917,9 @@ Invalidated: the function this record was raised on was deleted with
 `crates/context-core/src/claim_operation.rs`; it had no consumer once the
 claim mirror, the claim-intent ledger, and the claim-lane classify request were
 gone. No successor record. The record body and its evidence file keep the
-deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - 2 fixture cases (`claim_operation.rs:803-822`): the empty list and
 one two-element list. No case permutes the same list, so the invariance is asserted
 nowhere.
@@ -1945,8 +1963,9 @@ Invalidated: the function this record was raised on was deleted with
 `crates/context-core/src/claim_operation.rs`; it had no consumer once the
 claim mirror, the claim-intent ledger, and the claim-lane classify request were
 gone. No successor record. The record body and its evidence file keep the
-deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - the fixture (`claim_operation.rs:760-786`) asserts
 `format(parse(s)) == s` for each valid case and rejection for 8 invalid strings, but
 never asserts `parse(format(l)) == Some(l)` for a generated locator.
@@ -1990,8 +2009,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - nothing in `context-core` asserts transition legality, because
 `context-core` does not model it. `crates/memory-store/tests/claim_intent_ledger.rs` exercises
 acknowledgements, and Group D's `intent-terminal-state-is-entered-at-most-once` is where
