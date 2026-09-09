@@ -1227,13 +1227,16 @@ Required faults and enabling state: A seeded mirror plus a source that stops
 delivering receipts, for example because a receipt was refused with
 `CheckpointMismatch` and the lane wedged. Then read through `list_committed_claims`.
 Confidence: high - [evidence](evidence/mirror-staleness-undetectable-on-memory-tool-read-path.md).
-Enumerated the production read sites: `lib.rs:7368-7377` (atomic, in-transaction)
-and `memory_tool.rs:57-67` (no comparison). The transform and historian read sites
-the evidence file cites were deleted when both moved to canonical kernel rows
-(`crates/daemon/src/canonical_memory.rs`), which leaves the memory tool as the only
-unfenced mirror reader. Verified `updated_at_ms` is written but never selected.
-Existing check: none for the unfenced path. The fenced paths are mechanisms, not
-checks.
+Enumerated the production read sites: `memory_tool.rs:57-67` (`list_committed_claims`,
+no comparison) is the only production caller of `list_claim_mirror`. The transform
+and historian read sites were deleted when both moved to canonical kernel rows
+(`crates/daemon/src/canonical_memory.rs`), and the commit-time vector comparison in
+`commit_transform` went with them. `snapshot_vector_from_connection`
+(`claim_mirror.rs:806-840`) survives at one call site, `claim_mirror.rs:980` inside
+`replace_claim_mirror_snapshot`, where it decides whether an incoming seed is an
+idempotent replay of the stored one; that is a writer-side check, not a read fence.
+Verified `updated_at_ms` is written but never selected.
+Existing check: none. No production read of the mirror is fenced.
 Impact: `list_committed_claims` can surface committed claim memory from a wedged
 mirror indefinitely, with no error and no signal to the caller, while the transform
 and historian, which compose from canonical kernel rows, are unaffected by mirror
@@ -2090,16 +2093,17 @@ executing check.
   [mirror-read-fence-relies-on-generation-advance](#mirror-read-fence-relies-on-generation-advance),
   [mirror-staleness-undetectable-on-memory-tool-read-path](#mirror-staleness-undetectable-on-memory-tool-read-path),
   [mirror-generation-advances-exactly-one-per-touched-project](#mirror-generation-advances-exactly-one-per-touched-project).
-  Four production read paths of the same tables, at three different strengths:
-  `lib.rs:7368-7377` re-reads the vector inside the fenced commit and converts a
-  mismatch to `CasConflict`, which is the only genuinely atomic check;
-  `transform.rs:1978-2011` and `historian_chunk.rs:563-608` are optimistic double-reads
-  against a caller-supplied expected value, and they compare *different things*, a
-  canonical vector versus the whole `ClaimMirrorState`; and `memory_tool.rs:57-67`
-  compares nothing. The generation record is load-bearing under the weaker of the two
-  double-reads: transform's vector comparison is a sufficient change-detector only
-  because every touched project's generation must advance, and neither site states the
-  coupling. Hypothesis: the generation record *hypothetically dominates* the read-fence
+  At the time of this synthesis there were four production read paths of the same
+  tables, at three different strengths: the fenced `commit_transform` re-read
+  converted a vector mismatch to `CasConflict`, the transform and historian were
+  optimistic double-reads against a caller-supplied expected value that compared
+  *different things*, a canonical vector versus the whole `ClaimMirrorState`, and
+  `memory_tool.rs:57-67` compared nothing. The first three were deleted when the
+  transform and historian moved to canonical kernel rows, so on the current tree the
+  memory tool is the only production reader and the read-fence record is invalidated.
+  The generation record was load-bearing under the weaker of the two double-reads:
+  transform's vector comparison was a sufficient change-detector only because every
+  touched project's generation must advance, and neither site stated the coupling. Hypothesis: the generation record *hypothetically dominates* the read-fence
   record, since a proof that generations advance per touched project is exactly the
   premise transform's fence rests on. The staleness record is outside that relation
   entirely: its read-surface enumeration is checkable here, and its consequence half is
