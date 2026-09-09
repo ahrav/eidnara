@@ -7,7 +7,7 @@ import {
     type DatabaseUses,
     databaseBinders,
     databaseUses,
-    firstPartyCodeInputs,
+    firstPartyInputs,
     literalStrings,
     type ModuleGraph,
     OPERATION_LITERAL,
@@ -108,9 +108,9 @@ function moduleGraphReport(): Record<string, ReportedGraph> {
 const PRODUCTION_ROOTS = [ENTRY, TUI_ENTRY];
 
 /**
- * Every source file a production root bundles, wherever it lives: the retained tree, a sibling
- * workspace package, but not a third-party dependency. A production root must never reach a
- * test-named file, since the state-ownership scans select by file name.
+ * Every first-party file a production root bundles, wherever it lives: the retained tree, a
+ * sibling workspace package, a JSON data file, but not a third-party dependency. A production
+ * root must never reach a test-named file, since the state-ownership scans select by file name.
  */
 function productionReached(): string[] {
     const graphs = moduleGraphReport();
@@ -118,7 +118,8 @@ function productionReached(): string[] {
     for (const root of PRODUCTION_ROOTS) {
         const graph = graphs[root];
         if (!graph) throw new Error(`no graph for production root ${root}`);
-        for (const input of firstPartyCodeInputs(graph)) reached.add(resolve(SRC, input));
+        const inputs = firstPartyInputs(graph);
+        for (const input of [...inputs.code, ...inputs.data]) reached.add(resolve(SRC, input));
     }
     const testNamed = [...reached].filter((file) => /\.test\.tsx?$/.test(file));
     expect(testNamed).toEqual([]);
@@ -409,12 +410,16 @@ describe("databaseUses", () => {
                     'const { DatabaseSync: Sqlite } = load("node:sqlite");',
                     'const other = load("node:path");',
                     'const viaModule = module.require("better-sqlite3");',
+                    'import { createRequire as makeRequire } from "node:module";',
+                    "const aliased = makeRequire(import.meta.url);",
+                    'const bun = aliased("bun:sqlite");',
                     "",
                 ].join("\n"),
             ).escapes,
         ).toEqual([
             'const { DatabaseSync: Sqlite } = load("node:sqlite");',
             'const viaModule = module.require("better-sqlite3");',
+            'const bun = aliased("bun:sqlite");',
         ]);
     });
 
@@ -517,6 +522,8 @@ describe("operationLiteralHits", () => {
             'const partial = "memory" + suffix;',
             'const later = join(dir, "store.db");',
             'const escaped = join(dir, "context\\u002edb");',
+            'const templated = join(dir, `${"context"}.db`);',
+            "const matcher = /^memory\\.sqlite$/.test(name);",
             "",
         ].join("\n"),
     );
@@ -534,6 +541,8 @@ describe("operationLiteralHits", () => {
             `${commented}:8`,
             `${commented}:10`,
             `${commented}:11`,
+            `${commented}:12`,
+            `${commented}:13`,
         ]);
         expect(withoutComments("/* a */ b // c\n", "m.ts")).toBe("        b     \n");
         expect(
@@ -546,6 +555,14 @@ describe("operationLiteralHits", () => {
                 parseSource('const f = "context\\u002edb"; const t = `x${y}/store.db`;', "m.ts"),
             ).map((entry) => entry.value),
         ).toEqual(["context.db", "x", "/store.db"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    'const t = `${"context"}.db`; const r = /^claim\\.intent\\.stage$/;',
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["context.db", "context", ".db", "claim.intent.stage"]);
     });
 
     // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;

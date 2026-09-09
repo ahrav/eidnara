@@ -28401,7 +28401,7 @@ mod tests {
 
     /// The literals a macro invocation carries. `concat!` also contributes the string it
     /// evaluates to, since fragments such as `"mural"` and `".render"` name nothing alone, and
-    /// `stringify!` contributes its token text with and without spaces and as words. A `concat!` whose
+    /// `stringify!` contributes its token text with and without spaces. A `concat!` whose
     /// arguments are not all literals cannot be evaluated here, so it fails the audit rather
     /// than yielding a spelling the compiler would never produce.
     fn macro_literals(mac: &syn::Macro) -> Vec<String> {
@@ -28411,9 +28411,7 @@ mod tests {
         macro_string_literals(mac.tokens.clone(), &mut literals);
         if mac.path.is_ident("stringify") {
             let spaced = mac.tokens.to_string();
-            let joined = spaced.replace(' ', "");
-            literals.push(identifier_words(&joined));
-            literals.push(joined);
+            literals.push(spaced.replace(' ', ""));
             literals.push(spaced);
         }
         if mac.path.is_ident("concat") {
@@ -28756,25 +28754,73 @@ mod tests {
         out
     }
 
-    /// The words of an identifier with acronym runs kept whole: `MURALRender` becomes
-    /// `mural_render`, where `camel_words` would give `m_u_r_a_l_render`.
-    fn identifier_words(ident: &str) -> String {
-        let chars: Vec<char> = ident.chars().collect();
-        let mut out = String::new();
-        for (index, &ch) in chars.iter().enumerate() {
-            if index > 0 && ch.is_ascii_uppercase() {
-                let previous = chars[index - 1];
-                let next_is_lower = chars.get(index + 1).is_some_and(char::is_ascii_lowercase);
-                if previous.is_ascii_lowercase()
-                    || previous.is_ascii_digit()
-                    || (previous.is_ascii_uppercase() && next_is_lower)
-                {
-                    out.push('_');
-                }
+    /// The wire spelling serde derives from a variant identifier under a `rename_all` rule.
+    /// The rules are serde's: snake_case inserts `_` before every uppercase letter after the
+    /// first, so `MURALRender` becomes `m_u_r_a_l_render`.
+    fn serde_rename(rule: &str, ident: &str) -> String {
+        let snake = camel_words(ident);
+        match rule {
+            "snake_case" => snake,
+            "SCREAMING_SNAKE_CASE" => snake.to_ascii_uppercase(),
+            "kebab-case" => snake.replace('_', "-"),
+            "SCREAMING-KEBAB-CASE" => snake.replace('_', "-").to_ascii_uppercase(),
+            "lowercase" => ident.to_ascii_lowercase(),
+            "UPPERCASE" => ident.to_ascii_uppercase(),
+            "camelCase" => {
+                let mut chars = ident.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_ascii_lowercase().to_string() + chars.as_str())
+                    .unwrap_or_default()
             }
-            out.push(ch.to_ascii_lowercase());
+            "PascalCase" => ident.to_string(),
+            other => panic!("unknown serde rename_all rule {other:?}"),
         }
-        out
+    }
+
+    /// The `rename_all` rule an item declares, from `#[serde(rename_all = "...")]`.
+    fn rename_all_rule(attrs: &[syn::Attribute]) -> Option<String> {
+        attrs.iter().find_map(|attr| {
+            if !attr.path().is_ident("serde") {
+                return None;
+            }
+            let mut rule = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename_all") {
+                    let value: syn::LitStr = meta.value()?.parse()?;
+                    rule = Some(value.value());
+                } else if meta.input.peek(syn::Token![=]) {
+                    let _: syn::Expr = meta.value()?.parse()?;
+                } else if meta.input.peek(syn::token::Paren) {
+                    let _ = meta.parse_nested_meta(|_| Ok(()));
+                }
+                Ok(())
+            });
+            rule
+        })
+    }
+
+    /// Whether a variant carries `#[serde(rename = "...")]`, which replaces the identifier as
+    /// the wire spelling.
+    fn has_serde_rename(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            if !attr.path().is_ident("serde") {
+                return false;
+            }
+            let mut renamed = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
+                    renamed = true;
+                }
+                if meta.input.peek(syn::Token![=]) {
+                    let _: syn::Expr = meta.value()?.parse()?;
+                } else if meta.input.peek(syn::token::Paren) {
+                    let _ = meta.parse_nested_meta(|_| Ok(()));
+                }
+                Ok(())
+            });
+            renamed
+        })
     }
 
     fn is_test_only(attrs: &[syn::Attribute]) -> bool {
@@ -29121,9 +29167,10 @@ mod tests {
                 syn::visit::visit_arm(self, arm);
             }
 
-            /// A deserializable enum accepts each variant's identifier as written, or its
-            /// `rename_all` form; both are recorded, since every rename rule derives from the
-            /// same word split and the identifier itself is the default.
+            /// A deserializable enum accepts, for each variant, exactly the wire spelling serde
+            /// derives: the identifier as written by default, the `rename_all` rule's output when
+            /// the enum declares one, or the variant's own `rename` literal, which the attribute
+            /// walk already collects. Nothing else is synthesized, so `GitHub` is not `git_hub`.
             fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
                 type Derives = syn::punctuated::Punctuated<syn::Path, syn::Token![,]>;
                 let deserializable = item.attrs.iter().any(|attr| {
@@ -29141,11 +29188,16 @@ mod tests {
                             })
                 });
                 if deserializable {
+                    let rule = rename_all_rule(&item.attrs);
                     for variant in &item.variants {
+                        if has_serde_rename(&variant.attrs) {
+                            continue;
+                        }
                         let ident = variant.ident.to_string();
-                        self.compared.push(camel_words(&ident));
-                        self.compared.push(identifier_words(&ident));
-                        self.compared.push(ident);
+                        self.compared.push(match &rule {
+                            Some(rule) => serde_rename(rule, &ident),
+                            None => ident,
+                        });
                     }
                 }
                 syn::visit::visit_item_enum(self, item);
@@ -29181,11 +29233,17 @@ mod tests {
             );
         }
         assert_eq!(camel_words("MuralRender"), "mural_render");
-        assert_eq!(identifier_words("MURALRender"), "mural_render");
-        assert_eq!(identifier_words("GitIngestV2"), "git_ingest_v2");
-        assert_eq!(identifier_words("HTTPServer"), "http_server");
+        assert_eq!(serde_rename("snake_case", "MuralRender"), "mural_render");
+        assert_eq!(serde_rename("kebab-case", "MuralRender"), "mural-render");
+        assert_eq!(
+            serde_rename("SCREAMING_SNAKE_CASE", "GitIngest"),
+            "GIT_INGEST"
+        );
+        assert_eq!(serde_rename("camelCase", "GitIngest"), "gitIngest");
+        assert_eq!(serde_rename("lowercase", "GitHub"), "github");
+        assert!(!test_support::names_absent_subsystem("GitHub", BARE_WORDS));
         assert!(test_support::names_absent_subsystem(
-            &identifier_words("MURALRender"),
+            &serde_rename("snake_case", "MuralRender"),
             BARE_WORDS
         ));
         assert_eq!(camel_words("GitIngest"), "git_ingest");

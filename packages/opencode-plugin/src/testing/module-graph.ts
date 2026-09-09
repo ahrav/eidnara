@@ -22,21 +22,26 @@ export const DATABASE_BINDING =
 export const CODE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 
 /**
- * First-party bundle inputs that are code go to the scans; JSON is data. Anything else is an
- * extension no scan understands, so it is an error rather than a silent skip.
+ * First-party bundle inputs: code goes to every scan, and JSON goes to the literal scans since
+ * a bundled JSON value can carry a store path or an operation name the importing code never
+ * spells. Anything else is an extension no scan understands, so it is an error rather than a
+ * silent skip.
  */
-export function firstPartyCodeInputs(graph: Pick<ModuleGraph, "inputs">): string[] {
+export function firstPartyInputs(graph: Pick<ModuleGraph, "inputs">): {
+    code: string[];
+    data: string[];
+} {
     const code: string[] = [];
+    const data: string[] = [];
     for (const input of graph.inputs) {
         // The bundler names inputs relative to its working directory, so a dependency can
         // appear with or without a leading path segment.
         if (input.startsWith("node_modules/") || input.includes("/node_modules/")) continue;
         if (CODE_FILE.test(input)) code.push(input);
-        else if (!/\.json$/.test(input)) {
-            throw new Error(`bundle input ${input} has an extension the source scans do not read`);
-        }
+        else if (/\.json$/.test(input)) data.push(input);
+        else throw new Error(`bundle input ${input} has an extension the source scans do not read`);
     }
-    return code;
+    return { code, data };
 }
 
 /** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches. */
@@ -223,9 +228,10 @@ export function operationLiteralHits(
 
 /**
  * The strings a module evaluates to, as the parser cooks them: every string literal and template
- * span with escapes decoded (`"context\u002edb"` is `context.db`), and every `+` expression whose
- * leaves are all string literals folded to its concatenation, inner chains included. Each is
- * reported at its first line.
+ * span with escapes decoded (`"context\u002edb"` is `context.db`); every `+` expression or
+ * template whose leaves are all string literals, folded to the value it produces, inner chains
+ * included; and every regular-expression literal reduced to its body without anchors or
+ * escapes. Each is reported at its first line.
  */
 export function literalStrings(file: ts.SourceFile): { line: number; value: string }[] {
     const folded: { line: number; value: string }[] = [];
@@ -237,15 +243,36 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             const right = leafText(inner.right);
             return left !== undefined && right !== undefined ? left + right : undefined;
         }
+        if (ts.isTemplateExpression(inner)) {
+            let value = inner.head.text;
+            for (const span of inner.templateSpans) {
+                const substituted = leafText(span.expression);
+                if (substituted === undefined) return undefined;
+                value += substituted + span.literal.text;
+            }
+            return value;
+        }
         return undefined;
+    };
+    // A regex that matches one exact string is that string with its anchors and escapes removed;
+    // the literal-shaped body is what a `/^claim\.intent\.stage$/.test(op)` dispatch compares.
+    const regexBody = (text: string): string => {
+        const body = text.slice(1, text.lastIndexOf("/"));
+        return body.replace(/^\^/, "").replace(/\$$/, "").replace(/\\(.)/g, "$1");
     };
     const lineOf = (node: ts.Node) =>
         file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
     const visit = (node: ts.Node): void => {
-        if (ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)) {
+        if ((ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)) && node.text !== "") {
             folded.push({ line: lineOf(node), value: node.text });
         }
-        if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        if (ts.isRegularExpressionLiteral(node)) {
+            folded.push({ line: lineOf(node), value: regexBody(node.text) });
+        }
+        if (
+            (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
+            ts.isTemplateExpression(node)
+        ) {
             const value = leafText(node);
             if (value !== undefined) folded.push({ line: lineOf(node), value });
         }
@@ -357,17 +384,30 @@ export function databaseUses(
     };
     const isBindingSpecifier = (node: ts.Expression | undefined) =>
         node !== undefined && ts.isStringLiteralLike(node) && DATABASE_BINDING.test(node.text);
-    // `const load = createRequire(import.meta.url)` makes `load(...)` a require by another name.
+    // `const load = createRequire(import.meta.url)` makes `load(...)` a require by another name,
+    // and `import { createRequire as makeRequire }` gives the factory another name too.
+    const factories = new Set<string>(["createRequire"]);
+    const collectFactories = (node: ts.Node): void => {
+        if (
+            ts.isImportSpecifier(node) &&
+            node.propertyName?.text === "createRequire" &&
+            !node.isTypeOnly
+        ) {
+            factories.add(node.name.text);
+        }
+        ts.forEachChild(node, collectFactories);
+    };
+    collectFactories(file);
     const loaders = new Set<string>(["require"]);
     const collectLoaders = (node: ts.Node): void => {
         if (
             ts.isVariableDeclaration(node) &&
             ts.isIdentifier(node.name) &&
             node.initializer &&
-            ts.isCallExpression(node.initializer) &&
-            /(^|\.)createRequire$/.test(node.initializer.expression.getText(file))
+            ts.isCallExpression(node.initializer)
         ) {
-            loaders.add(node.name.text);
+            const factory = node.initializer.expression.getText(file).split(".").pop() ?? "";
+            if (factories.has(factory)) loaders.add(node.name.text);
         }
         ts.forEachChild(node, collectLoaders);
     };
