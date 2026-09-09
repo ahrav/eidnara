@@ -28,7 +28,7 @@ import {
     ANTI_MEMORY_CATEGORY,
     ANTI_MEMORY_DEFAULT_TTL_MS,
     type AntiMemoryPayload,
-    ClaimOperationInputError,
+    MemoryInputError,
     parseAntiMemoryContent,
     renderAntiMemoryContent,
 } from "../../shared/kernel-client/anti-memory";
@@ -47,7 +47,7 @@ export const CTX_MEMORY_ACTOR = "agent:opencode";
 function uniqueIds(ids: readonly string[] | undefined): string[] {
     // The wrappers fall back to unvalidated raw arguments when schema parsing fails, so the check rejects non-string entries before `.trim()` throws a TypeError. commentlint: allow(JUDGE)
     if (ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))) {
-        throw new ClaimOperationInputError("'objectIds' must be an array of strings");
+        throw new MemoryInputError("'objectIds' must be an array of strings");
     }
     return [...new Set((ids ?? []).map((id) => id.trim()).filter((id) => id.length > 0))];
 }
@@ -189,7 +189,7 @@ function derivedId(prefix: string, identity: CtxMemoryWriteIdentity, index: numb
 function contentOf(args: CtxMemoryArgs): string {
     if (args.antiMemory) return renderAntiMemoryContent(args.antiMemory);
     const content = args.content?.trim() ?? "";
-    if (!content) throw new ClaimOperationInputError("content is required");
+    if (!content) throw new MemoryInputError("content is required");
     return content;
 }
 
@@ -224,7 +224,7 @@ function successorLineage(predecessors: readonly ReadRow[]): {
             row.object.source_id !== first.object.source_id ||
             row.object.source_kind !== first.object.source_kind
         ) {
-            throw new ClaimOperationInputError(
+            throw new MemoryInputError(
                 "merge targets have different lineages (source_id/source_kind); one survivor cannot supersede them all. Merge same-lineage memories only.",
             );
         }
@@ -244,7 +244,7 @@ function rowCategory(row: ReadRow): string {
 function requireMergeableCategory(predecessors: readonly ReadRow[]): string {
     const categories = [...new Set(predecessors.map(rowCategory))].sort();
     if (categories.length > 1) {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             `merge targets span categories (${categories.join(", ")}); one survivor cannot replace facts from different categories. Merge same-category memories only.`,
         );
     }
@@ -259,7 +259,7 @@ function requireMatchingAntiArm(
 ): void {
     const successorAnti = successorCategory === ANTI_MEMORY_CATEGORY;
     if (successorAnti !== (predecessorCategory === ANTI_MEMORY_CATEGORY)) {
-        throw new ClaimOperationInputError(successorAnti ? errors.toAnti : errors.toPositive);
+        throw new MemoryInputError(successorAnti ? errors.toAnti : errors.toPositive);
     }
 }
 
@@ -283,7 +283,7 @@ function requireVisible(rows: readonly ReadRow[], targets: readonly string[]): R
     const byId = new Map(rows.map((row) => [row.object.object_id, row]));
     const missing = targets.filter((id) => !byId.has(id));
     if (missing.length > 0) {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             `memory not found or not visible from this project: ${missing.join(", ")}`,
         );
     }
@@ -292,11 +292,11 @@ function requireVisible(rows: readonly ReadRow[], targets: readonly string[]): R
 
 function requireTarget(args: CtxMemoryArgs): string {
     if (args.objectId !== undefined && typeof args.objectId !== "string") {
-        throw new ClaimOperationInputError("'objectId' must be a string");
+        throw new MemoryInputError("'objectId' must be a string");
     }
     const objectId = args.objectId?.trim();
     if (!objectId) {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             `'objectId' is required when action is '${String(args.action)}'`,
         );
     }
@@ -399,7 +399,7 @@ function revisionArgs(args: CtxMemoryArgs, predecessors: readonly ReadRow[]): Ct
     try {
         return { ...merged, antiMemory: parseAntiMemoryContent(decision.payload.summary) };
     } catch {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             "the anti-memory being replaced has an unparseable stored payload; pass a full antiMemory payload to replace it",
         );
     }
@@ -569,7 +569,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
             return "Error: 'objectIds' is required when action is 'get'.";
         }
         if (wanted.length > GET_MAX_CLAIMS) {
-            throw new ClaimOperationInputError(
+            throw new MemoryInputError(
                 `get accepts at most ${GET_MAX_CLAIMS} objectIds; ${wanted.length} were given. Split the request.`,
             );
         }
@@ -667,7 +667,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
             if (isAvailable(probe) && probe.receipt.replayed) {
                 return renderCommit(action, probe, [target]);
             }
-            throw new ClaimOperationInputError(
+            throw new MemoryInputError(
                 `memory not found or not visible from this project: ${target}`,
             );
         }
@@ -709,7 +709,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         assertCtxMemoryWriteShape({ ...merged, action: "revise" });
         const category = merged.category?.trim();
         if (!category) {
-            throw new ClaimOperationInputError(`revise requires a category for ${target}`);
+            throw new MemoryInputError(`revise requires a category for ${target}`);
         }
         requireMatchingAntiArm(category, rowCategory(predecessors[0] as ReadRow), {
             toAnti: `revise cannot convert a positive memory into a ${ANTI_MEMORY_CATEGORY} memory; archive it and create the anti-memory instead`,
@@ -733,7 +733,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
 
     // The raw list's length is bounded before any per-element work so an oversized input (the schema-fallback path passes raw arguments through) is rejected without a scan, and blank entries count toward the cap because they were given. A duplicate id in the merge list is a caller-side bug; the duplicate check precedes arity validation so duplicate input cannot pass as a smaller merge after deduplication, and the error names the offending ids so the caller can fix its list. commentlint: allow(JUDGE)
     if (Array.isArray(args.objectIds) && args.objectIds.length > MERGE_MAX_TARGETS) {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             `merge accepts at most ${MERGE_MAX_TARGETS} objectIds; ${args.objectIds.length} were given. Merge in smaller batches.`,
         );
     }
@@ -749,17 +749,17 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         }
     }
     if (duplicates.size > 0) {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             `merge requires distinct objectIds; duplicated: ${[...duplicates].join(", ")}`,
         );
     }
     if (targets.length < 2) {
-        throw new ClaimOperationInputError("merge requires at least two objectIds");
+        throw new MemoryInputError("merge requires at least two objectIds");
     }
     // Revise may inherit its predecessor's payload, but a merge survivor that inherited only
     // `predecessors[0]` would retire every other target and silently discard their content.
     if (args.content == null && args.antiMemory == null) {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             "merge requires content (with category) or antiMemory for the survivor; the targets' payloads are not combined automatically",
         );
     }
@@ -794,7 +794,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
     const merged = revisionArgs(args, predecessors);
     assertCtxMemoryWriteShape({ ...merged, action: "revise" });
     const category = merged.category?.trim();
-    if (!category) throw new ClaimOperationInputError("merge requires a category");
+    if (!category) throw new MemoryInputError("merge requires a category");
     requireMatchingAntiArm(category, predecessorCategory, {
         toAnti: "merge cannot fold positive memories into an anti-memory survivor",
         toPositive: `merge cannot fold ${ANTI_MEMORY_CATEGORY} memories into a positive survivor; the negation would be lost`,

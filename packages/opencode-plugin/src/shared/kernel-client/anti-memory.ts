@@ -7,11 +7,11 @@
 /** The decision kind under which anti-memories are recorded. */
 export const ANTI_MEMORY_CATEGORY = "REJECTED_APPROACH" as const;
 
-/** Reports unknown claims, duplicate collisions, and malformed input before any receipt exists, so a transaction rolls back entirely. */
-export class ClaimOperationInputError extends Error {
+/** Invalid caller input or a malformed stored payload, raised before any write is attempted. */
+export class MemoryInputError extends Error {
     constructor(message: string) {
         super(message);
-        this.name = "ClaimOperationInputError";
+        this.name = "MemoryInputError";
     }
 }
 
@@ -48,7 +48,7 @@ export interface StoredAntiMemoryPayload {
 
 function requiredText(value: unknown, field: string): string {
     if (typeof value !== "string" || value.trim().length === 0) {
-        throw new ClaimOperationInputError(`anti-memory ${field} must be non-empty`);
+        throw new MemoryInputError(`anti-memory ${field} must be non-empty`);
     }
     return value.replace(/\s+/g, " ").trim();
 }
@@ -63,7 +63,7 @@ function optionalText(value: unknown, field: string): string | null {
 function optionalEpochMs(value: unknown, field: string): number | null {
     if (value === undefined || value === null) return null;
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             `anti-memory ${field} must be a positive epoch-milliseconds integer`,
         );
     }
@@ -127,10 +127,10 @@ export function parseAntiMemoryContent(content: string): AntiMemoryPayload {
     for (const line of content.split(/\r?\n/)) {
         if (line.trim().length === 0) continue;
         const separator = line.indexOf(":");
-        if (separator <= 0) throw new ClaimOperationInputError("invalid anti-memory content line");
+        if (separator <= 0) throw new MemoryInputError("invalid anti-memory content line");
         const label = line.slice(0, separator).trim();
         const value = line.slice(separator + 1).trim();
-        if (fields.has(label)) throw new ClaimOperationInputError(`duplicate anti-memory ${label}`);
+        if (fields.has(label)) throw new MemoryInputError(`duplicate anti-memory ${label}`);
         fields.set(label, value);
     }
     const known = new Set([
@@ -147,8 +147,7 @@ export function parseAntiMemoryContent(content: string): AntiMemoryPayload {
         "Expires at",
     ]);
     for (const label of fields.keys()) {
-        if (!known.has(label))
-            throw new ClaimOperationInputError(`unknown anti-memory field ${label}`);
+        if (!known.has(label)) throw new MemoryInputError(`unknown anti-memory field ${label}`);
     }
     const rawExpiresAt = fields.get("Expires at");
     const expiresAt =

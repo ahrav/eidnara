@@ -396,13 +396,14 @@ mod tests {
     }
 
     #[test]
-    fn shared_guidance_keeps_host_specific_memory_contracts_conditional() {
+    fn shared_guidance_names_one_memory_identity_form() {
         let memory_schema = ctx_memory_schema();
         let memory_properties = memory_schema["properties"]
             .as_object()
             .expect("ctx_memory schema has properties");
-        assert!(memory_properties.contains_key("publicClaimId"));
-        assert!(memory_properties.contains_key("publicClaimIds"));
+        assert!(memory_properties.contains_key("objectId"));
+        assert!(memory_properties.contains_key("objectIds"));
+        assert!(!memory_schema.to_string().contains("Claim"));
 
         for guidance in [
             GUIDANCE_FULL_PRIMARY,
@@ -411,9 +412,11 @@ mod tests {
             GUIDANCE_LIGHT_NO_REDUCE_TEXT,
         ] {
             assert!(guidance.contains("`objectId`/`objectIds`"));
-            assert!(guidance.contains("`publicClaimId`/`publicClaimIds`"));
             assert!(guidance.contains("`mem_<32hex>`"));
-            assert!(guidance.contains("`mcm_<32hex>`"));
+            assert!(
+                !guidance.contains("Claim") && !guidance.contains("claim ID"),
+                "{guidance}"
+            );
             assert!(guidance.contains("`sources` permits only `memory`"));
             assert!(
                 guidance.contains("when its current contract includes project memories")

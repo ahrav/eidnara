@@ -21,7 +21,7 @@ export function renderAntiMemoryWarning(result: AntiMemorySearchResult): string 
         rejectionReason: result.rejectionReason,
         saferAlternative: result.saferAlternative,
         boundField: boundDynamicField,
-        citation: result.publicClaimId,
+        citation: result.objectId,
     });
 }
 
@@ -31,7 +31,7 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
             ? ` status=${boundDynamicField(result.policyLabel)}`
             : " status=active";
         return [
-            `[${index}] [anti-memory warning] score=${result.score.toFixed(2)} id=${result.publicClaimId} match=${result.matchType}${policy}`,
+            `[${index}] [anti-memory warning] score=${result.score.toFixed(2)} id=${result.objectId} match=${result.matchType}${policy}`,
             renderAntiMemoryWarning(result),
             // The rationale renders only in this full-result view; the compact auto-search hint keeps the warning-line field set.
             ...(result.rationale ? [`Rationale: ${boundDynamicField(result.rationale)}`] : []),
@@ -40,7 +40,7 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
     const source = result.sourceName ? ` source=${boundDynamicField(result.sourceName)}` : "";
     const policy = result.policyLabel ? ` trust=[${boundDynamicField(result.policyLabel)}]` : "";
     return [
-        `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.publicClaimId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${policy}`,
+        `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${policy}`,
         boundDynamicField(result.content),
     ].join("\n");
 }

@@ -4,10 +4,7 @@
  * payload under the anti-memory category, never both.
  */
 
-import {
-    ANTI_MEMORY_CATEGORY,
-    ClaimOperationInputError,
-} from "../../shared/kernel-client/anti-memory";
+import { ANTI_MEMORY_CATEGORY, MemoryInputError } from "../../shared/kernel-client/anti-memory";
 import { WRITABLE_MEMORY_CATEGORIES } from "./constants";
 import type { CtxMemoryAction } from "./types";
 
@@ -21,7 +18,7 @@ export interface CtxMemoryWriteShape {
 export function requireTaxonomyCategory(category: string | undefined): string | undefined {
     if (category === undefined || category === "") return undefined;
     if (!(WRITABLE_MEMORY_CATEGORIES as readonly string[]).includes(category)) {
-        throw new ClaimOperationInputError(
+        throw new MemoryInputError(
             `unknown claim category: ${category} (expected one of ${WRITABLE_MEMORY_CATEGORIES.join(", ")})`,
         );
     }
@@ -33,7 +30,7 @@ export function assertCtxMemoryFieldTypes(args: CtxMemoryWriteShape): void {
     for (const field of ["content", "category", "reason", "objectId"] as const) {
         const value = (args as Record<string, unknown>)[field];
         if (value !== undefined && value !== null && typeof value !== "string") {
-            throw new ClaimOperationInputError(`'${field}' must be a string`);
+            throw new MemoryInputError(`'${field}' must be a string`);
         }
     }
 }
@@ -46,18 +43,16 @@ export function assertCtxMemoryWriteShape(args: CtxMemoryWriteShape): void {
     const antiArm = category === ANTI_MEMORY_CATEGORY || args.antiMemory != null;
     if (antiArm) {
         if (category !== ANTI_MEMORY_CATEGORY || !args.antiMemory || args.content != null) {
-            throw new ClaimOperationInputError(
+            throw new MemoryInputError(
                 `${args.action} anti-memory requires category ${ANTI_MEMORY_CATEGORY}, antiMemory payload, and no content`,
             );
         }
         return;
     }
     if (args.antiMemory != null) {
-        throw new ClaimOperationInputError(
-            `${args.action} positive memory cannot carry antiMemory`,
-        );
+        throw new MemoryInputError(`${args.action} positive memory cannot carry antiMemory`);
     }
     if (args.action === "create" && (!category || !args.content?.trim())) {
-        throw new ClaimOperationInputError("create requires non-empty content and category");
+        throw new MemoryInputError("create requires non-empty content and category");
     }
 }

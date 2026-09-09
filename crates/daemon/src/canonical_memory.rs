@@ -174,7 +174,7 @@ pub(crate) fn read_project_memory(
     }
 }
 
-/// Restates the domain filter of the retired claim mirror on canonical rows:
+/// The domain filter the injectable memory surface applies to canonical rows:
 /// a row is injectable when it is live (the visible-row read already keeps only
 /// live rows), resolves visible on the surface, and carries a decision whose
 /// kind is a positive memory category. Labeled rows never reach `auto_inject`;

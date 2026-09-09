@@ -70,13 +70,12 @@ describe("memoryResultFromRow", () => {
         expect(result.rejectionReason).toBe("it creates split ownership");
         expect(result.saferAlternative).toBe("use SQLite");
         expect(result.score).toBe(0.9);
-        expect(result.publicClaimId).toBe(OBJECT_A);
-        expect(result.revisionLocator).toBe(`${OBJECT_A}@7`);
+        expect(result.objectId).toBe(OBJECT_A);
+        expect(result.commitSeq).toBe(7);
         expect(result.matchType).toBe("exact");
         expect(result.policyLabel).toBe("labeled");
         expect(result.contentDigest).toMatch(/^[0-9a-f]{64}$/);
         expect(result.normalizedHash).toBe(result.contentDigest);
-        expect(result.claimId).toBe(-1);
     });
 
     test("a rejected-approach row with an unparseable summary stays a conservative anti-memory warning", () => {
@@ -93,7 +92,6 @@ describe("memoryResultFromRow", () => {
         expect(result.rejectionReason).toContain("unparseable");
         expect(result.saferAlternative).toBeNull();
         expect(result.matchType).toBe("lexical");
-        expect(result.claimId).toBe(-1);
     });
 
     test("an anti-memory row carries its decision rationale; an empty rationale stays absent", () => {
@@ -255,9 +253,7 @@ describe("searchKernelMemoryRows baseline exclusion", () => {
 
     test("an explicit object-id query resolves a baseline-visible object", () => {
         const hits = searchKernelMemoryRows({ rows, query: OBJECT_A, limit: 5, excludeObjectIds });
-        expect(hits?.map((hit) => [hit.publicClaimId, hit.matchType])).toEqual([
-            [OBJECT_A, "exact"],
-        ]);
+        expect(hits?.map((hit) => [hit.objectId, hit.matchType])).toEqual([[OBJECT_A, "exact"]]);
     });
 
     test("lexical ranking still excludes baseline-visible objects", () => {
@@ -267,24 +263,23 @@ describe("searchKernelMemoryRows baseline exclusion", () => {
             limit: 5,
             excludeObjectIds,
         });
-        expect(hits?.map((hit) => hit.publicClaimId)).toEqual([OBJECT_B]);
+        expect(hits?.map((hit) => hit.objectId)).toEqual([OBJECT_B]);
     });
 });
 
-describe("parseObjectIdQuery revision-locator round-trip", () => {
-    test("a pasted result revisionLocator resolves through the exact object-id path", () => {
+describe("parseObjectIdQuery id@commit round-trip", () => {
+    test("a pasted id@commit token resolves through the exact object-id path", () => {
         const row = readRow({
             objectId: OBJECT_A,
             decisionKind: "PROJECT_RULES",
             summary: "the historian runs on a lease",
             seq: 7,
         });
-        const locator = memoryResultFromRow(row, 1, "exact").revisionLocator;
+        const result = memoryResultFromRow(row, 1, "exact");
+        const locator = `${result.objectId}@${result.commitSeq}`;
         expect(locator).toBe(`${OBJECT_A}@7`);
         const hits = searchKernelMemoryRows({ rows: [row], query: locator, limit: 5 });
-        expect(hits?.map((hit) => [hit.publicClaimId, hit.matchType])).toEqual([
-            [OBJECT_A, "exact"],
-        ]);
+        expect(hits?.map((hit) => [hit.objectId, hit.matchType])).toEqual([[OBJECT_A, "exact"]]);
     });
 
     test("bare ids and locators mix in one query and deduplicate to the same object", () => {
@@ -339,7 +334,7 @@ describe("searchKernelMemoryRows tie-breaking", () => {
             }),
         ];
         const hits = searchKernelMemoryRows({ rows, query: "alpha beta", limit: 5 });
-        expect(hits?.map((hit) => hit.publicClaimId)).toEqual([OBJECT_A, OBJECT_B]);
+        expect(hits?.map((hit) => hit.objectId)).toEqual([OBJECT_A, OBJECT_B]);
     });
 });
 

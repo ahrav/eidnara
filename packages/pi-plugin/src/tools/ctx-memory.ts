@@ -1,6 +1,6 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
-import { ClaimOperationInputError } from "@eidnara/opencode/shared/kernel-client/anti-memory";
+import { MemoryInputError } from "@eidnara/opencode/shared/kernel-client/anti-memory";
 import {
     CTX_MEMORY_DESCRIPTION,
     CTX_MEMORY_TOOL_NAME,
@@ -150,7 +150,7 @@ export function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition<typ
                 });
                 return text.startsWith("Error:") ? err(text) : ok(text);
             } catch (error) {
-                if (error instanceof ClaimOperationInputError) {
+                if (error instanceof MemoryInputError) {
                     return err(`Error: ${error.message}`);
                 }
                 throw error;

@@ -19,8 +19,8 @@ function memoryResult(id: number, content: string): MemorySearchResult {
         source: "memory",
         content,
         score: 0.9,
-        publicClaimId: `mcm_${id}`,
-        revisionLocator: `mcm_${id}/r1/${"0".repeat(64)}`,
+        objectId: `mem_${String(id).padStart(32, "0")}`,
+        commitSeq: id,
         category: "decision",
         matchType: "exact",
     };
@@ -30,10 +30,9 @@ function antiMemoryResult(rationale?: string): AntiMemorySearchResult {
     return {
         source: "anti_memory",
         score: 0.5,
-        publicClaimId: `mem_${"c".repeat(32)}`,
-        revisionLocator: `mem_${"c".repeat(32)}@1`,
+        objectId: `mem_${"c".repeat(32)}`,
+        commitSeq: 1,
         contentDigest: "d".repeat(64),
-        claimId: -1,
         normalizedHash: "d".repeat(64),
         trigger: "session caching",
         rejectedStrategy: "Redis",
@@ -67,7 +66,7 @@ describe("packed search text rendering", () => {
             [
                 'Found 2 results for "queue":',
                 "",
-                "[1] [memory] score=0.90 id=mcm_7 category=decision match=exact",
+                `[1] [memory] score=0.90 id=mem_${"7".padStart(32, "0")} category=decision match=exact`,
                 "always use bd for tracking",
                 "",
                 `[2] [anti-memory warning] score=0.50 id=mem_${"c".repeat(32)} match=lexical status=active`,
@@ -187,7 +186,7 @@ describe("packSearchResults", () => {
         expect(packed.delivered).toEqual(results.slice(0, shownBlocks));
         expect(packed.omittedCount).toBe(50 - shownBlocks);
         for (const delivered of results.slice(0, shownBlocks)) {
-            expect(packed.text).toContain(`id=${delivered.publicClaimId}`);
+            expect(packed.text).toContain(`id=${delivered.objectId}`);
         }
         for (const [index, omitted] of results.slice(shownBlocks).entries()) {
             void omitted;

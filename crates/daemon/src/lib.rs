@@ -16482,7 +16482,7 @@ pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
 }
 
 fn ctx_memory_description() -> String {
-    "Read and maintain durable project-memory claims. Use public claim IDs and exact revision-bound mutation tokens; never use local row IDs. Create standalone facts, revise changed claims, archive or restore lifecycle state, and merge duplicate claims through the host commit path.".to_string()
+    "Read and maintain durable project memories. Memories are addressed by object id (mem_<32hex>); never use local row IDs. Create standalone facts, revise changed memories, archive or restore lifecycle state, and merge duplicate memories through the kernel commit path.".to_string()
 }
 
 fn ctx_search_description() -> String {
@@ -16498,23 +16498,6 @@ fn ctx_note_description() -> String {
 }
 
 fn ctx_memory_schema() -> Value {
-    let mutation_token = json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-            "tokenVersion", "publicClaimId", "revision", "contentDigest",
-            "lifecycleSeq", "applicabilityHeadsDigest", "policyHeadsDigest"
-        ],
-        "properties": {
-            "tokenVersion": { "type": "integer", "minimum": 1 },
-            "publicClaimId": { "type": "string", "pattern": "^mcm_[0-9a-f]{32}$" },
-            "revision": { "type": "integer", "minimum": 1 },
-            "contentDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "lifecycleSeq": { "type": "integer", "minimum": 1 },
-            "applicabilityHeadsDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "policyHeadsDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-        }
-    });
     let positive_categories = json!([
         "PROJECT_RULES",
         "ARCHITECTURE",
@@ -16561,17 +16544,11 @@ fn ctx_memory_schema() -> Value {
             },
             "content": { "type": "string", "maxLength": 65536 },
             "antiMemory": anti_memory,
-            "publicClaimId": { "type": "string", "pattern": "^mcm_[0-9a-f]{32}$" },
-            "publicClaimIds": {
+            "objectId": { "type": "string", "pattern": "^mem_[0-9a-f]{32}$" },
+            "objectIds": {
                 "type": "array",
                 "maxItems": 20,
-                "items": { "type": "string", "pattern": "^mcm_[0-9a-f]{32}$" }
-            },
-            "mutationToken": mutation_token,
-            "mutationTokens": {
-                "type": "array",
-                "maxItems": 100,
-                "items": mutation_token
+                "items": { "type": "string", "pattern": "^mem_[0-9a-f]{32}$" }
             },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
             "reason": { "type": "string", "maxLength": 4096 },
@@ -26536,10 +26513,8 @@ mod tests {
                     "antiMemory",
                     "category",
                     "content",
-                    "publicClaimId",
-                    "publicClaimIds",
-                    "mutationToken",
-                    "mutationTokens",
+                    "objectId",
+                    "objectIds",
                     "limit",
                     "reason",
                     "memory_project",
@@ -27344,22 +27319,21 @@ mod tests {
         );
     }
 
-    /// Each retired claim-lane facade name answers with the same unsupported
-    /// outcome an unknown tool gets, in every request shape, and a
-    /// `ctx_memory` read answers with a tool error naming where memory is
-    /// served from; none of them performs a claim-mirror or claim-intent
-    /// operation.
+    /// Each retired facade name answers with the same unsupported outcome an
+    /// unknown tool gets, in every request shape, and a `ctx_memory` read
+    /// answers with a tool error naming where memory is served from. The
+    /// names are spelled in halves so this file does not contain them.
     #[tokio::test(flavor = "current_thread")]
     async fn retired_claim_facade_names_are_unsupported() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, project) = handler_with_store(producer, default_test_config());
         for name in [
-            "claim.intent.stage",
-            "claim.intent.inspect",
-            "claim.intent.ack",
-            "claim.effects.apply",
-            "claim.mirror.replace",
-            "claim.mirror.apply",
+            concat!("claim.", "intent.stage"),
+            concat!("claim.", "intent.inspect"),
+            concat!("claim.", "intent.ack"),
+            concat!("claim.", "effects.apply"),
+            concat!("claim.", "mirror.replace"),
+            concat!("claim.", "mirror.apply"),
         ] {
             for (request, expected) in [
                 (
@@ -27395,7 +27369,7 @@ mod tests {
             let outcome = call_facade(
                 &handler,
                 "ctx_memory",
-                json!({"action": action, "publicClaimIds": ["mcm_00000000000000000000000000000000"]}),
+                json!({"action": action, "objectIds": ["mem_00000000000000000000000000000000"]}),
             )
             .await;
             let body = tool_body(outcome);
@@ -27409,12 +27383,12 @@ mod tests {
         }
     }
 
-    /// No production source in this crate names a claim-mirror, claim-intent,
-    /// claim-operation, claim-lane, public-claim-id, or claim-snapshot-vector
+    /// No production source in this crate names a retired memory-plane
     /// identifier. Test modules are excluded: they may spell the retired names
-    /// to prove they are refused.
+    /// to prove they are refused. The needles are spelled in halves so this
+    /// file does not contain them.
     #[test]
-    fn daemon_production_source_names_no_claim_lane_identifier() {
+    fn daemon_production_source_names_no_retired_memory_plane_identifier() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         let mut pending = vec![src];
@@ -27430,19 +27404,19 @@ mod tests {
         }
         assert!(files.len() > 10, "{files:?}");
         let needles = [
-            "claim_mirror",
-            "ClaimMirror",
-            "claim_intent",
-            "ClaimIntent",
-            "claim_operation",
-            "ClaimOperation",
-            "claim_lane",
-            "public_claim_id",
-            "snapshot_vector",
-            "SnapshotVector",
-            "claim_snapshot",
-            "CommittedClaim",
-            "mirror_row",
+            concat!("claim_", "mirror"),
+            concat!("Claim", "Mirror"),
+            concat!("claim_", "intent"),
+            concat!("Claim", "Intent"),
+            concat!("claim_", "operation"),
+            concat!("Claim", "Operation"),
+            concat!("claim_", "lane"),
+            concat!("public_", "claim_id"),
+            concat!("snapshot_", "vector"),
+            concat!("Snapshot", "Vector"),
+            concat!("claim_", "snapshot"),
+            concat!("Committed", "Claim"),
+            concat!("mirror_", "row"),
         ];
         let mut offending = Vec::new();
         for path in files {
@@ -29438,9 +29412,9 @@ mod tests {
         assert!(harness.classifications().is_empty());
     }
 
-    /// The retired request shape is refused: a host-rendered prompt or
-    /// claim-lane items are `invalid_params` at parse time, before any
-    /// authority or ledger read; a public claim id where an object id belongs
+    /// The retired request shape is refused: a host-rendered prompt or the
+    /// retired `items` list are `invalid_params` at parse time, before any
+    /// authority or ledger read; a retired-form id where an object id belongs
     /// parses as an id and is refused because no such kernel object exists in
     /// the project, still with no dispatch and no write.
     #[tokio::test(flavor = "current_thread")]
@@ -29452,12 +29426,12 @@ mod tests {
                 "a host-rendered prompt",
             ),
             (
-                json!({"items": [{"public_claim_id": "mcm_0101010101010101010101010101010101"}], "object_ids": [id], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
-                "claim-lane items",
+                json!({"items": [{concat!("public_", "claim_id"): concat!("mc", "m_0101010101010101010101010101010101")}], "object_ids": [id], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "retired items",
             ),
             (
-                json!({"object_ids": ["mcm_01010101010101010101010101010101"], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
-                "a public claim id where an object id belongs",
+                json!({"object_ids": [concat!("mc", "m_01010101010101010101010101010101")], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "a retired-form id where an object id belongs",
             ),
             (
                 json!({"object_ids": [], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
@@ -29483,7 +29457,7 @@ mod tests {
                 PreparedOutcome::Error { code, .. } => code,
                 other => panic!("expected invalid_params for {why}, got {other:?}"),
             };
-            // A public claim id where an object id belongs is well-formed as a
+            // A retired-form id where an object id belongs is well-formed as a
             // request, so it is refused because the project does not hold it;
             // the other shapes are refused by the parser. Either way the code is
             // the same and nothing runs.

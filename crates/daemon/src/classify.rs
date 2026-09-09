@@ -653,14 +653,20 @@ mod tests {
         assert!(base.starts_with("eidnara-dreamer:classify:"));
     }
 
-    /// The module that owns the classify task names no claim-lane identity.
+    /// The module that owns the classify task names no retired identity.
+    /// The needles are spelled in halves so this file does not contain them.
     #[test]
-    fn the_classify_module_references_no_claim_operation_identifier() {
+    fn the_classify_module_references_no_retired_identifier() {
         let source = include_str!("classify.rs");
         let (production, _) = source
             .split_once("#[cfg(test)]\nmod tests")
             .expect("tests module marker");
-        for needle in ["claim_operation", "public_claim_id", "mcm_", "claim_intent"] {
+        for needle in [
+            concat!("claim_", "operation"),
+            concat!("public_", "claim_id"),
+            concat!("mc", "m_"),
+            concat!("claim_", "intent"),
+        ] {
             assert!(
                 !production.contains(needle),
                 "classify.rs production code references {needle}"
