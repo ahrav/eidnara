@@ -4376,3 +4376,782 @@ async fn a_stale_ready_sample_reads_as_unavailable_until_a_fresh_one_lands() {
     assert_eq!(kernel["sampled_at_ms"], fresh_at);
     daemon.handler.shutdown().await.unwrap();
 }
+
+// --- kernel.commit disposition operations ---
+
+fn disposition(object_id: &str, event: &str) -> Value {
+    json!({"op": "disposition", "object_id": object_id, "event": event})
+}
+
+fn disposition_with_approval(object_id: &str, event: &str, approval: &str) -> Value {
+    json!({
+        "op": "disposition",
+        "object_id": object_id,
+        "event": event,
+        "approval_object_id": approval,
+    })
+}
+
+fn admission_row_count(daemon: &Daemon) -> i64 {
+    core_connection(daemon)
+        .query_row("SELECT COUNT(*) FROM admission_decisions", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+fn commit_log_count(daemon: &Daemon) -> i64 {
+    core_connection(daemon)
+        .query_row("SELECT COUNT(*) FROM commit_log", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// The disposition the store holds for `object_id`, read from its latest
+/// admission row rather than from any route reply.
+fn stored_disposition(daemon: &Daemon, object_id: &str) -> String {
+    core_connection(daemon)
+        .query_row(
+            "SELECT disposition FROM admission_decisions WHERE subject_object_id=?1
+             ORDER BY commit_seq DESC, admission_decision_id DESC LIMIT 1",
+            [object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// An approval object the kernel honors: a live `adr_accepted` decision whose
+/// own admission was recorded by an explicit user, which the store API alone
+/// can create. `scope_id` places it in a project.
+fn seed_approval(daemon: &Daemon, object_id: &str, scope_id: Option<&str>) {
+    daemon
+        .store()
+        .commit(intent(&format!("approve-{object_id}")), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                decision_id: format!("{object_id}-decision"),
+                object_id: object_id.to_string(),
+                domain_id: DOMAIN.to_string(),
+                proposition_id: None,
+                scope_id: scope_id.map(str::to_string),
+                anchor_id: None,
+                evidence_id: None,
+                decision_kind: "adr_accepted".to_string(),
+                payload: DecisionPayload {
+                    summary: "Approved by the user.".to_string(),
+                    rationale: String::new(),
+                },
+                source_kind: "user".to_string(),
+                source_id: format!("{object_id}-lineage"),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            envelope.record_admission(admission(
+                object_id,
+                EventKind::AcceptedAdr,
+                None,
+                (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+            ))?;
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// Each event kind yields the kernel's fixed disposition; the reply carries the
+/// outcome and both dispositions, and the object becomes a token of the commit.
+#[tokio::test]
+async fn disposition_events_apply_the_fixed_table_and_report_outcome_and_disposition() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let cases = [
+        ("mark_stale", "deny", "stale"),
+        ("mark_disputed", "deny", "disputed"),
+        ("explicit_reject", "reject", "rejected"),
+        ("contradict", "deny", "contradicted"),
+        ("quarantine", "quarantine", "quarantined"),
+    ];
+    for (index, (event, outcome, resulting)) in (1..).zip(cases) {
+        let object_id = format!("decision-object-{index}");
+        assert_state(
+            &daemon
+                .commit(
+                    &format!("create-{index}"),
+                    vec![insert_decision(index)],
+                    vec![],
+                )
+                .await,
+            "available",
+            None,
+        );
+        let applied = daemon
+            .commit(
+                &format!("dispose-{index}"),
+                vec![disposition(&object_id, event)],
+                vec![],
+            )
+            .await;
+        assert_state(&applied, "available", None);
+        let commit_seq = applied["receipt"]["commit_seq"].as_i64().unwrap();
+        assert_eq!(
+            applied["dispositions"],
+            json!([{
+                "object_id": object_id,
+                "event": event,
+                "outcome": outcome,
+                "previous_disposition": "active",
+                "disposition": resulting,
+                "denied": false,
+            }]),
+            "{applied}"
+        );
+        assert_eq!(stored_disposition(&daemon, &object_id), resulting);
+        assert_eq!(
+            applied["tokens"],
+            json!([{"object_id": object_id, "known_as_of": commit_seq}])
+        );
+        if event == "quarantine" {
+            assert_matches_route_fixture(&applied, "commit-available-disposition-quarantine.json");
+        }
+    }
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// Tightening needs no approval; moving back toward a less restrictive
+/// disposition is denied without one and leaves the disposition unchanged,
+/// and a valid approval object lets it through.
+#[tokio::test]
+async fn a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    let quarantined = daemon
+        .commit(
+            "quarantine",
+            vec![disposition("decision-object-1", "quarantine")],
+            vec![],
+        )
+        .await;
+    assert_state(&quarantined, "available", None);
+    let rows_after_quarantine = admission_row_count(&daemon);
+
+    let denied = daemon
+        .commit(
+            "relax-unapproved",
+            vec![disposition("decision-object-1", "mark_stale")],
+            vec![],
+        )
+        .await;
+    assert_state(&denied, "available", None);
+    assert_eq!(
+        denied["dispositions"],
+        json!([{
+            "object_id": "decision-object-1",
+            "event": "mark_stale",
+            "outcome": "deny",
+            "previous_disposition": "quarantined",
+            "disposition": "quarantined",
+            "denied": true,
+        }]),
+        "{denied}"
+    );
+    assert_matches_route_fixture(&denied, "commit-available-disposition-denied.json");
+    // The denial is itself a recorded decision, so the ledger grows by one row
+    // while the stored disposition stays put.
+    assert_eq!(admission_row_count(&daemon), rows_after_quarantine + 1);
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "quarantined"
+    );
+
+    let unknown_approval = daemon
+        .commit(
+            "relax-unknown-approval",
+            vec![disposition_with_approval(
+                "decision-object-1",
+                "mark_stale",
+                "no-such-approval",
+            )],
+            vec![],
+        )
+        .await;
+    assert_state(&unknown_approval, "invalid", Some("not_found"));
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "quarantined"
+    );
+
+    seed_approval(&daemon, "approval-1", Some(&scope_id));
+    let relaxed = daemon
+        .commit(
+            "relax-approved",
+            vec![disposition_with_approval(
+                "decision-object-1",
+                "mark_stale",
+                "approval-1",
+            )],
+            vec![],
+        )
+        .await;
+    assert_state(&relaxed, "available", None);
+    assert_eq!(
+        relaxed["dispositions"],
+        json!([{
+            "object_id": "decision-object-1",
+            "event": "mark_stale",
+            "outcome": "deny",
+            "previous_disposition": "quarantined",
+            "disposition": "stale",
+            "denied": false,
+        }]),
+        "{relaxed}"
+    );
+    assert_eq!(stored_disposition(&daemon, "decision-object-1"), "stale");
+
+    // Re-marking a stale decision stale asks for the disposition it already
+    // holds, so it is admitted, not denied.
+    let repeated = daemon
+        .commit(
+            "mark-stale-again",
+            vec![disposition("decision-object-1", "mark_stale")],
+            vec![],
+        )
+        .await;
+    assert_state(&repeated, "available", None);
+    assert_eq!(repeated["dispositions"][0]["denied"], false, "{repeated}");
+    assert_eq!(repeated["dispositions"][0]["disposition"], "stale");
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// Explicit and inherited approvals obey the same project boundary. A scoped
+/// override takes precedence, but a disposition does not replace stored support.
+#[tokio::test]
+async fn disposition_approvals_are_project_scoped_whether_explicit_or_inherited() {
+    assert_disposition_approval_scope(ApprovalChain::Direct).await;
+}
+
+#[tokio::test]
+async fn disposition_own_admission_approval_chains_are_project_scoped() {
+    assert_disposition_approval_scope(ApprovalChain::OwnAdmission).await;
+}
+
+#[tokio::test]
+async fn disposition_lineage_approval_chains_are_project_scoped() {
+    assert_disposition_approval_scope(ApprovalChain::Lineage).await;
+}
+
+#[tokio::test]
+async fn approval_chain_reader_sees_envelope_writes_and_refuses_truncation() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    seed_approval(&daemon, "approval-root", Some(&scope_id));
+    daemon
+        .store()
+        .commit(intent("approval-chain"), |envelope| {
+            let mut parent = "approval-root".to_string();
+            let mut expected = vec![parent.clone()];
+            for index in 1..=65 {
+                let object_id = format!("store-decision-object-{index}");
+                let mut spec = store_decision(index, &scope_id, &object_id);
+                spec.decision_kind = "adr_accepted".to_string();
+                envelope.insert_decision(spec)?;
+                let mut request = admission(
+                    &object_id,
+                    EventKind::Approve,
+                    None,
+                    (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+                );
+                request.event.approval_object_id = Some(parent);
+                let decision = envelope.record_admission(request)?;
+                assert_eq!(decision.effective_maturity, kernel::Maturity::Approved);
+                parent = object_id;
+                expected.push(parent.clone());
+                if index == 64 {
+                    let mut members = envelope.approval_chain_members(&parent)?;
+                    members.sort();
+                    expected.sort();
+                    assert_eq!(members, expected);
+                }
+            }
+            assert_eq!(
+                envelope.approval_chain_members(&parent),
+                Err(kernel::KernelError::AdmissionPolicy),
+            );
+            Ok(String::new())
+        })
+        .unwrap();
+    daemon.handler.shutdown().await.unwrap();
+}
+
+enum ApprovalChain {
+    Direct,
+    OwnAdmission,
+    Lineage,
+}
+
+async fn assert_disposition_approval_scope(chain: ApprovalChain) {
+    let daemon = Daemon::start().await;
+    let receipt_count = || -> i64 {
+        core_connection(&daemon)
+            .query_row("SELECT COUNT(*) FROM operation_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    let (route_b, project_b) = daemon.bind_project("project-b").await;
+    assert_state(
+        &daemon
+            .call(
+                route_b,
+                commit_request(
+                    &project_b,
+                    "session-b",
+                    "create",
+                    vec![insert_decision(2)],
+                    vec![],
+                ),
+            )
+            .await,
+        "available",
+        None,
+    );
+    let read_b = daemon
+        .call(
+            route_b,
+            read_request(&project_b, "session-b", "explicit_search", None),
+        )
+        .await;
+    let foreign_scope = read_b["rows"][0]["scope_id"].as_str().unwrap();
+    assert_ne!(foreign_scope, scope_id);
+    let approvals = [
+        ("approval-foreign", Some(foreign_scope)),
+        ("approval-unscoped", None),
+        ("approval-local", Some(scope_id.as_str())),
+    ];
+    for (approval, scope) in approvals {
+        seed_approval(&daemon, approval, scope);
+    }
+
+    for (index, (root_approval, scope)) in (1..).zip(approvals) {
+        let approval = match chain {
+            ApprovalChain::Direct => root_approval.to_string(),
+            ApprovalChain::OwnAdmission | ApprovalChain::Lineage => {
+                let approval = format!("approval-child-{index}");
+                let lineage = format!("{approval}-lineage");
+                let mut spec = store_decision(1_000 + index, &scope_id, &lineage);
+                spec.object_id = approval.clone();
+                spec.decision_kind = "adr_accepted".to_string();
+                daemon
+                    .store()
+                    .commit(intent(&format!("approve-{approval}")), |envelope| {
+                        envelope.insert_decision(spec)?;
+                        let mut request = admission(
+                            &approval,
+                            EventKind::AcceptedAdr,
+                            None,
+                            (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+                        );
+                        if matches!(chain, ApprovalChain::OwnAdmission) {
+                            request.event.kind = EventKind::Approve;
+                            request.event.approval_object_id = Some(root_approval.to_string());
+                        }
+                        let decision = envelope.record_admission(request)?;
+                        assert_eq!(decision.effective_maturity, kernel::Maturity::Approved);
+                        assert_eq!(
+                            envelope.subject_admission(&approval)?.unwrap().1.as_deref(),
+                            matches!(chain, ApprovalChain::OwnAdmission).then_some(root_approval)
+                        );
+                        Ok(String::new())
+                    })
+                    .unwrap();
+                if matches!(chain, ApprovalChain::Lineage) {
+                    let candidate_id = format!("lineage-{approval}");
+                    let now = now_ms();
+                    daemon
+                        .store()
+                        .stage_candidate(kernel::StagingCandidateSpec {
+                            extraction_run_id: candidate_id.clone(),
+                            candidate_id: candidate_id.clone(),
+                            extractor: "fixture".to_string(),
+                            source_kind: "repo".to_string(),
+                            source_id: lineage,
+                            source_revision: 1,
+                            candidate_kind: "domain".to_string(),
+                            payload: "Approved lineage".to_string(),
+                            provenance: Some(kernel::RepositoryProvenance {
+                                repository_id: "repo".to_string(),
+                                revision: "abc123".to_string(),
+                            }),
+                            recorded_at: now,
+                            lease_expires_at: now + 60_000,
+                        })
+                        .unwrap();
+                    daemon
+                        .store()
+                        .commit(intent(&candidate_id), |envelope| {
+                            let decision = envelope.record_admission(kernel::AdmissionRequest {
+                                candidate_id: Some(candidate_id.clone()),
+                                subject_object_id: None,
+                                source_class: Some(SourceClass::ModelInference),
+                                taint_class: Some(TaintClass::AssistantInference),
+                                event: kernel::AdmissionEvent {
+                                    kind: EventKind::Verify,
+                                    trigger_object_id: None,
+                                    approval_object_id: Some(root_approval.to_string()),
+                                    evidence_id: None,
+                                    reason: "Verify the approval's lineage".to_string(),
+                                },
+                            })?;
+                            assert_eq!(decision.effective_maturity, kernel::Maturity::Verified);
+                            assert_eq!(decision.sensitivity, Sensitivity::Normal);
+                            Ok(String::new())
+                        })
+                        .unwrap();
+                }
+                approval
+            }
+        };
+        let approval = approval.as_str();
+        let classes = (SourceClass::ModelInference, TaintClass::AssistantInference);
+        for (case_index, case) in (0..).zip(["explicit", "inherited", "cached", "override"]) {
+            let subject_index = index * 10 + case_index;
+            let subject = format!("store-decision-object-{subject_index}");
+            let key = format!("relax-{index}-{case}");
+            daemon
+                .store()
+                .commit(intent(&format!("quarantine-{key}")), |envelope| {
+                    envelope.insert_decision(store_decision(subject_index, &scope_id, &subject))?;
+                    if case != "explicit" {
+                        let mut request = admission(&subject, EventKind::Verify, None, classes);
+                        request.event.approval_object_id = Some(approval.to_string());
+                        let decision = envelope.record_admission(request)?;
+                        assert_eq!(decision.effective_maturity.as_str(), "verified");
+                    }
+                    envelope.record_admission(admission(
+                        &subject,
+                        EventKind::Quarantine,
+                        None,
+                        classes,
+                    ))?;
+                    Ok(String::new())
+                })
+                .unwrap();
+            let stored_approval: Option<String> = core_connection(&daemon)
+                .query_row(
+                    "SELECT approval_object_id FROM admission_decisions
+                     WHERE subject_object_id=?1
+                     ORDER BY commit_seq DESC, admission_decision_id DESC LIMIT 1",
+                    [&subject],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                stored_approval.as_deref(),
+                (case != "explicit").then_some(approval)
+            );
+            assert_eq!(stored_disposition(&daemon, &subject), "quarantined");
+            let admission_rows = admission_row_count(&daemon);
+            let commit_rows = commit_log_count(&daemon);
+            let receipts = receipt_count();
+            let tip = daemon.tip();
+            let outbox = newest_outbox_position(&daemon);
+            let inserted_index = 100 + subject_index;
+            let mut operations = vec![insert_decision(inserted_index)];
+            if case == "cached" {
+                operations.push(disposition_with_approval(
+                    &subject,
+                    "mark_disputed",
+                    "approval-local",
+                ));
+            }
+            operations.push(match case {
+                "explicit" => disposition_with_approval(&subject, "mark_stale", approval),
+                "override" => disposition_with_approval(&subject, "mark_stale", "approval-local"),
+                _ => disposition(&subject, "mark_stale"),
+            });
+            let response = daemon.commit(&key, operations, vec![]).await;
+
+            if scope == Some(scope_id.as_str()) || case == "override" {
+                assert_state(&response, "available", None);
+                assert_eq!(response["receipt"]["replayed"], false, "{key}: {response}");
+                let mut expected = Vec::new();
+                if case == "cached" {
+                    expected.push(json!({
+                        "object_id": subject,
+                        "event": "mark_disputed",
+                        "outcome": "deny",
+                        "previous_disposition": "quarantined",
+                        "disposition": "disputed",
+                        "denied": false,
+                    }));
+                }
+                expected.push(json!({
+                    "object_id": subject,
+                    "event": "mark_stale",
+                    "outcome": "deny",
+                    "previous_disposition": if case == "cached" { "disputed" } else { "quarantined" },
+                    "disposition": "stale",
+                    "denied": false,
+                }));
+                assert_eq!(response["dispositions"], json!(expected), "{key}");
+                assert_eq!(stored_disposition(&daemon, &subject), "stale", "{key}");
+                assert_eq!(commit_log_count(&daemon), commit_rows + 1, "{key}");
+                assert_eq!(receipt_count(), receipts + 1, "{key}");
+                assert_eq!(
+                    admission_row_count(&daemon),
+                    admission_rows + 1 + expected.len() as i64,
+                    "{key}"
+                );
+            } else {
+                assert_state(&response, "invalid", Some("not_found"));
+                assert!(response["receipt"].is_null(), "{key}: {response}");
+                assert_eq!(
+                    stored_disposition(&daemon, &subject),
+                    "quarantined",
+                    "{key}"
+                );
+                assert_eq!(admission_row_count(&daemon), admission_rows, "{key}");
+                assert_eq!(commit_log_count(&daemon), commit_rows, "{key}");
+                assert_eq!(receipt_count(), receipts, "{key}");
+                assert_eq!(daemon.tip(), tip, "{key}");
+                assert_eq!(newest_outbox_position(&daemon), outbox, "{key}");
+                let (_, states) = daemon
+                    .store()
+                    .object_states(&[format!("decision-object-{inserted_index}")])
+                    .unwrap();
+                assert!(
+                    states[0].is_none(),
+                    "{key}: insert escaped the rejected envelope"
+                );
+            }
+        }
+    }
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A disposition targets a live decision with admission history; a retired
+/// decision or a decision the store admitted nothing for is refused before
+/// any event is recorded.
+#[tokio::test]
+async fn a_disposition_needs_a_live_admitted_decision() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit(
+                "create",
+                vec![insert_decision(1), insert_decision(2)],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    assert_state(
+        &daemon
+            .commit(
+                "retire-2",
+                vec![json!({"op": "retire_decision", "object_id": "decision-object-2"})],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    daemon
+        .store()
+        .commit(intent("unadmitted"), |envelope| {
+            envelope.insert_decision(store_decision(7, &scope_id, "unadmitted-lineage"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let rows = admission_row_count(&daemon);
+
+    let retired = daemon
+        .commit(
+            "dispose-retired",
+            vec![disposition("decision-object-2", "quarantine")],
+            vec![],
+        )
+        .await;
+    assert_state(&retired, "invalid", Some("not_found"));
+    let unadmitted = daemon
+        .commit(
+            "dispose-unadmitted",
+            vec![disposition("store-decision-object-7", "quarantine")],
+            vec![],
+        )
+        .await;
+    assert_state(&unadmitted, "invalid", Some("admission_policy"));
+    assert_eq!(admission_row_count(&daemon), rows);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// An admission event does not move the object's mutation token: a token read
+/// before a disposition still names the object the caller read, so a writer
+/// holding it is not turned back by a disposition landing in between.
+#[tokio::test]
+async fn a_disposition_leaves_the_object_token_valid() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let created = daemon
+        .commit("create", vec![insert_decision(1)], vec![])
+        .await;
+    assert_state(&created, "available", None);
+    let created_seq = created["receipt"]["commit_seq"].as_i64().unwrap();
+    assert_state(
+        &daemon
+            .commit(
+                "quarantine",
+                vec![disposition("decision-object-1", "quarantine")],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let retired = daemon
+        .commit(
+            "retire-with-old-token",
+            vec![json!({"op": "retire_decision", "object_id": "decision-object-1"})],
+            vec![token("decision-object-1", created_seq)],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// The envelope's identity and token rules cover disposition operations: a
+/// replay returns the recorded receipt and writes nothing, a reused key with
+/// another digest is refused, and a conflicting token aborts the whole
+/// envelope, including the operations beside the disposition.
+#[tokio::test]
+async fn disposition_operations_share_the_envelope_replay_and_token_rules() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let created = daemon
+        .commit(
+            "create",
+            vec![insert_decision(1), insert_decision(2)],
+            vec![],
+        )
+        .await;
+    assert_state(&created, "available", None);
+    let created_seq = created["receipt"]["commit_seq"].as_i64().unwrap();
+
+    let first = daemon
+        .commit(
+            "dispose",
+            vec![disposition("decision-object-1", "mark_disputed")],
+            vec![],
+        )
+        .await;
+    assert_state(&first, "available", None);
+    assert_eq!(first["receipt"]["replayed"], false);
+    let admission_rows = admission_row_count(&daemon);
+    let commit_rows = commit_log_count(&daemon);
+
+    let replayed = daemon
+        .commit(
+            "dispose",
+            vec![disposition("decision-object-1", "mark_disputed")],
+            vec![],
+        )
+        .await;
+    assert_state(&replayed, "available", None);
+    assert_eq!(replayed["receipt"]["replayed"], true);
+    assert_eq!(
+        replayed["receipt"]["commit_seq"],
+        first["receipt"]["commit_seq"]
+    );
+    assert_eq!(replayed["dispositions"], first["dispositions"]);
+    assert_eq!(replayed["tokens"], first["tokens"]);
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    assert_eq!(commit_log_count(&daemon), commit_rows);
+
+    let mut reused = commit_request(
+        &daemon.project,
+        SESSION,
+        "dispose",
+        vec![disposition("decision-object-1", "quarantine")],
+        vec![],
+    );
+    reused["intent"] = wire_intent("dispose", "other-bytes");
+    let reused = daemon.call(daemon.route, reused).await;
+    assert_state(&reused, "invalid", Some("operation_key_reused"));
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    assert_eq!(commit_log_count(&daemon), commit_rows);
+
+    // Retiring the second decision retracts the object a token read at
+    // `created_seq` still names, so the token conflicts and nothing in the
+    // envelope lands: neither the insert nor the disposition beside it.
+    assert_state(
+        &daemon
+            .commit(
+                "retire-2",
+                vec![json!({"op": "retire_decision", "object_id": "decision-object-2"})],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    let admission_rows = admission_row_count(&daemon);
+    let commit_rows = commit_log_count(&daemon);
+    let aborted = daemon
+        .commit(
+            "mixed",
+            vec![
+                insert_decision(3),
+                disposition("decision-object-1", "quarantine"),
+            ],
+            vec![token("decision-object-2", created_seq)],
+        )
+        .await;
+    assert_state(&aborted, "conflict", Some("retracted"));
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    assert_eq!(commit_log_count(&daemon), commit_rows);
+    assert_eq!(
+        object_ids(&daemon.read("explicit_search", None).await),
+        ["decision-object-1"]
+    );
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "disputed",
+        "the aborted quarantine left the disposition where the replayed envelope put it"
+    );
+
+    // An unknown or out-of-scope target uses the existing not-found answer.
+    let missing = daemon
+        .commit(
+            "dispose-missing",
+            vec![disposition("decision-object-9", "quarantine")],
+            vec![],
+        )
+        .await;
+    assert_state(&missing, "invalid", Some("not_found"));
+    assert_eq!(admission_row_count(&daemon), admission_rows);
+    daemon.handler.shutdown().await.unwrap();
+}

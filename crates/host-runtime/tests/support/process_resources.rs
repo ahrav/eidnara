@@ -74,6 +74,44 @@ pub fn observe(pid: u32) -> Result<ResourceCounts, ObserveError> {
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
+/// Task completion can wake a serial caller before its blocking worker becomes idle.
+/// A single blocking worker queues the next operation instead of expanding the resource baseline.
+pub fn serial_blocking_runtime() -> tokio::runtime::Runtime {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let threads = std::sync::Arc::new(AtomicUsize::new(0));
+    let created = threads.clone();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .thread_name_fn(move || {
+            created.fetch_add(1, Ordering::SeqCst);
+            "tokio-rt-worker".to_owned()
+        })
+        .enable_all()
+        .build()
+        .expect("resource test runtime");
+    let (started, running) = std::sync::mpsc::sync_channel(1);
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let first = runtime.spawn_blocking(move || {
+        started.send(()).unwrap();
+        let _ = held.recv();
+    });
+    running
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("blocking worker starts");
+    let next = runtime.spawn_blocking(|| {});
+    drop(release);
+    runtime.block_on(first).expect("held worker joins");
+    runtime.block_on(next).expect("queued operation joins");
+    assert_eq!(
+        threads.load(Ordering::SeqCst),
+        3,
+        "resource tests require two async workers and one blocking worker"
+    );
+    runtime
+}
+
 /// Returns a baseline for `pid` once three consecutive samples are identical.
 /// Requiring three matching samples rejects counters still changing between
 /// polls.

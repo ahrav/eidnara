@@ -1,0 +1,27 @@
+{
+  "dispositions": [
+    {
+      "denied": true,
+      "disposition": "quarantined",
+      "event": "mark_stale",
+      "object_id": "decision-object-1",
+      "outcome": "deny",
+      "previous_disposition": "quarantined"
+    }
+  ],
+  "known_as_of": 4,
+  "merged": [],
+  "receipt": {
+    "commit_seq": 4,
+    "replayed": false
+  },
+  "state": {
+    "kind": "available"
+  },
+  "tokens": [
+    {
+      "known_as_of": 4,
+      "object_id": "decision-object-1"
+    }
+  ]
+}

@@ -920,6 +920,43 @@ impl Envelope<'_> {
         self.guarded(|envelope| envelope.record_admission_inner(request))
     }
 
+    /// Returns the prior decision and supporting approval id from the same cache
+    /// used by admission evaluation, including writes within this envelope.
+    pub fn subject_admission(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<(PriorDecision, Option<String>)>, KernelError> {
+        let object_id = identity(object_id)?;
+        Ok(load_prior_for_key(self, &AdmissionKey::Object(object_id))?
+            .map(|stored| (stored.decision, stored.approval_object_id)))
+    }
+
+    /// Reads the seed and ancestors with the policy's own-row and lineage traversal.
+    /// Rejects chains above the authority bound instead of returning a partial list.
+    pub fn approval_chain_members(
+        &self,
+        approval_object_id: &str,
+    ) -> Result<Vec<String>, KernelError> {
+        let approval_object_id = identity(approval_object_id)?;
+        let chain = authority_chain_cte("?1", AuthorityAsOf::Now);
+        let mut statement = self
+            .tx
+            .prepare_cached(&format!(
+                "WITH RECURSIVE {chain} SELECT object_id FROM chain LIMIT {}",
+                MAX_AUTHORITY_CHAIN_DEPTH + 2
+            ))
+            .map_err(map_sqlite)?;
+        let members = statement
+            .query_map([approval_object_id], |row| row.get(0))
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_sqlite)?;
+        if members.len() > MAX_AUTHORITY_CHAIN_DEPTH + 1 {
+            return Err(KernelError::AdmissionPolicy);
+        }
+        Ok(members)
+    }
+
     fn record_admission_inner(
         &mut self,
         request: AdmissionRequest,
@@ -1962,8 +1999,17 @@ fn load_prior_decision(
     envelope: &Envelope<'_>,
     facts: &SubjectFacts,
 ) -> Result<Option<StoredAdmission>, KernelError> {
-    let key = facts.key();
-    if let Some(prior) = envelope.admission_latest.get(&key) {
+    load_prior_for_key(envelope, &facts.key())
+}
+
+/// The latest committed admission under `key`, read through the envelope's
+/// same-transaction cache first so a decision written earlier in the envelope
+/// is the prior a later one sees.
+fn load_prior_for_key(
+    envelope: &Envelope<'_>,
+    key: &AdmissionKey,
+) -> Result<Option<StoredAdmission>, KernelError> {
+    if let Some(prior) = envelope.admission_latest.get(key) {
         return Ok(Some(prior.clone()));
     }
     let columns = "maturity,effective_maturity,disposition,outcome,source_class,
@@ -1981,7 +2027,7 @@ fn load_prior_decision(
             row.get::<_, Option<String>>(8)?,
         ))
     };
-    let row = match &key {
+    let row = match key {
         AdmissionKey::Object(object_id) => envelope
             .tx
             .query_row_cached(
@@ -1996,7 +2042,11 @@ fn load_prior_decision(
             )
             .optional()
             .map_err(map_sqlite)?,
-        AdmissionKey::Candidate(_) | AdmissionKey::Lineage { .. } => envelope
+        AdmissionKey::Lineage {
+            source_kind,
+            source_id,
+            source_revision,
+        } => envelope
             .tx
             .query_row_cached(
                 &format!(
@@ -2007,11 +2057,15 @@ fn load_prior_decision(
                        AND commit_seq IS NOT NULL
                      ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
                 ),
-                params![facts.source_kind, facts.source_id, facts.source_revision],
+                params![source_kind, source_id, source_revision],
                 map_row,
             )
             .optional()
             .map_err(map_sqlite)?,
+        // A candidate's prior lives under its lineage key; `SubjectFacts::key`
+        // performs that translation, so a lookup keyed by the candidate id has
+        // no answer and fails closed instead of reporting "no prior".
+        AdmissionKey::Candidate(_) => return Err(KernelError::InvalidInput),
     };
     let Some((
         maturity,
@@ -3377,6 +3431,16 @@ const fn source_allows_taint(source: SourceClass, taint: TaintClass) -> bool {
     }
 }
 // policy-digest:tables-end
+
+impl EventKind {
+    /// The disposition an admitted event of this kind moves its subject to;
+    /// `None` for events that leave the disposition alone. Reads the fixed
+    /// event table, so a caller can tell a denied transition (the subject kept
+    /// another disposition) from an admitted one without a second copy of it.
+    pub fn requested_disposition(self) -> Option<Disposition> {
+        event_effect(self, Maturity::Candidate).1
+    }
+}
 
 const _: () = {
     assert!(Maturity::Candidate.rank() < Maturity::Corroborated.rank());

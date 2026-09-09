@@ -370,7 +370,6 @@ pub async fn request_json(client: &Client, route: ClientRoute, body: Value) -> V
     serde_json::from_slice(&response.body).expect("response JSON")
 }
 
-/// `wait_for_store` polls module status until the fixture reports an open store or the shared budget expires.
 pub async fn wait_for_store(client: &Client, route: ClientRoute, session: &str) -> Value {
     let deadline = Instant::now() + BUDGET;
     loop {
@@ -388,14 +387,17 @@ pub async fn wait_for_store(client: &Client, route: ClientRoute, session: &str) 
         {
             Ok(response) => {
                 let status: Value = serde_json::from_slice(&response.body).unwrap();
-                if status["store_open"] == true {
+                if status["store_open"] == true && status["kernel"]["kernel_state"] == "ready" {
                     return status;
                 }
             }
             Err(error) if error.code() == "host.store_unavailable" => {}
             Err(error) => panic!("store readiness request failed: {error}"),
         }
-        assert!(Instant::now() < deadline, "module store did not open");
+        assert!(
+            Instant::now() < deadline,
+            "fixture stores did not become ready"
+        );
         tokio::task::yield_now().await;
     }
 }
