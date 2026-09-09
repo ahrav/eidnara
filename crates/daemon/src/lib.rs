@@ -28389,7 +28389,8 @@ mod tests {
     /// A probe list cannot detect an unlisted spelling, so the route set comes from the two
     /// dispatchers' `match` arm patterns. Each arm must use string-literal patterns or `_`; the
     /// parser fails on a constant or binding pattern instead of skipping the route it names.
-    /// commentlint: allow(JUDGE)
+    /// The `_` arm must reject the request because delegating would route every unlisted
+    /// spelling. commentlint: allow(JUDGE)
     fn dispatcher_route_literals() -> Vec<String> {
         use quote::ToTokens;
         use syn::visit::Visit;
@@ -28420,6 +28421,7 @@ mod tests {
 
         struct Dispatcher<'a> {
             scrutinee: &'a str,
+            rejecting_body: &'a str,
             matches: usize,
             literals: Vec<String>,
         }
@@ -28429,6 +28431,19 @@ mod tests {
                 if expr.expr.to_token_stream().to_string() == self.scrutinee {
                     self.matches += 1;
                     for arm in &expr.arms {
+                        if matches!(arm.pat, syn::Pat::Wild(_)) {
+                            assert!(
+                                arm.guard.is_none(),
+                                "the `_` arm of `match {}` must not be guarded",
+                                self.scrutinee
+                            );
+                            assert_eq!(
+                                arm.body.to_token_stream().to_string(),
+                                self.rejecting_body,
+                                "the `_` arm of `match {}` must reject the request",
+                                self.scrutinee
+                            );
+                        }
                         pattern_literals(&arm.pat, &mut self.literals);
                     }
                 }
@@ -28437,6 +28452,7 @@ mod tests {
         }
 
         struct Dispatchers {
+            rejecting_body: String,
             functions: Vec<(&'static str, Option<Vec<String>>)>,
         }
 
@@ -28446,6 +28462,7 @@ mod tests {
                 if let Some((_, scrutinee)) = DISPATCHERS.iter().find(|(f, _)| *f == name) {
                     let mut dispatcher = Dispatcher {
                         scrutinee,
+                        rejecting_body: &self.rejecting_body,
                         matches: 0,
                         literals: Vec::new(),
                     };
@@ -28467,7 +28484,10 @@ mod tests {
         }
 
         let file: syn::File = syn::parse_str(include_str!("lib.rs")).expect("lib.rs parses");
+        let rejecting_body: syn::Expr =
+            syn::parse_str("unrecognized_request_error(&request)").expect("rejecting body parses");
         let mut dispatchers = Dispatchers {
+            rejecting_body: rejecting_body.to_token_stream().to_string(),
             functions: DISPATCHERS.iter().map(|(f, _)| (*f, None)).collect(),
         };
         dispatchers.visit_file(&file);

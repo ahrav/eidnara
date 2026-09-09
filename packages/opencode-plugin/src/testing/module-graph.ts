@@ -174,8 +174,18 @@ export function databaseUses(
                 }
             }
         }
-        if (ts.isExportDeclaration(node) && isBindingSpecifier(node.moduleSpecifier)) {
-            recordEscape(node);
+        if (
+            ts.isExportDeclaration(node) &&
+            isBindingSpecifier(node.moduleSpecifier) &&
+            !node.isTypeOnly
+        ) {
+            // A type-only re-export is erased at runtime; one runtime specifier in a mixed clause is enough to escape.
+            const clause = node.exportClause;
+            const exportsValue =
+                !clause ||
+                !ts.isNamedExports(clause) ||
+                clause.elements.some((element) => !element.isTypeOnly);
+            if (exportsValue) recordEscape(node);
         }
         if (ts.isCallExpression(node)) {
             const callee = node.expression;
@@ -191,7 +201,9 @@ export function databaseUses(
                 ts.isTypeReferenceNode(parent) ||
                 ts.isTypeQueryNode(parent) ||
                 ts.isQualifiedName(parent) ||
-                (ts.isTypeAliasDeclaration(parent) && parent.name === node);
+                (ts.isTypeAliasDeclaration(parent) && parent.name === node) ||
+                (ts.isExportSpecifier(parent) &&
+                    (parent.isTypeOnly || parent.parent.parent.isTypeOnly));
             const isOpen = ts.isNewExpression(parent) && parent.expression === node;
             const isPropertyKey =
                 (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
