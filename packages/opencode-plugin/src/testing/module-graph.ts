@@ -164,8 +164,12 @@ export function parseSource(source: string, fileName: string): ts.SourceFile {
  * Comments are blanked to spaces, never removed, so the scan reports the source line number
  * of a hit and a closed block comment cannot hide the code that follows it on the same line.
  */
-export function withoutComments(source: string, fileName = "module.ts"): string {
-    const file = parseSource(source, fileName);
+export function withoutComments(
+    source: string,
+    fileName = "module.ts",
+    parsed?: ts.SourceFile,
+): string {
+    const file = parsed ?? parseSource(source, fileName);
     const ranges = new Map<number, number>();
     const collect = (node: ts.Node): void => {
         for (const range of [
@@ -198,12 +202,53 @@ export function operationLiteralHits(
     assertStatelessPattern("operationLiteralHits", pattern);
     const hits: string[] = [];
     for (const file of files) {
-        const lines = withoutComments(readFileSync(file, "utf8"), file).split("\n");
+        const source = readFileSync(file, "utf8");
+        const parsed = parseSource(source, file);
+        const lines = withoutComments(source, file, parsed).split("\n");
         for (const [index, line] of lines.entries()) {
             if (pattern.test(line)) hits.push(`${file}:${index + 1}`);
         }
+        for (const { line, value } of foldedStrings(parsed)) {
+            const quoted = `"${value}"`;
+            if (pattern.test(quoted) && !hits.includes(`${file}:${line}`)) {
+                hits.push(`${file}:${line}`);
+            }
+        }
     }
     return hits;
+}
+
+/**
+ * A string the bundler would fold: `"context" + ".db"` or `"claim." + "intent"`. Every `+`
+ * expression whose leaves are all string literals yields its concatenation at its first line,
+ * inner chains included, so a spelling split across literals is scanned as the value it becomes.
+ */
+export function foldedStrings(file: ts.SourceFile): { line: number; value: string }[] {
+    const folded: { line: number; value: string }[] = [];
+    const leafText = (node: ts.Expression): string | undefined => {
+        const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
+        if (ts.isStringLiteralLike(inner)) return inner.text;
+        if (ts.isBinaryExpression(inner) && inner.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+            const left = leafText(inner.left);
+            const right = leafText(inner.right);
+            return left !== undefined && right !== undefined ? left + right : undefined;
+        }
+        return undefined;
+    };
+    const visit = (node: ts.Node): void => {
+        if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+            const value = leafText(node);
+            if (value !== undefined) {
+                folded.push({
+                    line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+                    value,
+                });
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(file);
+    return folded;
 }
 
 export interface DatabaseUses {

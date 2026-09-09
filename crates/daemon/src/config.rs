@@ -1869,7 +1869,23 @@ mod tests {
             "/retrieval",
             "/synapse",
         ];
-        const ABSENT_STEMS: &[&str] = &["mural", "embed", "git", "index", "retriev", "synapse"];
+        const ABSENT_WORDS: &[&str] = &[
+            "mural",
+            "murals",
+            "embed",
+            "embeds",
+            "embedding",
+            "embeddings",
+            "git",
+            "index",
+            "indexes",
+            "indexing",
+            "indexer",
+            "retrieval",
+            "retrieve",
+            "retriever",
+            "synapse",
+        ];
         for pointer in [
             "/memory/git_commit_indexing",
             "/message_index/enabled",
@@ -1878,25 +1894,32 @@ mod tests {
             "/retrieval/enabled",
         ] {
             assert!(
-                crate::test_support::names_absent_subsystem(pointer, ABSENT_STEMS),
+                crate::test_support::names_absent_subsystem(pointer, ABSENT_WORDS),
                 "{pointer}"
             );
         }
-        for pointer in ["/ui/digital_clock", "/memory/enabled", "/historian/model"] {
+        for pointer in [
+            "/ui/digital_clock",
+            "/memory/enabled",
+            "/historian/model",
+            "/github/enabled",
+            "/gitignore/respect",
+        ] {
             assert!(
-                !crate::test_support::names_absent_subsystem(pointer, ABSENT_STEMS),
+                !crate::test_support::names_absent_subsystem(pointer, ABSENT_WORDS),
                 "{pointer}"
             );
         }
         for key in ConfigKey::ALL {
             for prefix in ABSENT_PREFIXES {
+                let pointer = key.pointer();
                 assert!(
-                    !key.pointer().starts_with(prefix),
+                    pointer != *prefix && !pointer.starts_with(&format!("{prefix}/")),
                     "{key:?} would let a tier configure an absent subsystem"
                 );
             }
             assert!(
-                !crate::test_support::names_absent_subsystem(key.pointer(), ABSENT_STEMS),
+                !crate::test_support::names_absent_subsystem(key.pointer(), ABSENT_WORDS),
                 "{key:?} would let a tier configure an absent subsystem"
             );
         }

@@ -8,6 +8,7 @@ import {
     databaseBinders,
     databaseUses,
     firstPartyCodeInputs,
+    foldedStrings,
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
@@ -494,6 +495,8 @@ describe("operationLiteralHits", () => {
             '/* compatibility */ writeFileSync(join(dir, "context.db"), data);',
             "const b = `not // a comment ${x}/store.db`;",
             "export const X = <div>text {`${y}/kernel.sqlite`}</div>;",
+            'const assembled = "memory" + ".sq" + "lite";',
+            'const partial = "memory" + suffix;',
             "",
         ].join("\n"),
     );
@@ -503,13 +506,19 @@ describe("operationLiteralHits", () => {
         expect(operationLiteralHits([file])).toEqual([`${file}:1`, `${file}:2`]);
     });
 
-    test("blanks comments but keeps code after a closed block comment, template text, and JSX", () => {
+    test("blanks comments but keeps code after a closed block comment, template text, JSX, and folded concatenations", () => {
         expect(operationLiteralHits([commented], PRODUCT_STORE_FILE)).toEqual([
             `${commented}:5`,
             `${commented}:6`,
             `${commented}:7`,
+            `${commented}:8`,
         ]);
         expect(withoutComments("/* a */ b // c\n", "m.ts")).toBe("        b     \n");
+        expect(
+            foldedStrings(parseSource('const op = ("claim." + "intent") + ".stage";', "m.ts")).map(
+                (entry) => entry.value,
+            ),
+        ).toEqual(["claim.intent.stage", "claim.intent"]);
     });
 
     // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;

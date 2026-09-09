@@ -28399,15 +28399,23 @@ mod tests {
         }
     }
 
-    /// The literals a macro invocation carries; `concat!` also contributes the string it
-    /// evaluates to, since fragments such as `"mural"` and `".render"` name nothing alone. A
-    /// `concat!` whose arguments are not all literals cannot be evaluated here, so it fails the
-    /// audit rather than yielding a spelling the compiler would never produce.
+    /// The literals a macro invocation carries. `concat!` also contributes the string it
+    /// evaluates to, since fragments such as `"mural"` and `".render"` name nothing alone, and
+    /// `stringify!` contributes its token text with and without spaces and as words. A `concat!` whose
+    /// arguments are not all literals cannot be evaluated here, so it fails the audit rather
+    /// than yielding a spelling the compiler would never produce.
     fn macro_literals(mac: &syn::Macro) -> Vec<String> {
         use quote::ToTokens;
 
         let mut literals = Vec::new();
         macro_string_literals(mac.tokens.clone(), &mut literals);
+        if mac.path.is_ident("stringify") {
+            let spaced = mac.tokens.to_string();
+            let joined = spaced.replace(' ', "");
+            literals.push(identifier_words(&joined));
+            literals.push(joined);
+            literals.push(spaced);
+        }
         if mac.path.is_ident("concat") {
             let evaluable = mac.tokens.clone().into_iter().all(|tree| match tree {
                 proc_macro2::TokenTree::Literal(_) => true,
@@ -28672,10 +28680,24 @@ mod tests {
 
     /// `model` covers the embedding-model listing routes (`models.list`) that the probe set
     /// treats as part of the absent embedding subsystem.
-    const ABSENT_ROUTE_STEMS: &[&str] = &["index", "embed", "model", "git", "mural"];
+    const ABSENT_ROUTE_WORDS: &[&str] = &[
+        "index",
+        "indexes",
+        "indexing",
+        "indexer",
+        "embed",
+        "embeds",
+        "embedding",
+        "embeddings",
+        "model",
+        "models",
+        "git",
+        "mural",
+        "murals",
+    ];
 
     fn names_absent_subsystem(route: &str) -> bool {
-        test_support::names_absent_subsystem(route, ABSENT_ROUTE_STEMS)
+        test_support::names_absent_subsystem(route, ABSENT_ROUTE_WORDS)
     }
 
     #[test]
@@ -28721,13 +28743,34 @@ mod tests {
             && (literal.contains('.') || literal.starts_with("ctx_") || literal.starts_with("ctx-"))
     }
 
-    /// `MuralRender` becomes `mural_render`, the snake_case form serde would accept and the
-    /// shape `names_absent_subsystem` splits.
+    /// `MuralRender` becomes `mural_render`, the snake_case form serde's `rename_all` produces
+    /// and the shape `names_absent_subsystem` splits.
     fn camel_words(ident: &str) -> String {
         let mut out = String::new();
         for (index, ch) in ident.chars().enumerate() {
             if ch.is_ascii_uppercase() && index > 0 {
                 out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        }
+        out
+    }
+
+    /// The words of an identifier with acronym runs kept whole: `MURALRender` becomes
+    /// `mural_render`, where `camel_words` would give `m_u_r_a_l_render`.
+    fn identifier_words(ident: &str) -> String {
+        let chars: Vec<char> = ident.chars().collect();
+        let mut out = String::new();
+        for (index, &ch) in chars.iter().enumerate() {
+            if index > 0 && ch.is_ascii_uppercase() {
+                let previous = chars[index - 1];
+                let next_is_lower = chars.get(index + 1).is_some_and(char::is_ascii_lowercase);
+                if previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase() && next_is_lower)
+                {
+                    out.push('_');
+                }
             }
             out.push(ch.to_ascii_lowercase());
         }
@@ -28855,6 +28898,33 @@ mod tests {
         tree
     }
 
+    /// Macros whose string content is visible to the audit: their literal arguments are
+    /// collected, and `concat!` and `stringify!` are evaluated. Any other macro in a comparison
+    /// operand (`env!`, `include_str!`, a crate-local macro) could yield a spelling the audit
+    /// never sees, so it fails the test.
+    const VISIBLE_MACROS: [&str; 6] = ["concat", "stringify", "format", "matches", "json", "vec"];
+
+    fn reject_unevaluable_macros(expr: &syn::Expr) {
+        use quote::ToTokens;
+
+        struct Macros(Vec<String>);
+        impl<'ast> syn::visit::Visit<'ast> for Macros {
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                if !VISIBLE_MACROS.iter().any(|name| mac.path.is_ident(name)) {
+                    self.0.push(mac.to_token_stream().to_string());
+                }
+                syn::visit::visit_macro(self, mac);
+            }
+        }
+        let mut macros = Macros(Vec::new());
+        syn::visit::Visit::visit_expr(&mut macros, expr);
+        assert!(
+            macros.0.is_empty(),
+            "a comparison operand invokes {:?}; only {VISIBLE_MACROS:?} can be audited there",
+            macros.0
+        );
+    }
+
     /// Every string literal under one expression or pattern, including literals inside macros.
     fn string_literals_in(node: impl FnOnce(&mut StringLiterals)) -> Vec<String> {
         let mut collector = StringLiterals(Vec::new());
@@ -28886,7 +28956,15 @@ mod tests {
         use quote::ToTokens;
         use syn::visit::Visit;
 
-        const BARE_STEMS: &[&str] = &["mural", "embed", "git"];
+        const BARE_WORDS: &[&str] = &[
+            "mural",
+            "murals",
+            "embed",
+            "embeds",
+            "embedding",
+            "embeddings",
+            "git",
+        ];
         const COMPARISON_METHODS: [&str; 6] = [
             "eq",
             "ne",
@@ -28971,6 +29049,7 @@ mod tests {
             fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
                 if matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
                     for side in [&binary.left, &binary.right] {
+                        reject_unevaluable_macros(side);
                         self.compared
                             .extend(string_literals_in(|c| c.visit_expr(side)));
                     }
@@ -29019,6 +29098,7 @@ mod tests {
                     for variant in &item.variants {
                         let ident = variant.ident.to_string();
                         self.compared.push(camel_words(&ident));
+                        self.compared.push(identifier_words(&ident));
                         self.compared.push(ident);
                     }
                 }
@@ -29055,21 +29135,34 @@ mod tests {
             );
         }
         assert_eq!(camel_words("MuralRender"), "mural_render");
+        assert_eq!(identifier_words("MURALRender"), "mural_render");
+        assert_eq!(identifier_words("GitIngestV2"), "git_ingest_v2");
+        assert_eq!(identifier_words("HTTPServer"), "http_server");
         assert!(test_support::names_absent_subsystem(
-            "MURALRender",
-            BARE_STEMS
+            &identifier_words("MURALRender"),
+            BARE_WORDS
         ));
         assert_eq!(camel_words("GitIngest"), "git_ingest");
         assert_eq!(camel_words("ReadOnly"), "read_only");
+        for word in [
+            "github",
+            "gitignore",
+            "digital",
+            "modeling",
+            "embedded_release",
+        ] {
+            assert!(!names_absent_subsystem(word), "{word}");
+        }
+        assert!(names_absent_subsystem("indexer.status"));
         for bare in ["git_ingest", "ctx_mural", "embed_query", "GIT_INGEST"] {
             assert!(
-                test_support::names_absent_subsystem(bare, BARE_STEMS),
+                test_support::names_absent_subsystem(bare, BARE_WORDS),
                 "{bare}"
             );
         }
         for bare in ["model", "item_index", "chunk_index", "no_models", "digital"] {
             assert!(
-                !test_support::names_absent_subsystem(bare, BARE_STEMS),
+                !test_support::names_absent_subsystem(bare, BARE_WORDS),
                 "{bare}"
             );
         }
@@ -29149,7 +29242,7 @@ mod tests {
             }
             for literal in scan.compared {
                 if !literal.chars().any(char::is_whitespace)
-                    && test_support::names_absent_subsystem(&literal, BARE_STEMS)
+                    && test_support::names_absent_subsystem(&literal, BARE_WORDS)
                 {
                     offending.push(format!("{relative}: compared against {literal:?}"));
                 }
