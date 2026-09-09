@@ -69,6 +69,8 @@ function requeueFlushBatch(sessionId: string, batch: IgnoredNotification[]): voi
     storeQueuedNotifications(sessionId, [...batch, ...arrived]);
 }
 
+export const TUI_TOAST_MAX_CHARS = 200;
+
 async function trySendTuiToast(
     sessionId: string,
     text: string,
@@ -78,7 +80,8 @@ async function trySendTuiToast(
     if (forcePersist) return false;
 
     const title = extractToastTitle(text);
-    const message = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+    const message =
+        text.length > TUI_TOAST_MAX_CHARS ? `${text.slice(0, TUI_TOAST_MAX_CHARS)}…` : text;
     const toastVariant = inferToastVariant(text);
     const { isTuiConnected: checkTui } = await import("../../shared/rpc-notifications");
     if (!checkTui(sessionId)) return false;

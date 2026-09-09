@@ -163,11 +163,3 @@ fn compartment(start: i64, end: i64, title: &str, content: &str) -> DecayRenderC
         ..Default::default()
     }
 }
-
-/// A name belongs to an absent subsystem when one of its segments is one of `words`. Segments
-/// split on the punctuation wire names and JSON pointers use and are compared in lowercase, so
-/// `git_commit_indexing` and `Mural.render` match while `github` and `digital_clock` do not.
-pub fn names_absent_subsystem(name: &str, words: &[&str]) -> bool {
-    name.split(['.', '_', '-', '/', ':'])
-        .any(|segment| words.contains(&segment.to_ascii_lowercase().as_str()))
-}

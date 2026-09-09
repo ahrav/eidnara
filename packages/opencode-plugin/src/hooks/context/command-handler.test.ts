@@ -11,7 +11,7 @@ import {
 import { createEidnaraCommandHandler } from "./command-handler";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
 import type { RustModeModuleClient } from "./rust-mode-transform";
-import { __ignoredNotificationTest } from "./send-session-notification";
+import { __ignoredNotificationTest, TUI_TOAST_MAX_CHARS } from "./send-session-notification";
 
 interface RecordedCall {
     method: string;
@@ -664,6 +664,33 @@ describe("createEidnaraCommandHandler", () => {
             );
             expect(texts().at(-1)).toContain("Applied");
             expect(kernel.objects.get("mem_verified")?.disposition).toBe("quarantined");
+        });
+
+        it("keeps the re-run line inside the toast cut for the longest event and a derived object id", async () => {
+            // With a TUI connected the reply is a toast that keeps only its opening characters, so the line the user must act on cannot follow the surface list. commentlint: allow(JUDGE)
+            const objectId = `mem_${"f".repeat(32)}`;
+            const kernel = new FakeKernel();
+            kernel.seedDecision({
+                object_id: objectId,
+                decision_kind: "PROJECT_RULES",
+                summary: "verified",
+                labeled: false,
+            });
+            const { run, texts } = setup(undefined, {
+                kernelClient: kernelResolver(kernel),
+                resolveProjectRoot: () => "/repo/project",
+            });
+
+            await expectSentinel(
+                run("ctx-memory-mark", "ses-mark", `explicit_reject ${objectId}`),
+                "ctx-memory-mark",
+            );
+            const reply = texts().at(-1) ?? "";
+            expect(reply).toContain("explicit_search: visible -> hidden");
+            expect(reply.slice(0, TUI_TOAST_MAX_CHARS)).toContain(
+                `/ctx-memory-mark explicit_reject ${objectId} --yes`,
+            );
+            expect(kernel.receipts.size).toBe(0);
         });
 
         it("reports usage for malformed arguments and disabled when no kernel client is wired", async () => {

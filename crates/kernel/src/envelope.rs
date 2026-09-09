@@ -257,7 +257,7 @@ pub struct Envelope<'tx> {
     poisoned: Option<KernelError>,
 }
 
-/// No `&mut Envelope` is reachable, so nothing lands in the log. The one mutation, [`Preview::preview_admission`], seeds the same-transaction prior cache the way `record_admission` does inside a commit, so a later operation in the same preview is judged against an earlier one's decision as the commit judges it. The authority cascade over a decision's dependents is not simulated. commentlint: allow(JUDGE)
+/// No `&mut Envelope` is reachable, so nothing lands in the log. The one mutation, [`Preview::preview_admission`], seeds the same-transaction prior cache the way `record_admission` does inside a commit, so a later operation in the same preview is judged against an earlier one's decision as the commit judges it. The authority cascade over a decision's dependents is not simulated; an operation whose authority chain an earlier operation in the preview touched is refused with [`KernelError::PreviewAuthorityChanged`] instead of being judged against stale authority. commentlint: allow(JUDGE)
 pub struct Preview<'tx> {
     pub(super) envelope: Envelope<'tx>,
 }
