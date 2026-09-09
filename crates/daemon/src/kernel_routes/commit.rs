@@ -519,6 +519,9 @@ fn record_disposition(
         .ok_or(KernelError::AdmissionPolicy)?;
     if let Some(approval) = approval_object_id.or(stored_approval.as_deref()) {
         scoped_object_state(envelope, filter, approval)?;
+        for member in envelope.approval_chain_members(approval)? {
+            scoped_object_state(envelope, filter, &member)?;
+        }
     }
     let decision = envelope.record_admission(AdmissionRequest {
         candidate_id: None,

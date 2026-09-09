@@ -4631,7 +4631,85 @@ async fn a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one(
 /// override takes precedence, but a disposition does not replace stored support.
 #[tokio::test]
 async fn disposition_approvals_are_project_scoped_whether_explicit_or_inherited() {
+    assert_disposition_approval_scope(ApprovalChain::Direct).await;
+}
+
+#[tokio::test]
+async fn disposition_own_admission_approval_chains_are_project_scoped() {
+    assert_disposition_approval_scope(ApprovalChain::OwnAdmission).await;
+}
+
+#[tokio::test]
+async fn disposition_lineage_approval_chains_are_project_scoped() {
+    assert_disposition_approval_scope(ApprovalChain::Lineage).await;
+}
+
+#[tokio::test]
+async fn approval_chain_reader_sees_envelope_writes_and_refuses_truncation() {
     let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    seed_approval(&daemon, "approval-root", Some(&scope_id));
+    daemon
+        .store()
+        .commit(intent("approval-chain"), |envelope| {
+            let mut parent = "approval-root".to_string();
+            let mut expected = vec![parent.clone()];
+            for index in 1..=65 {
+                let object_id = format!("store-decision-object-{index}");
+                let mut spec = store_decision(index, &scope_id, &object_id);
+                spec.decision_kind = "adr_accepted".to_string();
+                envelope.insert_decision(spec)?;
+                let mut request = admission(
+                    &object_id,
+                    EventKind::Approve,
+                    None,
+                    (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+                );
+                request.event.approval_object_id = Some(parent);
+                let decision = envelope.record_admission(request)?;
+                assert_eq!(decision.effective_maturity, kernel::Maturity::Approved);
+                parent = object_id;
+                expected.push(parent.clone());
+                if index == 64 {
+                    let mut members = envelope.approval_chain_members(&parent)?;
+                    members.sort();
+                    expected.sort();
+                    assert_eq!(members, expected);
+                }
+            }
+            assert_eq!(
+                envelope.approval_chain_members(&parent),
+                Err(kernel::KernelError::AdmissionPolicy),
+            );
+            Ok(String::new())
+        })
+        .unwrap();
+    daemon.handler.shutdown().await.unwrap();
+}
+
+enum ApprovalChain {
+    Direct,
+    OwnAdmission,
+    Lineage,
+}
+
+async fn assert_disposition_approval_scope(chain: ApprovalChain) {
+    let daemon = Daemon::start().await;
+    let receipt_count = || -> i64 {
+        core_connection(&daemon)
+            .query_row("SELECT COUNT(*) FROM operation_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
     seed_domain(&daemon.store());
     assert_state(
         &daemon
@@ -4675,7 +4753,86 @@ async fn disposition_approvals_are_project_scoped_whether_explicit_or_inherited(
         seed_approval(&daemon, approval, scope);
     }
 
-    for (index, (approval, scope)) in (1..).zip(approvals) {
+    for (index, (root_approval, scope)) in (1..).zip(approvals) {
+        let approval = match chain {
+            ApprovalChain::Direct => root_approval.to_string(),
+            ApprovalChain::OwnAdmission | ApprovalChain::Lineage => {
+                let approval = format!("approval-child-{index}");
+                let lineage = format!("{approval}-lineage");
+                let mut spec = store_decision(1_000 + index, &scope_id, &lineage);
+                spec.object_id = approval.clone();
+                spec.decision_kind = "adr_accepted".to_string();
+                daemon
+                    .store()
+                    .commit(intent(&format!("approve-{approval}")), |envelope| {
+                        envelope.insert_decision(spec)?;
+                        let mut request = admission(
+                            &approval,
+                            EventKind::AcceptedAdr,
+                            None,
+                            (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+                        );
+                        if matches!(chain, ApprovalChain::OwnAdmission) {
+                            request.event.kind = EventKind::Approve;
+                            request.event.approval_object_id = Some(root_approval.to_string());
+                        }
+                        let decision = envelope.record_admission(request)?;
+                        assert_eq!(decision.effective_maturity, kernel::Maturity::Approved);
+                        assert_eq!(
+                            envelope.subject_admission(&approval)?.unwrap().1.as_deref(),
+                            matches!(chain, ApprovalChain::OwnAdmission).then_some(root_approval)
+                        );
+                        Ok(String::new())
+                    })
+                    .unwrap();
+                if matches!(chain, ApprovalChain::Lineage) {
+                    let candidate_id = format!("lineage-{approval}");
+                    let now = now_ms();
+                    daemon
+                        .store()
+                        .stage_candidate(kernel::StagingCandidateSpec {
+                            extraction_run_id: candidate_id.clone(),
+                            candidate_id: candidate_id.clone(),
+                            extractor: "fixture".to_string(),
+                            source_kind: "repo".to_string(),
+                            source_id: lineage,
+                            source_revision: 1,
+                            candidate_kind: "domain".to_string(),
+                            payload: "Approved lineage".to_string(),
+                            provenance: Some(kernel::RepositoryProvenance {
+                                repository_id: "repo".to_string(),
+                                revision: "abc123".to_string(),
+                            }),
+                            recorded_at: now,
+                            lease_expires_at: now + 60_000,
+                        })
+                        .unwrap();
+                    daemon
+                        .store()
+                        .commit(intent(&candidate_id), |envelope| {
+                            let decision = envelope.record_admission(kernel::AdmissionRequest {
+                                candidate_id: Some(candidate_id.clone()),
+                                subject_object_id: None,
+                                source_class: Some(SourceClass::ModelInference),
+                                taint_class: Some(TaintClass::AssistantInference),
+                                event: kernel::AdmissionEvent {
+                                    kind: EventKind::Verify,
+                                    trigger_object_id: None,
+                                    approval_object_id: Some(root_approval.to_string()),
+                                    evidence_id: None,
+                                    reason: "Verify the approval's lineage".to_string(),
+                                },
+                            })?;
+                            assert_eq!(decision.effective_maturity, kernel::Maturity::Verified);
+                            assert_eq!(decision.sensitivity, Sensitivity::Normal);
+                            Ok(String::new())
+                        })
+                        .unwrap();
+                }
+                approval
+            }
+        };
+        let approval = approval.as_str();
         let classes = (SourceClass::ModelInference, TaintClass::AssistantInference);
         for (case_index, case) in (0..).zip(["explicit", "inherited", "cached", "override"]) {
             let subject_index = index * 10 + case_index;
@@ -4716,6 +4873,7 @@ async fn disposition_approvals_are_project_scoped_whether_explicit_or_inherited(
             assert_eq!(stored_disposition(&daemon, &subject), "quarantined");
             let admission_rows = admission_row_count(&daemon);
             let commit_rows = commit_log_count(&daemon);
+            let receipts = receipt_count();
             let tip = daemon.tip();
             let outbox = newest_outbox_position(&daemon);
             let inserted_index = 100 + subject_index;
@@ -4759,6 +4917,7 @@ async fn disposition_approvals_are_project_scoped_whether_explicit_or_inherited(
                 assert_eq!(response["dispositions"], json!(expected), "{key}");
                 assert_eq!(stored_disposition(&daemon, &subject), "stale", "{key}");
                 assert_eq!(commit_log_count(&daemon), commit_rows + 1, "{key}");
+                assert_eq!(receipt_count(), receipts + 1, "{key}");
                 assert_eq!(
                     admission_row_count(&daemon),
                     admission_rows + 1 + expected.len() as i64,
@@ -4774,6 +4933,7 @@ async fn disposition_approvals_are_project_scoped_whether_explicit_or_inherited(
                 );
                 assert_eq!(admission_row_count(&daemon), admission_rows, "{key}");
                 assert_eq!(commit_log_count(&daemon), commit_rows, "{key}");
+                assert_eq!(receipt_count(), receipts, "{key}");
                 assert_eq!(daemon.tip(), tip, "{key}");
                 assert_eq!(newest_outbox_position(&daemon), outbox, "{key}");
                 let (_, states) = daemon

@@ -931,6 +931,32 @@ impl Envelope<'_> {
             .map(|stored| (stored.decision, stored.approval_object_id)))
     }
 
+    /// Reads the seed and ancestors with the policy's own-row and lineage traversal.
+    /// Rejects chains above the authority bound instead of returning a partial list.
+    pub fn approval_chain_members(
+        &self,
+        approval_object_id: &str,
+    ) -> Result<Vec<String>, KernelError> {
+        let approval_object_id = identity(approval_object_id)?;
+        let chain = authority_chain_cte("?1", AuthorityAsOf::Now);
+        let mut statement = self
+            .tx
+            .prepare_cached(&format!(
+                "WITH RECURSIVE {chain} SELECT object_id FROM chain LIMIT {}",
+                MAX_AUTHORITY_CHAIN_DEPTH + 2
+            ))
+            .map_err(map_sqlite)?;
+        let members = statement
+            .query_map([approval_object_id], |row| row.get(0))
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(map_sqlite)?;
+        if members.len() > MAX_AUTHORITY_CHAIN_DEPTH + 1 {
+            return Err(KernelError::AdmissionPolicy);
+        }
+        Ok(members)
+    }
+
     fn record_admission_inner(
         &mut self,
         request: AdmissionRequest,
