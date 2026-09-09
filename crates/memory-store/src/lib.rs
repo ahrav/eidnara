@@ -3831,12 +3831,24 @@ pub use task_lease::{
 
 /// The outcome of leasing one scheduled Dreamer task; the claim's `note_id` is
 /// the task id and its `source_revision` the due instant the task was leased for.
-pub type DreamerTaskAcquireOutcome = LeaseAcquireOutcome<()>;
+pub type DreamerTaskAcquireOutcome = LeaseAcquireOutcome<DreamerLeasedTask>;
+
+/// Which task a Dreamer claim leases, relative to the task the acquisition
+/// asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DreamerLeasedTask {
+    Requested,
+    /// The caller's slot still held a live claim on `claim.note_id`; that
+    /// claim is returned, rebound to this acquisition and renewed. `task_id`
+    /// stays free until this claim is completed or abandoned.
+    Held,
+}
 
 impl MemoryStore {
     /// Leases `task_id` for the run due at `due_at_ms`. A task another live
-    /// claim holds is `NoWork`; the caller's own expired or rebound slot is
-    /// recovered by the shared protocol.
+    /// claim holds is `NoWork`. A live claim already on the caller's own slot
+    /// is recovered instead, and the outcome's `DreamerLeasedTask` says
+    /// whether that claim is on `task_id` or on a task the slot still held.
     #[allow(clippy::too_many_arguments)]
     pub fn acquire_dreamer_task(
         &self,
@@ -3873,13 +3885,19 @@ impl MemoryStore {
                 Ok(task_lease::LeaseSelected::Claim {
                     note_id: task_id,
                     phase: "run".to_string(),
-                    task: (),
+                    task: DreamerLeasedTask::Requested,
                     source_revision: due_at_ms,
                     state_version: 0,
                     policy_version: 0,
                 })
             },
-            |_, _| Ok(Some(())),
+            |_, leased_task_id| {
+                Ok(Some(if leased_task_id == task_id {
+                    DreamerLeasedTask::Requested
+                } else {
+                    DreamerLeasedTask::Held
+                }))
+            },
         )
     }
 
@@ -22960,6 +22978,83 @@ mod tests {
         assert!(matches!(
             other("other-4", expired_at + 7),
             LeaseAcquireOutcome::Claim {
+                replayed: false,
+                ..
+            }
+        ));
+    }
+
+    /// Slot recovery runs before the selector: a slot still holding a live
+    /// claim on another task hands that claim back, marked `Held`, and the
+    /// requested task stays free.
+    #[test]
+    fn dreamer_task_slot_recovery_names_the_task_it_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        activate_domain(&store, "memories");
+        let acquire = |acquisition_id: &str, slot: i64, task_id: i64, now_ms: i64| {
+            store
+                .acquire_dreamer_task(
+                    EVAL_PROJECT,
+                    acquisition_id,
+                    "sched",
+                    slot,
+                    1,
+                    task_id,
+                    now_ms,
+                    now_ms,
+                )
+                .unwrap()
+        };
+        let first = match acquire("acq-1", 0, 1, 100) {
+            LeaseAcquireOutcome::Claim {
+                claim,
+                task: DreamerLeasedTask::Requested,
+                replayed: false,
+            } => claim,
+            other => panic!("{other:?}"),
+        };
+        let recovered = match acquire("acq-2", 0, 2, 200) {
+            LeaseAcquireOutcome::Claim {
+                claim,
+                task: DreamerLeasedTask::Held,
+                replayed: true,
+            } => claim,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(recovered.claim_id, first.claim_id);
+        assert_eq!(recovered.note_id, 1, "the task the slot still held");
+        assert_eq!(recovered.acquisition_id, "acq-2");
+        assert_eq!(recovered.expires_at, 200 + DREAMER_TASK_LEASE_MS, "renewed");
+        // A replay of `acq-2` is still marked `Held`.
+        assert!(matches!(
+            acquire("acq-2", 0, 2, 201),
+            LeaseAcquireOutcome::Claim {
+                task: DreamerLeasedTask::Held,
+                replayed: true,
+                ..
+            }
+        ));
+        // Task 2 was never leased: another slot takes it.
+        assert!(matches!(
+            acquire("acq-3", 1, 2, 202),
+            LeaseAcquireOutcome::Claim {
+                task: DreamerLeasedTask::Requested,
+                replayed: false,
+                ..
+            }
+        ));
+        // Once the held claim is released, the slot leases what it asks for.
+        assert_eq!(
+            store
+                .abandon_dreamer_task(EVAL_PROJECT, &recovered.claim_id, "sched", 0, 203)
+                .unwrap(),
+            NoteEvalAbandonOutcome::Abandoned
+        );
+        assert!(matches!(
+            acquire("acq-4", 0, 3, 204),
+            LeaseAcquireOutcome::Claim {
+                task: DreamerLeasedTask::Requested,
                 replayed: false,
                 ..
             }
