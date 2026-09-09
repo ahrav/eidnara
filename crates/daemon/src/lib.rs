@@ -18786,6 +18786,8 @@ mod tests {
         call_transform_request(handler, request(messages)).await
     }
 
+    /// `host_mural_artifact` refuses a disabled mural, a host without vision, and an empty or
+    /// absent data URL; each refusal must leave the store empty and the messages image-free.
     #[tokio::test(flavor = "current_thread")]
     async fn mural_is_reached_only_through_a_host_supplied_enabled_artifact() {
         let (handler, store, _dir, project) =
@@ -18802,20 +18804,57 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        oc_request["mural"] = json!({
-            "enabled": false,
-            "supports_vision": true,
-            "data_url": "data:image/png;base64,YQ==",
-            "content_hash": "mural-a",
-        });
-        let disabled = call_transform_request_on_channel(&handler, 7, oc_request).await;
-        assert!(
-            store
-                .load_project_mural_artifact(project)
-                .unwrap()
-                .is_none()
-        );
-        for response in [&without, &disabled] {
+        let refusals = [
+            (
+                "disabled",
+                json!({
+                    "enabled": false,
+                    "supports_vision": true,
+                    "data_url": "data:image/png;base64,YQ==",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "no vision",
+                json!({
+                    "enabled": true,
+                    "supports_vision": false,
+                    "data_url": "data:image/png;base64,YQ==",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "empty data url",
+                json!({
+                    "enabled": true,
+                    "supports_vision": true,
+                    "data_url": "",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "absent data url",
+                json!({
+                    "enabled": true,
+                    "supports_vision": true,
+                    "content_hash": "mural-a",
+                }),
+            ),
+        ];
+        let mut responses = vec![without];
+        for (label, mural) in refusals {
+            oc_request["mural"] = mural;
+            let refused = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
+            assert!(
+                store
+                    .load_project_mural_artifact(project)
+                    .unwrap()
+                    .is_none(),
+                "{label} persisted an artifact"
+            );
+            responses.push(refused);
+        }
+        for response in &responses {
             let serialized = serde_json::to_string(&response["messages"]).unwrap();
             for marker in [
                 "data:image/",
@@ -29445,10 +29484,12 @@ mod tests {
     /// The string values of `const`, `static`, and associated `const` items, keyed by name, so a
     /// comparison against a named constant is classified by the text the constant holds. An
     /// initializer that names another constant (`const ROUTE: &str = MURAL;`) is recorded as a
-    /// reference and resolved once every file has been read.
+    /// reference and resolved once every file has been read. With `locals` set, `let` bindings
+    /// are recorded too; that table is built per file, since local names repeat across files.
     struct StringConsts {
         values: std::collections::HashMap<String, Vec<String>>,
         references: std::collections::HashMap<String, Vec<String>>,
+        locals: bool,
     }
 
     impl StringConsts {
@@ -29543,10 +29584,28 @@ mod tests {
             self.record(&item.ident, &item.expr);
             syn::visit::visit_item_static(self, item);
         }
+
+        /// `let candidate = "mural";` and `let candidate: &str = "mural";` bind a name a later
+        /// comparison can use in place of the literal.
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if self.locals
+                && let Some(init) = &local.init
+            {
+                let mut pat = &local.pat;
+                while let syn::Pat::Type(typed) = pat {
+                    pat = &typed.pat;
+                }
+                if let syn::Pat::Ident(ident) = pat {
+                    self.record(&ident.ident, &init.expr);
+                }
+            }
+            syn::visit::visit_local(self, local);
+        }
     }
 
-    /// `regex_texts` expands supported regex syntax into bounded literal texts.
-    /// Negated character classes remain unexpanded.
+    /// `regex_texts` expands supported regex syntax into literal texts and fails the audit past
+    /// 1024 of them rather than dropping an alternative. Negated character classes remain
+    /// unexpanded.
     fn regex_texts(pattern: &str) -> Vec<String> {
         /// A leading `(?i)` or `(?ix)` group sets flags and matches nothing.
         fn strip_flag_groups(pattern: &str) -> &str {
@@ -29643,10 +29702,15 @@ mod tests {
 
         /// Expand the innermost parenthesized group, then the first enumerable class; a NUL
         /// marks an escaped character so an escaped `|`, `(`, or `[` is never treated as syntax.
-        fn expand(text: &str, out: &mut Vec<String>) {
-            if out.len() >= 64 {
-                return;
-            }
+        fn push_text(pattern: &str, text: &str, out: &mut Vec<String>) {
+            assert!(
+                out.len() < 1024,
+                "`{pattern}` expands to more than 1024 texts and cannot be audited"
+            );
+            out.push(text.replace('\u{0}', ""));
+        }
+
+        fn expand(pattern: &str, text: &str, out: &mut Vec<String>) {
             let bytes: Vec<char> = text.chars().collect();
             let mut open = None;
             for (index, &ch) in bytes.iter().enumerate() {
@@ -29664,7 +29728,7 @@ mod tests {
                             let suffix: String = bytes[index + 1..].iter().collect();
                             let alternatives: Vec<&str> = split_unescaped(&inner, '|');
                             for alternative in alternatives {
-                                expand(&format!("{prefix}{alternative}{suffix}"), out);
+                                expand(pattern, &format!("{prefix}{alternative}{suffix}"), out);
                             }
                             return;
                         }
@@ -29681,13 +29745,19 @@ mod tests {
                 match ch {
                     '[' if class_open.is_none() => class_open = Some(index),
                     ']' => {
+                        // A quantified class (`[0-9a-f]{7,12}`) matches a run, not one
+                        // character, and stays as written.
+                        let quantified = bytes
+                            .get(index + 1)
+                            .is_some_and(|next| matches!(next, '*' | '+' | '?' | '{'));
                         if let Some(start) = class_open
+                            && !quantified
                             && let Some(members) = class_members(&bytes[start + 1..index])
                         {
                             let prefix: String = bytes[..start].iter().collect();
                             let suffix: String = bytes[index + 1..].iter().collect();
                             for member in members {
-                                expand(&format!("{prefix}{member}{suffix}"), out);
+                                expand(pattern, &format!("{prefix}{member}{suffix}"), out);
                             }
                             return;
                         }
@@ -29696,13 +29766,8 @@ mod tests {
                     _ => {}
                 }
             }
-            let alternatives = split_unescaped(text, '|');
-            if alternatives.len() > 1 {
-                for alternative in alternatives {
-                    out.push(alternative.replace('\u{0}', ""));
-                }
-            } else {
-                out.push(text.replace('\u{0}', ""));
+            for alternative in split_unescaped(text, '|') {
+                push_text(pattern, alternative, out);
             }
         }
 
@@ -29722,7 +29787,7 @@ mod tests {
         }
 
         let mut texts = Vec::new();
-        expand(&reduce(pattern), &mut texts);
+        expand(pattern, &reduce(pattern), &mut texts);
         texts
     }
 
@@ -30012,8 +30077,22 @@ mod tests {
                 syn::visit::visit_expr_let(self, expr);
             }
 
+            /// `let name = value;` declares a binding and compares nothing; a refutable pattern
+            /// (`let Some("mural") = op else { .. }`, `let MURAL = op else { .. }`) tests `op`
+            /// the same way an arm pattern does.
             fn visit_local(&mut self, local: &'ast syn::Local) {
-                self.compare_pattern(&local.pat);
+                let mut pat = &local.pat;
+                while let syn::Pat::Type(typed) = pat {
+                    pat = &typed.pat;
+                }
+                let irrefutable_binding = matches!(pat, syn::Pat::Ident(_))
+                    && local
+                        .init
+                        .as_ref()
+                        .is_none_or(|init| init.diverge.is_none());
+                if !irrefutable_binding {
+                    self.compare_pattern(&local.pat);
+                }
                 syn::visit::visit_local(self, local);
             }
 
@@ -30150,9 +30229,17 @@ mod tests {
             ["mural.render", "Mural.render"]
         );
         assert_eq!(regex_texts(r"^[a-c]\.db$"), ["a.db", "b.db", "c.db"]);
+        assert_eq!(regex_texts(r"^[0-9a-f]{7,12}$"), ["[0-9a-f]{7,12}"]);
+        assert_eq!(regex_texts(r"^[ab]+$"), ["[ab]+"]);
         assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
         assert_eq!(regex_texts(r"^[a-zA-Z0-9_-]+$"), ["[a-zA-Z0-9_-]+"]);
         assert_eq!(regex_texts(r"^\[x\]$"), ["[x]"]);
+        let ten = "(a|b)".repeat(10);
+        assert_eq!(regex_texts(&format!("^{ten}$")).len(), 1024);
+        assert!(
+            std::panic::catch_unwind(|| regex_texts(&format!("^{ten}(a|b)$"))).is_err(),
+            "2048 texts must fail the audit rather than truncate"
+        );
         assert_eq!(
             concat_value(quote::quote!("mu", 1, "ral.render")),
             Some("mu1ral.render".into())
@@ -30277,6 +30364,7 @@ mod tests {
         let mut consts = StringConsts {
             values: std::collections::HashMap::new(),
             references: std::collections::HashMap::new(),
+            locals: false,
         };
         for (_, file) in &tree.production {
             consts.visit_file(file);
@@ -30293,12 +30381,19 @@ mod tests {
         }
         let mut offending = Vec::new();
         for (path, file) in tree.production {
+            // Local bindings are resolved per file on top of the crate-wide constants.
+            let mut with_locals = StringConsts {
+                values: consts.clone(),
+                references: std::collections::HashMap::new(),
+                locals: true,
+            };
+            with_locals.visit_file(&file);
             let mut scan = ProductionLiterals {
                 literals: Vec::new(),
                 compared: Vec::new(),
                 deserialize_names: aliases.0.clone(),
                 pattern_types: pattern_types.0.clone(),
-                consts: consts.clone(),
+                consts: with_locals.resolved(),
             };
             scan.visit_file(&file);
             let relative = path

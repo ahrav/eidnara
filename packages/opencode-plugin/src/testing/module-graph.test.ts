@@ -726,6 +726,11 @@ describe("operationLiteralHits", () => {
         ]);
         expect(
             literalStrings(
+                parseSource("const hex = /^[0-9a-f]{7,12}$/; const run = /^[ab]+$/;", "m.ts"),
+            ).map((entry) => entry.value),
+        ).toEqual(["[0-9a-f]{7,12}", "[ab]+"]);
+        expect(
+            literalStrings(
                 parseSource(
                     'const ctor = new RegExp("^claim[.]intent[.]stage$"); const call = RegExp("^STORE[.]DB$", "i"); const dyn = new RegExp(pattern);',
                     "m.ts",
@@ -795,6 +800,11 @@ describe("operationLiteralHits", () => {
                 ),
             ).map((entry) => entry.value),
         ).toEqual(["claim.intent.stage", ".intent.stage", "claim", "im", "cla"]);
+        const ten = "(a|b)".repeat(10);
+        expect(literalStrings(parseSource(`const r = /^${ten}$/;`, "m.ts")).length).toBe(1024);
+        expect(() => literalStrings(parseSource(`const r = /^${ten}(a|b)$/;`, "m.ts"))).toThrow(
+            RangeError,
+        );
     });
 
     // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;

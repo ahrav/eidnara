@@ -347,8 +347,15 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             }
             return members.length <= 16 ? members : undefined;
         };
+        const pushText = (value: string): void => {
+            if (out.length >= 1024) {
+                throw new RangeError(
+                    `regex /${body}/ expands to more than 1024 texts and cannot be audited`,
+                );
+            }
+            out.push(value.replaceAll("\uE000", ""));
+        };
         const expand = (value: string): void => {
-            if (out.length >= 64) return;
             const group = /\((?:\?:)?([^()]*)\)/.exec(value);
             if (group?.index !== undefined && !value.startsWith("\uE000", group.index - 1)) {
                 const prefix = value.slice(0, group.index);
@@ -358,7 +365,9 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 }
                 return;
             }
-            const cls = /\[((?:\uE000.|[^\]\uE000])*)\]/.exec(value);
+            // A quantified class (`[0-9a-f]{7,12}`) matches a run, not one character, and stays
+            // as written.
+            const cls = /\[((?:\uE000.|[^\]\uE000])*)\](?![*+?{])/.exec(value);
             if (cls?.index !== undefined && !value.startsWith("\uE000", cls.index - 1)) {
                 const members = classMembers(cls[1] ?? "");
                 if (members !== undefined) {
@@ -368,8 +377,7 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                     return;
                 }
             }
-            const alternatives = splitUnescaped(value);
-            for (const alternative of alternatives) out.push(alternative.replaceAll("\uE000", ""));
+            for (const alternative of splitUnescaped(value)) pushText(alternative);
         };
         expand(reduced);
         return out;
