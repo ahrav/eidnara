@@ -11,7 +11,6 @@ use std::{
 mod scan_audit;
 
 use cache_stability::{CoreState, DurabilityClass, FrozenUnit};
-use context_core::claim_operation::{ClaimCommandIdentity, ClaimIntentBinding};
 use context_core::redaction::RedactionErrorKind;
 use memory_store::{
     AuthoritySeedRow, DURABLE_WRITE_REGISTRY, FacadeMutationOutcome, LineageAnchor,
@@ -1569,94 +1568,4 @@ fn note_transition_content_redacts_and_compiled_artifacts_reject() {
         })
         .unwrap_err();
     assert!(!error.to_string().contains("compiled-secret"));
-}
-
-#[test]
-fn fresh_claim_intent_identities_and_integrity_payloads_reject() {
-    let temp = tempfile::tempdir().unwrap();
-    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-claim-intent");
-    let store = MemoryStore::open(&descriptor).unwrap();
-
-    // Staging checks the route's memories authority before it checks identities, so an
-    // unmanaged route would refuse both requests without reaching redaction.
-    store
-        .bind_authority_route("store-uuid", "project", "route")
-        .unwrap();
-    let preparing = store
-        .authority_begin_prepare("store-uuid", "project", "memories")
-        .unwrap();
-    let authority = store
-        .authority_finish_prepare(
-            "store-uuid",
-            "project",
-            "memories",
-            preparing.generation,
-            "same",
-            "same",
-            true,
-        )
-        .unwrap();
-    let binding = ClaimIntentBinding {
-        database_incarnation_id: "0123456789abcdef0123456789abcdef".to_string(),
-        format_epoch: 1,
-        authority_project: "project".to_string(),
-        authority_generation: authority.generation,
-    };
-    let clean_identity = ClaimCommandIdentity {
-        producer: "producer".to_string(),
-        operation_key: "operation".to_string(),
-    };
-    store
-        .stage_claim_intent("route", &binding, &clean_identity, &json!({}), 1)
-        .unwrap();
-
-    let secret_identity = ClaimCommandIdentity {
-        producer: "producer".to_string(),
-        operation_key: "password=operation-secret".to_string(),
-    };
-    let error = store
-        .stage_claim_intent("route", &binding, &secret_identity, &json!({}), 1)
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            MemoryStoreError::Redaction(RedactionErrorKind::SecretDetected)
-        ),
-        "{error:?}"
-    );
-    assert!(!error.to_string().contains("operation-secret"));
-    assert!(
-        store
-            .inspect_claim_intent(&secret_identity)
-            .unwrap()
-            .is_none()
-    );
-
-    let request_identity = ClaimCommandIdentity {
-        producer: "producer".to_string(),
-        operation_key: "request".to_string(),
-    };
-    let error = store
-        .stage_claim_intent(
-            "route",
-            &binding,
-            &request_identity,
-            &json!({"content":"password=request-secret"}),
-            1,
-        )
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            MemoryStoreError::Redaction(RedactionErrorKind::SecretDetected)
-        ),
-        "{error:?}"
-    );
-    assert!(!error.to_string().contains("request-secret"));
-    assert!(
-        store
-            .inspect_claim_intent(&request_identity)
-            .unwrap()
-            .is_none()
-    );
 }

@@ -768,42 +768,6 @@ CREATE TABLE note_eval_acquisitions (
 CREATE INDEX idx_primer_candidates_session
             ON primer_candidates(session_id, id);
 
-CREATE TABLE claim_intents (
-            producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 256),
-            operation_key TEXT NOT NULL CHECK (length(operation_key) BETWEEN 1 AND 256),
-            database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
-            format_epoch INTEGER NOT NULL CHECK (format_epoch > 0),
-            authority_project TEXT NOT NULL CHECK (length(authority_project) > 0),
-            authority_generation INTEGER NOT NULL CHECK (authority_generation >= 0),
-            request_encoding_version INTEGER NOT NULL CHECK (request_encoding_version = 1),
-            request_digest TEXT NOT NULL CHECK (length(request_digest) = 64),
-            state TEXT NOT NULL CHECK (state IN (
-                'staged', 'context-committed', 'acknowledged', 'terminal-rejected'
-            )),
-            result_json TEXT,
-            created_at_ms INTEGER NOT NULL,
-            updated_at_ms INTEGER NOT NULL,
-            PRIMARY KEY (producer, operation_key),
-            CHECK (
-                (state = 'staged' AND result_json IS NULL)
-                OR (state <> 'staged' AND result_json IS NOT NULL)
-            )
-        );
-
-CREATE INDEX idx_claim_intents_unresolved
-            ON claim_intents(state, created_at_ms, producer, operation_key);
-
-CREATE TABLE claim_intent_controls (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            database_incarnation_id TEXT NOT NULL
-                CHECK (length(database_incarnation_id) = 32),
-            authority_generation INTEGER NOT NULL CHECK (authority_generation >= 0),
-            transition_state TEXT NOT NULL CHECK (transition_state IN (
-                'accepting', 'draining', 'resetting'
-            )),
-            updated_at_ms INTEGER NOT NULL
-        );
-
 CREATE TABLE scan_batches (
             scan_batch_id TEXT PRIMARY KEY CHECK (length(scan_batch_id) = 32),
             owner_kind TEXT NOT NULL,

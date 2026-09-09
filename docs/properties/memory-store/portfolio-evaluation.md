@@ -12,7 +12,8 @@ questioning the framing.
 Reconciliation at this repository's HEAD. Findings and gaps below that concern
 the claim mirror describe the source tree; the mirror is gone from
 `crates/memory-store` and its nine records are invalidated in the catalog, so
-those findings are closed by deletion rather than by a harness.
+those findings are closed by deletion rather than by a harness. The same
+holds for the claim-intent ledger and its five records.
 
 Every correction below was re-verified against the code before acceptance,
 including the two the evaluator raised against the fault map. The evaluator was
