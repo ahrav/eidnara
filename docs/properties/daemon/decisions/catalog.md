@@ -237,14 +237,14 @@ reaches `:802`'s `tail_size_bar: trigger_budget * TAIL_SIZE_TRIGGER_MULTIPLIER`,
 which is a bare multiply with no `max` or `min` to absorb it, and the NaN lands in
 `TriggerProgress` — a struct whose own doc comment (`:322-324`) says it is
 "Surfaced through the transform response's historian diagnostics so a stalled rig
-drive is diagnosable per pass". It is carried out at `lib.rs:4982` and divided at
-`:5002`. So the defect class is present in shape, unreachable on the guarded
+drive is diagnosable per pass". It is carried out at `lib.rs:5023` and divided at
+`:5038`. So the defect class is present in shape, unreachable on the guarded
 derivations, and **reachable on the one unguarded passthrough**, which is a
 different sentence from the one this section used to carry. Group C's four guards
 still hold, and they are still worth recording for the reason given there. What
 changes is that the fifth thing in that neighbourhood is a defect and is now
-recorded as one. Production passes `None` (`lib.rs:4957`) and the only `Some` sites
-are `lib.rs:16495` and `:16760`, both tests, so the reachability is latent rather
+recorded as one. Production passes `None` (`lib.rs:4998`) and the only `Some` sites
+are `lib.rs:16672` and `:16937`, both tests, so the reachability is latent rather
 than default-production, and the split record says so. The nearest *reachable*
 hazard remains a different one: a `cache_ttl` of `"0"` parses to 0 ms and forces
 execution every pass, which no documentation mentions.
@@ -353,8 +353,8 @@ that source-catalog contract, not a census of all current user-facing docs.
 | `cache_ttl` (string or object) | `"5m"` (`config.rs:129`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:771-773`); `"never"` maps to `u64::MAX` (`scheduler.rs:365-368`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:924-945`); project warns (`config.rs:729-732`); the TypeScript strip removes it from project config (`project-security.ts:386-391`). `"0"` produces zero ms: hard expiry needs a positive prior timestamp and positive elapsed time (`scheduler.rs:400-407`), and later scheduler gates still apply (`scheduler.rs:689-732`) |
 | `prompt_surface.guidance_override_path` | `None` (`config.rs:127`) | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `CONFIGURATION.md:88`) | Yes, from the user tier after merging (`config.rs:278-279`, `config.rs:408-490`); project warns (`config.rs:729-732`) |
 | `prompt_surface.guidance_override_text` | `None` (`config.rs:127`) | **undocumented** | exactly one guidance marker (`config.rs:905-920`) | Yes, user-only (`config.rs:670-672`), but a configured path resets it to `None` first (`config.rs:424`); project warns (`config.rs:729-732`) |
-| `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none from config | The daemon supplies constant `true` (`lib.rs:640`, `lib.rs:5001`). TypeScript routing in the original catalog is historical, not verified by this reader audit |
-| `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none from config | The daemon supplies constant `3` (`lib.rs:641`, `lib.rs:5002`). The boundary consumes it at `boundary.rs:814-819` |
+| `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none from config | The daemon supplies constant `true` (`lib.rs:642`, `lib.rs:5003`). TypeScript routing in the original catalog is historical, not verified by this reader audit |
+| `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none from config | The daemon supplies constant `3` (`lib.rs:643`, `lib.rs:5004`). The boundary consumes it at `boundary.rs:814-819` |
 | `protected_tags` | not parsed by `config.rs` | `20`, range `1-100` (`:165`) | no config-reader bound; the request default is `20` (`transform.rs:797-799`) | It has a request field (`transform.rs:629-631`), so absence from config does not mean the value cannot arrive |
 | `clear_reasoning_age` | not parsed by `config.rs` | `50` (`:169`) | no config-reader bound | It has a request field (`transform.rs:640-644`) and a default helper (`transform.rs:765-767`); absence from config is not product-wide absence |
 | `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). The historical TypeScript-consumer lead is outside this reader audit |
@@ -535,14 +535,14 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - direct test contexts use `min_commit_clusters: 2` and
-enabled and disabled flags (`lib.rs:16664-16674`, `lib.rs:16929-16940`). They
+enabled and disabled flags (`lib.rs:16662-16679`, `lib.rs:16928-16946`). They
 do not load those controls from config. Existing checks remain `unaudited`.
 Guarantee: A configured `commit_cluster_trigger` reaches the module's trigger
 decision, or the module reports that it cannot honour the key.
 Check: `always` - for each supplied commit-cluster control, the production
 trigger context carries the requested value or resolution reports that the
 control is unsupported. `always` because every trigger evaluation constructs
-the context. The context is built inline at `lib.rs:4983-5005`; use a direct
+the context. The context is built inline at `lib.rs:4985-5007`; use a direct
 observation or a workload that distinguishes it from the requested value.
 Fault/timing angle: none.
 Required faults and enabling state: a nondefault user `commit_cluster_trigger`
@@ -551,8 +551,8 @@ of `true` and `3` match the constants and cannot expose the wiring gap. A
 behavioral check must isolate the commit-cluster arm from other fire reasons.
 Confidence: high - [evidence](evidence/dec-a-commit-cluster-trigger-config-is-inert-in-this-crate.md).
 The config fields and pointer table omit these controls (`config.rs:80-109`,
-`config.rs:588-618`). `lib.rs:640-641` defines the constants, used at
-`lib.rs:5001-5002`; `boundary.rs:814-819` consumes the context. Confidence is
+`config.rs:588-618`). `lib.rs:642-643` defines the constants, used at
+`lib.rs:5003-5004`; `boundary.rs:814-819` consumes the context. Confidence is
 in this daemon mechanism, not a product-wide TypeScript routing claim.
 Existing check: none for the config wiring. The default-constant assertion at
 `boundary.rs:2011-2015` and the direct contexts above remain `unaudited`.
@@ -860,14 +860,14 @@ Fault/timing angle: none.
 Required faults and enabling state: a `BoundaryContext` whose `context_limit`,
 `execute_threshold_percentage`, or `usage_percentage` is `f64::INFINITY` or
 `f64::NAN`. Reaching that from production needs a host-supplied usage reading,
-since `lib.rs:4950-4959` builds the context from request and store values.
+since `lib.rs:4988-5000` builds the context from request and store values.
 Confidence: high - [evidence](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md).
 Read every guard: `boundary.rs:339-341`, `:363-372`, `:926-931`. Executed
 `NAN.max(0.0) == 0.0` and `NAN.min(5.0) == 5.0` to confirm the absorption
 argument, which is what makes `:342` safe against a NaN threshold. Also
 confirmed that `ctx.trigger_budget` is the one unvalidated float (`:756-761`,
-`:377-379`) and that production always passes `None` (`lib.rs:4957`), with
-`Some` only at `lib.rs:16495` and `:16760`. The evidence file's test-plan item 4
+`:377-379`) and that production always passes `None` (`lib.rs:4998`), with
+`Some` only at `lib.rs:16672` and `:16937`. The evidence file's test-plan item 4
 already states that the `trigger_budget` case "fails today"
 ([evidence:184-187](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md)),
 which is what the split acts on.
@@ -886,7 +886,7 @@ Reachability: test-only
 Status: active
 Exercised: not yet - and the evidence for the sibling record already says the
 oracle fails. `boundary.rs`'s golden fixture suite never sets `trigger_budget` to
-a non-finite value; the two `Some` sites in the tree, `lib.rs:16495` and `:16760`,
+a non-finite value; the two `Some` sites in the tree, `lib.rs:16672` and `:16937`,
 pass finite numbers.
 Guarantee: `BoundaryContext::trigger_budget`, being caller-supplied and read
 without validation, does not carry a non-finite value into a boundary
@@ -925,8 +925,8 @@ Existing check: none. Status `unaudited`.
 Impact: `TriggerProgress`'s own doc comment (`boundary.rs:322-324`) says it is
 "Surfaced through the transform response's historian diagnostics so a stalled rig
 drive is diagnosable per pass", and `tail_size_bar` is described at `:329-330` as
-"The tail_size fire bar". It is carried out at `lib.rs:4982` and divided by 1000
-and rounded at `:5002`. A NaN there is the diagnostic field going quietly wrong in
+"The tail_size fire bar". It is carried out at `lib.rs:5023` and divided by 1000
+and rounded at `:5038`. A NaN there is the diagnostic field going quietly wrong in
 the response an operator reads to explain why the historian did not fire, and
 `serde_json` renders a NaN as `null`, so the wire form is an absent number rather
 than a visible error. This is the defect the sibling record's "no totality defect
@@ -938,7 +938,7 @@ Open questions:
   `usage_percentage`, or should the field's type make a non-finite value
   unrepresentable? The first is a two-line `is_finite` gate at each of the two
   read sites; the second is a newtype and a constructor. (needs human input)
-- Production passes `None` (`lib.rs:4957`) so the reachability is `test-only`
+- Production passes `None` (`lib.rs:4998`) so the reachability is `test-only`
   today. Whether a future caller may supply the budget — the field exists for
   someone — decides whether this is a latent defect or an active one. Unresolved;
   the field's purpose is not documented at its declaration (`:222-224`).
