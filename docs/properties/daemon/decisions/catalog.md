@@ -237,14 +237,14 @@ reaches `:802`'s `tail_size_bar: trigger_budget * TAIL_SIZE_TRIGGER_MULTIPLIER`,
 which is a bare multiply with no `max` or `min` to absorb it, and the NaN lands in
 `TriggerProgress` — a struct whose own doc comment (`:322-324`) says it is
 "Surfaced through the transform response's historian diagnostics so a stalled rig
-drive is diagnosable per pass". It is carried out at `lib.rs:4982` and divided at
-`:5002`. So the defect class is present in shape, unreachable on the guarded
+drive is diagnosable per pass". It is carried out at `lib.rs:5023` and divided at
+`:5038`. So the defect class is present in shape, unreachable on the guarded
 derivations, and **reachable on the one unguarded passthrough**, which is a
 different sentence from the one this section used to carry. Group C's four guards
 still hold, and they are still worth recording for the reason given there. What
 changes is that the fifth thing in that neighbourhood is a defect and is now
-recorded as one. Production passes `None` (`lib.rs:4957`) and the only `Some` sites
-are `lib.rs:16495` and `:16760`, both tests, so the reachability is latent rather
+recorded as one. Production passes `None` (`lib.rs:4998`) and the only `Some` sites
+are `lib.rs:16708` and `:16973`, both tests, so the reachability is latent rather
 than default-production, and the split record says so. The nearest *reachable*
 hazard remains a different one: a `cache_ttl` of `"0"` parses to 0 ms and forces
 execution every pass, which no documentation mentions.
@@ -272,7 +272,7 @@ purity claim, not a restatement of it.
 | Unit | Decides | Inputs | Output domain | Pure? |
 | --- | --- | --- | --- | --- |
 | `selection::select_reductions_with_outcome` (`selection.rs:1119-1385`) | which tail blocks to reduce and with which payload | `items`, `frozen_keys`, `SelectionContext`, `SelectionConfig` | `Vec<ReductionDecision>` sorted by unique `target_id`, kinds `drop`/`skeleton`/`edit_marker`; empty on Defer | Yes. No clock, no store, no statics. Iterates `HashMap`s internally but every result is a set or is totally sorted before it escapes; see `dec-a-selection-decision-order-is-total-under-hashmap-iteration` |
-| `selection::region_hint` (`:558-571`) | how far to clamp a superseded diff value | one `&str` | `String`, normally `<=40` UTF-16 units plus the sentinel | Yes, and idempotent. But the idempotence guard is also a bypass: see `dec-a-region-hint-clamp-bypassed-by-sentinel-suffix` |
+| `selection::region_hint` (`:536-549`) | how far to clamp a superseded diff value | one `&str` | `String`, normally `<=40` UTF-16 units plus the sentinel | Yes, and idempotent. But the idempotence guard is also a bypass: see `dec-a-region-hint-clamp-bypassed-by-sentinel-suffix` |
 | `selection::skeleton_payload` (`:648-694`) / `canonical_json` (`:597-619`) | the frozen call-skeleton bytes | one `serde_json::Value` | canonical `String` with sorted keys | Yes. Key sort makes bytes independent of map order |
 | `selection::resolve_tool_tier` (`:948-958`) | emergency drop tier of a tool | tool name | `{1,2,3}`, total via the `else` arm | Yes |
 | `selection::select_emergency` (`:995-1084`) | which arcs to evict under force pressure | active arcs, ctx, floor tokens | `HashSet<String>` of arc ids | Yes. Guards non-finite ceiling and usage at `:1001-1009` and refuses sub-`2000`-token reclaim at `:1018` |
@@ -353,8 +353,8 @@ that source-catalog contract, not a census of all current user-facing docs.
 | `cache_ttl` (string or object) | `"5m"` (`config.rs:129`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:771-773`); `"never"` maps to `u64::MAX` (`scheduler.rs:365-368`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:924-945`); project warns (`config.rs:729-732`); the TypeScript strip removes it from project config (`project-security.ts:386-391`). `"0"` produces zero ms: hard expiry needs a positive prior timestamp and positive elapsed time (`scheduler.rs:400-407`), and later scheduler gates still apply (`scheduler.rs:689-732`) |
 | `prompt_surface.guidance_override_path` | `None` (`config.rs:127`) | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `CONFIGURATION.md:88`) | Yes, from the user tier after merging (`config.rs:278-279`, `config.rs:408-490`); project warns (`config.rs:729-732`) |
 | `prompt_surface.guidance_override_text` | `None` (`config.rs:127`) | **undocumented** | exactly one guidance marker (`config.rs:905-920`) | Yes, user-only (`config.rs:670-672`), but a configured path resets it to `None` first (`config.rs:424`); project warns (`config.rs:729-732`) |
-| `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none from config | The daemon supplies constant `true` (`lib.rs:640`, `lib.rs:5001`). TypeScript routing in the original catalog is historical, not verified by this reader audit |
-| `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none from config | The daemon supplies constant `3` (`lib.rs:641`, `lib.rs:5002`). The boundary consumes it at `boundary.rs:814-819` |
+| `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none from config | The daemon supplies constant `true` (`lib.rs:642`, `lib.rs:5003`). TypeScript routing in the original catalog is historical, not verified by this reader audit |
+| `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none from config | The daemon supplies constant `3` (`lib.rs:643`, `lib.rs:5004`). The boundary consumes it at `boundary.rs:814-819` |
 | `protected_tags` | not parsed by `config.rs` | `20`, range `1-100` (`:165`) | no config-reader bound; the request default is `20` (`transform.rs:797-799`) | It has a request field (`transform.rs:629-631`), so absence from config does not mean the value cannot arrive |
 | `clear_reasoning_age` | not parsed by `config.rs` | `50` (`:169`) | no config-reader bound | It has a request field (`transform.rs:640-644`) and a default helper (`transform.rs:765-767`); absence from config is not product-wide absence |
 | `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). The historical TypeScript-consumer lead is outside this reader audit |
@@ -535,14 +535,14 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - direct test contexts use `min_commit_clusters: 2` and
-enabled and disabled flags (`lib.rs:16664-16674`, `lib.rs:16929-16940`). They
+enabled and disabled flags (`lib.rs:16698-16715`, `lib.rs:16964-16982`). They
 do not load those controls from config. Existing checks remain `unaudited`.
 Guarantee: A configured `commit_cluster_trigger` reaches the module's trigger
 decision, or the module reports that it cannot honour the key.
 Check: `always` - for each supplied commit-cluster control, the production
 trigger context carries the requested value or resolution reports that the
 control is unsupported. `always` because every trigger evaluation constructs
-the context. The context is built inline at `lib.rs:4983-5005`; use a direct
+the context. The context is built inline at `lib.rs:4985-5007`; use a direct
 observation or a workload that distinguishes it from the requested value.
 Fault/timing angle: none.
 Required faults and enabling state: a nondefault user `commit_cluster_trigger`
@@ -551,8 +551,8 @@ of `true` and `3` match the constants and cannot expose the wiring gap. A
 behavioral check must isolate the commit-cluster arm from other fire reasons.
 Confidence: high - [evidence](evidence/dec-a-commit-cluster-trigger-config-is-inert-in-this-crate.md).
 The config fields and pointer table omit these controls (`config.rs:80-109`,
-`config.rs:588-618`). `lib.rs:640-641` defines the constants, used at
-`lib.rs:5001-5002`; `boundary.rs:814-819` consumes the context. Confidence is
+`config.rs:588-618`). `lib.rs:642-643` defines the constants, used at
+`lib.rs:5003-5004`; `boundary.rs:814-819` consumes the context. Confidence is
 in this daemon mechanism, not a product-wide TypeScript routing claim.
 Existing check: none for the config wiring. The default-constant assertion at
 `boundary.rs:2011-2015` and the direct contexts above remain `unaudited`.
@@ -602,7 +602,7 @@ gate and a lower project threshold. The production path reads project values
 from `.eidnara/eidnara.jsonc`; no injected fault is required.
 Confidence: high - [evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
 Verified against the working tree based on
-`0da79d706ea40de75e76af5423dd7fc9b088d8cf`: the classifications at
+`74044960ee91641dec95c8552f15282844a18b13`: the classifications at
 `config.rs:657-693` match the explicit policy, and `:710-755` applies the tiers
 through them. The build-time assertion at `:696-708` rejects privileged keys
 classified as project-allowed; it does not pin the exact permissions of every
@@ -860,14 +860,14 @@ Fault/timing angle: none.
 Required faults and enabling state: a `BoundaryContext` whose `context_limit`,
 `execute_threshold_percentage`, or `usage_percentage` is `f64::INFINITY` or
 `f64::NAN`. Reaching that from production needs a host-supplied usage reading,
-since `lib.rs:4950-4959` builds the context from request and store values.
+since `lib.rs:4988-5000` builds the context from request and store values.
 Confidence: high - [evidence](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md).
 Read every guard: `boundary.rs:339-341`, `:363-372`, `:926-931`. Executed
 `NAN.max(0.0) == 0.0` and `NAN.min(5.0) == 5.0` to confirm the absorption
 argument, which is what makes `:342` safe against a NaN threshold. Also
 confirmed that `ctx.trigger_budget` is the one unvalidated float (`:756-761`,
-`:377-379`) and that production always passes `None` (`lib.rs:4957`), with
-`Some` only at `lib.rs:16495` and `:16760`. The evidence file's test-plan item 4
+`:377-379`) and that production always passes `None` (`lib.rs:4998`), with
+`Some` only at `lib.rs:16708` and `:16973`. The evidence file's test-plan item 4
 already states that the `trigger_budget` case "fails today"
 ([evidence:184-187](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md)),
 which is what the split acts on.
@@ -886,7 +886,7 @@ Reachability: test-only
 Status: active
 Exercised: not yet - and the evidence for the sibling record already says the
 oracle fails. `boundary.rs`'s golden fixture suite never sets `trigger_budget` to
-a non-finite value; the two `Some` sites in the tree, `lib.rs:16495` and `:16760`,
+a non-finite value; the two `Some` sites in the tree, `lib.rs:16708` and `:16973`,
 pass finite numbers.
 Guarantee: `BoundaryContext::trigger_budget`, being caller-supplied and read
 without validation, does not carry a non-finite value into a boundary
@@ -925,8 +925,8 @@ Existing check: none. Status `unaudited`.
 Impact: `TriggerProgress`'s own doc comment (`boundary.rs:322-324`) says it is
 "Surfaced through the transform response's historian diagnostics so a stalled rig
 drive is diagnosable per pass", and `tail_size_bar` is described at `:329-330` as
-"The tail_size fire bar". It is carried out at `lib.rs:4982` and divided by 1000
-and rounded at `:5002`. A NaN there is the diagnostic field going quietly wrong in
+"The tail_size fire bar". It is carried out at `lib.rs:5023` and divided by 1000
+and rounded at `:5038`. A NaN there is the diagnostic field going quietly wrong in
 the response an operator reads to explain why the historian did not fire, and
 `serde_json` renders a NaN as `null`, so the wire form is an absent number rather
 than a visible error. This is the defect the sibling record's "no totality defect
@@ -938,7 +938,7 @@ Open questions:
   `usage_percentage`, or should the field's type make a non-finite value
   unrepresentable? The first is a two-line `is_finite` gate at each of the two
   read sites; the second is a newtype and a constructor. (needs human input)
-- Production passes `None` (`lib.rs:4957`) so the reachability is `test-only`
+- Production passes `None` (`lib.rs:4998`) so the reachability is `test-only`
   today. Whether a future caller may supply the budget — the field exists for
   someone — decides whether this is a latent defect or an active one. Unresolved;
   the field's purpose is not documented at its declaration (`:222-224`).
@@ -1049,7 +1049,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet - `selection.rs:2537-2549` covers the UTF-16 cap and the
+Exercised: not yet - `selection.rs:2424-2436` covers the UTF-16 cap and the
 surrogate back-off. No test supplies a value that already ends with the
 sentinel.
 Guarantee: An `edit_marker` payload's diff-bearing values are clamped to a
@@ -1065,11 +1065,11 @@ default (`config.rs:128`) and permitted in either tier (`config.rs:680`,
 tool call superseded by a later edit to the same file, whose `oldString`,
 `newString`, or `content` value ends with the literal `...[truncated]`.
 Confidence: high - [evidence](evidence/dec-a-region-hint-clamp-bypassed-by-sentinel-suffix.md).
-`selection.rs:559-561` returns the input unchanged when it ends with
-`TRUNCATION_SENTINEL` (`:71`). Executed the predicate on a 5,014-character
+`selection.rs:537-539` returns the input unchanged when it ends with
+`TRUNCATION_SENTINEL` (`:62`). Executed the predicate on a 5,014-character
 hostile string to confirm it takes the short-circuit arm. The gate is
-`cfg.smart_drops` at `:1229` and `:1236`.
-Existing check: `selection.rs:2537-2549`
+`cfg.smart_drops` at `:1109` and `:1134`.
+Existing check: `selection.rs:2424-2436`
 `edit_marker_region_hint_caps_utf16_and_backs_off_split_surrogate`, which
 covers the other two arms. Status `unaudited`.
 Impact: a superseded edit keeps its full diff instead of a 40-unit hint, so the
@@ -1251,7 +1251,7 @@ unconditional. This is the surviving half of Part 1's
 decoded field or is retained verbatim, and here it is the second case for four
 named types.
 Fault/timing angle: none at decode. The interaction to check is with
-`remove_unretained_native_parts` (`codec/sidecar.rs:118-128`), which removes a
+`remove_unretained_native_parts` (`codec/sidecar.rs:135-145`), which removes a
 native index only when it is in `decoded_native_indices` and not in
 `retained_native_indices`. The four types never enter `decoded_native_indices`,
 so they are structurally immune to deletion compaction. That immunity is
@@ -1313,7 +1313,7 @@ Confidence: high - [evidence](evidence/codec-b-provenance-recovery-on-decode-is-
 `codec/opencode.rs:1277-1279` read at `HEAD`:
 `!parts.is_empty() && parts.iter().all(is_synthetic_part)`, so an empty-parts
 message and a mixed-parts message both classify as authentic.
-`is_synthetic_part` at `codec/sidecar.rs:331-339` accepts `synthetic` or
+`is_synthetic_part` at `codec/sidecar.rs:454-462` accepts `synthetic` or
 `syntheticTodoMarker`. Encoder side: `codec/opencode.rs:991-995` stamps
 `synthetic: true` on every part only when
 `msg.meta.synthetic && msg.role == "user"`; `render_synthetic_todo_pair` at
@@ -1331,7 +1331,7 @@ which asserts `message["meta"]["synthetic"] == true` on the native fixtures.
 Neither covers a mixed message. Status `unaudited`.
 Impact: the module's own writes can come back classified as user-authored.
 `meta.synthetic` gates `meta_for_ck`'s positional fallback
-(`codec/sidecar.rs:324-328`), so a misclassified module-authored message
+(`codec/sidecar.rs:446-450`), so a misclassified module-authored message
 becomes eligible to inherit a native envelope by position, which is the failure
 `codec/mod.rs:128-175` exists to prevent for the other direction. Pi's
 hardcoded `false` means the Pi leg has no provenance at all in either
@@ -1355,7 +1355,8 @@ composition property here. The absolute ordinal every later decision indexes on 
 harness-supplied and never validated. And the block-identity stamp is
 caller-writable while the fingerprint is computed over the typed projection only,
 so it is a change detector rather than an identity. All three live in or depend on
-`codec/sidecar.rs`, the file with no tests.
+`codec/sidecar.rs`, whose only direct tests cover greedy and linear alignment
+(`codec/sidecar.rs:487-557`) and not the stamp or fingerprint contracts.
 
 ### codec-b-decoder-output-can-violate-the-projector-precondition
 
@@ -1495,9 +1496,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - `codec/sidecar.rs` has zero `#[test]` functions.
-Everything in it is covered only incidentally through the two harness codecs'
-goldens, which supply no duplicate-content blocks and no caller-supplied stamp.
+Exercised: not yet - `codec/sidecar.rs` has three direct `#[test]` functions
+(`codec/sidecar.rs:487-557`), all of which exercise `match_block_metas` and
+`greedy_block_metas` pairing. None constructs a caller-supplied stamp or two
+byte-identical parts, so the stamp and collision halves are still covered only
+incidentally through the two harness codecs' goldens.
 Guarantee: The block-identity stamp that the encoder trusts to align a mutated
 block with its native part is authentic, and the fingerprint stored beside it
 distinguishes blocks that differ.
@@ -1518,8 +1521,8 @@ carrying `provider_extras["_eidnara_codec"]` with plausible `blockIndex`,
 `Vec<IngressMessage>` (`transform.rs:781`) and `WireBlock`'s `Deserialize`
 (`memory-store/src/lib.rs:207-221`) reads `provider_extras` verbatim.
 Confidence: high - [evidence](evidence/codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity.md).
-`codec/sidecar.rs:131-134` gives the namespace and three keys as plain string
-constants. `stamped_block_identity` at `:177-183` reads them back with no
+`codec/sidecar.rs:148-151` gives the namespace and three keys as plain string
+constants. `stamped_block_identity` at `:196-203` reads them back with no
 provenance check; `alignment_candidate` at `:204-211` returns early on a stamp
 match, never consulting `kind_matches`, so a forged stamp outranks the kind
 check. `decoded_block_fingerprint` at `:151-156` calls
@@ -1928,7 +1931,8 @@ claim. Existing checks and their execution are recorded in
   [codec-b-absolute-ordinal-is-harness-supplied-and-never-validated](#codec-b-absolute-ordinal-is-harness-supplied-and-never-validated),
   [codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity](#codec-b-block-identity-stamp-is-caller-writable-and-the-fingerprint-is-not-an-identity).
   All three are properties of the seam rather than of either side, and all three
-  route through `codec/sidecar.rs`, which has no tests. Hypothesis: the projector
+  route through `codec/sidecar.rs`, whose three direct tests cover alignment
+  pairing only (`codec/sidecar.rs:487-557`). Hypothesis: the projector
   precondition record *hypothetically dominates* the ordinal record, because a
   composition check that decodes then projects and asserts the projector accepted
   would also catch an ordinal the projector rejects; it does not dominate the

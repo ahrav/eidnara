@@ -12,12 +12,14 @@ import {
     type DispositionOperation,
     type DispositionPreview,
     type DispositionResult,
+    invalid,
     isAvailable,
     type KernelClient,
     type MemoryState,
     OPERATION_KEY_SEPARATOR,
     renderToolStateText,
     stateKey,
+    unavailable,
 } from "./kernel-client";
 
 export const MEMORY_MARK_COMMAND = "ctx-memory-mark";
@@ -97,6 +99,17 @@ export function memoryMarkOperationId(sessionId: string, args: MemoryMarkArgs): 
     return [sessionId, args.event, args.objectId].join(OPERATION_KEY_SEPARATOR);
 }
 
+/** The daemon returns one verdict for the single operation sent; only a verdict for `operation` may decide the confirmation and the reported outcome. commentlint: allow(JUDGE) */
+function verdictFor<R extends DispositionResult>(
+    results: readonly R[],
+    operation: DispositionOperation,
+): R | null {
+    const [verdict] = results;
+    if (results.length !== 1 || verdict === undefined) return null;
+    if (verdict.object_id !== operation.object_id || verdict.event !== operation.event) return null;
+    return verdict;
+}
+
 export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<MemoryMarkOutcome> {
     const { client, args } = input;
     const operation: DispositionOperation = {
@@ -115,8 +128,9 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         return { kind: "refused", step: "preview", state: previewed.state };
     // A recorded identity replays its receipt whatever the object's state is now, so the preview has nothing to judge and asks nothing. commentlint: allow(JUDGE)
     if (previewed.receipt === undefined) {
-        const preview = previewed.previews[0];
-        if (!preview) return { kind: "refused", step: "preview", state: previewed.state };
+        const preview = verdictFor(previewed.previews, operation);
+        // The reply decoded but does not answer the operation sent: a daemon contract violation, and nothing was written. commentlint: allow(JUDGE)
+        if (!preview) return { kind: "refused", step: "preview", state: invalid("internal") };
         if (preview.denied) return { kind: "denied", result: preview };
         if (preview.visibility_changes && !args.confirmed) {
             if (!input.confirm) return { kind: "needs_confirmation", preview };
@@ -127,8 +141,9 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
         return { kind: "refused", step: "commit", state: { kind: "cancelled" } };
     const committed = await client.commit({ ...intent, operations: [operation] });
     if (!isAvailable(committed)) return { kind: "refused", step: "commit", state: committed.state };
-    const result = committed.dispositions[0];
-    if (!result) return { kind: "refused", step: "commit", state: committed.state };
+    const result = verdictFor(committed.dispositions, operation);
+    // The receipt exists, so the commit may have been applied; a verdict list that does not answer the operation leaves its effect unknown rather than refused. commentlint: allow(JUDGE)
+    if (!result) return { kind: "refused", step: "commit", state: unavailable("outcome_unknown") };
     // The object can move between the preview and the commit; the commit's verdict is the one recorded. commentlint: allow(JUDGE)
     if (result.denied) return { kind: "denied", result };
     return {

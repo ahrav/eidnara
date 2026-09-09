@@ -466,6 +466,12 @@ mod tests {
         );
         assert_ne!(
             base,
+            attempt_child_session_id("project", "ses", "command", 2, 0, "prov/model-a"),
+            "the receipt generation alone must separate sessions: a successor never \
+             shares a child session with the predecessor it fenced"
+        );
+        assert_ne!(
+            base,
             attempt_child_session_id("other", "ses", "command", 1, 0, "prov/model-a")
         );
         assert_ne!(
@@ -477,11 +483,6 @@ mod tests {
         assert_ne!(
             base,
             attempt_child_session_id("project", "ses", "other", 1, 0, "prov/model-a")
-        );
-        assert_ne!(
-            base,
-            attempt_child_session_id("project", "ses", "command", 2, 0, "prov/model-a"),
-            "a successor generation must never reuse a predecessor's session"
         );
         assert!(base.starts_with("eidnara-dreamer:classify:"));
     }
