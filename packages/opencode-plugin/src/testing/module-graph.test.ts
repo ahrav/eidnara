@@ -161,9 +161,10 @@ describe("module graph over the landed tree", () => {
         expect(readFileSync(join(SRC, HARNESS_DATABASE_WRITER), "utf8")).toMatch(
             /const dbPath = getOpenCodeDbPath\(\);/,
         );
-        expect(databaseUses(readFileSync(join(SRC, DATABASE_ADAPTER), "utf8")).opens).toEqual([
-            '    const probe = new Database(":memory:");',
-        ]);
+        expect(databaseUses(readFileSync(join(SRC, DATABASE_ADAPTER), "utf8"))).toEqual({
+            opens: ['    const probe = new Database(":memory:");'],
+            escapes: ["export const Database: typeof BetterSqlite3 = DatabaseImpl;"],
+        });
     }, 120_000);
 });
 const graph: ModuleGraph = {
@@ -211,12 +212,14 @@ describe("databaseBinders", () => {
 describe("databaseUses", () => {
     const allowed = [
         'import { Database, runImmediate } from "../../shared/sqlite";',
+        'import type BetterSqlite3 from "better-sqlite3";',
         "let cached: { path: string; db: Database } | null = null;",
         "function open(dbPath: string): Database {",
         "    const db = new Database(dbPath, { readonly: true });",
         "    return db;",
         "}",
         "type Ctor = typeof Database;",
+        "type Database = BetterSqlite3.Database;",
         "const meta = { Database: 1 };",
         "const name = meta.Database;",
         "",
