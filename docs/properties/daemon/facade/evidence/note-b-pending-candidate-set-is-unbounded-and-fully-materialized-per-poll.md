@@ -22,12 +22,16 @@ are no, and the per-poll cost is linear in the unbounded quantity.
    `:11393`, which is a store-scoped teardown owned by Parts 3 and 4c, and the
    `deleted.saturating_add(if table == "notes" ...)` accounting at `:5460`.
    Neither is age- or volume-driven. Compare the note-evaluation *ledgers*, which
-   do have a reaper: `task_lease::collect_ledgers_tx` (`:13119-13157`) deletes
-   acquisition rows past `NOTE_EVAL_NO_WORK_RETENTION_MS` (`:13146-13150`) and
+   do have a reaper: `task_lease::collect_ledgers_tx`
+   (`crates/memory-store/src/task_lease.rs:332-418`) deletes acquisition rows past
+   `NOTE_EVAL_NO_WORK_RETENTION_MS`
+   (`crates/memory-store/src/task_lease.rs:383-387`) and
    terminal claim rows past `NOTE_EVAL_TERMINAL_RETENTION_MS`
-   (`:13151-13156`), with an explicit comment on why blanking columns is not
-   enough (`:13143-13147`). So the codebase has the reaper pattern and applied it
-   to the ledgers and not to the notes.
+   (`crates/memory-store/src/task_lease.rs:411-416`), with those retention fields
+   set by `NOTE_EVALUATION` (`crates/memory-store/src/lib.rs:3790-3791`) and an
+   explicit comment on why blanking columns is not enough
+   (`crates/memory-store/src/task_lease.rs:356-360`). So the codebase has the
+   reaper pattern and applied it to the ledgers and not to the notes.
 
 3. The candidate query has no `LIMIT`:
 
@@ -157,7 +161,7 @@ as a deliberate observation rather than an oversight in the test.
   `notes` triggers (`:774`, `:857`, `:1041`, `:1142`), a grep for
   `MAX_NOTE`/`max_notes`/`notes_max` across `memory-store` and `daemon` returning
   only `MAX_NOTE_CONTENT_BYTES`, and the ledger reaper for contrast
-  (`:13119-13157`).
+  (`crates/memory-store/src/task_lease.rs:332-418`).
 - Findings: no cap and no reaper in either crate. The triggers are ownership,
   authority, writer-fence, and feed maintenance, not volume control. The
   `DELETE` at `:8675` is inside a different subsystem's cleanup and is keyed on
