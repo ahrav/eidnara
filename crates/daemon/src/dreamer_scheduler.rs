@@ -163,8 +163,15 @@ impl DreamerScheduler {
             if cancel.is_cancelled() {
                 return;
             }
+            // Cancellation drops the in-flight tick. The receipt protocol
+            // recovers an abandoned run on restart; projects still due are not leased.
+            let events = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                events = self.tick(host.as_ref()) => events,
+            };
             let mut store_failed = false;
-            for event in self.tick(host.as_ref()).await {
+            for event in events {
                 match event {
                     TickEvent::Ran { .. } => {}
                     TickEvent::Skipped {
@@ -486,6 +493,8 @@ mod tests {
         run_takes: Option<(Arc<ManualClock>, Duration)>,
         /// The next `scheduled_projects` fails with this instead of answering.
         fail_projects_once: Mutex<Option<String>>,
+        /// Every run parks on this until it is notified.
+        block_runs: Option<Arc<tokio::sync::Notify>>,
     }
 
     #[async_trait]
@@ -513,6 +522,9 @@ mod tests {
                 .push((project.project.clone(), command_id.to_string()));
             if let Some((clock, by)) = &self.run_takes {
                 clock.advance(*by);
+            }
+            if let Some(gate) = &self.block_runs {
+                gate.notified().await;
             }
             if self.runnable {
                 TaskRunOutcome::Ran {
@@ -574,6 +586,7 @@ mod tests {
             runnable: true,
             run_takes: None,
             fail_projects_once: Mutex::new(None),
+            block_runs: None,
         }
     }
 
@@ -1069,6 +1082,59 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(host.runs.lock().unwrap().len(), 1);
+    }
+
+    /// Cancellation during a run drops the tick where it stands: the loop
+    /// returns without waiting for the run, and the project still due behind
+    /// it is not leased.
+    #[tokio::test]
+    async fn run_stops_mid_tick_at_cancellation_without_leasing_the_next_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let mut host = scripted(
+            &store,
+            vec![
+                project(&store, "git:a", "*/15 * * * *"),
+                project(&store, "git:b", "*/15 * * * *"),
+            ],
+        );
+        host.block_runs = Some(Arc::clone(&gate));
+        let host = Arc::new(host);
+        let clock = ManualClock::parked_at(T0 + 1_000);
+        let mut scheduler = DreamerScheduler::new(clock.shared());
+        assert!(scheduler.tick(host.as_ref()).await.is_empty());
+        clock.advance(15 * MINUTE);
+        let cancel = CancellationToken::new();
+        let dyn_host: Arc<dyn SchedulerHost> = Arc::clone(&host) as Arc<dyn SchedulerHost>;
+        let running = tokio::spawn(scheduler.run(dyn_host, cancel.clone()));
+        tokio::task::yield_now().await;
+        assert_eq!(
+            host.runs.lock().unwrap().len(),
+            1,
+            "the first slot is running and parked"
+        );
+        assert!(!running.is_finished());
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("run returns without waiting for the parked run")
+            .unwrap();
+        assert_eq!(
+            host.runs.lock().unwrap().as_slice(),
+            &[("git:a".to_string(), command(T0 + 15 * MINUTE_MS))],
+            "the second project was never leased or run"
+        );
+        assert!(
+            matches!(
+                slot_state(&store, "git:b", T0 + 15 * MINUTE_MS),
+                LeaseAcquireOutcome::Claim {
+                    replayed: false,
+                    ..
+                }
+            ),
+            "no decision was recorded for git:b's slot"
+        );
     }
 
     /// Cancellation ends a loop parked in its wait without another tick.

@@ -15,33 +15,37 @@ billable runs.
 Verified at HEAD. References are to `crates/daemon/src/dreamer_scheduler.rs`
 unless stated.
 
-- `DreamerScheduler::tick` (`:235`) reads the clock once for due-ness, asks the
+- `DreamerScheduler::tick` (`:242`) reads the clock once for due-ness, asks the
   host for its scheduled projects, and runs those due at or before that
-  instant oldest first (`due_projects`, `:255`). After a run the project's
+  instant oldest first (`due_projects`, `:262`). After a run the project's
   next instant is recomputed from the clock as the run returns (`advance`,
-  `:288`, called at `:246`), so slots missed while the daemon was down are not
+  `:295`, called at `:253`), so slots missed while the daemon was down are not
   back-filled, and a slot that came due while the run itself was in progress
   is not back-filled either: the loop waits for the next instant after the
   run rather than re-ticking at once on an instant already in the past. When
-  the host returns `Err`, `tick` returns one `TickEvent::Deferred` (`:239`)
+  the host returns `Err`, `tick` returns one `TickEvent::Deferred` (`:246`)
   before the due table is reconciled, so no project is dropped and no due
   instant moves.
-- `run` (`:161`) logs every `Skipped` and `Deferred` event to stderr and, after
-  a deferred tick, waits the idle poll instead of the distance to the earliest
-  due instant, which would otherwise be zero and re-tick at once against a
-  failing store.
-- `run_slot` (`:303`) leases before it runs:
+- `run` (`:161`) logs every `Skipped`, `Retained`, and `Deferred` event to
+  stderr and, after a deferred tick or a retained slot, waits the idle poll
+  instead of the distance to the earliest due instant, which would otherwise be
+  zero and re-tick at once against a failing store. The tick is awaited under
+  `select!` with the cancellation token (`:170`), so cancellation during
+  a run drops the tick where it stands: the run in flight is abandoned to the
+  receipt protocol, which recovers it on restart, and the projects still due
+  behind it are not leased.
+- `run_slot` (`:310`) leases before it runs:
   `acquire_dreamer_task` with acquisition id `slot_command_id(task, due_at_ms)`,
   the scheduler's instance and slot, the registration generation, the task id,
   and the due instant as the claim's `source_revision`. Every acquisition
   decision other than `Claim` is a `Skipped` event with no run, and `tick`
   advances the project past the slot. A store `Err` from the generation lookup
   or from the acquisition is not a decision: `run_slot` returns
-  `TickEvent::Retained` (`:315`), `tick` leaves that project's
-  due instant in place (`:245`), and `run` waits the idle poll
+  `TickEvent::Retained` (`:322`), `tick` leaves that project's
+  due instant in place (`:252`), and `run` waits the idle poll
   before the next tick retries the same slot under the same acquisition id.
 - The command id the run is dispatched under is derived from the returned
-  claim's `source_revision` (`:357`), not from the slot that came due. The
+  claim's `source_revision` (`:364`), not from the slot that came due. The
   shared protocol rebinds a live claim held by the same instance and slot under
   an older registration generation (`crates/memory-store/src/task_lease.rs`,
   slot recovery in `acquire_task_lease`), and a rebound claim keeps its
@@ -55,12 +59,13 @@ unless stated.
   not used, so a clock step backwards cannot rank the successor below its
   predecessor.
 - Lease and completion instants are read from the clock as each operation
-  happens (`:332`, `:378`), so a long run for one project does not shorten the
+  happens (`:339`, `:385`), so a long run for one project does not shorten the
   lease of the project behind it in the same tick.
 - `SchedulerBridge::scheduled_projects` (`crates/daemon/src/lib.rs:13789`)
   takes the most recently bound binding on each route root
-  (`RouteBindings::latest_per_root`, `lib.rs:277`; each bind is stamped with a
-  sequence at `lib.rs:235`), with or without a schedule, and admits a root only
+  (`RouteBindings::latest_per_root`, `lib.rs:277`; `RouteBindings::insert`
+  stamps each bind with a sequence at `lib.rs:244-245`), with or without a
+  schedule, and admits a root only
   when `memories_authority_for_route` (`lib.rs:13726`) answers
   `Module`. That helper is the same one `run_dreamer_task` uses, so a store
   `Err` is an `Err` from `scheduled_projects`, not a missing project. Roots
@@ -77,10 +82,12 @@ unless stated.
   (`DreamerRuntime::classify_inputs`, `lib.rs:3101`, `None` on this HEAD), and
   otherwise calls `run_dreamer_task` under `SCHEDULER_LEDGER_SESSION`
   (`lib.rs:13858`) with `leased_project` set to the project the lease
-  is on. `binding_for_root` (`lib.rs:13771`) takes the same most
-  recently bound binding that `scheduled_projects` read the schedule from. The
-  not-runnable reply is recorded on the lease so the slot is not retried every
-  tick.
+  is on. `binding_for_root` (`lib.rs:13771`) reads the newest binding on the
+  scheduled root at dispatch, the same choice `scheduled_projects` made at the
+  tick; a rebind of that root in between dispatches under the binding the user
+  now presents, and a rebind during the run cannot be observed at all, so the
+  binding is not re-validated against the tick's snapshot. The not-runnable
+  reply is recorded on the lease so the slot is not retried every tick.
 - `run_dreamer_task` resolves the route again at its authority gate
   (`lib.rs:9540`). The generation check alone does not pin the
   project: a root rebound to another `MODULE` project at an equal generation
@@ -134,7 +141,9 @@ tick future dropped while the producer blocks on output, then a second
 `acquire_dreamer_task` return a backend error before it touches the ledger. For
 the refused run: a second `MODULE` authority activated on the leased root
 through `activate_module_authority`, so the root resolves to the other project
-at an equal generation. For binding selection:
+at an equal generation. For cancellation mid-tick: two due projects on a host
+whose runs park on a `Notify`, cancelled while the first is parked. For
+binding selection:
 twelve routes bound on one root with distinct schedules and harnesses, so a
 pick by map order almost never matches the newest bind, then a rebind of the
 oldest channel and a newest binding with no schedule. For the post-run

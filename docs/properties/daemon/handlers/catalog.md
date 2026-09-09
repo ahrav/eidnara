@@ -661,7 +661,8 @@ pending slot when the host cannot report its projects, a retained slot when the
 ledger cannot answer the lease, recovery of a
 predecessor's live claim under its own slot with the successor's generation
 taken from the ledger, expired-versus-live predecessor leases, a not-runnable
-slot ending `applied`, cancellation of a parked loop, and the idle-poll wait
+slot ending `applied`, cancellation of a parked loop and of a tick parked in a
+run with a second project still due, and the idle-poll wait
 after a deferred tick.
 `dreamer_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt`
 (`lib.rs`, `mod tests`) runs a slot through `SchedulerBridge` with scripted
@@ -703,12 +704,12 @@ slot_command_id(task, due_at_ms)))` has at most one attempt row that is not
 slot; the lease is what serialises schedulers and the receipt is what
 serialises retries, and the property holds only when both keys agree.
 Fault/timing angle: The scheduler leases before it runs (`run_slot`,
-`dreamer_scheduler.rs:303`) and derives the command id from the claim's
-`source_revision`, not the slot that came due (`:357`), so a claim rebound from
+`dreamer_scheduler.rs:310`) and derives the command id from the claim's
+`source_revision`, not the slot that came due (`:364`), so a claim rebound from
 a predecessor names the predecessor's slot. Lease and completion instants are
 read from the clock as each happens, so a long run does not shorten the next
 project's lease. The next instant is recomputed from the clock after the run
-returns (`:246`), so a run that outlasts its period skips the slot it crossed
+returns (`:253`), so a run that outlasts its period skips the slot it crossed
 instead of re-ticking at once on an instant already in the past. A daemon that
 dies between `acquire` and `complete` leaves a
 live claim; the successor's registration generation comes from
@@ -720,19 +721,24 @@ receipt then waits for a request with its command id, which no scheduler
 issues, and stays `in_progress`. A store failure inside
 `SchedulerBridge::scheduled_projects` is an `Err`, not an empty list
 (`memories_authority_for_route`, `lib.rs:13726`, shared with the wire route);
-`tick` returns `TickEvent::Deferred` (`:239`) without reconciling the due
+`tick` returns `TickEvent::Deferred` (`:246`) without reconciling the due
 table, and `run` waits the idle poll before retrying (`:161`). A store failure
 from the generation lookup or from `acquire_dreamer_task` is
-`TickEvent::Retained` (`run_slot`, `:315`): `tick` does not advance that
-project (`:245`), so the slot stays due, and `run` waits the idle poll as after
+`TickEvent::Retained` (`run_slot`, `:322`): `tick` does not advance that
+project (`:252`), so the slot stays due, and `run` waits the idle poll as after
 a deferred tick. Every other acquisition outcome is a ledger decision and
-consumes the slot. Bindings freeze configuration at bind, so `RouteBindings`
-(`lib.rs:235`) stamps each bind with a sequence and the bridge collapses roots
-to the most recently bound binding per root and the most recently bound root
-per project before it reads the schedule, so a newest binding without a
-schedule unschedules the project; `binding_for_root` follows the same choice,
-so the harness a run dispatches under is the one whose schedule put the project
-on the scheduler. The route is resolved again inside `run_dreamer_task`;
+consumes the slot. Bindings freeze configuration at bind, so
+`RouteBindings::insert` (`lib.rs:244-245`) stamps each bind with a sequence and
+the bridge collapses roots to the most recently bound binding per root and the
+most recently bound root per project before it reads the schedule, so a newest
+binding without a schedule unschedules the project; `binding_for_root` reads
+the newest binding on that root again at dispatch, so the run dispatches under
+the binding the user presents at that moment on the root whose schedule put
+the project on the scheduler. `run` awaits each tick under `select!` with the
+cancellation token (`:170`): shutdown drops a tick mid-run instead of
+waiting out the run, and the projects still due behind it are not leased; the
+abandoned run is the receipt protocol's to recover. The route is resolved again
+inside `run_dreamer_task`;
 `DreamerRunRequest::leased_project` names the project the lease is on, and a
 route that now resolves to another project is refused as
 `authority_project_mismatch` (`lib.rs:9570`) before any receipt is written,
