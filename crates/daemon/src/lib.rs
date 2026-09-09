@@ -13,6 +13,7 @@ pub(crate) mod config;
 pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;
+pub(crate) mod dreamer_scheduler;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
@@ -2878,7 +2879,7 @@ pub struct Handler {
     #[cfg(test)]
     publication_fence_write_hook: ConnectFailureCommitHook,
     /// A full route handle maps to its session binding and route root; epoch-scoped lookups and removals prevent channel reuse from accessing another incarnation's state.
-    bindings: Mutex<HashMap<RouteHandle, SessionBinding>>,
+    bindings: Arc<Mutex<HashMap<RouteHandle, SessionBinding>>>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -2895,7 +2896,8 @@ pub struct Handler {
     transform_pages: Mutex<TransformPageCoordinator>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
-    /// The durable classify protocol behind `dreamer.run_task`.
+    /// The durable classify protocol behind `dreamer.run_task`; the scheduler
+    /// that drives it unattended is spawned once the store opens.
     dreamer: Arc<DreamerRuntime>,
     /// Facade callers without a host tool-call ID receive one warning per resolved session, and the mutation proceeds.
     missing_facade_command_id_sessions: Mutex<HashSet<String>>,
@@ -3010,6 +3012,18 @@ pub(crate) struct DreamerRuntime {
     active_dreamer_runs: Arc<Mutex<HashSet<String>>>,
     /// [`DreamCommandGuard`].
     inflight_dream_commands: Arc<Mutex<HashSet<(String, String)>>>,
+    /// Where a scheduled task's classify inputs come from; `None` until a task
+    /// has a Rust-owned input builder, so nothing unattended can dispatch.
+    task_inputs: Mutex<Option<Arc<dyn DreamerTaskInputs>>>,
+}
+
+/// Builds the classify inputs of one scheduled task from canonical state.
+pub(crate) trait DreamerTaskInputs: Send + Sync {
+    fn classify_inputs(
+        &self,
+        project: &dreamer_scheduler::ScheduledProject,
+        task: &str,
+    ) -> Option<ClassifyRequest>;
 }
 
 impl DreamerRuntime {
@@ -3018,7 +3032,25 @@ impl DreamerRuntime {
             producer_factory,
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             inflight_dream_commands: Arc::new(Mutex::new(HashSet::new())),
+            task_inputs: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    fn install_task_inputs(&self, inputs: Arc<dyn DreamerTaskInputs>) {
+        *self.task_inputs.lock().expect("dreamer task inputs mutex") = Some(inputs);
+    }
+
+    fn classify_inputs(
+        &self,
+        project: &dreamer_scheduler::ScheduledProject,
+        task: &str,
+    ) -> Option<ClassifyRequest> {
+        self.task_inputs
+            .lock()
+            .expect("dreamer task inputs mutex")
+            .as_ref()
+            .and_then(|inputs| inputs.classify_inputs(project, task))
     }
 
     fn unregister_dreamer_run(&self, session_id: &str) {
@@ -3462,7 +3494,7 @@ impl Handler {
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
-            bindings: Mutex::new(HashMap::new()),
+            bindings: Arc::new(Mutex::new(HashMap::new())),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -3536,6 +3568,9 @@ impl Handler {
         let coordinator = Arc::clone(&self.store_open);
         let task_coordinator = Arc::clone(&coordinator);
         let cancel = self.cancel.clone();
+        let store_slot = Arc::clone(&self.store);
+        let bindings = Arc::clone(&self.bindings);
+        let dreamer = Arc::clone(&self.dreamer);
         if admission
             .spawn(async move {
                 let _guard = StoreOpenWaiterGuard {
@@ -3552,6 +3587,22 @@ impl Handler {
                 let opened =
                     Self::run_store_open(store, task_coordinator, &descriptor, cancel.clone())
                         .await;
+                // The scheduler needs only the memory store; it starts once
+                // that store is installed, whatever the kernel does next, and
+                // holds the store until shutdown joins it.
+                if opened && let Some(store) = store_slot.lock().expect("store slot mutex").clone()
+                {
+                    let host: Arc<dyn dreamer_scheduler::SchedulerHost> =
+                        Arc::new(SchedulerBridge {
+                            store,
+                            bindings,
+                            dreamer,
+                        });
+                    let scheduler = dreamer_scheduler::DreamerScheduler::new(Arc::new(
+                        dreamer_scheduler::WallClock,
+                    ));
+                    task_admission.spawn(scheduler.run(host, cancel.clone()));
+                }
                 // SQLite supplies the path that derives the kernel root.
                 match (opened, &descriptor.backend) {
                     (true, StorageBackend::Sqlite { path }) => {
@@ -3771,7 +3822,7 @@ impl Handler {
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
-            bindings: Mutex::new(HashMap::new()),
+            bindings: Arc::new(Mutex::new(HashMap::new())),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -13602,6 +13653,124 @@ fn classify_success_response(
     })
 }
 
+/// The daemon state the Dreamer scheduler reads and drives: the open store,
+/// the live route bindings a run's harness and configuration come from, and
+/// the durable classify protocol.
+struct SchedulerBridge {
+    store: Arc<MemoryStore>,
+    bindings: Arc<Mutex<HashMap<RouteHandle, SessionBinding>>>,
+    dreamer: Arc<DreamerRuntime>,
+}
+
+impl SchedulerBridge {
+    /// One live binding per route root, so every scheduled run of a project
+    /// dispatches under the same harness and credentials.
+    fn binding_for_root(&self, route_root: &Path) -> Option<SessionBinding> {
+        self.bindings
+            .lock()
+            .expect("bindings mutex")
+            .values()
+            .find(|binding| binding.project_root == route_root)
+            .cloned()
+    }
+}
+
+#[async_trait]
+impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
+    fn store(&self) -> &MemoryStore {
+        &self.store
+    }
+
+    /// The schedule is read from the configuration each route was bound
+    /// under, the same tier-merged value every other gate on that route uses;
+    /// the project tier cannot set it, so a project-tier schedule never
+    /// appears here. A project qualifies when its memories authority is
+    /// `MODULE`, the state every run writes under.
+    fn scheduled_projects(&self) -> Vec<dreamer_scheduler::ScheduledProject> {
+        let store = &self.store;
+        let mut roots: BTreeMap<PathBuf, String> = BTreeMap::new();
+        for binding in self.bindings.lock().expect("bindings mutex").values() {
+            if let Some(schedule) = &binding.config.dreamer_review_user_memories_schedule {
+                roots
+                    .entry(binding.project_root.clone())
+                    .or_insert_with(|| schedule.clone());
+            }
+        }
+        roots
+            .into_iter()
+            .filter_map(|(route_root, schedule)| {
+                let root = route_root.to_string_lossy().to_string();
+                let project = store
+                    .authority_project_for_route(&root, "memories")
+                    .ok()
+                    .flatten()?;
+                let (context_store_uuid, authority_project) = store
+                    .module_authority_for_project(&project, "memories")
+                    .ok()
+                    .flatten()?;
+                let authority = store
+                    .authority_status(&context_store_uuid, &authority_project, "memories")
+                    .ok()
+                    .flatten()?;
+                (authority.state == "MODULE").then_some(dreamer_scheduler::ScheduledProject {
+                    project: authority_project,
+                    route_root,
+                    authority_generation: authority.generation,
+                    schedule,
+                })
+            })
+            .collect()
+    }
+
+    async fn run_task(
+        &self,
+        project: &dreamer_scheduler::ScheduledProject,
+        task: &str,
+        command_id: &str,
+    ) -> dreamer_scheduler::TaskRunOutcome {
+        let Some(binding) = self.binding_for_root(&project.route_root) else {
+            return dreamer_scheduler::TaskRunOutcome::NotRunnable {
+                reason: "no live route is bound to the project".to_string(),
+            };
+        };
+        let Some(inputs) = self.dreamer.classify_inputs(project, task) else {
+            return dreamer_scheduler::TaskRunOutcome::NotRunnable {
+                reason: format!("task {task} has no Rust-owned classify inputs on this daemon"),
+            };
+        };
+        let outcome = self
+            .dreamer
+            .run_dreamer_task(
+                Arc::clone(&self.store),
+                DreamerRunRequest {
+                    route: DreamerRoute::of(&binding),
+                    ledger_session: dreamer_scheduler::SCHEDULER_LEDGER_SESSION,
+                    command_id,
+                    authority_generation: project.authority_generation,
+                    task: &inputs,
+                },
+            )
+            .await;
+        dreamer_scheduler::TaskRunOutcome::Ran {
+            response: match outcome {
+                PreparedOutcome::Response(output) => output
+                    .measure()
+                    .ok()
+                    .and_then(|measured| {
+                        let mut bytes = Vec::new();
+                        measured.write_to(&mut bytes).ok()?;
+                        serde_json::from_slice(&bytes).ok()
+                    })
+                    .unwrap_or_else(|| json!({"ok": false, "code": "dreamer_ledger_corrupt"})),
+                PreparedOutcome::Error { code, message } => {
+                    json!({"ok": false, "code": code, "message": message})
+                }
+                PreparedOutcome::Streamed => json!({"ok": false, "code": "dreamer_run_failed"}),
+            },
+        }
+    }
+}
+
 /// The three route facts a model run is dispatched under; a wire request takes
 /// them from its session binding, a scheduled run from the binding of a live
 /// route on the project.
@@ -18466,6 +18635,8 @@ mod tests {
         purge_errors: Mutex<VecDeque<HistorianProducerError>>,
         await_timeouts: Mutex<Vec<Duration>>,
         on_await_output: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Runs once, on entry to the next `start`, before it is counted.
+        on_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         /// Scripted `status` answers; `Active` once the queue is drained.
         status_results: Mutex<VecDeque<RunState>>,
         /// Every run id `status` was asked about, in order.
@@ -18526,6 +18697,9 @@ mod tests {
             prompt: &str,
             _model: &str,
         ) -> Result<RunHandle, HistorianProducerError> {
+            if let Some(hook) = self.state.on_start.lock().expect("start hook mutex").take() {
+                hook();
+            }
             let n = self.state.starts.fetch_add(1, Ordering::SeqCst) + 1;
             self.state
                 .sessions
@@ -18858,6 +19032,7 @@ mod tests {
             caveman: crate::config::CavemanConfig::default(),
             auto_promote: true,
             user_memory_collection_enabled: false,
+            dreamer_review_user_memories_schedule: None,
             historian_context_limit_tokens: 128_000,
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
@@ -27216,6 +27391,30 @@ mod tests {
             }
         }
 
+        /// A second handler over `predecessor`'s store and route root: the
+        /// state a daemon restart leaves.
+        fn start_with_store(producer: &Arc<ProducerState>, predecessor: &Self) -> Self {
+            let handler = Handler::with_producer_factory_config_resolver(
+                Arc::new(TestProducerFactory {
+                    state: Arc::clone(producer),
+                }),
+                default_test_config(),
+                Arc::new(MissingSessionResolver),
+            );
+            handler.install_store_for_test(Arc::clone(&predecessor.store));
+            handler.bind_route(
+                test_route(7),
+                binding_with_harness(&predecessor.route_root, "pi", "ses"),
+            );
+            Self {
+                handler,
+                store: Arc::clone(&predecessor.store),
+                _dir: tempfile::tempdir().unwrap(),
+                generation: predecessor.generation,
+                route_root: predecessor.route_root.clone(),
+            }
+        }
+
         /// Rebinds the route under another harness, the way a user who moved
         /// harnesses between two daemon incarnations would present.
         fn rebind_harness(&self, harness: &str) {
@@ -27898,6 +28097,341 @@ mod tests {
             DreamerReceiptState::InProgress { generation: 1 }
         );
         assert_eq!(harness.attempts("held")[0].terminal_kind, None);
+    }
+
+    /// The classify inputs a scheduled slot dispatches in these tests: one
+    /// fixed claim manifest request, so the receipt's fingerprint is stable
+    /// across a restart.
+    struct FixedTaskInputs(ClassifyRequest);
+
+    impl DreamerTaskInputs for FixedTaskInputs {
+        fn classify_inputs(
+            &self,
+            _project: &dreamer_scheduler::ScheduledProject,
+            _task: &str,
+        ) -> Option<ClassifyRequest> {
+            Some(self.0.clone())
+        }
+    }
+
+    impl DreamerHarness {
+        /// The scheduler's view of this handler.
+        fn scheduler_bridge(&self) -> SchedulerBridge {
+            SchedulerBridge {
+                store: Arc::clone(&self.store),
+                bindings: Arc::clone(&self.handler.bindings),
+                dreamer: Arc::clone(&self.handler.dreamer),
+            }
+        }
+
+        /// Rebinds the route under a user-tier schedule, the way a bound
+        /// session presents once its user enabled the task.
+        fn schedule(&self, schedule: Option<&str>) {
+            let mut route_binding = binding_with_harness(&self.route_root, "pi", "ses");
+            route_binding.config.dreamer_review_user_memories_schedule =
+                schedule.map(str::to_string);
+            self.handler.bind_route(test_route(7), route_binding);
+        }
+
+        fn install_task_inputs(&self, payload: &Value) {
+            let request = ClassifyRequest::parse(payload.as_object().unwrap())
+                .ok()
+                .unwrap();
+            self.handler
+                .dreamer
+                .install_task_inputs(Arc::new(FixedTaskInputs(request)));
+        }
+    }
+
+    fn scheduler_attempts(
+        store: &MemoryStore,
+        command_id: &str,
+    ) -> Vec<memory_store::dreamer_ledger::DreamerAttempt> {
+        let operation_key =
+            dreamer_operation_key(dreamer_scheduler::SCHEDULER_LEDGER_SESSION, command_id);
+        store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap()
+    }
+
+    fn scheduler_receipt(
+        store: &MemoryStore,
+        command_id: &str,
+    ) -> Option<memory_store::dreamer_ledger::DreamerReceipt> {
+        let operation_key =
+            dreamer_operation_key(dreamer_scheduler::SCHEDULER_LEDGER_SESSION, command_id);
+        store
+            .lookup_dreamer_receipt(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap()
+    }
+
+    /// Only a user-tier schedule on a bound route whose memories authority is
+    /// `MODULE` puts a project on the scheduler; without one nothing is
+    /// scheduled, and a task with no Rust-owned inputs leases nothing to run.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_sees_only_user_scheduled_module_projects() {
+        use dreamer_scheduler::SchedulerHost;
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        let bridge = harness.scheduler_bridge();
+        assert!(
+            bridge.scheduled_projects().is_empty(),
+            "disabled by default"
+        );
+
+        // The route is bound under the configuration the loader produces from
+        // the tier files. A project tier that sets every Dreamer key, with a
+        // valid cron, is dropped with a warning per key before it reaches the
+        // binding, so the bridge schedules nothing; the same schedule at the
+        // user tier puts the project on the scheduler.
+        let project_config = Path::new(&harness.route_root).join(".eidnara");
+        std::fs::create_dir_all(&project_config).unwrap();
+        let hostile = json!({
+            "dreamer": {
+                "inject_docs": true,
+                "tasks": { "review-user-memories": { "schedule": "*/15 * * * *" } }
+            },
+            "user_memories": { "enabled": true }
+        });
+        std::fs::write(
+            project_config.join("eidnara.jsonc"),
+            serde_json::to_string(&hostile).unwrap(),
+        )
+        .unwrap();
+        let user_path = harness._dir.path().join("user.jsonc");
+        std::fs::write(&user_path, "{}").unwrap();
+        let (_, warnings) = config::merge_tiers_with_warnings(Some(&json!({})), Some(&hostile));
+        assert_eq!(
+            warnings.len(),
+            3,
+            "one warning per ignored key: {warnings:?}"
+        );
+        for pointer in [
+            "/dreamer/inject_docs",
+            "/dreamer/tasks/review-user-memories/schedule",
+            "/user_memories/enabled",
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(pointer)),
+                "{pointer}: {warnings:?}"
+            );
+        }
+        let mut cache = config::ConfigCache::default();
+        let from_project_tier =
+            cache.effective_for_paths(&user_path, Path::new(&harness.route_root));
+        assert_eq!(
+            from_project_tier.dreamer_review_user_memories_schedule,
+            None
+        );
+        let mut route_binding = binding_with_harness(&harness.route_root, "pi", "ses");
+        route_binding.config = from_project_tier;
+        harness.handler.bind_route(test_route(7), route_binding);
+        assert!(
+            bridge.scheduled_projects().is_empty(),
+            "a project tier cannot put a task on the scheduler"
+        );
+
+        std::fs::write(
+            &user_path,
+            r#"{ "dreamer": { "tasks": { "review-user-memories": { "schedule": "*/15 * * * *" } } } }"#,
+        )
+        .unwrap();
+        let from_user_tier = config::ConfigCache::default()
+            .effective_for_paths(&user_path, Path::new(&harness.route_root));
+        assert_eq!(
+            from_user_tier
+                .dreamer_review_user_memories_schedule
+                .as_deref(),
+            Some("*/15 * * * *")
+        );
+        let mut route_binding = binding_with_harness(&harness.route_root, "pi", "ses");
+        route_binding.config = from_user_tier;
+        harness.handler.bind_route(test_route(7), route_binding);
+        let projects = bridge.scheduled_projects();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].project, "git:identity");
+        assert_eq!(projects[0].schedule, "*/15 * * * *");
+        assert_eq!(projects[0].authority_generation, harness.generation);
+        assert_eq!(projects[0].route_root.to_str().unwrap(), harness.route_root);
+
+        // No task has Rust-owned inputs on this daemon: nothing is dispatched
+        // and no receipt is written.
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "slot",
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                dreamer_scheduler::TaskRunOutcome::NotRunnable { .. }
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(scheduler_receipt(&harness.store, "slot").is_none());
+
+        // A route whose memories authority is not MODULE is not scheduled.
+        let draining = harness
+            .store
+            .authority_begin_drain("context", "git:identity", "memories", "lease", i64::MAX, 1)
+            .unwrap();
+        assert_ne!(draining.state, "MODULE");
+        assert!(bridge.scheduled_projects().is_empty());
+    }
+
+    /// A scheduled slot runs through the same durable protocol as the wire
+    /// route: the `IN_PROGRESS` receipt is committed before the model is
+    /// started, and a scheduler that restarts mid-run recovers the interrupted
+    /// slot through its receipt instead of dispatching again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt() {
+        use dreamer_scheduler::{DreamerScheduler, ManualClock, TickEvent, slot_command_id};
+        const T0: i64 = 1_767_225_600_000;
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        harness.schedule(Some("*/15 * * * *"));
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        harness.install_task_inputs(&payload);
+        let bridge: Arc<dyn dreamer_scheduler::SchedulerHost> =
+            Arc::new(harness.scheduler_bridge());
+        let due = T0 + 15 * 60_000;
+        let command_id = slot_command_id(dreamer_scheduler::REVIEW_USER_MEMORIES_TASK, due);
+
+        // On entry to `start`, the receipt is already committed `IN_PROGRESS`.
+        let (receipt_at_start, seen_at_start) = {
+            let store = Arc::clone(&harness.store);
+            let command_id = command_id.clone();
+            let seen: Arc<Mutex<Option<DreamerReceiptState>>> = Arc::new(Mutex::new(None));
+            let sink = Arc::clone(&seen);
+            (
+                Box::new(move || {
+                    *sink.lock().unwrap() =
+                        scheduler_receipt(&store, &command_id).map(|receipt| receipt.state);
+                }) as Box<dyn FnOnce() + Send>,
+                seen,
+            )
+        };
+        *producer.on_start.lock().unwrap() = Some(receipt_at_start);
+        producer.block_output.store(true, Ordering::SeqCst);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = DreamerScheduler::new(clock.shared());
+        assert!(scheduler.tick(bridge.as_ref()).await.is_empty());
+        clock.advance(Duration::from_secs(15 * 60));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), scheduler.tick(bridge.as_ref()))
+                .await
+                .is_err(),
+            "the run must still be awaiting output"
+        );
+        producer.block_output.store(false, Ordering::SeqCst);
+        drop(scheduler);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *seen_at_start.lock().unwrap(),
+            Some(DreamerReceiptState::InProgress { generation: 1 }),
+            "the receipt precedes the dispatch"
+        );
+        assert!(
+            producer.prompts.lock().unwrap()[0].contains("classify"),
+            "the dispatched prompt is built from the task's classify prompt"
+        );
+        let receipt = scheduler_receipt(&harness.store, &command_id).expect("receipt");
+        assert_eq!(
+            receipt.state,
+            DreamerReceiptState::InProgress { generation: 1 }
+        );
+        assert_eq!(
+            receipt.binding.ledger_session,
+            dreamer_scheduler::SCHEDULER_LEDGER_SESSION
+        );
+        assert_eq!(receipt.binding.harness, "pi");
+        let attempts = scheduler_attempts(&harness.store, &command_id);
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].terminal_kind, None);
+        assert_eq!(attempts[0].run_handle.as_deref(), Some("run-1"));
+
+        // A new daemon incarnation: fresh runtime state over the same store,
+        // whose producer no longer knows the run. Its first slot comes due one
+        // period later, while the predecessor's lease is still live, so the
+        // ledger hands it the interrupted claim and the interrupted slot is
+        // what runs, through the receipt's recovery path.
+        let restarted = DreamerHarness::start_with_store(&producer, &harness);
+        restarted.schedule(Some("*/15 * * * *"));
+        restarted.install_task_inputs(&payload);
+        producer
+            .status_results
+            .lock()
+            .unwrap()
+            .push_back(RunState::Missing { detail: None });
+        let bridge: Arc<dyn dreamer_scheduler::SchedulerHost> =
+            Arc::new(restarted.scheduler_bridge());
+        let clock = ManualClock::at(due + 1);
+        let mut successor = DreamerScheduler::new(clock.shared());
+        assert!(successor.tick(bridge.as_ref()).await.is_empty());
+        clock.advance(Duration::from_secs(15 * 60));
+        let events = successor.tick(bridge.as_ref()).await;
+        match &events[..] {
+            [
+                TickEvent::Ran {
+                    due_at_ms,
+                    outcome: dreamer_scheduler::TaskRunOutcome::Ran { response },
+                    ..
+                },
+            ] => {
+                assert_eq!(*due_at_ms, due, "the interrupted slot, not the new one");
+                assert_eq!(
+                    response["code"],
+                    json!("dreamer_outcome_unknown"),
+                    "{response}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            1,
+            "no second attempt"
+        );
+        assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
+        let attempts = scheduler_attempts(&harness.store, &command_id);
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].terminal_kind,
+            Some(DreamerTerminalKind::Unknown)
+        );
+        assert!(matches!(
+            scheduler_receipt(&harness.store, &command_id)
+                .unwrap()
+                .state,
+            DreamerReceiptState::Complete {
+                generation: 1,
+                terminal_kind: DreamerTerminalKind::Unknown,
+                ..
+            }
+        ));
+        // The new slot's command has no receipt: nothing ran under it.
+        assert!(
+            scheduler_receipt(
+                &harness.store,
+                &slot_command_id(
+                    dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                    due + 15 * 60_000
+                )
+            )
+            .is_none()
+        );
     }
 
     /// A receipt left `IN_PROGRESS` before any model was dispatched is taken over

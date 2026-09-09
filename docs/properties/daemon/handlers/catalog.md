@@ -330,6 +330,7 @@ lines.
 | [h4c-guidance-date-returns-success-without-persisting](#h4c-guidance-date-returns-success-without-persisting) | safety | high |
 | [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked) | safety | invalidated |
 | [dreamer-dispatched-attempt-always-settles-through-the-receipt](#dreamer-dispatched-attempt-always-settles-through-the-receipt) | safety | high |
+| [scheduled-dreamer-slot-runs-once-through-lease-and-receipt](#scheduled-dreamer-slot-runs-once-through-lease-and-receipt) | safety | high |
 | [h4c-side-channel-drain-result-is-discarded-by-the-caller](#h4c-side-channel-drain-result-is-discarded-by-the-caller) | safety | high |
 | [h4c-session-delete-has-no-caller-supplied-operation-identity](#h4c-session-delete-has-no-caller-supplied-operation-identity) | safety | high |
 | [h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write](#h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write) | safety | high |
@@ -598,6 +599,78 @@ Open questions:
 - `DREAMER_ATTEMPT_BUDGET` (200 per project per 24 h) is a host default adopted
   by the implementation ticket; the spec left the number to the plan owner.
   (needs human input)
+
+### scheduled-dreamer-slot-runs-once-through-lease-and-receipt
+
+Type: safety
+Reachability: explicit-config-only - the scheduler runs on every daemon once
+the store opens (`lib.rs:3593`), but it has a project to run only when the user
+tier sets `/dreamer/tasks/review-user-memories/schedule`, a `UserOnly` key
+(`config.rs:663-678`) that the project tier cannot set, and the route's
+memories authority is `MODULE` (`lib.rs:13689`). No task has Rust-owned
+classify inputs yet (`DreamerRuntime::classify_inputs`, `lib.rs:3044`), so on
+this HEAD a due slot ends `dreamer_task_not_runnable` without a dispatch.
+Status: active
+Exercised: yes - `dreamer_scheduler::tests` in
+`crates/daemon/src/dreamer_scheduler.rs` drive `tick` with a manual clock over
+a real store: due-ness, oldest-first backlog with no back-fill, per-acquisition
+lease instants, schedule change and removal, recovery of a predecessor's live
+claim under its own slot with the successor's generation taken from the ledger,
+expired-versus-live predecessor leases, a not-runnable slot ending `applied`,
+and cancellation of a parked loop.
+`dreamer_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt`
+(`lib.rs`, `mod tests`) runs a slot through `SchedulerBridge` with scripted
+inputs, reads the receipt from inside the producer's `start`, drops the tick
+mid-await, and shows a restarted scheduler recovers the interrupted slot
+through the receipt with no second start.
+`dreamer_scheduler_sees_only_user_scheduled_module_projects` binds a route under
+the loader's output for a hostile project tier and for a user tier.
+Guarantee: For every project and due instant, the scheduler dispatches at most
+one model run, and only through `DreamerRuntime::run_dreamer_task` under the
+command id `slot_command_id(task, due_at_ms)`, after `acquire_dreamer_task`
+returned a claim for the task; a restarted scheduler that is handed a
+predecessor's live claim runs that claim's slot, so the interrupted receipt is
+resumed rather than a second one opened; a project without a user-tier schedule
+or without `MODULE` memories authority is never leased.
+Check: `always` - for every `TickEvent::Ran { project, due_at_ms }`, the
+ledger holds exactly one `dreamer_task` claim whose `note_id` is the task id
+and whose `source_revision` is `due_at_ms`, and the receipt for
+`(project, "dreamer.run_task", operation_key(SCHEDULER_LEDGER_SESSION,
+slot_command_id(task, due_at_ms)))` has at most one attempt row that is not
+`not_sent`. `always` because every run is a billable side effect keyed by the
+slot; the lease is what serialises schedulers and the receipt is what
+serialises retries, and the property holds only when both keys agree.
+Fault/timing angle: The scheduler leases before it runs (`run_slot`,
+`dreamer_scheduler.rs:248`) and derives the command id from the claim's
+`source_revision`, not the slot that came due (`:297`), so a claim rebound from
+a predecessor names the predecessor's slot. Lease and completion instants are
+read from the clock as each happens, so a long run does not shorten the next
+project's lease. A daemon that dies between `acquire` and `complete` leaves a
+live claim; the successor's registration generation comes from
+`next_dreamer_scheduler_generation` (`memory-store:3939`), above every
+generation the instance recorded, so the shared protocol rebinds the claim to
+the successor rather than refusing it. A lease that expired first is collected
+and the successor leases a fresh claim for its own slot; the predecessor's
+receipt then waits for a request with its command id, which no scheduler
+issues, and stays `in_progress`.
+Required faults and enabling state: A user-tier schedule on a bound route with
+`MODULE` memories authority; for recovery, a tick dropped between `acquire`
+and `complete` while the producer is awaiting output, and a successor started
+within `DREAMER_TASK_LEASE_MS` (20 min) of the interrupted slot.
+Confidence: high - [evidence](evidence/scheduled-dreamer-slot-runs-once-through-lease-and-receipt.md).
+The lease and receipt keys are derived from one value in one function; the
+recovery tests observe the ledger and the producer, not the scheduler's own
+events.
+Existing check: the tests named under Exercised.
+Impact: A second billable model call for one slot after a restart, or an
+unattended run a project tier switched on.
+Open questions:
+
+- A predecessor slot whose lease expired before the successor's first slot
+  leaves its receipt `in_progress` with no scheduler ever retrying that
+  command id; the run's own attempt row still holds the dispatch, so nothing
+  is double-billed, but the receipt is never settled. Whether the successor
+  should sweep such receipts is a design decision. (needs human input)
 
 ### h4c-side-channel-drain-result-is-discarded-by-the-caller
 

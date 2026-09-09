@@ -3929,6 +3929,28 @@ impl MemoryStore {
             now_ms,
         )
     }
+
+    /// A registration generation above every one `scheduler_instance` has
+    /// recorded on the ledger, so a restarted scheduler outranks any claim its
+    /// predecessor left live. Reclaimed rows do not count, but a live claim is
+    /// never reclaimed, so the answer is above every claim that could still be
+    /// rebound. Wall time is not used: a clock that steps backwards would rank
+    /// a successor below its predecessor.
+    pub fn next_dreamer_scheduler_generation(
+        &self,
+        scheduler_instance: &str,
+    ) -> Result<i64, MemoryStoreError> {
+        self.inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COALESCE(MAX(registration_generation), 0) + 1 FROM note_eval_claims
+                      WHERE task_kind = ?1 AND evaluator_instance = ?2",
+                    params![DREAMER_TASK.task_kind, scheduler_instance],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .map_err(Into::into)
+    }
 }
 
 pub type NoteEvalAcquireOutcome = LeaseAcquireOutcome<StoredNote>;

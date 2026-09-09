@@ -92,6 +92,11 @@ pub struct DaemonConfig {
     pub auto_promote: bool,
     /// The privacy gate controls whether historian user observations may be collected for later review and promotion.
     pub user_memory_collection_enabled: bool,
+    /// The five-field cron expression that schedules the Dreamer
+    /// `review-user-memories` task; `None` leaves the task disabled. Only the
+    /// user tier can set it, and a value that is not a valid cron expression is
+    /// refused with a warning rather than enabling the task on a guess.
+    pub dreamer_review_user_memories_schedule: Option<String>,
     pub historian_context_limit_tokens: usize,
     pub memory_budget_tokens: f64,
     pub user_profile_budget_tokens: f64,
@@ -119,6 +124,7 @@ impl Default for DaemonConfig {
             caveman: CavemanConfig::default(),
             auto_promote: true,
             user_memory_collection_enabled: false,
+            dreamer_review_user_memories_schedule: None,
             historian_context_limit_tokens: DEFAULT_HISTORIAN_CONTEXT_LIMIT_TOKENS,
             memory_budget_tokens: DEFAULT_MEMORY_BUDGET_TOKENS,
             user_profile_budget_tokens: DEFAULT_USER_PROFILE_BUDGET_TOKENS,
@@ -707,7 +713,7 @@ const _: () = {
     }
 };
 
-fn merge_tiers_with_warnings(
+pub(crate) fn merge_tiers_with_warnings(
     user: Option<&Value>,
     project: Option<&Value>,
 ) -> (DaemonConfig, Vec<String>) {
@@ -874,7 +880,18 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         }
         ConfigKey::DreamerReviewUserMemoriesSchedule => {
             if let Some(schedule) = tier.pointer(pointer).and_then(Value::as_str) {
-                cfg.user_memory_collection_enabled = !schedule.trim().is_empty();
+                let schedule = schedule.trim();
+                cfg.user_memory_collection_enabled = !schedule.is_empty();
+                if schedule.is_empty() {
+                    cfg.dreamer_review_user_memories_schedule = None;
+                } else if crate::smart_note_evaluation::is_valid_smart_note_cron(schedule) {
+                    cfg.dreamer_review_user_memories_schedule = Some(schedule.to_string());
+                } else {
+                    cfg.dreamer_review_user_memories_schedule = None;
+                    warnings.push(format!(
+                        "ignoring {pointer}: not a five-field cron expression; the task stays unscheduled"
+                    ));
+                }
             }
         }
         ConfigKey::UserMemoriesEnabled => {
@@ -1783,6 +1800,10 @@ mod tests {
             "project tier must not change the historian context budget"
         );
         assert_eq!(cfg.prompt_surface_guidance_override, None);
+        assert_eq!(
+            cfg.dreamer_review_user_memories_schedule, None,
+            "no unattended task is runnable from a project tier"
+        );
         let ignored = ConfigKey::ALL
             .iter()
             .filter(|key| {
