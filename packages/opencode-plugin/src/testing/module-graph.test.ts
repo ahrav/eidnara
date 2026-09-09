@@ -470,9 +470,9 @@ describe("parseSource", () => {
         const malformed = ["const t = `oops;", "const db = new Database(productPath);", ""].join(
             "\n",
         );
-        expect(() => parseSource(malformed, "m.ts")).toThrow(/Unterminated template literal/);
+        expect(() => parseSource(malformed, "m.ts")).toThrow(/TS1160\b/);
         expect(() => databaseUses(malformed)).toThrow(SyntaxError);
-        expect(() => parseSource("const a: number = 1;", "m.mjs")).toThrow(/TypeScript files/);
+        expect(() => parseSource("const a: number = 1;", "m.mjs")).toThrow(/TS8010\b/);
         expect(() => parseSource("export const X = <div>{1}</div>;", "m.tsx")).not.toThrow();
     });
 });
@@ -497,6 +497,7 @@ describe("operationLiteralHits", () => {
             "export const X = <div>text {`${y}/kernel.sqlite`}</div>;",
             'const assembled = "memory" + ".sq" + "lite";',
             'const partial = "memory" + suffix;',
+            'const later = join(dir, "store.db");',
             "",
         ].join("\n"),
     );
@@ -512,6 +513,7 @@ describe("operationLiteralHits", () => {
             `${commented}:6`,
             `${commented}:7`,
             `${commented}:8`,
+            `${commented}:10`,
         ]);
         expect(withoutComments("/* a */ b // c\n", "m.ts")).toBe("        b     \n");
         expect(

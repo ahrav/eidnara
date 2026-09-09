@@ -28898,11 +28898,37 @@ mod tests {
         tree
     }
 
-    /// Macros whose string content is visible to the audit: their literal arguments are
-    /// collected, and `concat!` and `stringify!` are evaluated. Any other macro in a comparison
-    /// operand (`env!`, `include_str!`, a crate-local macro) could yield a spelling the audit
-    /// never sees, so it fails the test.
+    /// Macros a comparison operand may invoke. `concat!` and `stringify!` are evaluated. The
+    /// others carry their string content as literal tokens the audit collects (`format!`'s
+    /// template, `matches!` patterns, `json!` keys and values); a runtime interpolation in them
+    /// is outside the literal-spelling contract in the same way a runtime string is anywhere
+    /// else. Any other macro (`env!`, `include_str!`, a crate-local macro) could yield a
+    /// spelling the audit never sees, and so could a macro nested inside one of these, so both
+    /// fail the test.
     const VISIBLE_MACROS: [&str; 6] = ["concat", "stringify", "format", "matches", "json", "vec"];
+
+    fn nests_a_macro(tokens: proc_macro2::TokenStream) -> bool {
+        let mut previous_ident = false;
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Group(group) => {
+                    if nests_a_macro(group.stream()) {
+                        return true;
+                    }
+                    previous_ident = false;
+                }
+                proc_macro2::TokenTree::Ident(_) => previous_ident = true,
+                proc_macro2::TokenTree::Punct(punct) => {
+                    if previous_ident && punct.as_char() == '!' {
+                        return true;
+                    }
+                    previous_ident = false;
+                }
+                proc_macro2::TokenTree::Literal(_) => previous_ident = false,
+            }
+        }
+        false
+    }
 
     fn reject_unevaluable_macros(expr: &syn::Expr) {
         use quote::ToTokens;
@@ -28910,7 +28936,8 @@ mod tests {
         struct Macros(Vec<String>);
         impl<'ast> syn::visit::Visit<'ast> for Macros {
             fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-                if !VISIBLE_MACROS.iter().any(|name| mac.path.is_ident(name)) {
+                let visible = VISIBLE_MACROS.iter().any(|name| mac.path.is_ident(name));
+                if !visible || nests_a_macro(mac.tokens.clone()) {
                     self.0.push(mac.to_token_stream().to_string());
                 }
                 syn::visit::visit_macro(self, mac);
@@ -28920,7 +28947,8 @@ mod tests {
         syn::visit::Visit::visit_expr(&mut macros, expr);
         assert!(
             macros.0.is_empty(),
-            "a comparison operand invokes {:?}; only {VISIBLE_MACROS:?} can be audited there",
+            "a comparison operand invokes {:?}; only {VISIBLE_MACROS:?} with no nested macro \
+             can be audited there",
             macros.0
         );
     }

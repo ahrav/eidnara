@@ -28,7 +28,9 @@ export const CODE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 export function firstPartyCodeInputs(graph: Pick<ModuleGraph, "inputs">): string[] {
     const code: string[] = [];
     for (const input of graph.inputs) {
-        if (input.includes("/node_modules/")) continue;
+        // The bundler names inputs relative to its working directory, so a dependency can
+        // appear with or without a leading path segment.
+        if (input.startsWith("node_modules/") || input.includes("/node_modules/")) continue;
         if (CODE_FILE.test(input)) code.push(input);
         else if (!/\.json$/.test(input)) {
             throw new Error(`bundle input ${input} has an extension the source scans do not read`);
@@ -153,7 +155,10 @@ export function parseSource(source: string, fileName: string): ts.SourceFile {
     const diagnostics = program.getSyntacticDiagnostics(file);
     if (diagnostics.length > 0) {
         const messages = diagnostics
-            .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, " "))
+            .map(
+                (diagnostic) =>
+                    `TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, " ")}`,
+            )
             .join("; ");
         throw new SyntaxError(`${fileName} does not parse: ${messages}`);
     }
@@ -204,16 +209,14 @@ export function operationLiteralHits(
     for (const file of files) {
         const source = readFileSync(file, "utf8");
         const parsed = parseSource(source, file);
-        const lines = withoutComments(source, file, parsed).split("\n");
-        for (const [index, line] of lines.entries()) {
-            if (pattern.test(line)) hits.push(`${file}:${index + 1}`);
+        const lines = new Set<number>();
+        for (const [index, line] of withoutComments(source, file, parsed).split("\n").entries()) {
+            if (pattern.test(line)) lines.add(index + 1);
         }
         for (const { line, value } of foldedStrings(parsed)) {
-            const quoted = `"${value}"`;
-            if (pattern.test(quoted) && !hits.includes(`${file}:${line}`)) {
-                hits.push(`${file}:${line}`);
-            }
+            if (pattern.test(`"${value}"`)) lines.add(line);
         }
+        for (const line of [...lines].sort((a, b) => a - b)) hits.push(`${file}:${line}`);
     }
     return hits;
 }
