@@ -164,10 +164,33 @@ fn compartment(start: i64, end: i64, title: &str, content: &str) -> DecayRenderC
     }
 }
 
-/// A name belongs to an absent subsystem when one of its segments is one of `words`. Segments
-/// split on the punctuation wire names and JSON pointers use and are compared in lowercase, so
-/// `git_commit_indexing` and `Mural.render` match while `github` and `digital_clock` do not.
+/// A name belongs to an absent subsystem when one of its segments is one of `words`.
+/// Segments split on `.`, `_`, `-`, `/`, and `:`.
+/// Lowercase-starting segments also split at uppercase boundaries.
+/// All are compared in lowercase, so `git_commit_indexing`, `Mural.render`, and `muralRender`
+/// match while `github`, `digital_clock`, and `GitHub` do not.
 pub fn names_absent_subsystem(name: &str, words: &[&str]) -> bool {
     name.split(['.', '_', '-', '/', ':'])
+        .flat_map(camel_segments)
         .any(|segment| words.contains(&segment.to_ascii_lowercase().as_str()))
+}
+
+/// A lowercase-starting segment splits at uppercase boundaries; a PascalCase proper name such as
+/// `GitHub` remains whole.
+fn camel_segments(segment: &str) -> Vec<&str> {
+    let mut parts = vec![segment];
+    if !segment.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+        return parts;
+    }
+    let mut start = 0;
+    for (index, ch) in segment.char_indices() {
+        if index > 0 && ch.is_ascii_uppercase() {
+            parts.push(&segment[start..index]);
+            start = index;
+        }
+    }
+    if start > 0 {
+        parts.push(&segment[start..]);
+    }
+    parts
 }

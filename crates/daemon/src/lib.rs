@@ -29110,8 +29110,11 @@ mod tests {
             }
         }
 
+        /// rustc resolves `#[path]` relative to the declaring file at file level and relative
+        /// to the inline module directory inside an inline module block; `path_base` selects the
+        /// applicable directory.
         fn child_path(
-            declaring: &std::path::Path,
+            path_base: &std::path::Path,
             module_dir: &std::path::Path,
             item: &syn::ItemMod,
         ) -> Option<std::path::PathBuf> {
@@ -29129,13 +29132,7 @@ mod tests {
                 else {
                     return None;
                 };
-                // `#[path]` is relative to the declaring file's directory.
-                Some(
-                    declaring
-                        .parent()
-                        .expect("module file has a directory")
-                        .join(path.value()),
-                )
+                Some(path_base.join(path.value()))
             });
             if let Some(path) = explicit {
                 return Some(path);
@@ -29167,6 +29164,7 @@ mod tests {
             struct Declared<'a> {
                 declaring: &'a std::path::Path,
                 module_dir: std::path::PathBuf,
+                inline_depth: usize,
                 test_only: bool,
                 into: &'a mut Vec<(std::path::PathBuf, bool)>,
             }
@@ -29198,13 +29196,24 @@ mod tests {
                         Some((_, inner)) => {
                             let nested = self.module_dir.join(module.ident.to_string());
                             let outer = std::mem::replace(&mut self.module_dir, nested);
+                            self.inline_depth += 1;
                             for item in inner {
                                 self.visit_item(item);
                             }
+                            self.inline_depth -= 1;
                             self.module_dir = outer;
                         }
                         None => {
-                            let child = child_path(self.declaring, &self.module_dir, module)
+                            let file_dir = self
+                                .declaring
+                                .parent()
+                                .expect("module file has a directory");
+                            let path_base = if self.inline_depth > 0 {
+                                self.module_dir.as_path()
+                            } else {
+                                file_dir
+                            };
+                            let child = child_path(path_base, &self.module_dir, module)
                                 .unwrap_or_else(|| {
                                     panic!(
                                         "{}: cannot resolve `{}`",
@@ -29221,6 +29230,7 @@ mod tests {
             let mut declared = Declared {
                 declaring,
                 module_dir: module_dir.to_path_buf(),
+                inline_depth: 0,
                 test_only,
                 into,
             };
@@ -29794,7 +29804,7 @@ mod tests {
         ];
         /// Types whose `new` takes a pattern the code later matches input against; a `use ... as`
         /// rename of one of them is collected across the tree.
-        const PATTERN_TYPES: [&str; 3] = ["Regex", "RegexSet", "RegexBuilder"];
+        const PATTERN_TYPES: [&str; 4] = ["Regex", "RegexSet", "RegexBuilder", "RegexSetBuilder"];
 
         struct ProductionLiterals {
             literals: Vec<String>,
@@ -30034,12 +30044,15 @@ mod tests {
                                 })
                             })
                 });
-                let untagged = attrs.iter().any(|attr| {
+                let variants_off_wire = attrs.iter().any(|attr| {
                     attr.path().is_ident("serde")
                         && attr
                             .parse_nested_meta(|meta| {
-                                if meta.path.is_ident("untagged") {
-                                    return Err(meta.error("untagged"));
+                                if meta.path.is_ident("untagged")
+                                    || meta.path.is_ident("from")
+                                    || meta.path.is_ident("try_from")
+                                {
+                                    return Err(meta.error("variants are not wire spellings"));
                                 }
                                 if meta.input.peek(syn::Token![=]) {
                                     let _: syn::Expr = meta.value()?.parse()?;
@@ -30050,9 +30063,10 @@ mod tests {
                             })
                             .is_err()
                 });
-                // An untagged enum is chosen by payload shape; its variant names never cross
+                // An untagged enum is chosen by payload shape, and a `from` or `try_from` enum
+                // is built from another type's deserialization; neither's variant names cross
                 // the wire.
-                if deserializable && !untagged {
+                if deserializable && !variants_off_wire {
                     let rule = rename_all_rule(&attrs);
                     for variant in &item.variants {
                         let variant_attrs = production_attrs(&variant.attrs);
@@ -30183,6 +30197,24 @@ mod tests {
             assert!(
                 test_support::names_absent_subsystem(bare, BARE_WORDS),
                 "{bare}"
+            );
+        }
+        for camel in ["muralRender", "embedQuery", "gitIngest", "renderMural"] {
+            assert!(
+                test_support::names_absent_subsystem(camel, BARE_WORDS),
+                "{camel}"
+            );
+        }
+        for benign in [
+            "GitHub",
+            "MuralRender",
+            "github",
+            "gitignore",
+            "digitalClock",
+        ] {
+            assert!(
+                !test_support::names_absent_subsystem(benign, BARE_WORDS),
+                "{benign}"
             );
         }
         for bare in ["model", "item_index", "chunk_index", "no_models", "digital"] {

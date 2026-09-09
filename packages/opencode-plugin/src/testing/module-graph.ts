@@ -246,9 +246,13 @@ export function operationLiteralHits(
  */
 export function literalStrings(file: ts.SourceFile): { line: number; value: string }[] {
     const folded: { line: number; value: string }[] = [];
+    // Bindings whose initializer folds to a string, keyed by name without regard to scope.
+    // Resolving to a shadowing binding produces an extra fold, never a missed one.
+    const bindings = new Map<string, string>();
     const leafText = (node: ts.Expression): string | undefined => {
         const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
         if (ts.isStringLiteralLike(inner)) return inner.text;
+        if (ts.isIdentifier(inner)) return bindings.get(inner.text);
         if (ts.isBinaryExpression(inner) && inner.operatorToken.kind === ts.SyntaxKind.PlusToken) {
             const left = leafText(inner.left);
             const right = leafText(inner.right);
@@ -414,6 +418,24 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
         }
         ts.forEachChild(node, visit);
     };
+    // Bindings can refer to declarations collected in earlier passes, so collection repeats
+    // until no new values are resolved.
+    const collectBindings = (node: ts.Node): void => {
+        if (
+            ts.isVariableDeclaration(node) &&
+            ts.isIdentifier(node.name) &&
+            node.initializer &&
+            !bindings.has(node.name.text)
+        ) {
+            const value = leafText(node.initializer);
+            if (value !== undefined) bindings.set(node.name.text, value);
+        }
+        ts.forEachChild(node, collectBindings);
+    };
+    for (let size = -1; size !== bindings.size; ) {
+        size = bindings.size;
+        collectBindings(file);
+    }
     visit(file);
     return folded;
 }
@@ -421,7 +443,7 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
 export interface DatabaseUses {
     /** `opens` contains source lines for `new` expressions whose constructor text contains `Database`, or for every `new` expression under `allConstructions`. */
     opens: string[];
-    /** `escapes` contains source lines for value-position identifiers containing `Database`, for binding-module imports that bypass direct constructor matching, and for dynamic loads whose specifier is not a string literal. */
+    /** `escapes` contains source lines for value-position identifiers containing `Database`, for binding-module imports that bypass direct constructor matching, for `new` expressions whose constructor is not a plain identifier, and for dynamic loads whose specifier is not a string literal. */
     escapes: string[];
 }
 
@@ -598,6 +620,16 @@ export function databaseUses(
         collectFactories(file);
         collectLoaders(file);
     }
+    let namesBinding = options.allConstructions === true;
+    const findBinding = (node: ts.Node): void => {
+        if (namesBinding) return;
+        if (ts.isStringLiteralLike(node) && resolvesToBinding(fileName, node.text)) {
+            namesBinding = true;
+            return;
+        }
+        ts.forEachChild(node, findBinding);
+    };
+    findBinding(file);
 
     const visit = (node: ts.Node): void => {
         if (
@@ -605,6 +637,15 @@ export function databaseUses(
             (options.allConstructions || /Database/.test(node.expression.getText(file)))
         ) {
             uses.opens.push(lineOf(node));
+        }
+        // `new db.constructor(path)` reopens whatever `db` is; `new Intl.DisplayNames(...)` in
+        // a module with no binding specifier cannot reach a database.
+        if (
+            ts.isNewExpression(node) &&
+            !ts.isIdentifier(node.expression) &&
+            (namesBinding || /\bconstructor\b/.test(node.expression.getText(file)))
+        ) {
+            recordEscape(node);
         }
         if (
             ts.isImportDeclaration(node) &&

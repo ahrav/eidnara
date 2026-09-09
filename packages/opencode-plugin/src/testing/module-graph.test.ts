@@ -386,6 +386,38 @@ describe("databaseUses", () => {
         ]);
     });
 
+    test("reports a computed constructor as an escape and a plain one only as an open", () => {
+        const uses = databaseUses(
+            [
+                'import { Database } from "../../shared/sqlite";',
+                "const db = new Database(dbPath, { readonly: true });",
+                "const copy = new db.constructor(productPath);",
+                'const picked = new sqlite["Database"](productPath);',
+                "const made = new (pick())(productPath);",
+                "const plain = new Map<string, number>();",
+                "",
+            ].join("\n"),
+        );
+        expect(uses.opens).toEqual([
+            "const db = new Database(dbPath, { readonly: true });",
+            'const picked = new sqlite["Database"](productPath);',
+        ]);
+        expect(uses.escapes).toEqual([
+            "const copy = new db.constructor(productPath);",
+            'const picked = new sqlite["Database"](productPath);',
+            "const made = new (pick())(productPath);",
+        ]);
+        expect(
+            databaseUses(
+                [
+                    'const names = new Intl.DisplayNames(["en"], { type: "language" });',
+                    "const again = new handle.constructor(productPath);",
+                    "",
+                ].join("\n"),
+            ).escapes,
+        ).toEqual(["const again = new handle.constructor(productPath);"]);
+    });
+
     test("reports aliased, namespace, default, re-exported, and dynamic binding imports as escapes", () => {
         const uses = databaseUses(
             [
@@ -749,6 +781,20 @@ describe("operationLiteralHits", () => {
                 ),
             ).map((entry) => entry.value),
         ).toEqual(["claim.intent.stage", "claim", "intent", "stage", ".", "a"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    [
+                        'const full = prefix + ".intent.stage";',
+                        'const prefix = head + "im";',
+                        'const head = "cla";',
+                        "const dynamic = runtime + prefix;",
+                        "",
+                    ].join("\n"),
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim.intent.stage", ".intent.stage", "claim", "im", "cla"]);
     });
 
     // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;
