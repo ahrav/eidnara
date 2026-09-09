@@ -33,7 +33,9 @@ pub struct DreamerReceiptKey<'a> {
 
 /// What a receipt binds its request to: the store incarnation and authority
 /// generation the request ran under, the digest over its effect-defining
-/// inputs, and the client identity that issued it.
+/// inputs, the client identity that issued it, and the harness the model runs
+/// are started under, which a later incarnation needs to ask the runtime about
+/// a recorded run handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamerReceiptBinding {
     pub database_incarnation_id: String,
@@ -41,6 +43,7 @@ pub struct DreamerReceiptBinding {
     pub request_digest: String,
     pub ledger_session: String,
     pub command_id: String,
+    pub harness: String,
 }
 
 /// How an attempt or a whole request ended.
@@ -137,7 +140,9 @@ pub enum DreamerTransition {
     Fenced,
 }
 
-/// The identities an attempt row records before dispatch.
+/// The identities an attempt row records before dispatch. `project_root`,
+/// `harness`, and `child_session` are the run identity the model runtime keys
+/// on, so a later incarnation can ask it about this attempt exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamerAttemptSpec<'a> {
     pub attempt_index: u32,
@@ -146,6 +151,8 @@ pub struct DreamerAttemptSpec<'a> {
     pub system_prompt_hash: &'a str,
     pub schema_version: u32,
     pub child_session: &'a str,
+    pub project_root: &'a str,
+    pub harness: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +164,8 @@ pub struct DreamerAttempt {
     pub system_prompt_hash: String,
     pub schema_version: u32,
     pub child_session: String,
+    pub project_root: String,
+    pub harness: String,
     pub dispatched_at_ms: i64,
     pub run_handle: Option<String>,
     pub terminal_kind: Option<DreamerTerminalKind>,
@@ -166,7 +175,7 @@ pub struct DreamerAttempt {
 
 const RECEIPT_COLUMNS: &str = "database_incarnation_id, authority_generation, request_digest,
      ledger_session, command_id, state, generation, terminal_kind, result_json,
-     created_at_ms, updated_at_ms";
+     created_at_ms, updated_at_ms, harness";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DreamerReceipt> {
     let state: String = row.get(5)?;
@@ -195,6 +204,7 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DreamerReceipt>
             request_digest: row.get(2)?,
             ledger_session: row.get(3)?,
             command_id: row.get(4)?,
+            harness: row.get(11)?,
         },
         state,
         created_at_ms: row.get(9)?,
@@ -291,6 +301,7 @@ impl MemoryStore {
         write.identity("operation_key", key.operation_key)?;
         write.identity("ledger_session", &binding.ledger_session)?;
         write.identity("command_id", &binding.command_id)?;
+        write.identity("harness", &binding.harness)?;
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             let existing = tx
@@ -344,8 +355,9 @@ impl MemoryStore {
                 "INSERT INTO dreamer_receipts (
                      project, producer, operation_key, database_incarnation_id,
                      authority_generation, request_encoding_version, request_digest,
-                     ledger_session, command_id, state, generation, created_at_ms, updated_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'in_progress', 1, ?10, ?10)",
+                     ledger_session, command_id, harness, state, generation,
+                     created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'in_progress', 1, ?11, ?11)",
                 params![
                     key.project,
                     key.producer,
@@ -356,6 +368,7 @@ impl MemoryStore {
                     binding.request_digest,
                     binding.ledger_session,
                     binding.command_id,
+                    binding.harness,
                     now_ms,
                 ],
             )?;
@@ -406,14 +419,16 @@ impl MemoryStore {
                 write.identity("model", spec.model)?;
                 write.identity("child_session", spec.child_session)?;
                 write.identity("system_prompt_hash", spec.system_prompt_hash)?;
+                write.identity("project_root", spec.project_root)?;
+                write.identity("harness", spec.harness)?;
                 Ok(())
             },
             "INSERT INTO dreamer_attempts (
                  project, producer, operation_key, generation, attempt_index, model,
                  prompt_template_version, system_prompt_hash, schema_version,
-                 child_session, dispatched_at_ms
+                 child_session, dispatched_at_ms, project_root, harness
              )
-             SELECT project, producer, operation_key, generation, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+             SELECT project, producer, operation_key, generation, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, ?13
                FROM dreamer_receipts
               WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
                 AND state = 'in_progress' AND generation = ?11
@@ -431,6 +446,8 @@ impl MemoryStore {
                 spec.child_session,
                 now_ms,
                 generation,
+                spec.project_root,
+                spec.harness,
             ],
         )
     }
@@ -606,7 +623,8 @@ impl MemoryStore {
                 let mut statement = conn.prepare_cached(
                     "SELECT generation, attempt_index, model, prompt_template_version,
                             system_prompt_hash, schema_version, child_session, dispatched_at_ms,
-                            run_handle, terminal_kind, terminal_at_ms, session_released_at_ms
+                            run_handle, terminal_kind, terminal_at_ms, session_released_at_ms,
+                            project_root, harness
                        FROM dreamer_attempts
                       WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
                       ORDER BY generation, attempt_index",
@@ -630,6 +648,8 @@ impl MemoryStore {
                                 .transpose()?,
                             terminal_at_ms: row.get(10)?,
                             session_released_at_ms: row.get(11)?,
+                            project_root: row.get(12)?,
+                            harness: row.get(13)?,
                         })
                     },
                 )?;

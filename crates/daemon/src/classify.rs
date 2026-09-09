@@ -19,6 +19,16 @@ pub const CLASSIFY_TEMPERATURE: f64 = 0.1;
 pub const CLASSIFY_MAX_OUTPUT_TOKENS: u32 = 32_000;
 pub const CLASSIFY_AWAIT_TIMEOUT: Duration = Duration::from_secs(600);
 pub const CLASSIFY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+/// The host clamps a request's `timeout_ms` to the await ceiling, so no caller can hold a producer past it.
+pub const CLASSIFY_MAX_REQUEST_TIMEOUT: Duration = CLASSIFY_AWAIT_TIMEOUT;
+
+/// The time budget one request may spend across its whole chain.
+pub fn classify_request_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms).min(CLASSIFY_MAX_REQUEST_TIMEOUT)
+}
+/// Dispatched attempts one project may accumulate within `DREAMER_ATTEMPT_BUDGET_WINDOW` before requests are refused.
+pub const DREAMER_ATTEMPT_BUDGET: u64 = 200;
+pub const DREAMER_ATTEMPT_BUDGET_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// This is deliberately a zero-tool system role. The host supplies the pool and
 /// retains the parser because accepting a caller-selected role would reopen the
 /// producer trust boundary.
@@ -190,11 +200,14 @@ pub fn child_session_id(project: &str, command_id: &str) -> String {
 /// Durable ledger commands are scoped to `(ledger_session, command_id)`.
 /// Including attempt index and model separates fallback attempts, while
 /// `ledger_session` prevents module sessions that reuse `command_id` from
-/// attaching to or purging each other's runs.
+/// attaching to or purging each other's runs. The receipt generation keeps a
+/// successor's sessions apart from a predecessor's, so a taken-over command
+/// can never attach to or purge a run the predecessor may still hold.
 pub fn attempt_child_session_id(
     project: &str,
     ledger_session: &str,
     command_id: &str,
+    generation: u64,
     attempt: usize,
     model: &str,
 ) -> String {
@@ -204,6 +217,8 @@ pub fn attempt_child_session_id(
     hasher.update(ledger_session.as_bytes());
     hasher.update([0]);
     hasher.update(command_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(generation.to_le_bytes());
     hasher.update([0]);
     hasher.update((attempt as u64).to_le_bytes());
     hasher.update([0]);
@@ -410,41 +425,63 @@ mod tests {
     }
 
     #[test]
+    fn a_request_timeout_is_clamped_to_the_host_ceiling() {
+        assert_eq!(classify_request_timeout(1), Duration::from_millis(1));
+        assert_eq!(
+            classify_request_timeout(CLASSIFY_MAX_REQUEST_TIMEOUT.as_millis() as u64),
+            CLASSIFY_MAX_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            classify_request_timeout(CLASSIFY_MAX_REQUEST_TIMEOUT.as_millis() as u64 + 1),
+            CLASSIFY_MAX_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            classify_request_timeout(u64::MAX),
+            CLASSIFY_MAX_REQUEST_TIMEOUT
+        );
+    }
+
+    #[test]
     fn child_ids_are_stable_per_attempt_and_distinct_across_attempt_identity() {
         assert_eq!(
-            attempt_child_session_id("project", "ses", "command", 0, "prov/model-a"),
-            attempt_child_session_id("project", "ses", "command", 0, "prov/model-a"),
+            attempt_child_session_id("project", "ses", "command", 1, 0, "prov/model-a"),
+            attempt_child_session_id("project", "ses", "command", 1, 0, "prov/model-a"),
             "a retry of the same attempt must reuse its session"
         );
-        let base = attempt_child_session_id("project", "ses", "command", 0, "prov/model-a");
+        let base = attempt_child_session_id("project", "ses", "command", 1, 0, "prov/model-a");
         assert_ne!(
             base,
-            attempt_child_session_id("project", "ses", "command", 1, "prov/model-b"),
+            attempt_child_session_id("project", "ses", "command", 1, 1, "prov/model-b"),
             "fallback attempts must use distinct sessions"
         );
         assert_ne!(
             base,
-            attempt_child_session_id("project", "ses", "command", 1, "prov/model-a"),
+            attempt_child_session_id("project", "ses", "command", 1, 1, "prov/model-a"),
             "the attempt slot alone must separate sessions"
         );
         assert_ne!(
             base,
-            attempt_child_session_id("project", "ses", "command", 0, "prov/model-b"),
+            attempt_child_session_id("project", "ses", "command", 1, 0, "prov/model-b"),
             "the model alone must separate sessions"
         );
         assert_ne!(
             base,
-            attempt_child_session_id("other", "ses", "command", 0, "prov/model-a")
+            attempt_child_session_id("other", "ses", "command", 1, 0, "prov/model-a")
         );
         assert_ne!(
             base,
-            attempt_child_session_id("project", "other", "command", 0, "prov/model-a"),
+            attempt_child_session_id("project", "other", "command", 1, 0, "prov/model-a"),
             "the ledger session alone must separate sessions: commands are \
              scoped to (ledger_session, command_id)"
         );
         assert_ne!(
             base,
-            attempt_child_session_id("project", "ses", "other", 0, "prov/model-a")
+            attempt_child_session_id("project", "ses", "other", 1, 0, "prov/model-a")
+        );
+        assert_ne!(
+            base,
+            attempt_child_session_id("project", "ses", "command", 2, 0, "prov/model-a"),
+            "a successor generation must never reuse a predecessor's session"
         );
         assert!(base.starts_with("eidnara-dreamer:classify:"));
     }

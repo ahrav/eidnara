@@ -44,6 +44,7 @@ fn binding(prompt: &str) -> DreamerReceiptBinding {
         request_digest: dreamer_request_digest(&request(prompt)).unwrap(),
         ledger_session: "ses-1".to_string(),
         command_id: "cmd-1".to_string(),
+        harness: "pi".to_string(),
     }
 }
 
@@ -55,6 +56,8 @@ fn attempt(index: u32, model: &str) -> DreamerAttemptSpec<'_> {
         system_prompt_hash: SYSTEM_PROMPT_HASH,
         schema_version: 1,
         child_session: "eidnara-dreamer:classify:0123456789abcdef",
+        project_root: "/repo",
+        harness: "pi",
     }
 }
 
