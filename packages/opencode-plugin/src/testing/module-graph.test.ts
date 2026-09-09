@@ -157,6 +157,34 @@ function moduleGraphReport(): Record<string, ReportedGraph> {
     return cachedReport as Record<string, ReportedGraph>;
 }
 
+const PRODUCTION_ROOTS = [ENTRY, TUI_ENTRY];
+
+/**
+ * Every source file a production root bundles, wherever it lives: the retained tree, a sibling
+ * workspace package, but not a third-party dependency. A production root must never reach a
+ * test-named file, since the state-ownership scans select by file name.
+ */
+function productionReached(): string[] {
+    const graphs = moduleGraphReport();
+    const reached = new Set<string>();
+    for (const root of PRODUCTION_ROOTS) {
+        const graph = graphs[root];
+        if (!graph) throw new Error(`no graph for production root ${root}`);
+        for (const input of graph.inputs) {
+            if (input.includes("/node_modules/") || !/\.(?:tsx?|mjs|js)$/.test(input)) continue;
+            reached.add(resolve(SRC, input));
+        }
+    }
+    const testNamed = [...reached].filter((file) => /\.test\.tsx?$/.test(file));
+    expect(testNamed).toEqual([]);
+    return [...reached].sort();
+}
+
+/** The retained tree plus whatever production reaches outside it. */
+function scannedSources(): string[] {
+    return [...new Set([...MODULES, ...productionReached()])].sort();
+}
+
 describe("module graph over the landed tree", () => {
     test("the residue pattern matches a not-ported subsystem at the source root and nested under it", () => {
         expect(NOT_PORTED.test("memory/foo.ts")).toBe(true);
@@ -195,15 +223,15 @@ describe("module graph over the landed tree", () => {
         expect(OPERATION_LITERAL.test("`dreamer.${task}`")).toBe(true);
         expect(OPERATION_LITERAL.test('"dreamer_inference"')).toBe(false);
         expect(OPERATION_LITERAL.test("claim.claim_id")).toBe(false);
-        expect(operationLiteralHits(MODULES)).toEqual([]);
-    });
+        expect(operationLiteralHits(scannedSources())).toEqual([]);
+    }, 120_000);
 
     test("retained modules name no Eidnara product-store file", () => {
         expect(PRODUCT_STORE_FILE.test('join(dir, "memory.sqlite")')).toBe(true);
         expect(PRODUCT_STORE_FILE.test("`${dir}/context.db`")).toBe(true);
         expect(PRODUCT_STORE_FILE.test("Eidnara's own context.db.")).toBe(false);
-        expect(operationLiteralHits(MODULES, PRODUCT_STORE_FILE)).toEqual([]);
-    });
+        expect(operationLiteralHits(scannedSources(), PRODUCT_STORE_FILE)).toEqual([]);
+    }, 120_000);
 
     test("the compaction marker is the only retained module that writes a database", () => {
         const binders = new Set<string>();
@@ -230,7 +258,7 @@ describe("module graph over the landed tree", () => {
         // Every retained module is read directly, so an open, an alias, or a computed load in a
         // module no graph edge names as a binder still lands here.
         const uses: Record<string, DatabaseUses> = {};
-        for (const file of MODULES) {
+        for (const file of scannedSources()) {
             const module = relative(SRC, file);
             const found = databaseUses(readFileSync(file, "utf8"), module);
             if (found.opens.length > 0 || found.escapes.length > 0) uses[module] = found;

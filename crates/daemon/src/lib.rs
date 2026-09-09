@@ -28694,6 +28694,19 @@ mod tests {
             && (literal.contains('.') || literal.starts_with("ctx_") || literal.starts_with("ctx-"))
     }
 
+    /// `MuralRender` becomes `mural_render`, the snake_case form serde would accept and the
+    /// shape `names_absent_subsystem` splits.
+    fn camel_words(ident: &str) -> String {
+        let mut out = String::new();
+        for (index, ch) in ident.chars().enumerate() {
+            if ch.is_ascii_uppercase() && index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        }
+        out
+    }
+
     fn is_test_only(attrs: &[syn::Attribute]) -> bool {
         attrs.iter().any(|attr| {
             attr.path().is_ident("test")
@@ -28713,6 +28726,106 @@ mod tests {
                 into.push(path);
             }
         }
+    }
+
+    /// The files that reach a production build: the crate roots and every out-of-line module
+    /// they declare, transitively, skipping a declaration behind `#[cfg(test)]`. A file the
+    /// compiler never sees is reported as `orphaned` so the scan cannot skip it silently.
+    struct ModuleTree {
+        production: Vec<(std::path::PathBuf, syn::File)>,
+        test_only: Vec<std::path::PathBuf>,
+    }
+
+    fn module_tree(roots: &[std::path::PathBuf]) -> ModuleTree {
+        use quote::ToTokens;
+
+        fn child_path(
+            declaring: &std::path::Path,
+            item: &syn::ItemMod,
+        ) -> Option<std::path::PathBuf> {
+            let dir = declaring.parent().expect("module file has a directory");
+            let explicit = item.attrs.iter().find_map(|attr| {
+                if !attr.path().is_ident("path") {
+                    return None;
+                }
+                let syn::Meta::NameValue(meta) = &attr.meta else {
+                    return None;
+                };
+                let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(path),
+                    ..
+                }) = &meta.value
+                else {
+                    return None;
+                };
+                Some(dir.join(path.value()))
+            });
+            if let Some(path) = explicit {
+                return Some(path);
+            }
+            let stem = declaring.file_stem().and_then(|stem| stem.to_str())?;
+            let base = if matches!(stem, "mod" | "lib" | "main")
+                || dir.file_name().is_some_and(|name| name == "bin")
+            {
+                dir.to_path_buf()
+            } else {
+                dir.join(stem)
+            };
+            let name = item.ident.to_string();
+            let flat = base.join(format!("{name}.rs"));
+            let nested = base.join(&name).join("mod.rs");
+            if flat.is_file() {
+                Some(flat)
+            } else if nested.is_file() {
+                Some(nested)
+            } else {
+                None
+            }
+        }
+
+        fn walk(path: &std::path::PathBuf, tree: &mut ModuleTree) {
+            if tree.production.iter().any(|(seen, _)| seen == path) {
+                return;
+            }
+            let source = std::fs::read_to_string(path).expect("readable source");
+            let file: syn::File = syn::parse_str(&source)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let children: Vec<(std::path::PathBuf, bool)> = file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    syn::Item::Mod(module) if module.content.is_none() => Some(module),
+                    _ => None,
+                })
+                .map(|module| {
+                    let child = child_path(path, module).unwrap_or_else(|| {
+                        panic!(
+                            "{}: cannot resolve `{}`",
+                            path.display(),
+                            module.to_token_stream()
+                        )
+                    });
+                    (child, is_test_only(&module.attrs))
+                })
+                .collect();
+            tree.production.push((path.clone(), file));
+            for (child, test_only) in children {
+                if test_only {
+                    tree.test_only.push(child);
+                } else {
+                    walk(&child, tree);
+                }
+            }
+        }
+
+        let mut tree = ModuleTree {
+            production: Vec::new(),
+            test_only: Vec::new(),
+        };
+        for root in roots {
+            walk(root, &mut tree);
+        }
+        tree
     }
 
     /// Every string literal under one expression or pattern, including literals inside macros.
@@ -28843,6 +28956,25 @@ mod tests {
                 syn::visit::visit_arm(self, arm);
             }
 
+            /// A deserializable enum accepts each variant's identifier, or its `rename_all` form,
+            /// as a wire value; the words of the identifier are the spelling.
+            fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+                let deserializable = item.attrs.iter().any(|attr| {
+                    attr.path().is_ident("derive")
+                        && attr
+                            .meta
+                            .to_token_stream()
+                            .to_string()
+                            .contains("Deserialize")
+                });
+                if deserializable {
+                    for variant in &item.variants {
+                        self.compared.push(camel_words(&variant.ident.to_string()));
+                    }
+                }
+                syn::visit::visit_item_enum(self, item);
+            }
+
             /// A `#[serde(rename = "...")]` or alias names a wire spelling that appears nowhere
             /// else, and the deserializer compares input against it; doc text is prose and is
             /// skipped.
@@ -28872,6 +29004,9 @@ mod tests {
                 "{spelling}"
             );
         }
+        assert_eq!(camel_words("MuralRender"), "mural_render");
+        assert_eq!(camel_words("GitIngest"), "git_ingest");
+        assert_eq!(camel_words("ReadOnly"), "read_only");
         for bare in ["git_ingest", "ctx_mural", "embed_query", "GIT_INGEST"] {
             assert!(
                 test_support::names_absent_subsystem(bare, BARE_STEMS),
@@ -28898,14 +29033,48 @@ mod tests {
         }
 
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut sources = Vec::new();
-        rust_sources(&src, &mut sources);
-        assert!(sources.len() > 30, "found only {} sources", sources.len());
+        let mut roots = vec![src.join("lib.rs")];
+        for entry in std::fs::read_dir(src.join("bin")).expect("bin directory") {
+            let path = entry.expect("directory entry").path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                roots.push(path);
+            }
+        }
+        let tree = module_tree(&roots);
+        let mut every_file = Vec::new();
+        rust_sources(&src, &mut every_file);
+        let orphaned: Vec<_> = every_file
+            .iter()
+            .filter(|file| {
+                !tree.production.iter().any(|(path, _)| path == *file)
+                    && !tree.test_only.contains(file)
+            })
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "no module declaration reaches {orphaned:?}; the scan cannot classify them"
+        );
+        assert_eq!(
+            tree.test_only
+                .iter()
+                .map(|path| path
+                    .strip_prefix(&src)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["differential_goldens.rs", "test_support.rs"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert!(
+            tree.production.len() > 30,
+            "found only {} production sources",
+            tree.production.len()
+        );
         let mut offending = Vec::new();
-        for path in sources {
-            let source = std::fs::read_to_string(&path).expect("readable source");
-            let file: syn::File = syn::parse_str(&source)
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        for (path, file) in tree.production {
             let mut scan = ProductionLiterals {
                 literals: Vec::new(),
                 compared: Vec::new(),
