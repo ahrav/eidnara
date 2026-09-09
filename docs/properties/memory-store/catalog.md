@@ -998,7 +998,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: invalidated
-Invalidated: the transform no longer reads the claim mirror. `claim_snapshot_for_context`, the double-read vector fence, and the commit-time vector check in `commit_transform` were deleted when the transform moved to canonical kernel rows (`crates/daemon/src/canonical_memory.rs`), and the historian's full-state fence went with `historian_claim_block`. No production read compares a snapshot vector, so the subject of this record is unreachable. The replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon transform catalog.
+Invalidated: by commit `3b817ad8`, which moved the transform onto canonical kernel rows (`crates/daemon/src/canonical_memory.rs`) and deleted `claim_snapshot_for_context`, the double-read vector fence, the commit-time vector check in `commit_transform`, and the historian's full-state fence with `historian_claim_block`. At HEAD `snapshot_vector_from_connection` has one caller, `replace_claim_mirror_snapshot` (`claim_mirror.rs:980`), a seed-path replay check; no read of claim rows compares a vector, so the subject of this record is unreachable. The replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon transform catalog. The record body and its evidence file keep the deleted code as quoted from the host repository at `eb6da6109`; those `file:line` references resolve there only.
 Exercised: not yet - nothing constructs a mirror mutation that changes
 `acked_effect_id` without changing a generation, which is the only case that would
 distinguish the two fence strengths.

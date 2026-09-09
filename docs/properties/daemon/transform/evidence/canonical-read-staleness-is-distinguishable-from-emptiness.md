@@ -16,22 +16,25 @@ Verified at HEAD.
 
 - `crates/daemon/src/canonical_memory.rs`: `CanonicalMemoryRead` has two
   variants, `Available(CanonicalMemorySnapshot)` and `Withheld(KernelOutcome)`
-  (`:90-96`). `composition()` (`:100-111`) maps `Available` to
+  (`:91-97`). `composition()` (`:101-112`) maps `Available` to
   `ProjectMemoryComposition::Canonical { known_as_of, truncated, revision }` and
   `Withheld` to `ProjectMemoryComposition::Withheld { state }` with
-  `state = verdict.state_key()`. `revision()` (`:114-119`) is `None` when
-  withheld. `rows()` (`:122-127`) returns the snapshot rows or an empty slice.
+  `state = verdict.state_key()`. `revision()` (`:115-120`) is `None` when
+  withheld. `rows()` (`:123-128`) returns the snapshot rows or an empty slice.
   Each is a single `match` with no default arm.
-- `crates/daemon/src/canonical_memory.rs:138-166` (`read_project_memory`): the
+- `crates/daemon/src/canonical_memory.rs:141-175` (`read_project_memory`): the
   store phase (`KernelOpenCoordinator::kernel_store`), the `tip` read, the
   `outbox_lag` read, the serving decision
   `serving::project(serving::decide_for_tip_read(&lag), Surface::AutoInject)`,
   and the `read_visible` call each return `Withheld` carrying a
   `KernelOutcome`; only a served read constructs `Available`, and it does so
-  through `injectable_snapshot` (`:177-206`), which filters to visible
-  positive-category decisions in the memory domain, trims them to the memory
-  budget, and hands the trimmed rows to `CanonicalMemorySnapshot::new` (`:48`),
-  which digests exactly those rows once. The tip is read before the lag sample
+  through `injectable_snapshot` (`:184-212`), which filters to visible
+  positive-category decisions, trims them to the memory budget, and hands the
+  trimmed rows to `CanonicalMemorySnapshot::new` (`:50`), which digests exactly
+  those rows once as the lines the renderer emits. The read passes
+  `RowSelection::DomainDecisions(MEMORY_DOMAIN_ID)` (`kernel_routes/read.rs`),
+  so only memory-domain decisions reach the row and byte caps and another
+  domain's rows cannot crowd them out. The tip is read before the lag sample
   and passed to `read_visible` as `as_of`, the same order `handle_kernel_read`
   uses for a gated read, so the rows a served read pins are the rows the
   freshness verdict covered.

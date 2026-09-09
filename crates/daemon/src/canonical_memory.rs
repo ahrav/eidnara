@@ -11,10 +11,10 @@ use std::hash::{Hash, Hasher};
 use kernel::{Surface, SurfaceVisibility};
 use memory_store::ProjectMemoryComposition;
 
-use crate::kernel_routes::read::{ReadResponse, read_visible};
+use crate::kernel_routes::read::{ReadResponse, RowSelection, read_visible};
 use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding, serving};
 use crate::m0_compose::trim_memories_to_budget;
-use crate::memory_render::is_positive_memory_category;
+use crate::memory_render::{is_positive_memory_category, render_memory_line};
 
 pub(crate) const MEMORY_DOMAIN_ID: &str = "memory";
 
@@ -43,8 +43,10 @@ impl CanonicalMemorySnapshot {
     /// Rows are digested in object-id order after the renderer's
     /// positive-category filter, so the digest is a function of the rendered
     /// row set and not of the order the read returned it in or of rows the
-    /// renderer drops. `truncated` is not digested: it does not change the
-    /// rendered bytes.
+    /// renderer drops. Each row contributes its category and the exact line
+    /// `render_memory_line` emits, so an edit past the renderer's content cap
+    /// changes no digested byte. `truncated` is not digested: it does not
+    /// change the rendered bytes.
     pub fn new(known_as_of: i64, truncated: bool, rows: Vec<CanonicalMemory>) -> Self {
         let mut rendered: Vec<&CanonicalMemory> = rows
             .iter()
@@ -54,9 +56,8 @@ impl CanonicalMemorySnapshot {
         let mut hasher = DefaultHasher::new();
         "eidnara-project-memory-revision-v1".hash(&mut hasher);
         for row in rendered {
-            row.object_id.hash(&mut hasher);
             row.category.hash(&mut hasher);
-            row.content.hash(&mut hasher);
+            render_memory_line(row).hash(&mut hasher);
         }
         Self {
             known_as_of,
@@ -132,6 +133,8 @@ impl CanonicalMemoryRead {
 ///
 /// The tip is captured before the lag sample, and the visible-row read is bound to it, so a commit published between them cannot admit rows the freshness verdict did not cover.
 ///
+/// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read. commentlint: allow(JUDGE)
+///
 /// The store phase, the serving decision for a tip read on the `auto_inject`
 /// surface, and the visible-row read each withhold the composition with the
 /// `KernelOutcome` the `kernel.read` route would answer with.
@@ -157,7 +160,13 @@ pub(crate) fn read_project_memory(
     if !verdict.is_available() {
         return CanonicalMemoryRead::Withheld(verdict);
     }
-    match read_visible(&store, project, Surface::AutoInject, Some(tip), None) {
+    match read_visible(
+        &store,
+        project,
+        Surface::AutoInject,
+        Some(tip),
+        RowSelection::DomainDecisions(MEMORY_DOMAIN_ID),
+    ) {
         Ok(response) => {
             CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
         }
@@ -172,8 +181,6 @@ pub(crate) fn read_project_memory(
 /// the guard keeps a label-bearing row out of a block that has no label
 /// renderer. The injectable rows are then trimmed to `memory_budget_tokens` in
 /// serving order, so the snapshot holds only rows the block renders.
-///
-/// The kernel holds decisions of every domain, and a positive kind such as `ARCHITECTURE` is not reserved to memory writers, so rows outside the memory domain are dropped before the kind test.
 fn injectable_snapshot(
     response: ReadResponse,
     memory_budget_tokens: f64,
@@ -187,7 +194,6 @@ fn injectable_snapshot(
     } = response;
     let injectable: Vec<CanonicalMemory> = rows
         .iter()
-        .filter(|row| row.object.domain_id == MEMORY_DOMAIN_ID)
         .filter(|row| row.visibility == SurfaceVisibility::Visible)
         .filter_map(|row| decisions.get(&row.object.object_id))
         .filter(|decision| is_positive_memory_category(&decision.decision_kind))
@@ -219,20 +225,11 @@ mod tests {
         object_kind: &str,
         visibility: SurfaceVisibility,
     ) -> VisibleRow {
-        visible_row_in_domain(object_id, object_kind, MEMORY_DOMAIN_ID, visibility)
-    }
-
-    fn visible_row_in_domain(
-        object_id: &str,
-        object_kind: &str,
-        domain_id: &str,
-        visibility: SurfaceVisibility,
-    ) -> VisibleRow {
         VisibleRow {
             object: ObjectRow {
                 object_id: object_id.to_string(),
                 object_kind: object_kind.to_string(),
-                domain_id: domain_id.to_string(),
+                domain_id: MEMORY_DOMAIN_ID.to_string(),
                 source_kind: "assistant".to_string(),
                 source_id: "lineage".to_string(),
                 source_revision: 1,
@@ -315,37 +312,6 @@ mod tests {
     }
 
     #[test]
-    fn rows_outside_the_memory_domain_are_not_injectable() {
-        let snapshot = injectable_snapshot(
-            response(
-                vec![
-                    visible_row("rule", "decision", SurfaceVisibility::Visible),
-                    visible_row_in_domain(
-                        "note-arch",
-                        "decision",
-                        "notes",
-                        SurfaceVisibility::Visible,
-                    ),
-                ],
-                vec![
-                    decision("rule", "PROJECT_RULES", "Keep the public contract."),
-                    decision("note-arch", "ARCHITECTURE", "A note about architecture."),
-                ],
-            ),
-            UNBOUNDED,
-        );
-        assert_eq!(
-            snapshot
-                .rows()
-                .iter()
-                .map(|row| row.object_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["rule"],
-            "a positive-kind decision from another domain must not be injected"
-        );
-    }
-
-    #[test]
     fn revision_changes_only_when_the_rendered_inputs_change() {
         let base = injectable_snapshot(
             response(
@@ -418,6 +384,28 @@ mod tests {
         let only_rule = CanonicalMemorySnapshot::new(1, false, vec![rule.clone()]);
         let with_dropped = CanonicalMemorySnapshot::new(1, false, vec![rule, anti]);
         assert_eq!(only_rule.revision(), with_dropped.revision());
+    }
+
+    #[test]
+    fn bytes_past_the_render_cap_do_not_move_the_revision() {
+        const CAP: usize = 64 * 1024;
+        let row = |content: String| CanonicalMemory {
+            object_id: "long".to_string(),
+            category: "PROJECT_RULES".to_string(),
+            content,
+        };
+        let base = "a".repeat(CAP);
+        let same_prefix = CanonicalMemorySnapshot::new(1, false, vec![row(base.clone())]);
+        let edited_past_cap =
+            CanonicalMemorySnapshot::new(1, false, vec![row(format!("{base} trailing edit"))]);
+        assert_eq!(
+            same_prefix.revision(),
+            edited_past_cap.revision(),
+            "the renderer never emits bytes past the cap, so they must not fold m0"
+        );
+        let edited_inside_cap =
+            CanonicalMemorySnapshot::new(1, false, vec![row(format!("b{}", &base[1..]))]);
+        assert_ne!(same_prefix.revision(), edited_inside_cap.revision());
     }
 
     #[test]

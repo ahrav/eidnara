@@ -2,15 +2,27 @@
 
 ## Invalidated
 
-The subject of this record is gone. The transform and the historian compose
-project memory from canonical kernel rows through
-`crates/daemon/src/canonical_memory.rs`; `claim_snapshot_for_context`, the
-double-read vector fence, `historian_claim_block`, and the commit-time vector
-check in `commit_transform` no longer exist. The replacement property is
-`canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
-transform catalog. The sections below quote the deleted code as it stood when
-this record was written; their `file:line` references are historical and do not
-resolve against HEAD.
+The subject of this record is gone. Commit `3b817ad8` (this repository) moved
+the transform and the historian onto canonical kernel rows through
+`crates/daemon/src/canonical_memory.rs` and deleted `claim_snapshot_for_context`,
+the double-read vector fence, `historian_claim_block`, `MirroredClaimMemory`,
+`ClaimLaneWire`, and the commit-time vector check in `commit_transform`. The
+replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog.
+
+Verified at HEAD: `rg 'ClaimLaneWire|claim_snapshot_for_context|historian_claim_block|MirroredClaimMemory' crates/`
+returns no match, and `snapshot_vector_from_connection`
+(`crates/memory-store/src/claim_mirror.rs:806-840`) has exactly one caller,
+`replace_claim_mirror_snapshot` (`claim_mirror.rs:980`), which compares an
+incoming seed against the stored vector to detect an idempotent replay on the
+seed path; no read of claim rows compares a vector.
+
+Provenance of the quoted code: the sections below were copied from the host
+repository at `eb6da6109` by commit `72e05e91` and quote the code as it stood
+there. Their `file:line` references resolve against that host-repository
+revision only; they never resolved in this repository's history and are kept as
+the record of what the deleted mechanism did and did not guarantee, which is the
+convention the shm-transport catalog uses for its invalidated records.
 
 ## Discovery trigger
 
