@@ -29334,6 +29334,27 @@ mod tests {
             fn visit_arm(&mut self, arm: &'ast syn::Arm) {
                 self.compared
                     .extend(string_literals_in(|c| c.visit_pat(&arm.pat)));
+                // A pattern may name a constant (`MURAL => ...`), which matches its value.
+                struct PatternPaths(Vec<String>);
+                impl<'ast> Visit<'ast> for PatternPaths {
+                    fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
+                        self.0.push(pat.ident.to_string());
+                        syn::visit::visit_pat_ident(self, pat);
+                    }
+                    fn visit_path(&mut self, path: &'ast syn::Path) {
+                        if let Some(segment) = path.segments.last() {
+                            self.0.push(segment.ident.to_string());
+                        }
+                        syn::visit::visit_path(self, path);
+                    }
+                }
+                let mut paths = PatternPaths(Vec::new());
+                paths.visit_pat(&arm.pat);
+                for name in paths.0 {
+                    if let Some(held) = self.consts.get(&name) {
+                        self.compared.extend(held.iter().cloned());
+                    }
+                }
                 syn::visit::visit_arm(self, arm);
             }
 

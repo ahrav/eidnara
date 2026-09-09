@@ -252,6 +252,15 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             }
             return value;
         }
+        // `"context".concat(".db")` with a foldable receiver and arguments.
+        if (
+            ts.isCallExpression(inner) &&
+            ts.isPropertyAccessExpression(inner.expression) &&
+            inner.expression.name.text === "concat"
+        ) {
+            const parts = [inner.expression.expression, ...inner.arguments].map(leafText);
+            return parts.every((part) => part !== undefined) ? parts.join("") : undefined;
+        }
         // `["claim", "intent"].join(".")` with every element and the separator foldable.
         if (
             ts.isCallExpression(inner) &&
@@ -280,12 +289,12 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             body
                 .replace(/^\^/, "")
                 .replace(/\$$/, "")
-                // `[.]` matches exactly one character; a wider class stays as written.
-                .replace(/\[([^\]\\^])\]/g, "$1")
                 .replace(
                     /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g,
                     (_, x, u, b) => String.fromCodePoint(Number.parseInt(x ?? u ?? b, 16)),
                 )
+                // `[.]` matches exactly one character; a wider class stays as written.
+                .replace(/\[([^\]\\^])\]/g, "$1")
                 .replace(/\\(.)/g, "$1")
         );
     };
@@ -434,12 +443,19 @@ export function databaseUses(
         ) {
             factories.add(node.name.text);
         }
-        // `const { createRequire: make } = mod;` destructures it under another name.
+        // `const { createRequire: make } = mod;` destructures it under another name, and
+        // `{ ["createRequire"]: make }` spells the key as a computed string.
         if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
             const property = node.propertyName ?? node.name;
-            if (ts.isIdentifier(property) && factories.has(property.text)) {
-                factories.add(node.name.text);
-            }
+            const key = ts.isIdentifier(property)
+                ? property.text
+                : ts.isStringLiteralLike(property)
+                  ? property.text
+                  : ts.isComputedPropertyName(property) &&
+                      ts.isStringLiteralLike(property.expression)
+                    ? property.expression.text
+                    : undefined;
+            if (key !== undefined && factories.has(key)) factories.add(node.name.text);
         }
         ts.forEachChild(node, collectFactories);
     };

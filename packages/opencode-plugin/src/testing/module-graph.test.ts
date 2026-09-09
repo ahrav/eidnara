@@ -429,6 +429,9 @@ describe("databaseUses", () => {
                     "const { createRequire: picked } = mod;",
                     "const viaPick = picked(import.meta.url);",
                     'const nodeSql = viaPick("node:sqlite");',
+                    'const { ["createRequire"]: computed } = mod;',
+                    "const viaComputed = computed(import.meta.url);",
+                    'const bunSql = viaComputed("bun:sqlite");',
                     "",
                 ].join("\n"),
             ).escapes,
@@ -439,6 +442,7 @@ describe("databaseUses", () => {
             'const { DatabaseSync: Builtin } = process.getBuiltinModule("node:sqlite");',
             'const better = local("better-sqlite3");',
             'const nodeSql = viaPick("node:sqlite");',
+            'const bunSql = viaComputed("bun:sqlite");',
         ]);
     });
 
@@ -598,6 +602,14 @@ describe("operationLiteralHits", () => {
                 ),
             ).map((entry) => entry.value),
         ).toEqual(["claim.intent.stage", "mem[a-z]+.sqlite"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    'const e = /^[\\x63]laim[.]intent$/; const f = "context".concat(".", "db");',
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim.intent", "context.db", "context", ".", "db"]);
         expect(
             literalStrings(
                 parseSource(
