@@ -18,7 +18,17 @@ pub const MAX_CLASSIFY_MODEL_CHAIN: usize = 8;
 pub const CLASSIFY_TEMPERATURE: f64 = 0.1;
 pub const CLASSIFY_MAX_OUTPUT_TOKENS: u32 = 32_000;
 pub const CLASSIFY_AWAIT_TIMEOUT: Duration = Duration::from_secs(600);
-pub const CLASSIFY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+/// The host clamps a request's `timeout_ms` to the await ceiling, so no caller can hold a producer past it.
+/// With the two bounds equal, an await that times out has spent the whole request budget. commentlint: allow(JUDGE)
+pub const CLASSIFY_MAX_REQUEST_TIMEOUT: Duration = CLASSIFY_AWAIT_TIMEOUT;
+
+/// The time budget one request may spend across its whole chain.
+pub fn classify_request_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms).min(CLASSIFY_MAX_REQUEST_TIMEOUT)
+}
+/// Dispatched attempts one project may accumulate within `DREAMER_ATTEMPT_BUDGET_WINDOW` before requests are refused.
+pub const DREAMER_ATTEMPT_BUDGET: u64 = 200;
+pub const DREAMER_ATTEMPT_BUDGET_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// This is deliberately a zero-tool system role. The host supplies the pool and
 /// retains the parser because accepting a caller-selected role would reopen the
 /// producer trust boundary.
@@ -190,8 +200,9 @@ pub fn child_session_id(project: &str, command_id: &str) -> String {
 /// Durable ledger commands are scoped to `(ledger_session, command_id)`.
 /// Including attempt index and model separates fallback attempts, while
 /// `ledger_session` prevents module sessions that reuse `command_id` from
-/// attaching to or purging each other's runs. Including `generation` prevents
-/// a fenced predecessor's cleanup from naming its successor's run. commentlint: allow(JUDGE)
+/// attaching to or purging each other's runs. The receipt generation keeps a
+/// successor's sessions apart from a predecessor's, so a taken-over command
+/// can never attach to or purge a run the predecessor may still hold.
 pub fn attempt_child_session_id(
     project: &str,
     ledger_session: &str,
@@ -411,6 +422,23 @@ mod tests {
             let detail = validate_classify_manifest(&text, &expected).expect_err("rejected");
             assert!(!detail.contains(secret), "manifest text leaked: {detail}");
         }
+    }
+
+    #[test]
+    fn a_request_timeout_is_clamped_to_the_host_ceiling() {
+        assert_eq!(classify_request_timeout(1), Duration::from_millis(1));
+        assert_eq!(
+            classify_request_timeout(CLASSIFY_MAX_REQUEST_TIMEOUT.as_millis() as u64),
+            CLASSIFY_MAX_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            classify_request_timeout(CLASSIFY_MAX_REQUEST_TIMEOUT.as_millis() as u64 + 1),
+            CLASSIFY_MAX_REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            classify_request_timeout(u64::MAX),
+            CLASSIFY_MAX_REQUEST_TIMEOUT
+        );
     }
 
     #[test]

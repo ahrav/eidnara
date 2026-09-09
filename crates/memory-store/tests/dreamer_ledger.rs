@@ -55,6 +55,8 @@ fn attempt(index: u32, model: &str) -> DreamerAttemptSpec<'_> {
         system_prompt_hash: SYSTEM_PROMPT_HASH,
         schema_version: 1,
         child_session: "eidnara-dreamer:classify:0123456789abcdef",
+        project_root: "/repo",
+        harness: "pi",
     }
 }
 
@@ -276,7 +278,7 @@ fn a_flagged_command_id_is_refused_only_when_no_receipt_exists_for_it() {
 }
 
 #[test]
-fn an_undispatched_receipt_can_be_taken_over_but_one_with_an_attempt_cannot() {
+fn an_undispatched_receipt_can_be_taken_over_only_without_a_possible_dispatch() {
     let dir = tempfile::tempdir().unwrap();
     let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     store
@@ -305,7 +307,6 @@ fn an_undispatched_receipt_can_be_taken_over_but_one_with_an_attempt_cannot() {
             .unwrap(),
         DreamerTransition::Applied
     );
-    // An attempt row, terminal or not, closes the undispatched path.
     assert_eq!(
         store
             .take_over_undispatched_dreamer_receipt(key(), 2, 5)
@@ -319,11 +320,29 @@ fn an_undispatched_receipt_can_be_taken_over_but_one_with_an_attempt_cannot() {
         store
             .take_over_undispatched_dreamer_receipt(key(), 2, 7)
             .unwrap(),
-        DreamerTransition::Fenced
+        DreamerTransition::Applied
     );
     assert_eq!(
         store.lookup_dreamer_receipt(key()).unwrap().unwrap().state,
-        DreamerReceiptState::InProgress { generation: 2 }
+        DreamerReceiptState::InProgress { generation: 3 }
+    );
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 3, 8)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    store
+        .begin_dreamer_attempt(key(), 4, &attempt(0, "prov/model-a"), 9)
+        .unwrap();
+    store
+        .finish_dreamer_attempt(key(), 4, 0, DreamerTerminalKind::Failed, 10)
+        .unwrap();
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 4, 11)
+            .unwrap(),
+        DreamerTransition::Fenced
     );
 }
 

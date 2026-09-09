@@ -370,6 +370,8 @@ CREATE TABLE dreamer_attempts (
             system_prompt_hash TEXT NOT NULL CHECK (length(system_prompt_hash) = 64),
             schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
             child_session TEXT NOT NULL CHECK (length(child_session) > 0),
+            project_root TEXT NOT NULL CHECK (length(project_root) > 0),
+            harness TEXT NOT NULL CHECK (length(harness) > 0),
             dispatched_at_ms INTEGER NOT NULL,
             run_handle TEXT,
             terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown', 'not_sent')),

@@ -33,7 +33,7 @@ pub struct DreamerReceiptKey<'a> {
 
 /// What a receipt binds its request to: the store incarnation and authority
 /// generation the request ran under, the digest over its effect-defining
-/// inputs, and the client identity that issued it.
+/// inputs, and the client identity that issued it. commentlint: allow(JUDGE)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamerReceiptBinding {
     pub database_incarnation_id: String,
@@ -137,7 +137,9 @@ pub enum DreamerTransition {
     Fenced,
 }
 
-/// The identities an attempt row records before dispatch.
+/// The identities an attempt row records before dispatch. `project_root`,
+/// `harness`, and `child_session` are the run identity the model runtime keys
+/// on, so a later incarnation can ask it about this attempt exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamerAttemptSpec<'a> {
     pub attempt_index: u32,
@@ -146,6 +148,8 @@ pub struct DreamerAttemptSpec<'a> {
     pub system_prompt_hash: &'a str,
     pub schema_version: u32,
     pub child_session: &'a str,
+    pub project_root: &'a str,
+    pub harness: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +161,8 @@ pub struct DreamerAttempt {
     pub system_prompt_hash: String,
     pub schema_version: u32,
     pub child_session: String,
+    pub project_root: String,
+    pub harness: String,
     pub dispatched_at_ms: i64,
     pub run_handle: Option<String>,
     pub terminal_kind: Option<DreamerTerminalKind>,
@@ -398,10 +404,9 @@ impl MemoryStore {
         )
     }
 
-    /// Attempt rows precede every model dispatch, so their absence proves the
-    /// predecessor never called a model. The absence check and the fence move
-    /// are one statement, which keeps a concurrent first attempt from landing
-    /// between them. commentlint: allow(JUDGE)
+    /// Adopts a generation with no attempt that may have reached a model.
+    /// Attempt rows precede dispatch; only `not_sent` rows prove no dispatch.
+    /// The attempt check and fence move share one statement, so no attempt can land between them.
     pub fn take_over_undispatched_dreamer_receipt(
         &self,
         key: DreamerReceiptKey<'_>,
@@ -418,7 +423,9 @@ impl MemoryStore {
                 AND state = 'in_progress' AND generation = ?6
                 AND NOT EXISTS (
                     SELECT 1 FROM dreamer_attempts a
-                     WHERE a.project = ?1 AND a.producer = ?2 AND a.operation_key = ?3
+                      WHERE a.project = ?1 AND a.producer = ?2 AND a.operation_key = ?3
+                        AND a.generation = ?6
+                        AND (a.terminal_kind IS NULL OR a.terminal_kind != 'not_sent')
                 )",
             params![successor, now_ms, predecessor],
         )
@@ -442,14 +449,16 @@ impl MemoryStore {
                 write.identity("model", spec.model)?;
                 write.identity("child_session", spec.child_session)?;
                 write.identity("system_prompt_hash", spec.system_prompt_hash)?;
+                write.identity("project_root", spec.project_root)?;
+                write.identity("harness", spec.harness)?;
                 Ok(())
             },
             "INSERT INTO dreamer_attempts (
                  project, producer, operation_key, generation, attempt_index, model,
                  prompt_template_version, system_prompt_hash, schema_version,
-                 child_session, dispatched_at_ms
+                 child_session, dispatched_at_ms, project_root, harness
              )
-             SELECT project, producer, operation_key, generation, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+             SELECT project, producer, operation_key, generation, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, ?13
                FROM dreamer_receipts
               WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
                 AND state = 'in_progress' AND generation = ?11
@@ -467,6 +476,8 @@ impl MemoryStore {
                 spec.child_session,
                 now_ms,
                 generation,
+                spec.project_root,
+                spec.harness,
             ],
         )
     }
@@ -642,7 +653,8 @@ impl MemoryStore {
                 let mut statement = conn.prepare_cached(
                     "SELECT generation, attempt_index, model, prompt_template_version,
                             system_prompt_hash, schema_version, child_session, dispatched_at_ms,
-                            run_handle, terminal_kind, terminal_at_ms, session_released_at_ms
+                            run_handle, terminal_kind, terminal_at_ms, session_released_at_ms,
+                            project_root, harness
                        FROM dreamer_attempts
                       WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
                       ORDER BY generation, attempt_index",
@@ -666,6 +678,8 @@ impl MemoryStore {
                                 .transpose()?,
                             terminal_at_ms: row.get(10)?,
                             session_released_at_ms: row.get(11)?,
+                            project_root: row.get(12)?,
+                            harness: row.get(13)?,
                         })
                     },
                 )?;
