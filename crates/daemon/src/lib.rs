@@ -4876,30 +4876,30 @@ impl Handler {
                     state: "unknown".to_string(),
                     progress: None,
                     last_failure: None,
+                    project_memory: None,
                 });
             }
         };
-        let state = loaded.meta.historian.state.as_str().to_string();
-        let last_failure = loaded.meta.historian.last_failure.clone();
+        let mut not_fired = HistorianDiagnostics {
+            fired: false,
+            reason: None,
+            no_fire: None,
+            state: loaded.meta.historian.state.as_str().to_string(),
+            progress: None,
+            last_failure: loaded.meta.historian.last_failure.clone(),
+            project_memory: None,
+        };
         if loaded.meta.pending_rewrite.is_some() {
             return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                fired: false,
-                reason: None,
                 no_fire: Some("pending_rewrite".to_string()),
-                state,
-                progress: None,
-                last_failure,
+                ..not_fired
             });
         }
         if let Some(completion) = self.live_historian_completion_wait(&parsed.session_id) {
             return PreparedHistorianAction::Busy {
                 diagnostics: HistorianDiagnostics {
-                    fired: false,
-                    reason: None,
                     no_fire: Some("busy".to_string()),
-                    state,
-                    progress: None,
-                    last_failure,
+                    ..not_fired
                 },
                 completion,
             };
@@ -4917,12 +4917,8 @@ impl Handler {
                 )
                 .unwrap_or("busy");
             return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                fired: false,
-                reason: None,
                 no_fire: Some(no_fire.to_string()),
-                state,
-                progress: None,
-                last_failure,
+                ..not_fired
             });
         }
         let boundary_build_started_at = Instant::now();
@@ -4953,12 +4949,8 @@ impl Handler {
                 );
                 self.record_no_fire(&store, &parsed.session_id, &loaded, detail);
                 return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                    fired: false,
-                    reason: None,
                     no_fire: Some(detail.to_string()),
-                    state,
-                    progress: None,
-                    last_failure,
+                    ..not_fired
                 });
             }
             Ok(_) | Err(_) => None,
@@ -5015,15 +5007,16 @@ impl Handler {
             .replace(&parsed.session_id, token_cache_snapshot);
         trigger_timer.timings.cache_store_ms +=
             cache_store_started_at.elapsed().as_secs_f64() * 1_000.0;
-        let progress = trigger
-            .progress
-            .as_ref()
-            .map(|p| transform::HistorianTriggerProgress {
-                eligible_chunk_tokens: p.eligible_chunk_tokens,
-                tail_size_bar: p.tail_size_bar,
-                protected_tail_n_tokens: p.n_tokens,
-                protected_start_ordinal: p.protected_start_ordinal,
-            });
+        not_fired.progress =
+            trigger
+                .progress
+                .as_ref()
+                .map(|p| transform::HistorianTriggerProgress {
+                    eligible_chunk_tokens: p.eligible_chunk_tokens,
+                    tail_size_bar: p.tail_size_bar,
+                    protected_tail_n_tokens: p.n_tokens,
+                    protected_start_ordinal: p.protected_start_ordinal,
+                });
         if !trigger.fire {
             let reason = if loaded.meta.historian.state == HistorianPhase::Idle {
                 "trigger_false"
@@ -5044,35 +5037,24 @@ impl Handler {
                 self.record_no_fire(&store, &parsed.session_id, &loaded, &detail);
             }
             return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                fired: false,
-                reason: None,
                 no_fire: Some(reason.to_string()),
-                state,
-                progress,
-                last_failure,
+                ..not_fired
             });
         }
         let trigger_reason = trigger.reason.map(|r| r.as_str().to_string());
         if cfg.model_chain.is_empty() {
             self.record_no_fire(&store, &parsed.session_id, &loaded, "no_models");
             return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                fired: false,
                 reason: trigger_reason,
                 no_fire: Some("no_models".to_string()),
-                state,
-                progress: progress.clone(),
-                last_failure,
+                ..not_fired
             });
         }
         let Some(boundary) = trigger.boundary.clone() else {
             self.record_no_fire(&store, &parsed.session_id, &loaded, "missing_boundary");
             return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                fired: false,
-                reason: None,
                 no_fire: Some("missing_boundary".to_string()),
-                state,
-                progress: progress.clone(),
-                last_failure,
+                ..not_fired
             });
         };
         if loaded
@@ -5083,12 +5065,9 @@ impl Handler {
         {
             self.record_no_fire(&store, &parsed.session_id, &loaded, "backoff");
             return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                fired: false,
                 reason: trigger_reason,
                 no_fire: Some("backoff".to_string()),
-                state,
-                progress: progress.clone(),
-                last_failure,
+                ..not_fired
             });
         }
         let live: Vec<_> = projection
@@ -5144,12 +5123,9 @@ impl Handler {
                     &format!("assemble:{reason:?}"),
                 );
                 return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                    fired: false,
                     reason: trigger_reason,
                     no_fire: Some(format!("assemble:{reason:?}")),
-                    state,
-                    progress: progress.clone(),
-                    last_failure,
+                    ..not_fired
                 });
             }
             Err(e) => {
@@ -5160,34 +5136,26 @@ impl Handler {
                     &format!("assemble_failed:{e}"),
                 );
                 return PreparedHistorianAction::Complete(HistorianDiagnostics {
-                    fired: false,
                     reason: trigger_reason,
                     no_fire: Some(format!("assemble_failed:{e}")),
-                    state,
-                    progress: progress.clone(),
-                    last_failure,
+                    ..not_fired
                 });
             }
         };
         let diagnostics = HistorianDiagnostics {
             fired: true,
             reason: trigger_reason,
-            no_fire: None,
-            state: state.clone(),
-            progress: progress.clone(),
-            last_failure: last_failure.clone(),
+            project_memory: firing.project_memory.clone(),
+            ..not_fired.clone()
         };
         let live_guard = match self.try_claim_live_historian_session(&parsed.session_id) {
             LiveHistorianSessionClaim::Acquired(live_guard) => live_guard,
             LiveHistorianSessionClaim::Busy(completion) => {
                 return PreparedHistorianAction::Busy {
                     diagnostics: HistorianDiagnostics {
-                        fired: false,
                         reason: diagnostics.reason,
                         no_fire: Some("busy".to_string()),
-                        state,
-                        progress,
-                        last_failure,
+                        ..not_fired
                     },
                     completion,
                 };
@@ -8127,6 +8095,7 @@ impl Handler {
                 state: "disabled".to_string(),
                 progress: None,
                 last_failure: None,
+                project_memory: None,
             }
         } else if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
             match self.prepare_historian_fire(
@@ -12104,14 +12073,17 @@ pub mod kernel_route_fixtures {
 
     use host_runtime::RouteIdentity;
     use kernel::{
-        AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent, DomainSpec,
-        EventKind, KernelStore, ProviderEgress, RepositoryProvenance, ScopeSpec, ScopeTermSpec,
-        Sensitivity, SourceClass, TaintClass,
+        AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent, DecisionPayload,
+        DecisionSpec, DomainSpec, Envelope, EventKind, KernelError, KernelStore,
+        ObservationPayload, ObservationSpec, ProviderEgress, RepositoryProvenance, ScopeSpec,
+        ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
     };
     use serde_json::{Value, json};
 
     /// The domain every fixture row belongs to.
     pub const DOMAIN: &str = "domain";
+
+    pub const MEMORY_DOMAIN: &str = crate::canonical_memory::MEMORY_DOMAIN_ID;
 
     /// A route identity with no consumer module, capabilities, or credentials.
     pub fn route_identity(project_root: &Path, harness: &str, session: &str) -> RouteIdentity {
@@ -12362,6 +12334,114 @@ pub mod kernel_route_fixtures {
                 revision: "abc123".to_string(),
             }),
         }
+    }
+
+    pub fn memory_decision_spec(
+        object_id: &str,
+        scope_id: &str,
+        kind: &str,
+        summary: &str,
+    ) -> DecisionSpec {
+        decision_spec_in_domain(object_id, scope_id, MEMORY_DOMAIN, kind, summary)
+    }
+
+    pub fn decision_spec_in_domain(
+        object_id: &str,
+        scope_id: &str,
+        domain_id: &str,
+        kind: &str,
+        summary: &str,
+    ) -> DecisionSpec {
+        DecisionSpec {
+            decision_id: format!("{object_id}-decision"),
+            object_id: object_id.to_string(),
+            domain_id: domain_id.to_string(),
+            proposition_id: None,
+            scope_id: Some(scope_id.to_string()),
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: kind.to_string(),
+            payload: DecisionPayload {
+                summary: summary.to_string(),
+                rationale: String::new(),
+            },
+            source_kind: "repo".to_string(),
+            source_id: format!("{object_id}-lineage"),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+        }
+    }
+
+    /// `object_registry.domain_id` requires a domain row because store-direct writes bypass domain creation.
+    pub fn ensure_domain(envelope: &mut Envelope<'_>, domain_id: &str) -> Result<(), KernelError> {
+        if envelope.domain_exists(domain_id)? {
+            return Ok(());
+        }
+        envelope.insert_domain(DomainSpec {
+            domain_id: domain_id.to_string(),
+            object_id: format!("domain:{domain_id}"),
+            name: domain_id.to_string(),
+            source_kind: "repo".to_string(),
+            source_id: format!("domain:{domain_id}"),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+        })
+    }
+
+    /// `CodeObserved` from trusted local code admits `object_id` as current code.
+    pub fn verify_decision(
+        envelope: &mut Envelope<'_>,
+        object_id: &str,
+    ) -> Result<(), KernelError> {
+        ensure_domain(envelope, MEMORY_DOMAIN)?;
+        let observation = format!("{object_id}-observed");
+        envelope.insert_observation(ObservationSpec {
+            observation_id: observation.clone(),
+            object_id: observation.clone(),
+            domain_id: MEMORY_DOMAIN.to_string(),
+            proposition_id: None,
+            scope_id: None,
+            anchor_id: None,
+            evidence_id: None,
+            observation_kind: "code_present".to_string(),
+            payload: ObservationPayload {
+                summary: "code present".to_string(),
+                classification: "code_present".to_string(),
+                detail: None,
+            },
+            observed_at: 1,
+            dependencies: Vec::new(),
+            source_kind: "repo".to_string(),
+            source_id: format!("{object_id}-lineage"),
+            source_revision: 1,
+            sensitivity: Sensitivity::Normal,
+        })?;
+        envelope.record_admission(admission(
+            object_id,
+            EventKind::CodeObserved,
+            Some(&observation),
+            (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
+        ))?;
+        Ok(())
+    }
+
+    pub fn commit_verified_memory(
+        store: &KernelStore,
+        key: &str,
+        object_id: &str,
+        scope_id: &str,
+        kind: &str,
+        summary: &str,
+    ) {
+        store
+            .commit(intent(key), |envelope| {
+                ensure_domain(envelope, MEMORY_DOMAIN)?;
+                envelope
+                    .insert_decision(memory_decision_spec(object_id, scope_id, kind, summary))?;
+                verify_decision(envelope, object_id)?;
+                Ok(String::new())
+            })
+            .unwrap();
     }
 }
 
@@ -18330,6 +18410,20 @@ mod tests {
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), "ses"));
+        (handler, store, dir, project)
+    }
+
+    async fn handler_with_store_and_kernel(
+        state: Arc<ProducerState>,
+        config: DaemonConfig,
+    ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
+        let (handler, store, dir, project) = handler_with_store(state, config);
+        let root = dir.path().join("kernel");
+        handler
+            .kernel
+            .open(root, StoreOpenPolicy::default(), handler.cancel.clone())
+            .await;
+        assert_eq!(handler.kernel.state(), kernel_routes::KernelState::Ready);
         (handler, store, dir, project)
     }
 
@@ -28270,6 +28364,196 @@ mod tests {
                 .contains('#')
         );
         assert!(m0_text(&second).contains("autonomous summary"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn historian_prompt_composes_project_memory_from_canonical_rows() {
+        use kernel::{EventKind, SourceClass, TaintClass};
+        use kernel_route_fixtures::{
+            MEMORY_DOMAIN, admission, commit_verified_memory, intent, memory_decision_spec,
+            verify_decision,
+        };
+
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+        let kernel = handler.kernel.kernel_store().unwrap();
+        // The route stamps the bound project's scope onto committed rows and creates its scope object.
+        // Its `assistant` classes cap the row at candidate maturity, which the automatic surface hides.
+        let routed = handler
+            .dispatch_value_for_test(
+                test_route(7),
+                kernel_route_fixtures::commit_request(
+                    &project,
+                    "ses",
+                    "routed",
+                    vec![json!({"op": "insert_decision", "spec": {
+                        "decision_id": "mem-routed-decision",
+                        "object_id": "mem-routed",
+                        "domain_id": MEMORY_DOMAIN,
+                        "decision_kind": "PROJECT_RULES",
+                        "payload": {"summary": "Routed through kernel.commit.", "rationale": ""},
+                        "source_id": "mem-routed-lineage",
+                        "source_revision": 1,
+                    }})],
+                    Vec::new(),
+                ),
+            )
+            .await;
+        let routed = tool_body(routed);
+        assert_eq!(routed["state"]["kind"], "available", "{routed}");
+        let scope_id = binding(project.to_str().unwrap(), "ses")
+            .kernel_project
+            .scope_id();
+        for (key, object_id, kind, summary) in [
+            (
+                "rule",
+                "mem-rule",
+                "PROJECT_RULES",
+                "Keep the public contract.",
+            ),
+            (
+                "soon-quarantined",
+                "mem-quarantine",
+                "CONSTRAINTS",
+                "Soon quarantined.",
+            ),
+            ("soon-retired", "mem-retired", "NAMING", "Soon retired."),
+            ("old", "mem-old", "ARCHITECTURE", "Old architecture note."),
+        ] {
+            commit_verified_memory(&kernel, key, object_id, &scope_id, kind, summary);
+        }
+        kernel
+            .commit(intent("other-project"), |envelope| {
+                let other = kernel_routes::ProjectBinding::new(Path::new("/elsewhere"));
+                envelope.insert_scope(other.scope_spec(MEMORY_DOMAIN))?;
+                envelope.insert_decision(memory_decision_spec(
+                    "mem-other",
+                    &other.scope_id(),
+                    "PROJECT_RULES",
+                    "Other project rule.",
+                ))?;
+                verify_decision(envelope, "mem-other")?;
+                Ok(String::new())
+            })
+            .unwrap();
+        kernel
+            .commit(intent("shape"), |envelope| {
+                envelope.record_admission(admission(
+                    "mem-quarantine",
+                    EventKind::Quarantine,
+                    None,
+                    (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
+                ))?;
+                envelope.retire_decision("mem-retired")?;
+                let mut replacement = memory_decision_spec(
+                    "mem-new",
+                    &scope_id,
+                    "ARCHITECTURE",
+                    "New architecture note.",
+                );
+                replacement.source_id = "mem-old-lineage".to_string();
+                replacement.source_revision = 2;
+                envelope.supersede_decision("mem-old", replacement)?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let tip = kernel.tip().unwrap();
+
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["historian"]["fired"], true, "{response}");
+        assert_eq!(
+            response["historian"]["project_memory"],
+            json!({
+                "kind": "canonical",
+                "known_as_of": tip,
+                "truncated": false,
+                "revision": response["historian"]["project_memory"]["revision"],
+            }),
+            "{response}"
+        );
+        wait_for_count(&producer.starts, 1).await;
+        let prompt = producer.prompts.lock().unwrap()[0].clone();
+        assert!(prompt.contains("<project-memory>"), "{prompt}");
+        assert!(
+            prompt.contains("mem-rule: Keep the public contract."),
+            "{prompt}"
+        );
+        for absent in [
+            "Routed through kernel.commit.",
+            "Soon quarantined.",
+            "Soon retired.",
+            "Old architecture note.",
+            "Other project rule.",
+        ] {
+            assert!(!prompt.contains(absent), "{absent} leaked into {prompt}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_withheld_historian_memory_read_is_recorded_and_differs_from_an_empty_block() {
+        let withheld_producer = Arc::new(ProducerState::default());
+        let (withheld_handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&withheld_producer), default_test_config());
+        let withheld = call_transform(&withheld_handler, big_messages()).await;
+        assert_eq!(withheld["historian"]["fired"], true, "{withheld}");
+        assert_eq!(
+            withheld["historian"]["project_memory"],
+            json!({ "kind": "withheld", "state": "unavailable:store_starting" }),
+            "{withheld}"
+        );
+
+        let empty_producer = Arc::new(ProducerState::default());
+        let (empty_handler, _store, _dir, _project) =
+            handler_with_store_and_kernel(Arc::clone(&empty_producer), default_test_config()).await;
+        let empty = call_transform(&empty_handler, big_messages()).await;
+        assert_eq!(empty["historian"]["fired"], true, "{empty}");
+        assert_eq!(empty["historian"]["project_memory"]["kind"], "canonical");
+        assert_ne!(
+            withheld["historian"]["project_memory"],
+            empty["historian"]["project_memory"]
+        );
+
+        wait_for_count(&withheld_producer.starts, 1).await;
+        wait_for_count(&empty_producer.starts, 1).await;
+        for producer in [&withheld_producer, &empty_producer] {
+            let prompt = producer.prompts.lock().unwrap()[0].clone();
+            assert!(!prompt.contains("<project-memory>"), "{prompt}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn historian_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+        let not_fired = call_transform_request(&handler, request(vec![ck("m1", 1, "hello")])).await;
+        assert_eq!(not_fired["historian"]["fired"], false, "{not_fired}");
+        assert!(
+            not_fired["historian"].get("project_memory").is_none(),
+            "{not_fired}"
+        );
+
+        let disabled = DaemonConfig {
+            memory_enabled: false,
+            ..default_test_config()
+        };
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: disabled,
+                ..binding(project.to_str().unwrap(), "ses")
+            },
+        );
+        let fired = call_transform(&handler, big_messages()).await;
+        assert_eq!(fired["historian"]["fired"], true, "{fired}");
+        assert!(
+            fired["historian"].get("project_memory").is_none(),
+            "{fired}"
+        );
+        wait_for_count(&producer.starts, 1).await;
+        let prompt = producer.prompts.lock().unwrap()[0].clone();
+        assert!(!prompt.contains("<project-memory>"), "{prompt}");
     }
 
     #[tokio::test(flavor = "current_thread")]
