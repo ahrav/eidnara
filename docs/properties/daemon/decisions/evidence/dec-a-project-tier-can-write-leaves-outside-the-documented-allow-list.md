@@ -9,7 +9,7 @@ against the classified merge. An implementation-derived allow-list cannot serve
 as the oracle for an accidental policy change.
 
 Source snapshot: working tree based on
-`0da79d706ea40de75e76af5423dd7fc9b088d8cf`, verified
+`74044960ee91641dec95c8552f15282844a18b13`, verified
 2026-09-09. Rust references below name `crates/daemon/src/config.rs`.
 TypeScript references name files under `packages/opencode-plugin/src/config/`.
 The [PR's decisions](https://github.com/ahrav/eidnara/pull/330) establish the

@@ -55,6 +55,8 @@ export interface FakeObject {
     labeled: boolean;
     /** The kernel's disposition ratchet; `active` unless a disposition event moved it. */
     disposition: FakeDisposition;
+    /** The approval the latest admission decision rests on; a disposition event that names none inherits it, as the kernel's `record_admission` does. commentlint: allow(JUDGE) */
+    approval_object_id: string | null;
     /**
      * The project root the row was written under. `null` marks a seeded row
      * that serves to every project, a shape no route commit can produce.
@@ -255,8 +257,13 @@ export class FakeKernel {
     readonly receipts = new Map<string, Receipt>();
     /** Every `decision_id` the store has held, live or retired; the daemon's `decisions` primary key refuses a second insert under any of them. commentlint: allow(JUDGE) */
     readonly decisionIds = new Set<string>();
-    /** Objects the kernel would honor as approval authority: a live `adr_accepted` decision admitted by an explicit user. Any other live object cited as an approval is valid to name but grants nothing, so a relaxation citing it is denied. commentlint: allow(JUDGE) */
+    /** Objects the kernel would honor as approval authority: a live `adr_accepted` decision admitted by an explicit user, for as long as its own disposition stays `active`. Any other live object cited as an approval is valid to name but grants nothing, so a relaxation citing it is denied. commentlint: allow(JUDGE) */
     readonly approvals = new Set<string>();
+    /** Every disposition each object has held, oldest first, so a read at `as_of` serves the disposition of that snapshot rather than the tip's. commentlint: allow(JUDGE) */
+    private readonly dispositionHistory = new Map<
+        string,
+        { seq: number; disposition: FakeDisposition }[]
+    >();
     /** Forces every read on a surface to answer with this state instead of rows. */
     readonly surfaceStates = new Map<Surface, MemoryState>();
     /** Forces the next commit to answer with this state. */
@@ -310,6 +317,7 @@ export class FakeKernel {
             sensitivity: input.sensitivity ?? "normal",
             labeled: input.labeled ?? true,
             disposition: input.disposition ?? "active",
+            approval_object_id: null,
             project_root: input.projectRoot ?? null,
             decision: {
                 decision_kind: input.decision_kind,
@@ -319,6 +327,7 @@ export class FakeKernel {
         this.objects.set(object.object_id, object);
         this.lastChange.set(object.object_id, seq);
         this.decisionIds.add(input.decision_id ?? input.object_id);
+        this.recordDisposition(object.object_id, seq, object.disposition);
         return object;
     }
 
@@ -379,6 +388,23 @@ export class FakeKernel {
         return FakeKernel.visibilityOn(object, surface) !== "hidden";
     }
 
+    private recordDisposition(objectId: string, seq: number, disposition: FakeDisposition): void {
+        const history = this.dispositionHistory.get(objectId) ?? [];
+        history.push({ seq, disposition });
+        this.dispositionHistory.set(objectId, history);
+    }
+
+    /** Returns the object with its disposition at `asOf`, not its latest disposition. */
+    private snapshotAt(object: FakeObject, asOf: number): FakeObject {
+        const history = this.dispositionHistory.get(object.object_id) ?? [];
+        let disposition = history[0]?.disposition ?? object.disposition;
+        for (const entry of history) {
+            if (entry.seq > asOf) break;
+            disposition = entry.disposition;
+        }
+        return { ...object, disposition };
+    }
+
     /** Newest `created_commit_seq` first, then ascending `object_id` within one commit. */
     private static servingOrder(left: FakeObject, right: FakeObject): number {
         if (left.created_commit_seq !== right.created_commit_seq) {
@@ -406,13 +432,16 @@ export class FakeKernel {
         const objectIds = Array.isArray(body.object_ids)
             ? new Set(body.object_ids.filter((id): id is string => typeof id === "string"))
             : null;
-        let visible = [...this.objects.values()].filter(
-            (object) =>
-                object.created_commit_seq <= asOf &&
-                (object.invalidated_commit_seq === null || asOf < object.invalidated_commit_seq) &&
-                FakeKernel.inProject(object, projectRoot) &&
-                FakeKernel.servesOn(object, surface as Surface),
-        );
+        let visible = [...this.objects.values()]
+            .filter(
+                (object) =>
+                    object.created_commit_seq <= asOf &&
+                    (object.invalidated_commit_seq === null ||
+                        asOf < object.invalidated_commit_seq) &&
+                    FakeKernel.inProject(object, projectRoot),
+            )
+            .map((object) => this.snapshotAt(object, asOf))
+            .filter((object) => FakeKernel.servesOn(object, surface as Surface));
         if (objectIds !== null) {
             visible = visible.filter((object) => objectIds.has(object.object_id));
         }
@@ -425,7 +454,14 @@ export class FakeKernel {
             truncated = true;
         }
         const rows = visible.map((object) => {
-            const { labeled, disposition: _disposition, project_root, decision, ...row } = object;
+            const {
+                labeled,
+                disposition: _disposition,
+                approval_object_id: _approval,
+                project_root,
+                decision,
+                ...row
+            } = object;
             const visibility = FakeKernel.visibilityOn(object, surface as Surface);
             return {
                 object: row,
@@ -583,6 +619,7 @@ export class FakeKernel {
                 sensitivity,
                 labeled: true,
                 disposition: "active",
+                approval_object_id: null,
                 project_root: projectRoot,
                 decision: {
                     decision_kind: spec.decision_kind as string,
@@ -668,6 +705,7 @@ export class FakeKernel {
                 if ("reply" in judged) return judged.reply;
                 const row = stage(judged.result.object_id);
                 row.disposition = judged.result.disposition as FakeDisposition;
+                row.approval_object_id = judged.approval;
                 // An admission event is part of the receipt but does not advance the object's token. commentlint: allow(JUDGE)
                 touched.add(row.object_id);
                 dispositions.push(judged.result);
@@ -678,6 +716,9 @@ export class FakeKernel {
         this.tip = seq;
         for (const [objectId, row] of staged) {
             const existing = this.objects.get(objectId);
+            if (!existing || existing.disposition !== row.disposition) {
+                this.recordDisposition(objectId, seq, row.disposition);
+            }
             if (existing) {
                 Object.assign(existing, row);
             } else {
@@ -708,13 +749,15 @@ export class FakeKernel {
      * The daemon's `disposition_request` and the kernel's ratchet: the target
      * must be a live in-project decision, a cited approval a live in-project
      * object, and a move toward a less restrictive disposition without one is
-     * recorded as denied with the disposition unchanged.
+     * recorded as denied with the disposition unchanged. An operation that
+     * names no approval inherits the target's stored one; `approval` is the
+     * one the recorded decision rests on.
      */
     private judgeDisposition(
         operation: Operation,
         projectRoot: string | null,
         view: (objectId: string) => FakeObject | undefined,
-    ): { result: DispositionResult } | { reply: unknown } {
+    ): { result: DispositionResult; approval: string | null } | { reply: unknown } {
         const objectId = operation.object_id;
         const event = operation.event;
         if (
@@ -732,12 +775,13 @@ export class FakeKernel {
         ) {
             return { reply: invalid("not_found") };
         }
-        const approval = operation.approval_object_id;
+        const cited = operation.approval_object_id;
+        if (cited !== undefined && typeof cited !== "string") {
+            throw invalidParams("kernel.commit disposition approval is malformed");
+        }
+        const approval = cited ?? target.approval_object_id;
         let approved = false;
-        if (approval !== undefined) {
-            if (typeof approval !== "string") {
-                throw invalidParams("kernel.commit disposition approval is malformed");
-            }
+        if (approval !== null) {
             const object = view(approval);
             if (
                 !object ||
@@ -746,7 +790,8 @@ export class FakeKernel {
             ) {
                 return { reply: invalid("not_found") };
             }
-            approved = this.approvals.has(approval);
+            // The kernel reads approval authority at use: a seeded approval whose own disposition has since left `active` grants nothing. commentlint: allow(JUDGE)
+            approved = this.approvals.has(approval) && object.disposition === "active";
         }
         const effect = EVENT_EFFECT[event as DispositionEvent];
         const relaxes = DISPOSITION_RANK[effect.disposition] < DISPOSITION_RANK[target.disposition];
@@ -760,10 +805,11 @@ export class FakeKernel {
                 disposition: denied ? target.disposition : effect.disposition,
                 denied,
             },
+            approval,
         };
     }
 
-    /** `kernel.commit` with `preview: true`: a recorded identity answers its receipt; otherwise every operation is judged at the tip, nothing is written, and no receipt is created. commentlint: allow(JUDGE) */
+    /** `kernel.commit` with `preview: true`: a recorded identity answers its receipt; otherwise operations are judged in order on an overlay of the tip, nothing is written, and no receipt is created. commentlint: allow(JUDGE) */
     private previewReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
         const tokens = (body.tokens as unknown[] | undefined) ?? [];
         if (tokens.length > 0)
@@ -783,12 +829,12 @@ export class FakeKernel {
             };
         }
         const previews = [];
+        const staged = new Map<string, FakeObject>();
+        const view = (id: string): FakeObject | undefined => staged.get(id) ?? this.objects.get(id);
         for (const operation of operations) {
-            const judged = this.judgeDisposition(operation, projectRoot, (id) =>
-                this.objects.get(id),
-            );
+            const judged = this.judgeDisposition(operation, projectRoot, view);
             if ("reply" in judged) return judged.reply;
-            const target = this.objects.get(judged.result.object_id) as FakeObject;
+            const target = view(judged.result.object_id) as FakeObject;
             const current = surfaceVisibilities(
                 visibilityRow(target.labeled, target.disposition),
                 target.sensitivity,
@@ -801,6 +847,11 @@ export class FakeKernel {
                 (surface) =>
                     current[surface] !== "hidden" && current[surface] !== projected[surface],
             );
+            staged.set(target.object_id, {
+                ...target,
+                disposition: judged.result.disposition as FakeDisposition,
+                approval_object_id: judged.approval,
+            });
             previews.push({ ...judged.result, current, projected, visibility_changes });
         }
         return { state: { kind: "available" }, known_as_of: this.tip, previews };

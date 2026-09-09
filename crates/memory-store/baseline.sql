@@ -346,7 +346,6 @@ CREATE TABLE dreamer_receipts (
             request_digest TEXT NOT NULL CHECK (length(request_digest) = 64),
             ledger_session TEXT NOT NULL CHECK (length(ledger_session) > 0),
             command_id TEXT NOT NULL CHECK (length(command_id) BETWEEN 1 AND 256),
-            harness TEXT NOT NULL CHECK (length(harness) > 0),
             state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
             generation INTEGER NOT NULL CHECK (generation >= 1),
             terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown')),
