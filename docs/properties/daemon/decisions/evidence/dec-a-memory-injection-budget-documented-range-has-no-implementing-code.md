@@ -2,133 +2,88 @@
 
 ## Discovery trigger
 
-Task 5 asks for every configuration key in scope with its default, where the
-default is defined, and whether the documented default matches the code default.
-Task 6 asks whether an out-of-range value is rejected, clamped, or silently
-accepted. Working the key table for `config.rs` produced a match on the default
-and a miss on the range, in a key that the project tier can write.
+The source-catalog contract describes a `500-20000` memory-injection budget,
+but the Rust parser applies a floor of `1` and no ceiling. This is a user-tier
+range property. A project-tier fixture exercises trust-policy rejection instead.
+
+Source snapshot: `c73ed613dc9c48f4ad789925034f6eb081fca260`, verified
+2026-09-09. Rust paths below are relative to `crates/daemon/src/`.
 
 ## Evidence trail
 
-The documented contract. `CONFIGURATION.md:591` (source-catalog path, not present at HEAD), inside the `memory` table:
+The historical contract quotes `CONFIGURATION.md:591`, inside the `memory`
+table. That source-catalog document is absent at HEAD; the quote is a retained
+claim under test, not a newly verified documentation source:
 
 > `injection_budget_tokens` | `number` (500–20000) | `4000` | Token budget for
 > memory injection into `<session-history>`.
 
-The default matches. `config.rs:20-22`:
+The default is `4_000.0` at `config.rs:23`, applied at `:123`. The standard
+key's `apply_key` arm (`:847-851`) stores `budget.max(1.0)`. The legacy arm
+(`:852-864`) uses the same floor when the primary key has no parsed numeric
+value, and emits a deprecation warning. `number_at` (`:963-968`) accepts finite
+JSON numbers. Neither assignment enforces `500` or `20000`.
 
-```
-/// Default token budget for project-memory injection. This is the twin of
-/// `packages/plugin/src/config/schema/eidnara.ts` (source-catalog path, not present at HEAD) and must stay at 4,000 tokens.
-pub const DEFAULT_MEMORY_BUDGET_TOKENS: f64 = 4_000.0;
-```
+Both keys are `UserOnly` (`:664-672`). The user loop invokes their parsers
+(`:717-720`); the project loop emits an ignored-key warning without invoking
+them (`:723-733`). There is no project-tier budget assignment. A project-only
+out-of-range value therefore leaves the default budget intact and emits a
+warning, which would make the range oracle pass for the wrong reason.
 
-used in `DaemonConfig::default` at `:130`.
-
-The range does not. There are two parse sites and both apply the same asymmetric
-floor and no ceiling.
-
-User tier, `config.rs:441-445`:
-
-```
-if let Some(budget) = number_at(user, "/memory/injection_budget_tokens") {
-    cfg.memory_budget_tokens = budget.max(1.0);
-} else if let Some(budget) = number_at(user, "/memory/budget_tokens") {
-    cfg.memory_budget_tokens = budget.max(1.0);
-}
-```
-
-Project tier, `config.rs:526-528`:
-
-```
-if let Some(budget) = number_at(project, "/memory/injection_budget_tokens") {
-    cfg.memory_budget_tokens = budget.max(1.0);
-}
-```
-
-`.max(1.0)` is the only bound. `500` is not enforced, `20000` is not enforced, and
-`number_at` (`:631-636`) accepts any finite `f64`, so a fractional or enormous
-value passes.
-
-The contrast with the neighbouring leaf is instructive. The user-profile budget
-is user-tier only and the project tier is told so.
-`config.rs:452-454` parses it on the user tier and `:539` warns on the project
-tier:
-
-```
-warn_ignored_project_key(project, "/memory/user_profile_budget_tokens", &mut warnings);
-```
-
-So the author distinguished the two budgets deliberately: the injection budget is
-project-writable, the user-profile budget is not. The file header states the
-policy at `:6-7`: "User-profile and historian budgets remain user-tier only."
-
-Where the value lands. `lib.rs:8293`:
-
-```
-memory_budget_tokens: binding.config.memory_budget_tokens,
-```
-
-That is the bind-time module config with no request override, so the value takes
-effect on every harness leg. Inside the transform it is a trim ceiling.
-`transform.rs:2657`:
-
-```
-trim_claims_to_budget(claims, ctx.memory_budget_tokens, estimate_tokens)
-```
-
-and it is threaded to the `m0` composition inputs at `:3024`, `:4583`, `:4686`,
-`:4873`, and `:4919`. Raising it means more mirrored-claim and memory bytes inside
-the frozen `m0` baseline, which every later pass replays verbatim.
+`Handler::project_memory_read` (`lib.rs:4832-4845`) passes the effective budget
+to `canonical_memory::read_project_memory` when memory is enabled. The reader
+applies its visible-row read before memory trimming (`canonical_memory.rs:163-174`,
+`:195-212`). Increasing this budget does not remove the separate row and byte
+caps of the visible-row read.
 
 ## Failure scenario
 
-A repository ships `.eidnara/eidnara.jsonc` containing
+A user-tier `eidnara.jsonc` contains:
 
 ```
 { "memory": { "injection_budget_tokens": 200000 } }
 ```
 
-either because someone wanted "all the memory" or because a value was copied from
-a different unit. `config.rs:526-528` accepts `200000.0`. On the next transform
-pass, `trim_claims_to_budget` is handed a ceiling far above the whole context
-window, so it trims nothing. The `m0` baseline grows to hold every claim, the
-usable window shrinks, and because `m0` is frozen between HARD folds the inflated
-block is replayed on every subsequent pass rather than reconsidered.
-
-The documentation told the author that `20000` was the maximum, so nobody looking
-at the config file would suspect the value is honoured. There is no warning, and
-`emit_warnings` (`config.rs:275-279`) has nothing to print because no warning was
-pushed.
-
-The low end is milder but also silent: `injection_budget_tokens: 10` becomes `10`,
-not `500`, and the memory block trims to almost nothing.
+With the project tier absent, the standard-key arm accepts `200000.0` without
+a range warning. A value of `10` likewise remains `10`, not `500`. These are
+source-traced outcomes of `config.rs:847-851`, not recorded campaign results.
+They violate the retained range contract while preserving the user-only policy.
 
 ## Timing windows and dependencies
 
-None. The value is resolved at route bind (`lib.rs:4427-4436`) and read from the
-binding on each pass at `lib.rs:8293`. It is stable for the life of the config
-file's mtime.
+No fault or timing window is needed. Reachability is `explicit-config-only`
+because an out-of-range user value is required; the default is inside the range.
+The in-memory merge is enough to expose the mismatch. A file-based check uses
+`ConfigCache::effective_with_warnings` (`config.rs:262-282`) to read and merge
+the user tier.
 
 ## What a test must construct
 
-Two assertions in the existing tier-merge style. `config.rs:851-874` is the
-closest existing shape, `memory_injection_budget_uses_standard_key_and_deprecated_user_fallback`.
+For each value in `[200000, 10]`, construct a user object containing only
+`memory.injection_budget_tokens` and call
+`merge_tiers_with_warnings(Some(&user), None)`. Assert that the effective budget
+is in `[500, 20000]` or that a warning names `/memory/injection_budget_tokens`.
+Do not supply a project tier or the deprecated key: either can add a warning
+without checking the standard key's range.
 
-1. `merge_tiers_with_warnings(None, Some(&json!({"memory": {"injection_budget_tokens":
-   200000}})))` and assert either `memory_budget_tokens == 20000.0` or a warning
-   naming `/memory/injection_budget_tokens`.
-2. The same with `10` and assert `500.0` or a warning.
+Keep project rejection separate: with a user budget of `3000` and a project
+budget of `200000`, require `3000` and an ignored-project-key warning. That
+checks authority, not the range.
 
-Both are single-expression tests against a function that already returns the
-warning vector (`config.rs:373-376`, `:572`).
-
-An end-to-end assertion is possible but not necessary to establish the defect:
-build a producer context with a large `memory_budget_tokens` and assert that
-`trim_claims_to_budget` retains every claim. That belongs to 4b's `m0`
-composition material rather than here.
+Existing checks, each `unaudited`: `config.rs:1311-1314` pins the default;
+`:1317-1350` checks standard/legacy precedence and project rejection;
+`:1353-1387` checks the other user-only budget leaves. The fallback cases at
+`:1884-1902` accept `128` but do not assert the standard-key range. No full
+range-check exercise is claimed.
 
 ## Investigation log
+
+### Historical discovery notes
+
+The two entries below are preserved from the
+[pre-refresh evidence](https://github.com/ahrav/eidnara/blob/c73ed613dc9c48f4ad789925034f6eb081fca260/docs/properties/daemon/decisions/evidence/dec-a-memory-injection-budget-documented-range-has-no-implementing-code.md).
+Their references and tier-policy conclusions describe discovery-time source,
+not HEAD. The current disposition follows them.
 
 ### Q: Is the project tier supposed to be able to write this key at all?
 
@@ -160,3 +115,16 @@ composition material rather than here.
 - Missing evidence: none.
 - Conclusion: resolved with answer. The record's check covers both keys because
   both write the same field, and the assertion is on the resolved field.
+
+### Q: Which tier must a range campaign exercise?
+
+- Sources examined: `config.rs:664-672`, `:717-744`, `:847-864`, and
+  `:1317-1350` at the source snapshot above.
+- Findings: both budget keys are user-only. A project value never reaches the
+  budget parser, and its rejection warning can satisfy a range-or-warning
+  assertion vacuously. A legacy-key deprecation warning can do the same.
+- Missing evidence: an independent standard-key range test using only the user
+  tier.
+- Conclusion: resolved with answer. Exercise the standard user-tier key with
+  no project tier. Treat project rejection and legacy deprecation as separate
+  properties; the missing range remains a user-tier concern.

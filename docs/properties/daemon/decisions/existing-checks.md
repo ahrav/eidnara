@@ -23,6 +23,10 @@ respectively. Both were confirmed directly in the working tree at `HEAD`, and th
 a step appears, matching 4e's convention
 (`../rendering/existing-checks.md:18-27`).
 
+The config test row, classified-merge inventory, compile-time guard, and tier
+diagnostics below are verified at `c73ed613dc9c48f4ad789925034f6eb081fca260`
+on 2026-09-09. Other source-catalog counts retain the historical provenance above.
+
 An existing check does not remove a property from the catalog. **Every status
 below is `unaudited`**: test adequacy belongs to
 `/testing:invariant-test-review`, and production assertion adequacy to
@@ -412,7 +416,7 @@ is the same hazard 4e recorded for `tail_hygiene.rs:38`
 | --- | --- | --- | --- | --- |
 | `selection.rs` | `:1413` | **37** | `:1573`-`:3349` | `:1732` the TypeScript selector golden; `:1858`-`:2486` band, force, emergency and supersession batching; `:2537` the `region_hint` UTF-16 cap and surrogate back-off; `:2552`-`:2762` the `provider_executed`, `frozen_arc` and dynamic-protection filters; `:2836` drop beats edit marker; `:2885` payload purity; `:3107`-`:3300` the duplicate-safe-tool family; `:3349` defer produces nothing |
 | `boundary.rs` | `:1975` | **29** | `:2174`-`:3042` | `:2174` constants match TypeScript; `:2247`, `:2285`, `:2329` the three goldens; `:2473`-`:2772` the backward reasoning fence and fold-only guard; `:2809`-`:2877` wrap-up watermarks; `:2911`, `:2924` determinism and anchor monotonicity; `:2966`-`:3042` trigger and ordinal-zero edges |
-| `config.rs` | `:806` | **26** | `:721`-`:1191` | `:760` the shared TypeScript cache-TTL vectors; `:797`, `:811`, `:829`, `:876`, `:913`, `:930`, `:981`, `:1096`, `:1166` the per-leaf trust tiering; `:837`, `:843`, `:1088` schema agreement; `:999`-`:1051` guidance override resolution; `:1181`, `:1191` JSONC stripping and the mtime cache |
+| `config.rs` | `cache_ttl_tests` at `:1084`; `tests` at `:1183` | **43** (5 + 38) | `:1089`-`:2174` | Cache-TTL parsing and routing, defaults, per-key tier permissions, sibling precedence, guidance resolution, JSONC parsing, and file-cache behavior. The classified-merge checks are enumerated below |
 | `codec/opencode.rs` | `:1323` | **17** | `:1413`-`:2157` | `:1413`-`:1978` fresh-part completeness, adjacency deletion, native-extras survival, polarity round trip, reasoning exemptions; `:1860` compaction as a boundary; `:2079` the duplicate-id guard, debug-only; `:2113` incremental sidecar pins; `:2157` typed wire projection |
 | `scheduler.rs` | `:919` | **16** | `:1050`-`:1437` | `:1050` the golden; `:1206`-`:1257` band geometry and the durable-overflow arm; `:1270`-`:1397` deferral, latch lifecycle, determinism, vocabulary mapping; `:1417`-`:1437` the never-TTL family |
 | `codec/pi.rs` | `:1079` | **14** | `:1083`-`:1487` | `:1121` split-pipe ids; `:1153`-`:1231` adjacency deletion and survivor extras; `:1277`-`:1404` multi-part, image, opaque and empty-error tool results; `:1427`, `:1447`, `:1470` frozen and untouched replay; `:1487` compaction as a boundary signal |
@@ -421,6 +425,26 @@ is the same hazard 4e recorded for `tail_hygiene.rs:38`
 | `caveman.rs` | `:613` | **1** | `:626` (extent `:626-650`) | The 42-case differential golden. The only test in 651 lines. Shared with 4e |
 | `session_resolver.rs` | `:57` | **1** | `:61` (`#[tokio::test]`, attribute `:60`) | `unsupported_mapping_is_local_absence`. The supported-mapping path has no test |
 | `codec/sidecar.rs` | **none** | **0** | — | **No test module and no test.** See quiet area 1 |
+
+### Classified-merge checks
+
+All locations name `crates/daemon/src/config.rs`. Each status is `unaudited`;
+the inventory describes assertions, not a verdict that they prove the full
+[tier-policy property](catalog.md#dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list).
+
+| Check | Location | Assertion scope | Status |
+| --- | --- | --- | --- |
+| `project_tier_cannot_set_cache_ttl` | `:1174-1179` | Project TTL map leaves the default and per-model map unchanged | unaudited |
+| `project_threshold_may_only_raise` | `:1297-1302` | Raising 70 to 91 yields the upper clamp, 90 | unaudited |
+| `memory_injection_budget_uses_standard_key_and_deprecated_user_fallback` | `:1317-1350` | Standard-key precedence, user fallback, and a warning for the ignored project budget | unaudited |
+| `rust_only_budget_leaves_are_user_tier_only_and_warn_when_project_supplies_them` | `:1353-1387` | Legacy budget, user-profile budget, and historian context limit reject project overrides with key-specific warnings | unaudited |
+| `docs_injection_is_user_tier_only_and_temporal_flag_follows_project_tier` | `:1458-1480` | Project config cannot enable user-disabled docs injection, but can override the temporal flag | unaudited |
+| `project_tier_cannot_raise_the_user_memory_gate` | `:1637-1666` | Project flags and schedules cannot open a closed gate; an unchanged closed gate has no warning | unaudited |
+| `privileged_keys_are_the_model_budget_and_schedule_levers` | `:1671-1697` | Pins nine privileged names and excludes `ProjectAllowed`, not every exact tier class | unaudited |
+| `hostile_project_tier_cannot_change_privileged_values_and_warns_per_key` | `:1702-1804` | Supplies all 25 keys, asserts selected outputs, and counts unique warnings against an implementation-derived ignored-key count | unaudited |
+| `every_consumed_pointer_is_a_classified_config_key` | `:1809-1844` | Inventories literal pointers, unique registration, and 25 keys; rejects raw `.pointer("` calls, not computed pointers or `Value::get` reads | unaudited |
+| `sibling_keys_keep_their_precedence_within_a_tier` | `:1849-1921` | Schedule/flag and standard/legacy budget precedence, malformed primary fallback, and rejection of project docs/schedule changes | unaudited |
+| `module_model_is_user_tier_only` | `:1969-1987` | Project module model and fallback are ignored with two user-only warnings | unaudited |
 
 ### `#[ignore]`, `should_panic`, and property tooling
 
@@ -517,8 +541,11 @@ all. Owned by
 
 **Zero unconditional runtime assertions in the 4f production halves.** Verified by
 matching `assert!`, `assert_eq!` and `assert_ne!` excluding `debug_assert` across
-every production half: no match in any of the eleven files. **Zero compile-time
-`const _` assertions in scope.** This matches 4e's finding for its own scope.
+every production half: no match in any of the eleven files at the historical
+snapshot. **The classified merge has a compile-time guard** at
+`config.rs:696-708`: every registered privileged key must not be
+`ProjectAllowed`. This is not a runtime assertion or a complete independent
+policy oracle. Guard adequacy status: `unaudited`.
 
 **Panicking sites: two, so 4f is unlike 4e, which had none.**
 
@@ -555,14 +582,16 @@ verified at `HEAD`). `config.rs:568-570` clamps to
 `MAX_EXECUTE_THRESHOLD_PERCENTAGE` (`:28`, `= 90.0`), the one numeric ceiling in
 the trust policy, and `project_threshold_may_only_raise` (`:829`) is its test.
 
-**Diagnostics that replace a guard.** `warn_ignored_project_key`
-(`config.rs:575-581`) is the only reporting channel in the part, and it is called
-for **six** pointers only (`config.rs:520`, `:538`, `:539`, `:540`, `:556`,
-`:561`). At least six further leaves are dropped from the project tier with no
-warning at all: `/historian/model`, `/historian/fallback_models`,
-`/historian/module_model`, `/historian/module_fallback_models`, `/cache_ttl`, and
-the object form of `/execute_threshold_percentage`. No clamp anywhere in
-`config.rs` reports itself.
+**Tier diagnostics.** `merge_tiers_with_warnings` (`config.rs:710-755`)
+reports every supplied `UserOnly` key at `:729-732`, including all four model
+keys, the injection budget, docs injection, the task schedule, and cache TTL.
+There are 14 user-only keys (`:659-672`), not six hard-coded warning sites.
+The two raise-only keys warn when a parsed candidate would weaken the current
+value (`:734-744`); a no-op candidate emits no tier warning. An object-valued
+execute threshold fails numeric parsing (`:963-968`), leaves the candidate
+unchanged, and emits no warning. Numeric clamps do not emit range diagnostics
+(`:750-752`, `:827-849`). The class table controls rejection; the warnings
+report it. The removed `warn_ignored_project_key` helper is not a check.
 
 ## Codec golden coverage
 
@@ -702,13 +731,12 @@ Ranked by the gap between what the code decides and what any check proves.
     `projection_oracle` fields that exist are not deserialized
     (`codec/mod.rs:28-34`, `:41-47`).
 
-11. **`config.rs`'s per-leaf trust tiering is the crate's only security-shaped
-    policy and its deliberate divergence from TypeScript is asserted by nothing.**
-    Nine of its 26 tests check tiering (`:797`, `:811`, `:829`, `:876`, `:913`,
-    `:930`, `:981`, `:1096`, `:1166`), the densest per-leaf coverage in 4f. But
-    `:8`'s claim that the module "intentionally keeps stricter model-selection
-    policy than the current TypeScript implementation" is an inequality no test on
-    either side evaluates.
+11. **The classified merge lacks a complete independent per-key policy oracle.**
+    Its checks are enumerated above. The hostile fixture derives the expected
+    ignored-key count from `tier_class` (`config.rs:1775-1785`), while the
+    privileged-name check (`:1671-1697`) only excludes `ProjectAllowed` for
+    those names. Neither establishes every exact permission independently of
+    the implementation table.
 
 12. **No integration coverage of the decision layer, the codecs, or the trust
     policy.** Zero of the seven integration binaries reach 4f, against 4b's two
