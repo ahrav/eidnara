@@ -18786,6 +18786,9 @@ mod tests {
         call_transform_request(handler, request(messages)).await
     }
 
+    /// `host_mural_artifact` refuses a disabled mural, a host without vision, and an empty or
+    /// absent data URL; each refusal must leave the store empty and the messages image-free
+    /// while the transform itself still succeeds.
     #[tokio::test(flavor = "current_thread")]
     async fn mural_is_reached_only_through_a_host_supplied_enabled_artifact() {
         let (handler, store, _dir, project) =
@@ -18802,26 +18805,79 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        oc_request["mural"] = json!({
-            "enabled": false,
-            "supports_vision": true,
-            "data_url": "data:image/png;base64,YQ==",
-            "content_hash": "mural-a",
-        });
-        let disabled = call_transform_request_on_channel(&handler, 7, oc_request).await;
-        assert!(
-            store
-                .load_project_mural_artifact(project)
-                .unwrap()
-                .is_none()
-        );
-        for response in [&without, &disabled] {
+        let refusals = [
+            (
+                "disabled",
+                json!({
+                    "enabled": false,
+                    "supports_vision": true,
+                    "data_url": "data:image/png;base64,YQ==",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "no vision",
+                json!({
+                    "enabled": true,
+                    "supports_vision": false,
+                    "data_url": "data:image/png;base64,YQ==",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "empty data url",
+                json!({
+                    "enabled": true,
+                    "supports_vision": true,
+                    "data_url": "",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "absent data url",
+                json!({
+                    "enabled": true,
+                    "supports_vision": true,
+                    "content_hash": "mural-a",
+                }),
+            ),
+        ];
+        let mut responses = vec![without];
+        for (label, mural) in refusals {
+            oc_request["mural"] = mural;
+            let refused = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
             assert!(
-                !serde_json::to_string(&response["messages"])
-                    .unwrap()
-                    .contains("data:image/"),
-                "{response}"
+                matches!(refused["action"].as_str(), Some("HARD" | "SOFT" | "SOFT+")),
+                "{label}: {refused}"
             );
+            assert!(
+                refused["messages"]
+                    .as_array()
+                    .is_some_and(|messages| !messages.is_empty()),
+                "{label}: {refused}"
+            );
+            assert!(
+                store
+                    .load_project_mural_artifact(project)
+                    .unwrap()
+                    .is_none(),
+                "{label} persisted an artifact"
+            );
+            responses.push(refused);
+        }
+        for response in &responses {
+            let serialized = serde_json::to_string(&response["messages"]).unwrap();
+            for marker in [
+                "data:image/",
+                "<memory-mural>",
+                "image/",
+                "\"type\":\"file\"",
+            ] {
+                assert!(
+                    !serialized.contains(marker),
+                    "{marker} present in {response}"
+                );
+            }
         }
     }
 
@@ -28354,6 +28410,7 @@ mod tests {
             "mural.render",
             "mural.get",
             "ctx_mural",
+            "ctx-mural",
         ];
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());

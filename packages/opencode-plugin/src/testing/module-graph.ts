@@ -17,7 +17,8 @@ export const BUNDLE_EXTERNALS = [
 export const DATABASE_BINDING =
     /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|(?:^|\/)shared\/sqlite(?:\.ts)?$/;
 
-export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[A-Za-z_][A-Za-z0-9_.]*["'`]/;
+/** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches; case is ignored so a handler cannot compare a normalized operation against an upper-cased name. */
+export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/i;
 
 export interface ModuleGraph {
     /** Every source module in the bundle, as the bundler names it relative to the working directory. */

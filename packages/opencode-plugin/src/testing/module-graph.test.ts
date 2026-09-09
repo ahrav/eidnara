@@ -70,8 +70,9 @@ const HARNESS_DATABASE_WRITER = "features/context/compaction-marker.ts";
 const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"];
 
 /** File names of the Rust-owned product stores, as a path a module could open. */
+/** File names of the Rust-owned product stores, as a path a module could open, with any non-word suffix such as `-wal` or `?mode=ro`; a line that is a comment is skipped. */
 const PRODUCT_STORE_FILE =
-    /^(?!\s*(?:\/\/|\*|\/\*)).*["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)["'`]/;
+    /^(?!\s*(?:\/\/|\*|\/\*)).*["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)(?!\w)/;
 
 type ReportedGraph = Omit<ModuleGraph, "text">;
 
@@ -120,6 +121,9 @@ describe("module graph over the landed tree", () => {
         expect(OPERATION_LITERAL.test('"claim.intent.stage"')).toBe(true);
         expect(OPERATION_LITERAL.test("'dreamer.run_task'")).toBe(true);
         expect(OPERATION_LITERAL.test("`dreamer.run_task`")).toBe(true);
+        expect(OPERATION_LITERAL.test('"claim.intent-stage"')).toBe(true);
+        expect(OPERATION_LITERAL.test("`dreamer.${task}`")).toBe(true);
+        expect(OPERATION_LITERAL.test('"CLAIM.INTENT.STAGE"')).toBe(true);
         expect(OPERATION_LITERAL.test('"dreamer_inference"')).toBe(false);
         expect(OPERATION_LITERAL.test("claim.claim_id")).toBe(false);
         expect(operationLiteralHits(MODULES)).toEqual([]);
@@ -128,6 +132,9 @@ describe("module graph over the landed tree", () => {
     test("retained modules name no Eidnara product-store file", () => {
         expect(PRODUCT_STORE_FILE.test('join(dir, "memory.sqlite")')).toBe(true);
         expect(PRODUCT_STORE_FILE.test("`${dir}/context.db`")).toBe(true);
+        expect(PRODUCT_STORE_FILE.test('"context.db?mode=ro"')).toBe(true);
+        expect(PRODUCT_STORE_FILE.test("'store.db-wal'")).toBe(true);
+        expect(PRODUCT_STORE_FILE.test('"context.dbx"')).toBe(false);
         expect(PRODUCT_STORE_FILE.test("Eidnara's own context.db.")).toBe(false);
         expect(PRODUCT_STORE_FILE.test("     * applies to its own `context.db`.")).toBe(false);
         expect(operationLiteralHits(MODULES, PRODUCT_STORE_FILE)).toEqual([]);
