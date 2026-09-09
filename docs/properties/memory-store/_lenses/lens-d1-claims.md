@@ -423,8 +423,9 @@ almost nothing to enforce.
   note_eval_claims(project, task_kind, evaluator_instance, evaluator_slot) WHERE
   terminal_kind IS NULL` (`baseline.sql`) — encodes: an evaluator slot holds
   at most one live claim per task kind, so a worker cannot double-book itself. Also enforced in
-  app code: yes. `lib.rs:13269-13274` selects the slot's live claim first and
-  rebinds it via `task_lease::rebind_claim_tx` (`lib.rs:13714`) rather than
+  app code: yes. `crates/memory-store/src/task_lease.rs:577-608` selects the slot's
+  live claim first and rebinds it via `task_lease::rebind_claim_tx`
+  (`crates/memory-store/src/task_lease.rs:436-475`) rather than
   inserting a second, which is what makes acquisition idempotent under a lost
   response.
 
