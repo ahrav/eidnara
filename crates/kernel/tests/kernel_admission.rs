@@ -7451,3 +7451,87 @@ fn preview_projects_the_row_the_commit_writes_without_the_stored_trigger_fold() 
         "the preview projected what the commit serves"
     );
 }
+
+/// A subject serves under its own row and its lineage's row. When the lineage
+/// row was promoted through an approval, quarantining that approval makes the
+/// commit demote the lineage row before it judges the next operation, so the
+/// subject's `current` verdicts are the demoted ones. The preview cannot see
+/// that demotion, so an operation on such a subject after the quarantine is
+/// refused rather than compared against the stale lineage row.
+#[test]
+fn preview_refuses_an_operation_whose_lineage_authority_an_earlier_one_changed() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "target", "code_present", 1, "target-trigger");
+    assert_eq!(
+        admit(&store, request("target"), "target", "target"),
+        "admit"
+    );
+    // A sibling candidate on the target's lineage, approved while unmaterialized: the
+    // approval is recorded on a source-scoped row the target serves under too.
+    stage_in_run(&store, "run-sibling", "sibling", "source-target");
+    let mut approved = request("sibling");
+    approved.source_class = Some(SourceClass::ModelInference);
+    approved.taint_class = Some(TaintClass::AssistantInference);
+    approved.event.kind = EventKind::Approve;
+    approved.event.trigger_object_id = None;
+    approved.event.approval_object_id = Some("approval".to_string());
+    store
+        .commit(intent("approve-lineage"), |envelope| {
+            envelope.record_admission(approved)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let quarantine_approval = || {
+        let mut request = subject_request("approval", EventKind::Quarantine);
+        request.source_class = Some(SourceClass::ExplicitUser);
+        request.taint_class = Some(TaintClass::UserExplicit);
+        request
+    };
+    let surfaces = |visibility: &dyn Fn(Surface) -> kernel::SurfaceVisibility| {
+        Surface::ALL
+            .iter()
+            .map(|surface| visibility(*surface))
+            .collect::<Vec<_>>()
+    };
+
+    let (_, before) = store
+        .preview(far_deadline(), |preview| {
+            let served = preview.served_rows_for(&["object-target"], None)?;
+            let before = surfaces(&|surface| served["object-target"].visibility(surface));
+            preview.preview_admission(quarantine_approval())?;
+            assert_eq!(
+                preview.preview_admission(subject_request("object-target", EventKind::MarkStale)),
+                Err(KernelError::PreviewAuthorityChanged)
+            );
+            Ok(before)
+        })
+        .unwrap();
+    assert_eq!(before, [kernel::SurfaceVisibility::Visible; 3]);
+
+    // The commit's cascade demotes the lineage row, so the target already serves
+    // labeled when the next operation is judged.
+    store
+        .commit(intent("quarantine-approval"), |envelope| {
+            envelope.record_admission(quarantine_approval())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let (_, after) = store
+        .preview(far_deadline(), |preview| {
+            let served = preview.served_rows_for(&["object-target"], None)?;
+            Ok(surfaces(&|surface| {
+                served["object-target"].visibility(surface)
+            }))
+        })
+        .unwrap();
+    assert_eq!(
+        after,
+        [
+            kernel::SurfaceVisibility::Hidden,
+            kernel::SurfaceVisibility::Hidden,
+            kernel::SurfaceVisibility::Labeled,
+        ]
+    );
+}

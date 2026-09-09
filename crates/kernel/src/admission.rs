@@ -1801,19 +1801,38 @@ impl Preview<'_> {
         Ok(prepared.evaluation)
     }
 
-    /// `prepare_admission` validates the cited and the stored approval by SQL over the committed ledger, which a decision previewed earlier never reaches, while a commit writes that decision and runs its authority cascade before judging the next one. Refuses when either chain holds an object or lineage an earlier admission in this preview decided, so an evaluation never rests on authority the commit would have revised. commentlint: allow(JUDGE)
+    /// `prepare_admission` validates the cited and the stored approval by SQL over the committed ledger, which a decision previewed earlier never reaches, while a commit writes that decision and runs its authority cascade before judging the next one. The cascade also rewrites the subject's lineage row when that row rests on the withdrawn authority, and the lineage row is half of what the subject serves. Refuses when any of those chains holds an object or lineage an earlier admission in this preview decided, so neither the evaluation nor the served state it is compared against rests on authority the commit would have revised. commentlint: allow(JUDGE)
     fn refuse_changed_authority(&self, prepared: &PreparedDecision) -> Result<(), KernelError> {
         let envelope = &self.envelope;
         if envelope.admission_latest.is_empty() {
             return Ok(());
         }
-        let stored = load_prior_decision(envelope, &prepared.facts)?;
-        let cited = prepared.event.approval_object_id.as_deref();
-        let stored = stored
-            .as_ref()
-            .and_then(|stored| stored.approval_object_id.as_deref())
-            .filter(|stored| Some(*stored) != cited);
-        for approval in [cited, stored].into_iter().flatten() {
+        let own = load_prior_decision(envelope, &prepared.facts)?;
+        let lineage = load_prior_for_key(
+            envelope,
+            &AdmissionKey::Lineage {
+                source_kind: prepared.facts.source_kind.clone(),
+                source_id: prepared.facts.source_id.clone(),
+                source_revision: prepared.facts.source_revision,
+            },
+        )?;
+        let mut approvals: Vec<&str> = Vec::with_capacity(3);
+        for approval in [
+            prepared.event.approval_object_id.as_deref(),
+            own.as_ref()
+                .and_then(|own| own.approval_object_id.as_deref()),
+            lineage
+                .as_ref()
+                .and_then(|lineage| lineage.approval_object_id.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !approvals.contains(&approval) {
+                approvals.push(approval);
+            }
+        }
+        for approval in approvals {
             let members = match envelope.approval_chain_members(approval) {
                 Ok(members) => members,
                 // A chain past the authority bound validates as no authority
