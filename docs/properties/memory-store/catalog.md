@@ -112,11 +112,18 @@ correction were applied to `fault-map.md` and change no record here.
   `tests/claim_mirror.rs`. The mirror's in-transaction snapshot-vector
   compare and its clear step lived in that module and went with it; nothing
   in `lib.rs` compared a snapshot vector. The claim-intent ledger and its
-  control row stay for the next ticket; with the mirror gone, the only writer
-  of the control row's `accepting` state is the authority finish transition,
-  which writes it only for a 32-hex context-store id, so a rebuild grant
-  (`begin_claim_store_rebuild`, no production caller) now freezes the ledger
-  until the next authority cycle. Every
+  control row stay for the next ticket. The mirror's seed path was the only
+  writer that moved the control row from `resetting` back to `accepting`
+  without an identity check; with it gone, the only remaining `accepting`
+  writer is `authority_finish_prepare` through
+  `set_claim_intent_transition_tx`, which returns `Ok(())` without writing
+  unless its `context_store_uuid` is 32 lowercase hex
+  (`crates/memory-store/src/lib.rs:4973-4975`). Under the dashed production
+  shape that `intent-control-transition-write-is-silently-dropped` documents,
+  no authority cycle writes the row, so a rebuild grant
+  (`begin_claim_store_rebuild`, test-only caller) leaves the ledger in
+  `resetting` with no in-repository path back to `accepting`;
+  `claim_intent_stage_fence` reports every later stage as `Frozen`. Every
   Group C record carries `Status: invalidated` and names
   `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
   transform catalog as the replacement; prose below that treats the mirror
@@ -264,15 +271,15 @@ bill for the crate.
 | [migration-and-its-version-record-commit-together](#migration-and-its-version-record-commit-together) | safety | high |
 | [recorded-schema-version-cannot-disagree-with-the-actual-schema](#recorded-schema-version-cannot-disagree-with-the-actual-schema) | safety | medium |
 | [post-migration-open-repair-is-resumable-and-effect-idempotent](#post-migration-open-repair-is-resumable-and-effect-idempotent) | safety | high |
-| [mirror-receipt-replay-applies-effects-once](#mirror-receipt-replay-applies-effects-once) | safety | invalidated |
-| [mirror-receipt-conflict-rejects-divergent-replay](#mirror-receipt-conflict-rejects-divergent-replay) | safety | invalidated |
-| [mirror-project-effect-chain-detects-omission](#mirror-project-effect-chain-detects-omission) | safety | invalidated |
-| [mirror-generation-advances-exactly-one-per-touched-project](#mirror-generation-advances-exactly-one-per-touched-project) | safety | invalidated |
-| [mirror-read-fence-relies-on-generation-advance](#mirror-read-fence-relies-on-generation-advance) | safety | invalidated |
-| [mirror-reset-cycle-requires-a-rebuild-grant](#mirror-reset-cycle-requires-a-rebuild-grant) | reachability | invalidated |
-| [mirror-clear-without-a-grant-is-never-entered](#mirror-clear-without-a-grant-is-never-entered) | reachability | invalidated |
-| [mirror-accepting-gate-is-skipped-when-control-is-absent](#mirror-accepting-gate-is-skipped-when-control-is-absent) | safety | invalidated |
-| [mirror-staleness-undetectable-on-memory-tool-read-path](#mirror-staleness-undetectable-on-memory-tool-read-path) | safety | invalidated |
+| [mirror-receipt-replay-applies-effects-once](#mirror-receipt-replay-applies-effects-once) | safety | high |
+| [mirror-receipt-conflict-rejects-divergent-replay](#mirror-receipt-conflict-rejects-divergent-replay) | safety | high |
+| [mirror-project-effect-chain-detects-omission](#mirror-project-effect-chain-detects-omission) | safety | high |
+| [mirror-generation-advances-exactly-one-per-touched-project](#mirror-generation-advances-exactly-one-per-touched-project) | safety | high |
+| [mirror-read-fence-relies-on-generation-advance](#mirror-read-fence-relies-on-generation-advance) | safety | medium |
+| [mirror-reset-cycle-requires-a-rebuild-grant](#mirror-reset-cycle-requires-a-rebuild-grant) | reachability | high |
+| [mirror-clear-without-a-grant-is-never-entered](#mirror-clear-without-a-grant-is-never-entered) | reachability | high |
+| [mirror-accepting-gate-is-skipped-when-control-is-absent](#mirror-accepting-gate-is-skipped-when-control-is-absent) | safety | high |
+| [mirror-staleness-undetectable-on-memory-tool-read-path](#mirror-staleness-undetectable-on-memory-tool-read-path) | safety | high |
 | [intent-control-transition-write-is-silently-dropped](#intent-control-transition-write-is-silently-dropped) | safety | high |
 | [intent-identity-is-producer-and-operation-key](#intent-identity-is-producer-and-operation-key) | safety | high |
 | [intent-terminal-state-is-entered-at-most-once](#intent-terminal-state-is-entered-at-most-once) | safety | high |
@@ -842,7 +849,9 @@ Every record in this group is invalidated at HEAD: the claim mirror module, its
 tables, and its tests are gone from `crates/memory-store` (see Provenance), and
 the replacement for what the mirror's consumers relied on is
 `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
-transform catalog. The group is kept as the record of the source tree.
+transform catalog. The group is kept as the record of the source tree; its
+`file:line` references are host-repository citations at `eb6da6109` (see
+Provenance) and name files that no longer exist here.
 
 Nine records on a projection of an authority that lives outside this store. The
 mirror is not a cache and not a second source of truth: every mutation is push-only
@@ -868,8 +877,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:177-250` applies one receipt and
 replays the identical bytes, asserting `applied_effect_count` then `replayed`. It
 does not cover a replay interleaved with an intervening receipt, a replay after
@@ -921,8 +931,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test reuses a receipt ID with different bytes.
 `tests/claim_mirror.rs:223-232` replays identical bytes only; `:592-624` covers a
 different guard (equal revision, different content, fresh receipt).
@@ -968,8 +979,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:304-320` skips one effect and asserts
 `CheckpointMismatch`. Only the single-project, single-gap case; no multi-project
 interleave where another project occupies the intervening global effect IDs, which
@@ -1019,8 +1031,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:290-303` asserts one wrong generation is
 refused, and `:528-591` asserts untouched rows are restamped. Neither covers the
 untouched-project arm, where a receipt must present `stored + 0` for a project it
@@ -1112,8 +1125,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: yes - `tests/claim_mirror.rs:377-458` and `:482-517` drive the whole
 cycle, and `tests/claim_intent_ledger.rs:288-335` drives the grant. Every one of
 these calls `begin_claim_store_rebuild` directly from test code.
@@ -1176,8 +1190,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:461-479`
 (`u10_scenario_7_equivalent_restart_seed_is_idempotent`) seeds the same snapshot
 twice with no grant and asserts both succeed (`:470-471`), then mutates one
@@ -1242,8 +1257,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test applies a receipt while the control row says
 `draining`, and no test asserts that an absent control row permits an apply. The
 absent-row case is the production default
@@ -1300,8 +1316,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test reads through `list_committed_claims` with a mirror
 deliberately behind the authority, because nothing in the store can express "behind
 the authority".
