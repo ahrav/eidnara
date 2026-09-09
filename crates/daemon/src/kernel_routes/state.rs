@@ -128,6 +128,21 @@ impl KernelOutcome {
     pub const fn is_available(&self) -> bool {
         matches!(self, Self::Available)
     }
+
+    /// The state key the TypeScript client indexes guidance by: the serde `kind`
+    /// tag, followed by `:` and the `reason` when the serialized outcome has one.
+    ///
+    /// Both halves are read from the serialized form, so the key is the same
+    /// function of the wire object the client applies (`stateKey` in
+    /// `kernel-client/state.ts`) and cannot drift from a variant or reason rename.
+    pub fn state_key(&self) -> String {
+        let value = serde_json::to_value(self).expect("KernelOutcome serializes");
+        let kind = value["kind"].as_str().expect("tagged with a string kind");
+        match value["reason"].as_str() {
+            Some(reason) => format!("{kind}:{reason}"),
+            None => kind.to_string(),
+        }
+    }
 }
 
 /// Every [`UnavailableReason`], in declaration order.
@@ -450,6 +465,49 @@ mod tests {
         outcomes.extend(ALL_CONFLICT.iter().copied().map(KernelOutcome::conflict));
         outcomes.extend(ALL_INVALID.iter().copied().map(KernelOutcome::invalid));
         outcomes
+    }
+
+    #[test]
+    fn state_key_joins_kind_and_reason_with_a_colon() {
+        assert_eq!(KernelOutcome::Available.state_key(), "available");
+        assert_eq!(
+            KernelOutcome::Abstained {
+                lag_positions: 3,
+                oldest_unconsumed_age_ms: 4,
+            }
+            .state_key(),
+            "abstained"
+        );
+        assert_eq!(
+            KernelOutcome::unavailable(UnavailableReason::StoreStarting).state_key(),
+            "unavailable:store_starting"
+        );
+        assert_eq!(
+            KernelOutcome::invalid(InvalidReason::ProjectMismatch).state_key(),
+            "invalid:project_mismatch"
+        );
+        let keys: std::collections::HashSet<String> = all_outcomes()
+            .iter()
+            .map(KernelOutcome::state_key)
+            .collect();
+        assert_eq!(keys.len(), all_outcomes().len(), "state keys are distinct");
+    }
+
+    /// The TypeScript client derives its key from the wire object as
+    /// `kind` or `kind:reason` (`stateKey` in `kernel-client/state.ts`); the
+    /// Rust key must be the same function of the same serialized fields for
+    /// every outcome, so a variant rename moves both or neither.
+    #[test]
+    fn state_key_agrees_with_the_serialized_kind_and_reason_for_every_outcome() {
+        for outcome in all_outcomes() {
+            let wire = serde_json::to_value(&outcome).unwrap();
+            let kind = wire["kind"].as_str().unwrap();
+            let expected = match wire.get("reason").and_then(serde_json::Value::as_str) {
+                Some(reason) => format!("{kind}:{reason}"),
+                None => kind.to_string(),
+            };
+            assert_eq!(outcome.state_key(), expected, "{wire}");
+        }
     }
 
     #[test]

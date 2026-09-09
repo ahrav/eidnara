@@ -22,9 +22,12 @@ This record does not depend on the sibling commons worktree.
 `crates/memory-store/src/lib.rs:6903-6907`. Inside one fenced transaction it checks:
 
 1. the current cache-state row version at `:6992-6998`;
-2. the expected row version at `:7000-7007`;
-3. the optional claim snapshot vector at `:7008-7017`; and
-4. the optional compartment maximum sequence at `:7018-7027`.
+2. the expected row version at `:7000-7007`; and
+3. the optional compartment maximum sequence at `:7018-7027`.
+
+A third check, the optional claim snapshot vector, sat between items 2 and 3
+until the transform moved to canonical kernel rows; `TransformCommit` no longer
+carries a vector and the commit performs no mirror comparison.
 
 The compartment check queries `MAX(sequence)` from `compartments` and returns
 a CAS conflict when it differs from the supplied value (`:7018-7026`).

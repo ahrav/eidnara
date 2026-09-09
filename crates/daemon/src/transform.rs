@@ -10,6 +10,7 @@
 //! Synthetic items are stripped before boundary detection.
 //! The `eidnara_*` ID namespace is reserved so synthetic blocks cannot masquerade as the real boundary.
 
+use crate::canonical_memory::{CanonicalMemory, CanonicalMemoryRead};
 use crate::compartment_coverage::{M0ContentEpoch, fold_m0_content_epoch, resolve_coverage};
 use crate::config::{
     CacheTtlProvenance, DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS, DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
@@ -21,16 +22,12 @@ use crate::injection::{
     InjectionOutcome, advance_injection_from_meta, capture_todo_state_on_bust,
     injection_pending_after_capture, is_synthetic_todo_id,
 };
-use crate::m0_compose::{
-    compose_m0_from_claim_mirror, trim_claims_to_budget, trim_user_profile_to_budget,
-};
+use crate::m0_compose::{compose_m0, trim_user_profile_to_budget};
 use crate::m1_compose::{
-    M1RevisionReadTimings, M1RevisionSignal, claim_and_render_notes, compose_m1_from_claim_mirror,
-    m1_revision_signal_parts_for_claims_timed,
+    M1RevisionReadTimings, M1RevisionSignal, claim_and_render_notes, compose_m1,
+    m1_revision_signal_timed,
 };
-use crate::memory_render::{
-    M0Inputs, M1_PLACEHOLDER, MirroredClaimMemory, render_claim_memory_block, render_m0,
-};
+use crate::memory_render::{M0Inputs, M1_PLACEHOLDER, render_m0, render_memory_block};
 use crate::project_docs::read_project_docs_canonical;
 pub use crate::prompt_surface::PromptSurfacePreset;
 use crate::prompt_surface::PromptSurfaceSelection;
@@ -49,15 +46,15 @@ use crate::tail_hygiene::{
 };
 use crate::wire;
 use cache_stability::{CoreState, FrozenUnit, PassInput};
-use context_core::claim_operation::{SnapshotVector, canonical_snapshot_vector};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
     BlockIdentity, Channel1AppendRow, DeferredExecuteState, LineageAnchor, LineageConstituent,
     LineageDescentDisposition, LineageDescentRequest, MemoryStore, MemoryStoreError, ModuleMeta,
     ModuleUsage, NoteDelivery, PassSchedulerObservation, PendingAgentDrop,
-    PendingChannel2Directive, PendingRewriteState, ServedBlockFingerprint, StoredCompartment,
-    TagCacheSummary, TagMintInput, TagRow, TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow,
-    TransformCommit, TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
+    PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
+    ServedBlockFingerprint, StoredCompartment, TagCacheSummary, TagMintInput, TagRow,
+    TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
+    TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -506,12 +503,15 @@ pub struct ReductionDecision {
 }
 
 pub struct ProducerContext<'a> {
-    pub claim_lane: Option<&'a ClaimLaneWire>,
+    /// The canonical memory read pinned for this pass, already trimmed to the
+    /// memory budget; every memory surface of the pass composes from it. `None`
+    /// when memory is disabled and no read was taken, so a HARD then records no
+    /// composition rather than one for a block it never rendered.
+    pub project_memory: Option<CanonicalMemoryRead>,
     pub project_path: &'a str,
     pub note_project_path: &'a str,
     pub project_directory: &'a str,
     pub history_budget_tokens: f64,
-    pub memory_budget_tokens: f64,
     pub user_profile_budget_tokens: f64,
     pub memory_enabled: bool,
     pub inject_docs: bool,
@@ -542,11 +542,27 @@ pub struct ProducerContext<'a> {
     pub injected_reductions: Vec<ReductionDecision>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClaimLaneWire {
-    pub enabled: bool,
-    pub snapshot_vector: Option<SnapshotVector>,
+impl ProducerContext<'_> {
+    /// The injectable rows of the pinned read; empty when no read was taken or it was withheld.
+    fn project_memory_rows(&self) -> &[CanonicalMemory] {
+        self.project_memory
+            .as_ref()
+            .map_or(&[], CanonicalMemoryRead::rows)
+    }
+
+    /// The row digest the m1 revision signal folds in; `None` when no read was taken or it was withheld.
+    fn project_memory_revision(&self) -> Option<u64> {
+        self.project_memory
+            .as_ref()
+            .and_then(CanonicalMemoryRead::revision)
+    }
+
+    /// The composition record a HARD freezes beside its m0 bytes; `None` when no read was taken.
+    fn project_memory_composition(&self) -> Option<ProjectMemoryComposition> {
+        self.project_memory
+            .as_ref()
+            .map(CanonicalMemoryRead::composition)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -633,8 +649,6 @@ pub struct TransformRequest {
     /// A missing host-resolved execute threshold falls back to route-bind configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_execute_threshold: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_lane: Option<ClaimLaneWire>,
     /// `auto_search_enabled` permits automatic memory hints on an independent cache-busting pass.
     #[serde(
         default = "default_auto_search_enabled",
@@ -812,8 +826,6 @@ struct TransformRequestWire {
     cache_ttl: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effective_execute_threshold: Option<f64>,
-    #[serde(default)]
-    claim_lane: Option<ClaimLaneWire>,
     #[serde(default = "default_auto_search_enabled")]
     auto_search_enabled: bool,
     #[serde(default = "default_auto_search_score_threshold")]
@@ -916,7 +928,6 @@ impl<'de> Deserialize<'de> for TransformRequest {
             clear_reasoning_age: wire.clear_reasoning_age,
             cache_ttl: wire.cache_ttl,
             effective_execute_threshold: wire.effective_execute_threshold,
-            claim_lane: wire.claim_lane,
             auto_search_enabled: wire.auto_search_enabled,
             auto_search_score_threshold: wire.auto_search_score_threshold,
             auto_search_min_prompt_chars: wire.auto_search_min_prompt_chars,
@@ -1368,10 +1379,9 @@ pub struct TransformResponse {
     pub committed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_ordinal: Option<u64>,
+    /// The project-memory composition the served m0 was frozen with; absent until the first HARD and when memory is disabled.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub rendered_revision_locators: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub memory_snapshot_vector: Option<SnapshotVector>,
+    pub project_memory: Option<ProjectMemoryComposition>,
     /// The module omits `descent_edge_id` on ordinary, subagent, defer-only protocol-error, and pending-build-skew responses.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub lineage_switch_consumed_id: Option<u64>,
@@ -1437,8 +1447,7 @@ impl TransformResponse {
             surface_state: SurfaceState::Inactive,
             committed: false,
             coverage_ordinal: None,
-            rendered_revision_locators: None,
-            memory_snapshot_vector: None,
+            project_memory: None,
             lineage_switch_consumed_id: None,
             lineage_descent_disposition: None,
             cache_ttl: None,
@@ -1716,105 +1725,22 @@ impl From<crate::m1_compose::M1ComposeError> for TransformError {
     }
 }
 
-fn claim_state_vector(state: &memory_store::claim_mirror::ClaimMirrorState) -> SnapshotVector {
-    SnapshotVector {
-        vector_version: state.vector_version,
-        database_incarnation_id: state.database_incarnation_id.clone(),
-        workspace_epoch: state.workspace_epoch.clone(),
-        project_generations: state
-            .projects
-            .iter()
-            .map(|(project_id, project)| (project_id.to_string(), project.project_generation))
-            .collect(),
-        policy_generations: state
-            .projects
-            .iter()
-            .map(|(project_id, project)| (project_id.to_string(), project.policy_generation))
-            .collect(),
-    }
-}
-
-/// The claim-memory read returns `Ok(None)` only when no claim data applies and propagates storage failures.
-///
-fn claim_mirror_read_outcome<T>(
-    result: Result<T, memory_store::claim_mirror::ClaimMirrorError>,
-) -> Result<Option<T>, MemoryStoreError> {
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(memory_store::claim_mirror::ClaimMirrorError::Store(error)) => Err(error.into()),
-        Err(_) => Ok(None),
-    }
-}
-
-/// Reads claim data only when the mirror remains at the caller's snapshot vector across both reads.
-///
-/// `Ok(None)` means no claim data applies or the mirror changed during the read.
-fn claim_snapshot_for_context(
-    store: &MemoryStore,
-    ctx: &ProducerContext<'_>,
-) -> Result<Option<(SnapshotVector, Vec<MirroredClaimMemory>)>, MemoryStoreError> {
-    let Some(lane) = ctx.claim_lane else {
-        return Ok(None);
-    };
-    let Some(expected) = lane
-        .enabled
-        .then_some(lane.snapshot_vector.as_ref())
-        .flatten()
-    else {
-        return Ok(None);
-    };
-    let Some(before) = claim_mirror_read_outcome(store.claim_mirror_state())?.flatten() else {
-        return Ok(None);
-    };
-    let before_vector = claim_state_vector(&before);
-    let (Ok(before_canonical), Ok(expected_canonical)) = (
-        canonical_snapshot_vector(&before_vector),
-        canonical_snapshot_vector(expected),
-    ) else {
-        return Ok(None);
-    };
-    if before_canonical != expected_canonical {
-        return Ok(None);
-    }
-    let Some(rows) =
-        claim_mirror_read_outcome(store.list_claim_mirror(&before.database_incarnation_id, None))?
-    else {
-        return Ok(None);
-    };
-    let claims = rows
-        .iter()
-        .filter_map(|row| MirroredClaimMemory::try_from(row).ok())
-        .collect::<Vec<_>>();
-    let Some(after) = claim_mirror_read_outcome(store.claim_mirror_state())?.flatten() else {
-        return Ok(None);
-    };
-    let after_vector = claim_state_vector(&after);
-    if canonical_snapshot_vector(&after_vector).ok().as_deref() != Some(&before_canonical) {
-        return Ok(None);
-    }
-    Ok(Some((after_vector, claims)))
-}
-
-#[allow(clippy::too_many_arguments)]
 fn revision_signal_for_context(
     store: &MemoryStore,
-    _project_path: &str,
     note_project_path: &str,
     session_id: &str,
     user_profile_version: u64,
     memory_enabled: bool,
-    _now_ms: i64,
     timings: Option<&mut M1RevisionReadTimings>,
     ctx: &ProducerContext<'_>,
 ) -> Result<M1RevisionSignal, MemoryStoreError> {
-    let vector = claim_snapshot_for_context(store, ctx)?.map(|(vector, _)| vector);
-    m1_revision_signal_parts_for_claims_timed(
+    m1_revision_signal_timed(
         store,
         note_project_path,
         session_id,
         user_profile_version,
         memory_enabled,
-        vector.as_ref(),
+        ctx.project_memory_revision(),
         timings,
     )
 }
@@ -1825,42 +1751,7 @@ fn compose_m0_for_context(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     ctx: &ProducerContext<'_>,
 ) -> Result<crate::m0_compose::M0Composition, crate::m0_compose::M0ComposeError> {
-    let snapshot = claim_snapshot_for_context(store, ctx)?;
-    let claims = snapshot
-        .as_ref()
-        .map(|(_, claims)| claims.as_slice())
-        .unwrap_or(&[]);
-    let mut composition = compose_m0_from_claim_mirror(store, inputs, claims, estimate_tokens)?;
-    composition.claim_snapshot_vector = snapshot.map(|(vector, _)| vector);
-    Ok(composition)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compose_m1_for_context(
-    store: &MemoryStore,
-    _project_path: &str,
-    note_project_path: &str,
-    session_id: &str,
-    meta: &ModuleMeta,
-    now_ms: i64,
-    memory_enabled: bool,
-    _memory_budget_tokens: f64,
-    user_profile_budget_tokens: f64,
-    temporal_awareness: bool,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
-    _ctx: &ProducerContext<'_>,
-) -> Result<crate::m1_compose::M1Composition, crate::m1_compose::M1ComposeError> {
-    compose_m1_from_claim_mirror(
-        store,
-        note_project_path,
-        session_id,
-        meta,
-        now_ms,
-        memory_enabled,
-        user_profile_budget_tokens,
-        temporal_awareness,
-        estimate_tokens,
-    )
+    compose_m0(store, inputs, ctx.project_memory_rows(), estimate_tokens)
 }
 
 /// The CAS retry reloads and reclassifies because classification depends on freshly loaded state.
@@ -2402,35 +2293,20 @@ fn todo_synthesis_verdict(req: &TransformRequest) -> Option<bool> {
 struct AdditiveM0Composition {
     m0_bytes: String,
     mural: Option<crate::m0_compose::M0MuralBlock>,
-    rendered_revision_locators: Vec<String>,
-    claim_snapshot_vector: Option<SnapshotVector>,
 }
 
 fn compose_additive_m0(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
-    _expiry_cutoff_ms: i64,
     serializer_profile: Option<SerializerProfile>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<AdditiveM0Composition, TransformError> {
-    let claim_snapshot = claim_snapshot_for_context(store, ctx)?;
-    // `compose_additive_m0` advances the vector even when memory is disabled to match `m0` freshness bookkeeping, but renders no claim content.
-    // `compose_additive_m0` does not render the mirror when memory is disabled because it includes shared claims from foreign projects.
-    let selected_claims = if ctx.memory_enabled {
-        claim_snapshot
-            .as_ref()
-            .map(|(_, claims)| {
-                trim_claims_to_budget(claims, ctx.memory_budget_tokens, estimate_tokens)
-            })
-            .unwrap_or_default()
+    let selected_memories = if ctx.memory_enabled {
+        ctx.project_memory_rows()
     } else {
-        Vec::new()
+        &[]
     };
-    let rendered_revision_locators = selected_claims
-        .iter()
-        .map(|claim| claim.revision_locator.clone())
-        .collect();
     let user_profile = if ctx.memory_enabled {
         store.load_active_user_memories()?
     } else {
@@ -2458,21 +2334,16 @@ fn compose_additive_m0(
         },
         estimate_tokens,
     );
-    let claim_memory = render_claim_memory_block(&selected_claims, "project-memory");
-    if !claim_memory.is_empty() {
+    let project_memory = render_memory_block(selected_memories, "project-memory");
+    if !project_memory.is_empty() {
         m0_bytes.push_str("\n\n");
-        m0_bytes.push_str(&claim_memory);
+        m0_bytes.push_str(&project_memory);
     }
     if mural.is_some() {
         m0_bytes.push_str("\n\n");
         m0_bytes.push_str(crate::m0_compose::MEMORY_MURAL_BLOCK);
     }
-    Ok(AdditiveM0Composition {
-        m0_bytes,
-        mural,
-        rendered_revision_locators,
-        claim_snapshot_vector: claim_snapshot.map(|(vector, _)| vector),
-    })
+    Ok(AdditiveM0Composition { m0_bytes, mural })
 }
 
 fn apply_additive_only(
@@ -2523,13 +2394,8 @@ fn apply_additive_only(
     let serializer_profile = SerializerProfile::parse(&req.serializer_profile);
     let tagging_surface_requested =
         crate::tagging_surface_active(serializer_profile, req.tool_present);
-    let content_epoch = m0_content_epoch_for_pass(
-        store,
-        req,
-        ctx,
-        serializer_profile,
-        tagging_surface_requested,
-    )?;
+    let content_epoch =
+        m0_content_epoch_for_pass(req, serializer_profile, tagging_surface_requested);
     let additive_render_identity = format!(
         "additive-only-v2|{}",
         render_identity_base(req, &content_epoch.prompt_surface_epoch)
@@ -2543,19 +2409,12 @@ fn apply_additive_only(
         render_config_change(&loaded.meta, req, &effective_render_config, false);
 
     let mut m1_revision_read_timings = M1RevisionReadTimings::default();
-    let m1_visibility_cutoff_ms = if loaded.meta.initialized {
-        loaded.meta.expiry_cutoff_ms
-    } else {
-        ctx.now_ms
-    };
     let m1_signal = revision_signal_for_context(
         store,
-        ctx.project_path,
         ctx.note_project_path,
         &req.session_id,
         loaded.meta.user_profile_version,
         ctx.memory_enabled,
-        m1_visibility_cutoff_ms,
         Some(&mut m1_revision_read_timings),
         ctx,
     )?;
@@ -2696,14 +2555,8 @@ fn apply_additive_only(
     let mut note_deliveries = Vec::new();
     match plan {
         PassPlan::Hard | PassPlan::MigrateHard => {
-            let composition = compose_additive_m0(
-                store,
-                req,
-                ctx,
-                ctx.now_ms,
-                serializer_profile,
-                estimate_tokens,
-            )?;
+            let composition =
+                compose_additive_m0(store, req, ctx, serializer_profile, estimate_tokens)?;
             let (note_body, hard_note_deliveries) = claim_and_render_notes(
                 store,
                 ctx.note_project_path,
@@ -2742,12 +2595,10 @@ fn apply_additive_only(
 
             let applied_m1_signal = revision_signal_for_context(
                 store,
-                ctx.project_path,
                 ctx.note_project_path,
                 &req.session_id,
                 meta.user_profile_version,
                 ctx.memory_enabled,
-                ctx.now_ms,
                 Some(&mut m1_revision_read_timings),
                 ctx,
             )?;
@@ -2764,8 +2615,7 @@ fn apply_additive_only(
             meta.coverage_compartment_seq = Some(applied_m1_signal.max_compartment_seq);
             // When compaction is off, record the current maximum sequence so pre-existing rows do not appear in `m1` as new history.
             meta.folded_compartment_seq = applied_m1_signal.max_compartment_seq;
-            meta.rendered_revision_locators = composition.rendered_revision_locators;
-            meta.claim_snapshot_vector = composition.claim_snapshot_vector;
+            meta.project_memory = ctx.project_memory_composition();
             meta.expiry_cutoff_ms = ctx.now_ms;
             meta.memory_disabled = !ctx.memory_enabled;
             meta.m1_revision = applied_m1_signal.revision;
@@ -2782,19 +2632,16 @@ fn apply_additive_only(
             let mut additive_meta = meta.clone();
             additive_meta.folded_compartment_seq = m1_signal.max_compartment_seq;
             additive_meta.coverage_ordinal = None;
-            let m1 = compose_m1_for_context(
+            let m1 = compose_m1(
                 store,
-                ctx.project_path,
                 ctx.note_project_path,
                 &req.session_id,
                 &additive_meta,
                 meta.expiry_cutoff_ms,
                 ctx.memory_enabled,
-                ctx.memory_budget_tokens,
                 ctx.user_profile_budget_tokens,
                 ctx.temporal_awareness,
                 crate::token_cache::cached_estimate_tokens,
-                ctx,
             )?;
             note_deliveries = m1.note_deliveries.clone();
             let profile_rendered = m1.profile_rendered;
@@ -2808,12 +2655,10 @@ fn apply_additive_only(
             })?;
             let applied_m1_signal = revision_signal_for_context(
                 store,
-                ctx.project_path,
                 ctx.note_project_path,
                 &req.session_id,
                 meta.user_profile_version,
                 ctx.memory_enabled,
-                meta.expiry_cutoff_ms,
                 Some(&mut m1_revision_read_timings),
                 ctx,
             )?;
@@ -2887,7 +2732,6 @@ fn apply_additive_only(
                 meta: &meta,
                 consumed_drop_ids: &[],
                 first_applied_command_ids: &[],
-                claim_snapshot_vector: meta.claim_snapshot_vector.as_ref(),
                 compartment_max_seq: commit_compartment_max_seq,
                 project_root: Some(ctx.project_directory),
                 first_divergence: None,
@@ -2968,11 +2812,7 @@ fn apply_additive_only(
             surface_state: SurfaceState::Inactive,
             committed: commit_required,
             coverage_ordinal: None,
-            rendered_revision_locators: meta
-                .claim_snapshot_vector
-                .as_ref()
-                .map(|_| meta.rendered_revision_locators.clone()),
-            memory_snapshot_vector: meta.claim_snapshot_vector.clone(),
+            project_memory: meta.project_memory.clone(),
             lineage_switch_consumed_id: None,
             lineage_descent_disposition: None,
             cache_ttl: None,
@@ -3229,13 +3069,8 @@ fn apply_once(
         SurfaceState::Inactive
     };
 
-    let mut content_epoch = m0_content_epoch_for_pass(
-        store,
-        req,
-        ctx,
-        serializer_profile,
-        tagging_surface_requested,
-    )?;
+    let mut content_epoch =
+        m0_content_epoch_for_pass(req, serializer_profile, tagging_surface_requested);
     let render_identity = render_identity_base(req, &content_epoch.prompt_surface_epoch);
     let persisted_mural_hash = frozen_mural_hash(&loaded.core).to_string();
     let stable_effective_render_config_base =
@@ -3354,7 +3189,6 @@ fn apply_once(
                         meta: &next_meta,
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
-                        claim_snapshot_vector: next_meta.claim_snapshot_vector.as_ref(),
                         compartment_max_seq: None,
                         project_root: Some(ctx.project_directory),
                         first_divergence: first_divergence_json.as_deref(),
@@ -3390,8 +3224,7 @@ fn apply_once(
                 req,
                 mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
                 row_version,
-                rendered_revision_locators: next_meta.rendered_revision_locators.clone(),
-                memory_snapshot_vector: next_meta.claim_snapshot_vector.clone(),
+                project_memory: next_meta.project_memory.clone(),
                 revert_epoch: next_meta.revert_epoch,
                 reasoning_watermark: next_meta
                     .reasoning_cleared_through_tag
@@ -3465,7 +3298,6 @@ fn apply_once(
                 meta: &meta,
                 consumed_drop_ids: &[],
                 first_applied_command_ids: &[],
-                claim_snapshot_vector: meta.claim_snapshot_vector.as_ref(),
                 compartment_max_seq: None,
                 project_root: Some(ctx.project_directory),
                 first_divergence: first_divergence_json.as_deref(),
@@ -3502,8 +3334,7 @@ fn apply_once(
             req,
             mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
             row_version,
-            rendered_revision_locators: meta.rendered_revision_locators.clone(),
-            memory_snapshot_vector: meta.claim_snapshot_vector.clone(),
+            project_memory: meta.project_memory.clone(),
             revert_epoch: meta.revert_epoch,
             reasoning_watermark: meta
                 .reasoning_cleared_through_tag
@@ -3568,19 +3399,12 @@ fn apply_once(
     let pending_agent_drops = store.load_pending_agent_drops(&req.session_id)?;
     timings.pending_drops = elapsed_ms(pending_drops_started_at);
 
-    let m1_visibility_cutoff_ms = if loaded.meta.initialized {
-        loaded.meta.expiry_cutoff_ms
-    } else {
-        ctx.now_ms
-    };
     let mut m1_signal = revision_signal_for_context(
         store,
-        ctx.project_path,
         ctx.note_project_path,
         &req.session_id,
         loaded.meta.user_profile_version,
         ctx.memory_enabled,
-        m1_visibility_cutoff_ms,
         Some(&mut m1_revision_read_timings),
         ctx,
     )?;
@@ -3616,12 +3440,10 @@ fn apply_once(
     if divergence_candidate.is_some() && !boundary_divergence_retry {
         let revalidated = revision_signal_for_context(
             store,
-            ctx.project_path,
             ctx.note_project_path,
             &req.session_id,
             loaded.meta.user_profile_version,
             ctx.memory_enabled,
-            m1_visibility_cutoff_ms,
             Some(&mut m1_revision_read_timings),
             ctx,
         )?;
@@ -4000,6 +3822,7 @@ fn apply_once(
         first_fold_due,
         ttl_expired: scheduler_outcome.idle_ttl_fired,
         coverage_fold_due: system_absorb_hard_due,
+        project_memory_delta: external_revision_changed || project_memory_epoch_hard_due,
         reconcile_hard_due,
         coverage_delta: compartment_seq_changed_since_meta,
         m1_delta: current_m1_digest != loaded.meta.m1_revision,
@@ -4221,7 +4044,6 @@ fn apply_once(
                         history_budget_tokens: ctx.history_budget_tokens,
                         covered_system_messages: &covered_system_messages,
                         memory_enabled: ctx.memory_enabled,
-                        memory_budget_tokens: ctx.memory_budget_tokens,
                         user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                         inject_docs: ctx.inject_docs,
                         temporal_awareness: ctx.temporal_awareness,
@@ -4270,12 +4092,10 @@ fn apply_once(
                             meta.last_recut = outcome.last_recut;
                             m1_signal = revision_signal_for_context(
                                 store,
-                                ctx.project_path,
                                 ctx.note_project_path,
                                 &req.session_id,
                                 loaded.meta.user_profile_version,
                                 ctx.memory_enabled,
-                                m1_visibility_cutoff_ms,
                                 Some(&mut m1_revision_read_timings),
                                 ctx,
                             )?;
@@ -4300,7 +4120,6 @@ fn apply_once(
                                     history_budget_tokens: ctx.history_budget_tokens,
                                     covered_system_messages: &recut_covered_system_messages,
                                     memory_enabled: ctx.memory_enabled,
-                                    memory_budget_tokens: ctx.memory_budget_tokens,
                                     user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                                     inject_docs: ctx.inject_docs,
                                     temporal_awareness: ctx.temporal_awareness,
@@ -4440,17 +4259,14 @@ fn apply_once(
                 meta.coverage_start_ordinal = comp.first_covered_ordinal;
                 meta.coverage_compartment_seq = Some(comp.folded_compartment_seq);
                 meta.folded_compartment_seq = comp.folded_compartment_seq;
-                meta.rendered_revision_locators = comp.rendered_revision_locators;
-                meta.claim_snapshot_vector = comp.claim_snapshot_vector;
+                meta.project_memory = ctx.project_memory_composition();
                 meta.expiry_cutoff_ms = ctx.now_ms; // FROZEN here, atomic with the m0 bytes
                 let applied_m1_signal = revision_signal_for_context(
                     store,
-                    ctx.project_path,
                     ctx.note_project_path,
                     &req.session_id,
                     loaded.meta.user_profile_version,
                     ctx.memory_enabled,
-                    meta.expiry_cutoff_ms,
                     Some(&mut m1_revision_read_timings),
                     ctx,
                 )?;
@@ -4463,19 +4279,16 @@ fn apply_once(
             }
             PassPlan::Soft => {
                 meta.memory_disabled = !ctx.memory_enabled;
-                let m1 = compose_m1_for_context(
+                let m1 = compose_m1(
                     store,
-                    ctx.project_path,
                     ctx.note_project_path,
                     &req.session_id,
                     &meta,
                     meta.expiry_cutoff_ms,
                     ctx.memory_enabled,
-                    ctx.memory_budget_tokens,
                     ctx.user_profile_budget_tokens,
                     ctx.temporal_awareness,
                     crate::token_cache::cached_estimate_tokens,
-                    ctx,
                 )?;
                 note_deliveries = m1.note_deliveries.clone();
                 let m0_tokens = core
@@ -4517,7 +4330,6 @@ fn apply_once(
                             history_budget_tokens: ctx.history_budget_tokens,
                             covered_system_messages: &covered_system_messages,
                             memory_enabled: ctx.memory_enabled,
-                            memory_budget_tokens: ctx.memory_budget_tokens,
                             user_profile_budget_tokens: ctx.user_profile_budget_tokens,
                             inject_docs: ctx.inject_docs,
                             temporal_awareness: ctx.temporal_awareness,
@@ -4618,17 +4430,14 @@ fn apply_once(
                     meta.coverage_start_ordinal = comp.first_covered_ordinal;
                     meta.coverage_compartment_seq = Some(comp.folded_compartment_seq);
                     meta.folded_compartment_seq = comp.folded_compartment_seq;
-                    meta.rendered_revision_locators = comp.rendered_revision_locators;
-                    meta.claim_snapshot_vector = comp.claim_snapshot_vector;
+                    meta.project_memory = ctx.project_memory_composition();
                     meta.expiry_cutoff_ms = ctx.now_ms;
                     let applied_m1_signal = revision_signal_for_context(
                         store,
-                        ctx.project_path,
                         ctx.note_project_path,
                         &req.session_id,
                         loaded.meta.user_profile_version,
                         ctx.memory_enabled,
-                        meta.expiry_cutoff_ms,
                         Some(&mut m1_revision_read_timings),
                         ctx,
                     )?;
@@ -4702,12 +4511,10 @@ fn apply_once(
                     }
                     let applied_m1_signal = revision_signal_for_context(
                         store,
-                        ctx.project_path,
                         ctx.note_project_path,
                         &req.session_id,
                         loaded.meta.user_profile_version,
                         ctx.memory_enabled,
-                        meta.expiry_cutoff_ms,
                         Some(&mut m1_revision_read_timings),
                         ctx,
                     )?;
@@ -5133,7 +4940,6 @@ fn apply_once(
                 meta: &meta,
                 consumed_drop_ids: &consumed_drop_ids,
                 first_applied_command_ids: &first_applied_command_ids,
-                claim_snapshot_vector: meta.claim_snapshot_vector.as_ref(),
                 compartment_max_seq: is_bust_pass.then_some(m1_signal.max_compartment_seq),
                 project_root: Some(ctx.project_directory),
                 first_divergence: first_divergence_json.as_deref(),
@@ -5239,11 +5045,7 @@ fn apply_once(
             surface_state,
             committed: commit_required,
             coverage_ordinal: meta.coverage_ordinal,
-            rendered_revision_locators: meta
-                .claim_snapshot_vector
-                .as_ref()
-                .map(|_| meta.rendered_revision_locators.clone()),
-            memory_snapshot_vector: meta.claim_snapshot_vector.clone(),
+            project_memory: meta.project_memory.clone(),
             lineage_switch_consumed_id: lineage_state.acknowledge_edge,
             lineage_descent_disposition: lineage_state.disposition.map(str::to_string),
             cache_ttl: None,
@@ -5545,12 +5347,10 @@ fn m0_mural_input(
 }
 
 fn m0_content_epoch_for_pass(
-    _store: &MemoryStore,
     req: &TransformRequest,
-    ctx: &ProducerContext<'_>,
     serializer_profile: Option<SerializerProfile>,
     tagging_surface_requested: bool,
-) -> Result<M0ContentEpoch, TransformError> {
+) -> M0ContentEpoch {
     let memory_render_epoch = if crate::MEMORY_RENDER_FORMAT_EPOCH != 0 {
         format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH)
     } else {
@@ -5574,12 +5374,7 @@ fn m0_content_epoch_for_pass(
         &req.system_prompt_hash,
         &prompt_surface_selection(req),
     );
-    Ok(M0ContentEpoch {
-        workspace_fingerprint: ctx
-            .claim_lane
-            .and_then(|lane| lane.snapshot_vector.as_ref())
-            .map(|vector| vector.workspace_epoch.clone())
-            .unwrap_or_default(),
+    M0ContentEpoch {
         upgrade_state: req.upgrade_state.clone(),
         memory_content_epoch: String::new(),
         memory_render_epoch,
@@ -5588,7 +5383,7 @@ fn m0_content_epoch_for_pass(
         prompt_surface_epoch,
         tagger_feature_epoch,
         transition_epoch: String::new(),
-    })
+    }
 }
 
 fn render_config_change(
@@ -6810,8 +6605,7 @@ struct PendingPassthroughArgs<'a> {
     req: &'a TransformRequest,
     mutation_exempt_mid: Option<String>,
     row_version: u64,
-    rendered_revision_locators: Vec<String>,
-    memory_snapshot_vector: Option<SnapshotVector>,
+    project_memory: Option<ProjectMemoryComposition>,
     revert_epoch: u64,
     reasoning_watermark: u64,
     transition_consumed: bool,
@@ -6862,8 +6656,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         req,
         mutation_exempt_mid,
         row_version,
-        rendered_revision_locators,
-        memory_snapshot_vector,
+        project_memory,
         revert_epoch,
         reasoning_watermark,
         transition_consumed,
@@ -6880,10 +6673,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         TransformResponse::passthrough(Vec::new(), req.full_array_fingerprint.clone());
     response.messages = Some(messages);
     response.row_version = row_version;
-    response.rendered_revision_locators = memory_snapshot_vector
-        .as_ref()
-        .map(|_| rendered_revision_locators);
-    response.memory_snapshot_vector = memory_snapshot_vector;
+    response.project_memory = project_memory;
     response.surface_state = surface_state;
     response.committed = committed;
     response.materialize_reason = materialize_reason;
@@ -11884,6 +11674,8 @@ struct MaterializeReasonInputs {
     first_fold_due: bool,
     ttl_expired: bool,
     coverage_fold_due: bool,
+    /// The project-memory revision moved, or an out-of-process memory epoch change is pending.
+    project_memory_delta: bool,
     reconcile_hard_due: bool,
     coverage_delta: bool,
     m1_delta: bool,
@@ -11901,6 +11693,7 @@ fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<String>
         first_fold_due,
         ttl_expired,
         coverage_fold_due,
+        project_memory_delta,
         reconcile_hard_due,
         coverage_delta,
         m1_delta,
@@ -11921,6 +11714,8 @@ fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<String>
                 "coverage_fold"
             } else if ttl_expired {
                 "ttl_expiry"
+            } else if project_memory_delta {
+                "project_memory_epoch"
             } else if reconcile_hard_due {
                 "reconcile"
             } else {
@@ -13216,7 +13011,6 @@ pub(crate) mod tests {
 
     fn req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
         TransformRequest {
-            claim_lane: None,
             cache_ttl: None,
             effective_execute_threshold: None,
             auto_search_enabled: true,
@@ -13381,12 +13175,11 @@ pub(crate) mod tests {
     /// is deterministic.
     fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
         ProducerContext {
-            claim_lane: None,
+            project_memory: canonical_read(1, &[]),
             project_path: project,
             note_project_path: project,
             project_directory: dir,
             history_budget_tokens: 60_000.0,
-            memory_budget_tokens: 8_000.0,
             user_profile_budget_tokens: 4_000.0,
             memory_enabled: true,
             inject_docs: true,
@@ -13412,199 +13205,174 @@ pub(crate) mod tests {
         ctx
     }
 
-    fn claim_vector(generation: i64) -> SnapshotVector {
-        SnapshotVector {
-            vector_version: 1,
-            database_incarnation_id: "a".repeat(32),
-            workspace_epoch: "workspace-1".to_string(),
-            project_generations: BTreeMap::from([("1".to_string(), generation)]),
-            policy_generations: BTreeMap::from([("1".to_string(), generation)]),
-        }
+    /// A pinned canonical read with `(object_id, category, content)` rows.
+    fn canonical_read(
+        known_as_of: i64,
+        rows: &[(&str, &str, &str)],
+    ) -> Option<CanonicalMemoryRead> {
+        Some(CanonicalMemoryRead::Available(
+            crate::canonical_memory::CanonicalMemorySnapshot::new(
+                known_as_of,
+                false,
+                rows.iter()
+                    .map(|(object_id, category, content)| {
+                        crate::canonical_memory::CanonicalMemory {
+                            object_id: object_id.to_string(),
+                            category: category.to_string(),
+                            content: content.to_string(),
+                        }
+                    })
+                    .collect(),
+            ),
+        ))
     }
 
-    fn mirrored_claim(
-        content: &str,
-        generation: i64,
-    ) -> memory_store::claim_mirror::CommittedClaimMirrorRow {
-        let public_claim_id = format!("mcm_{}", "b".repeat(32));
-        let content_digest = context_core::claim_operation::sha256_hex_utf8(content);
-        memory_store::claim_mirror::CommittedClaimMirrorRow {
-            revision_locator: format!("{public_claim_id}/r1/{content_digest}"),
-            public_claim_id,
-            project_id: 1,
-            content: content.to_string(),
-            content_digest,
-            attributes: json!({
-                "category": "CONSTRAINTS",
-                "normalizedHash": "hash",
-                "importance": 80,
-                "memoryScope": "project",
-                "sharing": "private",
-                "expiresAt": null,
-            }),
-            lifecycle: memory_store::claim_mirror::ClaimMirrorLifecycle::Active,
-            applicability: json!({"assertions": []}),
-            policy: json!({"dispositions": []}),
-            provenance_label: Some("repo".to_string()),
-            project_generation: generation,
-            policy_generation: generation,
-        }
-    }
-
-    fn seed_claim_mirror(
-        store: &MemoryStore,
-        content: &str,
-    ) -> memory_store::claim_mirror::CommittedClaimMirrorRow {
-        let claim = mirrored_claim(content, 1);
-        store
-            .replace_claim_mirror_snapshot(
-                &memory_store::claim_mirror::ClaimMirrorSnapshot {
-                    mirror_version: 1,
-                    vector: claim_vector(1),
-                    project_checkpoints: BTreeMap::from([(1, 0)]),
-                    claims: vec![claim.clone()],
-                },
-                1,
-            )
-            .unwrap();
-        claim
+    fn served_bytes(response: &TransformResponse) -> String {
+        serde_json::to_string(response.messages()).unwrap()
     }
 
     #[test]
-    fn claim_policy_revocation_invalidates_m0_without_revision_change() {
+    fn canonical_memory_composes_the_project_memory_block_and_pins_the_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        let claim = seed_claim_mirror(&store, "claim-only rule");
-        let lane = ClaimLaneWire {
-            enabled: true,
-            snapshot_vector: Some(claim_vector(1)),
-        };
         let mut ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
-        ctx.claim_lane = Some(&lane);
-        let request = req("claim-policy", "cfg", vec![item("u1", 1, "prompt")]);
-        let first = transform(&store, &request, &ctx).unwrap();
-        let first_bytes = serde_json::to_string(first.messages()).unwrap();
-        assert!(first_bytes.contains("claim-only rule"));
-        assert!(first_bytes.contains(&claim.public_claim_id));
-        assert!(!first_bytes.contains("#1:"));
+        ctx.project_memory = canonical_read(
+            42,
+            &[
+                ("mem_rule", "PROJECT_RULES", "Keep the public contract."),
+                (
+                    "mem_anti",
+                    "REJECTED_APPROACH",
+                    "Do not resurrect the shelved design.",
+                ),
+            ],
+        );
+        let request = req(
+            "canonical-memory",
+            "cfg",
+            vec![item("u1", 1, "live prompt")],
+        );
+        let response = transform(&store, &request, &ctx).unwrap();
+        assert_eq!(response.action, "HARD");
+        let bytes = served_bytes(&response);
+        assert!(bytes.contains("<project-memory>"));
+        assert!(bytes.contains("mem_rule: Keep the public contract."));
+        assert!(!bytes.contains("shelved design"));
         assert_eq!(
-            first.rendered_revision_locators,
-            Some(vec![claim.revision_locator.clone()])
+            response.project_memory,
+            Some(ProjectMemoryComposition::Canonical {
+                known_as_of: 42,
+                truncated: false,
+                revision: ctx
+                    .project_memory_revision()
+                    .expect("the injected read is available"),
+            })
         );
+        assert_eq!(
+            store.load("canonical-memory").unwrap().meta.project_memory,
+            response.project_memory
+        );
+    }
 
-        store
-            .apply_claim_mirror_receipt(
-                &memory_store::claim_mirror::ClaimMirrorReceiptGroup {
-                    mirror_version: 1,
-                    receipt_id: 1,
-                    expected_effect_count: 1,
-                    vector: claim_vector(2),
-                    effects: vec![memory_store::claim_mirror::ClaimMirrorEffect {
-                        effect_id: 1,
-                        previous_project_effect_id: 0,
-                        effect_key: "policy-revoke".to_string(),
-                        project_id: 1,
-                        generation: 2,
-                        change_kind:
-                            memory_store::claim_mirror::ClaimMirrorChangeKind::Verification,
-                        public_claim_id: claim.public_claim_id.clone(),
-                        revision_locator: claim.revision_locator.clone(),
-                        claim: None,
-                    }],
+    #[test]
+    fn withheld_canonical_read_composes_no_block_and_differs_from_empty_memory() {
+        let empty_dir = tempfile::tempdir().unwrap();
+        let empty_store = store(empty_dir.path());
+        let request = req("withheld-memory", "cfg", vec![item("u1", 1, "live prompt")]);
+        let empty_ctx = pctx("git:proj", empty_dir.path().to_str().unwrap(), 1);
+        let empty = transform(&empty_store, &request, &empty_ctx).unwrap();
+        assert!(!served_bytes(&empty).contains("<project-memory>"));
+        let empty_composition = empty
+            .project_memory
+            .clone()
+            .expect("first HARD records the composition");
+        assert!(matches!(
+            empty_composition,
+            ProjectMemoryComposition::Canonical {
+                known_as_of: 1,
+                truncated: false,
+                ..
+            }
+        ));
+
+        for (verdict, state) in [
+            (
+                crate::kernel_routes::KernelOutcome::Stale {
+                    lag_positions: 10_000,
+                    oldest_unconsumed_age_ms: 0,
                 },
-                2,
-            )
-            .unwrap();
-        let revoked_lane = ClaimLaneWire {
-            enabled: true,
-            snapshot_vector: Some(claim_vector(2)),
-        };
-        ctx.claim_lane = Some(&revoked_lane);
-        let second = transform(&store, &request, &ctx).unwrap();
-        assert_eq!(second.action, "HARD");
-        assert!(
-            !serde_json::to_string(second.messages())
-                .unwrap()
-                .contains("claim-only rule")
-        );
-        assert_eq!(second.rendered_revision_locators, Some(Vec::new()));
+                "stale",
+            ),
+            (
+                crate::kernel_routes::KernelOutcome::Abstained {
+                    lag_positions: 0,
+                    oldest_unconsumed_age_ms: 60_000,
+                },
+                "abstained",
+            ),
+            (
+                crate::kernel_routes::KernelOutcome::unavailable(
+                    crate::kernel_routes::UnavailableReason::StoreStarting,
+                ),
+                "unavailable:store_starting",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let mut ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
+            ctx.project_memory = Some(CanonicalMemoryRead::Withheld(verdict));
+            let withheld = transform(&store, &request, &ctx).unwrap();
+            assert_eq!(withheld.action, "HARD");
+            assert!(!served_bytes(&withheld).contains("<project-memory>"));
+            assert_eq!(
+                withheld.project_memory,
+                Some(ProjectMemoryComposition::Withheld {
+                    state: state.to_string()
+                })
+            );
+            assert_ne!(withheld.project_memory, Some(empty_composition.clone()));
+            assert_eq!(
+                store.load("withheld-memory").unwrap().meta.project_memory,
+                withheld.project_memory
+            );
+        }
     }
 
     #[test]
-    fn claim_vector_commit_fence_never_publishes_interleaved_stale_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(store(dir.path()));
-        let claim = seed_claim_mirror(&store, "interleaved stale claim");
-        let lane = ClaimLaneWire {
-            enabled: true,
-            snapshot_vector: Some(claim_vector(1)),
-        };
-        let mut ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
-        ctx.claim_lane = Some(&lane);
-        let request = req("claim-fence", "cfg", vec![item("u1", 1, "live prompt")]);
-        let hook_store = Arc::clone(&store);
-        install_transform_attempt_hook("claim-fence", move || {
-            hook_store
-                .apply_claim_mirror_receipt(
-                    &memory_store::claim_mirror::ClaimMirrorReceiptGroup {
-                        mirror_version: 1,
-                        receipt_id: 1,
-                        expected_effect_count: 1,
-                        vector: claim_vector(2),
-                        effects: vec![memory_store::claim_mirror::ClaimMirrorEffect {
-                            effect_id: 1,
-                            previous_project_effect_id: 0,
-                            effect_key: "interleaved-revoke".to_string(),
-                            project_id: 1,
-                            generation: 2,
-                            change_kind:
-                                memory_store::claim_mirror::ClaimMirrorChangeKind::Verification,
-                            public_claim_id: claim.public_claim_id.clone(),
-                            revision_locator: claim.revision_locator.clone(),
-                            claim: None,
-                        }],
-                    },
-                    2,
-                )
-                .unwrap();
-        });
-        let response = transform(&store, &request, &ctx).unwrap();
-        let bytes = serde_json::to_string(response.messages()).unwrap();
-        assert!(!bytes.contains("interleaved stale claim"));
-        assert!(bytes.contains("live prompt"));
-        assert!(response.memory_snapshot_vector.is_none());
-    }
-
-    #[test]
-    fn mismatched_claim_vector_removes_stale_claim_lane_only() {
+    fn project_memory_revision_change_requests_a_hard_fold() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        seed_claim_mirror(&store, "stale claim bytes");
-        let active_lane = ClaimLaneWire {
-            enabled: true,
-            snapshot_vector: Some(claim_vector(1)),
-        };
+        let request = req("memory-revision", "cfg", vec![item("u1", 1, "live prompt")]);
         let mut ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
-        ctx.claim_lane = Some(&active_lane);
-        let request = req("claim-mismatch", "cfg", vec![item("u1", 1, "live prompt")]);
-        assert!(
-            serde_json::to_string(transform(&store, &request, &ctx).unwrap().messages())
-                .unwrap()
-                .contains("stale claim bytes")
-        );
+        ctx.project_memory = canonical_read(5, &[("mem_rule", "PROJECT_RULES", "First rule.")]);
+        assert_eq!(transform(&store, &request, &ctx).unwrap().action, "HARD");
 
-        let mut future = claim_vector(1);
-        future.vector_version = 2;
-        let future_lane = ClaimLaneWire {
-            enabled: true,
-            snapshot_vector: Some(future),
-        };
-        ctx.claim_lane = Some(&future_lane);
-        let response = transform(&store, &request, &ctx).unwrap();
-        let bytes = serde_json::to_string(response.messages()).unwrap();
-        assert!(!bytes.contains("stale claim bytes"));
-        assert!(bytes.contains("live prompt"));
-        assert!(response.memory_snapshot_vector.is_none());
+        // The same rows at a later snapshot leave the composition alone.
+        ctx.project_memory = canonical_read(9, &[("mem_rule", "PROJECT_RULES", "First rule.")]);
+        let steady = transform(&store, &request, &ctx).unwrap();
+        assert_ne!(steady.action, "HARD");
+
+        // A changed row set folds and rematerializes m0 with the new block.
+        ctx.project_memory = canonical_read(10, &[("mem_rule", "PROJECT_RULES", "Second rule.")]);
+        let folded = transform(&store, &request, &ctx).unwrap();
+        assert_eq!(folded.action, "HARD");
+        assert_eq!(
+            folded.materialize_reason.as_deref(),
+            Some("project_memory_epoch")
+        );
+        let bytes = served_bytes(&folded);
+        assert!(bytes.contains("Second rule."));
+        assert!(!bytes.contains("First rule."));
+
+        // A withheld read folds again to a served m0 without the block.
+        ctx.project_memory = Some(CanonicalMemoryRead::Withheld(
+            crate::kernel_routes::KernelOutcome::unavailable(
+                crate::kernel_routes::UnavailableReason::StoreBusy,
+            ),
+        ));
+        let withheld = transform(&store, &request, &ctx).unwrap();
+        assert_eq!(withheld.action, "HARD");
+        assert!(!served_bytes(&withheld).contains("<project-memory>"));
     }
 
     fn with_usage(
@@ -23488,7 +23256,6 @@ pub(crate) mod tests {
                     meta: &loaded.meta,
                     consumed_drop_ids: &[pending[0].id],
                     first_applied_command_ids: &command_ids,
-                    claim_snapshot_vector: None,
                     compartment_max_seq: None,
                     project_root: None,
                     first_divergence: None,
@@ -23575,7 +23342,6 @@ pub(crate) mod tests {
                     meta: &loaded.meta,
                     consumed_drop_ids: &[pending_a[0].id],
                     first_applied_command_ids: &command_a,
-                    claim_snapshot_vector: None,
                     compartment_max_seq: None,
                     project_root: None,
                     first_divergence: None,
@@ -24460,7 +24226,6 @@ pub(crate) mod tests {
         fold_m0_content_epoch(
             cfg,
             &M0ContentEpoch {
-                workspace_fingerprint: String::new(),
                 upgrade_state: String::new(),
                 memory_content_epoch: String::new(),
                 memory_render_epoch,
@@ -24565,7 +24330,6 @@ pub(crate) mod tests {
             last_render_config: fold_m0_content_epoch(
                 "cfg",
                 &M0ContentEpoch {
-                    workspace_fingerprint: String::new(),
                     upgrade_state: String::new(),
                     memory_content_epoch: String::new(),
                     memory_render_epoch: format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
@@ -26081,7 +25845,6 @@ pub(crate) mod tests {
                 meta: &poisoned.meta,
                 consumed_drop_ids: &[],
                 first_applied_command_ids: &[],
-                claim_snapshot_vector: None,
                 compartment_max_seq: None,
                 project_root: None,
                 first_divergence: None,

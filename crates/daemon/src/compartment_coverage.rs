@@ -22,14 +22,12 @@ use memory_store::StoredCompartment;
 /// docs_hash is a snapshot marker, not a HARD-fold trigger.
 ///
 /// Content-only staleness may defer until the next HARD fold; composition changes require a HARD.
-/// Changes to `workspace_fingerprint`, `upgrade_state`, or the external memory epoch require a HARD because they alter m0 composition or format.
+/// Changes to `upgrade_state` or the external memory epoch require a HARD because they alter m0 composition or format.
 /// An external memory-epoch change requires a HARD because m0 cannot otherwise observe the out-of-process edit.
 /// Structure staleness requires a HARD fold.
 /// Only composition and structure markers belong in this struct.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct M0ContentEpoch {
-    /// `workspace_fingerprint` tracks workspace membership and shared-category policy for visible foreign memories.
-    pub workspace_fingerprint: String,
     /// A session upgrade rewrites the memory pool under the current taxonomy, changing `upgrade_state`.
     pub upgrade_state: String,
     /// `memory_content_epoch` changes only for out-of-process edits or session-upgrade migrations; in-session mutations use the m1 delta.
@@ -56,12 +54,16 @@ pub struct M0ContentEpoch {
 
 /// Any difference in `base_render_config` or an epoch field changes the returned string.
 /// The encoding length-prefixes each field so no value can forge a field boundary.
+///
+/// `ws` is a fixed empty slot. Every persisted `last_render_config` contains
+/// it, so it stays in the fold to keep stored render identities byte-identical;
+/// dropping it would refold every session on its next pass.
 pub fn fold_m0_content_epoch(base_render_config: &str, epoch: &M0ContentEpoch) -> String {
     fn part(label: &str, value: &str) -> String {
         format!("{label}:{}:{value}", value.len())
     }
     let mut parts = vec![
-        part("ws", &epoch.workspace_fingerprint),
+        part("ws", ""),
         part("upg", &epoch.upgrade_state),
         part("mem", &epoch.memory_content_epoch),
     ];
@@ -267,11 +269,23 @@ mod tests {
         );
     }
 
+    /// Every persisted `last_render_config` carries a `ws:0:` slot, so the fold
+    /// must keep emitting it or every stored session refolds on its next pass.
+    #[test]
+    fn fold_keeps_the_fixed_workspace_slot_stored_sessions_carry() {
+        let stored_before_canonical_memory =
+            "sys0|tools0|model0|prof0|m0epoch[ws:0:;upg:0:;mem:0:]";
+        assert_eq!(
+            fold_m0_content_epoch("sys0|tools0|model0|prof0", &M0ContentEpoch::default()),
+            stored_before_canonical_memory,
+            "a default epoch must reproduce the identity stored sessions already hold"
+        );
+    }
+
     #[test]
     fn m0_content_epoch_folds_legibly_and_deterministically() {
         let base = "sys0|tools0|model0|prof0";
         let epoch = M0ContentEpoch {
-            workspace_fingerprint: "wf1".into(),
             upgrade_state: "u1".into(),
             memory_content_epoch: "mc1".into(),
             memory_render_epoch: String::new(),
@@ -283,11 +297,10 @@ mod tests {
         };
         let folded = fold_m0_content_epoch(base, &epoch);
         assert_eq!(
-            folded, "sys0|tools0|model0|prof0|m0epoch[ws:3:wf1;upg:2:u1;mem:3:mc1]",
+            folded, "sys0|tools0|model0|prof0|m0epoch[ws:0:;upg:2:u1;mem:3:mc1]",
             "omitted epoch-zero fields must not change existing render identities"
         );
         assert!(folded.starts_with(base));
-        assert!(folded.contains("ws:3:wf1"));
         assert!(folded.contains("mem:3:mc1"));
         assert!(!folded.contains("mre:"), "global epoch zero must be inert");
         assert!(
@@ -352,13 +365,13 @@ mod tests {
         assert_ne!(folded, fold_m0_content_epoch(base, &e3));
 
         let forge_a = M0ContentEpoch {
-            workspace_fingerprint: "a".into(),
-            upgrade_state: "bc".into(),
+            upgrade_state: "a".into(),
+            memory_content_epoch: "bc".into(),
             ..Default::default()
         };
         let forge_b = M0ContentEpoch {
-            workspace_fingerprint: "ab".into(),
-            upgrade_state: "c".into(),
+            upgrade_state: "ab".into(),
+            memory_content_epoch: "c".into(),
             ..Default::default()
         };
         assert_ne!(

@@ -299,10 +299,17 @@ describe("A1 prompt-surface golden", () => {
             expect(guidance).toContain("`mcm_<32hex>`");
             expect(guidance).toMatch(/Never interchange (these ID forms|them)\./);
 
-            const publicClaimIdLine = guidance.split("\n").find((line) => line.includes("mcm_…"));
-            expect(publicClaimIdLine).toContain("display-only when");
-            expect(publicClaimIdLine).toContain("`objectId`/`objectIds`");
-            expect(publicClaimIdLine).toContain("`publicClaimId`/`publicClaimIds`");
+            // `<project-memory>` lines render kernel object IDs, so the guidance must
+            // present them as direct `objectId` handles and only fall back to a
+            // content search for the claim-ID schema.
+            const projectMemoryLine = guidance
+                .split("\n")
+                .find((line) => line.includes("`<project-memory>`") && line.includes("ID"));
+            expect(projectMemoryLine).toContain("`mem_<32hex>`");
+            expect(projectMemoryLine).toContain("`objectId`/`objectIds`");
+            expect(projectMemoryLine).toContain("`publicClaimId`/`publicClaimIds`");
+            expect(projectMemoryLine).toMatch(/display-only/);
+            expect(projectMemoryLine).not.toContain("mcm_…");
 
             const sourceScopeLine = guidance
                 .split("\n")

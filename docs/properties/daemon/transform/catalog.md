@@ -313,6 +313,7 @@ believes.
 | [lineage-descent-write-precedes-the-array-validity-guards](#lineage-descent-write-precedes-the-array-validity-guards) | safety | high |
 | [revert-epoch-bumps-at-most-once-per-logical-recut](#revert-epoch-bumps-at-most-once-per-logical-recut) | safety | medium |
 | [defer-commit-carries-no-compartment-fence](#defer-commit-carries-no-compartment-fence) | safety | high |
+| [canonical-read-staleness-is-distinguishable-from-emptiness](#canonical-read-staleness-is-distinguishable-from-emptiness) | safety | high |
 | [speculative-tag-numbering-has-two-authorities](#speculative-tag-numbering-has-two-authorities) | safety | medium |
 | [output-cache-replace-trails-the-accepted-commit](#output-cache-replace-trails-the-accepted-commit) | safety | high |
 | [exactly-one-core-step-executes-per-pass](#exactly-one-core-step-executes-per-pass) | safety | high |
@@ -648,6 +649,69 @@ Open questions:
   (`:445-447`). Is a session whose output always exceeds the budget permanently uncached, and
   does anything observe that? Suggest one record in 4c's cache-validity focus rather than
   here.
+
+### canonical-read-staleness-is-distinguishable-from-emptiness
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
+(`transform.rs:13278`) drives a stale, an abstained, and an unavailable verdict
+through the compaction-off engine and compares each frozen composition with the
+empty canonical composition; `withheld_reads_record_the_verdict_and_inject_nothing`
+(`canonical_memory.rs`) pins the record-level distinction; the integration tests
+in `tests/transform_canonical_memory.rs` pin `known_as_of` and `truncated` over a
+real kernel store, reach the withheld arm through the reader with a lagging
+registered consumer (`a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it`),
+and show a memory-disabled pass records no composition at all
+(`a_memory_disabled_pass_takes_no_canonical_read`). All run in CI under
+`cargo test --workspace`.
+Guarantee: A HARD pass whose canonical memory read was not served (stale,
+abstained, or unavailable) composes no `<project-memory>` block and records
+`ProjectMemoryComposition::Withheld { state }` in `ModuleMeta.project_memory`
+and in the response; that record is never equal to the `Canonical { .. }`
+record a served read with zero injectable rows produces, and a pass that took
+no read because memory is disabled records `None`, not a `Canonical` record.
+Check: `always` - for every pass that freezes m0 with
+`ctx.project_memory == Some(CanonicalMemoryRead::Withheld(_))`, the committed
+`meta.project_memory` is `Some(Withheld { state })` with `state` equal to the
+verdict's `KernelOutcome::state_key()`, and the frozen m0 bytes contain no
+`<project-memory>` element; with `ctx.project_memory == None` the committed
+record is `None`. `always` because the record is written on every HARD
+(`transform.rs:2618`, `:4262`, `:4433`) through one accessor
+(`ProducerContext::project_memory_composition`, `:561`) from the same pinned
+read every memory surface of the pass composed from, so there is no optional
+path.
+Fault/timing angle: The read is taken once per pass in `lib.rs:8020`, through
+`Handler::project_memory_read` (`lib.rs:4828`), before the `run_transform`
+closure, and the same value is handed to a historian firing the pass triggers
+(`lib.rs:5119`), so a store phase change or lag change after that point cannot
+split one pass between a served block and a withheld record. The
+verdict-to-record mapping is total over `KernelOutcome`
+(`canonical_memory.rs:101-112`, `state.rs` `state_key`).
+Required faults and enabling state: A `KernelOpenCoordinator` phase other than
+`Ready` (store starting or unavailable), an `outbox_lag` or `read_visible`
+error, or a registered consumer past either lag threshold
+(`serving.rs:58-63`, `decide_for_tip_read`). With no registered consumer the
+tip read is served, so the withheld arm needs one of those faults; the unit
+test injects the verdict directly; the integration test registers a consumer
+and publishes 10,000 outbox positions past its checkpoint.
+Confidence: high - [evidence](evidence/canonical-read-staleness-is-distinguishable-from-emptiness.md).
+Read the three `meta.project_memory` writers, the accessors every consumer goes
+through (`rows()` empty and `composition()` withheld are produced by one
+`match` each; the context accessors map `None` to empty rows, `None` revision,
+and `None` composition), and the durable enum whose two variants have different
+serde tags.
+Existing check: `transform.rs:13278`, `canonical_memory.rs` tests, and
+`tests/transform_canonical_memory.rs` as described.
+Impact: If a withheld read were recorded as `Canonical` with zero rows, an
+operator reading a session with no memory block could not tell "this project
+has no injectable memory" from "the store was starting when m0 froze", which is
+the silent collapse the retired claim-mirror fence had
+(`mirror-read-fence-relies-on-generation-advance`, now invalidated). If a
+memory-disabled pass recorded `Canonical`, the same operator could not tell
+"disabled" from "served and empty".
+Open questions: None.
 
 ## Group 2: transition integrity
 

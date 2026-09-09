@@ -61,15 +61,35 @@ impl ReadRequest {
 }
 
 pub(crate) struct ReadResponse {
-    known_as_of: i64,
-    tip: i64,
-    rows: Vec<VisibleRow>,
+    pub(crate) known_as_of: i64,
+    pub(crate) tip: i64,
+    pub(crate) rows: Vec<VisibleRow>,
     /// Whether rows beyond [`MAX_READ_ROWS`] were dropped. Byte-budget truncation happens at serialization, so the response's flag can be `true` while `truncated` here is `false`. commentlint: allow(JUDGE)
-    truncated: bool,
+    pub(crate) truncated: bool,
     /// Decision rows keyed by `object_id`, looked up at `known_as_of`. Total
     /// over the visible decision-kind rows in `rows`: a missing entry fails
     /// the read, so a `None` lookup during rendering means a non-decision row.
-    decisions: HashMap<String, DecisionRow>,
+    pub(crate) decisions: HashMap<String, DecisionRow>,
+}
+
+/// The rows a read admits before [`MAX_READ_ROWS`] and [`MAX_READ_ROW_BYTES`] apply, so a bounded read spends its budget only on rows the caller can use rather than on the rest of the project's surface. commentlint: allow(JUDGE)
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RowSelection<'a> {
+    All,
+    /// Applied in the kernel query, so a targeted lookup addresses a row the bounded unfiltered read drops. commentlint: allow(JUDGE)
+    Objects(&'a [String]),
+    DomainDecisions(&'a str),
+}
+
+impl RowSelection<'_> {
+    fn keeps(self, row: &VisibleRow) -> bool {
+        match self {
+            Self::All | Self::Objects(_) => true,
+            Self::DomainDecisions(domain_id) => {
+                row.object.object_kind == "decision" && row.object.domain_id == domain_id
+            }
+        }
+    }
 }
 
 /// Orders rows for a max-heap whose maximum is the serving-order-last row: an older `created_commit_seq` ranks greater, and among rows of one commit the greater `object_id` ranks greater, so the heap's peek is exactly the row a full newest-first sort then truncate drops first. commentlint: allow(JUDGE)
@@ -141,11 +161,15 @@ pub(crate) fn read_visible(
     project: &ProjectBinding,
     surface: Surface,
     as_of: Option<i64>,
-    object_ids: Option<&[String]>,
+    selection: RowSelection<'_>,
 ) -> Result<ReadResponse, KernelError> {
     let requested = match as_of {
         Some(as_of) => as_of,
         None => store.tip()?,
+    };
+    let object_ids = match selection {
+        RowSelection::Objects(ids) => Some(ids),
+        RowSelection::All | RowSelection::DomainDecisions(_) => None,
     };
     // The kernel keeps rows whose scope names another project out of the
     // snapshot, so the read costs the project's rows and not the store's.
@@ -156,7 +180,7 @@ pub(crate) fn read_visible(
     // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter. commentlint: allow(JUDGE)
     let mut newest = NewestRows::new(MAX_READ_ROWS);
     for row in visible.rows {
-        if filter.matches(row.scope_id.as_deref(), &mut terms)? {
+        if selection.keeps(&row) && filter.matches(row.scope_id.as_deref(), &mut terms)? {
             newest.push(row);
         }
     }
@@ -288,9 +312,13 @@ impl Handler {
         let store = scope.store.clone();
         let project = scope.project.clone();
         let object_ids = parsed.object_ids.clone();
-        let result =
-            blocking(move || read_visible(&store, &project, surface, as_of, object_ids.as_deref()))
-                .await;
+        let result = blocking(move || {
+            let selection = object_ids
+                .as_deref()
+                .map_or(RowSelection::All, RowSelection::Objects);
+            read_visible(&store, &project, surface, as_of, selection)
+        })
+        .await;
         let response = match result {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => return state_only(KernelOutcome::from(error)),
@@ -331,5 +359,51 @@ impl Handler {
                 "rows": rows,
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kernel::{ObjectRow, Sensitivity, SurfaceVisibility};
+
+    use super::*;
+
+    fn row(object_kind: &str, domain_id: &str) -> VisibleRow {
+        VisibleRow {
+            object: ObjectRow {
+                object_id: format!("{domain_id}-{object_kind}"),
+                object_kind: object_kind.to_string(),
+                domain_id: domain_id.to_string(),
+                source_kind: "repo".to_string(),
+                source_id: "lineage".to_string(),
+                source_revision: 1,
+                created_commit_seq: 1,
+                invalidated_commit_seq: None,
+                superseded_by: None,
+                sensitivity: Sensitivity::Normal,
+            },
+            visibility: SurfaceVisibility::Visible,
+            labeled: false,
+            scope_id: None,
+        }
+    }
+
+    #[test]
+    fn domain_selection_keeps_only_that_domains_decisions() {
+        let selection = RowSelection::DomainDecisions("memory");
+        assert!(selection.keeps(&row("decision", "memory")));
+        assert!(
+            !selection.keeps(&row("decision", "notes")),
+            "a decision from another domain must not spend the memory read's budget"
+        );
+        assert!(
+            !selection.keeps(&row("observation", "memory")),
+            "an observation carries no decision and must not spend the budget"
+        );
+        let ids = ["memory-decision".to_string()];
+        for selection in [RowSelection::All, RowSelection::Objects(&ids)] {
+            assert!(selection.keeps(&row("decision", "notes")));
+            assert!(selection.keeps(&row("observation", "memory")));
+        }
     }
 }

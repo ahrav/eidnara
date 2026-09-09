@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boundary;
+pub mod canonical_memory;
 pub mod caveman;
 pub(crate) mod chunk_text;
 pub mod classify;
@@ -120,8 +121,8 @@ pub mod bench_internals {
     use std::collections::HashSet;
     use std::sync::Mutex;
 
+    use crate::canonical_memory::CanonicalMemory;
     pub use crate::config::CacheTtlProvenance;
-    pub use crate::memory_render::MirroredClaimMemory;
     use crate::transform::{
         ProducerContext, SerializedOutputCache, TransformError, TransformRequest,
         TransformWithProjection,
@@ -151,10 +152,10 @@ pub mod bench_internals {
         (measurement.u, measurement.t)
     }
 
-    /// Returns how many leading claims fit the supplied token budget.
-    pub fn trim_claims_to_budget(claims: &[MirroredClaimMemory], budget_tokens: f64) -> usize {
-        crate::m0_compose::trim_claims_to_budget(
-            claims,
+    /// Returns how many leading memories fit the supplied token budget.
+    pub fn trim_memories_to_budget(memories: &[CanonicalMemory], budget_tokens: f64) -> usize {
+        crate::m0_compose::trim_memories_to_budget(
+            memories,
             budget_tokens,
             crate::token_cache::cached_estimate_tokens,
         )
@@ -3104,6 +3105,9 @@ struct HistorianPrepareContext<'a> {
     now: i64,
     snapshot_generation: u64,
     timings: &'a mut HistorianTriggerTimings,
+    /// The pass's pinned canonical memory read, so the historian prompt and the
+    /// m0 of the same pass compose from one snapshot.
+    project_memory: Option<&'a canonical_memory::CanonicalMemoryRead>,
 }
 
 #[derive(Default)]
@@ -4818,6 +4822,25 @@ impl Handler {
         }
     }
 
+    /// The canonical memory read for one pass, trimmed to the configured memory
+    /// budget; `None` when memory is disabled, so a disabled deployment never
+    /// touches the kernel store for it.
+    fn project_memory_read(
+        &self,
+        binding: &SessionBinding,
+        cfg: &DaemonConfig,
+        now_ms: i64,
+    ) -> Option<canonical_memory::CanonicalMemoryRead> {
+        cfg.memory_enabled.then(|| {
+            canonical_memory::read_project_memory(
+                &self.kernel,
+                &binding.kernel_project,
+                now_ms,
+                cfg.memory_budget_tokens,
+            )
+        })
+    }
+
     fn prepare_historian_fire(
         &self,
         store: Arc<MemoryStore>,
@@ -4831,6 +4854,7 @@ impl Handler {
             now,
             snapshot_generation,
             timings,
+            project_memory,
         } = prepare;
         let trigger_timer = HistorianTriggerTimer {
             started_at: Instant::now(),
@@ -5090,12 +5114,9 @@ impl Handler {
                 model_chain: cfg.model_chain.clone(),
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary,
-                memory_enabled: cfg.memory_enabled,
-                claim_snapshot_vector: parsed
-                    .claim_lane
-                    .as_ref()
-                    .filter(|lane| lane.enabled)
-                    .and_then(|lane| lane.snapshot_vector.clone()),
+                // `project_memory` was read under `binding.config`; the gate must come from the same config or a reload between bind and fire pairs `memory_enabled: true` with no read. commentlint: allow(JUDGE)
+                memory_enabled: binding.config.memory_enabled,
+                project_memory: project_memory.cloned(),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
@@ -5246,15 +5267,11 @@ impl Handler {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
+                project_memory: self.project_memory_read(binding, &cfg, now),
                 model_chain: cfg.model_chain,
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary: boundary.clone(),
                 memory_enabled: cfg.memory_enabled,
-                claim_snapshot_vector: parsed
-                    .claim_lane
-                    .as_ref()
-                    .filter(|lane| lane.enabled)
-                    .and_then(|lane| lane.snapshot_vector.clone()),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
@@ -6113,13 +6130,17 @@ impl Handler {
         let short_session = session_id.chars().take(12).collect::<String>();
         let age = format_traffic_age(newest_pass_at, now_ms());
         // Structured fields let reconciliation determine completion without parsing the summary or issuing another operation.
-        let m1_signal = match crate::m1_compose::m1_revision_signal_parts_for_claims_timed(
+        let m1_signal = match crate::m1_compose::m1_revision_signal_timed(
             &store,
             &binding.project_root.to_string_lossy(),
             &session_id,
             loaded.meta.user_profile_version,
             !loaded.meta.memory_disabled,
-            loaded.meta.claim_snapshot_vector.as_ref(),
+            loaded
+                .meta
+                .project_memory
+                .as_ref()
+                .and_then(memory_store::ProjectMemoryComposition::revision),
             None,
         ) {
             Ok(signal) => Some(signal),
@@ -7991,6 +8012,12 @@ impl Handler {
         let trace_received_started_at = Instant::now();
         let _ = store.trace_pass_received(&parsed.session_id, pass_now);
         let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
+        // One canonical read per pass: every memory surface of the pass (m0, the
+        // m1 revision signal, and a historian firing this pass triggers), and
+        // every attempt the closure below makes, composes from the same pinned
+        // snapshot. `None` when memory is disabled, so the kernel store is not
+        // touched for a block that is never rendered.
+        let project_memory = self.project_memory_read(&binding, &binding.config, pass_now);
         let run_transform = || {
             let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
                 || {
@@ -8004,7 +8031,7 @@ impl Handler {
                 },
             );
             let producer_ctx = transform::ProducerContext {
-                claim_lane: parsed.claim_lane.as_ref(),
+                project_memory: project_memory.clone(),
                 project_path: &project_path,
                 note_project_path: &note_project_path,
                 project_directory: &route_project_root,
@@ -8015,7 +8042,6 @@ impl Handler {
                 memory_enabled: binding.config.memory_enabled,
                 inject_docs: binding.config.inject_docs,
                 temporal_awareness: binding.config.temporal_awareness,
-                memory_budget_tokens: binding.config.memory_budget_tokens,
                 user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
                 now_ms: pass_now,
                 execute_threshold_percentage: parsed
@@ -8107,6 +8133,7 @@ impl Handler {
                     now: pass_now,
                     snapshot_generation,
                     timings: &mut trigger_timings,
+                    project_memory: project_memory.as_ref(),
                 },
             ) {
                 PreparedHistorianAction::Complete(diagnostics) => diagnostics,
@@ -8133,6 +8160,7 @@ impl Handler {
                                 now: pass_now,
                                 snapshot_generation,
                                 timings: &mut trigger_timings,
+                                project_memory: project_memory.as_ref(),
                             },
                         ) {
                             PreparedHistorianAction::Complete(diagnostics) => diagnostics,
@@ -8196,6 +8224,7 @@ impl Handler {
                     now: pass_now,
                     snapshot_generation,
                     timings: &mut trigger_timings,
+                    project_memory: project_memory.as_ref(),
                 },
             ) {
                 PreparedHistorianAction::Complete(diagnostics) => diagnostics,
@@ -29837,12 +29866,13 @@ mod tests {
             &baseline_store,
             &expected_request,
             &transform::ProducerContext {
-                claim_lane: None,
+                project_memory: Some(canonical_memory::CanonicalMemoryRead::Available(
+                    canonical_memory::CanonicalMemorySnapshot::new(0, false, Vec::new()),
+                )),
                 project_path: &baseline_project_path,
                 note_project_path: &baseline_project_path,
                 project_directory: &baseline_project_path,
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
-                memory_budget_tokens: 8_000.0,
                 user_profile_budget_tokens: 4_000.0,
                 memory_enabled: true,
                 inject_docs: true,

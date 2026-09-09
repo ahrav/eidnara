@@ -18,8 +18,7 @@ pub mod claim_mirror;
 use cache_stability::{DurabilityClass, FrozenUnit};
 use context_core::claim_operation::{
     CLAIM_REQUEST_ENCODING_VERSION, ClaimResultOutcome, canonical_json_encode,
-    canonical_snapshot_vector, compute_claim_operation_request_digest,
-    decode_claim_operation_result, is_lower_hex,
+    compute_claim_operation_request_digest, decode_claim_operation_result, is_lower_hex,
 };
 use context_core::redaction::{
     DETECTOR_ID, Detection, Redaction, detector_revision, detector_semantic_digest,
@@ -1315,6 +1314,34 @@ pub struct TailHygieneBaseline {
     pub content_signature: String,
 }
 
+/// The source of a project-memory block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectMemoryComposition {
+    /// The block was composed from canonical rows visible at `known_as_of`.
+    /// `truncated` records the kernel read's row or byte cap over the project's
+    /// visible rows, not the token budget the block was trimmed to; `revision`
+    /// digests exactly the rows the block rendered.
+    Canonical {
+        known_as_of: i64,
+        truncated: bool,
+        revision: u64,
+    },
+    /// The canonical read was not served and no block was composed.
+    /// `state` is the kernel state key of the verdict, such as `abstained` or `unavailable:store_starting`.
+    Withheld { state: String },
+}
+
+impl ProjectMemoryComposition {
+    /// The row digest of a composed block; `None` when the block was withheld.
+    pub fn revision(&self) -> Option<u64> {
+        match self {
+            Self::Canonical { revision, .. } => Some(*revision),
+            Self::Withheld { .. } => None,
+        }
+    }
+}
+
 /// The non-CoreState durable blob: bootstrap + epoch-detection + coverage watermark.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModuleMeta {
@@ -1459,12 +1486,12 @@ pub struct ModuleMeta {
     /// fall back to `folded_compartment_seq`.
     #[serde(default)]
     pub coverage_compartment_seq: Option<i64>,
-    /// The frozen m0 contains these claim revisions.
-    #[serde(default)]
-    pub rendered_revision_locators: Vec<String>,
-    /// The frozen m0/m1 pair represents this claim generation vector.
+    /// `Some` records either a pinned canonical snapshot or a withheld composition.
+    /// `None` occurs before the first HARD, or when memory was disabled at the
+    /// HARD and no canonical read was taken.
+    /// A withheld composition differs from an empty canonical snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_snapshot_vector: Option<SnapshotVector>,
+    pub project_memory: Option<ProjectMemoryComposition>,
     /// The expiry cutoff FROZEN at the last HARD (the module clock at materialization). A
     /// memory's expiry is judged against THIS, not a live clock, so every later SOFT/defer
     /// compose sees the SAME memory set the m0 baseline was built against — a memory
@@ -1779,8 +1806,6 @@ pub struct TransformCommit<'a> {
     pub meta: &'a ModuleMeta,
     pub consumed_drop_ids: &'a [i64],
     pub first_applied_command_ids: &'a [String],
-    /// Snapshot vector fenced by this cache commit.
-    pub claim_snapshot_vector: Option<&'a SnapshotVector>,
     /// Highest compartment sequence observed while composing a bust. The fenced commit
     /// re-reads this scalar so a publication interleaved between signal read and commit
     /// cannot be hidden behind the older rendered m1 bytes.
@@ -8430,7 +8455,6 @@ impl MemoryStore {
                 meta,
                 consumed_drop_ids,
                 first_applied_command_ids: &[],
-                claim_snapshot_vector: None,
                 compartment_max_seq: None,
                 project_root: None,
                 first_divergence: None,
@@ -8467,7 +8491,6 @@ impl MemoryStore {
             meta,
             consumed_drop_ids,
             first_applied_command_ids,
-            claim_snapshot_vector,
             compartment_max_seq,
             project_root,
             first_divergence,
@@ -8677,18 +8700,6 @@ impl MemoryStore {
                     .borrow()
                     .reject_recorded_identities(&["session_id"])
                     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            }
-            if let Some(expected_vector) = claim_snapshot_vector {
-                let current_vector = claim_mirror::snapshot_vector_from_connection(tx)?;
-                let vector_matches = current_vector
-                    .as_ref()
-                    .and_then(|vector| canonical_snapshot_vector(vector).ok())
-                    == canonical_snapshot_vector(expected_vector).ok();
-                if !vector_matches {
-                    return Ok(WriteDisposition::Replay(CommitOutcome::CasConflict(
-                        current.max(0) as u64,
-                    )));
-                }
             }
             if let Some(expected_seq) = compartment_max_seq {
                 let current_seq: i64 = tx.query_row(
@@ -16878,7 +16889,6 @@ mod tests {
             meta,
             consumed_drop_ids: &[],
             first_applied_command_ids: &[],
-            claim_snapshot_vector: None,
             compartment_max_seq: None,
             project_root: None,
             first_divergence: None,
@@ -16929,7 +16939,6 @@ mod tests {
                     meta: &meta,
                     consumed_drop_ids: &[],
                     first_applied_command_ids: &[],
-                    claim_snapshot_vector: None,
                     compartment_max_seq: None,
                     project_root: None,
                     first_divergence: produced_output_divergence.then_some("{}"),
@@ -17638,7 +17647,6 @@ mod tests {
                         meta: &loaded.meta,
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
-                        claim_snapshot_vector: None,
                         compartment_max_seq: None,
                         project_root: Some("/root-a"),
                         first_divergence: None,
@@ -19447,7 +19455,6 @@ mod tests {
                         meta: &meta,
                         consumed_drop_ids: &[],
                         first_applied_command_ids: &[],
-                        claim_snapshot_vector: None,
                         compartment_max_seq: None,
                         project_root: None,
                         first_divergence,

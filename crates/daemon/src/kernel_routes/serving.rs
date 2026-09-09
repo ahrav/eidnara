@@ -51,6 +51,17 @@ pub fn decide(lag: &OutboxLag) -> ServingDecision {
     ServingDecision::Available
 }
 
+/// Serving decision for a daemon-internal read of canonical rows at the tip.
+///
+/// Such a read consumes the commit log itself. Without a registered consumer,
+/// no derived state can lag behind canonical rows, so the read is available.
+pub fn decide_for_tip_read(lag: &OutboxLag) -> ServingDecision {
+    if lag.consumer_count == 0 {
+        return ServingDecision::Available;
+    }
+    decide(lag)
+}
+
 /// Explicit search reports why it cannot serve fresh rows; an automatic
 /// surface only abstains, because an injection path has no user to show a
 /// reason to and must not inject on an unjudged store.
@@ -146,6 +157,22 @@ mod tests {
                 oldest_unconsumed_age_ms: 0
             }
         );
+    }
+
+    #[test]
+    fn tip_read_diverges_from_the_route_only_without_a_consumer() {
+        assert_eq!(
+            decide_for_tip_read(&lag(None, None)),
+            ServingDecision::Available
+        );
+        for consumer_lag in [
+            lag(Some(0), Some(0)),
+            lag(Some(9_999), Some(59_999)),
+            lag(Some(10_000), Some(0)),
+            lag(Some(0), Some(60_000)),
+        ] {
+            assert_eq!(decide_for_tip_read(&consumer_lag), decide(&consumer_lag));
+        }
     }
 
     #[test]

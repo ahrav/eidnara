@@ -7,7 +7,6 @@ use crate::chunk_text::{
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{Local, TimeZone};
-use context_core::claim_operation::{SnapshotVector, canonical_snapshot_vector};
 use memory_store::{
     BlockIdentity, CompartmentSetGeneration, HistorianSelectedMessageIdentity, MemoryStore,
     StoredCompartment,
@@ -16,15 +15,15 @@ use serde_json::Value;
 use tokenizer::estimate_tokens;
 
 use crate::boundary::BoundaryResolution;
+use crate::canonical_memory::CanonicalMemoryRead;
 use crate::historian::{ChunkSnapshotItem, HistorianFireRequest, compute_chunk_fingerprint};
 use crate::historian_prompt::{
     CompartmentPromptInputs, build_compartment_agent_prompt, build_reference_blocks_from_stored,
-    render_historian_claim_block,
+    render_historian_memory_block,
 };
 use crate::historian_validate::{
     ChunkLine, HistorianChunk, MessageRange, StoredCompartmentRange, ValidateOptions,
 };
-use crate::memory_render::MirroredClaimMemory;
 use crate::wire::{BlockKind, FlatBlock, IngressMessage};
 
 /// `ChunkSnapshotOwnedItem` stores block identity and bytes used to fingerprint a historian chunk.
@@ -457,7 +456,11 @@ pub struct HistorianAssemblerConfig {
     pub token_budget: usize,
     pub boundary: BoundaryResolution,
     pub memory_enabled: bool,
-    pub claim_snapshot_vector: Option<SnapshotVector>,
+    /// The canonical memory read of this pass, already trimmed to the memory
+    /// budget by the reader; `None` when memory is disabled and no read was
+    /// taken. A withheld read renders no block and is logged, so summarization
+    /// keeps running through a kernel outage.
+    pub project_memory: Option<CanonicalMemoryRead>,
     pub auto_promote: bool,
     pub user_memory_collection_enabled: bool,
     pub extraction_free: bool,
@@ -551,51 +554,6 @@ pub enum AssembleHistorianFiringOutcome {
     NoFire(HistorianNoFireReason),
 }
 
-fn historian_claim_block(store: &MemoryStore, expected: Option<&SnapshotVector>) -> String {
-    let Some(expected) = expected else {
-        return String::new();
-    };
-    let Some(before) = store.claim_mirror_state().ok().flatten() else {
-        return String::new();
-    };
-    let vector = SnapshotVector {
-        vector_version: before.vector_version,
-        database_incarnation_id: before.database_incarnation_id.clone(),
-        workspace_epoch: before.workspace_epoch.clone(),
-        project_generations: before
-            .projects
-            .iter()
-            .map(|(id, project)| (id.to_string(), project.project_generation))
-            .collect(),
-        policy_generations: before
-            .projects
-            .iter()
-            .map(|(id, project)| (id.to_string(), project.policy_generation))
-            .collect(),
-    };
-    if canonical_snapshot_vector(&vector).ok() != canonical_snapshot_vector(expected).ok() {
-        return String::new();
-    }
-    let Some(claims) = store
-        .list_claim_mirror(&before.database_incarnation_id, None)
-        .ok()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| MirroredClaimMemory::try_from(row).ok())
-                .collect::<Vec<_>>()
-        })
-    else {
-        return String::new();
-    };
-    let Some(after) = store.claim_mirror_state().ok().flatten() else {
-        return String::new();
-    };
-    if before != after {
-        return String::new();
-    }
-    render_historian_claim_block(&claims)
-}
-
 /// Assembles one fenced historian firing or returns the first no-fire reason.
 pub fn assemble_historian_firing(
     store: &MemoryStore,
@@ -609,6 +567,13 @@ pub fn assemble_historian_firing(
         return Ok(AssembleHistorianFiringOutcome::NoFire(
             HistorianNoFireReason::NoModels,
         ));
+    }
+    if let Some(CanonicalMemoryRead::Withheld(verdict)) = &config.project_memory {
+        eprintln!(
+            "daemon: historian project memory withheld session={} state={}",
+            config.session_id,
+            verdict.state_key()
+        );
     }
     let snapshot = store.load_historian_assembly_snapshot(&config.session_id)?;
     let compartments = snapshot.compartments;
@@ -712,10 +677,9 @@ pub fn assemble_historian_firing(
         chunk.chunk.start_index as i64,
         &compartments,
     );
-    let memory_block = if !config.memory_enabled {
-        String::new()
-    } else {
-        historian_claim_block(store, config.claim_snapshot_vector.as_ref())
+    let memory_block = match &config.project_memory {
+        Some(read) if config.memory_enabled => render_historian_memory_block(read.rows()),
+        _ => String::new(),
     };
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &reference_blocks.seed_examples,
@@ -1377,7 +1341,7 @@ mod tests {
                     boundary_reason: "test".to_string(),
                 },
                 memory_enabled: false,
-                claim_snapshot_vector: None,
+                project_memory: None,
                 auto_promote: true,
                 user_memory_collection_enabled: false,
                 extraction_free: false,
@@ -1393,6 +1357,43 @@ mod tests {
     }
 
     fn tiny_chunk_assemble_fold_only(in_emergency: bool) -> AssembleHistorianFiringOutcome {
+        tiny_chunk_assemble_with_memory(in_emergency, false, None)
+    }
+
+    #[test]
+    fn a_withheld_memory_read_renders_no_block_and_still_assembles() {
+        let withheld =
+            CanonicalMemoryRead::Withheld(crate::kernel_routes::KernelOutcome::Abstained {
+                lag_positions: 10_000,
+                oldest_unconsumed_age_ms: 0,
+            });
+        let served =
+            CanonicalMemoryRead::Available(crate::canonical_memory::CanonicalMemorySnapshot::new(
+                3,
+                false,
+                vec![crate::canonical_memory::CanonicalMemory {
+                    object_id: "mem_rule".to_string(),
+                    category: "PROJECT_RULES".to_string(),
+                    content: "Keep the public contract.".to_string(),
+                }],
+            ));
+        let prompt = |read: CanonicalMemoryRead| match tiny_chunk_assemble_with_memory(
+            false,
+            true,
+            Some(read),
+        ) {
+            AssembleHistorianFiringOutcome::Fire(firing) => firing.prompt,
+            AssembleHistorianFiringOutcome::NoFire(reason) => panic!("{reason:?}"),
+        };
+        assert!(!prompt(withheld).contains("<project-memory>"));
+        assert!(prompt(served).contains("mem_rule: Keep the public contract."));
+    }
+
+    fn tiny_chunk_assemble_with_memory(
+        in_emergency: bool,
+        memory_enabled: bool,
+        project_memory: Option<CanonicalMemoryRead>,
+    ) -> AssembleHistorianFiringOutcome {
         use storage::{Isolation, StorageBackend, StorageDescriptor};
 
         let dir = tempfile::tempdir().unwrap();
@@ -1432,8 +1433,8 @@ mod tests {
                     raw_message_count: 2,
                     boundary_reason: "test".to_string(),
                 },
-                memory_enabled: false,
-                claim_snapshot_vector: None,
+                memory_enabled,
+                project_memory,
                 auto_promote: true,
                 user_memory_collection_enabled: false,
                 extraction_free: false,
@@ -1514,7 +1515,7 @@ mod tests {
                     boundary_reason: "test".to_string(),
                 },
                 memory_enabled: false,
-                claim_snapshot_vector: None,
+                project_memory: None,
                 auto_promote: true,
                 user_memory_collection_enabled: false,
                 extraction_free: false,

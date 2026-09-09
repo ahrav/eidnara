@@ -15,7 +15,7 @@ use host_runtime::{
 use serde_json::{Value, json};
 use storage::StorageDescriptor;
 
-const SESSION: &str = "stage1-session";
+pub const SESSION: &str = "stage1-session";
 pub const DOMAIN: &str = "stage1-domain";
 
 pub struct KernelDaemon {
@@ -29,6 +29,12 @@ pub struct KernelDaemon {
 
 impl KernelDaemon {
     pub async fn start() -> Self {
+        Self::start_with_project_config(None).await
+    }
+
+    /// Starts the daemon with `project_config` written to the project's
+    /// `.eidnara/eidnara.jsonc` before the route binds, so the binding reads it.
+    pub async fn start_with_project_config(project_config: Option<Value>) -> Self {
         let data = tempfile::tempdir().unwrap();
         let descriptor: StorageDescriptor = dev_descriptor_at(data.path().to_str().unwrap());
         let handler = Handler::new();
@@ -56,6 +62,15 @@ impl KernelDaemon {
         }
         let project = data.path().join("project");
         fs::create_dir_all(&project).unwrap();
+        if let Some(config) = project_config {
+            let config_dir = project.join(".eidnara");
+            fs::create_dir_all(&config_dir).unwrap();
+            fs::write(
+                config_dir.join("eidnara.jsonc"),
+                serde_json::to_vec_pretty(&config).unwrap(),
+            )
+            .unwrap();
+        }
         let route = RouteHandle {
             channel: 7,
             epoch: 1,
