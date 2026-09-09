@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 use host_runtime::RouteHandle;
 use kernel::{
     ALIGNMENT_DEPENDENCY_KIND, AdmissionEvent, AdmissionRequest, CommitIntent, CommitReceipt,
-    DecisionPayload, DecisionSpec, DomainSpec, Envelope, EventKind, KernelError, KernelStore,
-    ObjectState, ObservationDependencySpec, ObservationPayload, ObservationSpec, Sensitivity,
-    SourceClass, TaintClass, TokenCheck, TokenConflict,
+    DecisionPayload, DecisionSpec, Disposition, DomainSpec, Envelope, EventKind, KernelError,
+    KernelStore, ObjectState, ObservationDependencySpec, ObservationPayload, ObservationSpec,
+    Outcome, PriorDecision, Sensitivity, ServedRow, SourceClass, Surface, SurfaceVisibility,
+    TaintClass, TokenCheck, TokenConflict,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -64,6 +65,11 @@ struct CommitRequest {
     asserted_taint_class: Option<String>,
     #[serde(default)]
     deadline_ms: Option<u64>,
+    /// Judges each disposition operation without writing: no commit-log row,
+    /// no receipt, and no token check, so the intent is parsed but never
+    /// recorded. Refused for every other operation kind.
+    #[serde(default)]
+    preview: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,6 +386,58 @@ struct DispositionResult {
     denied: bool,
 }
 
+/// The verdict of every surface for one object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct SurfaceVisibilities {
+    auto_inject: &'static str,
+    auto_search: &'static str,
+    explicit_search: &'static str,
+}
+
+const fn visibility_name(visibility: SurfaceVisibility) -> &'static str {
+    match visibility {
+        SurfaceVisibility::Hidden => "hidden",
+        SurfaceVisibility::Visible => "visible",
+        SurfaceVisibility::Labeled => "labeled",
+    }
+}
+
+impl SurfaceVisibilities {
+    fn of(visibility: impl Fn(Surface) -> SurfaceVisibility) -> Self {
+        Self {
+            auto_inject: visibility_name(visibility(Surface::AutoInject)),
+            auto_search: visibility_name(visibility(Surface::AutoSearch)),
+            explicit_search: visibility_name(visibility(Surface::ExplicitSearch)),
+        }
+    }
+
+    /// Whether a surface serving the object now would show `projected`'s
+    /// verdict instead; a hidden surface changing is not a visible change.
+    fn changes_to(self, projected: Self) -> bool {
+        [
+            (self.auto_inject, projected.auto_inject),
+            (self.auto_search, projected.auto_search),
+            (self.explicit_search, projected.explicit_search),
+        ]
+        .into_iter()
+        .any(|(now, next)| now != visibility_name(SurfaceVisibility::Hidden) && now != next)
+    }
+}
+
+/// What one disposition operation would do, judged at the tip without writing.
+/// `visibility_changes` is true when a surface that serves the object now
+/// (`visible` or `labeled`) would show a different verdict afterwards; a
+/// hidden surface staying hidden, or a surface newly hiding nothing it served,
+/// changes nothing a user sees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DispositionPreview {
+    #[serde(flatten)]
+    result: DispositionResult,
+    current: SurfaceVisibilities,
+    projected: SurfaceVisibilities,
+    visibility_changes: bool,
+}
+
 impl CommitResult {
     fn normalize(&mut self) {
         self.touched.sort();
@@ -502,14 +560,15 @@ fn scoped_object_state(
     Ok(state)
 }
 
-/// Records `event` on a live decision of the bound project.
-fn record_disposition(
-    envelope: &mut Envelope<'_>,
+/// The admission request `event` makes against a live decision of the bound
+/// project, once the object and every approval it would rest on are in scope.
+fn disposition_request(
+    envelope: &Envelope<'_>,
     filter: &mut ScopeFilter,
     object_id: &str,
     event: DispositionEvent,
     approval_object_id: Option<&str>,
-) -> Result<DispositionResult, KernelError> {
+) -> Result<(PriorDecision, AdmissionRequest), KernelError> {
     let state = scoped_object_state(envelope, filter, object_id)?;
     if state.object.object_kind != "decision" || state.object.invalidated_commit_seq.is_some() {
         return Err(KernelError::NotFound);
@@ -523,7 +582,7 @@ fn record_disposition(
             scoped_object_state(envelope, filter, &member)?;
         }
     }
-    let decision = envelope.record_admission(AdmissionRequest {
+    let request = AdmissionRequest {
         candidate_id: None,
         subject_object_id: Some(object_id.to_string()),
         source_class: Some(prior.source_class),
@@ -535,19 +594,129 @@ fn record_disposition(
             evidence_id: None,
             reason: ADMISSION_REASON.to_string(),
         },
-    })?;
-    let denied = event
-        .kind()
-        .requested_disposition()
-        .is_some_and(|requested| decision.disposition != requested);
-    Ok(DispositionResult {
-        object_id: object_id.to_string(),
+    };
+    Ok((prior, request))
+}
+
+impl DispositionResult {
+    fn new(
+        object_id: &str,
+        event: DispositionEvent,
+        prior: PriorDecision,
+        outcome: Outcome,
+        disposition: Disposition,
+    ) -> Self {
+        let denied = event
+            .kind()
+            .requested_disposition()
+            .is_some_and(|requested| disposition != requested);
+        Self {
+            object_id: object_id.to_string(),
+            event,
+            outcome: outcome.as_str().to_string(),
+            previous_disposition: prior.disposition.as_str().to_string(),
+            disposition: disposition.as_str().to_string(),
+            denied,
+        }
+    }
+}
+
+/// Records `event` on a live decision of the bound project.
+fn record_disposition(
+    envelope: &mut Envelope<'_>,
+    filter: &mut ScopeFilter,
+    object_id: &str,
+    event: DispositionEvent,
+    approval_object_id: Option<&str>,
+) -> Result<DispositionResult, KernelError> {
+    let (prior, request) =
+        disposition_request(envelope, filter, object_id, event, approval_object_id)?;
+    let decision = envelope.record_admission(request)?;
+    Ok(DispositionResult::new(
+        object_id,
         event,
-        outcome: decision.outcome.as_str().to_string(),
-        previous_disposition: prior.disposition.as_str().to_string(),
-        disposition: decision.disposition.as_str().to_string(),
-        denied,
+        prior,
+        decision.outcome,
+        decision.disposition,
+    ))
+}
+
+/// Judges `event` against a live decision of the bound project without
+/// recording it, and reports what each surface serves now and would serve.
+fn preview_disposition(
+    envelope: &Envelope<'_>,
+    filter: &mut ScopeFilter,
+    project: &ProjectBinding,
+    object_id: &str,
+    event: DispositionEvent,
+    approval_object_id: Option<&str>,
+) -> Result<DispositionPreview, KernelError> {
+    let (prior, request) =
+        disposition_request(envelope, filter, object_id, event, approval_object_id)?;
+    let evaluation = envelope.preview_admission(request)?;
+    let served: ServedRow = envelope
+        .served_row(object_id, Some(project.scope_term()))?
+        .ok_or(KernelError::NotFound)?;
+    let current = SurfaceVisibilities::of(|surface| served.visibility(surface));
+    let projected = SurfaceVisibilities::of(|surface| {
+        served.visibility_with(evaluation.visibility, evaluation.sensitivity, surface)
+    });
+    let visibility_changes = current.changes_to(projected);
+    Ok(DispositionPreview {
+        result: DispositionResult::new(
+            object_id,
+            event,
+            prior,
+            evaluation.outcome,
+            evaluation.disposition,
+        ),
+        current,
+        projected,
+        visibility_changes,
     })
+}
+
+/// An identity the store already holds replays its receipt instead of being
+/// judged again, the same answer the commit gives; otherwise every operation
+/// is judged at the tip.
+enum PreviewOutcome {
+    Replay(CommitReceipt),
+    Judged(Vec<DispositionPreview>),
+}
+
+/// Every operation of a preview must be a disposition; the tokens must be
+/// absent because a preview checks none.
+fn preview(store: &KernelStore, plan: &CommitPlan) -> Result<(i64, PreviewOutcome), CommitFailure> {
+    let mut filter = ScopeFilter::new(&plan.project);
+    store
+        .preview(|envelope| {
+            if let Some(receipt) = envelope.stored_receipt(plan.intent.clone())? {
+                return Ok(PreviewOutcome::Replay(receipt));
+            }
+            plan.operations
+                .iter()
+                .map(|operation| match operation {
+                    Operation::Disposition {
+                        object_id,
+                        event,
+                        approval_object_id,
+                    } => preview_disposition(
+                        envelope,
+                        &mut filter,
+                        &plan.project,
+                        object_id,
+                        *event,
+                        approval_object_id.as_deref(),
+                    ),
+                    _ => Err(KernelError::InvalidInput),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(PreviewOutcome::Judged)
+        })
+        .map_err(|error| match error {
+            KernelError::Conflict => CommitFailure::OperationKeyReused,
+            error => CommitFailure::Kernel(error),
+        })
 }
 
 /// `refused` records why `apply` returns `KernelError::Conflict`, since the
@@ -796,6 +965,38 @@ impl Handler {
             deadline,
         };
         let store = scope.store;
+        if parsed.preview {
+            if !plan.tokens.is_empty() {
+                return crate::invalid_params_error(format!(
+                    "{OPERATION} preview checks no tokens; send none"
+                ));
+            }
+            if plan
+                .operations
+                .iter()
+                .any(|operation| !matches!(operation, Operation::Disposition { .. }))
+            {
+                return crate::invalid_params_error(format!(
+                    "{OPERATION} preview supports disposition operations only"
+                ));
+            }
+            return match blocking(move || preview(&store, &plan)).await {
+                Ok(Ok((tip, PreviewOutcome::Judged(previews)))) => kernel_response(
+                    &KernelOutcome::Available,
+                    json!({"known_as_of": tip, "previews": previews}),
+                ),
+                Ok(Ok((tip, PreviewOutcome::Replay(receipt)))) => kernel_response(
+                    &KernelOutcome::Available,
+                    json!({
+                        "known_as_of": tip,
+                        "receipt": {"commit_seq": receipt.commit_seq, "replayed": true},
+                        "previews": [],
+                    }),
+                ),
+                Ok(Err(failure)) => state_only(KernelOutcome::from(failure)),
+                Err(outcome) => state_only(outcome),
+            };
+        }
         let receipt = match blocking(move || run(&store, plan)).await {
             Ok(Ok(receipt)) => receipt,
             Ok(Err(failure)) => return state_only(KernelOutcome::from(failure)),

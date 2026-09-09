@@ -920,6 +920,26 @@ impl Envelope<'_> {
         self.guarded(|envelope| envelope.record_admission_inner(request))
     }
 
+    /// Returns the evaluation that `record_admission` would persist for `request` without writing it.
+    /// The same event, prior, approval, and trigger checks run, so a refusal here is the refusal the commit would give.
+    pub fn preview_admission(&self, request: AdmissionRequest) -> Result<Evaluation, KernelError> {
+        refuse_succession_events(&request)?;
+        Ok(self.prepare_admission(request)?.evaluation)
+    }
+
+    /// `None` when the registry has no live object by that id or its scope cannot match `scope`.
+    pub fn served_row(
+        &self,
+        object_id: &str,
+        scope: Option<ScopeTermFilter<'_>>,
+    ) -> Result<Option<ServedRow>, KernelError> {
+        let ids = serde_json::to_string(&[identity(object_id)?])
+            .map_err(|_| KernelError::InvalidInput)?;
+        Ok(served_classes(self.tx, self.commit_seq, Some(&ids), scope)?
+            .into_iter()
+            .next())
+    }
+
     /// Returns the prior decision and supporting approval id from the same cache
     /// used by admission evaluation, including writes within this envelope.
     pub fn subject_admission(
@@ -961,12 +981,7 @@ impl Envelope<'_> {
         &mut self,
         request: AdmissionRequest,
     ) -> Result<AdmissionDecision, KernelError> {
-        if matches!(
-            request.event.kind,
-            EventKind::Correct | EventKind::Replace | EventKind::ApprovalRevoked
-        ) {
-            return Err(KernelError::AdmissionPolicy);
-        }
+        refuse_succession_events(&request)?;
         let subject_object_id = request.subject_object_id.clone();
         let candidate_id = request.candidate_id.clone();
         let reason = request.event.reason.clone();
@@ -2376,6 +2391,18 @@ fn load_approval_dependents(
     Ok(dependents)
 }
 
+/// Succession and revocation events are recorded by the envelope's own
+/// supersede, retire, and revoke paths; a caller naming one directly is refused.
+fn refuse_succession_events(request: &AdmissionRequest) -> Result<(), KernelError> {
+    if matches!(
+        request.event.kind,
+        EventKind::Correct | EventKind::Replace | EventKind::ApprovalRevoked
+    ) {
+        return Err(KernelError::AdmissionPolicy);
+    }
+    Ok(())
+}
+
 fn validate_provenance(
     source_class: SourceClass,
     taint_class: TaintClass,
@@ -2767,7 +2794,7 @@ impl KernelStore {
         let ids = ids
             .map(|ids| serde_json::to_string(ids).map_err(|_| KernelError::InvalidInput))
             .transpose()?;
-        let (tip, rows) = self.read_snapshot(requested, |tx| {
+        let (tip, rows) = self.read_snapshot(requested, |tx, _| {
             let rows = served_rows(tx, surface, requested, ids.as_deref(), scope)?
                 .into_iter()
                 .filter_map(|(object, visibility, scope_id)| match visibility {
@@ -2802,14 +2829,7 @@ impl KernelStore {
         let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
         let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
         let generation_before = self.classification_generation.load(Ordering::SeqCst);
-        let (tip, candidates) = self.read_snapshot(0, |tx| {
-            let tip = tx
-                .query_row_cached(
-                    "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(map_sqlite)?;
+        let (tip, candidates) = self.read_snapshot(0, |tx, tip| {
             // Hidden at `ExplicitSearch`, the widest surface, means hidden everywhere.
             let served: HashMap<String, ServedClass> =
                 served_rows(tx, Surface::ExplicitSearch, tip, Some(&ids), None)?
@@ -2921,6 +2941,39 @@ pub struct ServedClass {
     pub visibility: SurfaceVisibility,
 }
 
+/// `ServedRow` keeps own and lineage rows separate so callers can evaluate a hypothetical own row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedRow {
+    /// `sensitivity` is the folded serving sensitivity, not the registry column.
+    pub object: ObjectRow,
+    pub scope_id: Option<String>,
+    own: VisibilityRow,
+    lineage: Option<VisibilityRow>,
+}
+
+impl ServedRow {
+    pub fn visibility(&self, surface: Surface) -> SurfaceVisibility {
+        self.visibility_with(self.own, self.object.sensitivity, surface)
+    }
+
+    pub fn visibility_with(
+        &self,
+        own: VisibilityRow,
+        sensitivity: Sensitivity,
+        surface: Surface,
+    ) -> SurfaceVisibility {
+        let row = match self.lineage {
+            Some(lineage) => served_visibility_row(Some(own), Some(lineage)),
+            None => own,
+        };
+        surface_visibility(
+            row,
+            surface,
+            self.object.sensitivity.restrictive(sensitivity),
+        )
+    }
+}
+
 /// One value on one scope dimension that a served-rows read is restricted to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopeTermFilter<'a> {
@@ -2939,6 +2992,22 @@ fn served_rows(
     ids: Option<&str>,
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<(ObjectRow, SurfaceVisibility, Option<String>)>, KernelError> {
+    Ok(served_classes(tx, requested, ids, scope)?
+        .into_iter()
+        .map(|row| {
+            let visibility = row.visibility(surface);
+            (row.object, visibility, row.scope_id)
+        })
+        .collect())
+}
+
+/// `served_rows` before a surface is applied.
+fn served_classes(
+    tx: &Transaction<'_>,
+    requested: i64,
+    ids: Option<&str>,
+    scope: Option<ScopeTermFilter<'_>>,
+) -> Result<Vec<ServedRow>, KernelError> {
     // The query text embeds only constants, so it is identical on every call.
     // A per-call `format!` would allocate a string only to hash it against the
     // same `prepare_cached` entry every time. commentlint: allow(JUDGE)
@@ -3046,23 +3115,23 @@ fn served_rows(
             },
             |row| {
                 let mut object = object_row_from(row)?;
-                let (mut visibility_row_value, mut sensitivity, interpretable) = decided_row(
+                let (mut own, mut sensitivity, interpretable) = decided_row(
                     row,
                     &OWN_DECISION_COLUMNS,
                 )?
                 .unwrap_or((VisibilityRow::AuditOnly, Sensitivity::Secret, false));
                 if !interpretable || row.get::<_, bool>(OWN_HISTORY_INCONSISTENT_COLUMN)? {
-                    visibility_row_value = VisibilityRow::AuditOnly;
+                    own = VisibilityRow::AuditOnly;
                     sensitivity = Sensitivity::Secret;
                 }
                 // Neither scope may relax the other: a restriction on one
                 // outlives a later permissive decision on the other, so the
                 // served surface is the stricter of the two.
+                let mut lineage = None;
                 if let Some((lineage_row, lineage_sensitivity, _)) =
                     decided_row(row, &LINEAGE_DECISION_COLUMNS)?
                 {
-                    visibility_row_value =
-                        served_visibility_row(Some(visibility_row_value), Some(lineage_row));
+                    lineage = Some(lineage_row);
                     sensitivity = sensitivity.restrictive(lineage_sensitivity);
                 }
                 sensitivity = sensitivity.restrictive(Sensitivity::from_stored(
@@ -3085,10 +3154,13 @@ fn served_rows(
                     }
                 }
                 object.sensitivity = object.sensitivity.restrictive(sensitivity);
-                let visibility =
-                    surface_visibility(visibility_row_value, surface, object.sensitivity);
                 let scope_id = row.get::<_, Option<String>>(SCOPE_ID_COLUMN)?;
-                Ok((object, visibility, scope_id))
+                Ok(ServedRow {
+                    object,
+                    scope_id,
+                    own,
+                    lineage,
+                })
             },
         )
         .map_err(map_sqlite)?
@@ -3456,6 +3528,118 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    fn served_row(
+        own: VisibilityRow,
+        lineage: Option<VisibilityRow>,
+        sensitivity: Sensitivity,
+    ) -> ServedRow {
+        ServedRow {
+            object: ObjectRow {
+                object_id: "object".to_string(),
+                object_kind: "decision".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: "repo".to_string(),
+                source_id: "lineage".to_string(),
+                source_revision: 1,
+                created_commit_seq: 1,
+                invalidated_commit_seq: None,
+                superseded_by: None,
+                sensitivity,
+            },
+            scope_id: None,
+            own,
+            lineage,
+        }
+    }
+
+    /// A hypothetical own row is judged the way the stored one is: the
+    /// lineage row still wins when stricter, and the folded sensitivity only
+    /// ever tightens.
+    #[test]
+    fn served_row_projects_a_replaced_own_row_under_the_stored_lineage_and_sensitivity() {
+        const SURFACES: [Surface; 3] = [
+            Surface::AutoInject,
+            Surface::AutoSearch,
+            Surface::ExplicitSearch,
+        ];
+        let all = |row: &ServedRow, own, sensitivity| {
+            SURFACES.map(|surface| row.visibility_with(own, sensitivity, surface))
+        };
+        let automatic = served_row(VisibilityRow::Automatic, None, Sensitivity::Normal);
+        assert_eq!(
+            SURFACES.map(|surface| automatic.visibility(surface)),
+            [
+                SurfaceVisibility::Visible,
+                SurfaceVisibility::Visible,
+                SurfaceVisibility::Visible
+            ]
+        );
+        assert_eq!(
+            all(
+                &automatic,
+                VisibilityRow::ExplicitLabeled,
+                Sensitivity::Normal
+            ),
+            [
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Labeled
+            ]
+        );
+        assert_eq!(
+            all(&automatic, VisibilityRow::AuditOnly, Sensitivity::Normal),
+            [SurfaceVisibility::Hidden; 3]
+        );
+        // The stricter sensitivity supplied by the evaluation hides the automatic surfaces.
+        assert_eq!(
+            all(&automatic, VisibilityRow::Automatic, Sensitivity::Sensitive),
+            [
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Visible
+            ]
+        );
+        // A secret object stays hidden however permissive the supplied classes are.
+        let secret = served_row(VisibilityRow::Automatic, None, Sensitivity::Secret);
+        assert_eq!(
+            all(&secret, VisibilityRow::Automatic, Sensitivity::Normal),
+            [SurfaceVisibility::Hidden; 3]
+        );
+        // A labeled lineage row caps a relaxed own row at labeled; an absent lineage row caps nothing.
+        let capped = served_row(
+            VisibilityRow::ExplicitLabeled,
+            Some(VisibilityRow::ExplicitLabeled),
+            Sensitivity::Normal,
+        );
+        assert_eq!(
+            all(&capped, VisibilityRow::Automatic, Sensitivity::Normal),
+            [
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Hidden,
+                SurfaceVisibility::Labeled
+            ]
+        );
+        let uncapped = served_row(VisibilityRow::ExplicitLabeled, None, Sensitivity::Normal);
+        assert_eq!(
+            all(&uncapped, VisibilityRow::Automatic, Sensitivity::Normal),
+            [SurfaceVisibility::Visible; 3]
+        );
+        // An audit-only lineage row hides the object whatever its own row becomes.
+        let audited = served_row(
+            VisibilityRow::Automatic,
+            Some(VisibilityRow::AuditOnly),
+            Sensitivity::Normal,
+        );
+        assert_eq!(
+            SURFACES.map(|surface| audited.visibility(surface)),
+            [SurfaceVisibility::Hidden; 3]
+        );
+        assert_eq!(
+            all(&audited, VisibilityRow::Automatic, Sensitivity::Normal),
+            [SurfaceVisibility::Hidden; 3]
+        );
+    }
 
     #[test]
     fn vocabularies_round_trip_and_reject_unknown_tokens() {

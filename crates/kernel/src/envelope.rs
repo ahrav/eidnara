@@ -423,6 +423,17 @@ impl Envelope<'_> {
         load_object_state(self.tx, object_id)
     }
 
+    /// The receipt `KernelStore::commit` would replay for `intent` instead of
+    /// running its operation, or `None` when the identity is unrecorded;
+    /// `Conflict` when the key is recorded under another digest.
+    pub fn stored_receipt(
+        &self,
+        intent: CommitIntent,
+    ) -> Result<Option<CommitReceipt>, KernelError> {
+        intent.refuse_reserved_producer()?;
+        stored_receipt(self.tx, &RedactedIntent::new(intent)?)
+    }
+
     /// Succession is judged before invalidation because a superseded object is
     /// also invalidated, and advancement last because both of the others also
     /// leave a later change event.
@@ -584,11 +595,29 @@ impl KernelStore {
         &self,
         object_ids: &[String],
     ) -> Result<(i64, Vec<Option<ObjectState>>), KernelError> {
-        self.read_snapshot(0, |tx| {
+        self.read_snapshot(0, |tx, _| {
             object_ids
                 .iter()
                 .map(|object_id| load_object_state(tx, object_id))
                 .collect()
+        })
+    }
+
+    /// `read` holds the envelope by shared reference over a read transaction, so its mutators are unreachable and nothing lands in the log.
+    /// The envelope's `commit_seq` is the sequence the next commit would take, so `check_token` judges a token from the tip the way that commit would.
+    pub fn preview<T>(
+        &self,
+        read: impl FnOnce(&Envelope<'_>) -> Result<T, KernelError>,
+    ) -> Result<(i64, T), KernelError> {
+        self.read_snapshot(0, |tx, tip| {
+            read(&Envelope {
+                tx,
+                commit_seq: tip + 1,
+                changes: Vec::new(),
+                admission_ordinal: 0,
+                admission_latest: HashMap::new(),
+                poisoned: None,
+            })
         })
     }
 
@@ -621,7 +650,7 @@ impl KernelStore {
     }
 
     fn snapshot(&self, requested: i64, sql: &str) -> Result<KnownAsOf, KernelError> {
-        let (tip, objects) = self.read_snapshot(requested, |tx| {
+        let (tip, objects) = self.read_snapshot(requested, |tx, _| {
             let mut statement = tx.prepare(sql).map_err(map_sqlite)?;
             let objects = statement
                 .query_map([requested], object_row_from)
@@ -637,10 +666,11 @@ impl KernelStore {
         })
     }
 
+    /// `read` receives the tip the transaction observed along with the transaction.
     pub(super) fn read_snapshot<T>(
         &self,
         requested: i64,
-        read: impl FnOnce(&Transaction<'_>) -> Result<T, KernelError>,
+        read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
     ) -> Result<(i64, T), KernelError> {
         if requested < 0 {
             return Err(KernelError::InvalidInput);
@@ -656,7 +686,7 @@ impl KernelStore {
         if requested > tip {
             return Err(KernelError::FutureSnapshot);
         }
-        let result = read(&tx)?;
+        let result = read(&tx, tip)?;
         tx.commit().map_err(map_sqlite)?;
         Ok((tip, result))
     }
@@ -939,21 +969,13 @@ pub(super) fn replace_alignment_projection_tx(
     Ok(rows.len())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn commit_prepared_with_writer(
-    writer: &mut Connection,
-    lease_epoch: u64,
-    intent: RedactedIntent,
-    transaction_id: String,
-    operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
-    after_events: impl FnOnce() -> Result<(), KernelError>,
-) -> Result<CommitReceipt, KernelError> {
-    let tx = writer
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(map_sqlite)?;
-    check_fence(&tx, lease_epoch)?;
-
-    if let Some((digest, commit_seq, result)) = tx
+/// The receipt a repeat of `intent` replays; a stored key under a different
+/// digest is `Conflict`, since the caller reused an identity for other bytes.
+fn stored_receipt(
+    tx: &Transaction<'_>,
+    intent: &RedactedIntent,
+) -> Result<Option<CommitReceipt>, KernelError> {
+    let Some((digest, commit_seq, result)) = tx
         .query_row_cached(
             "SELECT request_digest,commit_seq,result_payload FROM operation_receipts
              WHERE producer=?1 AND operation_key=?2",
@@ -968,21 +990,41 @@ fn commit_prepared_with_writer(
         )
         .optional()
         .map_err(map_sqlite)?
-    {
-        if digest != intent.request_digest {
-            return Err(KernelError::Conflict);
-        }
-        let repair_alignment = commit_affects_alignment(&tx, commit_seq)?;
+    else {
+        return Ok(None);
+    };
+    if digest != intent.request_digest {
+        return Err(KernelError::Conflict);
+    }
+    Ok(Some(CommitReceipt {
+        commit_seq,
+        result: String::from_utf8(result).map_err(|_| KernelError::Io)?,
+        replayed: true,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_prepared_with_writer(
+    writer: &mut Connection,
+    lease_epoch: u64,
+    intent: RedactedIntent,
+    transaction_id: String,
+    operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
+    after_events: impl FnOnce() -> Result<(), KernelError>,
+) -> Result<CommitReceipt, KernelError> {
+    let tx = writer
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(map_sqlite)?;
+    check_fence(&tx, lease_epoch)?;
+
+    if let Some(receipt) = stored_receipt(&tx, &intent)? {
+        let repair_alignment = commit_affects_alignment(&tx, receipt.commit_seq)?;
         tx.commit().map_err(map_sqlite)?;
         if repair_alignment {
             // The commit is already durable, so a repair failure cannot change its outcome.
             let _ = super::slice::rebuild_alignment_with_writer(writer, lease_epoch);
         }
-        return Ok(CommitReceipt {
-            commit_seq,
-            result: String::from_utf8(result).map_err(|_| KernelError::Io)?,
-            replayed: true,
-        });
+        return Ok(receipt);
     }
 
     let recorded_at = current_time_ms();
