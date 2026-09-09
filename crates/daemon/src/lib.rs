@@ -28260,10 +28260,11 @@ mod tests {
                     .find('"')
                     .expect("unterminated literal in dispatch arms");
                 let candidate = &literal[..close];
-                // Only pattern literals name routes; a body literal such as the `echo`
-                // response key is followed by neither `=>` nor `|`.
+                // Only pattern literals name routes: a pattern is followed by `=>`, by `|` in
+                // an or-pattern, or by `if` in a guarded arm; a body literal such as the
+                // `echo` response key is followed by none of these.
                 let after = literal[close + 1..].trim_start();
-                if after.starts_with("=>") || after.starts_with('|') {
+                if after.starts_with("=>") || after.starts_with('|') || after.starts_with("if ") {
                     literals.push(candidate.to_string());
                 }
                 rest = &rest[open + 1 + close + 1..];
