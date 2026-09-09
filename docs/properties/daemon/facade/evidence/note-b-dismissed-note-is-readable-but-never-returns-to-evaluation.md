@@ -69,8 +69,8 @@ what can undo it.
    supplied by a caller that already excluded `dismissed` (`:12871`).
 
 7. An in-flight claim is fenced at dismissal:
-   `fence_active_note_claims_tx(self.tx, project_path, Some(note_id), "stale",
-   now_ms)` (`:4602`, and `:10558` in the other variant). That marks the claim
+   `task_lease::fence_task_claims_tx(self.tx, &NOTE_EVALUATION, project_path,
+   note_id, "stale", now_ms)` (`:4602`, and `:10558` in the other variant). That marks the claim
    terminal with kind `"stale"` (`:13092-13111`), so a late completion returns
    `Conflict { kind: "stale" }` rather than writing. The completion fence would
    also catch it independently, on all three of its clauses:

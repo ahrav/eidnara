@@ -720,10 +720,12 @@ CREATE TRIGGER notes_feed_delete AFTER DELETE ON notes BEGIN
         END;
 
 CREATE TABLE note_eval_claims (
-            claim_id TEXT PRIMARY KEY,
+            claim_id TEXT NOT NULL,
             project TEXT NOT NULL,
+            task_kind TEXT NOT NULL,
             note_id INTEGER NOT NULL,
-            phase TEXT NOT NULL CHECK (phase IN ('compile', 'due', 'liveness', 'fallback')),
+            phase TEXT NOT NULL CHECK (task_kind <> 'note_evaluation'
+                OR phase IN ('compile', 'due', 'liveness', 'fallback')),
             acquisition_id TEXT NOT NULL,
             evaluator_instance TEXT NOT NULL,
             evaluator_slot INTEGER NOT NULL,
@@ -739,23 +741,25 @@ CREATE TABLE note_eval_claims (
             terminal_kind TEXT,
             terminal_response TEXT,
             terminal_at_ms INTEGER,
-            UNIQUE (project, acquisition_id)
+            PRIMARY KEY (task_kind, claim_id),
+            UNIQUE (project, task_kind, acquisition_id)
         );
 
 CREATE UNIQUE INDEX idx_note_eval_claims_active_note
-            ON note_eval_claims(project, note_id) WHERE terminal_kind IS NULL;
+            ON note_eval_claims(project, task_kind, note_id) WHERE terminal_kind IS NULL;
 
 CREATE UNIQUE INDEX idx_note_eval_claims_active_slot
-            ON note_eval_claims(project, evaluator_instance, evaluator_slot)
+            ON note_eval_claims(project, task_kind, evaluator_instance, evaluator_slot)
             WHERE terminal_kind IS NULL;
 
 CREATE TABLE note_eval_acquisitions (
             project TEXT NOT NULL,
+            task_kind TEXT NOT NULL,
             acquisition_id TEXT NOT NULL,
             decision TEXT NOT NULL,
             created_at_ms INTEGER NOT NULL,
             expires_at INTEGER NOT NULL,
-            PRIMARY KEY (project, acquisition_id)
+            PRIMARY KEY (project, task_kind, acquisition_id)
         );
 
 CREATE INDEX idx_primer_candidates_session

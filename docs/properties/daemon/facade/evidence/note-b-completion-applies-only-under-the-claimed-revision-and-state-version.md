@@ -59,8 +59,8 @@ worth cataloging rather than the defect the question was hunting.
    = state_version + 1` unconditionally and `source_revision = source_revision +
    CASE WHEN ?5 THEN 1 ELSE 0 END` on a compiler edit
    (`memory-store:12846-12847`), and `update_note_cas` then calls
-   `fence_active_note_claims_tx(self.tx, project_path, Some(note_id), "stale",
-   now_ms)` when `compiler_edit` holds (`:4542-4544`, and the non-transaction
+   `task_lease::fence_task_claims_tx(self.tx, &NOTE_EVALUATION, project_path,
+   note_id, "stale", now_ms)` when `compiler_edit` holds (`:4542-4544`, and the non-transaction
    variant at `:10499-10501`). `dismiss_note` bumps both versions
    (`:12584-12585` region, seen at `:4583`) and fences unconditionally
    (`:4602`, `:10558`).
@@ -75,9 +75,10 @@ worth cataloging rather than the defect the question was hunting.
 
    ```
    AND id NOT IN (SELECT note_id FROM note_eval_claims
-                   WHERE project = ?1 AND terminal_kind IS NULL)
+                   WHERE project = ?1 AND task_kind = ?2
+                     AND terminal_kind IS NULL)
    ```
-   (`:13294-13295`), and a slot already holding a live claim is rebound to that
+   (`acquire_note_evaluation_with_cap`), and a slot already holding a live claim is rebound to that
    claim rather than issued a new one (`:13268-13288`).
 
 7. The artifact digest is an independent second guard on the compile phase, and it
@@ -168,7 +169,7 @@ than start over.
    Without it the test could pass by always returning `stale`.
 4. The interleaved form, which is the one that proves the fence rather than the
    comparison: hold a claim, call `ctx_note update` through the facade, then
-   complete. That exercises `fence_active_note_claims_tx` as well as the
+   complete. That exercises `task_lease::fence_task_claims_tx` as well as the
    comparison, and those are two independent mechanisms that both have to work.
 
 ## Investigation log
@@ -177,7 +178,7 @@ than start over.
 
 - Sources examined: `lib.rs:14197-14202` (the only module-side check), the four
   selectors' predicates (`smart_note_evaluation.rs:711-806`), the store fence
-  (`memory-store:13569-13573`), all four `fence_active_note_claims_tx` call sites
+  (`memory-store:13569-13573`), all four `task_lease::fence_task_claims_tx` call sites
   (`:4543`, `:4602`, `:10500`, `:10558`), the candidate query's live-claim
   exclusion (`:13294-13295`), and the slot rebind path (`:13268-13288`).
 - Findings: not reachable. To change a phase precondition under a live claim, some

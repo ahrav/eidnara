@@ -31,8 +31,8 @@ in Groups A and B is anchored to it:
 | 4610-4634 | `pub struct MemoryStore` |
 | **4810-12234** | **`impl MemoryStore` block 1**, including `open` 4816-4905, `repair_note_artifacts_v51` 5069-5114, `delete_session` 5432-5475, `set_todo_state` 6727-6757, `arm_soft_refresh` 6760-6778, `preflight_state_import` 7114-7139, `commit_state_import` 7145-7205, `commit_transform` 7260-7609, claim intent and mirror 11xxx-12232 |
 | 12236-12825 | Free `*_tx` writer helpers and compression |
-| **13160-13707** | **`impl MemoryStore` block 2** — note-evaluation claim lifecycle |
-| 13709-13930 | `rebind_note_eval_claim_tx`, `note_check_digest`, `repair_note_artifacts_tx`, misc helpers |
+| **13160-13707** | **`impl MemoryStore` block 2** — note-evaluation claim lifecycle. The acquire, renew, complete, and abandon lease protocol lives in `src/task_lease.rs`, parameterized by `TaskLeaseKind`; `lib.rs` keeps the note-specific selector, snapshot load, and completion body under `NOTE_EVALUATION` |
+| 13709-13930 | `note_check_digest`, `repair_note_artifacts_tx`, misc helpers (`rebind_note_eval_claim_tx` is `task_lease::rebind_claim_tx`) |
 | 13932-20650 | Three `#[cfg(test)]` modules |
 
 One boundary fact shapes the whole part. The PRAGMAs and the transaction
@@ -219,7 +219,8 @@ and D the claim mirror and the intent ledger, and Groups E through G a few
 thousand lines of pure functions in `context-core` and `tokenizer`. Large regions
 of production `lib.rs` have no record at all: the historian publish and outbox
 machinery (`:9194-9798`, which Part 4a covers from the module side), the
-note-evaluation claim lifecycle (`:13160-13707`), the drop-seed and strip-seed
+note-evaluation claim lifecycle (`:13160-13707`, whose lease protocol is
+`src/task_lease.rs`), the drop-seed and strip-seed
 materializers (`:4636-4808`), and most of the DTO and state layer. Retention,
 eviction, deletion, and cross-table conservation have no group at all, which the
 evaluation queued as its gap G4. Read the 37 records as a baseline over the

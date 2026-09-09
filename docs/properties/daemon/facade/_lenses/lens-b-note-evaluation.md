@@ -62,12 +62,12 @@ an artifact, and otherwise preserved (`:14245-14252`).
 | update | `update_note_cas` (`lib.rs:11837-11871`, store `:10409-10505`) | content and/or condition, `status_version + 1`, `state_version + 1`; on a compiler edit also `source_revision + 1`, `status='pending'`, and the entire check lifecycle NULLed (`memory-store:12844-12871`) |
 | supersede | none | there is no supersession relation between notes; a re-authored condition is an in-place update, not a new row |
 | evaluate | `note.evaluation.complete` (`lib.rs:11334-11405`) | the 20 reduced projection fields plus the two compile-provenance fields |
-| expire (claim) | `collect_note_eval_ledgers_tx` (`memory-store:13119-13157`) | claim rows only; the note row is never touched by claim expiry |
+| expire (claim) | `task_lease::collect_ledgers_tx` (`memory-store:13119-13157`) | claim rows only; the note row is never touched by claim expiry |
 | dismiss | `dismiss_note` (`memory-store:4551-4605`, `:10507-10563`) | `status='dismissed'`, `dismissed_at`, `dismissal_resolution`, content with the resolution appended (`:4574-4577`), version bumps, and a claim fence |
 | delete | `DELETE FROM notes WHERE context_store_uuid = ?1 AND project_path = ?2` (`memory-store:11393`) | the row; this is session-delete / recomp territory owned by Parts 3 and 4c |
 
 Both `update_note_cas` and `dismiss_note` call
-`fence_active_note_claims_tx(..., "stale", ...)` (`memory-store:4543`, `:4602`,
+`task_lease::fence_task_claims_tx(..., "stale", ...)` (`memory-store:4543`, `:4602`,
 `:10500`, `:10558`), so an in-flight claim cannot apply an outcome across an
 edit or a dismissal.
 
@@ -230,7 +230,7 @@ The two blanks are the two records
    in injected entries.
 6. The claim and acquisition ledgers are both capped and reaped.
    `NOTE_EVAL_LEDGER_CAP` is 10,000 in-flight (`memory-store:2946`), checked at
-   `:13307-13313` and `:13355-13358`; `collect_note_eval_ledgers_tx`
+   `:13307-13313` and `:13355-13358`; `task_lease::collect_ledgers_tx`
    (`:13119-13157`) deletes rows, not just columns, and says why
    (`:13143-13147`). This is the counter-example to the recurring
    missing-reaper finding: the ledgers have one.
@@ -487,7 +487,7 @@ concurrent facade mutation of that note. No injected fault is needed.
 Confidence: high — [evidence](../evidence/note-b-completion-applies-only-under-the-claimed-revision-and-state-version.md).
 Read the fence at `memory-store:13569-13573`, the `stale` terminal it produces
 (`:13552-13561`), the reduced-status guard (`:13594-13606`), and the four
-`fence_active_note_claims_tx` call sites on the mutation paths (`:4543`,
+`task_lease::fence_task_claims_tx` call sites on the mutation paths (`:4543`,
 `:4602`, `:10500`, `:10558`). Confirmed the module side asserts only the phase
 name (`lib.rs:14197-14202`), so the store fence is the sole protection for the
 phase's eligibility predicate.
@@ -662,7 +662,7 @@ with its pre-dismissal content as a prefix of its current content, that a
 returns it to `pending`, `ready`, or `active`. `always` because both halves must
 hold on every dismissal evaluated.
 Fault/timing angle: none for the read half. For the evaluation half the window
-is a live claim at dismissal time, which `fence_active_note_claims_tx` must
+is a live claim at dismissal time, which `task_lease::fence_task_claims_tx` must
 close.
 Required faults and enabling state: a smart note in `pending` or `ready`, a
 `ctx_note dismiss`, then a `ctx_note read` with `filter: "dismissed"` and a

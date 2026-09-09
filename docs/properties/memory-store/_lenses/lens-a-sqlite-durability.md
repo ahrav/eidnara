@@ -48,7 +48,7 @@ line ranges, so every citation below is anchored.
 | 12236-12825 | Free `*_tx` writer helpers and compression: `write_seed_compartment_tx` 12236, `insert_compartment_tx` 12352, `insert_historian_events_tx` 12388-12409, outbox helpers 12411-12607, `append_compartments_tx` 12609, transcript helpers 12671-12825 |
 | 12827-13158 | Note SQL constants, row mappers, note-eval helpers |
 | **13160-13707** | **`impl MemoryStore` block 2** — note-evaluation claim lifecycle (acquire, renew, complete, abandon) |
-| 13709-13930 | `rebind_note_eval_claim_tx` 13714, `note_check_digest` 13765, `repair_note_artifacts_tx` 13782, misc helpers to 13930 |
+| 13709-13930 | `task_lease::rebind_claim_tx` 13714, `note_check_digest` 13765, `repair_note_artifacts_tx` 13782, misc helpers to 13930 |
 | 13932-19420 | `#[cfg(test)] mod tests` |
 | 19422-19980 | `#[cfg(test)] mod shadow_tests` |
 | 19982-20650 | `#[cfg(test)] mod lineage_descent_tests` |
