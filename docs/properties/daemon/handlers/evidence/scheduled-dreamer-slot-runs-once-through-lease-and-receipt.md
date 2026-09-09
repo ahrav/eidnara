@@ -21,9 +21,12 @@ has no task input builder, so scheduled model dispatch is test-only.
 
 - `DreamerScheduler::tick` reads the clock once for due-ness, asks the
   host for its scheduled projects, and runs those due at or before that
-  instant oldest first (`due_projects`). After a run or a skip the project's
-  next instant is recomputed from the tick instant (`advance`), so
-  slots missed while the daemon was down are not back-filled. When the host
+  instant oldest first (`due_projects`). After `run_slot` returns a non-`Retained`
+  event, `tick` reads the clock again and passes that instant to `advance`.
+  The project's next slot is strictly after that instant: slots crossed during
+  the run are not back-filled, nor are slots missed while the daemon was down.
+  A run that outlasts its period therefore does not leave its own next slot
+  already in the past. When the host
   returns `Err`, `tick` returns one `TickEvent::Deferred` before the
   due table is reconciled, so no project is dropped and no due instant moves.
   A `Retained` slot is not advanced; the tick still processes other due projects.
@@ -163,7 +166,9 @@ through `activate_module_authority`, so the root resolves to the other project
 at an equal generation. For binding selection:
 twelve routes bound on one root with distinct schedules and harnesses, so a
 pick by map order almost never matches the newest bind, then a rebind of the
-oldest channel and a newest binding with no schedule. For the per-project
+oldest channel and a newest binding with no schedule. For the post-run
+advance: a scripted host that moves the manual clock twelve minutes during a
+run on a five-minute schedule. For the per-project
 collapse: a second route root bound to the same authority project through
 `bind_authority_route` with a different schedule, then a third with none.
 

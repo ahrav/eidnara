@@ -708,7 +708,8 @@ Status: active
 Exercised: yes - the working tree merging `bc007c9a` into `c35a4ad5` passed the
 nextest run recorded below. `dreamer_scheduler::tests` in
 `crates/daemon/src/dreamer_scheduler.rs` drive `tick` with a manual clock over
-a real store: due-ness, oldest-first backlog with no back-fill, per-acquisition
+a real store: due-ness, oldest-first backlog with no back-fill, a run that
+outlasts its period leaving the crossed slot unfilled, per-acquisition
 lease instants, schedule change and removal, a deferred tick that keeps the
 pending slot when the host cannot report its projects, a retained slot when the
 ledger cannot answer the lease, recovery of a
@@ -772,7 +773,11 @@ Fault/timing angle: The scheduler leases before it runs (`run_slot`,
 claim's `source_revision`, not the slot that came due, so a claim rebound from
 a predecessor names the predecessor's slot. Lease and completion instants are
 read from the clock as each happens, so a long run does not shorten the next
-project's lease. A daemon that dies between `acquire` and `complete` leaves a
+project's lease. After `run_slot` returns a non-`Retained` event, `tick` reads
+the clock again and passes that instant to `advance`, so a run that outlasts
+its period skips the slots it crossed
+instead of re-ticking at once on an instant already in the past. A daemon that
+dies between `acquire` and `complete` leaves a
 live claim; the successor's registration generation comes from
 `next_dreamer_scheduler_generation` (`crates/memory-store/src/lib.rs`), above
 every retained generation the instance recorded, so the shared protocol rebinds
