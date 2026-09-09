@@ -138,15 +138,20 @@ export function databaseUses(source: string, fileName = "module.ts"): DatabaseUs
         if (ts.isNewExpression(node) && /Database/.test(node.expression.getText(file))) {
             uses.opens.push(lineOf(node));
         }
-        if (ts.isImportDeclaration(node) && isBindingSpecifier(node.moduleSpecifier)) {
+        if (
+            ts.isImportDeclaration(node) &&
+            isBindingSpecifier(node.moduleSpecifier) &&
+            node.importClause &&
+            !node.importClause.isTypeOnly
+        ) {
             const clause = node.importClause;
             if (
-                clause?.name ||
-                (clause?.namedBindings && ts.isNamespaceImport(clause.namedBindings))
+                clause.name ||
+                (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings))
             ) {
                 uses.escapes.push(lineOf(node));
             }
-            if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+            if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
                 for (const element of clause.namedBindings.elements) {
                     if (element.propertyName) uses.escapes.push(lineOf(element));
                 }
@@ -169,7 +174,11 @@ export function databaseUses(source: string, fileName = "module.ts"): DatabaseUs
         }
         if (ts.isIdentifier(node) && node.text === "Database") {
             const parent = node.parent;
-            const isTypeUse = ts.isTypeReferenceNode(parent) || ts.isTypeQueryNode(parent);
+            const isTypeUse =
+                ts.isTypeReferenceNode(parent) ||
+                ts.isTypeQueryNode(parent) ||
+                ts.isQualifiedName(parent) ||
+                (ts.isTypeAliasDeclaration(parent) && parent.name === node);
             const isOpen = ts.isNewExpression(parent) && parent.expression === node;
             const isPropertyKey =
                 (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
