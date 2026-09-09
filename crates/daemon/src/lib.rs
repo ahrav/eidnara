@@ -28182,28 +28182,29 @@ mod tests {
         }
     }
 
+    const UNREACHABLE_ROUTE_SPELLINGS: &[&str] = &[
+        "index.messages",
+        "message_index.sync",
+        "messages.index",
+        "embed.query",
+        "embed.batch",
+        "embed.result",
+        "embedding.ingest",
+        "models.list",
+        "git.ingest",
+        "git.retrieve",
+        "git_ingest",
+        "git_retrieval.query",
+        "mural.render",
+        "mural.get",
+        "ctx_mural",
+    ];
+
     #[tokio::test(flavor = "current_thread")]
     async fn indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape() {
-        const UNREACHABLE: &[&str] = &[
-            "index.messages",
-            "message_index.sync",
-            "messages.index",
-            "embed.query",
-            "embed.batch",
-            "embed.result",
-            "embedding.ingest",
-            "models.list",
-            "git.ingest",
-            "git.retrieve",
-            "git_ingest",
-            "git_retrieval.query",
-            "mural.render",
-            "mural.get",
-            "ctx_mural",
-        ];
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
-        for name in UNREACHABLE {
+        for name in UNREACHABLE_ROUTE_SPELLINGS {
             let as_method = handler
                 .dispatch_value(
                     test_route(7),
@@ -28264,9 +28265,11 @@ mod tests {
         literals
     }
 
+    /// `model` covers the embedding-model listing routes (`models.list`) that the probe set
+    /// treats as part of the absent embedding subsystem.
     fn names_absent_subsystem(route: &str) -> bool {
         route.split(['.', '_']).any(|segment| {
-            ["index", "embed", "git", "mural"]
+            ["index", "embed", "model", "git", "mural"]
                 .iter()
                 .any(|stem| segment.starts_with(stem))
         })
@@ -28274,16 +28277,7 @@ mod tests {
 
     #[test]
     fn dispatchers_register_no_indexing_embedding_git_or_mural_route() {
-        for spelling in [
-            "index.messages",
-            "message_index.sync",
-            "embed.query",
-            "embedding.ingest",
-            "git_ingest",
-            "git.retrieve",
-            "mural.render",
-            "ctx_mural",
-        ] {
+        for spelling in UNREACHABLE_ROUTE_SPELLINGS {
             assert!(names_absent_subsystem(spelling), "{spelling}");
         }
         for spelling in [

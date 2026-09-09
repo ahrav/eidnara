@@ -21,7 +21,7 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
         const full = join(dir, entry.name);
         if (GENERATED.has(full)) continue;
         if (entry.isDirectory()) sourceFiles(full, acc);
-        else if (/\.tsx?$/.test(entry.name)) acc.push(full);
+        else if (/\.(?:tsx?|mjs)$/.test(entry.name)) acc.push(full);
     }
     return acc;
 }
@@ -60,6 +60,10 @@ const AWAITING_CONSUMER = new Map<string, string>([
     [
         "testing/module-graph-report.ts",
         "test infrastructure: run as a child process, never imported",
+    ],
+    [
+        "tui/entry.mjs",
+        "the `./tui` package export: a loader whose only imports are `tui/index.tsx` (a root here) and its compiled copy, plus the host's virtual runtime registry that no bundler resolves",
     ],
 ]);
 
@@ -161,9 +165,33 @@ describe("module graph over the landed tree", () => {
         expect(readFileSync(join(SRC, HARNESS_DATABASE_WRITER), "utf8")).toMatch(
             /const dbPath = getOpenCodeDbPath\(\);/,
         );
-        expect(databaseUses(readFileSync(join(SRC, DATABASE_ADAPTER), "utf8"))).toEqual({
-            opens: ['    const probe = new Database(":memory:");'],
-            escapes: ["export const Database: typeof BetterSqlite3 = DatabaseImpl;"],
+        expect(
+            databaseUses(readFileSync(join(SRC, DATABASE_ADAPTER), "utf8"), DATABASE_ADAPTER, {
+                allConstructions: true,
+            }),
+        ).toEqual({
+            opens: [
+                "        throw new TypeError(",
+                "            throw new TypeError(",
+                "        throw new Error(`unable to open database file: ${location} does not exist`);",
+                "            throw new SqliteRuntimeUnavailableError(runtime, specifier, error);",
+                "const privilegeDepth = new WeakMap<Database, number>();",
+                "        throw new TypeError(",
+                "        throw new TypeError(",
+                '    const probe = new Database(":memory:");',
+            ],
+            escapes: [
+                "const DatabaseImpl: typeof BetterSqlite3 = isBun",
+                "    ? buildBunSqliteDatabaseClass(sqliteModule.Database)",
+                "    : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);",
+                "export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqlite3 {",
+                "    class BunSqliteDatabase extends BunDatabase {",
+                "    return BunSqliteDatabase as unknown as typeof BetterSqlite3;",
+                "export function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {",
+                "    class NodeSqliteDatabase extends DatabaseSync {",
+                "    return NodeSqliteDatabase as unknown as typeof BetterSqlite3;",
+                "export const Database: typeof BetterSqlite3 = DatabaseImpl;",
+            ],
         });
     }, 120_000);
 });
@@ -291,6 +319,28 @@ describe("databaseUses", () => {
     test("reports any constructor named like the binding as an open", () => {
         expect(databaseUses("const probe = new DatabaseSync(':memory:');").opens).toEqual([
             "const probe = new DatabaseSync(':memory:');",
+        ]);
+    });
+
+    test("under allConstructions, an alias of an implementation constructor is both an escape and an open", () => {
+        const uses = databaseUses(
+            [
+                "const DatabaseImpl = buildNodeSqliteDatabaseClass(mod.DatabaseSync);",
+                "const DB = DatabaseImpl;",
+                "const leak = new DB(productPath);",
+                "const marker = new Error('x');",
+                "",
+            ].join("\n"),
+            "module.ts",
+            { allConstructions: true },
+        );
+        expect(uses.escapes).toEqual([
+            "const DatabaseImpl = buildNodeSqliteDatabaseClass(mod.DatabaseSync);",
+            "const DB = DatabaseImpl;",
+        ]);
+        expect(uses.opens).toEqual([
+            "const leak = new DB(productPath);",
+            "const marker = new Error('x');",
         ]);
     });
 });
