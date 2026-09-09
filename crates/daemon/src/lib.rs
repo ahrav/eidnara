@@ -29938,11 +29938,20 @@ mod tests {
                 .map(|(start, end)| class_members(&bytes[start + 1..*end]).map_or(1, |m| m.len()))
                 .try_fold(1usize, |acc, count| acc.checked_mul(count))
                 .unwrap_or(usize::MAX);
+            // A pattern with no quantifier accepts a finite set of texts; one too large to
+            // enumerate cannot be proved free of an absent spelling, so it fails the audit.
+            let quantified = bytes.iter().enumerate().any(|(index, &ch)| {
+                matches!(ch, '*' | '+' | '?' | '{') && !(index > 0 && bytes[index - 1] == '\u{0}')
+            });
+            assert!(
+                class_budget <= 64 || quantified,
+                "`{pattern}` accepts more than 64 texts and cannot be audited"
+            );
             for (start, end) in classes {
-                if class_budget > 64 {
-                    break;
-                }
-                if let Some(members) = class_members(&bytes[start + 1..end]) {
+                // Past the budget only a one-member class, which adds no variant, expands.
+                if let Some(members) = class_members(&bytes[start + 1..end])
+                    && (class_budget <= 64 || members.len() == 1)
+                {
                     let prefix: String = bytes[..start].iter().collect();
                     let suffix: String = bytes[end + 1..].iter().collect();
                     for member in members {
@@ -30335,8 +30344,18 @@ mod tests {
                 syn::visit::visit_macro(self, mac);
             }
 
+            /// `op <= "mural" && op >= "mural"` narrows to one spelling, so ordering operators
+            /// are comparison contexts alongside equality.
             fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
-                if matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+                if matches!(
+                    binary.op,
+                    syn::BinOp::Eq(_)
+                        | syn::BinOp::Ne(_)
+                        | syn::BinOp::Lt(_)
+                        | syn::BinOp::Le(_)
+                        | syn::BinOp::Gt(_)
+                        | syn::BinOp::Ge(_)
+                ) {
                     for side in [&binary.left, &binary.right] {
                         reject_unevaluable_macros(side);
                         self.compared.extend(compared_strings(side, &self.consts));
@@ -30586,6 +30605,14 @@ mod tests {
         assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
         assert!(regex_texts(r"^[^x]ural[.]render$").contains(&"mural.render".to_string()));
         assert!(!regex_texts(r"^[^m]ural[.]render$").contains(&"mural.render".to_string()));
+        assert!(
+            std::panic::catch_unwind(|| regex_texts(r"^[^x][^x][^x][^x][^x][.]render$")).is_err(),
+            "a quantifier-free pattern past the class budget must fail the audit"
+        );
+        assert_eq!(
+            regex_texts(r"^[^x][^x][^x][^x][^x]+[.]render$"),
+            ["[^x][^x][^x][^x][^x]+.render"]
+        );
         assert_eq!(regex_texts(r"^[a-zA-Z0-9_-]+$"), ["[a-zA-Z0-9_-]+"]);
         assert_eq!(regex_texts(r"^\[x\]$"), ["[x]"]);
         let ten = "(a|b)".repeat(10);

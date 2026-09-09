@@ -438,11 +438,18 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 if (match.index > 0 && value.startsWith("\uE000", match.index - 1)) continue;
                 classBudget *= classMembers(match[1] ?? "")?.length ?? 1;
             }
+            // A pattern with no quantifier accepts a finite set of texts; one too large to
+            // enumerate cannot be proved free of a forbidden spelling, so it fails the scan.
+            if (classBudget > 64 && !/(?<!\uE000)[*+?{]/.test(value)) {
+                throw new RangeError(
+                    `regex /${body}/ accepts more than 64 texts and cannot be audited`,
+                );
+            }
             for (const cls of value.matchAll(classPattern)) {
-                if (classBudget > 64) break;
                 if (cls.index > 0 && value.startsWith("\uE000", cls.index - 1)) continue;
                 const members = classMembers(cls[1] ?? "");
-                if (members !== undefined) {
+                // Past the budget only a one-member class, which adds no variant, expands.
+                if (members !== undefined && (classBudget <= 64 || members.length === 1)) {
                     const prefix = value.slice(0, cls.index);
                     const suffix = value.slice(cls.index + cls[0].length);
                     for (const member of members) expand(prefix + member + suffix);
@@ -700,12 +707,26 @@ export function databaseUses(
     // `const Ctor = db.constructor`, `const { constructor: Ctor } = db`, and `Again = Ctor`
     // reach whatever class `db` is without naming it; `new Ctor(...)` is then an escape.
     const constructorAliases = new Set<string>();
-    const isConstructorSource = (value: ts.Expression): boolean =>
-        (ts.isPropertyAccessExpression(value) && value.name.text === "constructor") ||
-        (ts.isElementAccessExpression(value) &&
-            ts.isStringLiteralLike(value.argumentExpression) &&
-            value.argumentExpression.text === "constructor") ||
-        (ts.isIdentifier(value) && constructorAliases.has(value.text));
+    // A computed member (`obj["constr" + "uctor"]`, `obj[key]`) may name `constructor`, so any
+    // element access whose key is not a plain literal counts.
+    const unwrap = (value: ts.Expression): ts.Expression =>
+        ts.isParenthesizedExpression(value) ||
+        ts.isAsExpression(value) ||
+        ts.isNonNullExpression(value) ||
+        ts.isTypeAssertionExpression(value) ||
+        ts.isSatisfiesExpression(value)
+            ? unwrap(value.expression)
+            : value;
+    const isConstructorSource = (raw: ts.Expression): boolean => {
+        const value = unwrap(raw);
+        return (
+            (ts.isPropertyAccessExpression(value) && value.name.text === "constructor") ||
+            (ts.isElementAccessExpression(value) &&
+                (!ts.isStringLiteralLike(value.argumentExpression) ||
+                    value.argumentExpression.text === "constructor")) ||
+            (ts.isIdentifier(value) && constructorAliases.has(value.text))
+        );
+    };
     const collectConstructorAliases = (node: ts.Node): void => {
         if (
             ts.isVariableDeclaration(node) &&

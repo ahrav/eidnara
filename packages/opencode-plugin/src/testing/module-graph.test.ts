@@ -424,6 +424,10 @@ describe("databaseUses", () => {
                     "let Late;",
                     'Late = handle["constructor"];',
                     "const Chained = Ctor;",
+                    'const Folded = (handle as any)["constr" + "uctor"];',
+                    "const Keyed = handle[key];",
+                    "const viaFolded = new Folded(productPath);",
+                    "const viaKeyed = new Keyed(productPath);",
                     "const viaCtor = new Ctor(productPath);",
                     "const viaPicked = new Picked(productPath);",
                     "const viaLate = new Late(productPath);",
@@ -436,6 +440,8 @@ describe("databaseUses", () => {
             ).escapes,
         ).toEqual([
             "const again = new handle.constructor(productPath);",
+            "const viaFolded = new Folded(productPath);",
+            "const viaKeyed = new Keyed(productPath);",
             "const viaCtor = new Ctor(productPath);",
             "const viaPicked = new Picked(productPath);",
             "const viaLate = new Late(productPath);",
@@ -886,6 +892,14 @@ describe("operationLiteralHits", () => {
         expect(negated).toContain("claim.intent.stage");
         expect(negated).not.toContain("claim");
         expect(negated.filter((value) => value.endsWith("laim")).length).toBeGreaterThan(1);
+        expect(() =>
+            literalStrings(parseSource("const wide = /^[^x][^x][^x][^x][^x][.]intent$/;", "m.ts")),
+        ).toThrow(RangeError);
+        expect(
+            literalStrings(
+                parseSource("const run = /^[^x][^x][^x][^x][^x]+[.]intent$/;", "m.ts"),
+            ).map((entry) => entry.value),
+        ).toEqual(["[^x][^x][^x][^x][^x]+.intent"]);
         const ten = "(a|b)".repeat(10);
         expect(literalStrings(parseSource(`const r = /^${ten}$/;`, "m.ts")).length).toBe(1024);
         expect(() => literalStrings(parseSource(`const r = /^${ten}(a|b)$/;`, "m.ts"))).toThrow(
