@@ -359,9 +359,6 @@ CREATE TABLE dreamer_receipts (
             )
         );
 
-CREATE INDEX idx_dreamer_receipts_in_progress
-            ON dreamer_receipts(state, created_at_ms, project, producer, operation_key);
-
 CREATE TABLE dreamer_attempts (
             project TEXT NOT NULL,
             producer TEXT NOT NULL,

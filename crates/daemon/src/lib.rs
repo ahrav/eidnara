@@ -9749,6 +9749,26 @@ impl Handler {
                 attempt_terminal,
                 now_ms(),
             )) {
+                // A usable result in hand is a known outcome even though its attempt
+                // row cannot record one, so it is offered as the receipt's terminal
+                // response first.
+                if let Ok(result) = &attempt_output
+                    && length_capped_or_invalid(result, &expected_ids).is_ok()
+                {
+                    let response_json =
+                        classify_success_response(model, result, attempts, &child_session)
+                            .to_string();
+                    if let Ok(DreamerTransition::Applied) = store.complete_dreamer_receipt(
+                        receipt_key,
+                        generation,
+                        DreamerTerminalKind::Complete,
+                        &response_json,
+                        now_ms(),
+                    ) {
+                        let _ = producer.purge_session(&child_session).await;
+                        return replay_dream_task_response(&response_json);
+                    }
+                }
                 // The model was dispatched but the ledger cannot follow it, so the
                 // request settles as unknown rather than staying open forever.
                 let _ = producer.purge_session(&child_session).await;
@@ -9823,22 +9843,8 @@ impl Handler {
             };
         }
         let (model, result, child_session, mut producer) = output.expect("classifier output set");
-        let response = json!({
-            "ok": true,
-            "manifest_text": result.text,
-            "truncated": result.length_capped,
-            "diagnostics": {
-                "task": CLASSIFY_TASK,
-                "model": model,
-                "attempts": attempts,
-                "child_session_id": child_session,
-                "temperature": CLASSIFY_TEMPERATURE,
-                "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
-                "await_timeout_ms": CLASSIFY_AWAIT_TIMEOUT.as_millis(),
-                "recovery_timeout_ms": CLASSIFY_RECOVERY_TIMEOUT.as_millis(),
-            }
-        });
-        let response_json = response.to_string();
+        let response_json =
+            classify_success_response(&model, &result, attempts, &child_session).to_string();
         match store.complete_dreamer_receipt(
             receipt_key,
             generation,
@@ -13347,6 +13353,29 @@ fn length_capped_or_invalid(
         return Err("a length-capped generation".to_owned());
     }
     validate_classify_manifest(&result.text, expected_ids)
+}
+
+fn classify_success_response(
+    model: &str,
+    result: &historian_producer::ProducerOutput,
+    attempts: usize,
+    child_session: &str,
+) -> Value {
+    json!({
+        "ok": true,
+        "manifest_text": result.text,
+        "truncated": result.length_capped,
+        "diagnostics": {
+            "task": CLASSIFY_TASK,
+            "model": model,
+            "attempts": attempts,
+            "child_session_id": child_session,
+            "temperature": CLASSIFY_TEMPERATURE,
+            "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
+            "await_timeout_ms": CLASSIFY_AWAIT_TIMEOUT.as_millis(),
+            "recovery_timeout_ms": CLASSIFY_RECOVERY_TIMEOUT.as_millis(),
+        }
+    })
 }
 
 /// The receipt producer every `dreamer.run_task` request is recorded under.
@@ -26923,6 +26952,72 @@ mod tests {
             harness.receipt("faulted").state,
             DreamerReceiptState::InProgress { generation: 1 }
         );
+    }
+
+    /// A model result in hand is a known outcome, so a failed attempt terminal
+    /// write still completes the receipt with it, and a retry replays it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails() {
+        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: claim_manifest(&claims),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer);
+        harness
+            .store
+            .execute_tag_sql_for_test(
+                "CREATE TRIGGER dreamer_attempt_terminal_fault
+                 BEFORE UPDATE OF terminal_kind ON dreamer_attempts
+                 BEGIN SELECT RAISE(ABORT, 'injected attempt fault'); END;",
+            )
+            .unwrap();
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let first = response_of(harness.classify(payload.clone(), "kept").await);
+        assert_eq!(first["ok"], json!(true));
+        assert_eq!(first["manifest_text"], json!(claim_manifest(&claims)));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(producer.purges.lock().unwrap().len(), 1);
+        let receipt = harness.receipt("kept");
+        match &receipt.state {
+            DreamerReceiptState::Complete {
+                terminal_kind,
+                result_json,
+                ..
+            } => {
+                assert_eq!(*terminal_kind, DreamerTerminalKind::Complete);
+                let recorded: Value = serde_json::from_str(result_json).unwrap();
+                assert_eq!(recorded, first);
+            }
+            other => panic!("the known result must complete the receipt: {other:?}"),
+        }
+        // The attempt row's terminal write is the one that failed; the receipt is
+        // the authority over the request's outcome.
+        let operation_key = dreamer_operation_key("ses", "kept");
+        let attempts = harness
+            .store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].terminal_kind, None);
+
+        harness
+            .store
+            .execute_tag_sql_for_test("DROP TRIGGER dreamer_attempt_terminal_fault;")
+            .unwrap();
+        let replayed = response_of(harness.classify(payload, "kept").await);
+        assert_eq!(replayed, first);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
     /// A chain that fails on every model completes the receipt as failed, and a

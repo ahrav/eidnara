@@ -21,7 +21,6 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_compartment_events_session"),
     ("index", "idx_compartments_session_end_message"),
     ("index", "idx_dreamer_attempts_project_dispatched"),
-    ("index", "idx_dreamer_receipts_in_progress"),
     ("index", "idx_facade_mutation_ledger_scope_newest"),
     ("index", "idx_field_scans_batch"),
     ("index", "idx_historian_side_channel_outbox_due"),

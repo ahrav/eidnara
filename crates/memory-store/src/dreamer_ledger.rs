@@ -12,6 +12,8 @@
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
+use context_core::claim_operation::is_lower_hex;
+
 use crate::{
     DurableWriteFamily, JsonScanPolicy, MemoryStore, MemoryStoreError, PreparedWrite,
     WriteDisposition, active_scan_owner_key,
@@ -238,12 +240,7 @@ fn validate_key(key: DreamerReceiptKey<'_>) -> Result<(), MemoryStoreError> {
 /// The schema's CHECK constraints bound every other field; the digest's
 /// character set is the one rule SQLite cannot express.
 fn validate_binding(binding: &DreamerReceiptBinding) -> Result<(), MemoryStoreError> {
-    let hex = binding.request_digest.len() == 64
-        && binding
-            .request_digest
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
-    if !hex {
+    if !is_lower_hex(&binding.request_digest, 64) {
         return Err(MemoryStoreError::Serde(
             "dreamer receipt request digest must be 64 lowercase hex characters".to_string(),
         ));
