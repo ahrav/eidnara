@@ -373,7 +373,10 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
         };
         const expand = (value: string): void => {
             // A quantified group (`(ab)?`, `(a|b){2}`) belongs to the quantifier rule below.
-            const group = /\((?:\?:)?([^()]*)\)(?![*+?{])/.exec(value);
+            // `?:`, a capture name `?<name>`, and a flag prefix `?i:` are group syntax, not text.
+            const group = /\((?:\?(?::|<[A-Za-z_$][\w$]*>|[a-zA-Z-]*:))?([^()]*)\)(?![*+?{])/.exec(
+                value,
+            );
             if (group?.index !== undefined && !value.startsWith("\uE000", group.index - 1)) {
                 const prefix = value.slice(0, group.index);
                 const suffix = value.slice(group.index + group[0].length);
@@ -386,7 +389,7 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             // whole text's quantifiers must multiply to at most 64 variants, so expanding them
             // can never trip the cap on a pattern that is not literal-shaped.
             const quantifierPattern =
-                /(\((?:\?:)?[^()]*\)|\uE000.|\[(?:\uE000.|[^\]\uE000])*\]|[^\uE000\]?*+{}()|])(\?|\{(\d+)(?:,(\d+))?\})/g;
+                /(\((?:\?(?::|<[A-Za-z_$][\w$]*>|[a-zA-Z-]*:))?[^()]*\)|\uE000.|\[(?:\uE000.|[^\]\uE000])*\]|[^\uE000\]?*+{}()|])(\?|\{(\d+)(?:,(\d+))?\})/g;
             const variantsOf = (match: RegExpExecArray): number | undefined => {
                 const [, atom, quantifier, low, high] = match;
                 if (match.index > 0 && value.startsWith("\uE000", match.index - 1))
@@ -396,7 +399,11 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 const choices = atom.startsWith("[")
                     ? classMembers(atom.slice(1, -1))?.length
                     : atom.startsWith("(")
-                      ? splitUnescaped(atom.replace(/^\((?:\?:)?/, "").slice(0, -1)).length
+                      ? splitUnescaped(
+                            atom
+                                .replace(/^\((?:\?(?::|<[A-Za-z_$][\w$]*>|[a-zA-Z-]*:))?/, "")
+                                .slice(0, -1),
+                        ).length
                       : 1;
                 if (choices === undefined || to < from || to > 16) return undefined;
                 let variants = 0;
@@ -737,10 +744,22 @@ export function databaseUses(
     let namesBinding = options.allConstructions === true;
     const findBinding = (node: ts.Node): void => {
         if (namesBinding) return;
-        // A type-only import or export is erased at runtime and binds nothing.
+        // A type-only import or export is erased at runtime and binds nothing, whether the
+        // `type` marker sits on the declaration or on every specifier in its clause.
+        const allTypeOnly = (elements: readonly { isTypeOnly: boolean }[]) =>
+            elements.length > 0 && elements.every((element) => element.isTypeOnly);
         if (
-            (ts.isImportDeclaration(node) && node.importClause?.isTypeOnly) ||
-            (ts.isExportDeclaration(node) && node.isTypeOnly) ||
+            (ts.isImportDeclaration(node) &&
+                (node.importClause?.isTypeOnly ||
+                    (node.importClause?.namedBindings !== undefined &&
+                        !node.importClause.name &&
+                        ts.isNamedImports(node.importClause.namedBindings) &&
+                        allTypeOnly(node.importClause.namedBindings.elements)))) ||
+            (ts.isExportDeclaration(node) &&
+                (node.isTypeOnly ||
+                    (node.exportClause !== undefined &&
+                        ts.isNamedExports(node.exportClause) &&
+                        allTypeOnly(node.exportClause.elements)))) ||
             (ts.isImportEqualsDeclaration(node) && node.isTypeOnly)
         ) {
             return;

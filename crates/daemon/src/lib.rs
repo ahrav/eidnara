@@ -28500,6 +28500,20 @@ mod tests {
         Some(out)
     }
 
+    /// Every identifier in a macro invocation, descending into parenthesized, bracketed, and
+    /// braced groups.
+    fn macro_idents(tokens: proc_macro2::TokenStream) -> Vec<String> {
+        let mut idents = Vec::new();
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Group(group) => idents.extend(macro_idents(group.stream())),
+                proc_macro2::TokenTree::Ident(ident) => idents.push(ident.to_string()),
+                _ => {}
+            }
+        }
+        idents
+    }
+
     /// `syn` leaves macro bodies as tokens, so their string literals are collected by hand.
     fn macro_string_literals(tokens: proc_macro2::TokenStream, into: &mut Vec<String>) {
         for tree in tokens {
@@ -29234,12 +29248,11 @@ mod tests {
         /// rustc resolves `#[path]` relative to the declaring file at file level and relative
         /// to the inline module directory inside an inline module block; `path_base` selects the
         /// applicable directory.
-        fn child_path(
+        fn explicit_path(
+            attrs: &[syn::Attribute],
             path_base: &std::path::Path,
-            module_dir: &std::path::Path,
-            item: &syn::ItemMod,
         ) -> Option<std::path::PathBuf> {
-            let explicit = item.attrs.iter().find_map(|attr| {
+            attrs.iter().find_map(|attr| {
                 if !attr.path().is_ident("path") {
                     return None;
                 }
@@ -29254,10 +29267,14 @@ mod tests {
                     return None;
                 };
                 Some(path_base.join(path.value()))
-            });
-            if let Some(path) = explicit {
-                return Some(path);
-            }
+            })
+        }
+
+        /// The conventional file for `mod name;`: `name.rs` or `name/mod.rs` under `module_dir`.
+        fn conventional_child(
+            module_dir: &std::path::Path,
+            item: &syn::ItemMod,
+        ) -> Option<std::path::PathBuf> {
             let name = item.ident.to_string();
             let flat = module_dir.join(format!("{name}.rs"));
             let nested = module_dir.join(&name).join("mod.rs");
@@ -29268,6 +29285,25 @@ mod tests {
             } else {
                 None
             }
+        }
+
+        /// The file production compiles for `item`, plus the conventional file a test build
+        /// compiles instead when the production `#[path]` arrives through a `cfg_attr` and the
+        /// conventional file exists.
+        fn child_paths(
+            path_base: &std::path::Path,
+            module_dir: &std::path::Path,
+            item: &syn::ItemMod,
+        ) -> Option<(std::path::PathBuf, Option<std::path::PathBuf>)> {
+            let direct = explicit_path(&item.attrs, path_base);
+            let production = explicit_path(&production_attrs(&item.attrs), path_base);
+            let conventional = conventional_child(module_dir, item);
+            let child = production.clone().or(conventional.clone())?;
+            let test_fallback = match (production, direct, conventional) {
+                (Some(_), None, Some(fallback)) if fallback != child => Some(fallback),
+                _ => None,
+            };
+            Some((child, test_fallback))
         }
 
         /// Collects out-of-line modules in `items`, including declarations inside inline modules
@@ -29334,15 +29370,20 @@ mod tests {
                             } else {
                                 file_dir
                             };
-                            let child = child_path(path_base, &self.module_dir, module)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "{}: cannot resolve `{}`",
-                                        self.declaring.display(),
-                                        module.to_token_stream()
-                                    )
-                                });
+                            let (child, test_fallback) =
+                                child_paths(path_base, &self.module_dir, module).unwrap_or_else(
+                                    || {
+                                        panic!(
+                                            "{}: cannot resolve `{}`",
+                                            self.declaring.display(),
+                                            module.to_token_stream()
+                                        )
+                                    },
+                                );
                             self.into.push((child, self.test_only));
+                            if let Some(fallback) = test_fallback {
+                                self.into.push((fallback, true));
+                            }
                         }
                     }
                 }
@@ -30282,11 +30323,10 @@ mod tests {
                     self.compared.extend(literals.iter().cloned());
                 }
                 if mac.path.is_ident("matches") {
-                    // `matches!(op, MURAL)` names a constant in its pattern.
-                    for tree in mac.tokens.clone() {
-                        if let proc_macro2::TokenTree::Ident(ident) = tree
-                            && let Some(held) = self.consts.get(&ident.to_string())
-                        {
+                    // `matches!(op, MURAL)` and `matches!(Some(op), Some(MURAL))` name a
+                    // constant in their pattern, at any nesting depth.
+                    for name in macro_idents(mac.tokens.clone()) {
+                        if let Some(held) = self.consts.get(&name) {
                             self.compared.extend(held.iter().cloned());
                         }
                     }

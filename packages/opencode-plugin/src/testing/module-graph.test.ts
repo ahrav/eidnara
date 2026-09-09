@@ -415,6 +415,8 @@ describe("databaseUses", () => {
                     'import type { Database } from "bun:sqlite";',
                     'export type { Database as Db } from "../../shared/sqlite";',
                     'import type Native = require("node:sqlite");',
+                    'export { type Database as Only } from "bun:sqlite";',
+                    'import { type Database as Typed } from "../../shared/sqlite";',
                     'const names = new Intl.DisplayNames(["en"], { type: "language" });',
                     "const again = new handle.constructor(productPath);",
                     "const Ctor = handle.constructor;",
@@ -870,6 +872,14 @@ describe("operationLiteralHits", () => {
                 parseSource("const g = /^(a|b){2}$/; const o = /^(ab)?x$/;", "m.ts"),
             ).map((entry) => entry.value),
         ).toEqual(["aa", "ab", "ba", "bb", "x", "abx"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    "const named = /^(?<route>claim){1}[.]intent[.]stage$/; const flagged = /^(?i:CLAIM)[.]read$/;",
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim.intent.stage", "CLAIM.read"]);
         const negated = literalStrings(
             parseSource("const n = /^[^x]laim[.]intent[.]stage$/; const m = /^[^c]laim$/;", "m.ts"),
         ).map((entry) => entry.value);
