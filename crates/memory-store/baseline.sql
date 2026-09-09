@@ -372,7 +372,7 @@ CREATE TABLE dreamer_attempts (
             child_session TEXT NOT NULL CHECK (length(child_session) > 0),
             dispatched_at_ms INTEGER NOT NULL,
             run_handle TEXT,
-            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown')),
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown', 'not_sent')),
             terminal_at_ms INTEGER,
             session_released_at_ms INTEGER,
             PRIMARY KEY (project, producer, operation_key, generation, attempt_index),

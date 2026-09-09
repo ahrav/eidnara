@@ -51,6 +51,9 @@ pub enum DreamerTerminalKind {
     Cancelled,
     /// A dispatch marker exists but the run's outcome can no longer be learned.
     Unknown,
+    /// The producer proved that the request never reached the model runtime.
+    /// Only attempt rows end this way; `count_dreamer_attempts` excludes them.
+    NotSent,
 }
 
 impl DreamerTerminalKind {
@@ -60,6 +63,7 @@ impl DreamerTerminalKind {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Unknown => "unknown",
+            Self::NotSent => "not_sent",
         }
     }
 
@@ -69,6 +73,7 @@ impl DreamerTerminalKind {
             "failed" => Some(Self::Failed),
             "cancelled" => Some(Self::Cancelled),
             "unknown" => Some(Self::Unknown),
+            "not_sent" => Some(Self::NotSent),
             _ => None,
         }
     }
@@ -383,9 +388,10 @@ impl MemoryStore {
         )
     }
 
-    /// Records the dispatch marker for one model attempt before the model is
-    /// called. The row exists only while the receipt is `IN_PROGRESS` at
-    /// `generation`, so a fenced predecessor cannot add attempts.
+    /// Records the dispatch marker for one model attempt ahead of the model
+    /// call. The insert matches only an `IN_PROGRESS` receipt at `generation`;
+    /// a fenced predecessor adds no attempt. A second call for the same
+    /// `(generation, attempt_index)` returns `Fenced`.
     pub fn begin_dreamer_attempt(
         &self,
         key: DreamerReceiptKey<'_>,
@@ -410,7 +416,12 @@ impl MemoryStore {
              SELECT project, producer, operation_key, generation, ?4, ?5, ?6, ?7, ?8, ?9, ?10
                FROM dreamer_receipts
               WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
-                AND state = 'in_progress' AND generation = ?11",
+                AND state = 'in_progress' AND generation = ?11
+                AND NOT EXISTS (
+                    SELECT 1 FROM dreamer_attempts a
+                     WHERE a.project = ?1 AND a.producer = ?2 AND a.operation_key = ?3
+                       AND a.generation = ?11 AND a.attempt_index = ?4
+                )",
             params![
                 spec.attempt_index,
                 spec.model,
@@ -627,9 +638,7 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Attempts dispatched for `project` at or after `since_ms`: the per-project
-    /// count a budget refuses on. Every attempt counts, whatever its outcome,
-    /// because each one was a model dispatch.
+    /// Counts attempts except those ending `NotSent`. commentlint: allow(JUDGE)
     pub fn count_dreamer_attempts(
         &self,
         project: &str,
@@ -639,8 +648,9 @@ impl MemoryStore {
             .with_conn(|conn| {
                 conn.query_row(
                     "SELECT COUNT(*) FROM dreamer_attempts
-                      WHERE project = ?1 AND dispatched_at_ms >= ?2",
-                    params![project, since_ms],
+                      WHERE project = ?1 AND dispatched_at_ms >= ?2
+                        AND (terminal_kind IS NULL OR terminal_kind != ?3)",
+                    params![project, since_ms, DreamerTerminalKind::NotSent.as_str()],
                     |row| row.get::<_, i64>(0),
                 )
             })

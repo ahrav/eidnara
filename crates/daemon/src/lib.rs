@@ -106,7 +106,9 @@ use historian_chunk::{
     AssembleHistorianFiringOutcome, AssembledHistorianFiring, HistorianAssemblerConfig,
     assemble_historian_firing,
 };
-use historian_producer::{HistorianProducer, HistorianProducerConfig, HistorianProducerError};
+use historian_producer::{
+    HistorianProducer, HistorianProducerConfig, HistorianProducerError, HistorianSendOutcome,
+};
 use prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
 use scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT;
 use selection::SelKind;
@@ -9691,6 +9693,13 @@ impl Handler {
                 Ok(started) => started,
                 Err(_) => Err(HistorianProducerError::TimedOut),
             };
+            // Only a start error carries proof that the request never reached the
+            // model runtime; an error from the await path follows a run that
+            // already started.
+            let start_not_sent = matches!(
+                &started,
+                Err(error) if error.send_outcome() == Some(HistorianSendOutcome::NotSent)
+            );
             let attempt_output = match started {
                 Ok(handle) => match producer
                     .await_output_with_timeout(
@@ -9712,13 +9721,15 @@ impl Handler {
                 },
                 Err(error) => Err(error),
             };
-            //
             let attempt_terminal = match &attempt_output {
                 Ok(_) => DreamerTerminalKind::Complete,
                 Err(HistorianProducerError::TimedOut) => DreamerTerminalKind::Cancelled,
-                // The runtime already holds a run under this child session, so the
-                // dispatch happened somewhere this run cannot observe.
-                Err(error) if error.is_idempotency_conflict() => DreamerTerminalKind::Unknown,
+                Err(error)
+                    if error.is_idempotency_conflict() || error.is_cross_incarnation_unknown() =>
+                {
+                    DreamerTerminalKind::Unknown
+                }
+                Err(_) if start_not_sent => DreamerTerminalKind::NotSent,
                 Err(_) => DreamerTerminalKind::Failed,
             };
             if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
@@ -9778,10 +9789,8 @@ impl Handler {
                     },
                 },
                 Err(primary) => {
-                    if primary.is_idempotency_conflict() {
-                        // The runtime already holds a run under this child session, so the
-                        // request's outcome is whatever that run produces; the receipt
-                        // stays in progress for a later takeover to settle.
+                    if primary.is_idempotency_conflict() || primary.is_cross_incarnation_unknown() {
+                        // A run may already be active under this child session.
                         return PreparedOutcome::Error {
                             code: "dreamer_outcome_unknown".to_string(),
                             message: primary.to_string(),
@@ -13405,8 +13414,9 @@ fn ledger_stop(
 /// Settles a request whose model was dispatched but whose ledger bookkeeping
 /// failed afterwards: the attempt and the receipt are recorded as `unknown` on
 /// a best-effort basis so a retry replays the unknown outcome instead of
-/// dispatching the chain again. The caller's `stop` is returned unless even the
-/// receipt cannot be written, which is reported as the ledger failure.
+/// dispatching the chain again. A fenced receipt write reports the fence
+/// rather than the caller's `stop`, because another generation now owns the
+/// outcome.
 fn settle_dispatched_attempt_as_unknown(
     store: &MemoryStore,
     key: DreamerReceiptKey<'_>,
@@ -13433,7 +13443,8 @@ fn settle_dispatched_attempt_as_unknown(
         &envelope.to_string(),
         now_ms(),
     ) {
-        Ok(_) => stop,
+        Ok(DreamerTransition::Applied) => stop,
+        Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
         Err(error) => dreamer_ledger_failed(error),
     }
 }
@@ -26972,6 +26983,116 @@ mod tests {
                 .count_dreamer_attempts("git:identity", 0)
                 .unwrap(),
             2
+        );
+    }
+
+    /// A send whose outcome was lost across a replay fence may have started a
+    /// paid run, so the chain stops, the attempt ends `unknown`, and the receipt
+    /// stays in progress; a retry does not dispatch again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_stops_the_chain_when_the_send_outcome_crosses_an_incarnation() {
+        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer.start_errors.lock().unwrap().push_back(Err(
+            HistorianProducerError::CrossIncarnationUnknown {
+                daemon_changed: true,
+                identity_changed: false,
+            },
+        ));
+        let harness = DreamerHarness::start(&producer);
+        let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        payload["model_chain"] = json!(["test/first", "test/second"]);
+        let outcome = harness.classify(payload.clone(), "cross-incarnation").await;
+        assert_eq!(error_code_of(&outcome), "dreamer_outcome_unknown");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert!(producer.purges.lock().unwrap().is_empty());
+        let receipt = harness.receipt("cross-incarnation");
+        assert_eq!(
+            receipt.state,
+            DreamerReceiptState::InProgress { generation: 1 }
+        );
+        let operation_key = dreamer_operation_key("ses", "cross-incarnation");
+        let attempts = harness
+            .store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].model, "test/first");
+        assert_eq!(
+            attempts[0].terminal_kind,
+            Some(DreamerTerminalKind::Unknown)
+        );
+
+        let retried = harness.classify(payload, "cross-incarnation").await;
+        assert_eq!(error_code_of(&retried), "dreamer_outcome_unknown");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A start that the producer proves never queued a request ends the attempt
+    /// `not_sent`: the row stays in the ledger, the chain moves on, and the
+    /// dispatch count charges only the model that was actually sent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_does_not_count_a_proven_not_sent_start_as_a_dispatch() {
+        use historian_producer::{HistorianCallFailure, HistorianSendOutcome};
+        use memory_store::dreamer_ledger::DreamerTerminalKind;
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .start_errors
+            .lock()
+            .unwrap()
+            .push_back(Err(HistorianProducerError::Call(
+                HistorianCallFailure::untagged(
+                    HistorianSendOutcome::NotSent,
+                    "cancelled",
+                    "historian firing was cancelled before it started".to_owned(),
+                ),
+            )));
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: claim_manifest(&claims),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer);
+        let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        payload["model_chain"] = json!(["test/first", "test/second"]);
+        let response = response_of(harness.classify(payload, "not-sent").await);
+        assert_eq!(response["ok"], json!(true));
+        assert_eq!(response["diagnostics"]["model"], json!("test/second"));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
+        let operation_key = dreamer_operation_key("ses", "not-sent");
+        let attempts = harness
+            .store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap();
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| (attempt.model.as_str(), attempt.terminal_kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("test/first", Some(DreamerTerminalKind::NotSent)),
+                ("test/second", Some(DreamerTerminalKind::Complete)),
+            ]
+        );
+        assert_eq!(
+            harness
+                .store
+                .count_dreamer_attempts("git:identity", 0)
+                .unwrap(),
+            1
         );
     }
 

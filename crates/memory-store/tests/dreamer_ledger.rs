@@ -86,6 +86,14 @@ fn a_receipt_moves_from_absent_through_in_progress_to_complete_and_replays() {
             .unwrap(),
         DreamerTransition::Applied
     );
+    // Repeating the same attempt beginning is fenced, not a primary-key error.
+    assert_eq!(
+        store
+            .begin_dreamer_attempt(key(), 1, &attempt(0, "prov/model-a"), 12)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(store.list_dreamer_attempts(key()).unwrap().len(), 1);
     assert_eq!(
         store
             .record_dreamer_run_handle(key(), 1, 0, "run-1")
@@ -184,6 +192,45 @@ fn a_receipt_moves_from_absent_through_in_progress_to_complete_and_replays() {
     assert_eq!(store.count_dreamer_attempts(PROJECT, 0).unwrap(), 1);
     assert_eq!(store.count_dreamer_attempts(PROJECT, 13).unwrap(), 0);
     assert_eq!(store.count_dreamer_attempts("git:other", 0).unwrap(), 0);
+}
+
+#[test]
+fn an_attempt_that_was_never_sent_is_recorded_but_not_counted_as_a_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    store
+        .begin_dreamer_receipt(key(), &binding("prompt"), 1)
+        .unwrap();
+    store
+        .begin_dreamer_attempt(key(), 1, &attempt(0, "prov/model-a"), 2)
+        .unwrap();
+    assert_eq!(store.count_dreamer_attempts(PROJECT, 0).unwrap(), 1);
+    assert_eq!(
+        store
+            .finish_dreamer_attempt(key(), 1, 0, DreamerTerminalKind::NotSent, 3)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    // NotSent attempts remain in audit history but are excluded from dispatch counts.
+    let attempts = store.list_dreamer_attempts(key()).unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].terminal_kind,
+        Some(DreamerTerminalKind::NotSent)
+    );
+    assert_eq!(store.count_dreamer_attempts(PROJECT, 0).unwrap(), 0);
+
+    // A later attempt whose send outcome is unknown still counts.
+    store
+        .begin_dreamer_attempt(key(), 1, &attempt(1, "prov/model-b"), 4)
+        .unwrap();
+    assert_eq!(
+        store
+            .finish_dreamer_attempt(key(), 1, 1, DreamerTerminalKind::Unknown, 5)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    assert_eq!(store.count_dreamer_attempts(PROJECT, 0).unwrap(), 1);
 }
 
 #[test]
@@ -421,8 +468,8 @@ fn the_request_digest_ignores_map_insertion_order_and_pins_the_protocol() {
         dreamer_request_digest(&ordered).unwrap(),
         dreamer_request_digest(&permuted).unwrap()
     );
-    // Array order is part of the request; the model chain is ordered.
-    let reordered_chain = json!({
+    // Array order affects the digest. commentlint: allow(JUDGE)
+    let reordered_items = json!({
         "task": "classify",
         "prompt_body": "p",
         "items": ["b", "a"],
@@ -431,7 +478,7 @@ fn the_request_digest_ignores_map_insertion_order_and_pins_the_protocol() {
     });
     assert_ne!(
         dreamer_request_digest(&ordered).unwrap(),
-        dreamer_request_digest(&reordered_chain).unwrap()
+        dreamer_request_digest(&reordered_items).unwrap()
     );
     // The protocol prefix keeps a Dreamer digest distinct from a claim digest
     // over the same bytes.
