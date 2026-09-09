@@ -3,10 +3,11 @@
 //! The reader loads user and project tiers directly without a daemon config plane.
 //! Every key it consumes is a [`ConfigKey`] with one [`TierClass`]: the user
 //! tier sets any key; the project tier is applied key by key through its class,
-//! after the user tier. A privileged key (model selection, unattended task
-//! schedules, docs injection into task input) is never project-allowed; the
-//! execute threshold and the user-memory gate may only be tightened by the
-//! project tier. No environment variable supplies a configuration value.
+//! after the user tier. A privileged key (model selection, the memory injection
+//! budget, the historian cache TTL, unattended task schedules, docs injection
+//! into task input) is never project-allowed; the execute threshold and the
+//! user-memory gate may only be tightened by the project tier. No environment
+//! variable supplies a configuration value.
 //! The Rust module uses stricter model-selection policy than the TypeScript implementation.
 
 use std::fs;
@@ -620,15 +621,20 @@ impl ConfigKey {
     /// unattended task, or widen what such a task reads. Privileged keys are
     /// never `ProjectAllowed`; a `const` assertion below checks that at compile
     /// time.
+    ///
+    /// `cache_ttl` is the idle interval after which the historian fires on its
+    /// own (`scheduler::should_execute`), so it spends model budget.
     pub const fn privileged(self) -> bool {
         match self {
             Self::HistorianModuleModel
             | Self::HistorianModuleFallbackModels
             | Self::HistorianModel
             | Self::HistorianFallbackModels
+            | Self::MemoryInjectionBudgetTokens
             | Self::DreamerReviewUserMemoriesSchedule
             | Self::UserMemoriesEnabled
-            | Self::DreamerInjectDocs => true,
+            | Self::DreamerInjectDocs
+            | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
             | Self::MemoryEnabled
@@ -637,7 +643,6 @@ impl ConfigKey {
             | Self::AutoSearchMinPromptChars
             | Self::CavemanEnabled
             | Self::CavemanMinChars
-            | Self::MemoryInjectionBudgetTokens
             | Self::MemoryBudgetTokens
             | Self::UserProfileBudgetTokens
             | Self::MemoryAutoPromote
@@ -645,8 +650,7 @@ impl ConfigKey {
             | Self::SmartDrops
             | Self::TemporalAwareness
             | Self::PromptSurfaceGuidanceOverrideText
-            | Self::PromptSurfaceGuidanceOverridePath
-            | Self::CacheTtl => false,
+            | Self::PromptSurfaceGuidanceOverridePath => false,
         }
     }
 
@@ -657,6 +661,7 @@ impl ConfigKey {
             | Self::HistorianModel
             | Self::HistorianFallbackModels
             | Self::CompactionEnabled
+            | Self::MemoryInjectionBudgetTokens
             | Self::MemoryBudgetTokens
             | Self::UserProfileBudgetTokens
             | Self::DreamerReviewUserMemoriesSchedule
@@ -671,7 +676,6 @@ impl ConfigKey {
             | Self::AutoSearchMinPromptChars
             | Self::CavemanEnabled
             | Self::CavemanMinChars
-            | Self::MemoryInjectionBudgetTokens
             | Self::MemoryAutoPromote
             | Self::SmartDrops
             | Self::TemporalAwareness => TierClass::ProjectAllowed,
@@ -1319,10 +1323,21 @@ mod tests {
         });
         let (standard, warnings) =
             merge_tiers_with_warnings(Some(&standard_user), Some(&standard_project));
-        assert_eq!(standard.memory_budget_tokens, 3_500.0);
+        assert_eq!(
+            standard.memory_budget_tokens, 3_000.0,
+            "the injection budget bounds input tokens per request; the project tier cannot change it"
+        );
         assert!(warnings.iter().any(|warning| {
             warning.contains("/memory/budget_tokens") && warning.contains("deprecated")
         }));
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("/memory/injection_budget_tokens")
+                    && warning.contains("project tier")
+                    && warning.contains("user-tier only")
+            }),
+            "{warnings:?}"
+        );
 
         let legacy_user = serde_json::json!({ "memory": { "budget_tokens": 3_250 } });
         let (legacy, warnings) = merge_tiers_with_warnings(Some(&legacy_user), None);
@@ -1650,6 +1665,37 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
+    /// `historian.model`, `memory.injection_budget_tokens`, and `cache_ttl` are
+    /// removed by `stripUnsafeProjectConfigFields`; keep both lists aligned.
+    #[test]
+    fn privileged_keys_are_the_model_budget_and_schedule_levers() {
+        let privileged: Vec<ConfigKey> = ConfigKey::ALL
+            .iter()
+            .copied()
+            .filter(|key| key.privileged())
+            .collect();
+        assert_eq!(
+            privileged,
+            vec![
+                ConfigKey::HistorianModuleModel,
+                ConfigKey::HistorianModuleFallbackModels,
+                ConfigKey::HistorianModel,
+                ConfigKey::HistorianFallbackModels,
+                ConfigKey::MemoryInjectionBudgetTokens,
+                ConfigKey::UserMemoriesEnabled,
+                ConfigKey::DreamerReviewUserMemoriesSchedule,
+                ConfigKey::DreamerInjectDocs,
+                ConfigKey::CacheTtl,
+            ]
+        );
+        for key in privileged {
+            assert!(
+                !matches!(key.tier_class(), TierClass::ProjectAllowed),
+                "{key:?} is privileged and project-allowed"
+            );
+        }
+    }
+
     /// A project tier that sets every key the merge reads changes no privileged
     /// value and warns once per key it cannot set.
     #[test]
@@ -1721,6 +1767,10 @@ mod tests {
             user_only.execute_threshold_percentage
         );
         assert_eq!(cfg.cache_ttl, user_only.cache_ttl);
+        assert_eq!(
+            cfg.memory_budget_tokens, user_only.memory_budget_tokens,
+            "project tier must not widen the memory injection budget"
+        );
         assert_eq!(cfg.prompt_surface_guidance_override, None);
         let ignored = ConfigKey::ALL
             .iter()

@@ -446,10 +446,7 @@ async fn a_memory_disabled_pass_takes_no_canonical_read() {
 /// digested into the revision.
 #[tokio::test]
 async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
-    let daemon = KernelDaemon::start_with_project_config(Some(
-        json!({"memory": {"injection_budget_tokens": 60}}),
-    ))
-    .await;
+    let daemon = KernelDaemon::start().await;
     let asserted = daemon.commit("asserted", vec![insert_decision(1)]).await;
     assert_eq!(state_kind(&asserted), "available");
     let scope_id = daemon.read("explicit_search", None, None).await["rows"][0]["scope_id"]
@@ -457,7 +454,7 @@ async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
         .unwrap()
         .to_string();
     let store = daemon.store();
-    let long_summary = "x ".repeat(2_000);
+    let long_summary = "x ".repeat(6_000);
     commit_verified_memory(
         &store,
         "long",
