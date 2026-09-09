@@ -4,6 +4,8 @@
  * string that happens to appear in a comment or a log line.
  */
 
+import { readFileSync } from "node:fs";
+
 /** The Pi `build` script's externals; the graph stops at these package boundaries. */
 export const BUNDLE_EXTERNALS = [
     "@eidnara/shm-native",
@@ -11,17 +13,42 @@ export const BUNDLE_EXTERNALS = [
     "@earendil-works/pi-tui",
 ] as const;
 
+/** Import specifiers are matched as written, so the adapter may appear with or without its extension. */
+export const DATABASE_BINDING =
+    /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|(?:^|\/)shared\/sqlite(?:\.ts)?$/;
+
+/** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches; case is ignored so a handler cannot compare a normalized operation against an upper-cased name. */
+export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/i;
+
 export interface ModuleGraph {
     /** Every source module in the bundle, as the bundler names it relative to the working directory. */
     inputs: string[];
     /** Every specifier an input imports that stays external, since those never appear in `inputs`. */
     externals: string[];
+    /** Each input's import specifiers as written, bundled and external alike. */
+    imports: Record<string, string[]>;
     /** The bundled text, for claims about emitted bytes such as which externals stay external. */
     text: string;
 }
 
-interface MetafileInput {
+export interface MetafileInput {
     imports?: { path?: string; external?: boolean }[];
+}
+
+export function graphFromMetafileInputs(
+    inputs: Record<string, MetafileInput>,
+): Omit<ModuleGraph, "text"> {
+    const externals = new Set<string>();
+    const imports: Record<string, string[]> = {};
+    for (const [path, input] of Object.entries(inputs)) {
+        imports[path] = [];
+        for (const edge of input.imports ?? []) {
+            if (typeof edge.path !== "string") continue;
+            imports[path].push(edge.path);
+            if (edge.external === true) externals.add(edge.path);
+        }
+    }
+    return { inputs: Object.keys(inputs), externals: [...externals], imports };
 }
 
 export async function bundleModuleGraph(entry: string): Promise<ModuleGraph> {
@@ -43,17 +70,7 @@ export async function bundleModuleGraph(entry: string): Promise<ModuleGraph> {
         | undefined;
     if (!metafile?.inputs) throw new Error(`bundle of ${entry} produced no metafile`);
     const texts = await Promise.all(result.outputs.map((output) => output.text()));
-    const externals = new Set<string>();
-    for (const input of Object.values(metafile.inputs)) {
-        for (const edge of input.imports ?? []) {
-            if (edge.external === true && typeof edge.path === "string") externals.add(edge.path);
-        }
-    }
-    return {
-        inputs: Object.keys(metafile.inputs),
-        externals: [...externals],
-        text: texts.join("\n"),
-    };
+    return { ...graphFromMetafileInputs(metafile.inputs), text: texts.join("\n") };
 }
 
 /**
@@ -70,4 +87,29 @@ export function reachableModules(graph: ModuleGraph, pattern: RegExp): string[] 
         );
     }
     return [...graph.inputs, ...graph.externals].filter((path) => pattern.test(path));
+}
+
+export function databaseBinders(graph: Pick<ModuleGraph, "imports">): string[] {
+    return Object.entries(graph.imports)
+        .filter(
+            ([path, imports]) =>
+                !DATABASE_BINDING.test(path) && imports.some((edge) => DATABASE_BINDING.test(edge)),
+        )
+        .map(([path]) => path)
+        .sort();
+}
+
+/** Operation names are string literals, not import edges, so the metafile cannot see them. */
+export function operationLiteralHits(
+    files: string[],
+    pattern: RegExp = OPERATION_LITERAL,
+): string[] {
+    const hits: string[] = [];
+    for (const file of files) {
+        const lines = readFileSync(file, "utf8").split("\n");
+        for (const [index, line] of lines.entries()) {
+            if (pattern.test(line)) hits.push(`${file}:${index + 1}`);
+        }
+    }
+    return hits;
 }

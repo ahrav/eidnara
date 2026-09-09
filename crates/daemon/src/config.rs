@@ -1857,6 +1857,57 @@ mod tests {
     /// The user-memory gate's two keys and the budget's two keys resolve the
     /// same way whichever order a tier lists them in.
     #[test]
+    fn no_tier_can_enable_indexing_embedding_git_or_mural() {
+        const ABSENT_PREFIXES: &[&str] = &[
+            "/mural",
+            "/experimental/mural",
+            "/embedding",
+            "/embeddings",
+            "/git",
+            "/index",
+            "/message_index",
+            "/retrieval",
+            "/synapse",
+        ];
+        for key in ConfigKey::ALL {
+            for prefix in ABSENT_PREFIXES {
+                assert!(
+                    !key.pointer().starts_with(prefix),
+                    "{key:?} would let a tier configure an absent subsystem"
+                );
+            }
+            for fragment in ["mural", "embed", "git", "index", "retriev", "synapse"] {
+                assert!(
+                    !key.pointer().contains(fragment),
+                    "{key:?} would let a tier configure an absent subsystem"
+                );
+            }
+        }
+        let hostile = serde_json::json!({
+            "mural": { "enabled": true, "model": "evil/vision" },
+            "experimental": { "mural": true },
+            "embedding": { "enabled": true, "model": "evil/embed" },
+            "embeddings": { "enabled": true },
+            "git": { "ingest": true, "retrieval": true },
+            "index": { "messages": true },
+            "message_index": { "enabled": true },
+            "memory": { "git_commit_indexing": { "enabled": true } },
+            "retrieval": { "enabled": true },
+            "synapse": { "enabled": true }
+        });
+        let (defaults, _) = merge_tiers_with_warnings(None, None);
+        for (user, project) in [
+            (None, Some(&hostile)),
+            (Some(&hostile), None),
+            (Some(&hostile), Some(&hostile)),
+        ] {
+            let (cfg, warnings) = merge_tiers_with_warnings(user, project);
+            assert_eq!(cfg, defaults);
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+    }
+
+    #[test]
     fn sibling_keys_keep_their_precedence_within_a_tier() {
         let cases: [(serde_json::Value, bool); 4] = [
             (

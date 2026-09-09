@@ -18786,6 +18786,101 @@ mod tests {
         call_transform_request(handler, request(messages)).await
     }
 
+    /// `host_mural_artifact` refuses a disabled mural, a host without vision, and an empty or
+    /// absent data URL; each refusal must leave the store empty and the messages image-free
+    /// while the transform itself still succeeds.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mural_is_reached_only_through_a_host_supplied_enabled_artifact() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project = project.to_str().unwrap();
+        let messages = vec![ck("tail", 1, "raw")];
+        let mut oc_request = request(messages.clone());
+        oc_request["serializer_profile"] = json!("opencode-aisdk");
+        let without = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
+        assert_eq!(without["action"], "HARD", "{without}");
+        assert!(
+            store
+                .load_project_mural_artifact(project)
+                .unwrap()
+                .is_none()
+        );
+        let refusals = [
+            (
+                "disabled",
+                json!({
+                    "enabled": false,
+                    "supports_vision": true,
+                    "data_url": "data:image/png;base64,YQ==",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "no vision",
+                json!({
+                    "enabled": true,
+                    "supports_vision": false,
+                    "data_url": "data:image/png;base64,YQ==",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "empty data url",
+                json!({
+                    "enabled": true,
+                    "supports_vision": true,
+                    "data_url": "",
+                    "content_hash": "mural-a",
+                }),
+            ),
+            (
+                "absent data url",
+                json!({
+                    "enabled": true,
+                    "supports_vision": true,
+                    "content_hash": "mural-a",
+                }),
+            ),
+        ];
+        let mut responses = vec![without];
+        for (label, mural) in refusals {
+            oc_request["mural"] = mural;
+            let refused = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
+            assert!(
+                matches!(refused["action"].as_str(), Some("HARD" | "SOFT" | "SOFT+")),
+                "{label}: {refused}"
+            );
+            assert!(
+                refused["messages"]
+                    .as_array()
+                    .is_some_and(|messages| !messages.is_empty()),
+                "{label}: {refused}"
+            );
+            assert!(
+                store
+                    .load_project_mural_artifact(project)
+                    .unwrap()
+                    .is_none(),
+                "{label} persisted an artifact"
+            );
+            responses.push(refused);
+        }
+        for response in &responses {
+            let serialized = serde_json::to_string(&response["messages"]).unwrap();
+            for marker in [
+                "data:image/",
+                "<memory-mural>",
+                "image/",
+                "\"type\":\"file\"",
+            ] {
+                assert!(
+                    !serialized.contains(marker),
+                    "{marker} present in {response}"
+                );
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn cc_inherits_oc_project_mural_on_a_natural_hard_without_defer_first_apply() {
         let (handler, store, _dir, project) =
@@ -28294,6 +28389,49 @@ mod tests {
                 )
                 .await;
             assert_eq!(error_code(outcome), "unrecognized_request_shape", "{alias}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape() {
+        const UNREACHABLE: &[&str] = &[
+            "index.messages",
+            "message_index.sync",
+            "messages.index",
+            "embed.query",
+            "embed.batch",
+            "embed.result",
+            "embedding.ingest",
+            "models.list",
+            "git.ingest",
+            "git.retrieve",
+            "git_ingest",
+            "git_retrieval.query",
+            "mural.render",
+            "mural.get",
+            "ctx_mural",
+            "ctx-mural",
+        ];
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+        for name in UNREACHABLE {
+            let as_method = handler
+                .dispatch_value(
+                    test_route(7),
+                    json!({ "method": name, "session_id": "ses", "project": "p" }),
+                )
+                .await;
+            assert_eq!(
+                error_code(as_method),
+                "unrecognized_request_shape",
+                "{name}"
+            );
+            let as_facade = call_facade(&handler, name, json!({ "session_id": "ses" })).await;
+            assert_eq!(
+                error_code(as_facade),
+                "facade_envelope_not_supported",
+                "{name}"
+            );
         }
     }
 
