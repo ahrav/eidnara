@@ -87,7 +87,8 @@ reaches `handle_dreamer_run_task` without a feature or configuration gate.
 - Bounds: `timeout_ms` is clamped to `CLASSIFY_MAX_REQUEST_TIMEOUT`
   (`crates/daemon/src/classify.rs:23-27`, equal to the await ceiling) by
   `classify_request_timeout` at `:9491`; the chain is
-  capped at `MAX_CLASSIFY_MODEL_CHAIN` at parse time (`:9464-9468`); the budget is
+  capped at `MAX_CLASSIFY_MODEL_CHAIN` in `ClassifyRequest::parse`
+  (`:13698-13702`); the budget is
   `DREAMER_ATTEMPT_BUDGET` per `DREAMER_ATTEMPT_BUDGET_WINDOW`
   (`crates/daemon/src/classify.rs:30-31`). `count_dreamer_attempts` excludes
   `not_sent` rows and counts open, `cancelled`, and length-capped attempts alike
