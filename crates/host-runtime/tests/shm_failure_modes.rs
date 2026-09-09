@@ -222,36 +222,38 @@ async fn setup_active_and_idle_sigkill_each_return_exact_capacity() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repeated_crashes_do_not_ratchet_single_connection_capacity() {
-    let _serial = serial_failure_test().await;
-    let host = TestHost::start_with(|config| config.limits.max_connections = 1).await;
-    // The test records the baseline after one crash cycle so first-cycle setup
-    // does not affect a measured cycle.
-    crash_victim(&host, "active").await;
-    connect_after_reclamation(&host.publication_path())
-        .await
-        .close()
-        .await
-        .unwrap();
-    let baseline = support::process_resources::stabilize(std::process::id(), BUDGET).await;
+#[test]
+fn repeated_crashes_do_not_ratchet_single_connection_capacity() {
+    support::process_resources::serial_blocking_runtime().block_on(async {
+        let _serial = serial_failure_test().await;
+        let host = TestHost::start_with(|config| config.limits.max_connections = 1).await;
+        // The test records the baseline after one crash cycle so first-cycle setup
+        // does not affect a measured cycle.
+        crash_victim(&host, "active").await;
+        connect_after_reclamation(&host.publication_path())
+            .await
+            .close()
+            .await
+            .unwrap();
+        let baseline = support::process_resources::stabilize(std::process::id(), BUDGET).await;
 
-    for cycle in 0..12 {
-        crash_victim(&host, if cycle % 2 == 0 { "active" } else { "idle" }).await;
-        let probe = connect_after_reclamation(&host.publication_path()).await;
-        probe.close().await.unwrap();
-        // Readmission alone would still pass while descriptors, mappings, or
-        // threads ratchet on every kill.
-        support::process_resources::await_envelope(
-            std::process::id(),
-            baseline,
-            RSS_TOLERANCE_BYTES,
-            BUDGET,
-            &format!("crash cycle {cycle}"),
-        )
-        .await;
-    }
-    host.shutdown_gracefully().await;
+        for cycle in 0..12 {
+            crash_victim(&host, if cycle % 2 == 0 { "active" } else { "idle" }).await;
+            let probe = connect_after_reclamation(&host.publication_path()).await;
+            probe.close().await.unwrap();
+            // Readmission alone would still pass while descriptors, mappings, or
+            // threads ratchet on every kill.
+            support::process_resources::await_envelope(
+                std::process::id(),
+                baseline,
+                RSS_TOLERANCE_BYTES,
+                BUDGET,
+                &format!("crash cycle {cycle}"),
+            )
+            .await;
+        }
+        host.shutdown_gracefully().await;
+    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

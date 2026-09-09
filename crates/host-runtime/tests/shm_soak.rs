@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use host_runtime::{Client, RequestOptions, RouteIdentity, RouteTarget, TargetKind};
 use support::TestHost;
-use support::process_resources::{await_envelope, stabilize};
+use support::process_resources::{await_envelope, serial_blocking_runtime, stabilize};
 
 const QUIESCENCE: Duration = Duration::from_secs(10);
 const RSS_TOLERANCE_BYTES: u64 = 16 * 1024 * 1024;
@@ -78,14 +78,14 @@ async fn run_soak(cycles: Option<u64>, duration: Option<Duration>) {
     host.shutdown_gracefully().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded() {
-    run_soak(Some(8), None).await;
+#[test]
+fn short_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded() {
+    serial_blocking_runtime().block_on(run_soak(Some(8), None));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[ignore = "multi-hour resource soak; run with EIDNARA_SHM_SOAK_SECONDS=<secs> cargo test -p host-runtime --test shm_soak -- --ignored long_soak"]
-async fn long_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded() {
+fn long_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded() {
     // `--include-ignored` sweeps must not start a multi-hour run by accident, so
     // the duration is opt-in through the environment rather than defaulted.
     let Ok(value) = std::env::var("EIDNARA_SHM_SOAK_SECONDS") else {
@@ -96,5 +96,5 @@ async fn long_soak_keeps_fd_mapping_thread_and_rss_envelopes_bounded() {
         .parse::<u64>()
         .expect("EIDNARA_SHM_SOAK_SECONDS must be an integer");
     assert!(seconds > 0, "EIDNARA_SHM_SOAK_SECONDS must be positive");
-    run_soak(None, Some(Duration::from_secs(seconds))).await;
+    serial_blocking_runtime().block_on(run_soak(None, Some(Duration::from_secs(seconds))));
 }
