@@ -133,6 +133,18 @@ correction were applied to `fault-map.md` and change no record here.
   is no successor, because canonical memory writes go through the kernel's
   own `(producer, operation_key, request_digest)` receipts, which the kernel
   crate's tests hold (`crates/kernel/tests/kernel_envelope.rs`).
+- `crates/context-core/src/claim_operation.rs` is gone. The canonical-JSON
+  encoder, `ContractError::NotCanonical`, `is_lower_hex`, and the Dreamer
+  request digest moved unchanged to `crates/context-core/src/canonical_json.rs`,
+  with the canonicalization and rejection cases of the golden fixture as
+  `testdata/canonical-json-contract-v1.json`; the intent wire types, the
+  claim-result decoder, the public-claim-id validator, revision locators,
+  mutation tokens, the heads digests, and the snapshot vector were deleted
+  with no consumer left. In Group F, `core-canonical-encoding-crossruntime-parity`
+  stays active over the moved module;
+  `core-result-decode-acceptance-boundary`,
+  `core-applicability-heads-order-independence`, and
+  `core-revision-locator-roundtrip-inverse` carry `Status: invalidated`.
 - `crates/memory-store` opens its store through `storage::open_sqlite`
   against one baseline (`crates/memory-store/baseline.sql`); the `eidnara-host`
   managed layout names the file `memory.sqlite`, and the development
@@ -294,9 +306,9 @@ bill for the crate.
 | [core-decay-budget-pressure-range-totality](#core-decay-budget-pressure-range-totality) | safety | high |
 | [core-decay-archive-termination-bound](#core-decay-archive-termination-bound) | safety | high |
 | [core-canonical-encoding-crossruntime-parity](#core-canonical-encoding-crossruntime-parity) | safety | high |
-| [core-result-decode-acceptance-boundary](#core-result-decode-acceptance-boundary) | safety | high |
-| [core-applicability-heads-order-independence](#core-applicability-heads-order-independence) | safety | high |
-| [core-revision-locator-roundtrip-inverse](#core-revision-locator-roundtrip-inverse) | safety | high |
+| [core-result-decode-acceptance-boundary](#core-result-decode-acceptance-boundary) | safety | invalidated |
+| [core-applicability-heads-order-independence](#core-applicability-heads-order-independence) | safety | invalidated |
+| [core-revision-locator-roundtrip-inverse](#core-revision-locator-roundtrip-inverse) | safety | invalidated |
 | [core-intent-ack-transition-legality-gap](#core-intent-ack-transition-legality-gap) | safety | invalidated |
 | [core-pass-classifier-destructive-clear-guard](#core-pass-classifier-destructive-clear-guard) | safety | high |
 | [tokenizer-cross-process-determinism](#tokenizer-cross-process-determinism) | safety | high |
@@ -1760,6 +1772,10 @@ Open questions:
 
 ## Group F: core operation semantics and encoding
 
+At HEAD `claim_operation.rs` is gone (see Provenance): the encoder record below
+is live over `canonical_json.rs`, the intent-ack and three encoding-law records
+are invalidated, and the pass-classifier record is unchanged.
+
 Six records on `crates/context-core/src/claim_operation.rs` (878 lines) and
 `crates/context-core/src/lib.rs` (338). This module is an encoding and identity contract,
 not a state machine: it defines closed enums and no transition function, and every
@@ -1800,9 +1816,14 @@ TS `:120`, not the default sort, so the agreement with Rust's `BTreeMap` orderin
 (`claim_operation.rs:124`) is deliberate. I decoded the `astral-key-order` fixture keys
 as `U+0041`, `U+FFFD`, `U+1F600` and confirmed the pinned canonical output is in
 code-point order, which UTF-16 order would reverse for the last two.
-Existing check: `crates/context-core/src/claim_operation.rs:718`
+Existing check: at HEAD the encoder lives in
+`crates/context-core/src/canonical_json.rs`, and the checks are
+`canonical_bytes_match_fixture`, `non_canonical_numbers_are_rejected`, and
+`dreamer_request_digest_is_sha256_over_protocol_and_canonical_bytes` there,
+fixture-driven from `testdata/canonical-json-contract-v1.json`. The source tree's
+checks were `claim_operation.rs:718`
 `canonical_bytes_and_request_digests_match_fixture` and `:737`
-`non_canonical_numbers_are_rejected`, both fixture-driven. Status `unaudited`.
+`non_canonical_numbers_are_rejected`. Status `unaudited`.
 Impact: a divergence means the two runtimes compute different request digests for the
 same semantic command, so the intent ledger's replay detection and the mutation-token
 fence both misfire: a replay looks like a new command, or two different commands collide
@@ -1815,12 +1836,22 @@ Open questions:
   generator's history)
 - Only two `invalidCanonical` cases exist (`1.5` and `9007199254740993`). Is the
   rejection surface intended to be that narrow? (needs human input)
+- The TypeScript twin this record compares against is not in this repository;
+  at HEAD the fixture pins the Rust encoder's bytes only, so the check is a
+  Rust byte-stability check until a TypeScript encoder under the same fixture
+  exists here. (needs human input)
 
 ### core-result-decode-acceptance-boundary
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the function this record was raised on was deleted with
+`crates/context-core/src/claim_operation.rs`; it had no consumer once the
+claim mirror, the claim-intent ledger, and the claim-lane classify request were
+gone. No successor record. The record body and its evidence file keep the
+deleted code as quoted from the source tree; those `file:line` references
+resolve there only.
 Exercised: partial - `claim_operation.rs:847-877` covers 2 valid and 5 invalid fixture
 envelopes. Neither valid case has a non-canonical payload, and no case pairs an
 `applied` outcome with a non-null `staleReason`.
@@ -1864,7 +1895,13 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the function this record was raised on was deleted with
+`crates/context-core/src/claim_operation.rs`; it had no consumer once the
+claim mirror, the claim-intent ledger, and the claim-lane classify request were
+gone. No successor record. The record body and its evidence file keep the
+deleted code as quoted from the source tree; those `file:line` references
+resolve there only.
 Exercised: partial - 2 fixture cases (`claim_operation.rs:803-822`): the empty list and
 one two-element list. No case permutes the same list, so the invariance is asserted
 nowhere.
@@ -1903,7 +1940,13 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the function this record was raised on was deleted with
+`crates/context-core/src/claim_operation.rs`; it had no consumer once the
+claim mirror, the claim-intent ledger, and the claim-lane classify request were
+gone. No successor record. The record body and its evidence file keep the
+deleted code as quoted from the source tree; those `file:line` references
+resolve there only.
 Exercised: partial - the fixture (`claim_operation.rs:760-786`) asserts
 `format(parse(s)) == s` for each valid case and rejection for 8 invalid strings, but
 never asserts `parse(format(l)) == Some(l)` for a generated locator.

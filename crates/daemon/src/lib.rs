@@ -27410,10 +27410,9 @@ mod tests {
     }
 
     /// No production source in this crate names a claim-mirror, claim-intent,
-    /// claim-lane, or claim-snapshot-vector identifier. Test modules are
-    /// excluded: they may spell the retired names to prove they are refused.
-    /// The `claim_operation` module path stays until context-core re-homes the
-    /// hex helpers the kernel routes import from it.
+    /// claim-operation, claim-lane, public-claim-id, or claim-snapshot-vector
+    /// identifier. Test modules are excluded: they may spell the retired names
+    /// to prove they are refused.
     #[test]
     fn daemon_production_source_names_no_claim_lane_identifier() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -27435,7 +27434,10 @@ mod tests {
             "ClaimMirror",
             "claim_intent",
             "ClaimIntent",
+            "claim_operation",
+            "ClaimOperation",
             "claim_lane",
+            "public_claim_id",
             "snapshot_vector",
             "SnapshotVector",
             "claim_snapshot",

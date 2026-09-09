@@ -1,0 +1,91 @@
+{
+  "protocol": "eidnara-canonical-json-contract-v1",
+  "dreamerRequestEncodingVersion": 1,
+  "dreamerRequestDigestProtocol": "eidnara-dreamer-request-v1",
+  "canonicalization": [
+    {
+      "name": "scalars-and-key-order",
+      "value": {
+        "b": 1,
+        "a": null,
+        "c": true,
+        "d": false
+      },
+      "canonical": "{\"a\":null,\"b\":1,\"c\":true,\"d\":false}"
+    },
+    {
+      "name": "unicode-and-escapes",
+      "value": {
+        "é": "café",
+        "emoji": "🎉 party",
+        "control": "line\nbreak\ttab\u0000nul \"quote\" back\\slash"
+      },
+      "canonical": "{\"control\":\"line\\u000abreak\\u0009tab\\u0000nul \\\"quote\\\" back\\\\slash\",\"emoji\":\"🎉 party\",\"é\":\"café\"}"
+    },
+    {
+      "name": "astral-key-order",
+      "value": {
+        "�": 1,
+        "😀": 2,
+        "A": 3
+      },
+      "canonical": "{\"A\":3,\"�\":1,\"😀\":2}"
+    },
+    {
+      "name": "numbers",
+      "value": {
+        "zero": 0,
+        "negative": -42,
+        "maxSafe": 9007199254740991,
+        "minSafe": -9007199254740991
+      },
+      "canonical": "{\"maxSafe\":9007199254740991,\"minSafe\":-9007199254740991,\"negative\":-42,\"zero\":0}"
+    },
+    {
+      "name": "nesting",
+      "value": {
+        "list": [
+          1,
+          [
+            2,
+            {
+              "deep": null
+            }
+          ],
+          "x"
+        ],
+        "empty": {},
+        "emptyList": [],
+        "": "empty key"
+      },
+      "canonical": "{\"\":\"empty key\",\"empty\":{},\"emptyList\":[],\"list\":[1,[2,{\"deep\":null}],\"x\"]}"
+    }
+  ],
+  "invalidCanonical": [
+    {
+      "name": "float",
+      "valueJson": "1.5",
+      "reason": "is not a safe integer"
+    },
+    {
+      "name": "beyond-safe-integer",
+      "valueJson": "9007199254740993",
+      "reason": "is not a safe integer"
+    },
+    {
+      "name": "two-pow-53",
+      "valueJson": "9007199254740992",
+      "reason": "is not a safe integer"
+    },
+    {
+      "name": "negative-two-pow-53",
+      "valueJson": "-9007199254740992",
+      "reason": "is not a safe integer"
+    },
+    {
+      "name": "beyond-i64",
+      "valueJson": "18446744073709551615",
+      "reason": "is not a safe integer"
+    }
+  ]
+}

@@ -483,11 +483,13 @@ fn the_request_digest_ignores_map_insertion_order_and_pins_the_protocol() {
         dreamer_request_digest(&ordered).unwrap(),
         dreamer_request_digest(&reordered_items).unwrap()
     );
-    // The protocol prefix keeps a Dreamer digest distinct from a claim digest
-    // over the same bytes.
-    assert_ne!(
-        dreamer_request_digest(&ordered).unwrap(),
-        context_core::claim_operation::compute_claim_operation_request_digest(&ordered).unwrap()
-    );
+    // The protocol prefix is part of the digested bytes: the digest is not the
+    // hash of the canonical JSON alone.
+    let canonical = context_core::canonical_json::canonical_json_encode(&ordered).unwrap();
+    let bare = {
+        use sha2::Digest as _;
+        format!("{:x}", sha2::Sha256::digest(canonical.as_bytes()))
+    };
+    assert_ne!(dreamer_request_digest(&ordered).unwrap(), bare);
     assert_eq!(dreamer_request_digest(&ordered).unwrap().len(), 64);
 }
