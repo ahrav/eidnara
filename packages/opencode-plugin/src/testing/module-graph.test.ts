@@ -232,8 +232,12 @@ describe("reachableModules", () => {
 });
 
 describe("databaseBinders", () => {
-    test("names the modules importing a binding and skips the bindings themselves", () => {
-        expect(databaseBinders(graph)).toEqual(["src/a/forbidden.ts", "src/b/forbidden.ts"]);
+    test("names every module importing a binding, including an adapter that imports one statically", () => {
+        expect(databaseBinders(graph)).toEqual([
+            "src/a/forbidden.ts",
+            "src/b/forbidden.ts",
+            "src/shared/sqlite.ts",
+        ]);
     });
 });
 
@@ -293,13 +297,14 @@ describe("databaseUses", () => {
         ]);
     });
 
-    test("reports aliased, namespace, default, star-exported, and dynamic binding imports as escapes", () => {
+    test("reports aliased, namespace, default, re-exported, and dynamic binding imports as escapes", () => {
         const uses = databaseUses(
             [
                 'import { Database as DB } from "../../shared/sqlite";',
                 'import * as sqlite from "../../shared/sqlite";',
                 'import bun from "bun:sqlite";',
                 'export * from "../../shared/sqlite";',
+                'export { default as Db } from "better-sqlite3";',
                 'const lazy = await import("node:sqlite");',
                 'const legacy = require("better-sqlite3");',
                 'import { join } from "node:path";',
@@ -311,6 +316,7 @@ describe("databaseUses", () => {
             'import * as sqlite from "../../shared/sqlite";',
             'import bun from "bun:sqlite";',
             'export * from "../../shared/sqlite";',
+            'export { default as Db } from "better-sqlite3";',
             'const lazy = await import("node:sqlite");',
             'const legacy = require("better-sqlite3");',
         ]);
