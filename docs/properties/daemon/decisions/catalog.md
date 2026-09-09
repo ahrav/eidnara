@@ -618,51 +618,58 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: yes - `config.rs` test
-`hostile_project_tier_cannot_change_privileged_values_and_warns_per_key` sets
-every `ConfigKey` from the project tier and asserts the privileged values equal
-the user tier and that exactly one warning is emitted per ignored key;
-`every_consumed_pointer_is_a_classified_config_key` asserts every JSON pointer
-literal the production merge reads is a `ConfigKey`.
-Guarantee: The set of leaves a project-tier config can change equals the set
-`ConfigKey::tier_class` classifies as `ProjectAllowed`, plus the tightening
-direction of the two `ProjectRaiseOnly` keys.
-Check: `always` - for every `ConfigKey`, a project-tier value changes the
-effective config only through its `TierClass`; the merge iterates the closed
-`ConfigKey::ALL` table and has no other read path. `always` because the tier
-merge runs on every resolution.
+Exercised: partial - the hostile fixture at `config.rs:1702-1804` supplies all
+25 consumed keys and asserts selected effective values, but derives its expected
+ignored-key count from `tier_class`. The pointer inventory at `:1809-1844` checks
+registration, not policy. No single independent per-key oracle covers this whole
+contract.
+Guarantee: A project may override only `memory.enabled`,
+`memory.auto_search.enabled`, `memory.auto_search.score_threshold`,
+`memory.auto_search.min_prompt_chars`, `caveman_text_compression.enabled`,
+`caveman_text_compression.min_chars`, `memory.auto_promote`, `smart_drops`, and
+`temporal_awareness`, raise `execute_threshold_percentage`, or close the
+`user_memories.enabled` gate; all other consumed keys are user-tier only.
+Check: `always` - compare user-only and user-plus-project resolutions against
+the fixed permissions above, not against `tier_class()` or `privileged()`.
+For valid project values, assert the nine allowed leaves take the parsed project
+value, the effective threshold never decreases, and a closed user-memory gate
+never opens. Assert that `historian.module_model`,
+`historian.module_fallback_models`, `historian.model`, `historian.fallback_models`,
+`compaction.enabled`,
+`memory.injection_budget_tokens`, `memory.budget_tokens`,
+`memory.user_profile_budget_tokens`, `historian.context_limit_tokens`,
+`dreamer.inject_docs`, `dreamer.tasks.review-user-memories.schedule`,
+`prompt_surface.guidance_override_text`, `prompt_surface.guidance_override_path`,
+and `cache_ttl` keep their user-only effects. Each supplied user-only key emits
+one ignored-key warning; a rejected weakening emits one warning, while an
+unchanged raise-only value emits none. Use distinct in-range values and both
+boolean directions to distinguish rejection from a no-op. `always` applies
+because every tier resolution must obey the same policy.
 Fault/timing angle: none.
-Required faults and enabling state: a project `.eidnara/eidnara.jsonc` setting
-any privileged key (`historian.module_model`, `memory.injection_budget_tokens`,
-`cache_ttl`, `dreamer.inject_docs`,
-`dreamer.tasks.review-user-memories.schedule`, or `user_memories.enabled: true`
-against a closed user gate).
+Required faults and enabling state: distinct valid user and project values for
+each consumed key, including `user_memories.enabled: true` against a closed user
+gate and a lower project threshold. The production path reads project values
+from `.eidnara/eidnara.jsonc`; no injected fault is required.
 Confidence: high - [evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
-The evidence file records the pre-table state this record was discovered in.
-The table now replaces the header's prose allow-list: `dreamer.inject_docs`,
-the review-user-memories schedule, `memory.injection_budget_tokens`, and
-`cache_ttl` are `UserOnly` and `privileged()`; `user_memories.enabled` is
-`ProjectRaiseOnly` (a project may close the gate, never open it); a
-`const` assertion fails the build if a key marked `privileged()` is classified
-`ProjectAllowed`. `smart_drops` and `temporal_awareness` remain
-`ProjectAllowed` by classification rather than by omission. The memory budget
-the evidence file names as the permissive-direction risk is closed: the daemon
-reads the project file itself, so the TypeScript strip of
-`memory.injection_budget_tokens` (`project-security.ts:401-406`) did not reach
-this path. `cache_ttl` is privileged because the scheduler fires the historian
-once the TTL has elapsed since the last response (`scheduler.rs:473-478`), and
-the TypeScript leg now strips it too (`project-security.ts:386-391`) so the wire
-value the daemon prefers (`lib.rs:8026-8036`) cannot carry a project TTL.
-Existing check: the two tests named above, plus
-`privileged_keys_are_the_model_budget_and_schedule_levers` (pins the privileged
-list by name),
-`memory_injection_budget_uses_standard_key_and_deprecated_user_fallback`
-(project value ignored with a warning),
-`docs_injection_is_user_tier_only_and_temporal_flag_follows_project_tier`,
-`project_tier_cannot_raise_the_user_memory_gate`,
-`module_model_is_user_tier_only` (now asserts the warnings), and
-`project-security.test.ts` `strips cache_ttl from project config in both
-shapes`.
+Verified at `eccca05ec111fdf39df3795f08b7ca31ee713d96`: the classifications at
+`config.rs:657-693` match the explicit policy, and `:710-755` applies the tiers
+through them. The build-time assertion at `:696-708` rejects privileged keys
+classified as project-allowed; it does not pin the exact permissions of every
+key. The evidence separates these implementation facts from the independent
+contract and retains the discovery history as historical evidence only.
+Existing check: `config.rs:1297-1302` covers raising and clamping the threshold;
+`:1317-1350` covers injection-budget rejection and the user-tier legacy fallback;
+`:1458-1480` covers docs-injection rejection and a temporal-flag override;
+`:1637-1666` covers attempts to open a closed gate and the unchanged closed gate;
+`:1671-1697` pins privileged key names; `:1702-1804` and `:1809-1844` are the
+hostile fixture and pointer inventory described above. Status `unaudited` for
+each check; their presence is not a full independent policy oracle.
+Impact: a policy regression can let repository configuration select a model,
+widen an input budget, change unattended-task controls, or replace trusted
+guidance without the user's consent. Deriving the oracle from the same
+classification can hide that regression.
+Open questions: None.
+
 ### dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller
 
 Type: safety
