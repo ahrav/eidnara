@@ -395,6 +395,7 @@ describe("databaseUses", () => {
                 'const picked = new sqlite["Database"](productPath);',
                 "const made = new (pick())(productPath);",
                 "const plain = new Map<string, number>();",
+                "const built = Reflect.construct(sqliteModule.DatabaseSync, [dynamicPath]);",
                 "",
             ].join("\n"),
         );
@@ -406,6 +407,7 @@ describe("databaseUses", () => {
             "const copy = new db.constructor(productPath);",
             'const picked = new sqlite["Database"](productPath);',
             "const made = new (pick())(productPath);",
+            "const built = Reflect.construct(sqliteModule.DatabaseSync, [dynamicPath]);",
         ]);
         expect(
             databaseUses(
@@ -425,6 +427,8 @@ describe("databaseUses", () => {
                     "const viaLate = new Late(productPath);",
                     "const viaChained = new Chained(productPath);",
                     "const plain = new Map();",
+                    "const reflected = Reflect.construct(handle.constructor, [productPath]);",
+                    "const other = Reflect.construct(Map, []);",
                     "",
                 ].join("\n"),
             ).escapes,
@@ -434,6 +438,7 @@ describe("databaseUses", () => {
             "const viaPicked = new Picked(productPath);",
             "const viaLate = new Late(productPath);",
             "const viaChained = new Chained(productPath);",
+            "const reflected = Reflect.construct(handle.constructor, [productPath]);",
         ]);
     });
 
@@ -865,6 +870,12 @@ describe("operationLiteralHits", () => {
                 parseSource("const g = /^(a|b){2}$/; const o = /^(ab)?x$/;", "m.ts"),
             ).map((entry) => entry.value),
         ).toEqual(["aa", "ab", "ba", "bb", "x", "abx"]);
+        const negated = literalStrings(
+            parseSource("const n = /^[^x]laim[.]intent[.]stage$/; const m = /^[^c]laim$/;", "m.ts"),
+        ).map((entry) => entry.value);
+        expect(negated).toContain("claim.intent.stage");
+        expect(negated).not.toContain("claim");
+        expect(negated.filter((value) => value.endsWith("laim")).length).toBeGreaterThan(1);
         const ten = "(a|b)".repeat(10);
         expect(literalStrings(parseSource(`const r = /^${ten}$/;`, "m.ts")).length).toBe(1024);
         expect(() => literalStrings(parseSource(`const r = /^${ten}(a|b)$/;`, "m.ts"))).toThrow(

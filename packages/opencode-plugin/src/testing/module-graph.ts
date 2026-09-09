@@ -58,6 +58,9 @@ export function firstPartyInputs(graph: Pick<ModuleGraph, "inputs">): {
 /** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches; case is ignored so a handler cannot compare a normalized operation against `"CLAIM.INTENT.STAGE"`. */
 export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/i;
 
+/** Every character the scans' forbidden spellings use; a regex wildcard is tried against each of them. */
+const WILDCARD_ALPHABET = [...new Set("claimdreamemorysqlitekernelcontextdbstore.")].join("");
+
 /** File names of the Rust-owned product stores, as a path a module could open, with any non-word suffix such as `-wal` or `?mode=ro`; the scan blanks comments before matching. */
 export const PRODUCT_STORE_FILE =
     /["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)(?!\w)/;
@@ -330,8 +333,15 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
         const out: string[] = [];
         const splitUnescaped = (value: string): string[] => value.split(/(?<!\uE000)\|/);
         // `classMembers` marks every member as escaped so expansion treats `-` and `]` literally.
+        // A negated class yields every alphabet character it does not exclude.
         const classMembers = (inner: string): string[] | undefined => {
-            if (inner.startsWith("^")) return undefined;
+            if (inner.startsWith("^")) {
+                const excluded = classMembers(inner.slice(1));
+                if (excluded === undefined) return undefined;
+                return [...WILDCARD_ALPHABET]
+                    .map((char) => `\uE000${char}`)
+                    .filter((member) => !excluded.includes(member));
+            }
             const members: string[] = [];
             const chars = [...inner];
             for (let index = 0; index < chars.length; index++) {
@@ -351,7 +361,7 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 }
                 members.push(`\uE000${char}`);
             }
-            return members.length <= 16 ? members : undefined;
+            return members.length <= 32 ? members : undefined;
         };
         const pushText = (value: string): void => {
             if (out.length >= 1024) {
@@ -413,9 +423,17 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 return;
             }
             // A quantified class (`[0-9a-f]{7,12}`) matches a run, not one character, and stays
-            // as written.
-            const cls = /\[((?:\uE000.|[^\]\uE000])*)\](?![*+?{])/.exec(value);
-            if (cls?.index !== undefined && !value.startsWith("\uE000", cls.index - 1)) {
+            // as written. Classes multiply, so they expand only while the text's enumerable
+            // classes together stay within 64 variants.
+            const classPattern = /\[((?:\uE000.|[^\]\uE000])*)\](?![*+?{])/g;
+            let classBudget = 1;
+            for (const match of value.matchAll(classPattern)) {
+                if (match.index > 0 && value.startsWith("\uE000", match.index - 1)) continue;
+                classBudget *= classMembers(match[1] ?? "")?.length ?? 1;
+            }
+            for (const cls of value.matchAll(classPattern)) {
+                if (classBudget > 64) break;
+                if (cls.index > 0 && value.startsWith("\uE000", cls.index - 1)) continue;
                 const members = classMembers(cls[1] ?? "");
                 if (members !== undefined) {
                     const prefix = value.slice(0, cls.index);
@@ -792,6 +810,17 @@ export function databaseUses(
             !node.isTypeOnly &&
             ts.isExternalModuleReference(node.moduleReference) &&
             isBindingSpecifier(node.moduleReference.expression)
+        ) {
+            recordEscape(node);
+        }
+        // `Reflect.construct(ctor, args)` builds an instance with no `new` expression to classify.
+        if (
+            ts.isCallExpression(node) &&
+            memberText(node.expression) === "Reflect.construct" &&
+            (namesBinding ||
+                node.arguments.some((argument) =>
+                    /Database|constructor/.test(argument.getText(file)),
+                ))
         ) {
             recordEscape(node);
         }

@@ -29361,15 +29361,17 @@ mod tests {
         }
 
         /// Files reachable only through a test-gated declaration, classified without being
-        /// scanned, so a fixture module's own children are not reported as orphans.
+        /// scanned, so a fixture module's own children are not reported as orphans. A test-gated
+        /// `include!` may splice an expression rather than items; such a file has no children.
         fn walk_test_only(path: &std::path::PathBuf, tree: &mut ModuleTree) {
             if tree.test_only.contains(path) {
                 return;
             }
             tree.test_only.push(path.clone());
             let source = std::fs::read_to_string(path).expect("readable source");
-            let file: syn::File = syn::parse_str(&source)
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let Ok(file) = syn::parse_str::<syn::File>(&source) else {
+                return;
+            };
             let mut children = Vec::new();
             declared_children(
                 path,
@@ -29383,25 +29385,56 @@ mod tests {
             }
         }
 
-        /// Files spliced in by `include!`, which Cargo compiles like any module. A literal path
-        /// is followed; a computed one (an `OUT_DIR` build output) cannot be scanned, so it
-        /// fails the audit.
+        /// Files spliced in by `include!`, which Cargo compiles like any module, each flagged
+        /// when the invocation sits under a test-gated item or statement. A literal path is
+        /// followed; a computed one (an `OUT_DIR` build output) cannot be scanned, so it fails
+        /// the audit.
         fn included_files(
             declaring: &std::path::Path,
             file: &syn::File,
-        ) -> Vec<std::path::PathBuf> {
+        ) -> Vec<(std::path::PathBuf, bool)> {
             use quote::ToTokens;
 
             struct Includes<'a> {
                 declaring: &'a std::path::Path,
-                found: Vec<std::path::PathBuf>,
+                test_only: bool,
+                found: Vec<(std::path::PathBuf, bool)>,
+            }
+            impl Includes<'_> {
+                fn gated(&mut self, attrs: &[syn::Attribute], visit: impl FnOnce(&mut Self)) {
+                    let outer = self.test_only;
+                    self.test_only |= is_test_only(attrs);
+                    visit(self);
+                    self.test_only = outer;
+                }
             }
             impl<'ast> syn::visit::Visit<'ast> for Includes<'_> {
                 fn visit_item(&mut self, item: &'ast syn::Item) {
-                    if !is_test_only(item_attrs(item)) {
-                        syn::visit::visit_item(self, item);
-                    }
+                    self.gated(item_attrs(item), |this| syn::visit::visit_item(this, item));
                 }
+
+                fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+                    self.gated(impl_item_attrs(item), |this| {
+                        syn::visit::visit_impl_item(this, item)
+                    });
+                }
+
+                fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+                    self.gated(trait_item_attrs(item), |this| {
+                        syn::visit::visit_trait_item(this, item)
+                    });
+                }
+
+                fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+                    let attrs: &[syn::Attribute] = match stmt {
+                        syn::Stmt::Local(local) => &local.attrs,
+                        syn::Stmt::Expr(expr, _) => expr_attrs(expr),
+                        syn::Stmt::Macro(mac) => &mac.attrs,
+                        syn::Stmt::Item(_) => &[],
+                    };
+                    self.gated(attrs, |this| syn::visit::visit_stmt(this, stmt));
+                }
+
                 fn visit_macro(&mut self, mac: &'ast syn::Macro) {
                     if mac.path.is_ident("include") {
                         let literal = syn::parse2::<syn::LitStr>(mac.tokens.clone());
@@ -29413,13 +29446,14 @@ mod tests {
                             );
                         };
                         let dir = self.declaring.parent().expect("file has a directory");
-                        self.found.push(dir.join(literal.value()));
+                        self.found.push((dir.join(literal.value()), self.test_only));
                     }
                     syn::visit::visit_macro(self, mac);
                 }
             }
             let mut includes = Includes {
                 declaring,
+                test_only: false,
                 found: Vec::new(),
             };
             syn::visit::Visit::visit_file(&mut includes, file);
@@ -29450,8 +29484,12 @@ mod tests {
                     walk(&child, false, tree);
                 }
             }
-            for spliced in included {
-                walk(&spliced, false, tree);
+            for (spliced, test_only) in included {
+                if test_only {
+                    walk_test_only(&spliced, tree);
+                } else {
+                    walk(&spliced, false, tree);
+                }
             }
         }
 
@@ -29697,9 +29735,12 @@ mod tests {
         }
     }
 
+    /// Every character the audited spellings use; a negated class is tried against each of
+    /// them, since the audit only needs the texts that could spell an absent subsystem.
+    const WILDCARD_ALPHABET: &str = "muralembdingtoxs._-";
+
     /// `regex_texts` expands supported regex syntax into literal texts and fails the audit past
-    /// 1024 of them rather than dropping an alternative. Negated character classes remain
-    /// unexpanded.
+    /// 1024 of them rather than dropping an alternative.
     fn regex_texts(pattern: &str) -> Vec<String> {
         /// A leading `(?i)` or `(?ix)` group sets flags and matches nothing.
         fn strip_flag_groups(pattern: &str) -> &str {
@@ -29759,10 +29800,18 @@ mod tests {
             }
         }
 
-        /// Members are escaped so `-` and `]` remain literal.
+        /// Members are escaped so `-` and `]` remain literal. A negated class yields every
+        /// alphabet character it does not exclude.
         fn class_members(inner: &[char]) -> Option<Vec<String>> {
             if inner.first() == Some(&'^') {
-                return None;
+                let excluded = class_members(&inner[1..])?;
+                return Some(
+                    WILDCARD_ALPHABET
+                        .chars()
+                        .map(|ch| format!("\u{0}{ch}"))
+                        .filter(|member| !excluded.contains(member))
+                        .collect(),
+                );
             }
             let mut members = Vec::new();
             let mut index = 0;
@@ -29791,7 +29840,7 @@ mod tests {
                 }
                 index += 1;
             }
-            (members.len() <= 16).then_some(members)
+            (members.len() <= 32).then_some(members)
         }
 
         /// Expand the innermost parenthesized group, then the first enumerable class; a NUL
@@ -29839,34 +29888,26 @@ mod tests {
                     _ => {}
                 }
             }
-            let mut class_open = None;
-            for (index, &ch) in bytes.iter().enumerate() {
-                let escaped = index > 0 && bytes[index - 1] == '\u{0}';
-                if escaped {
-                    continue;
+            // A quantified class (`[0-9a-f]{7,12}`) matches a run, not one character, and
+            // stays as written. Classes multiply, so they expand only while the text's
+            // enumerable classes together stay within 64 variants.
+            let classes = unquantified_classes(&bytes);
+            let class_budget: usize = classes
+                .iter()
+                .map(|(start, end)| class_members(&bytes[start + 1..*end]).map_or(1, |m| m.len()))
+                .try_fold(1usize, |acc, count| acc.checked_mul(count))
+                .unwrap_or(usize::MAX);
+            for (start, end) in classes {
+                if class_budget > 64 {
+                    break;
                 }
-                match ch {
-                    '[' if class_open.is_none() => class_open = Some(index),
-                    ']' => {
-                        // A quantified class (`[0-9a-f]{7,12}`) matches a run, not one
-                        // character, and stays as written.
-                        let quantified = bytes
-                            .get(index + 1)
-                            .is_some_and(|next| matches!(next, '*' | '+' | '?' | '{'));
-                        if let Some(start) = class_open
-                            && !quantified
-                            && let Some(members) = class_members(&bytes[start + 1..index])
-                        {
-                            let prefix: String = bytes[..start].iter().collect();
-                            let suffix: String = bytes[index + 1..].iter().collect();
-                            for member in members {
-                                expand(pattern, &format!("{prefix}{member}{suffix}"), out);
-                            }
-                            return;
-                        }
-                        class_open = None;
+                if let Some(members) = class_members(&bytes[start + 1..end]) {
+                    let prefix: String = bytes[..start].iter().collect();
+                    let suffix: String = bytes[end + 1..].iter().collect();
+                    for member in members {
+                        expand(pattern, &format!("{prefix}{member}{suffix}"), out);
                     }
-                    _ => {}
+                    return;
                 }
             }
             // `?` and `{n,m}` on one character or an enumerable class spell out exact texts;
@@ -29893,6 +29934,34 @@ mod tests {
             for alternative in split_unescaped(text, '|') {
                 push_text(pattern, alternative, out);
             }
+        }
+
+        /// `(open, close)` index pairs of every unescaped class not followed by a quantifier.
+        fn unquantified_classes(bytes: &[char]) -> Vec<(usize, usize)> {
+            let mut classes = Vec::new();
+            let mut open = None;
+            for (index, &ch) in bytes.iter().enumerate() {
+                if index > 0 && bytes[index - 1] == '\u{0}' {
+                    continue;
+                }
+                match ch {
+                    '[' if open.is_none() => open = Some(index),
+                    ']' => {
+                        let quantified = bytes
+                            .get(index + 1)
+                            .is_some_and(|next| matches!(next, '*' | '+' | '?' | '{'));
+                        if let Some(start) = open
+                            && !quantified
+                            && index > start + 1
+                        {
+                            classes.push((start, index));
+                        }
+                        open = None;
+                    }
+                    _ => {}
+                }
+            }
+            classes
         }
 
         struct QuantifiedAtom {
@@ -30236,6 +30305,16 @@ mod tests {
                 syn::visit::visit_expr_binary(self, binary);
             }
 
+            /// `routes[operation]` selects by the discriminator the same way `routes.get(..)`
+            /// does, so the table and the index are both comparison operands.
+            fn visit_expr_index(&mut self, index: &'ast syn::ExprIndex) {
+                for side in [&index.expr, &index.index] {
+                    reject_unevaluable_macros(side);
+                    self.compared.extend(compared_strings(side, &self.consts));
+                }
+                syn::visit::visit_expr_index(self, index);
+            }
+
             fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
                 if COMPARISON_METHODS.contains(&call.method.to_string().as_str()) {
                     reject_unevaluable_macros(&call.receiver);
@@ -30465,6 +30544,8 @@ mod tests {
         assert_eq!(regex_texts(r"^(ab)?x$"), ["x", "abx"]);
         assert_eq!(regex_texts(r"^[ab]+$"), ["[ab]+"]);
         assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
+        assert!(regex_texts(r"^[^x]ural[.]render$").contains(&"mural.render".to_string()));
+        assert!(!regex_texts(r"^[^m]ural[.]render$").contains(&"mural.render".to_string()));
         assert_eq!(regex_texts(r"^[a-zA-Z0-9_-]+$"), ["[a-zA-Z0-9_-]+"]);
         assert_eq!(regex_texts(r"^\[x\]$"), ["[x]"]);
         let ten = "(a|b)".repeat(10);
