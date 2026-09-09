@@ -920,14 +920,15 @@ impl Envelope<'_> {
         self.guarded(|envelope| envelope.record_admission_inner(request))
     }
 
-    /// The latest admission decision recorded on `object_id`, including one
-    /// written earlier in this envelope; `None` when the object has no admission
-    /// history. A caller recording a further event on the object must reuse
-    /// the classes returned here, since the policy refuses a class change.
-    pub fn subject_admission(&self, object_id: &str) -> Result<Option<PriorDecision>, KernelError> {
+    /// Returns the prior decision and supporting approval id from the same cache
+    /// used by admission evaluation, including writes within this envelope.
+    pub fn subject_admission(
+        &self,
+        object_id: &str,
+    ) -> Result<Option<(PriorDecision, Option<String>)>, KernelError> {
         let object_id = identity(object_id)?;
         Ok(load_prior_for_key(self, &AdmissionKey::Object(object_id))?
-            .map(|stored| stored.decision))
+            .map(|stored| (stored.decision, stored.approval_object_id)))
     }
 
     fn record_admission_inner(

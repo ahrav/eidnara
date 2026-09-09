@@ -4585,26 +4585,6 @@ async fn a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one(
         "quarantined"
     );
 
-    // An approval minted outside the bound project is as unknown as a missing
-    // one, so another project's authority cannot lift a disposition here.
-    seed_approval(&daemon, "approval-foreign", None);
-    let foreign_approval = daemon
-        .commit(
-            "relax-foreign-approval",
-            vec![disposition_with_approval(
-                "decision-object-1",
-                "mark_stale",
-                "approval-foreign",
-            )],
-            vec![],
-        )
-        .await;
-    assert_state(&foreign_approval, "invalid", Some("not_found"));
-    assert_eq!(
-        stored_disposition(&daemon, "decision-object-1"),
-        "quarantined"
-    );
-
     seed_approval(&daemon, "approval-1", Some(&scope_id));
     let relaxed = daemon
         .commit(
@@ -4644,6 +4624,169 @@ async fn a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one(
     assert_state(&repeated, "available", None);
     assert_eq!(repeated["dispositions"][0]["denied"], false, "{repeated}");
     assert_eq!(repeated["dispositions"][0]["disposition"], "stale");
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// Explicit and inherited approvals obey the same project boundary. A scoped
+/// override takes precedence, but a disposition does not replace stored support.
+#[tokio::test]
+async fn disposition_approvals_are_project_scoped_whether_explicit_or_inherited() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    let (route_b, project_b) = daemon.bind_project("project-b").await;
+    assert_state(
+        &daemon
+            .call(
+                route_b,
+                commit_request(
+                    &project_b,
+                    "session-b",
+                    "create",
+                    vec![insert_decision(2)],
+                    vec![],
+                ),
+            )
+            .await,
+        "available",
+        None,
+    );
+    let read_b = daemon
+        .call(
+            route_b,
+            read_request(&project_b, "session-b", "explicit_search", None),
+        )
+        .await;
+    let foreign_scope = read_b["rows"][0]["scope_id"].as_str().unwrap();
+    assert_ne!(foreign_scope, scope_id);
+    let approvals = [
+        ("approval-foreign", Some(foreign_scope)),
+        ("approval-unscoped", None),
+        ("approval-local", Some(scope_id.as_str())),
+    ];
+    for (approval, scope) in approvals {
+        seed_approval(&daemon, approval, scope);
+    }
+
+    for (index, (approval, scope)) in (1..).zip(approvals) {
+        let classes = (SourceClass::ModelInference, TaintClass::AssistantInference);
+        for (case_index, case) in (0..).zip(["explicit", "inherited", "cached", "override"]) {
+            let subject_index = index * 10 + case_index;
+            let subject = format!("store-decision-object-{subject_index}");
+            let key = format!("relax-{index}-{case}");
+            daemon
+                .store()
+                .commit(intent(&format!("quarantine-{key}")), |envelope| {
+                    envelope.insert_decision(store_decision(subject_index, &scope_id, &subject))?;
+                    if case != "explicit" {
+                        let mut request = admission(&subject, EventKind::Verify, None, classes);
+                        request.event.approval_object_id = Some(approval.to_string());
+                        let decision = envelope.record_admission(request)?;
+                        assert_eq!(decision.effective_maturity.as_str(), "verified");
+                    }
+                    envelope.record_admission(admission(
+                        &subject,
+                        EventKind::Quarantine,
+                        None,
+                        classes,
+                    ))?;
+                    Ok(String::new())
+                })
+                .unwrap();
+            let stored_approval: Option<String> = core_connection(&daemon)
+                .query_row(
+                    "SELECT approval_object_id FROM admission_decisions
+                     WHERE subject_object_id=?1
+                     ORDER BY commit_seq DESC, admission_decision_id DESC LIMIT 1",
+                    [&subject],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                stored_approval.as_deref(),
+                (case != "explicit").then_some(approval)
+            );
+            assert_eq!(stored_disposition(&daemon, &subject), "quarantined");
+            let admission_rows = admission_row_count(&daemon);
+            let commit_rows = commit_log_count(&daemon);
+            let tip = daemon.tip();
+            let outbox = newest_outbox_position(&daemon);
+            let inserted_index = 100 + subject_index;
+            let mut operations = vec![insert_decision(inserted_index)];
+            if case == "cached" {
+                operations.push(disposition_with_approval(
+                    &subject,
+                    "mark_disputed",
+                    "approval-local",
+                ));
+            }
+            operations.push(match case {
+                "explicit" => disposition_with_approval(&subject, "mark_stale", approval),
+                "override" => disposition_with_approval(&subject, "mark_stale", "approval-local"),
+                _ => disposition(&subject, "mark_stale"),
+            });
+            let response = daemon.commit(&key, operations, vec![]).await;
+
+            if scope == Some(scope_id.as_str()) || case == "override" {
+                assert_state(&response, "available", None);
+                assert_eq!(response["receipt"]["replayed"], false, "{key}: {response}");
+                let mut expected = Vec::new();
+                if case == "cached" {
+                    expected.push(json!({
+                        "object_id": subject,
+                        "event": "mark_disputed",
+                        "outcome": "deny",
+                        "previous_disposition": "quarantined",
+                        "disposition": "disputed",
+                        "denied": false,
+                    }));
+                }
+                expected.push(json!({
+                    "object_id": subject,
+                    "event": "mark_stale",
+                    "outcome": "deny",
+                    "previous_disposition": if case == "cached" { "disputed" } else { "quarantined" },
+                    "disposition": "stale",
+                    "denied": false,
+                }));
+                assert_eq!(response["dispositions"], json!(expected), "{key}");
+                assert_eq!(stored_disposition(&daemon, &subject), "stale", "{key}");
+                assert_eq!(commit_log_count(&daemon), commit_rows + 1, "{key}");
+                assert_eq!(
+                    admission_row_count(&daemon),
+                    admission_rows + 1 + expected.len() as i64,
+                    "{key}"
+                );
+            } else {
+                assert_state(&response, "invalid", Some("not_found"));
+                assert!(response["receipt"].is_null(), "{key}: {response}");
+                assert_eq!(
+                    stored_disposition(&daemon, &subject),
+                    "quarantined",
+                    "{key}"
+                );
+                assert_eq!(admission_row_count(&daemon), admission_rows, "{key}");
+                assert_eq!(commit_log_count(&daemon), commit_rows, "{key}");
+                assert_eq!(daemon.tip(), tip, "{key}");
+                assert_eq!(newest_outbox_position(&daemon), outbox, "{key}");
+                let (_, states) = daemon
+                    .store()
+                    .object_states(&[format!("decision-object-{inserted_index}")])
+                    .unwrap();
+                assert!(
+                    states[0].is_none(),
+                    "{key}: insert escaped the rejected envelope"
+                );
+            }
+        }
+    }
     daemon.handler.shutdown().await.unwrap();
 }
 

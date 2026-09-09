@@ -503,13 +503,6 @@ fn scoped_object_state(
 }
 
 /// Records `event` on a live decision of the bound project.
-///
-/// The event is recorded under the subject's own admission classes: the policy
-/// refuses a class change on a subject, and a disposition speaks about the
-/// decision, not about its caller. A cited approval must itself be an object
-/// of the bound project, so an approval minted in another project cannot lift
-/// a disposition here; an out-of-project approval answers `not_found`, the
-/// same as an unknown one.
 fn record_disposition(
     envelope: &mut Envelope<'_>,
     filter: &mut ScopeFilter,
@@ -521,12 +514,12 @@ fn record_disposition(
     if state.object.object_kind != "decision" || state.object.invalidated_commit_seq.is_some() {
         return Err(KernelError::NotFound);
     }
-    if let Some(approval) = approval_object_id {
-        scoped_object_state(envelope, filter, approval)?;
-    }
-    let prior = envelope
+    let (prior, stored_approval) = envelope
         .subject_admission(object_id)?
         .ok_or(KernelError::AdmissionPolicy)?;
+    if let Some(approval) = approval_object_id.or(stored_approval.as_deref()) {
+        scoped_object_state(envelope, filter, approval)?;
+    }
     let decision = envelope.record_admission(AdmissionRequest {
         candidate_id: None,
         subject_object_id: Some(object_id.to_string()),
