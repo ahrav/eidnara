@@ -28812,8 +28812,9 @@ mod tests {
         })
     }
 
-    /// Whether a variant carries `#[serde(rename = "...")]`, which replaces the identifier as
-    /// the wire spelling.
+    /// Whether a variant carries a `rename` that applies to deserialization: `rename = "..."` or
+    /// `rename(deserialize = "...")`. A serialize-only rename leaves the deserialize spelling as
+    /// the identifier or the `rename_all` form.
     fn has_serde_rename(attrs: &[syn::Attribute]) -> bool {
         attrs.iter().any(|attr| {
             if !attr.path().is_ident("serde") {
@@ -28822,9 +28823,19 @@ mod tests {
             let mut renamed = false;
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename") {
-                    renamed = true;
-                }
-                if meta.input.peek(syn::Token![=]) {
+                    if meta.input.peek(syn::token::Paren) {
+                        meta.parse_nested_meta(|side| {
+                            let _: syn::LitStr = side.value()?.parse()?;
+                            if side.path.is_ident("deserialize") {
+                                renamed = true;
+                            }
+                            Ok(())
+                        })?;
+                    } else {
+                        let _: syn::Expr = meta.value()?.parse()?;
+                        renamed = true;
+                    }
+                } else if meta.input.peek(syn::Token![=]) {
                     let _: syn::Expr = meta.value()?.parse()?;
                 } else if meta.input.peek(syn::token::Paren) {
                     let _ = meta.parse_nested_meta(|_| Ok(()));
@@ -28871,6 +28882,58 @@ mod tests {
                 into.push(path);
             }
         }
+    }
+
+    /// Every root Cargo compiles into a shipped artifact: the auto-discovered `src/lib.rs`,
+    /// `src/main.rs`, `src/bin/*.rs`, and `src/bin/*/main.rs`, plus each explicit `[lib]` or
+    /// `[[bin]]` `path`. An explicit target outside `src/` would escape the orphan check, so it
+    /// fails here. Examples, tests, and benches are not shipped and are not roots.
+    fn crate_roots(manifest_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let src = manifest_dir.join("src");
+        let mut roots = Vec::new();
+        for auto in ["lib.rs", "main.rs"] {
+            let path = src.join(auto);
+            if path.is_file() {
+                roots.push(path);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(src.join("bin")) {
+            for entry in entries {
+                let path = entry.expect("directory entry").path();
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    roots.push(path);
+                } else if path.is_dir() && path.join("main.rs").is_file() {
+                    roots.push(path.join("main.rs"));
+                }
+            }
+        }
+        let manifest =
+            std::fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("readable manifest");
+        let mut section = String::new();
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                section = line.trim_matches(['[', ']']).to_string();
+                continue;
+            }
+            if !matches!(section.as_str(), "lib" | "bin") {
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("path") {
+                let value = value.trim_start().trim_start_matches('=').trim();
+                let target = manifest_dir.join(value.trim_matches('"'));
+                assert!(
+                    target.starts_with(&src),
+                    "Cargo target {} lies outside src/ and the audit cannot classify it",
+                    target.display()
+                );
+                if !roots.contains(&target) {
+                    roots.push(target);
+                }
+            }
+        }
+        assert!(!roots.is_empty(), "no crate roots found");
+        roots
     }
 
     /// The files that reach a production build: the crate roots and every out-of-line module
@@ -28928,6 +28991,26 @@ mod tests {
             }
         }
 
+        /// Files reachable only through a test-gated declaration, classified without being
+        /// scanned, so a fixture module's own children are not reported as orphans.
+        fn walk_test_only(path: &std::path::PathBuf, tree: &mut ModuleTree) {
+            if tree.test_only.contains(path) {
+                return;
+            }
+            tree.test_only.push(path.clone());
+            let source = std::fs::read_to_string(path).expect("readable source");
+            let file: syn::File = syn::parse_str(&source)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            for item in &file.items {
+                if let syn::Item::Mod(module) = item
+                    && module.content.is_none()
+                    && let Some(child) = child_path(path, module)
+                {
+                    walk_test_only(&child, tree);
+                }
+            }
+        }
+
         fn walk(path: &std::path::PathBuf, tree: &mut ModuleTree) {
             if tree.production.iter().any(|(seen, _)| seen == path) {
                 return;
@@ -28956,7 +29039,7 @@ mod tests {
             tree.production.push((path.clone(), file));
             for (child, test_only) in children {
                 if test_only {
-                    tree.test_only.push(child);
+                    walk_test_only(&child, tree);
                 } else {
                     walk(&child, tree);
                 }
@@ -29052,9 +29135,8 @@ mod tests {
         }
     }
 
-    /// The string values of a file's `const` and `static` items, so a comparison against a
-    /// named constant is classified by the text the constant holds. Cross-file constants stay
-    /// outside this file's view.
+    /// The string values of `const` and `static` items, keyed by name, so a comparison against a
+    /// named constant is classified by the text the constant holds.
     struct StringConsts(std::collections::HashMap<String, Vec<String>>);
 
     impl<'ast> syn::visit::Visit<'ast> for StringConsts {
@@ -29067,7 +29149,10 @@ mod tests {
         fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
             let values = string_literals_in(|c| c.visit_expr(&item.expr));
             if !values.is_empty() {
-                self.0.insert(item.ident.to_string(), values);
+                self.0
+                    .entry(item.ident.to_string())
+                    .or_default()
+                    .extend(values);
             }
             syn::visit::visit_item_const(self, item);
         }
@@ -29075,13 +29160,16 @@ mod tests {
         fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
             let values = string_literals_in(|c| c.visit_expr(&item.expr));
             if !values.is_empty() {
-                self.0.insert(item.ident.to_string(), values);
+                self.0
+                    .entry(item.ident.to_string())
+                    .or_default()
+                    .extend(values);
             }
             syn::visit::visit_item_static(self, item);
         }
     }
 
-    /// Literals in an expression plus the values of any same-file string constants it names.
+    /// Literals in an expression plus the values of any string constants it names.
     fn compared_strings(
         expr: &syn::Expr,
         consts: &std::collections::HashMap<String, Vec<String>>,
@@ -29163,7 +29251,7 @@ mod tests {
             compared: Vec<String>,
             /// `Deserialize` and every name a `use ... as` rename gives it in the file.
             deserialize_names: Vec<String>,
-            /// Same-file `const` and `static` string values by name.
+            /// Every production `const` and `static` string value in the crate, by name.
             consts: std::collections::HashMap<String, Vec<String>>,
         }
 
@@ -29372,13 +29460,7 @@ mod tests {
         }
 
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut roots = vec![src.join("lib.rs")];
-        for entry in std::fs::read_dir(src.join("bin")).expect("bin directory") {
-            let path = entry.expect("directory entry").path();
-            if path.extension().is_some_and(|ext| ext == "rs") {
-                roots.push(path);
-            }
-        }
+        let roots = crate_roots(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         let tree = module_tree(&roots);
         let mut every_file = Vec::new();
         rust_sources(&src, &mut every_file);
@@ -29412,17 +29494,22 @@ mod tests {
             "found only {} production sources",
             tree.production.len()
         );
+        // Constants are collected across the whole tree before any file is scanned, so a
+        // comparison against `routes::PREFIX` resolves whichever module declares it. Names are
+        // keyed by their last segment; a collision adds values and can only widen the check.
+        let mut consts = StringConsts(std::collections::HashMap::new());
+        for (_, file) in &tree.production {
+            consts.visit_file(file);
+        }
         let mut offending = Vec::new();
         for (path, file) in tree.production {
             let mut aliases = DeserializeAliases(vec!["Deserialize".to_string()]);
             aliases.visit_file(&file);
-            let mut consts = StringConsts(std::collections::HashMap::new());
-            consts.visit_file(&file);
             let mut scan = ProductionLiterals {
                 literals: Vec::new(),
                 compared: Vec::new(),
                 deserialize_names: aliases.0,
-                consts: consts.0,
+                consts: consts.0.clone(),
             };
             scan.visit_file(&file);
             let relative = path

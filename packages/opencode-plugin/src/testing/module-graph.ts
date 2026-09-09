@@ -228,10 +228,10 @@ export function operationLiteralHits(
 
 /**
  * The strings a module evaluates to, as the parser cooks them: every string literal and template
- * span with escapes decoded (`"context\u002edb"` is `context.db`); every `+` expression or
- * template whose leaves are all string literals, folded to the value it produces, inner chains
- * included; and every regular-expression literal reduced to its body without anchors or
- * escapes. Each is reported at its first line.
+ * span with escapes decoded (`"context\u002edb"` is `context.db`); every `+` expression,
+ * template, or array-literal `join` whose leaves are all string literals, folded to the value it
+ * produces, inner chains included; and every regular-expression literal reduced to its body
+ * without anchors or escapes. Each is reported at its first line.
  */
 export function literalStrings(file: ts.SourceFile): { line: number; value: string }[] {
     const folded: { line: number; value: string }[] = [];
@@ -251,6 +251,24 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 value += substituted + span.literal.text;
             }
             return value;
+        }
+        // `["claim", "intent"].join(".")` with every element and the separator foldable.
+        if (
+            ts.isCallExpression(inner) &&
+            ts.isPropertyAccessExpression(inner.expression) &&
+            inner.expression.name.text === "join" &&
+            ts.isArrayLiteralExpression(inner.expression.expression) &&
+            inner.arguments.length <= 1
+        ) {
+            const separator = inner.arguments[0] ? leafText(inner.arguments[0]) : ",";
+            if (separator === undefined) return undefined;
+            const parts: string[] = [];
+            for (const element of inner.expression.expression.elements) {
+                const part = leafText(element);
+                if (part === undefined) return undefined;
+                parts.push(part);
+            }
+            return parts.join(separator);
         }
         return undefined;
     };
@@ -278,7 +296,8 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
         }
         if (
             (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
-            ts.isTemplateExpression(node)
+            ts.isTemplateExpression(node) ||
+            ts.isCallExpression(node)
         ) {
             const value = leafText(node);
             if (value !== undefined) folded.push({ line: lineOf(node), value });
@@ -402,9 +421,22 @@ export function databaseUses(
         ) {
             factories.add(node.name.text);
         }
+        // `const make = createRequire;` aliases the factory itself.
+        if (
+            ts.isVariableDeclaration(node) &&
+            ts.isIdentifier(node.name) &&
+            node.initializer &&
+            factories.has(node.initializer.getText(file).split(".").pop() ?? "")
+        ) {
+            factories.add(node.name.text);
+        }
         ts.forEachChild(node, collectFactories);
     };
-    collectFactories(file);
+    // Aliases can be declared after their use, so repeat until the set stops growing.
+    for (let size = -1; size !== factories.size; ) {
+        size = factories.size;
+        collectFactories(file);
+    }
     const loaders = new Set<string>(["require"]);
     const collectLoaders = (node: ts.Node): void => {
         if (

@@ -417,6 +417,9 @@ describe("databaseUses", () => {
                     'const bun = aliased("bun:sqlite");',
                     'const { DatabaseSync: Builtin } = process.getBuiltinModule("node:sqlite");',
                     'const path = process.getBuiltinModule("node:path");',
+                    "const make = createRequire;",
+                    "const local = make(import.meta.url);",
+                    'const better = local("better-sqlite3");',
                     "",
                 ].join("\n"),
             ).escapes,
@@ -425,6 +428,7 @@ describe("databaseUses", () => {
             'const viaModule = module.require("better-sqlite3");',
             'const bun = aliased("bun:sqlite");',
             'const { DatabaseSync: Builtin } = process.getBuiltinModule("node:sqlite");',
+            'const better = local("better-sqlite3");',
         ]);
     });
 
@@ -576,6 +580,14 @@ describe("operationLiteralHits", () => {
                 ),
             ).map((entry) => entry.value),
         ).toEqual(["claim.intent.stage", "store.db"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    'const j = ["claim", "intent", "stage"].join("."); const k = ["a", b].join("");',
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim.intent.stage", "claim", "intent", "stage", ".", "a"]);
     });
 
     // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;
