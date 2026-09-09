@@ -891,9 +891,13 @@ export function databaseUses(
             ts.isCallExpression(node) &&
             memberText(node.expression) === "Reflect.construct" &&
             (namesBinding ||
-                node.arguments.some((argument) =>
-                    /Database|constructor/.test(argument.getText(file)),
-                ))
+                node.arguments.some((argument) => {
+                    const value = unwrap(argument);
+                    return (
+                        (ts.isIdentifier(value) && constructorAliases.has(value.text)) ||
+                        /Database|constructor/.test(argument.getText(file))
+                    );
+                }))
         ) {
             recordEscape(node);
         }

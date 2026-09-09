@@ -436,6 +436,7 @@ describe("databaseUses", () => {
                     "const viaChained = new Chained(productPath);",
                     "const plain = new Map();",
                     "const reflected = Reflect.construct(handle.constructor, [productPath]);",
+                    "const reflectedAlias = Reflect.construct(Ctor, [productPath]);",
                     "const other = Reflect.construct(Map, []);",
                     "",
                 ].join("\n"),
@@ -450,6 +451,7 @@ describe("databaseUses", () => {
             "const viaLate = new Late(productPath);",
             "const viaChained = new Chained(productPath);",
             "const reflected = Reflect.construct(handle.constructor, [productPath]);",
+            "const reflectedAlias = Reflect.construct(Ctor, [productPath]);",
         ]);
     });
 
