@@ -5,8 +5,8 @@ and end, how `SQLITE_BUSY` is handled, and whether schema and migrations are
 all-or-nothing. Other failure families are out of scope except where they
 intersect durability.
 
-System `/local/home/ahrav/scratch/eidnara` at `ed487e11`. Every line
-reference below was read at that revision.
+The source-catalog references describe `/local/home/ahrav/scratch/eidnara` at
+`ed487e11`. The structure-map legend identifies citations verified against HEAD.
 
 One boundary note that shapes the whole lens. The PRAGMAs, the transaction
 primitive, and the migration runner are **not** in this repository. They live in
@@ -22,8 +22,9 @@ trees. They contribute nothing to this lens.
 
 ## lib.rs structure map
 
-`crates/memory-store/src/lib.rs`, 20,650 lines. Top-level regions with verified
-line ranges, so every citation below is anchored.
+The source-catalog map describes `crates/memory-store/src/lib.rs` as 20,650
+lines. Plain-number ranges and their descriptions refer to that catalog.
+Full-path citations in this table identify code verified against HEAD.
 
 | Lines | Region |
 | --- | --- |
@@ -47,15 +48,16 @@ line ranges, so every citation below is anchored.
 | **4810-12234** | **`impl MemoryStore` block 1.** `open` 4816-4905, `prune_transform_session_roots` 4907-4929, `repair_note_artifacts_v51` 5069-5114, `with_note_conn_fenced` 5323-5343, `module_store_schema_version` 5348-5358, `delete_session` 5432-5475, `load` 5481, `load_transform_snapshot_with_hook` 5526, `load_session_status_snapshot` 5658, `set_todo_state` 6727-6757, `arm_soft_refresh` 6760-6778, `preflight_state_import` 7114-7139, `commit_state_import` 7145-7205, `commit` 7215-7223, `commit_with_consumed_drops` 7226-7257, `commit_transform` 7260-7609, `apply_state_sync` 7617, lineage 8177-8854, compartment writes 8887-9193, historian publish and outbox 9194-9798, notes 10033-11xxx, claim intent and mirror 11xxx-12232 |
 | 12236-12825 | Free `*_tx` writer helpers and compression: `write_seed_compartment_tx` 12236, `insert_compartment_tx` 12352, `insert_historian_events_tx` 12388-12409, outbox helpers 12411-12607, `append_compartments_tx` 12609, transcript helpers 12671-12825 |
 | 12827-13158 | Note SQL constants, row mappers, note-eval helpers |
-| **13160-13707** | **`impl MemoryStore` block 2** — note-evaluation claim lifecycle (acquire, renew, complete, abandon) |
-| 13709-13930 | `rebind_note_eval_claim_tx` 13714, `note_check_digest` 13765, `repair_note_artifacts_tx` 13782, misc helpers to 13930 |
+| `crates/memory-store/src/lib.rs:15119-15430`; `crates/memory-store/src/task_lease.rs:477-1012` | **Note-evaluation claim lifecycle.** The acquire, renew, complete, and abandon lease protocol lives in `task_lease.rs`, parameterized by `TaskLeaseKind`; `lib.rs` keeps the note-specific selector, snapshot load, and completion body under `NOTE_EVALUATION` |
+| `crates/memory-store/src/task_lease.rs:436-475` | `task_lease::rebind_claim_tx` |
+| `crates/memory-store/src/lib.rs:15442-15457` | `note_check_digest` |
 | 13932-19420 | `#[cfg(test)] mod tests` |
 | 19422-19980 | `#[cfg(test)] mod shadow_tests` |
 | 19982-20650 | `#[cfg(test)] mod lineage_descent_tests` |
 
-Production code is therefore lines 1-13930. Everything at 13932 and beyond is
-test code. That matters for reachability labelling: several of this lens's
-findings are about code that exists but has no production caller.
+In the source catalog, production code is lines 1-13930. Everything at 13932
+and beyond is test code. That matters for reachability labelling: several of
+this lens's findings are about code that exists but has no production caller.
 
 ## Observations
 

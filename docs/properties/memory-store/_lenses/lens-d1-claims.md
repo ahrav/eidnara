@@ -408,28 +408,30 @@ though `foreign_keys = ON` is set (`storage:291`), so the pragma has
 almost nothing to enforce.
 
 - S1: `CREATE UNIQUE INDEX idx_note_eval_claims_active_note ON
-  note_eval_claims(project, note_id) WHERE terminal_kind IS NULL`
-  [`lib.rs:1196-1197`] — encodes: at most one live evaluation claim per note per
-  project, with `terminal_kind IS NULL` as the liveness predicate. Also enforced
+  note_eval_claims(project, task_kind, note_id) WHERE terminal_kind IS NULL`
+  (`baseline.sql`) — encodes: at most one live claim per task per project and
+  task kind, with `terminal_kind IS NULL` as the liveness predicate. Also enforced
   in app code: yes, and redundantly. The candidate query excludes already-claimed
   notes with `id NOT IN (SELECT note_id FROM note_eval_claims WHERE project =
-  ?1 AND terminal_kind IS NULL)` at `lib.rs:13293-13296`. That read and the
+  ?1 AND task_kind = ?2 AND terminal_kind IS NULL)` in
+  `acquire_note_evaluation_with_cap`. That read and the
   subsequent insert are inside one fenced transaction, so the app check is sound
   and the index is the backstop. Highest-safety constraint in the schema: it is
   the mutual-exclusion guarantee for note evaluation.
 
 - S2: `CREATE UNIQUE INDEX idx_note_eval_claims_active_slot ON
-  note_eval_claims(project, evaluator_instance, evaluator_slot) WHERE
-  terminal_kind IS NULL` [`lib.rs:1199-1201`] — encodes: an evaluator slot holds
-  at most one live claim, so a worker cannot double-book itself. Also enforced in
-  app code: yes. `lib.rs:13269-13274` selects the slot's live claim first and
-  rebinds it via `rebind_note_eval_claim_tx` (`lib.rs:13714`) rather than
+  note_eval_claims(project, task_kind, evaluator_instance, evaluator_slot) WHERE
+  terminal_kind IS NULL` (`baseline.sql`) — encodes: an evaluator slot holds
+  at most one live claim per task kind, so a worker cannot double-book itself. Also enforced in
+  app code: yes. `crates/memory-store/src/task_lease.rs:577-608` selects the slot's
+  live claim first and rebinds it via `task_lease::rebind_claim_tx`
+  (`crates/memory-store/src/task_lease.rs:436-475`) rather than
   inserting a second, which is what makes acquisition idempotent under a lost
   response.
 
-- S3: `UNIQUE (project, acquisition_id)` on `note_eval_claims`
-  [`lib.rs:1193`] — encodes: an acquisition id is consumed at most once per
-  project, the deduplication key for a retried acquire. Also enforced in app
+- S3: `UNIQUE (project, task_kind, acquisition_id)` on `note_eval_claims`
+  (`baseline.sql`) — encodes: an acquisition id is consumed at most once per
+  project and task kind, the deduplication key for a retried acquire. Also enforced in app
   code: partially. The replay path at `lib.rs:13245-13262` returns a
   `NoWork { replayed: true }` outcome for a recognised acquisition rather than
   inserting, but the uniqueness itself is the constraint's job.

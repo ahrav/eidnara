@@ -241,14 +241,15 @@ only when the outcome carried an artifact and otherwise preserved
 | update | `update_note_cas` (`:11837-11871`, store `:10409-10505`) | content and/or condition, `status_version + 1`, `state_version + 1`; on a compiler edit also `source_revision + 1`, `status='pending'`, and the entire check lifecycle NULLed (`memory-store:12844-12871`) |
 | supersede | none | there is no supersession relation between notes; a re-authored condition is an in-place update, not a new row |
 | evaluate | `note.evaluation.complete` (`:11334-11405`) | the 20 reduced projection fields plus the two compile-provenance fields |
-| expire (claim) | `collect_note_eval_ledgers_tx` (`memory-store:13119-13157`) | claim rows only; the note row is never touched by claim expiry |
+| expire (claim) | `task_lease::collect_ledgers_tx` (`crates/memory-store/src/task_lease.rs:332-418`) | claim rows only; the note row is never touched by claim expiry |
 | dismiss | `dismiss_note` (`memory-store:4551-4605`, `:10507-10563`) | `status='dismissed'`, `dismissed_at`, `dismissal_resolution`, content with the resolution appended (`:4574-4577`), version bumps, and a claim fence |
 | delete | `DELETE FROM notes WHERE context_store_uuid = ?1 AND project_path = ?2` (`memory-store:11393`) | the row; this is session-delete and recomp territory, owned by Parts 3 and 4c |
 
-Both `update_note_cas` and `dismiss_note` call
-`fence_active_note_claims_tx(..., "stale", ...)` (`memory-store:4543`, `:4602`,
-`:10500`, `:10558`), so an in-flight claim cannot apply an outcome across an edit
-or a dismissal.
+Both `update_note_cas` and `dismiss_note` reach
+`task_lease::fence_task_claims_tx(..., "stale", ...)` through their shared
+transaction helpers (`crates/memory-store/src/lib.rs:14991-15000`,
+`crates/memory-store/src/lib.rs:15072`), so an in-flight claim cannot apply an
+outcome across an edit or a dismissal.
 
 ## Evaluation decision map
 
@@ -407,9 +408,13 @@ documentation establishes the contract and not its correctness.
 existing rows, no reaper deletes notes by age or volume, and the candidate query
 has no `LIMIT` (`:13291-13301`). This is the counterpoint to the one place the
 recurring missing-reaper finding does not apply: the claim and acquisition ledgers
-are both capped and reaped (`NOTE_EVAL_LEDGER_CAP` at `memory-store:2946`, checked at
-`:13307-13313` and `:13355-13358`; `collect_note_eval_ledgers_tx` at
-`:13119-13157` deletes rows and says why at `:13143-13147`). A dismissed note is
+are both capped and reaped (`NOTE_EVAL_LEDGER_CAP` at
+`crates/memory-store/src/lib.rs:3780`, checked at
+`crates/memory-store/src/task_lease.rs:630-638` and
+`crates/memory-store/src/task_lease.rs:678-686`;
+`task_lease::collect_ledgers_tx` at
+`crates/memory-store/src/task_lease.rs:332-418` deletes rows and says why at
+`crates/memory-store/src/task_lease.rs:356-360`). A dismissed note is
 the retirement counterpart: `dismiss_note` UPDATEs and never DELETEs and appends
 rather than replaces the resolution, so the content stays readable through
 `filter: "dismissed"`, and nothing returns it to `pending` — readable but never
@@ -1149,10 +1154,11 @@ Required faults and enabling state: an outstanding claim on a note, plus a
 concurrent facade mutation of that note. No injected fault is needed.
 Confidence: high - [evidence](evidence/note-b-completion-applies-only-under-the-claimed-revision-and-state-version.md).
 Read the fence at `memory-store:13569-13573`, the `stale` terminal it produces
-(`:13552-13561`), the reduced-status guard (`:13594-13606`), and the four
-`fence_active_note_claims_tx` call sites on the mutation paths (`:4543`,
-`:4602`, `:10500`, `:10558`). Confirmed the module side asserts only the phase
-name (`lib.rs:14197-14202`), so the store fence is the sole protection for the
+(`:13552-13561`), the reduced-status guard (`:13594-13606`), and the two
+`task_lease::fence_task_claims_tx` call sites in the shared mutation helpers
+(`crates/memory-store/src/lib.rs:14991-15000`,
+`crates/memory-store/src/lib.rs:15072`). Confirmed the module side asserts only
+the phase name (`lib.rs:14197-14202`), so the store fence is the sole protection for the
 phase's eligibility predicate.
 Existing check: `smart_note_revision_matrix_normative_matches_memory_store`
 (`smart_note_evaluation.rs:1189-1526`), replaying
@@ -1314,7 +1320,7 @@ Confirmed no count cap in `insert_note` (`memory-store:10130-10164`) or
 `LIMIT` (`:13291-13301`); confirmed `smart_note_selection_snapshot` clones three
 `String`s per note per poll (`lib.rs:13963-13985`); confirmed no reaper deletes
 notes by age or volume, in contrast with the ledger reaper at
-`memory-store:13119-13157`.
+`crates/memory-store/src/task_lease.rs:332-418`.
 Existing check: none for note volume. `MAX_NOTE_CONTENT_BYTES` (`lib.rs:14395`)
 bounds one note at 64 KiB, and `NOTE_EVAL_LEDGER_CAP` (`memory-store:2946`) bounds
 in-flight claims. Neither bounds the pending note count.
@@ -1475,7 +1481,7 @@ with its pre-dismissal content as a prefix of its current content, that a
 returns it to `pending`, `ready`, or `active`. `always` because both halves must
 hold on every dismissal evaluated.
 Fault/timing angle: none for the read half. For the evaluation half the window
-is a live claim at dismissal time, which `fence_active_note_claims_tx` must
+is a live claim at dismissal time, which `task_lease::fence_task_claims_tx` must
 close.
 Required faults and enabling state: a smart note in `pending` or `ready`, a `ctx_note dismiss`, then a `ctx_note read` with `filter: "dismissed"` and a `ctx_note update` on the same id. The oracle needs **four calls**, not three: the create is not setup, because it is the call that establishes the pre-dismissal content the read half asserts is a prefix of the post-dismissal content, so without it the first conjunct has no baseline. (Corrected this disposition, D1.)
 Confidence: high - [evidence](evidence/note-b-dismissed-note-is-readable-but-never-returns-to-evaluation.md).
@@ -1486,16 +1492,16 @@ is a readable filter (`lib.rs:11721`) and is inside the `filter: "all"` set
 loaded status to `active | pending | ready | surfacing | surfaced`
 (`lib.rs:11806-11813`, store `:10529`); confirmed the candidate query only ever
 sees `status = 'pending'` (`memory-store:13293`); confirmed the claim fence at
-`memory-store:4602`.
+`crates/memory-store/src/lib.rs:15072`.
 Existing check: none found for the dismissed round trip. The facade lens records
 the dismiss-not-found arm at `lib.rs:11902-11907` as an error text memoized as a
 command success; that is
 [facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes](#facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes),
 not this one.
 Impact: this is the answer to "is a dropped note recoverable": yes for reading,
-no for evaluation. If the fence at `memory-store:4602` regressed, a late `met`
-completion would set `status = "ready"` on a dismissed note and resurrect it
-into the surfacing path.
+no for evaluation. If the fence at `crates/memory-store/src/lib.rs:15072`
+regressed, a late `met` completion would set `status = "ready"` on a dismissed
+note and resurrect it into the surfacing path.
 Open questions:
 
 - Is the absence of an un-dismiss action deliberate? A user who dismisses by

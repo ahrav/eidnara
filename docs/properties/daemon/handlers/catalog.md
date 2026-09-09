@@ -454,22 +454,15 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - four `dreamer_run_task_*` tests (`:25872`, `:25899`, `:25931`, `:25977`) cover argument rejection and a successful classify. None faults `record_dream_task_command` on the failure path.
+Exercised: yes - four `dreamer_run_task_*` tests in `crates/daemon/src/lib.rs` (`mod tests`). `dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure` exhausts the model chain, asserts the receipt is `Complete` with a failed terminal kind, and replays the failure without a second producer start. `dreamer_run_task_replays_from_the_receipt_and_refuses_a_changed_request` covers the success replay and the digest conflict. `dreamer_run_task_fails_closed_when_the_failure_record_cannot_be_written` installs a `RAISE(ABORT)` trigger on `dreamer_receipts` `UPDATE OF state`, asserts the exhausted chain answers `dreamer_ledger_failed` with the receipt still `in_progress`, and asserts a retry answers `dreamer_outcome_unknown` without a producer start. `dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails` installs the same trigger on `dreamer_attempts` `UPDATE OF terminal_kind`, and asserts a successful model result still completes the receipt and replays.
 Guarantee: A `dreamer.run_task` that fails after consuming a model call records that outcome durably, so a retry with the same `command_id` does not repeat the call.
-Check: `always` - for any `dreamer.run_task` response **that consumed a model attempt**, `load`ing the dream task command for `(ledger_session, command_id)` returns a row. `always` because the ledger is the retry contract and applies to every terminal outcome, success or failure, that spent a billable run. The conditioning is a correction applied this disposition (F6): three response paths are supposed to leave no row, and an unconditional form was false against a correct implementation on all three. Argument rejection returns before the ledger is touched; the authority gate at `:9684-9698` returns before it; and the in-flight duplicate guard returns `dreamer_run_failed` at `:9803-9809` with no write **by design**, documented at `:9786-9789` as "the loser returns without any ledger write; its retry replays the winner's recorded response".
-Fault/timing angle: No interleaving is needed for the main window. `:9989-9994` binds `record_dream_task_command` to `let _`, so a write failure there is invisible and the handler returns `dreamer_run_failed` at `:9995-9998` regardless. The success path at `:10016` does the opposite and returns the distinct code `dreamer_ledger_failed` at `:10035-10038` when its write fails. The duplicate-guard half does need concurrency: the key is inserted into `inflight_dream_commands` at `:9802` and `DreamCommandGuard` (`:9811-9814`) removes it when the call returns, so two sequential deliveries never see it and two overlapping in-flight calls are required.
-Required faults and enabling state: For the main window, a classify run that exhausts its models so `output.is_none()` at `:9983`, plus a store fault on `record_dream_task_command`. The authority gate at `:9684-9698` must pass first. **Constructible today, revised this disposition (F3):** the model-exhaustion state is already reachable, since the fixture at `:25806-25810` poisons the route model chain to prove the classify loop ignores it, and the unchecked write is inducible by an aborting trigger on `dream_task_commands` (`memory-store:6945-6951`) installed via `execute_tag_sql_for_test`, with `RAISE(ABORT)` not swallowed by the `INSERT OR IGNORE`. For the duplicate-guard half, two **concurrent** deliveries, which means two tasks and a way to hold the first inside its run.
-Confidence: high - [evidence](evidence/h4c-dreamer-failure-path-ledger-write-is-unchecked.md). Both call sites read and compared, and the replay contract fully traced: the handler reads the ledger at `:9819-9828` *before* constructing a producer at `:9848` or starting a run at `:9878`, and the store's write is `INSERT OR IGNORE` plus an unconditional read-back (`crates/memory-store/src/lib.rs:6947-6963`), so the row is write-once and replay-stable. The comment at `:9816-9818` names the exact hazard in the authors' own words: a missing row means "a second billable run", and the read is deliberately hardened to fail closed against it (`:9822-9827`). The unchecked write at `:9989` is therefore a hole in a protection the authors built on purpose.
-Existing check: none for the failure-path ledger write. The four `dreamer_run_task_*` tests cover argument rejection and a successful classify.
-Impact: A retry re-runs the producer, so the model is called twice for one logical command. This is the only handler in this part whose repeat cost is an external paid side effect rather than a local write, which puts its severity above the row count involved. Secondary impact: the failure path returns `dreamer_run_failed` whether or not the ledger write landed, so a caller cannot distinguish "recorded as failed, do not retry" from "not recorded, a retry will re-run", while the success path does make that distinction with `dreamer_ledger_failed`. The collision is observable from the three `dreamer_run_failed` sites at `:9804`, `:9968` and `:9996`, in two of which no ledger row exists by design.
-Open questions:
-
-- Is `let _` at `:9989` deliberate? Given `:9816-9818` names the
-  second-billable-run hazard and `:9822-9827` hardens the read against it, an
-  unchecked write on the other half of the same contract looks like an oversight.
-  The alternative reading, that recording a failure is best-effort, is weakened by
-  `:9984-9988` constructing a full replay-shaped response for storage. (needs
-  human input)
+Check: `always` - for any `dreamer.run_task` response **that consumed a model attempt**, a terminal answer (`ok: true` or `dreamer_run_failed`) is returned only when `lookup_dreamer_receipt` for the request's `(project, producer, operation_key)` returns a `Complete` receipt; every other response after a consumed attempt is `dreamer_ledger_failed`, `dreamer_ledger_fenced`, or `dreamer_outcome_unknown`, and a retry over the receipt that response leaves behind does not start a producer. `always` because the receipt is the retry contract and applies to every terminal outcome, success or failure, that spent a billable call. The condition on a consumed attempt is load-bearing: the in-flight duplicate guard at the top of `handle_dreamer_run_task` returns `dreamer_run_failed` with no receipt and no attempt, by design.
+Fault/timing angle: The exhausted-chain path calls `complete_dreamer_receipt(.., DreamerTerminalKind::Failed, ..)` and returns `dreamer_run_failed` only on `Applied`; an `Err` becomes `dreamer_ledger_failed` and a `Fenced` result `dreamer_ledger_fenced`, so a dropped write cannot turn a terminal failure into a replayable command. The success path completes the receipt before deleting the child session. When `finish_dreamer_attempt` fails after a model call, the handler first tries to complete the receipt with a usable result it already holds; with no usable result, `settle_dispatched_attempt_as_unknown` completes the receipt as `unknown` on a best-effort basis so a retry replays `dreamer_outcome_unknown` rather than dispatching again. That settle write is matched on all three results: `Applied` returns the caller's stop response, `Fenced` returns `dreamer_ledger_fenced`, and `Err` returns `dreamer_ledger_failed`. Every receipt write is row-predicate guarded on key, generation, and `in_progress` state (`crates/memory-store/src/dreamer_ledger.rs`, `complete_dreamer_receipt`).
+Required faults and enabling state: A classify run whose authority gate passes and whose model chain is exhausted, so `output.is_none()` in `handle_dreamer_run_task`, plus a store fault on `complete_dreamer_receipt`. Both are constructed today: the `DreamerHarness` fixture poisons the route model chain to prove the classify loop ignores it, and `execute_tag_sql_for_test` installs a `BEFORE UPDATE OF state ON dreamer_receipts` trigger that raises `ABORT`, which the guarded `UPDATE` does not swallow. The attempt-write window needs the same trigger on `dreamer_attempts` `UPDATE OF terminal_kind`. The in-flight duplicate guard is outside this record's condition and needs two concurrent deliveries to reach.
+Confidence: high - [evidence](evidence/h4c-dreamer-failure-path-ledger-write-is-unchecked.md). The evidence file records the defect as it stood against `record_dream_task_command`; that table and method are gone. At HEAD the exhausted-chain write, the success write, and the settle write in `settle_dispatched_attempt_as_unknown` each match `Applied`, `Fenced`, and `Err` as separate arms; the known-result write inside the attempt-failure branch returns only on `Applied` and hands a `Fenced` or `Err` result to the settle path, so no receipt write is ignored. `begin_dreamer_receipt` runs before any producer is constructed, so an existing `Complete` receipt replays, an `in_progress` one that carries an attempt row refuses without a dispatch, and an `in_progress` one with no attempt row is adopted under the next generation by `take_over_undispatched_dreamer_receipt`, whose absence check and fence move are one guarded statement. The four tests under Exercised drive the success replay, the failed-chain replay, the faulted failure record, and the faulted attempt record against the real store.
+Existing check: the four tests named under Exercised; the two fault-injection tests cover the failure-path write and the attempt-row write.
+Impact: A retry re-runs the producer, so the model is called twice for one logical command. This is the only handler in this part whose repeat cost is an external paid side effect rather than a local write, which puts its severity above the row count involved.
+Open questions: None. The unchecked `let _` this record was raised on is gone; the receipt ledger checks every write on the failure path.
 
 ### h4c-side-channel-drain-result-is-discarded-by-the-caller
 
@@ -1327,8 +1320,11 @@ omission rather than a design choice.
 Grouped by shared mechanism rather than by the section headings above, because
 several of the sharpest relationships cross groups. Every dominance statement
 below is a **hypothesis** about which oracle subsumes which, offered to guide
-ordering, not a verified claim; none of them has been tested, because none of
-these records has an executing check.
+ordering, not a verified claim; none of them has been tested. The Dreamer record
+is the exception to the "no executing check" state the rest of this map assumes:
+the tests named under its Exercised field drive its guarantee under injected
+store faults. Every other record keeps the status its own Exercised and Existing
+check fields state.
 
 - **An earlier transaction commits and a later step fails.**
   [h4c-recomp-reset-precedes-its-ledger-row](#h4c-recomp-reset-precedes-its-ledger-row),
@@ -1340,7 +1336,7 @@ these records has an executing check.
   F3, an aborting trigger installed through `execute_tag_sql_for_test`
   (`memory-store:6431-6440`) on `recomp_commands`, `authority_route_bindings`,
   or `state_imports`, so **one harness serves three records** and that is the
-  cheapest leverage in the part. Hypothesis: building the trigger seam
+  best return in the part. Hypothesis: building the trigger seam
   *dominates* nothing on its own, since each record needs a different table and a
   different enabling state, but it is the shared precondition for all three. The
   transform record is outside the trigger relation entirely, because its fault is
@@ -1352,12 +1348,15 @@ these records has an executing check.
   Three records whose shared consequence is that the caller's view and the store's
   state can differ with nothing reporting it. They do not dominate one another,
   because each breaks a different signal: guidance withholds a persistence field,
-  the dreamer discards a write result on the one path a retry depends on, and the
+  the dreamer once discarded a write result on the one path a retry depends on
+  (resolved at HEAD, where every receipt write is matched and the receipt is the
+  retry contract; the record stays in this group for its mechanism), and the
   transform discards three counters the store computed. They are grouped because
   the guidance no-row arm and the side-channel drain both already have a driving
-  test, so two of the three are half-built, and because METHOD.md's
-  effect-accounting rule is the common lens: attempted and acknowledged must be
-  tracked separately, and in all three the module has the numbers and drops them.
+  test, and the dreamer's receipt writes are driven under injected faults, and
+  because METHOD.md's effect-accounting rule is the common lens: attempted and
+  acknowledged must be tracked separately, and in all three the module has the
+  numbers; two of them still drop them.
 - **Identity, or its absence, on a repeat delivery.**
   [h4c-session-delete-has-no-caller-supplied-operation-identity](#h4c-session-delete-has-no-caller-supplied-operation-identity),
   [h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write](#h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write).

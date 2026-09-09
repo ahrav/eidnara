@@ -14,6 +14,8 @@
 #![forbid(unsafe_code)]
 
 pub mod claim_mirror;
+pub mod dreamer_ledger;
+pub(crate) mod task_lease;
 
 use cache_stability::{DurabilityClass, FrozenUnit};
 use context_core::claim_operation::{
@@ -40,6 +42,7 @@ use std::sync::{
 use std::time::Instant;
 use storage::GuardedConn;
 use storage::{SqliteStore, open_sqlite};
+use task_lease::{LeaseCompletion, LeaseSelected, TaskLeaseKind};
 
 /// Foreign types that appear in this crate's public signatures, re-exported so a consumer
 /// can name them through `memory_store` alone. `StorageDescriptor` is the argument of
@@ -3778,22 +3781,25 @@ pub const NOTE_EVAL_LEDGER_CAP: i64 = 10_000;
 /// Rows the seeded-compiled-check verifier examines per committed batch.
 const NOTE_ARTIFACT_REPAIR_BATCH: i64 = 500;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoteEvalClaim {
-    pub claim_id: String,
-    pub note_id: i64,
-    pub phase: String,
-    pub acquisition_id: String,
-    pub evaluator_instance: String,
-    pub evaluator_slot: i64,
-    pub registration_generation: i64,
-    pub source_revision: i64,
-    pub state_version: i64,
-    pub policy_version: i64,
-    pub protocol_epoch: i64,
-    pub authority_generation: i64,
-    pub expires_at: i64,
-}
+/// Smart-note evaluation: the first task kind on the shared lease ledger.
+pub(crate) const NOTE_EVALUATION: TaskLeaseKind = TaskLeaseKind {
+    task_kind: "note_evaluation",
+    claim_id_prefix: "nec:",
+    phases: &["compile", "due", "liveness", "fallback"],
+    lease_ms: NOTE_EVAL_CLAIM_LEASE_MS,
+    no_work_retention_ms: NOTE_EVAL_NO_WORK_RETENTION_MS,
+    terminal_retention_ms: NOTE_EVAL_TERMINAL_RETENTION_MS,
+    response_redact_ms: NOTE_EVAL_RESPONSE_REDACT_MS,
+    ledger_cap: NOTE_EVAL_LEDGER_CAP,
+};
+
+pub use task_lease::{
+    LeaseAbandonOutcome as NoteEvalAbandonOutcome, LeaseAcquireOutcome,
+    LeaseClaim as NoteEvalClaim, LeaseCompleteOutcome as NoteEvalCompleteOutcome,
+    LeaseRenewOutcome as NoteEvalRenewOutcome,
+};
+
+pub type NoteEvalAcquireOutcome = LeaseAcquireOutcome<StoredNote>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// One selection decision produced by the caller's closure inside the
@@ -3804,63 +3810,6 @@ pub struct NoteEvalClaim {
 pub enum NoteEvalSelection {
     Claim { note_id: i64, phase: String },
     NoWork { cycle_exhausted: bool },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
-pub enum NoteEvalAcquireOutcome {
-    Claim {
-        claim: NoteEvalClaim,
-        note: StoredNote,
-        replayed: bool,
-    },
-    NoWork {
-        replayed: bool,
-        /// The selection cursor, not the queue, ended this pass. Durable in
-        /// the acquisition ledger so response-loss replays re-announce it.
-        cycle_exhausted: bool,
-    },
-    /// The acquisition identity replays an expired decision.
-    Expired,
-    /// The acquisition identity replays a terminal claim result.
-    Terminal {
-        kind: String,
-        response: Option<String>,
-    },
-    Busy,
-    AuthorityChanged,
-    Invalid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NoteEvalRenewOutcome {
-    Renewed {
-        expires_at: i64,
-    },
-    Expired,
-    AuthorityChanged,
-    UnknownClaim,
-    Invalid,
-    TerminalReplay {
-        kind: String,
-        response: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
-pub enum NoteEvalCompleteOutcome {
-    Applied { response_json: String },
-    Replayed { response_json: String },
-    Conflict { kind: &'static str },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NoteEvalAbandonOutcome {
-    Abandoned,
-    Replayed { kind: String },
-    UnknownClaim,
-    Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3962,12 +3911,6 @@ pub struct ChangefeedPage {
     pub next_cursor: i64,
     pub has_more: bool,
     pub rows: Vec<ChangefeedRow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DreamTaskCommandRow {
-    pub response_json: String,
-    pub created_at: i64,
 }
 
 /// A context row used by the crash-idempotent authority seed. The JSON payload is
@@ -8156,82 +8099,6 @@ impl MemoryStore {
                         rounds: rounds.max(0) as usize,
                         summary: row.get(2)?,
                         created_at: row.get(3)?,
-                    })
-                },
-            )?;
-            Ok(if inserted == 0 {
-                WriteDisposition::Replay(row)
-            } else {
-                WriteDisposition::Applied(row)
-            })
-        })
-    }
-
-    /// Return a recorded dream-task result for command-id retry deduplication.
-    pub fn load_dream_task_command(
-        &self,
-        session_id: &str,
-        command_id: &str,
-    ) -> Result<Option<DreamTaskCommandRow>, MemoryStoreError> {
-        Ok(self.inner.with_conn(|conn| {
-            conn.query_row(
-                "SELECT response_json, created_at
-                   FROM dream_task_commands
-                  WHERE session_id = ?1 AND command_id = ?2",
-                params![session_id, command_id],
-                |row| {
-                    Ok(DreamTaskCommandRow {
-                        response_json: row.get(0)?,
-                        created_at: row.get(1)?,
-                    })
-                },
-            )
-            .optional()
-        })?)
-    }
-
-    /// Record the first terminal dream-task response. INSERT OR IGNORE makes a response-loss
-    /// retry replay the original provider outcome instead of executing a second child session.
-    pub fn record_dream_task_command(
-        &self,
-        session_id: &str,
-        command_id: &str,
-        response_json: &str,
-        created_at: i64,
-    ) -> Result<DreamTaskCommandRow, MemoryStoreError> {
-        if let Some(existing) = self.load_dream_task_command(session_id, command_id)? {
-            return Ok(existing);
-        }
-        let mut write = PreparedWrite::new(DurableWriteFamily::CommandLedgers);
-        write.domain_owner(
-            "session",
-            session_id,
-            active_scan_owner_key(&["dream", command_id]),
-        );
-        write.existing_identity("session_id", session_id)?;
-        write.identity("command_id", command_id)?;
-        let response_json = write.json_content(
-            "response_json",
-            response_json,
-            JsonScanPolicy::DurableRejectProtected,
-        )?;
-        write.execute(&self.inner, |coordinated| {
-            let tx = coordinated.tx();
-            let inserted = tx.execute(
-                "INSERT OR IGNORE INTO dream_task_commands
-                     (session_id, command_id, response_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![session_id, command_id, response_json, created_at],
-            )?;
-            let row = tx.query_row(
-                "SELECT response_json, created_at
-                   FROM dream_task_commands
-                  WHERE session_id = ?1 AND command_id = ?2",
-                params![session_id, command_id],
-                |row| {
-                    Ok(DreamTaskCommandRow {
-                        response_json: row.get(0)?,
-                        created_at: row.get(1)?,
                     })
                 },
             )?;
@@ -13137,10 +13004,9 @@ impl MemoryStore {
                         // not block its note under the new generation for a
                         // full lease; completion is already generation-fenced,
                         // so terminalize it like the drain transition does.
-                        fence_active_note_claims_tx(
+                        task_lease::fence_project_claims_tx(
                             tx,
                             project,
-                            None,
                             "authority_changed",
                             current_time_ms(),
                         )?;
@@ -13291,10 +13157,9 @@ impl MemoryStore {
                     // prior MODULE period cannot complete under the new
                     // generation, but left active it blocks its note for a
                     // full lease.
-                    fence_active_note_claims_tx(
+                    task_lease::fence_project_claims_tx(
                         tx,
                         project,
-                        None,
                         "authority_changed",
                         current_time_ms(),
                     )?;
@@ -13410,10 +13275,9 @@ impl MemoryStore {
                     // prior MODULE period cannot complete under the new
                     // generation, but left active it blocks its note for a
                     // full lease.
-                    fence_active_note_claims_tx(
+                    task_lease::fence_project_claims_tx(
                         tx,
                         project,
-                        None,
                         "authority_changed",
                         current_time_ms(),
                     )?;
@@ -13615,7 +13479,12 @@ impl MemoryStore {
                     |row| row.get(0),
                 )?;
                 if domain == "notes" {
-                    fence_active_note_claims_tx(tx, project, None, "authority_changed", now_ms)?;
+                    task_lease::fence_project_claims_tx(
+                        tx,
+                        project,
+                        "authority_changed",
+                        now_ms,
+                    )?;
                 }
                 let next_generation = current.generation + 1;
                 let token = mint_coordinator_token(lease, lease_expires_at, next_generation);
@@ -15120,7 +14989,14 @@ fn update_note_cas_tx(
         }));
     }
     if compiler_edit {
-        fence_active_note_claims_tx(tx, project_path, Some(note_id), "stale", now_ms)?;
+        task_lease::fence_task_claims_tx(
+            tx,
+            &NOTE_EVALUATION,
+            project_path,
+            note_id,
+            "stale",
+            now_ms,
+        )?;
     }
     Ok(NoteCasApplication {
         outcome: NoteCasOutcome::Applied(load_note_tx(tx, note_id)?),
@@ -15193,14 +15069,9 @@ fn dismiss_note_tx(
     if changed == 0 {
         return Ok(None);
     }
-    fence_active_note_claims_tx(tx, project_path, Some(note_id), "stale", now_ms)?;
+    task_lease::fence_task_claims_tx(tx, &NOTE_EVALUATION, project_path, note_id, "stale", now_ms)?;
     Ok(Some(load_note_tx(tx, note_id)?))
 }
-
-const NOTE_EVAL_CLAIM_COLUMNS: &str = "claim_id, note_id, phase, acquisition_id, \
-    evaluator_instance, evaluator_slot, registration_generation, source_revision, \
-    state_version, policy_version, protocol_epoch, authority_generation, expires_at, \
-    completion_id, terminal_kind, terminal_response";
 
 /// Columns the work selector actually reads. Acquisition polls the pending set on
 /// every call, so this deliberately excludes `content`, `manifest_json`, and the
@@ -15245,242 +15116,11 @@ fn note_eval_candidate_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoteE
     })
 }
 
-const NOTE_EVAL_ID_MAX_LEN: usize = 200;
-const NOTE_EVAL_RESPONSE_MAX_LEN: usize = 2048;
-
-struct NoteEvalClaimRow {
-    claim: NoteEvalClaim,
-    completion_id: Option<String>,
-    terminal_kind: Option<String>,
-    terminal_response: Option<String>,
-}
-
-fn note_eval_claim_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NoteEvalClaimRow> {
-    Ok(NoteEvalClaimRow {
-        claim: NoteEvalClaim {
-            claim_id: row.get(0)?,
-            note_id: row.get(1)?,
-            phase: row.get(2)?,
-            acquisition_id: row.get(3)?,
-            evaluator_instance: row.get(4)?,
-            evaluator_slot: row.get(5)?,
-            registration_generation: row.get(6)?,
-            source_revision: row.get(7)?,
-            state_version: row.get(8)?,
-            policy_version: row.get(9)?,
-            protocol_epoch: row.get(10)?,
-            authority_generation: row.get(11)?,
-            expires_at: row.get(12)?,
-        },
-        completion_id: row.get(13)?,
-        terminal_kind: row.get(14)?,
-        terminal_response: row.get(15)?,
-    })
-}
-
-fn note_eval_valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= NOTE_EVAL_ID_MAX_LEN
-}
-
-fn note_eval_bound_response(response: &str) -> String {
-    if response.len() <= NOTE_EVAL_RESPONSE_MAX_LEN {
-        return response.to_string();
-    }
-    let mut end = NOTE_EVAL_RESPONSE_MAX_LEN;
-    while !response.is_char_boundary(end) {
-        end -= 1;
-    }
-    response[..end].to_string()
-}
-
-fn note_eval_kind_response(kind: &str) -> String {
-    serde_json::json!({ "result": kind }).to_string()
-}
-
-/// Resolve the notes-authority row this project's evaluation protocol is fenced on.
-/// A MODULE row wins over stale twins under other context store UUIDs, matching
-/// `module_authority_for_project`; otherwise the lowest UUID reports current state.
-fn note_eval_authority_tx(
-    tx: &GuardedConn<'_>,
-    project: &str,
-) -> rusqlite::Result<Option<(i64, i64, String)>> {
-    tx.query_row(
-        "SELECT generation, note_eval_protocol_epoch, state
-           FROM authority
-          WHERE project = ?1 AND domain = 'notes'
-          ORDER BY CASE WHEN state = 'MODULE' THEN 0 ELSE 1 END, context_store_uuid
-          LIMIT 1",
-        params![project],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )
-    .optional()
-}
-
-fn note_eval_module_authority_tx(
-    tx: &GuardedConn<'_>,
-    project: &str,
-) -> rusqlite::Result<Option<(i64, i64)>> {
-    Ok(note_eval_authority_tx(tx, project)?
-        .filter(|(_, _, state)| state == "MODULE")
-        .map(|(generation, epoch, _)| (generation, epoch)))
-}
-
-fn load_note_eval_claim_tx(
-    tx: &GuardedConn<'_>,
-    project: &str,
-    claim_id: &str,
-) -> rusqlite::Result<Option<NoteEvalClaimRow>> {
-    tx.query_row(
-        &format!(
-            "SELECT {NOTE_EVAL_CLAIM_COLUMNS} FROM note_eval_claims
-              WHERE project = ?1 AND claim_id = ?2"
-        ),
-        params![project, claim_id],
-        note_eval_claim_from_row,
-    )
-    .optional()
-}
-
-fn mark_note_eval_claim_terminal_tx(
-    tx: &GuardedConn<'_>,
-    project: &str,
-    claim_id: &str,
-    kind: &str,
-    completion_id: Option<&str>,
-    response: &str,
-    now_ms: i64,
-) -> rusqlite::Result<usize> {
-    tx.execute(
-        "UPDATE note_eval_claims
-            SET terminal_kind = ?1, completion_id = COALESCE(?2, completion_id),
-                terminal_response = ?3, terminal_at_ms = ?4
-          WHERE project = ?5 AND claim_id = ?6 AND terminal_kind IS NULL",
-        params![kind, completion_id, response, now_ms, project, claim_id],
-    )
-}
-
-/// Terminally fence active claims so in-flight evaluations lose their completion
-/// instead of surfacing stale work. `note_id = None` fences the whole project.
-fn fence_active_note_claims_tx(
-    tx: &GuardedConn<'_>,
-    project: &str,
-    note_id: Option<i64>,
-    kind: &str,
-    now_ms: i64,
-) -> rusqlite::Result<usize> {
-    tx.execute(
-        "UPDATE note_eval_claims
-            SET terminal_kind = ?1, terminal_response = ?2, terminal_at_ms = ?3
-          WHERE project = ?4 AND terminal_kind IS NULL AND (?5 IS NULL OR note_id = ?5)",
-        params![
-            kind,
-            note_eval_kind_response(kind),
-            now_ms,
-            project,
-            note_id
-        ],
-    )
-}
-
-/// Ledger garbage collection: expire overdue active claims, tombstone expired
-/// `no_work` decisions (`decision = ''` keeps replay identity), then null the
-/// response of terminal claims once their completion-replay window has passed
-/// (`NOTE_EVAL_RESPONSE_REDACT_MS`, well before row deletion at
-/// `NOTE_EVAL_TERMINAL_RETENTION_MS`). Tombstoned rows replay as `Expired`;
-/// they no longer count against either cap.
-fn collect_note_eval_ledgers_tx(
-    tx: &GuardedConn<'_>,
-    project: &str,
-    now_ms: i64,
-) -> rusqlite::Result<()> {
-    tx.execute(
-        "UPDATE note_eval_claims
-            SET terminal_kind = 'expired', terminal_response = ?1, terminal_at_ms = ?2
-          WHERE project = ?3 AND terminal_kind IS NULL AND expires_at <= ?2",
-        params![note_eval_kind_response("expired"), now_ms, project],
-    )?;
-    tx.execute(
-        "UPDATE note_eval_acquisitions SET decision = ''
-          WHERE project = ?1 AND decision <> '' AND expires_at <= ?2",
-        params![project, now_ms],
-    )?;
-    tx.execute(
-        "UPDATE note_eval_claims SET terminal_response = NULL
-          WHERE project = ?1 AND terminal_kind IS NOT NULL AND terminal_response IS NOT NULL
-            AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?2",
-        params![project, now_ms - NOTE_EVAL_RESPONSE_REDACT_MS],
-    )?;
-    // Reclaim rows, not just columns. Blanking `decision`/`terminal_response`
-    // stops a row counting toward the cap but leaves it on disk forever, so both
-    // ledgers would grow without bound - one acquisition row per poll, including
-    // every idle no-work poll - and the per-poll GC and cap counts would degrade
-    // into ever-longer scans.
-    let expired_acquisitions = {
-        let mut statement = tx.prepare(
-            "SELECT acquisition_id FROM note_eval_acquisitions
-              WHERE project = ?1 AND decision = '' AND expires_at <= ?2",
-        )?;
-
-        statement
-            .query_map(
-                params![project, now_ms - NOTE_EVAL_NO_WORK_RETENTION_MS],
-                |row| row.get::<_, String>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for acquisition_id in expired_acquisitions {
-        retire_active_scan_domain_owner(
-            tx,
-            "project",
-            project,
-            "note_evaluation_ledgers",
-            &active_scan_owner_key(&["acquisition", &acquisition_id]),
-        )?;
-    }
-    tx.execute(
-        "DELETE FROM note_eval_acquisitions
-          WHERE project = ?1 AND decision = '' AND expires_at <= ?2",
-        params![project, now_ms - NOTE_EVAL_NO_WORK_RETENTION_MS],
-    )?;
-    let expired_claims = {
-        let mut statement = tx.prepare(
-            "SELECT claim_id FROM note_eval_claims
-              WHERE project = ?1 AND terminal_kind IS NOT NULL
-                AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?2",
-        )?;
-
-        statement
-            .query_map(
-                params![project, now_ms - NOTE_EVAL_TERMINAL_RETENTION_MS],
-                |row| row.get::<_, String>(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    for claim_id in expired_claims {
-        retire_active_scan_domain_owner(
-            tx,
-            "project",
-            project,
-            "note_evaluation_ledgers",
-            &active_scan_owner_key(&["claim", &claim_id]),
-        )?;
-    }
-    tx.execute(
-        "DELETE FROM note_eval_claims
-          WHERE project = ?1 AND terminal_kind IS NOT NULL
-            AND terminal_at_ms IS NOT NULL AND terminal_at_ms <= ?2",
-        params![project, now_ms - NOTE_EVAL_TERMINAL_RETENTION_MS],
-    )?;
-    Ok(())
-}
-
 impl MemoryStore {
     /// Acquire one durable evaluation claim or a replayable `no_work` decision.
     /// `select` receives the pending, unclaimed smart notes and returns either a
-    /// (note, phase) claim or a classified `no_work`; the decision — including a
-    /// `no_work`'s `cycle_exhausted` cause — commits atomically under
-    /// (project, acquisition_id) uniqueness so the same acquisition ID always
-    /// returns the same decision after response loss.
+    /// (note, phase) claim or a classified `no_work`; the lease protocol is
+    /// `acquire_task_lease` under the `NOTE_EVALUATION` kind.
     #[allow(clippy::too_many_arguments)]
     pub fn acquire_note_evaluation(
         &self,
@@ -15516,262 +15156,63 @@ impl MemoryStore {
         now_ms: i64,
         ledger_cap: i64,
     ) -> Result<NoteEvalAcquireOutcome, MemoryStoreError> {
-        if project.is_empty()
-            || !note_eval_valid_id(acquisition_id)
-            || !note_eval_valid_id(evaluator_instance)
-            || evaluator_slot < 0
-        {
-            return Ok(NoteEvalAcquireOutcome::Invalid);
-        }
-        let mut write = PreparedWrite::new(DurableWriteFamily::NoteEvaluationLedgers);
-        write.existing_identity("project", project)?;
-        write.identity("acquisition_id", acquisition_id)?;
-        write.identity("evaluator_instance", evaluator_instance)?;
-        self.with_prepared_note_conn_fenced(project, write, |coordinated| {
-            let tx = coordinated.tx;
-            collect_note_eval_ledgers_tx(tx, project, now_ms)?;
-            let replayed_claim = tx
-                .query_row(
-                    &format!(
-                        "SELECT {NOTE_EVAL_CLAIM_COLUMNS} FROM note_eval_claims
-                          WHERE project = ?1 AND acquisition_id = ?2"
-                    ),
-                    params![project, acquisition_id],
-                    note_eval_claim_from_row,
-                )
-                .optional()?;
-            if let Some(row) = replayed_claim {
-                if let Some(kind) = row.terminal_kind {
-                    return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Terminal {
-                        kind,
-                        response: row.terminal_response,
-                    }));
-                }
-                if row.claim.evaluator_instance != evaluator_instance
-                    || row.claim.evaluator_slot != evaluator_slot
-                    || row.claim.registration_generation > registration_generation
-                {
-                    return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Invalid));
-                }
-                return rebind_note_eval_claim_tx(
-                    tx,
-                    project,
-                    row.claim,
-                    acquisition_id,
-                    registration_generation,
-                    now_ms,
-                )
-                .map(WriteDisposition::Replay);
-            }
-            let replayed_decision = tx
-                .query_row(
-                    "SELECT decision FROM note_eval_acquisitions
-                      WHERE project = ?1 AND acquisition_id = ?2",
-                    params![project, acquisition_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            if let Some(decision) = replayed_decision {
-                return Ok(WriteDisposition::Replay(if decision.is_empty() {
-                    NoteEvalAcquireOutcome::Expired
-                } else {
-                    // Replay the full recorded decision: a client only sees a
-                    // replay after losing the original response, so the
-                    // exhaustion cause must survive or the worker mistakes a
-                    // reset cursor for a drained queue.
-                    NoteEvalAcquireOutcome::NoWork {
-                        replayed: true,
-                        cycle_exhausted: decision == "no_work_exhausted",
-                    }
-                }));
-            }
-            let Some((authority_generation, protocol_epoch)) =
-                note_eval_module_authority_tx(tx, project)?
-            else {
-                return Ok(WriteDisposition::Replay(
-                    NoteEvalAcquireOutcome::AuthorityChanged,
-                ));
-            };
-            let slot_claim = tx
-                .query_row(
-                    &format!(
-                        "SELECT {NOTE_EVAL_CLAIM_COLUMNS} FROM note_eval_claims
-                          WHERE project = ?1 AND evaluator_instance = ?2
-                            AND evaluator_slot = ?3 AND terminal_kind IS NULL"
-                    ),
-                    params![project, evaluator_instance, evaluator_slot],
-                    note_eval_claim_from_row,
-                )
-                .optional()?;
-            if let Some(row) = slot_claim {
-                if row.claim.registration_generation > registration_generation {
-                    return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Invalid));
-                }
-                coordinated.domain_owner(
-                    "project",
-                    project,
-                    active_scan_owner_key(&["claim", &row.claim.claim_id]),
-                );
-                return rebind_note_eval_claim_tx(
-                    tx,
-                    project,
-                    row.claim,
-                    acquisition_id,
-                    registration_generation,
-                    now_ms,
-                )
-                .map(WriteDisposition::Applied);
-            }
-            let candidates = {
-                let mut stmt = tx.prepare_cached(&format!(
-                    "SELECT {NOTE_EVAL_CANDIDATE_COLUMNS} FROM notes
-                      WHERE project_path = ?1 AND type = 'smart' AND status = 'pending'
-                        AND id NOT IN (SELECT note_id FROM note_eval_claims
-                                        WHERE project = ?1 AND terminal_kind IS NULL)
-                      ORDER BY id"
-                ))?;
+        let kind = TaskLeaseKind {
+            ledger_cap,
+            ..NOTE_EVALUATION
+        };
+        self.acquire_task_lease(
+            &kind,
+            project,
+            acquisition_id,
+            evaluator_instance,
+            evaluator_slot,
+            registration_generation,
+            now_ms,
+            |tx| {
+                let candidates = {
+                    let mut stmt = tx.prepare_cached(&format!(
+                        "SELECT {NOTE_EVAL_CANDIDATE_COLUMNS} FROM notes
+                          WHERE project_path = ?1 AND type = 'smart' AND status = 'pending'
+                            AND id NOT IN (SELECT note_id FROM note_eval_claims
+                                            WHERE project = ?1 AND task_kind = ?2
+                                              AND terminal_kind IS NULL)
+                          ORDER BY id"
+                    ))?;
 
-                stmt.query_map(params![project], note_eval_candidate_from_row)?
+                    stmt.query_map(
+                        params![project, kind.task_kind],
+                        note_eval_candidate_from_row,
+                    )?
                     .collect::<Result<Vec<_>, _>>()?
-            };
-            let (note_id, phase) = match select(&candidates) {
-                NoteEvalSelection::Claim { note_id, phase } => (note_id, phase),
-                NoteEvalSelection::NoWork { cycle_exhausted } => {
-                    let live: i64 = tx.query_row(
-                        "SELECT COUNT(*) FROM note_eval_acquisitions
-                          WHERE project = ?1 AND decision <> ''",
-                        params![project],
-                        |row| row.get(0),
-                    )?;
-                    if live >= ledger_cap {
-                        return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Busy));
+                };
+                let (note_id, phase) = match select(&candidates) {
+                    NoteEvalSelection::Claim { note_id, phase } => (note_id, phase),
+                    NoteEvalSelection::NoWork { cycle_exhausted } => {
+                        return Ok(LeaseSelected::NoWork { cycle_exhausted });
                     }
-                    tx.execute(
-                        "INSERT INTO note_eval_acquisitions(
-                             project, acquisition_id, decision, created_at_ms, expires_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![
-                            project,
-                            acquisition_id,
-                            if cycle_exhausted {
-                                "no_work_exhausted"
-                            } else {
-                                "no_work"
-                            },
-                            now_ms,
-                            now_ms + NOTE_EVAL_NO_WORK_RETENTION_MS
-                        ],
-                    )?;
-                    coordinated.domain_owner(
-                        "project",
-                        project,
-                        active_scan_owner_key(&["acquisition", acquisition_id]),
-                    );
-                    return Ok(WriteDisposition::Applied(NoteEvalAcquireOutcome::NoWork {
-                        replayed: false,
-                        cycle_exhausted,
-                    }));
+                };
+                if !candidates.iter().any(|note| note.id == note_id) {
+                    return Ok(LeaseSelected::Invalid);
                 }
-            };
-            if !matches!(phase.as_str(), "compile" | "due" | "liveness" | "fallback") {
-                return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Invalid));
-            }
-            let Some(candidate) = candidates.into_iter().find(|note| note.id == note_id) else {
-                return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Invalid));
-            };
-            // Selection ran on the narrow projection; load the full row once for
-            // the note that actually won so the claim snapshot has content,
-            // condition, and the compiled artifact.
-            let note = load_note_tx(tx, candidate.id)?;
-            // Bound IN-FLIGHT claims only. Counting terminal rows still inside the
-            // replay-retention window would turn this cap into a rolling
-            // throughput ceiling: once a project completed `ledger_cap`
-            // evaluations within the retention window every further acquisition
-            // would return Busy and all evaluation would stall until rows aged
-            // out. Terminal-row volume is bounded by deletion in
-            // `collect_note_eval_ledgers_tx` instead.
-            let live: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM note_eval_claims
-                  WHERE project = ?1 AND terminal_kind IS NULL",
-                params![project],
-                |row| row.get(0),
-            )?;
-            if live >= ledger_cap {
-                return Ok(WriteDisposition::Replay(NoteEvalAcquireOutcome::Busy));
-            }
-            let claim = NoteEvalClaim {
-                // The module's wire protocol caps id fields at 128 bytes and
-                // the client echoes this id on every renew/complete/abandon,
-                // so it must stay bounded regardless of how long the project
-                // identity or acquisition id are. The digest keeps it
-                // deterministic per (project, acquisition); a replayed
-                // acquisition reads the stored row.
-                claim_id: {
-                    let mut hasher = Sha256::new();
-                    hasher.update(project.as_bytes());
-                    hasher.update([0u8]);
-                    hasher.update(acquisition_id.as_bytes());
-                    format!("nec:{:x}", hasher.finalize())
-                },
-                note_id: note.id,
-                phase,
-                acquisition_id: acquisition_id.to_string(),
-                evaluator_instance: evaluator_instance.to_string(),
-                evaluator_slot,
-                registration_generation,
-                source_revision: note.source_revision,
-                state_version: note.state_version,
-                policy_version: note.policy_version.unwrap_or(1),
-                protocol_epoch,
-                authority_generation,
-                expires_at: now_ms + NOTE_EVAL_CLAIM_LEASE_MS,
-            };
-            for (field_id, value) in [
-                ("claim_id", claim.claim_id.as_str()),
-                ("phase", claim.phase.as_str()),
-            ] {
-                coordinated
-                    .prepared
-                    .borrow_mut()
-                    .transaction_identity(field_id, value)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            }
-            tx.execute(
-                "INSERT INTO note_eval_claims(
-                     claim_id, project, note_id, phase, acquisition_id, evaluator_instance,
-                     evaluator_slot, registration_generation, source_revision, state_version,
-                     policy_version, protocol_epoch, authority_generation, expires_at,
-                     created_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                params![
-                    claim.claim_id,
-                    project,
-                    claim.note_id,
-                    claim.phase,
-                    claim.acquisition_id,
-                    claim.evaluator_instance,
-                    claim.evaluator_slot,
-                    claim.registration_generation,
-                    claim.source_revision,
-                    claim.state_version,
-                    claim.policy_version,
-                    claim.protocol_epoch,
-                    claim.authority_generation,
-                    claim.expires_at,
-                    now_ms,
-                ],
-            )?;
-            coordinated.domain_owner(
-                "project",
-                project,
-                active_scan_owner_key(&["claim", &claim.claim_id]),
-            );
-            Ok(WriteDisposition::Applied(NoteEvalAcquireOutcome::Claim {
-                claim,
-                note,
-                replayed: false,
-            }))
-        })
+                // Selection ran on the narrow projection; load the full row once for
+                // the note that actually won so the claim snapshot has content,
+                // condition, and the compiled artifact.
+                let note = load_note_tx(tx, note_id)?;
+                Ok(LeaseSelected::Claim {
+                    note_id: note.id,
+                    phase,
+                    source_revision: note.source_revision,
+                    state_version: note.state_version,
+                    policy_version: note.policy_version.unwrap_or(1),
+                    task: note,
+                })
+            },
+            |tx, note_id| {
+                Ok(load_note_tx(tx, note_id)
+                    .optional()?
+                    .filter(|note| note.project_path == project))
+            },
+        )
     }
 
     /// Extend an active claim's lease by one lease interval.
@@ -15784,69 +15225,15 @@ impl MemoryStore {
         registration_generation: i64,
         now_ms: i64,
     ) -> Result<NoteEvalRenewOutcome, MemoryStoreError> {
-        let mut write = PreparedWrite::new(DurableWriteFamily::NoteEvaluationLedgers);
-        write.domain_owner(
-            "project",
+        self.renew_task_lease(
+            &NOTE_EVALUATION,
             project,
-            active_scan_owner_key(&["claim", claim_id]),
-        );
-        for (field_id, value) in [
-            ("project", project),
-            ("claim_id", claim_id),
-            ("evaluator_instance", evaluator_instance),
-        ] {
-            write.existing_identity(field_id, value)?;
-        }
-        self.with_prepared_note_conn_fenced(project, write, |coordinated| {
-            let tx = coordinated.tx;
-            let before = tx.total_changes();
-            let outcome = (|| -> rusqlite::Result<NoteEvalRenewOutcome> {
-                let Some(row) = load_note_eval_claim_tx(tx, project, claim_id)? else {
-                    return Ok(NoteEvalRenewOutcome::UnknownClaim);
-                };
-                if let Some(kind) = row.terminal_kind {
-                    return Ok(NoteEvalRenewOutcome::TerminalReplay {
-                        kind,
-                        response: row.terminal_response,
-                    });
-                }
-                if row.claim.evaluator_instance != evaluator_instance
-                    || row.claim.evaluator_slot != evaluator_slot
-                    || row.claim.registration_generation != registration_generation
-                {
-                    return Ok(NoteEvalRenewOutcome::Invalid);
-                }
-                if row.claim.expires_at <= now_ms {
-                    mark_note_eval_claim_terminal_tx(
-                        tx,
-                        project,
-                        claim_id,
-                        "expired",
-                        None,
-                        &note_eval_kind_response("expired"),
-                        now_ms,
-                    )?;
-                    return Ok(NoteEvalRenewOutcome::Expired);
-                }
-                match note_eval_module_authority_tx(tx, project)? {
-                    Some((generation, _)) if generation == row.claim.authority_generation => {}
-                    _ => return Ok(NoteEvalRenewOutcome::AuthorityChanged),
-                }
-                let expires_at = now_ms + NOTE_EVAL_CLAIM_LEASE_MS;
-                tx.execute(
-                    "UPDATE note_eval_claims
-                    SET expires_at = ?1
-                  WHERE project = ?2 AND claim_id = ?3 AND terminal_kind IS NULL",
-                    params![expires_at, project, claim_id],
-                )?;
-                Ok(NoteEvalRenewOutcome::Renewed { expires_at })
-            })()?;
-            Ok(if tx.total_changes() > before {
-                WriteDisposition::Applied(outcome)
-            } else {
-                WriteDisposition::Replay(outcome)
-            })
-        })
+            claim_id,
+            evaluator_instance,
+            evaluator_slot,
+            registration_generation,
+            now_ms,
+        )
     }
 
     /// Commit one evaluation outcome. `apply` receives the fenced note snapshot and
@@ -15864,271 +15251,16 @@ impl MemoryStore {
         now_ms: i64,
         apply: impl FnOnce(&NoteEvalClaim, &StoredNote) -> Result<NoteEvalReducedState, String>,
     ) -> Result<NoteEvalCompleteOutcome, MemoryStoreError> {
-        if !note_eval_valid_id(completion_id) {
-            return Ok(NoteEvalCompleteOutcome::Conflict { kind: "invalid" });
-        }
-        let mut write = PreparedWrite::new(DurableWriteFamily::NoteEvaluationLedgers);
-        write.domain_owner(
-            "project",
+        self.complete_task_lease(
+            &NOTE_EVALUATION,
             project,
-            active_scan_owner_key(&["claim", claim_id]),
-        );
-        for (field_id, value) in [
-            ("project", project),
-            ("claim_id", claim_id),
-            ("completion_id", completion_id),
-            ("evaluator_instance", evaluator_instance),
-        ] {
-            write.existing_identity(field_id, value)?;
-        }
-        self.with_prepared_note_conn_fenced(project, write, |coordinated| {
-            let tx = coordinated.tx;
-            let before = tx.total_changes();
-            let outcome = (|| -> rusqlite::Result<NoteEvalCompleteOutcome> {
-                let Some(row) = load_note_eval_claim_tx(tx, project, claim_id)? else {
-                    return Ok(NoteEvalCompleteOutcome::Conflict {
-                        kind: "unknown_claim",
-                    });
-                };
-                if let Some(kind) = row.terminal_kind {
-                    return Ok(match row.completion_id {
-                        Some(stored) if stored == completion_id => match row.terminal_response {
-                            Some(response_json) => {
-                                NoteEvalCompleteOutcome::Replayed { response_json }
-                            }
-                            None => NoteEvalCompleteOutcome::Conflict { kind: "expired" },
-                        },
-                        Some(_) => NoteEvalCompleteOutcome::Conflict {
-                            kind: "completion_conflict",
-                        },
-                        None => NoteEvalCompleteOutcome::Conflict {
-                            kind: match kind.as_str() {
-                                "stale" => "stale",
-                                "expired" => "expired",
-                                "authority_changed" => "authority_changed",
-                                _ => "invalid",
-                            },
-                        },
-                    });
-                }
-                if row.claim.evaluator_instance != evaluator_instance
-                    || row.claim.evaluator_slot != evaluator_slot
-                {
-                    return Ok(NoteEvalCompleteOutcome::Conflict { kind: "invalid" });
-                }
-                if row.claim.expires_at <= now_ms {
-                    mark_note_eval_claim_terminal_tx(
-                        tx,
-                        project,
-                        claim_id,
-                        "expired",
-                        None,
-                        &note_eval_kind_response("expired"),
-                        now_ms,
-                    )?;
-                    return Ok(NoteEvalCompleteOutcome::Conflict { kind: "expired" });
-                }
-                match note_eval_module_authority_tx(tx, project)? {
-                    Some((generation, _)) if generation == row.claim.authority_generation => {}
-                    _ => {
-                        mark_note_eval_claim_terminal_tx(
-                            tx,
-                            project,
-                            claim_id,
-                            "authority_changed",
-                            None,
-                            &note_eval_kind_response("authority_changed"),
-                            now_ms,
-                        )?;
-                        return Ok(NoteEvalCompleteOutcome::Conflict {
-                            kind: "authority_changed",
-                        });
-                    }
-                }
-                let stale = |tx: &GuardedConn<'_>| -> rusqlite::Result<_> {
-                    mark_note_eval_claim_terminal_tx(
-                        tx,
-                        project,
-                        claim_id,
-                        "stale",
-                        None,
-                        &note_eval_kind_response("stale"),
-                        now_ms,
-                    )?;
-                    Ok(NoteEvalCompleteOutcome::Conflict { kind: "stale" })
-                };
-                let note = load_note_tx(tx, row.claim.note_id).optional()?;
-                let Some(note) = note.filter(|note| note.project_path == project) else {
-                    return stale(tx);
-                };
-                coordinated.domain_owner("project", project, note.id.to_string());
-                if note.source_revision != row.claim.source_revision
-                    || note.state_version != row.claim.state_version
-                    || note.status != "pending"
-                {
-                    return stale(tx);
-                }
-                let mut reduced = match apply(&row.claim, &note) {
-                    Ok(reduced) => reduced,
-                    Err(message) => {
-                        let message = coordinated
-                            .prepared
-                            .borrow_mut()
-                            .transaction_content("evaluation_error", &message)
-                            .map_err(|error| {
-                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-                            })?;
-                        let response = serde_json::json!({
-                            "result": "invalid",
-                            "error": note_eval_bound_response(&message),
-                        })
-                        .to_string();
-                        mark_note_eval_claim_terminal_tx(
-                            tx,
-                            project,
-                            claim_id,
-                            "invalid",
-                            None,
-                            &note_eval_bound_response(&response),
-                            now_ms,
-                        )?;
-                        return Ok(NoteEvalCompleteOutcome::Conflict { kind: "invalid" });
-                    }
-                };
-                if !matches!(reduced.status.as_str(), "pending" | "ready") {
-                    mark_note_eval_claim_terminal_tx(
-                        tx,
-                        project,
-                        claim_id,
-                        "invalid",
-                        None,
-                        &note_eval_kind_response("invalid"),
-                        now_ms,
-                    )?;
-                    return Ok(NoteEvalCompleteOutcome::Conflict { kind: "invalid" });
-                }
-                reduced.ready_reason = reduced
-                    .ready_reason
-                    .as_deref()
-                    .map(|value| {
-                        coordinated
-                            .prepared
-                            .borrow_mut()
-                            .transaction_content("ready_reason", value)
-                    })
-                    .transpose()
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                reduced
-                    .manifest_json
-                    .as_deref()
-                    .map(|value| {
-                        coordinated
-                            .prepared
-                            .borrow_mut()
-                            .transaction_identity("manifest_json", value)
-                            .map(drop)
-                    })
-                    .transpose()
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                for (field_id, value) in [
-                    ("check_status", reduced.check_status.as_deref()),
-                    ("compiled_check", reduced.compiled_check.as_deref()),
-                    ("check_hash", reduced.check_hash.as_deref()),
-                    ("check_cron", reduced.check_cron.as_deref()),
-                    (
-                        "compiled_project_path",
-                        reduced.compiled_project_path.as_deref(),
-                    ),
-                ] {
-                    value
-                        .map(|value| {
-                            coordinated
-                                .prepared
-                                .borrow_mut()
-                                .transaction_identity(field_id, value)
-                                .map(drop)
-                        })
-                        .transpose()
-                        .map_err(|error| {
-                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-                        })?;
-                }
-                let changed = tx.execute(
-                    "UPDATE notes SET status = ?1, ready_at = ?2, ready_reason = ?3,
-                    last_checked_at = ?4, updated_at_ms = ?5, compiled_check = ?6,
-                    manifest_json = ?7, check_hash = ?8, check_cron = ?9, check_version = ?10,
-                    check_status = COALESCE(?11, check_status), check_failure_count = ?12,
-                    check_network_failure_count = ?13, check_quarantined_until = ?14,
-                    check_next_due_at = ?15, check_compiled_at = ?16,
-                    check_false_since_at = ?17, check_last_liveness_at = ?18,
-                    policy_version = ?19, compiled_source_revision = ?20,
-                    compiled_project_path = ?21,
-                    status_version = status_version + 1, state_version = state_version + 1
-                  WHERE id = ?22 AND project_path = ?23 AND status = 'pending'
-                    AND state_version = ?24",
-                    params![
-                        reduced.status,
-                        reduced.ready_at,
-                        reduced.ready_reason,
-                        reduced.last_checked_at,
-                        reduced.updated_at_ms,
-                        reduced.compiled_check,
-                        reduced.manifest_json,
-                        reduced.check_hash,
-                        reduced.check_cron,
-                        reduced.check_version.unwrap_or(0),
-                        reduced.check_status,
-                        reduced.check_failure_count,
-                        reduced.check_network_failure_count,
-                        reduced.check_quarantined_until,
-                        reduced.check_next_due_at,
-                        reduced.check_compiled_at,
-                        reduced.check_false_since_at,
-                        reduced.check_last_liveness_at,
-                        reduced.policy_version.unwrap_or(1),
-                        reduced.compiled_source_revision,
-                        reduced.compiled_project_path,
-                        row.claim.note_id,
-                        project,
-                        row.claim.state_version,
-                    ],
-                )?;
-                if changed == 0 {
-                    return stale(tx);
-                }
-                // Every response field is already known locally (the CAS above
-                // asserted `state_version = row.claim.state_version`), so no
-                // re-read of the row is needed.
-                let response_json = serde_json::json!({
-                    "result": "applied",
-                    "note_id": row.claim.note_id,
-                    "status": reduced.status,
-                    "state_version": row.claim.state_version + 1,
-                    "check_status": reduced.check_status,
-                })
-                .to_string();
-                let response_json = coordinated
-                    .prepared
-                    .borrow_mut()
-                    .transaction_content("terminal_response", &response_json)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                mark_note_eval_claim_terminal_tx(
-                    tx,
-                    project,
-                    claim_id,
-                    "applied",
-                    Some(completion_id),
-                    &response_json,
-                    now_ms,
-                )?;
-                Ok(NoteEvalCompleteOutcome::Applied { response_json })
-            })()?;
-            Ok(if tx.total_changes() > before {
-                WriteDisposition::Applied(outcome)
-            } else {
-                WriteDisposition::Replay(outcome)
-            })
-        })
+            claim_id,
+            completion_id,
+            evaluator_instance,
+            evaluator_slot,
+            now_ms,
+            |coordinated, claim| complete_note_evaluation_tx(coordinated, project, claim, apply),
+        )
     }
 
     /// Terminally release a claim for controlled cancellation. Never touches
@@ -16141,94 +15273,160 @@ impl MemoryStore {
         evaluator_slot: i64,
         now_ms: i64,
     ) -> Result<NoteEvalAbandonOutcome, MemoryStoreError> {
-        let mut write = PreparedWrite::new(DurableWriteFamily::NoteEvaluationLedgers);
-        write.domain_owner(
-            "project",
+        self.abandon_task_lease(
+            &NOTE_EVALUATION,
             project,
-            active_scan_owner_key(&["claim", claim_id]),
-        );
-        for (field_id, value) in [
-            ("project", project),
-            ("claim_id", claim_id),
-            ("evaluator_instance", evaluator_instance),
-        ] {
-            write.existing_identity(field_id, value)?;
-        }
-        self.with_prepared_note_conn_fenced(project, write, |coordinated| {
-            let tx = coordinated.tx();
-            let Some(row) = load_note_eval_claim_tx(tx, project, claim_id)? else {
-                return Ok(WriteDisposition::Replay(
-                    NoteEvalAbandonOutcome::UnknownClaim,
-                ));
-            };
-            if let Some(kind) = row.terminal_kind {
-                return Ok(WriteDisposition::Replay(NoteEvalAbandonOutcome::Replayed {
-                    kind,
-                }));
-            }
-            if row.claim.evaluator_instance != evaluator_instance
-                || row.claim.evaluator_slot != evaluator_slot
-            {
-                return Ok(WriteDisposition::Replay(NoteEvalAbandonOutcome::Invalid));
-            }
-            mark_note_eval_claim_terminal_tx(
-                tx,
-                project,
-                claim_id,
-                "abandoned",
-                None,
-                &note_eval_kind_response("abandoned"),
-                now_ms,
-            )?;
-            Ok(WriteDisposition::Applied(NoteEvalAbandonOutcome::Abandoned))
-        })
+            claim_id,
+            evaluator_instance,
+            evaluator_slot,
+            now_ms,
+        )
     }
 }
 
-/// Rebind an active claim to the caller's registration and replay it with the
-/// current note snapshot. The lease is refreshed alongside the rebind: a
-/// re-registered worker schedules its first renewal a full heartbeat interval
-/// out, so replaying a claim with its original near-expiry lease would let the
-/// lease lapse mid-execution and force the billable phase to run again.
-fn rebind_note_eval_claim_tx(
-    tx: &GuardedConn<'_>,
+/// The note-evaluation completion body run by `complete_task_lease` once the
+/// lease fences hold: reload the claimed note, fence on its snapshot versions and
+/// pending status, reduce it through `apply`, and write the reduced lifecycle
+/// columns under a state-version CAS.
+fn complete_note_evaluation_tx(
+    coordinated: &mut ActiveWriteTransaction<'_>,
     project: &str,
-    mut claim: NoteEvalClaim,
-    acquisition_id: &str,
-    registration_generation: i64,
-    now_ms: i64,
-) -> rusqlite::Result<NoteEvalAcquireOutcome> {
-    let expires_at = now_ms + NOTE_EVAL_CLAIM_LEASE_MS;
-    // The slot-recovery path reaches this rebind with a NEW acquisition id.
-    // Persisting it keeps the replay guarantee: a retry of that id hits the
-    // acquisition-keyed lookup and replays this rebind instead of re-entering
-    // slot recovery and extending the lease again.
-    tx.execute(
-        "UPDATE note_eval_claims
-            SET registration_generation = ?1, expires_at = ?2, acquisition_id = ?3
-          WHERE project = ?4 AND claim_id = ?5 AND terminal_kind IS NULL",
+    claim: &NoteEvalClaim,
+    apply: impl FnOnce(&NoteEvalClaim, &StoredNote) -> Result<NoteEvalReducedState, String>,
+) -> rusqlite::Result<LeaseCompletion> {
+    let tx = coordinated.tx;
+    let redaction_error = task_lease::redaction_error;
+    let note = load_note_tx(tx, claim.note_id).optional()?;
+    let Some(note) = note.filter(|note| note.project_path == project) else {
+        return Ok(LeaseCompletion::Stale);
+    };
+    coordinated.domain_owner("project", project, note.id.to_string());
+    if note.source_revision != claim.source_revision
+        || note.state_version != claim.state_version
+        || note.status != "pending"
+    {
+        return Ok(LeaseCompletion::Stale);
+    }
+    let mut reduced = match apply(claim, &note) {
+        Ok(reduced) => reduced,
+        Err(message) => {
+            let message = coordinated
+                .prepared
+                .borrow_mut()
+                .transaction_content("evaluation_error", &message)
+                .map_err(redaction_error)?;
+            let response = serde_json::json!({
+                "result": "invalid",
+                "error": task_lease::bound_response(&message),
+            })
+            .to_string();
+            return Ok(LeaseCompletion::Invalid { response });
+        }
+    };
+    if !matches!(reduced.status.as_str(), "pending" | "ready") {
+        return Ok(LeaseCompletion::Invalid {
+            response: task_lease::kind_response("invalid"),
+        });
+    }
+    reduced.ready_reason = reduced
+        .ready_reason
+        .as_deref()
+        .map(|value| {
+            coordinated
+                .prepared
+                .borrow_mut()
+                .transaction_content("ready_reason", value)
+        })
+        .transpose()
+        .map_err(redaction_error)?;
+    reduced
+        .manifest_json
+        .as_deref()
+        .map(|value| {
+            coordinated
+                .prepared
+                .borrow_mut()
+                .transaction_identity("manifest_json", value)
+                .map(drop)
+        })
+        .transpose()
+        .map_err(redaction_error)?;
+    for (field_id, value) in [
+        ("check_status", reduced.check_status.as_deref()),
+        ("compiled_check", reduced.compiled_check.as_deref()),
+        ("check_hash", reduced.check_hash.as_deref()),
+        ("check_cron", reduced.check_cron.as_deref()),
+        (
+            "compiled_project_path",
+            reduced.compiled_project_path.as_deref(),
+        ),
+    ] {
+        value
+            .map(|value| {
+                coordinated
+                    .prepared
+                    .borrow_mut()
+                    .transaction_identity(field_id, value)
+                    .map(drop)
+            })
+            .transpose()
+            .map_err(redaction_error)?;
+    }
+    let changed = tx.execute(
+        "UPDATE notes SET status = ?1, ready_at = ?2, ready_reason = ?3,
+            last_checked_at = ?4, updated_at_ms = ?5, compiled_check = ?6,
+            manifest_json = ?7, check_hash = ?8, check_cron = ?9, check_version = ?10,
+            check_status = COALESCE(?11, check_status), check_failure_count = ?12,
+            check_network_failure_count = ?13, check_quarantined_until = ?14,
+            check_next_due_at = ?15, check_compiled_at = ?16,
+            check_false_since_at = ?17, check_last_liveness_at = ?18,
+            policy_version = ?19, compiled_source_revision = ?20,
+            compiled_project_path = ?21,
+            status_version = status_version + 1, state_version = state_version + 1
+          WHERE id = ?22 AND project_path = ?23 AND status = 'pending'
+            AND state_version = ?24",
         params![
-            registration_generation,
-            expires_at,
-            acquisition_id,
+            reduced.status,
+            reduced.ready_at,
+            reduced.ready_reason,
+            reduced.last_checked_at,
+            reduced.updated_at_ms,
+            reduced.compiled_check,
+            reduced.manifest_json,
+            reduced.check_hash,
+            reduced.check_cron,
+            reduced.check_version.unwrap_or(0),
+            reduced.check_status,
+            reduced.check_failure_count,
+            reduced.check_network_failure_count,
+            reduced.check_quarantined_until,
+            reduced.check_next_due_at,
+            reduced.check_compiled_at,
+            reduced.check_false_since_at,
+            reduced.check_last_liveness_at,
+            reduced.policy_version.unwrap_or(1),
+            reduced.compiled_source_revision,
+            reduced.compiled_project_path,
+            claim.note_id,
             project,
-            claim.claim_id
+            claim.state_version,
         ],
     )?;
-    claim.registration_generation = registration_generation;
-    claim.expires_at = expires_at;
-    claim.acquisition_id = acquisition_id.to_string();
-    let note = load_note_tx(tx, claim.note_id)
-        .optional()?
-        .filter(|note| note.project_path == project);
-    let Some(note) = note else {
-        return Ok(NoteEvalAcquireOutcome::Invalid);
-    };
-    Ok(NoteEvalAcquireOutcome::Claim {
-        claim,
-        note,
-        replayed: true,
+    if changed == 0 {
+        return Ok(LeaseCompletion::Stale);
+    }
+    // Every response field is already known locally (the CAS above
+    // asserted `state_version = claim.state_version`), so no re-read
+    // of the row is needed.
+    let response_json = serde_json::json!({
+        "result": "applied",
+        "note_id": claim.note_id,
+        "status": reduced.status,
+        "state_version": claim.state_version + 1,
+        "check_status": reduced.check_status,
     })
+    .to_string();
+    Ok(LeaseCompletion::Applied { response_json })
 }
 
 /// Canonical digest binding a compiled smart-note artifact to the condition it was
@@ -17043,10 +16241,6 @@ mod tests {
             "compartments",
             "INSERT INTO compartments(session_id, sequence, start_message, end_message, title, content)
              VALUES (?1, 1, 1, 2, 't', 'c')",
-        ),
-        (
-            "dream_task_commands",
-            "INSERT INTO dream_task_commands(session_id, command_id, response_json, created_at) VALUES (?1, 'c', '{}', 1)",
         ),
         (
             "historian_side_channel_outbox",
@@ -22728,6 +21922,324 @@ mod tests {
                 cycle_exhausted: false
             }
         );
+    }
+
+    /// This task kind uses the shared ledger and no task table of its own:
+    /// task ids are arbitrary and the snapshot is a string.
+    const SECOND_TASK_KIND: TaskLeaseKind = TaskLeaseKind {
+        task_kind: "second_task",
+        claim_id_prefix: "stc:",
+        phases: &["run"],
+        ..NOTE_EVALUATION
+    };
+
+    fn second_kind_acquire(
+        store: &MemoryStore,
+        kind: &TaskLeaseKind,
+        acquisition_id: &str,
+        task_id: Option<i64>,
+        now_ms: i64,
+    ) -> LeaseAcquireOutcome<String> {
+        store
+            .acquire_task_lease(
+                kind,
+                EVAL_PROJECT,
+                acquisition_id,
+                "eval-a",
+                0,
+                1,
+                now_ms,
+                |_tx| {
+                    Ok(match task_id {
+                        Some(task_id) => LeaseSelected::Claim {
+                            note_id: task_id,
+                            phase: "run".to_string(),
+                            task: format!("task-{task_id}"),
+                            source_revision: 1,
+                            state_version: 1,
+                            policy_version: 1,
+                        },
+                        None => LeaseSelected::NoWork {
+                            cycle_exhausted: false,
+                        },
+                    })
+                },
+                |_tx, task_id| Ok(Some(format!("task-{task_id}"))),
+            )
+            .unwrap()
+    }
+
+    /// Every mutable column of both ledgers, so any write under the wrong kind
+    /// shows up.
+    fn ledger_rows(store: &MemoryStore, task_kind: &str) -> Vec<Vec<Option<String>>> {
+        store
+            .inner
+            .with_conn(|conn| {
+                let mut rows = Vec::new();
+                for sql in [
+                    "SELECT claim_id, note_id, acquisition_id, registration_generation, \
+                     expires_at, completion_id, terminal_kind, terminal_response
+                       FROM note_eval_claims
+                      WHERE project = ?1 AND task_kind = ?2 ORDER BY claim_id",
+                    "SELECT acquisition_id, decision, expires_at FROM note_eval_acquisitions
+                      WHERE project = ?1 AND task_kind = ?2 ORDER BY acquisition_id",
+                ] {
+                    let mut statement = conn.prepare(sql)?;
+                    let count = statement.column_count();
+                    let mut fetched = statement
+                        .query_map(params![EVAL_PROJECT, task_kind], |row| {
+                            (0..count)
+                                .map(|index| {
+                                    row.get::<_, Option<SqlValue>>(index)
+                                        .map(|value| value.map(|value| format!("{value:?}")))
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    rows.append(&mut fetched);
+                }
+                Ok(rows)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn second_task_kind_has_independent_slots_and_acquisition_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        let note = eval_note(&store, "note one");
+        let note_claim = eval_claim(&store, "acq-1", 0, 100);
+        assert_eq!(note_claim.note_id, note.id);
+        let before = ledger_rows(&store, "note_evaluation");
+        assert_eq!(before.len(), 1);
+
+        // A `no_work` decision is keyed per kind too: the note evaluator's
+        // first use of the same acquisition id is a fresh decision.
+        assert_eq!(
+            second_kind_acquire(&store, &SECOND_TASK_KIND, "acq-2", None, 150),
+            LeaseAcquireOutcome::NoWork {
+                replayed: false,
+                cycle_exhausted: false
+            }
+        );
+        assert_eq!(
+            store
+                .acquire_note_evaluation(EVAL_PROJECT, "acq-2", "eval-b", 0, 1, pick_none, 160)
+                .unwrap(),
+            NoteEvalAcquireOutcome::NoWork {
+                replayed: false,
+                cycle_exhausted: false
+            }
+        );
+
+        // The same worker slot and acquisition id claim a second-kind task
+        // while the note claim on that slot stays active.
+        let second_claim =
+            match second_kind_acquire(&store, &SECOND_TASK_KIND, "acq-1", Some(7), 200) {
+                LeaseAcquireOutcome::Claim {
+                    claim,
+                    task,
+                    replayed: false,
+                } => {
+                    assert_eq!(task, "task-7");
+                    assert_eq!(claim.note_id, 7);
+                    assert!(claim.claim_id.starts_with("stc:"));
+                    claim
+                }
+                other => panic!("expected a fresh second-kind claim, got {other:?}"),
+            };
+        match second_kind_acquire(&store, &SECOND_TASK_KIND, "acq-1", Some(8), 250) {
+            LeaseAcquireOutcome::Claim {
+                claim,
+                replayed: true,
+                ..
+            } => assert_eq!(claim.claim_id, second_claim.claim_id),
+            other => panic!("expected the second-kind acquisition to replay, got {other:?}"),
+        }
+
+        // Each kind's claim is invisible to the other kind's protocol.
+        assert_eq!(
+            store
+                .renew_note_evaluation_claim(
+                    EVAL_PROJECT,
+                    &second_claim.claim_id,
+                    "eval-a",
+                    0,
+                    1,
+                    300
+                )
+                .unwrap(),
+            NoteEvalRenewOutcome::UnknownClaim
+        );
+        assert_eq!(
+            store
+                .renew_task_lease(
+                    &SECOND_TASK_KIND,
+                    EVAL_PROJECT,
+                    &note_claim.claim_id,
+                    "eval-a",
+                    0,
+                    1,
+                    300
+                )
+                .unwrap(),
+            NoteEvalRenewOutcome::UnknownClaim
+        );
+
+        // A kind that reuses the note-evaluation claim-id prefix produces the
+        // same claim id for the same acquisition and still gets its own row.
+        const COLLIDER: TaskLeaseKind = TaskLeaseKind {
+            task_kind: "collider",
+            phases: &["run"],
+            ..NOTE_EVALUATION
+        };
+        match second_kind_acquire(&store, &COLLIDER, "acq-1", Some(11), 310) {
+            LeaseAcquireOutcome::Claim {
+                claim,
+                replayed: false,
+                ..
+            } => assert_eq!(claim.claim_id, note_claim.claim_id),
+            other => panic!("expected a fresh collider claim, got {other:?}"),
+        }
+
+        let mut expected = before;
+        expected.push(vec![
+            Some("Text(\"acq-2\")".to_string()),
+            Some("Text(\"no_work\")".to_string()),
+            Some(format!("Integer({})", 160 + NOTE_EVAL_NO_WORK_RETENTION_MS)),
+        ]);
+        assert_eq!(
+            ledger_rows(&store, "note_evaluation"),
+            expected,
+            "note-evaluation rows changed only by the note evaluator's own no_work decision"
+        );
+    }
+
+    #[test]
+    fn second_task_kind_lifecycle_and_gc_leave_note_evaluation_rows_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        eval_note(&store, "note one");
+        let note_claim = eval_claim(&store, "acq-1", 0, 100);
+        let before = ledger_rows(&store, "note_evaluation");
+
+        let second_claim =
+            match second_kind_acquire(&store, &SECOND_TASK_KIND, "acq-1", Some(7), 200) {
+                LeaseAcquireOutcome::Claim { claim, .. } => claim,
+                other => panic!("expected a fresh second-kind claim, got {other:?}"),
+            };
+        assert_eq!(
+            store
+                .renew_task_lease(
+                    &SECOND_TASK_KIND,
+                    EVAL_PROJECT,
+                    &second_claim.claim_id,
+                    "eval-a",
+                    0,
+                    1,
+                    300
+                )
+                .unwrap(),
+            NoteEvalRenewOutcome::Renewed {
+                expires_at: 300 + NOTE_EVAL_CLAIM_LEASE_MS
+            }
+        );
+        let complete = |completion_id: &str, now_ms: i64| {
+            store
+                .complete_task_lease(
+                    &SECOND_TASK_KIND,
+                    EVAL_PROJECT,
+                    &second_claim.claim_id,
+                    completion_id,
+                    "eval-a",
+                    0,
+                    now_ms,
+                    |_coordinated, claim| {
+                        Ok(LeaseCompletion::Applied {
+                            response_json: format!("{{\"task\":{}}}", claim.note_id),
+                        })
+                    },
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            complete("done-1", 400),
+            NoteEvalCompleteOutcome::Applied {
+                response_json: "{\"task\":7}".to_string()
+            }
+        );
+        assert_eq!(
+            complete("done-1", 500),
+            NoteEvalCompleteOutcome::Replayed {
+                response_json: "{\"task\":7}".to_string()
+            }
+        );
+        assert_eq!(
+            store
+                .abandon_task_lease(
+                    &SECOND_TASK_KIND,
+                    EVAL_PROJECT,
+                    &second_claim.claim_id,
+                    "eval-a",
+                    0,
+                    600
+                )
+                .unwrap(),
+            NoteEvalAbandonOutcome::Replayed {
+                kind: "applied".to_string()
+            }
+        );
+
+        // Second-kind garbage collection runs past the note claim's lease and
+        // past terminal retention without expiring or deleting note rows.
+        let late = 100 + NOTE_EVAL_CLAIM_LEASE_MS + NOTE_EVAL_TERMINAL_RETENTION_MS + 1;
+        match second_kind_acquire(&store, &SECOND_TASK_KIND, "acq-3", Some(9), late) {
+            LeaseAcquireOutcome::Claim {
+                replayed: false, ..
+            } => {}
+            other => panic!("expected a fresh second-kind claim, got {other:?}"),
+        }
+        assert_eq!(
+            ledger_rows(&store, "note_evaluation"),
+            before,
+            "note-evaluation rows are unchanged"
+        );
+        assert_eq!(
+            ledger_rows(&store, "second_task").len(),
+            1,
+            "the completed second-kind claim was reclaimed by its own kind's collector"
+        );
+        match store
+            .acquire_note_evaluation(EVAL_PROJECT, "acq-1", "eval-a", 0, 1, pick_first, late)
+            .unwrap()
+        {
+            NoteEvalAcquireOutcome::Terminal { kind, .. } => assert_eq!(kind, "expired"),
+            other => panic!("expected the note claim to replay as expired, got {other:?}"),
+        }
+        let _ = note_claim;
+    }
+
+    #[test]
+    fn phase_check_constrains_note_evaluation_rows_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        let insert = |task_kind: &str, phase: &str| {
+            store.execute_tag_sql_for_test(&format!(
+                "INSERT INTO note_eval_claims(
+                     claim_id, project, task_kind, note_id, phase, acquisition_id,
+                     evaluator_instance, evaluator_slot, registration_generation,
+                     source_revision, state_version, policy_version, protocol_epoch,
+                     authority_generation, expires_at, created_at_ms)
+                 VALUES ('c', '{EVAL_PROJECT}', '{task_kind}', 1, '{phase}', 'a', 'w', 0, 1,
+                         1, 1, 1, 1, 1, 10, 0)"
+            ))
+        };
+        let rejected = insert("note_evaluation", "run").unwrap_err().to_string();
+        assert!(
+            rejected.contains("CHECK constraint failed"),
+            "expected a phase CHECK violation, got {rejected}"
+        );
+        insert("second_task", "run").unwrap();
     }
 
     #[test]

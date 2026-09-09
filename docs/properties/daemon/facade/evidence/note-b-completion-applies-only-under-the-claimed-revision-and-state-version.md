@@ -58,12 +58,16 @@ worth cataloging rather than the defect the question was hunting.
    `NOTE_CAS_UPDATE_SQL` sets `status_version = status_version + 1, state_version
    = state_version + 1` unconditionally and `source_revision = source_revision +
    CASE WHEN ?5 THEN 1 ELSE 0 END` on a compiler edit
-   (`memory-store:12846-12847`), and `update_note_cas` then calls
-   `fence_active_note_claims_tx(self.tx, project_path, Some(note_id), "stale",
-   now_ms)` when `compiler_edit` holds (`:4542-4544`, and the non-transaction
-   variant at `:10499-10501`). `dismiss_note` bumps both versions
-   (`:12584-12585` region, seen at `:4583`) and fences unconditionally
-   (`:4602`, `:10558`).
+   (`memory-store:12846-12847`), and both `update_note_cas` entry points delegate
+   to `update_note_cas_tx` (`crates/memory-store/src/lib.rs:5192-5200`,
+   `crates/memory-store/src/lib.rs:11839-11847`). That shared helper calls
+   `task_lease::fence_task_claims_tx(tx, &NOTE_EVALUATION, project_path,
+   note_id, "stale", now_ms)` when `compiler_edit` holds
+   (`crates/memory-store/src/lib.rs:14991-15000`). Both `dismiss_note` entry points
+   delegate to `dismiss_note_tx` (`crates/memory-store/src/lib.rs:5216-5224`,
+   `crates/memory-store/src/lib.rs:11872-11880`), which bumps both versions
+   (`crates/memory-store/src/lib.rs:15054`) and fences every successful dismissal
+   (`crates/memory-store/src/lib.rs:15072`).
 
 5. So the phase preconditions are protected transitively: every write that could
    invalidate them also invalidates the fence. That is why the missing direct
@@ -75,10 +79,12 @@ worth cataloging rather than the defect the question was hunting.
 
    ```
    AND id NOT IN (SELECT note_id FROM note_eval_claims
-                   WHERE project = ?1 AND terminal_kind IS NULL)
+                   WHERE project = ?1 AND task_kind = ?2
+                     AND terminal_kind IS NULL)
    ```
-   (`:13294-13295`), and a slot already holding a live claim is rebound to that
-   claim rather than issued a new one (`:13268-13288`).
+   (`acquire_note_evaluation_with_cap`), and a slot already holding a live claim is rebound to that
+   claim rather than issued a new one
+   (`crates/memory-store/src/task_lease.rs:577-608`).
 
 7. The artifact digest is an independent second guard on the compile phase, and it
    is recomputed rather than trusted:
@@ -168,7 +174,7 @@ than start over.
    Without it the test could pass by always returning `stale`.
 4. The interleaved form, which is the one that proves the fence rather than the
    comparison: hold a claim, call `ctx_note update` through the facade, then
-   complete. That exercises `fence_active_note_claims_tx` as well as the
+   complete. That exercises `task_lease::fence_task_claims_tx` as well as the
    comparison, and those are two independent mechanisms that both have to work.
 
 ## Investigation log
@@ -177,9 +183,11 @@ than start over.
 
 - Sources examined: `lib.rs:14197-14202` (the only module-side check), the four
   selectors' predicates (`smart_note_evaluation.rs:711-806`), the store fence
-  (`memory-store:13569-13573`), all four `fence_active_note_claims_tx` call sites
-  (`:4543`, `:4602`, `:10500`, `:10558`), the candidate query's live-claim
-  exclusion (`:13294-13295`), and the slot rebind path (`:13268-13288`).
+  (`memory-store:13569-13573`), both `task_lease::fence_task_claims_tx` call sites
+  in the shared mutation helpers (`crates/memory-store/src/lib.rs:14991-15000`,
+  `crates/memory-store/src/lib.rs:15072`), the candidate query's live-claim
+  exclusion (`crates/memory-store/src/lib.rs:15176-15178`), and the slot rebind path
+  (`crates/memory-store/src/task_lease.rs:577-608`).
 - Findings: not reachable. To change a phase precondition under a live claim, some
   writer must change `check_status`, `has_compiled_check`,
   `check_quarantined_until`, or `check_next_due_at`. Those columns are written by

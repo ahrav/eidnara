@@ -68,10 +68,13 @@ what can undo it.
    `:10632`), and `NOTE_CAS_UPDATE_SQL` whose WHERE clause pins the expected status
    supplied by a caller that already excluded `dismissed` (`:12871`).
 
-7. An in-flight claim is fenced at dismissal:
-   `fence_active_note_claims_tx(self.tx, project_path, Some(note_id), "stale",
-   now_ms)` (`:4602`, and `:10558` in the other variant). That marks the claim
-   terminal with kind `"stale"` (`:13092-13111`), so a late completion returns
+7. An in-flight claim is fenced at dismissal. Both entry points delegate to
+   `dismiss_note_tx` (`crates/memory-store/src/lib.rs:5216-5224`,
+   `crates/memory-store/src/lib.rs:11872-11880`), which calls
+   `task_lease::fence_task_claims_tx(tx, &NOTE_EVALUATION, project_path,
+   note_id, "stale", now_ms)` (`crates/memory-store/src/lib.rs:15072`). That marks
+   the claim terminal with kind `"stale"`
+   (`crates/memory-store/src/task_lease.rs:287-308`), so a late completion returns
    `Conflict { kind: "stale" }` rather than writing. The completion fence would
    also catch it independently, on all three of its clauses:
    `state_version` was bumped, `status` is no longer `'pending'`, and for a
@@ -92,7 +95,8 @@ it. Concurrently, an evaluator holds a `due`-phase claim on the same note issued
 before it became ready.
 
 With the fence: `dismiss_note` sets `status = 'dismissed'`, bumps
-`state_version`, and marks the claim `"stale"` (`memory-store:4583`, `:4602`). The
+`state_version`, and marks the claim `"stale"`
+(`crates/memory-store/src/lib.rs:15054`, `crates/memory-store/src/lib.rs:15072`). The
 evaluator's `complete` returns `Conflict { kind: "stale" }` and writes nothing.
 
 Without the fence, and with the completion comparison also relaxed: the evaluator

@@ -9,8 +9,9 @@ everything from 13,932 on is test code in three modules, `tests` (13,932 to
 to 20,650). That boundary matters for reachability labelling, because several
 records below are about code that exists and has no production caller.
 
-The `lib.rs` region map, reused from the durability lens because every citation
-in Groups A and B is anchored to it:
+The region map combines historical source-catalog rows with verified HEAD
+references. Plain-number ranges and their descriptions refer to the source
+catalog; full-path citations in this table refer to HEAD.
 
 | Lines | Region |
 | --- | --- |
@@ -31,8 +32,9 @@ in Groups A and B is anchored to it:
 | 4610-4634 | `pub struct MemoryStore` |
 | **4810-12234** | **`impl MemoryStore` block 1**, including `open` 4816-4905, `repair_note_artifacts_v51` 5069-5114, `delete_session` 5432-5475, `set_todo_state` 6727-6757, `arm_soft_refresh` 6760-6778, `preflight_state_import` 7114-7139, `commit_state_import` 7145-7205, `commit_transform` 7260-7609, claim intent and mirror 11xxx-12232 |
 | 12236-12825 | Free `*_tx` writer helpers and compression |
-| **13160-13707** | **`impl MemoryStore` block 2** — note-evaluation claim lifecycle |
-| 13709-13930 | `rebind_note_eval_claim_tx`, `note_check_digest`, `repair_note_artifacts_tx`, misc helpers |
+| `crates/memory-store/src/lib.rs:15119-15430`; `crates/memory-store/src/task_lease.rs:477-1012` | **Note-evaluation claim lifecycle.** The acquire, renew, complete, and abandon lease protocol lives in `task_lease.rs`, parameterized by `TaskLeaseKind`; `lib.rs` keeps the note-specific selector, snapshot load, and completion body under `NOTE_EVALUATION` |
+| `crates/memory-store/src/task_lease.rs:436-475` | `task_lease::rebind_claim_tx` |
+| `crates/memory-store/src/lib.rs:15442-15457` | `note_check_digest` |
 | 13932-20650 | Three `#[cfg(test)]` modules |
 
 One boundary fact shapes the whole part. The PRAGMAs and the transaction
@@ -75,11 +77,13 @@ correction were applied to `fault-map.md` and change no record here.
   their evidence files, and the check inventory, fault map, and portfolio
   evaluation are that catalog's text under this repository's crate, module,
   table, and identifier names. Nothing generates or validates this file.
-- The header, scope statement, line counts, region maps, identifiers, and
-  commits above and below this section are the source catalog's: they
-  describe the host repository's tree at `eb6da6109`, not this one.
-- Line citations are the source catalog's coordinates and are not verified
-  against this tree. An automated check over citations written as a
+- The header, scope statement, line counts, plain-number region-map rows,
+  historical identifiers, and commits above and below this section are the
+  source catalog's: they describe the host repository's tree at `eb6da6109`,
+  not this one.
+- The source catalog's line citations are not verified against this tree. The
+  region map's full-path citations are separate HEAD references. An automated
+  check over source-catalog citations written as a
   repository-root path (`crates/...`, `packages/...`, `docs/...`,
   `.github/...`, `release/...`), as `ci.yml:NNN`, as `CONFIGURATION.md:NNN`,
   as `tests/sqlite_runtime.rs:NNN`, or as `../commons/...` (source-catalog path, not present at HEAD) marks every
@@ -219,11 +223,13 @@ and D the claim mirror and the intent ledger, and Groups E through G a few
 thousand lines of pure functions in `context-core` and `tokenizer`. Large regions
 of production `lib.rs` have no record at all: the historian publish and outbox
 machinery (`:9194-9798`, which Part 4a covers from the module side), the
-note-evaluation claim lifecycle (`:13160-13707`), the drop-seed and strip-seed
-materializers (`:4636-4808`), and most of the DTO and state layer. Retention,
-eviction, deletion, and cross-table conservation have no group at all, which the
-evaluation queued as its gap G4. Read the 37 records as a baseline over the
-highest-risk mechanisms, not as a clean bill for the crate.
+note-evaluation claim lifecycle (`crates/memory-store/src/lib.rs:15119-15430`,
+whose lease protocol is `crates/memory-store/src/task_lease.rs:477-1012`), the
+drop-seed and strip-seed materializers (`:4636-4808`), and most of the DTO
+and state layer. Retention, eviction, deletion, and cross-table conservation
+have no group at all, which the evaluation queued as its gap G4. Read the
+37 records as a baseline over the highest-risk mechanisms, not as a clean
+bill for the crate.
 
 ## Index
 
