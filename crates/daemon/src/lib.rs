@@ -28812,6 +28812,27 @@ mod tests {
         })
     }
 
+    /// Whether a variant carries `#[serde(skip)]` or `#[serde(skip_deserializing)]`, which keep
+    /// it off the inbound wire.
+    fn is_skipped(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("serde")
+                && attr
+                    .parse_nested_meta(|meta| {
+                        if meta.path.is_ident("skip") || meta.path.is_ident("skip_deserializing") {
+                            return Err(meta.error("skipped"));
+                        }
+                        if meta.input.peek(syn::Token![=]) {
+                            let _: syn::Expr = meta.value()?.parse()?;
+                        } else if meta.input.peek(syn::token::Paren) {
+                            let _ = meta.parse_nested_meta(|_| Ok(()));
+                        }
+                        Ok(())
+                    })
+                    .is_err()
+        })
+    }
+
     /// Whether a variant carries a `rename` that applies to deserialization: `rename = "..."` or
     /// `rename(deserialize = "...")`. A serialize-only rename leaves the deserialize spelling as
     /// the identifier or the `rename_all` form.
@@ -28863,13 +28884,27 @@ mod tests {
         }
     }
 
+    /// Whether a `cfg` predicate can only hold in a test build: `test` itself, or an `all(...)`
+    /// with such a predicate among its operands. `any(...)` and `not(...)` do not require it.
+    fn requires_test(meta: &syn::Meta) -> bool {
+        match meta {
+            syn::Meta::Path(path) => path.is_ident("test"),
+            syn::Meta::List(list) if list.path.is_ident("all") => list
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .is_ok_and(|operands| operands.iter().any(requires_test)),
+            _ => false,
+        }
+    }
+
     fn is_test_only(attrs: &[syn::Attribute]) -> bool {
         attrs.iter().any(|attr| {
             attr.path().is_ident("test")
                 || (attr.path().is_ident("cfg")
                     && attr
-                        .parse_args::<syn::Ident>()
-                        .is_ok_and(|ident| ident == "test"))
+                        .parse_args::<syn::Meta>()
+                        .is_ok_and(|meta| requires_test(&meta)))
         })
     }
 
@@ -28893,12 +28928,23 @@ mod tests {
         let manifest =
             std::fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("readable manifest");
         let mut explicit_lib = false;
+        let mut autobins = true;
+        let mut autolib = true;
         let mut explicit: Vec<std::path::PathBuf> = Vec::new();
         let mut section = String::new();
         for line in manifest.lines() {
             let line = line.trim();
             if line.starts_with('[') {
                 section = line.trim_matches(['[', ']']).to_string();
+                continue;
+            }
+            if section == "package" {
+                if line.starts_with("autobins") && line.ends_with("false") {
+                    autobins = false;
+                }
+                if line.starts_with("autolib") && line.ends_with("false") {
+                    autolib = false;
+                }
                 continue;
             }
             if !matches!(section.as_str(), "lib" | "bin") {
@@ -28920,14 +28966,15 @@ mod tests {
         }
         let mut roots = Vec::new();
         // An explicit `[lib] path` is the sole library target; the conventional root then
-        // plays no part in the build.
-        if !explicit_lib && src.join("lib.rs").is_file() {
+        // plays no part in the build. `autolib = false` and `autobins = false` turn the
+        // conventional discovery off entirely.
+        if autolib && !explicit_lib && src.join("lib.rs").is_file() {
             roots.push(src.join("lib.rs"));
         }
-        if src.join("main.rs").is_file() {
+        if autobins && src.join("main.rs").is_file() {
             roots.push(src.join("main.rs"));
         }
-        if let Ok(entries) = std::fs::read_dir(src.join("bin")) {
+        if autobins && let Ok(entries) = std::fs::read_dir(src.join("bin")) {
             for entry in entries {
                 let path = entry.expect("directory entry").path();
                 if path.extension().is_some_and(|ext| ext == "rs") {
@@ -29415,21 +29462,17 @@ mod tests {
             "replace_all",
             "shortest_match",
         ];
-        /// Constructors whose string argument is a pattern the code later matches input against.
-        const PATTERN_CONSTRUCTORS: [&str; 6] = [
-            "Regex :: new",
-            "RegexSet :: new",
-            "RegexBuilder :: new",
-            "regex :: Regex :: new",
-            "regex :: RegexSet :: new",
-            "regex :: RegexBuilder :: new",
-        ];
+        /// Types whose `new` takes a pattern the code later matches input against; a `use ... as`
+        /// rename of one of them is collected across the tree.
+        const PATTERN_TYPES: [&str; 3] = ["Regex", "RegexSet", "RegexBuilder"];
 
         struct ProductionLiterals {
             literals: Vec<String>,
             compared: Vec<String>,
             /// `Deserialize` and every name a `use ... as` rename gives it in the file.
             deserialize_names: Vec<String>,
+            /// The regex types and every name a `use ... as` rename gives them.
+            pattern_types: Vec<String>,
             /// Every production `const` and `static` string value in the crate, by name.
             consts: std::collections::HashMap<String, Vec<String>>,
         }
@@ -29442,6 +29485,45 @@ mod tests {
             fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
                 if rename.ident == "Deserialize" {
                     self.0.push(rename.rename.to_string());
+                }
+            }
+        }
+
+        struct PatternTypeAliases(Vec<String>);
+
+        impl<'ast> Visit<'ast> for PatternTypeAliases {
+            fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+                if PATTERN_TYPES.iter().any(|name| rename.ident == name) {
+                    self.0.push(rename.rename.to_string());
+                }
+            }
+        }
+
+        impl ProductionLiterals {
+            /// Literals in a pattern, plus the values of constants the pattern names.
+            fn compare_pattern(&mut self, pat: &syn::Pat) {
+                self.compared
+                    .extend(string_literals_in(|c| c.visit_pat(pat)));
+                // A pattern may name a constant (`MURAL => ...`), which matches its value.
+                struct PatternPaths(Vec<String>);
+                impl<'ast> Visit<'ast> for PatternPaths {
+                    fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
+                        self.0.push(pat.ident.to_string());
+                        syn::visit::visit_pat_ident(self, pat);
+                    }
+                    fn visit_path(&mut self, path: &'ast syn::Path) {
+                        if let Some(segment) = path.segments.last() {
+                            self.0.push(segment.ident.to_string());
+                        }
+                        syn::visit::visit_path(self, path);
+                    }
+                }
+                let mut paths = PatternPaths(Vec::new());
+                paths.visit_pat(pat);
+                for name in paths.0 {
+                    if let Some(held) = self.consts.get(&name) {
+                        self.compared.extend(held.iter().cloned());
+                    }
                 }
             }
         }
@@ -29520,8 +29602,21 @@ mod tests {
             /// anchors, escapes, and one-character classes are removed so the text it accepts
             /// is what gets classified.
             fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-                let callee = call.func.to_token_stream().to_string();
-                if PATTERN_CONSTRUCTORS.contains(&callee.as_str()) {
+                let is_pattern_constructor = match &*call.func {
+                    syn::Expr::Path(path) => {
+                        let segments: Vec<String> = path
+                            .path
+                            .segments
+                            .iter()
+                            .map(|s| s.ident.to_string())
+                            .collect();
+                        segments.len() >= 2
+                            && segments[segments.len() - 1] == "new"
+                            && self.pattern_types.contains(&segments[segments.len() - 2])
+                    }
+                    _ => false,
+                };
+                if is_pattern_constructor {
                     for arg in &call.args {
                         reject_unevaluable_macros(arg);
                         for pattern in compared_strings(arg, &self.consts) {
@@ -29532,33 +29627,22 @@ mod tests {
                 syn::visit::visit_expr_call(self, call);
             }
 
-            fn visit_arm(&mut self, arm: &'ast syn::Arm) {
-                self.compared
-                    .extend(string_literals_in(|c| c.visit_pat(&arm.pat)));
-                // A pattern may name a constant (`MURAL => ...`), which matches its value.
-                struct PatternPaths(Vec<String>);
-                impl<'ast> Visit<'ast> for PatternPaths {
-                    fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
-                        self.0.push(pat.ident.to_string());
-                        syn::visit::visit_pat_ident(self, pat);
-                    }
-                    fn visit_path(&mut self, path: &'ast syn::Path) {
-                        if let Some(segment) = path.segments.last() {
-                            self.0.push(segment.ident.to_string());
-                        }
-                        syn::visit::visit_path(self, path);
-                    }
-                }
-                let mut paths = PatternPaths(Vec::new());
-                paths.visit_pat(&arm.pat);
-                for name in paths.0 {
-                    if let Some(held) = self.consts.get(&name) {
-                        self.compared.extend(held.iter().cloned());
-                    }
-                }
-                syn::visit::visit_arm(self, arm);
+            /// `if let "mural" = op` and `let Some("mural") = op else { .. }` test a value the
+            /// same way an arm pattern does.
+            fn visit_expr_let(&mut self, expr: &'ast syn::ExprLet) {
+                self.compare_pattern(&expr.pat);
+                syn::visit::visit_expr_let(self, expr);
             }
 
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                self.compare_pattern(&local.pat);
+                syn::visit::visit_local(self, local);
+            }
+
+            fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+                self.compare_pattern(&arm.pat);
+                syn::visit::visit_arm(self, arm);
+            }
             /// A deserializable enum accepts, for each variant, exactly the wire spelling serde
             /// derives: the identifier as written by default, the `rename_all` rule's output when
             /// the enum declares one, or the variant's own `rename` literal, which the attribute
@@ -29600,7 +29684,7 @@ mod tests {
                 if deserializable && !untagged {
                     let rule = rename_all_rule(&item.attrs);
                     for variant in &item.variants {
-                        if has_serde_rename(&variant.attrs) {
+                        if has_serde_rename(&variant.attrs) || is_skipped(&variant.attrs) {
                             continue;
                         }
                         let ident = variant.ident.to_string();
@@ -29758,8 +29842,11 @@ mod tests {
         // A `pub use serde::Deserialize as Decode` in one module is a derive name in every module
         // that imports it, so aliases are collected across the tree like constants.
         let mut aliases = DeserializeAliases(vec!["Deserialize".to_string()]);
+        let mut pattern_types =
+            PatternTypeAliases(PATTERN_TYPES.iter().map(|s| s.to_string()).collect());
         for (_, file) in &tree.production {
             aliases.visit_file(file);
+            pattern_types.visit_file(file);
         }
         let mut offending = Vec::new();
         for (path, file) in tree.production {
@@ -29767,6 +29854,7 @@ mod tests {
                 literals: Vec::new(),
                 compared: Vec::new(),
                 deserialize_names: aliases.0.clone(),
+                pattern_types: pattern_types.0.clone(),
                 consts: consts.0.clone(),
             };
             scan.visit_file(&file);

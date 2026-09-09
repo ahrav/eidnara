@@ -17,6 +17,7 @@ import {
     parseSource,
     RETAINED_DATABASE_USES,
     reachableModules,
+    TEST_FILE,
     withoutComments,
 } from "./module-graph";
 
@@ -36,8 +37,8 @@ function sourceFiles(dir: string, acc: string[] = [], skipGenerated = true): str
 }
 
 const ALL = sourceFiles(SRC);
-const TESTS = ALL.filter((file) => /\.test\.tsx?$/.test(file));
-const MODULES = ALL.filter((file) => !/\.test\.tsx?$/.test(file));
+const TESTS = ALL.filter((file) => TEST_FILE.test(file));
+const MODULES = ALL.filter((file) => !TEST_FILE.test(file));
 /** The plugin entry is a bundle root: it reaches the runtime graph no test imports directly. */
 const ENTRY = join(SRC, "index.ts");
 /** The `./tui` export's source; `entry.mjs` loads its compiled copy, so the graph starts here. */
@@ -122,7 +123,7 @@ function productionReached(): string[] {
         const inputs = firstPartyInputs(graph);
         for (const input of [...inputs.code, ...inputs.data]) reached.add(resolve(SRC, input));
     }
-    const testNamed = [...reached].filter((file) => /\.test\.tsx?$/.test(file));
+    const testNamed = [...reached].filter((file) => TEST_FILE.test(file));
     expect(testNamed).toEqual([]);
     return [...reached].sort();
 }
@@ -453,6 +454,9 @@ describe("databaseUses", () => {
                     'const notALoad = unrelated("bun:sqlite");',
                     "const builtin = process.getBuiltinModule;",
                     'const viaBuiltinAlias = builtin("node:sqlite");',
+                    "let late;",
+                    "late = createRequire(import.meta.url);",
+                    'const lateLoad = late("node:sqlite");',
                     "",
                 ].join("\n"),
             ).escapes,
@@ -466,6 +470,7 @@ describe("databaseUses", () => {
             'const bunSql = viaComputed("bun:sqlite");',
             'const ran = run("bun:sqlite");',
             'const viaBuiltinAlias = builtin("node:sqlite");',
+            'const lateLoad = late("node:sqlite");',
         ]);
     });
 
@@ -646,6 +651,11 @@ describe("operationLiteralHits", () => {
                 (entry) => entry.value,
             ),
         ).toEqual(["CONTEXT.DB", "context.db"]);
+        expect(
+            literalStrings(
+                parseSource("const alt = /^(?:claim[.]intent[.]stage|kernel[.]read)$/;", "m.ts"),
+            ).map((entry) => entry.value),
+        ).toEqual(["(?:claim.intent.stage|kernel.read)", "claim.intent.stage", "kernel.read"]);
         expect(
             literalStrings(
                 parseSource(

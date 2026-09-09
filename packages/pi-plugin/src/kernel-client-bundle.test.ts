@@ -13,6 +13,7 @@ import {
     PRODUCT_STORE_FILE,
     RETAINED_DATABASE_USES,
     reachableModules,
+    TEST_FILE,
 } from "@eidnara/opencode/testing/module-graph";
 
 /** The shared client Pi imports through the `@eidnara/opencode/*` alias. */
@@ -119,7 +120,7 @@ describe("Pi kernel-client bundle reachability", () => {
             }
         }
         expect(sources.size).toBeGreaterThan(0);
-        expect([...sources].filter((file) => /\.test\.tsx?$/.test(file))).toEqual([]);
+        expect([...sources].filter((file) => TEST_FILE.test(file))).toEqual([]);
         expect(operationLiteralHits([...sources])).toEqual([]);
         expect(operationLiteralHits([...sources], PRODUCT_STORE_FILE)).toEqual([]);
         // Every reached source is read directly, so a computed binding load or a constructor

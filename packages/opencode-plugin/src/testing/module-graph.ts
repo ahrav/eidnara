@@ -21,6 +21,9 @@ export const DATABASE_BINDING =
 /** Every executable extension the bundler accepts; the scans must read all of them. */
 export const CODE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 
+/** A test file under any executable extension; the state-ownership scans exclude these by name. */
+export const TEST_FILE = /\.test\.(?:[cm]?[jt]s|[jt]sx)$/;
+
 /**
  * First-party bundle inputs: code goes to every scan, and JSON goes to the literal scans since
  * a bundled JSON value can carry a store path or an operation name the importing code never
@@ -322,6 +325,14 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
         if (ts.isRegularExpressionLiteral(node)) {
             const body = regexBody(node.text);
             folded.push({ line: lineOf(node), value: body });
+            // `(?:a|b)` around the whole body, or a bare `a|b`, accepts each alternative.
+            const group = /^\((?:\?:)?([^()]*\|[^()]*)\)$/.exec(body);
+            const alternation = group?.[1] ?? (/^[^()]*\|[^()]*$/.test(body) ? body : undefined);
+            if (alternation !== undefined) {
+                for (const alternative of alternation.split("|")) {
+                    folded.push({ line: lineOf(node), value: alternative });
+                }
+            }
             // An `i` flag accepts every casing, including the case-sensitive store file names.
             const lower = body.toLowerCase();
             if (lower !== body && /\/[a-z]*i[a-z]*$/.test(node.text)) {
@@ -483,18 +494,28 @@ export function databaseUses(
     const isLoaderMember = (text: string) =>
         text === "module.require" || /(^|\.)getBuiltinModule$/.test(text);
     const loaders = new Set<string>(["require"]);
+    // `load = createRequire(...)` makes a loader whether it initializes a declaration or is
+    // assigned later; `run = load` aliases one; `load = process.getBuiltinModule` aliases a member.
+    const bindLoader = (name: ts.Identifier, value: ts.Expression): void => {
+        if (ts.isCallExpression(value)) {
+            const factory = value.expression.getText(file).split(".").pop() ?? "";
+            if (factories.has(factory)) loaders.add(name.text);
+        } else if (ts.isIdentifier(value) && loaders.has(value.text)) {
+            loaders.add(name.text);
+        } else if (isLoaderMember(value.getText(file))) {
+            loaders.add(name.text);
+        }
+    };
     const collectLoaders = (node: ts.Node): void => {
         if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-            // `const load = createRequire(...)` makes a loader; `const run = load;` aliases one.
-            if (ts.isCallExpression(node.initializer)) {
-                const factory = node.initializer.expression.getText(file).split(".").pop() ?? "";
-                if (factories.has(factory)) loaders.add(node.name.text);
-            } else if (ts.isIdentifier(node.initializer) && loaders.has(node.initializer.text)) {
-                loaders.add(node.name.text);
-            } else if (isLoaderMember(node.initializer.getText(file))) {
-                // `const load = process.getBuiltinModule;` aliases a loader member.
-                loaders.add(node.name.text);
-            }
+            bindLoader(node.name, node.initializer);
+        }
+        if (
+            ts.isBinaryExpression(node) &&
+            node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isIdentifier(node.left)
+        ) {
+            bindLoader(node.left, node.right);
         }
         ts.forEachChild(node, collectLoaders);
     };
