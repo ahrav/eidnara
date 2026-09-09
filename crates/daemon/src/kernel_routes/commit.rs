@@ -915,6 +915,7 @@ mod tests {
             (DispositionEvent::Quarantine, EventKind::Quarantine),
         ] {
             assert_eq!(event.kind(), kind);
+            assert!(kind.requested_disposition().is_some(), "{kind:?}");
             // The wire spelling is the kernel's own event name.
             assert_eq!(
                 serde_json::to_value(event).unwrap(),
