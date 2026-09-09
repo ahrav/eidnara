@@ -712,11 +712,24 @@ export class KernelClient {
         return retried;
     }
 
+    private async previewOnce(args: PreviewArgs, deadline: Deadline): Promise<PreviewResult> {
+        const { result } = await this.call(
+            "kernel.commit",
+            () => this.commitBody(args, [], deadline, true),
+            // A preview writes nothing, so an ambiguous transport outcome reissues once, as a read does. commentlint: allow(JUDGE)
+            { signal: args.signal, deadline, reissuable: true },
+            parsePreviewResponse,
+        );
+        return result;
+    }
+
     /**
      * Judges disposition operations at the tip without writing: the reply
      * carries each surface's verdict before and after, and whether any surface
      * serving the object would change. No receipt is created, so the same
      * identity is still free for `commit`.
+     *
+     * Previews carry no tokens or `as_of`, so after a connection identity refusal the same body is sent once more against the new connection, as a diverged read re-reads the tip. commentlint: allow(JUDGE)
      */
     async previewDispositions(input: PreviewArgs): Promise<PreviewResult> {
         const args: PreviewArgs = {
@@ -732,14 +745,9 @@ export class KernelClient {
         }
         const deadline = this.deadline(args);
         if (!(deadline instanceof Deadline)) return { state: deadline };
-        const { result } = await this.call(
-            "kernel.commit",
-            () => this.commitBody(args, [], deadline, true),
-            // A preview writes nothing, so an ambiguous transport outcome reissues once, as a read does. commentlint: allow(JUDGE)
-            { signal: args.signal, deadline, reissuable: true },
-            parsePreviewResponse,
-        );
-        return result;
+        const first = await this.previewOnce(args, deadline);
+        if (!isSnapshotDiverged(first.state)) return first;
+        return await this.previewOnce(args, deadline);
     }
 
     create(spec: DecisionSpecInput, args: MutationArgs): Promise<CommitResult> {
