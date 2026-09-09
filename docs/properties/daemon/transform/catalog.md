@@ -656,7 +656,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
-(`transform.rs:13278`) drives a stale, an abstained, and an unavailable verdict
+(`transform.rs:13282`) drives a stale, an abstained, and an unavailable verdict
 through the compaction-off engine and compares each frozen composition with the
 empty canonical composition; `withheld_reads_record_the_verdict_and_inject_nothing`
 (`canonical_memory.rs`) pins the record-level distinction; the integration tests
@@ -664,29 +664,53 @@ in `tests/transform_canonical_memory.rs` pin `known_as_of` and `truncated` over 
 real kernel store, reach the withheld arm through the reader with a lagging
 registered consumer (`a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it`),
 and show a memory-disabled pass records no composition at all
-(`a_memory_disabled_pass_takes_no_canonical_read`). All run in CI under
-`cargo test --workspace`.
+(`a_memory_disabled_pass_takes_no_canonical_read`). On the historian side,
+`a_withheld_memory_read_renders_no_block_and_records_its_verdict`
+(`historian_chunk.rs:1369`) assembles a withheld, an empty, a served, and a
+gated-off read, compares the firing's `project_memory` record for the
+withheld, empty, and gated-off reads, and checks the served prompt carries
+its row;
+`historian_prompt_composes_project_memory_from_canonical_rows` (`lib.rs:28216`)
+fires the historian over a real kernel store and checks the captured prompt
+carries the verified row and none of the quarantined, retired, superseded, or
+other-project rows; and
+`a_withheld_historian_memory_read_is_recorded_and_differs_from_an_empty_block`
+(`lib.rs:28340`) fires once with the kernel store still opening and once with
+an open, empty store and shows both prompts lack the block while the two
+`historian.project_memory` records differ; and
+`historian_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
+(`lib.rs:28372`) shows the field is absent from the wire, not `null`, both for
+a pass that did not fire and for a firing under a memory-disabled binding. All
+run in CI under `cargo test --workspace`.
 Guarantee: A HARD pass whose canonical memory read was not served (stale,
 abstained, or unavailable) composes no `<project-memory>` block and records
 `ProjectMemoryComposition::Withheld { state }` in `ModuleMeta.project_memory`
-and in the response; that record is never equal to the `Canonical { .. }`
-record a served read with zero injectable rows produces, and a pass that took
-no read because memory is disabled records `None`, not a `Canonical` record.
+and in the response, and a historian firing whose read was not served renders
+no block and records the same `Withheld { state }` in
+`HistorianDiagnostics.project_memory`; that record is never equal to the
+`Canonical { .. }` record a served read with zero injectable rows produces, and
+a pass that took no read because memory is disabled records `None`, not a
+`Canonical` record.
 Check: `always` - for every pass that freezes m0 with
 `ctx.project_memory == Some(CanonicalMemoryRead::Withheld(_))`, the committed
 `meta.project_memory` is `Some(Withheld { state })` with `state` equal to the
 verdict's `KernelOutcome::state_key()`, and the frozen m0 bytes contain no
 `<project-memory>` element; with `ctx.project_memory == None` the committed
 record is `None`. `always` because the record is written on every HARD
-(`transform.rs:2618`, `:4262`, `:4433`) through one accessor
+(`transform.rs:2622`, `:4266`, `:4437`) through one accessor
 (`ProducerContext::project_memory_composition`, `:561`) from the same pinned
 read every memory surface of the pass composed from, so there is no optional
-path.
-Fault/timing angle: The read is taken once per pass in `lib.rs:8020`, through
-`Handler::project_memory_read` (`lib.rs:4828`), before the `run_transform`
+path. For the historian, the assembler computes the block and the record from
+one gated read (`historian_chunk.rs:681-734`): the record is `None` exactly
+when the block is gated off, and otherwise the read's `composition()`, so the
+fired diagnostics (`lib.rs:5148`) cannot report a served block the prompt does
+not carry.
+Fault/timing angle: The read is taken once per pass in `lib.rs:7994`, through
+`Handler::project_memory_read` (`lib.rs:4834`), before the `run_transform`
 closure, and the same value is handed to a historian firing the pass triggers
-(`lib.rs:5119`), so a store phase change or lag change after that point cannot
-split one pass between a served block and a withheld record. The
+(`lib.rs:5104`), so a store phase change or lag change after that point cannot
+split one pass between a served block and a withheld record, or between the
+transform's record and the historian's. The
 verdict-to-record mapping is total over `KernelOutcome`
 (`canonical_memory.rs:101-112`, `state.rs` `state_key`).
 Required faults and enabling state: A `KernelOpenCoordinator` phase other than
@@ -702,8 +726,9 @@ through (`rows()` empty and `composition()` withheld are produced by one
 `match` each; the context accessors map `None` to empty rows, `None` revision,
 and `None` composition), and the durable enum whose two variants have different
 serde tags.
-Existing check: `transform.rs:13278`, `canonical_memory.rs` tests, and
-`tests/transform_canonical_memory.rs` as described.
+Existing check: `transform.rs:13282`, `canonical_memory.rs` tests,
+`tests/transform_canonical_memory.rs`, `historian_chunk.rs:1369`, and
+`lib.rs:28216`, `lib.rs:28340`, `lib.rs:28372` as described.
 Impact: If a withheld read were recorded as `Canonical` with zero rows, an
 operator reading a session with no memory block could not tell "this project
 has no injectable memory" from "the store was starting when m0 froze", which is
