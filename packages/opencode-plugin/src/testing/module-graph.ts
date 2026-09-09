@@ -137,9 +137,12 @@ export function databaseUses(
     const lineOf = (node: ts.Node) =>
         lines[file.getLineAndCharacterOfPosition(node.getStart(file)).line];
     const uses: DatabaseUses = { opens: [], escapes: [] };
+    const escapedLines = new Set<number>();
     const recordEscape = (node: ts.Node) => {
-        const line = lineOf(node);
-        if (!uses.escapes.includes(line)) uses.escapes.push(line);
+        const index = file.getLineAndCharacterOfPosition(node.getStart(file)).line;
+        if (escapedLines.has(index)) return;
+        escapedLines.add(index);
+        uses.escapes.push(lines[index]);
     };
     const isBindingSpecifier = (node: ts.Expression | undefined) =>
         node !== undefined && ts.isStringLiteralLike(node) && DATABASE_BINDING.test(node.text);

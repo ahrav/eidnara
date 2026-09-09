@@ -83,7 +83,11 @@ const PRODUCT_STORE_FILE =
 
 type ReportedGraph = Omit<ModuleGraph, "text">;
 
+let cachedReport: Record<string, ReportedGraph> | undefined;
+
+/** Two tests read the report; each root is bundled once per test file run. */
 function moduleGraphReport(): Record<string, ReportedGraph> {
+    if (cachedReport) return cachedReport;
     const report = Bun.spawnSync({
         cmd: ["bun", join(import.meta.dir, "module-graph-report.ts"), ...ROOTS],
         cwd: SRC,
@@ -93,7 +97,8 @@ function moduleGraphReport(): Record<string, ReportedGraph> {
     if (report.exitCode !== 0) {
         throw new Error(`module graph report failed: ${report.stderr.toString()}`);
     }
-    return JSON.parse(report.stdout.toString());
+    cachedReport = JSON.parse(report.stdout.toString());
+    return cachedReport as Record<string, ReportedGraph>;
 }
 
 describe("module graph over the landed tree", () => {
