@@ -1,7 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { bundleModuleGraph, reachableModules } from "@eidnara/opencode/testing/module-graph";
+import {
+    bundleModuleGraph,
+    databaseBinders,
+    type ModuleGraph,
+    OPERATION_LITERAL,
+    operationLiteralHits,
+    reachableModules,
+} from "@eidnara/opencode/testing/module-graph";
 
 /** The shared client Pi imports through the `@eidnara/opencode/*` alias. */
 const CLIENT_ENTRY = resolve(
@@ -10,6 +17,8 @@ const CLIENT_ENTRY = resolve(
 );
 const PI_ENTRY = resolve(import.meta.dir, "kernel-client-pi.ts");
 const CLAIM_STORAGE_PATTERN = /storage-claim/;
+/** Reads the harness's own `opencode.db` read-only; the shared plugin names its single writer. */
+const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"];
 /** A binding left external (`node:sqlite`, `bun:sqlite`, `better-sqlite3`) or a source module under a `sqlite` path segment. */
 const SQLITE_PATTERN =
     /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|\/sqlite(?:\.|-|\/)/;
@@ -25,7 +34,7 @@ const MODULE_GRAPH_REPORT = resolve(
 const BUILD_ENTRIES = ["index.ts", "subagent-entry.ts"].map((entry) => join(SRC, entry));
 
 /** The test runner shares its module registry with the in-process bundler, so build entry graphs run in a child process. */
-function buildEntryGraphs(): Record<string, { inputs: string[]; externals: string[] }> {
+function buildEntryGraphs(): Record<string, Omit<ModuleGraph, "text">> {
     const report = Bun.spawnSync({
         cmd: ["bun", MODULE_GRAPH_REPORT, ...BUILD_ENTRIES],
         cwd: PACKAGE_ROOT,
@@ -74,19 +83,35 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
 }
 
 describe("Pi kernel-client bundle reachability", () => {
-    it("reaches no SQLite binding or claim storage from the kernel-client entry", async () => {
+    it("reaches no SQLite binding, claim storage, or claim.*/dreamer.* literal from the kernel-client entry", async () => {
         const graph = await bundleModuleGraph(CLIENT_ENTRY);
         expect(graph.inputs.length).toBeGreaterThan(0);
         expect(reachableModules(graph, SQLITE_PATTERN)).toEqual([]);
         expect(reachableModules(graph, CLAIM_STORAGE_PATTERN)).toEqual([]);
+        expect(graph.text).not.toMatch(OPERATION_LITERAL);
     });
 
-    it("reaches no claim storage from Pi's resolver and leaves the native host module external", async () => {
+    it("reaches no claim storage or claim.*/dreamer.* literal from Pi's resolver and leaves the native host module external", async () => {
         const graph = await bundleModuleGraph(PI_ENTRY);
         expect(graph.inputs.length).toBeGreaterThan(0);
         expect(reachableModules(graph, CLAIM_STORAGE_PATTERN)).toEqual([]);
         expect(graph.text).toMatch(/from\s+["']@eidnara\/shm-native["']/);
+        expect(graph.text).not.toMatch(OPERATION_LITERAL);
     });
+
+    it("the shipped entry points reach only the read-only harness-database reader and carry no claim.*/dreamer.* literal", () => {
+        const sources = new Set<string>();
+        for (const graph of Object.values(buildEntryGraphs())) {
+            for (const binder of databaseBinders(graph)) {
+                expect(HARNESS_DATABASE_READERS).toContain(binder.replace(/^.*\/src\//, ""));
+            }
+            for (const input of graph.inputs) {
+                if (!input.includes("/node_modules/")) sources.add(resolve(PACKAGE_ROOT, input));
+            }
+        }
+        expect(sources.size).toBeGreaterThan(0);
+        expect(operationLiteralHits([...sources])).toEqual([]);
+    }, 120_000);
 
     it("the shipped entry points bundle under the build script's externals", () => {
         const graphs = buildEntryGraphs();
