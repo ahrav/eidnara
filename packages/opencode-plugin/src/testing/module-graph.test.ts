@@ -169,6 +169,8 @@ describe("module graph over the landed tree", () => {
         expect(OPERATION_LITERAL.test("`dreamer.run_task`")).toBe(true);
         expect(OPERATION_LITERAL.test('"claim.intent-stage"')).toBe(true);
         expect(OPERATION_LITERAL.test("`dreamer.${task}`")).toBe(true);
+        expect(OPERATION_LITERAL.test('"CLAIM.INTENT.STAGE"')).toBe(true);
+        expect(OPERATION_LITERAL.test("'Dreamer.Run_Task'")).toBe(true);
         expect(OPERATION_LITERAL.test('"dreamer_inference"')).toBe(false);
         expect(OPERATION_LITERAL.test("claim.claim_id")).toBe(false);
         expect(operationLiteralHits(scannedSources())).toEqual([]);
@@ -413,6 +415,8 @@ describe("databaseUses", () => {
                     'import { createRequire as makeRequire } from "node:module";',
                     "const aliased = makeRequire(import.meta.url);",
                     'const bun = aliased("bun:sqlite");',
+                    'const { DatabaseSync: Builtin } = process.getBuiltinModule("node:sqlite");',
+                    'const path = process.getBuiltinModule("node:path");',
                     "",
                 ].join("\n"),
             ).escapes,
@@ -420,6 +424,7 @@ describe("databaseUses", () => {
             'const { DatabaseSync: Sqlite } = load("node:sqlite");',
             'const viaModule = module.require("better-sqlite3");',
             'const bun = aliased("bun:sqlite");',
+            'const { DatabaseSync: Builtin } = process.getBuiltinModule("node:sqlite");',
         ]);
     });
 
@@ -563,6 +568,14 @@ describe("operationLiteralHits", () => {
                 ),
             ).map((entry) => entry.value),
         ).toEqual(["context.db", "context", ".db", "claim.intent.stage"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    "const r = /^claim\\x2eintent\\u002estage$/; const s = /store\\.db/i;",
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim.intent.stage", "store.db"]);
     });
 
     // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;

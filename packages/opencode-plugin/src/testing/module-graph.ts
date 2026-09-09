@@ -44,8 +44,8 @@ export function firstPartyInputs(graph: Pick<ModuleGraph, "inputs">): {
     return { code, data };
 }
 
-/** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches. */
-export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/;
+/** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches; case is ignored so a handler cannot compare a normalized operation against `"CLAIM.INTENT.STAGE"`. */
+export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/i;
 
 /** File names of the Rust-owned product stores, as a path a module could open, with any non-word suffix such as `-wal` or `?mode=ro`; the scan blanks comments before matching. */
 export const PRODUCT_STORE_FILE =
@@ -258,7 +258,14 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
     // the literal-shaped body is what a `/^claim\.intent\.stage$/.test(op)` dispatch compares.
     const regexBody = (text: string): string => {
         const body = text.slice(1, text.lastIndexOf("/"));
-        return body.replace(/^\^/, "").replace(/\$$/, "").replace(/\\(.)/g, "$1");
+        return body
+            .replace(/^\^/, "")
+            .replace(/\$$/, "")
+            .replace(
+                /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g,
+                (_, x, u, b) => String.fromCodePoint(Number.parseInt(x ?? u ?? b, 16)),
+            )
+            .replace(/\\(.)/g, "$1");
     };
     const lineOf = (node: ts.Node) =>
         file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
@@ -456,9 +463,11 @@ export function databaseUses(
         if (ts.isCallExpression(node)) {
             const callee = node.expression;
             const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
+            const calleeText = callee.getText(file);
             const isRequire =
                 (ts.isIdentifier(callee) && loaders.has(callee.text)) ||
-                callee.getText(file) === "module.require";
+                calleeText === "module.require" ||
+                /(^|\.)getBuiltinModule$/.test(calleeText);
             // Non-string-literal specifiers cannot be checked against the binding pattern, so they escape.
             const specifier = node.arguments[0];
             const unresolved = specifier !== undefined && !ts.isStringLiteralLike(specifier);

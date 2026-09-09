@@ -28787,8 +28787,20 @@ mod tests {
             let mut rule = None;
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename_all") {
-                    let value: syn::LitStr = meta.value()?.parse()?;
-                    rule = Some(value.value());
+                    if meta.input.peek(syn::token::Paren) {
+                        // `rename_all(serialize = "...", deserialize = "...")`: only the
+                        // deserialize side names what the wire accepts.
+                        meta.parse_nested_meta(|side| {
+                            let value: syn::LitStr = side.value()?.parse()?;
+                            if side.path.is_ident("deserialize") {
+                                rule = Some(value.value());
+                            }
+                            Ok(())
+                        })?;
+                    } else {
+                        let value: syn::LitStr = meta.value()?.parse()?;
+                        rule = Some(value.value());
+                    }
                 } else if meta.input.peek(syn::Token![=]) {
                     let _: syn::Expr = meta.value()?.parse()?;
                 } else if meta.input.peek(syn::token::Paren) {
@@ -28821,6 +28833,23 @@ mod tests {
             });
             renamed
         })
+    }
+
+    fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+        match item {
+            syn::Item::Const(i) => &i.attrs,
+            syn::Item::Enum(i) => &i.attrs,
+            syn::Item::Fn(i) => &i.attrs,
+            syn::Item::Impl(i) => &i.attrs,
+            syn::Item::Macro(i) => &i.attrs,
+            syn::Item::Mod(i) => &i.attrs,
+            syn::Item::Static(i) => &i.attrs,
+            syn::Item::Struct(i) => &i.attrs,
+            syn::Item::Trait(i) => &i.attrs,
+            syn::Item::Type(i) => &i.attrs,
+            syn::Item::Use(i) => &i.attrs,
+            _ => &[],
+        }
     }
 
     fn is_test_only(attrs: &[syn::Attribute]) -> bool {
@@ -29019,6 +29048,62 @@ mod tests {
         }
     }
 
+    /// The string values of a file's `const` and `static` items, so a comparison against a
+    /// named constant is classified by the text the constant holds. Cross-file constants stay
+    /// outside this file's view.
+    struct StringConsts(std::collections::HashMap<String, Vec<String>>);
+
+    impl<'ast> syn::visit::Visit<'ast> for StringConsts {
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            if !is_test_only(item_attrs(item)) {
+                syn::visit::visit_item(self, item);
+            }
+        }
+
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            let values = string_literals_in(|c| c.visit_expr(&item.expr));
+            if !values.is_empty() {
+                self.0.insert(item.ident.to_string(), values);
+            }
+            syn::visit::visit_item_const(self, item);
+        }
+
+        fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+            let values = string_literals_in(|c| c.visit_expr(&item.expr));
+            if !values.is_empty() {
+                self.0.insert(item.ident.to_string(), values);
+            }
+            syn::visit::visit_item_static(self, item);
+        }
+    }
+
+    /// Literals in an expression plus the values of any same-file string constants it names.
+    fn compared_strings(
+        expr: &syn::Expr,
+        consts: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        use syn::visit::Visit;
+
+        struct Paths(Vec<String>);
+        impl<'ast> syn::visit::Visit<'ast> for Paths {
+            fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+                if let Some(segment) = path.path.segments.last() {
+                    self.0.push(segment.ident.to_string());
+                }
+                syn::visit::visit_expr_path(self, path);
+            }
+        }
+        let mut values = string_literals_in(|c| c.visit_expr(expr));
+        let mut paths = Paths(Vec::new());
+        syn::visit::Visit::visit_expr(&mut paths, expr);
+        for name in paths.0 {
+            if let Some(held) = consts.get(&name) {
+                values.extend(held.iter().cloned());
+            }
+        }
+        values
+    }
+
     /// The dispatcher audit fixes where routes are registered; this fixes what any handler or
     /// helper could compare a request against. Every operation-shaped literal is classified; a
     /// bare word is classified only where it is compared, matched, or searched for, and only by
@@ -29039,6 +29124,9 @@ mod tests {
             "embeddings",
             "git",
         ];
+        /// The daemon composes a request-supplied mural into the M0 block and keys that frozen
+        /// unit `m0-mural`; comparing a unit key against it is not a route decision.
+        const KNOWN_NON_ROUTES: [&str; 1] = ["m0-mural"];
         /// Methods that test or split a string against a pattern; a literal argument to one of
         /// them is a spelling the code routes on.
         const COMPARISON_METHODS: [&str; 22] = [
@@ -29071,6 +29159,8 @@ mod tests {
             compared: Vec<String>,
             /// `Deserialize` and every name a `use ... as` rename gives it in the file.
             deserialize_names: Vec<String>,
+            /// Same-file `const` and `static` string values by name.
+            consts: std::collections::HashMap<String, Vec<String>>,
         }
 
         /// Renames of `Deserialize` anywhere in a file, so `use serde::Deserialize as Decode;`
@@ -29087,21 +29177,7 @@ mod tests {
 
         impl<'ast> Visit<'ast> for ProductionLiterals {
             fn visit_item(&mut self, item: &'ast syn::Item) {
-                let attrs = match item {
-                    syn::Item::Const(i) => &i.attrs,
-                    syn::Item::Enum(i) => &i.attrs,
-                    syn::Item::Fn(i) => &i.attrs,
-                    syn::Item::Impl(i) => &i.attrs,
-                    syn::Item::Macro(i) => &i.attrs,
-                    syn::Item::Mod(i) => &i.attrs,
-                    syn::Item::Static(i) => &i.attrs,
-                    syn::Item::Struct(i) => &i.attrs,
-                    syn::Item::Trait(i) => &i.attrs,
-                    syn::Item::Type(i) => &i.attrs,
-                    syn::Item::Use(i) => &i.attrs,
-                    _ => &Vec::new(),
-                };
-                if !is_test_only(attrs) {
+                if !is_test_only(item_attrs(item)) {
                     syn::visit::visit_item(self, item);
                 }
             }
@@ -29142,8 +29218,7 @@ mod tests {
                 if matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
                     for side in [&binary.left, &binary.right] {
                         reject_unevaluable_macros(side);
-                        self.compared
-                            .extend(string_literals_in(|c| c.visit_expr(side)));
+                        self.compared.extend(compared_strings(side, &self.consts));
                     }
                 }
                 syn::visit::visit_expr_binary(self, binary);
@@ -29152,10 +29227,9 @@ mod tests {
             fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
                 if COMPARISON_METHODS.contains(&call.method.to_string().as_str()) {
                     self.compared
-                        .extend(string_literals_in(|c| c.visit_expr(&call.receiver)));
+                        .extend(compared_strings(&call.receiver, &self.consts));
                     for arg in &call.args {
-                        self.compared
-                            .extend(string_literals_in(|c| c.visit_expr(arg)));
+                        self.compared.extend(compared_strings(arg, &self.consts));
                     }
                 }
                 syn::visit::visit_expr_method_call(self, call);
@@ -29328,10 +29402,13 @@ mod tests {
         for (path, file) in tree.production {
             let mut aliases = DeserializeAliases(vec!["Deserialize".to_string()]);
             aliases.visit_file(&file);
+            let mut consts = StringConsts(std::collections::HashMap::new());
+            consts.visit_file(&file);
             let mut scan = ProductionLiterals {
                 literals: Vec::new(),
                 compared: Vec::new(),
                 deserialize_names: aliases.0,
+                consts: consts.0,
             };
             scan.visit_file(&file);
             let relative = path
@@ -29346,6 +29423,7 @@ mod tests {
             }
             for literal in scan.compared {
                 if !literal.chars().any(char::is_whitespace)
+                    && !KNOWN_NON_ROUTES.contains(&literal.as_str())
                     && test_support::names_absent_subsystem(&literal, BARE_WORDS)
                 {
                     offending.push(format!("{relative}: compared against {literal:?}"));
