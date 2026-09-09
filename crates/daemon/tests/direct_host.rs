@@ -195,6 +195,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     wait_for_store(&client, route, "restart-transform").await;
     let materialized = request_json(&client, route, request.clone()).await;
     assert_eq!(materialized["action"], "HARD");
+    assert_eq!(materialized["project_memory"]["kind"], "canonical");
     let first_m0 = materialized["messages"]
         .as_array()
         .expect("messages")
@@ -223,7 +224,8 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
         .await;
     wait_for_store(&client, route, "restart-transform").await;
     let replay = request_json(&client, route, request).await;
-    assert_eq!(replay["action"], "SOFT+");
+    assert_eq!(replay["action"], "SOFT+", "{replay}");
+    assert_eq!(replay["project_memory"], materialized["project_memory"]);
     let replay_m0 = replay["messages"]
         .as_array()
         .expect("messages")
