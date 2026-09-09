@@ -1493,6 +1493,10 @@ pub struct HistorianDiagnostics {
     pub progress: Option<HistorianTriggerProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
+    /// Composition of the fired prompt's `<project-memory>` block; absent when the historian does not fire or memory is disabled.
+    /// A withheld read keeps its verdict here, distinct from a served read with no rows.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project_memory: Option<ProjectMemoryComposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

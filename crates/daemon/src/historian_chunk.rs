@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::{Local, TimeZone};
 use memory_store::{
     BlockIdentity, CompartmentSetGeneration, HistorianSelectedMessageIdentity, MemoryStore,
-    StoredCompartment,
+    ProjectMemoryComposition, StoredCompartment,
 };
 use serde_json::Value;
 use tokenizer::estimate_tokens;
@@ -458,8 +458,7 @@ pub struct HistorianAssemblerConfig {
     pub memory_enabled: bool,
     /// The canonical memory read of this pass, already trimmed to the memory
     /// budget by the reader; `None` when memory is disabled and no read was
-    /// taken. A withheld read renders no block and is logged, so summarization
-    /// keeps running through a kernel outage.
+    /// taken.
     pub project_memory: Option<CanonicalMemoryRead>,
     pub auto_promote: bool,
     pub user_memory_collection_enabled: bool,
@@ -506,6 +505,8 @@ pub struct AssembledHistorianFiring {
     pub now_ms: i64,
     pub failure_backoff_at_ms: i64,
     pub boundary_dates: BTreeMap<String, String>,
+    /// The `<project-memory>` gate sets `project_memory` to `None`.
+    pub project_memory: Option<ProjectMemoryComposition>,
 }
 
 impl AssembledHistorianFiring {
@@ -677,10 +678,13 @@ pub fn assemble_historian_firing(
         chunk.chunk.start_index as i64,
         &compartments,
     );
-    let memory_block = match &config.project_memory {
-        Some(read) if config.memory_enabled => render_historian_memory_block(read.rows()),
-        _ => String::new(),
-    };
+    let project_memory = config
+        .project_memory
+        .as_ref()
+        .filter(|_| config.memory_enabled);
+    let memory_block = project_memory
+        .map(|read| render_historian_memory_block(read.rows()))
+        .unwrap_or_default();
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &reference_blocks.seed_examples,
         session_references: &reference_blocks.session_references,
@@ -727,6 +731,7 @@ pub fn assemble_historian_firing(
             failure_backoff_at_ms: config.failure_backoff_at_ms,
             boundary_dates,
             chunk,
+            project_memory: project_memory.map(CanonicalMemoryRead::composition),
         },
     )))
 }
@@ -1361,7 +1366,7 @@ mod tests {
     }
 
     #[test]
-    fn a_withheld_memory_read_renders_no_block_and_still_assembles() {
+    fn a_withheld_memory_read_renders_no_block_and_records_its_verdict() {
         let withheld =
             CanonicalMemoryRead::Withheld(crate::kernel_routes::KernelOutcome::Abstained {
                 lag_positions: 10_000,
@@ -1377,16 +1382,42 @@ mod tests {
                     content: "Keep the public contract.".to_string(),
                 }],
             ));
-        let prompt = |read: CanonicalMemoryRead| match tiny_chunk_assemble_with_memory(
-            false,
-            true,
-            Some(read),
-        ) {
-            AssembleHistorianFiringOutcome::Fire(firing) => firing.prompt,
-            AssembleHistorianFiringOutcome::NoFire(reason) => panic!("{reason:?}"),
+        let empty = CanonicalMemoryRead::Available(
+            crate::canonical_memory::CanonicalMemorySnapshot::new(3, false, Vec::new()),
+        );
+        let assemble = |memory_enabled: bool, read: Option<CanonicalMemoryRead>| {
+            match tiny_chunk_assemble_with_memory(false, memory_enabled, read) {
+                AssembleHistorianFiringOutcome::Fire(firing) => *firing,
+                AssembleHistorianFiringOutcome::NoFire(reason) => panic!("{reason:?}"),
+            }
         };
-        assert!(!prompt(withheld).contains("<project-memory>"));
-        assert!(prompt(served).contains("mem_rule: Keep the public contract."));
+        let withheld = assemble(true, Some(withheld));
+        assert!(!withheld.prompt.contains("<project-memory>"));
+        assert_eq!(
+            withheld.project_memory,
+            Some(ProjectMemoryComposition::Withheld {
+                state: "abstained".to_string()
+            })
+        );
+        let empty = assemble(true, Some(empty));
+        assert!(!empty.prompt.contains("<project-memory>"));
+        assert!(matches!(
+            empty.project_memory,
+            Some(ProjectMemoryComposition::Canonical {
+                known_as_of: 3,
+                truncated: false,
+                ..
+            })
+        ));
+        let gated = assemble(false, Some(served.clone()));
+        assert!(!gated.prompt.contains("<project-memory>"));
+        assert_eq!(gated.project_memory, None);
+        let served = assemble(true, Some(served));
+        assert!(
+            served
+                .prompt
+                .contains("mem_rule: Keep the public contract.")
+        );
     }
 
     fn tiny_chunk_assemble_with_memory(
