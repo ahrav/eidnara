@@ -140,7 +140,7 @@ export function databaseUses(
     const lineOf = (node: ts.Node) =>
         lines[file.getLineAndCharacterOfPosition(node.getStart(file)).line];
     const uses: DatabaseUses = { opens: [], escapes: [] };
-    const escape = (node: ts.Node) => {
+    const recordEscape = (node: ts.Node) => {
         const line = lineOf(node);
         if (!uses.escapes.includes(line)) uses.escapes.push(line);
     };
@@ -165,11 +165,11 @@ export function databaseUses(
                 clause.name ||
                 (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings))
             ) {
-                escape(node);
+                recordEscape(node);
             }
             if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
                 for (const element of clause.namedBindings.elements) {
-                    if (element.propertyName) escape(element);
+                    if (element.propertyName) recordEscape(element);
                 }
             }
         }
@@ -178,14 +178,14 @@ export function databaseUses(
             !node.exportClause &&
             isBindingSpecifier(node.moduleSpecifier)
         ) {
-            escape(node);
+            recordEscape(node);
         }
         if (ts.isCallExpression(node)) {
             const callee = node.expression;
             const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
             const isRequire = ts.isIdentifier(callee) && callee.text === "require";
             if ((isImport || isRequire) && isBindingSpecifier(node.arguments[0])) {
-                escape(node);
+                recordEscape(node);
             }
         }
         if (ts.isIdentifier(node) && /Database/.test(node.text)) {
@@ -202,7 +202,7 @@ export function databaseUses(
                 (ts.isPropertySignature(parent) && parent.name === node) ||
                 (ts.isBindingElement(parent) && parent.propertyName === node);
             if (!ts.isImportSpecifier(parent) && !isTypeUse && !isOpen && !isPropertyKey) {
-                escape(node);
+                recordEscape(node);
             }
         }
         ts.forEachChild(node, visit);
