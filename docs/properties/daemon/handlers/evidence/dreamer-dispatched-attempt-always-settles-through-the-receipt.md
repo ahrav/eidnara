@@ -14,17 +14,20 @@ write on the failure path) no longer exists.
 ## Evidence trail
 
 Verified against the merged working tree. References are to
-`crates/daemon/src/lib.rs` unless stated. The default dispatch arm at `:12726`
+`crates/daemon/src/lib.rs` unless stated. The default dispatch arm at `:12728`
 reaches `handle_dreamer_run_task` without a feature or configuration gate.
 
-- `handle_dreamer_run_task` validates the request, passes the memories
-  authority `MODULE` gate, takes the in-process duplicate guard, then judges the
+- `handle_dreamer_run_task` validates the request shape (`ClassifyRequest::parse`)
+  and hands `DreamerRuntime::run_dreamer_task` the parsed task plus the route
+  facts (`DreamerRoute`); that shared protocol passes the memories authority
+  `MODULE` gate, takes the in-process duplicate guard, then judges the
   per-project attempt budget from `count_dreamer_attempts` before any receipt
   is written: an exhausted project with no receipt for the command answers
   `dreamer_budget_exhausted` and writes nothing; a command the ledger already
   holds proceeds to `begin_dreamer_receipt`, so it replays, refuses a changed
   request, or settles under the same rules as below, and only a takeover
-  (which would dispatch) is refused over budget (`:9339-9615`, `:9937-9946`).
+  (which would dispatch) is refused over budget (`:9345-9394`, `:9412-9616`,
+  `:9937-9946`).
 - The request digest includes the await timeout, output-token limit, and
   temperature along with the request, prompt, and schema inputs
   (`:9526-9539`). There is no recovery-timeout digest input or second recovery
@@ -50,7 +53,7 @@ reaches `handle_dreamer_run_task` without a feature or configuration gate.
   read is therefore not missed by the fence move. `Applied` admits the
   successor; `Fenced` answers `dreamer_ledger_fenced`, and a store error answers
   `dreamer_ledger_failed`. An ended attempt: complete the
-  receipt `unknown` through `complete_receipt_as_unknown` (`:13749`), leaving
+  receipt `unknown` through `complete_receipt_as_unknown` (`:13872`), leaving
   the attempt's own terminal in place. An open attempt with a handle: connect
   under the attempt's recorded `project_root` and `harness`, bind the recorded
   child session, and call `status`, all three under one `tokio::time::timeout`
@@ -61,7 +64,7 @@ reaches `handle_dreamer_run_task` without a feature or configuration gate.
   status error answers the same, as does a probe the deadline cuts off
   (`:9961-10025`). An open attempt with
   no handle: settle `unknown`. Settling an open attempt goes through
-  `settle_dispatched_attempt_as_unknown` (`:13729`), which writes the attempt
+  `settle_dispatched_attempt_as_unknown` (`:13852`), which writes the attempt
   terminal best-effort and then completes the receipt through the same helper,
   matching `Applied`, `Fenced`, and `Err` separately.
 - In the chain loop, `connect` runs under the deadline's remaining duration and
@@ -70,7 +73,7 @@ reaches `handle_dreamer_run_task` without a feature or configuration gate.
   `record_dreamer_run_handle` follows a successful `start` (`:9740`). A fenced
   handle write skips purge; a store error still attempts purge. Both try unknown
   settlement, whose receipt write reports `Fenced` if another generation owns
-  the receipt (`:9746-9758`, `:13760-13769`). The await-terminal write has the
+  the receipt (`:9746-9758`, `:13883-13892`). The await-terminal write has the
   same no-purge rule when fenced (`:9789-9823`).
   The await runs under `classify_attempt_timeout(CLASSIFY_AWAIT_TIMEOUT,
   deadline)`; because the request deadline is clamped to that same ceiling, an
@@ -82,17 +85,18 @@ reaches `handle_dreamer_run_task` without a feature or configuration gate.
   fence prevents that settlement from overwriting the successor's receipt.
 - The exhausted-chain write (`:9869`) and the success write (`:9884`) match
   `Applied`, `Fenced`, and `Err`; only `Applied` answers with the receipt's
-  recorded response, read back through `read_dream_task_response` (`:13773`).
+  recorded response, read back through `read_dream_task_response` (`:13896`).
 - `attempt_child_session_id` (`crates/daemon/src/classify.rs:206-227`) hashes the
   receipt generation with the request identity, attempt index, and model, so a
   successor generation cannot derive a predecessor's session.
 - Bounds: `timeout_ms` is clamped to `CLASSIFY_MAX_REQUEST_TIMEOUT`
   (`crates/daemon/src/classify.rs:23-27`, equal to the await ceiling) by
   `classify_request_timeout` at `:9491`; the chain is
-  capped at `MAX_CLASSIFY_MODEL_CHAIN` at parse time (`:9464-9468`); the budget is
+  capped at `MAX_CLASSIFY_MODEL_CHAIN` in `ClassifyRequest::parse`
+  (`:13726-13730`); the budget is
   `DREAMER_ATTEMPT_BUDGET` per `DREAMER_ATTEMPT_BUDGET_WINDOW`
   (`crates/daemon/src/classify.rs:30-31`), read through
-  `dreamer_attempt_budget_exhausted` (`:13674`) once before the receipt is
+  `dreamer_attempt_budget_exhausted` (`:13797`) once before the receipt is
   written and again before every model after the first (`:9627-9638`), so one
   admitted chain overshoots the budget by at most the attempt it was admitted
   for. `count_dreamer_attempts` excludes
@@ -168,10 +172,10 @@ never started again.
    terminal `unknown`, and a further retry replaying `unknown` with no second
    `status` call.
 4. A receipt stranded `in_progress` by an aborted attempt insert: assert the
-   retry dispatches once at generation 2 (`:27536-27589`). Also reopen a receipt
+   retry dispatches once at generation 2 (`:27659-27712`). Also reopen a receipt
    with a `NotSent` attempt: assert one successor dispatch under a
    generation-derived session and a fenced predecessor `finish_dreamer_attempt`
-   (`:28115-28198`).
+   (`:28238-28321`).
 5. A timed-out await with a late answer queued behind it: assert the attempt
    ends `cancelled`, no second read of the run happens, the attempt counts
    toward the budget, and the receipt completes `failed`.
@@ -189,7 +193,7 @@ never started again.
    `on_start` and `on_await_output` hooks. Assert `dreamer_ledger_fenced`, one
    start, no purge, the generation-2 receipt still `in_progress`, and the
    generation-1 attempt still open. The start window performs no await; the
-   await window performs exactly one (`:27592-27658`).
+   await window performs exactly one (`:27715-27781`).
 10. The durable attempt count at `budget - 1` and a three-model chain whose
     every model fails: assert one start, one `failed` attempt row, the receipt
     `complete` as `failed` with a budget message, the count at exactly the

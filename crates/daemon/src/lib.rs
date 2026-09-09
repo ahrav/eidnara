@@ -2895,11 +2895,8 @@ pub struct Handler {
     transform_pages: Mutex<TransformPageCoordinator>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
-    /// active_dreamer_runs contains only module-minted zero-tool dreamer sessions; prefixes are diagnostics only.
-    /// Registered IDs may bypass transform only after route validation.
-    active_dreamer_runs: Arc<Mutex<HashSet<String>>>,
-    /// [`DreamCommandGuard`].
-    inflight_dream_commands: Arc<Mutex<HashSet<(String, String)>>>,
+    /// The durable classify protocol behind `dreamer.run_task`.
+    dreamer: Arc<DreamerRuntime>,
     /// Facade callers without a host tool-call ID receive one warning per resolved session, and the mutation proceeds.
     missing_facade_command_id_sessions: Mutex<HashSet<String>>,
 }
@@ -3001,6 +2998,42 @@ struct MissingProducerFactory;
 struct DreamerRunGuard {
     registry: Arc<Mutex<HashSet<String>>>,
     session_id: String,
+}
+
+/// The durable classify protocol behind `dreamer.run_task`, owned apart from
+/// the request handler so the wire route and the scheduler drive one
+/// implementation.
+pub(crate) struct DreamerRuntime {
+    producer_factory: Arc<dyn HistorianProducerFactory>,
+    /// active_dreamer_runs contains only module-minted zero-tool dreamer sessions; prefixes are diagnostics only.
+    /// Registered IDs may bypass transform only after route validation.
+    active_dreamer_runs: Arc<Mutex<HashSet<String>>>,
+    /// [`DreamCommandGuard`].
+    inflight_dream_commands: Arc<Mutex<HashSet<(String, String)>>>,
+}
+
+impl DreamerRuntime {
+    fn new(producer_factory: Arc<dyn HistorianProducerFactory>) -> Self {
+        Self {
+            producer_factory,
+            active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
+            inflight_dream_commands: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    fn unregister_dreamer_run(&self, session_id: &str) {
+        self.active_dreamer_runs
+            .lock()
+            .expect("dreamer registry mutex")
+            .remove(session_id);
+    }
+
+    fn dreamer_run_registered(&self, session_id: &str) -> bool {
+        self.active_dreamer_runs
+            .lock()
+            .expect("dreamer registry mutex")
+            .contains(session_id)
+    }
 }
 
 impl Drop for DreamerRunGuard {
@@ -3390,6 +3423,7 @@ impl Handler {
             spawn_gate: Arc::new(Mutex::new(())),
             cancel,
             tasks: TaskTracker::new(),
+            dreamer: Arc::new(DreamerRuntime::new(Arc::clone(&producer_factory))),
             producer_factory,
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
@@ -3438,8 +3472,6 @@ impl Handler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
-            active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
-            inflight_dream_commands: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
         }
     }
@@ -3709,6 +3741,7 @@ impl Handler {
             spawn_gate: Arc::new(Mutex::new(())),
             cancel: CancellationToken::new(),
             tasks: TaskTracker::new(),
+            dreamer: Arc::new(DreamerRuntime::new(Arc::clone(&factory))),
             producer_factory: factory,
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
@@ -3748,8 +3781,6 @@ impl Handler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
-            active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
-            inflight_dream_commands: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
         }
     }
@@ -4240,7 +4271,7 @@ impl Handler {
         }
         if let Some(session) = last_session_route {
             if session.starts_with("eidnara-dreamer:") {
-                self.unregister_dreamer_run(&session);
+                self.dreamer.unregister_dreamer_run(&session);
             }
             self.purge_session_state(&session, "route_teardown");
         }
@@ -7814,7 +7845,7 @@ impl Handler {
             ticket.accept();
             return passthrough_transform_response(&parsed);
         }
-        if self.dreamer_run_registered(&parsed.session_id) {
+        if self.dreamer.dreamer_run_registered(&parsed.session_id) {
             match self.resolve_binding(channel, &parsed.session_id) {
                 Ok(_) => {
                     if parsed.tail_delta.is_some() {
@@ -9311,31 +9342,6 @@ impl Handler {
         }
     }
 
-    fn register_dreamer_run(&self, session_id: &str) -> DreamerRunGuard {
-        self.active_dreamer_runs
-            .lock()
-            .expect("dreamer registry mutex")
-            .insert(session_id.to_string());
-        DreamerRunGuard {
-            registry: Arc::clone(&self.active_dreamer_runs),
-            session_id: session_id.to_string(),
-        }
-    }
-
-    fn unregister_dreamer_run(&self, session_id: &str) {
-        self.active_dreamer_runs
-            .lock()
-            .expect("dreamer registry mutex")
-            .remove(session_id);
-    }
-
-    fn dreamer_run_registered(&self, session_id: &str) -> bool {
-        self.active_dreamer_runs
-            .lock()
-            .expect("dreamer registry mutex")
-            .contains(session_id)
-    }
-
     async fn handle_dreamer_run_task(
         &self,
         channel: RouteHandle,
@@ -9366,7 +9372,61 @@ impl Handler {
         else {
             return invalid_params_error("dreamer.run_task requires authority_generation");
         };
-        let route_root = binding.project_root.to_string_lossy().to_string();
+        let Some(payload) = request.get("payload").and_then(Value::as_object) else {
+            return invalid_params_error("dreamer.run_task requires an object payload");
+        };
+        let task = match ClassifyRequest::parse(payload) {
+            Ok(task) => task,
+            Err(outcome) => return outcome,
+        };
+        self.dreamer
+            .run_dreamer_task(
+                store,
+                DreamerRunRequest {
+                    route: DreamerRoute::of(&binding),
+                    ledger_session: &ledger_session,
+                    command_id,
+                    authority_generation,
+                    task: &task,
+                },
+            )
+            .await
+    }
+}
+
+impl DreamerRuntime {
+    fn register_dreamer_run(&self, session_id: &str) -> DreamerRunGuard {
+        self.active_dreamer_runs
+            .lock()
+            .expect("dreamer registry mutex")
+            .insert(session_id.to_string());
+        DreamerRunGuard {
+            registry: Arc::clone(&self.active_dreamer_runs),
+            session_id: session_id.to_string(),
+        }
+    }
+
+    /// The durable classify protocol behind `dreamer.run_task`, shared by the
+    /// wire route and the scheduler: the authority gate, the receipt, the
+    /// attempt chain, and every ledger write.
+    async fn run_dreamer_task(
+        &self,
+        store: Arc<MemoryStore>,
+        run: DreamerRunRequest<'_>,
+    ) -> PreparedOutcome {
+        let DreamerRunRequest {
+            route,
+            ledger_session,
+            command_id,
+            authority_generation,
+            task,
+        } = run;
+        let prompt_body = task.prompt_body.as_str();
+        let expected_ids = &task.expected_ids;
+        let model_chain = &task.model_chain;
+        let timeout_ms = task.timeout_ms;
+        let task = CLASSIFY_TASK;
+        let route_root = route.project_root.to_string_lossy().to_string();
         let Some(project) = (match store.authority_project_for_route(&route_root, "memories") {
             Ok(project) => project,
             Err(error) => {
@@ -9428,70 +9488,10 @@ impl Handler {
                 ),
             };
         }
-        let Some(payload) = request.get("payload").and_then(Value::as_object) else {
-            return invalid_params_error("dreamer.run_task requires an object payload");
-        };
-        let Some(prompt_body) = payload.get("prompt_body").and_then(Value::as_str) else {
-            return invalid_params_error("classify payload requires prompt_body");
-        };
-        if prompt_body.len() > MAX_CLASSIFY_PROMPT_BYTES {
-            return PreparedOutcome::Error {
-                code: "payload_too_large".to_string(),
-                message: format!("classify prompt_body exceeds {MAX_CLASSIFY_PROMPT_BYTES} bytes"),
-            };
-        }
-        let Some(items) = payload.get("items").and_then(Value::as_array) else {
-            return invalid_params_error("classify payload requires items");
-        };
-        let mut expected_ids: BTreeSet<String> = BTreeSet::new();
-        for item in items {
-            let Some(public_claim_id) = item.get("public_claim_id").and_then(Value::as_str) else {
-                return invalid_params_error("classify items require a public_claim_id string");
-            };
-            if !context_core::claim_operation::is_valid_public_claim_id(public_claim_id) {
-                return invalid_params_error(
-                    "classify items require a well-formed public_claim_id",
-                );
-            }
-            expected_ids.insert(public_claim_id.to_owned());
-        }
-        let Some(models) = payload.get("model_chain").and_then(Value::as_array) else {
-            return invalid_params_error("classify payload requires model_chain");
-        };
-        if models.is_empty() {
-            return invalid_params_error("classify model_chain must not be empty");
-        }
-        if models.len() > MAX_CLASSIFY_MODEL_CHAIN {
-            return invalid_params_error(format!(
-                "classify model_chain exceeds {MAX_CLASSIFY_MODEL_CHAIN} entries"
-            ));
-        }
-        let mut model_chain = Vec::with_capacity(models.len());
-        for model in models {
-            let Some(model) = model.as_str() else {
-                return invalid_params_error("classify model_chain entries must be strings");
-            };
-            let canonical = model
-                .split_once('/')
-                .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty());
-            if !canonical {
-                return invalid_params_error(format!(
-                    "classify model {model:?} is not in canonical provider/model form"
-                ));
-            }
-            model_chain.push(model.to_string());
-        }
-        let Some(timeout_ms) = payload
-            .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .filter(|ms| *ms > 0)
-        else {
-            return invalid_params_error("classify payload requires a positive timeout_ms");
-        };
         let deadline = Instant::now() + classify_request_timeout(timeout_ms);
 
         //
-        let command_key = (ledger_session.clone(), command_id.to_string());
+        let command_key = (ledger_session.to_string(), command_id.to_string());
         {
             let mut inflight = self
                 .inflight_dream_commands
@@ -9513,7 +9513,7 @@ impl Handler {
 
         // The receipt is the durable authority over this request; the in-process
         // guard above only spares a concurrent duplicate the ledger round trip.
-        let operation_key = dreamer_operation_key(&ledger_session, command_id);
+        let operation_key = dreamer_operation_key(ledger_session, command_id);
         let receipt_key = DreamerReceiptKey {
             project: &authority_project,
             producer: DREAMER_RECEIPT_PRODUCER,
@@ -9549,7 +9549,7 @@ impl Handler {
             database_incarnation_id: context_store_uuid.clone(),
             authority_generation,
             request_digest,
-            ledger_session: ledger_session.clone(),
+            ledger_session: ledger_session.to_string(),
             command_id: command_id.to_string(),
         };
         // The budget is judged from the durable attempt count before any receipt
@@ -9578,7 +9578,7 @@ impl Handler {
                         &store,
                         receipt_key,
                         generation,
-                        &binding,
+                        route.credential_fingerprints,
                         over_budget,
                         deadline,
                     )
@@ -9638,7 +9638,7 @@ impl Handler {
             }
             let child_session = attempt_child_session_id(
                 &authority_project,
-                &ledger_session,
+                ledger_session,
                 command_id,
                 generation,
                 attempt,
@@ -9648,9 +9648,9 @@ impl Handler {
                 return invalid_params_error("classify model_chain is too long to record");
             };
             let connect = self.producer_factory.connect(
-                &binding.project_root,
-                &binding.harness,
-                &binding.credential_fingerprints,
+                route.project_root,
+                route.harness,
+                route.credential_fingerprints,
             );
             let mut producer = match tokio::time::timeout(
                 deadline.saturating_duration_since(Instant::now()),
@@ -9686,7 +9686,7 @@ impl Handler {
                     schema_version: CLASSIFY_SCHEMA_VERSION,
                     child_session: &child_session,
                     project_root: &route_root,
-                    harness: &binding.harness,
+                    harness: route.harness,
                 },
                 now_ms(),
             )) {
@@ -9792,7 +9792,7 @@ impl Handler {
                 // row cannot record one, so it is offered as the receipt's terminal
                 // response first.
                 if let Ok(result) = &attempt_output
-                    && length_capped_or_invalid(result, &expected_ids).is_ok()
+                    && length_capped_or_invalid(result, expected_ids).is_ok()
                 {
                     let response_json =
                         classify_success_response(model, result, attempts, &child_session)
@@ -9822,7 +9822,7 @@ impl Handler {
                 );
             }
             match attempt_output {
-                Ok(result) => match length_capped_or_invalid(&result, &expected_ids) {
+                Ok(result) => match length_capped_or_invalid(&result, expected_ids) {
                     Ok(()) => {
                         output = Some((model.clone(), result, child_session, producer));
                         break;
@@ -9923,7 +9923,7 @@ impl Handler {
         store: &MemoryStore,
         key: DreamerReceiptKey<'_>,
         generation: u64,
-        binding: &SessionBinding,
+        credential_fingerprints: &std::collections::BTreeMap<String, String>,
         over_budget: bool,
         deadline: Instant,
     ) -> Result<u64, PreparedOutcome> {
@@ -9986,7 +9986,7 @@ impl Handler {
                 .connect(
                     Path::new(&marker.project_root),
                     &marker.harness,
-                    &binding.credential_fingerprints,
+                    credential_fingerprints,
                 )
                 .await?;
             producer.bind_session(&marker.child_session).await?;
@@ -10024,7 +10024,9 @@ impl Handler {
             ))),
         }
     }
+}
 
+impl Handler {
     async fn handle_facade_value(&self, channel: RouteHandle, request: Value) -> PreparedOutcome {
         let Some(name) = request.get("name").and_then(Value::as_str) else {
             return unrecognized_request_error(&request);
@@ -10614,7 +10616,7 @@ impl Handler {
                         Ok(binding) => binding.session.trim().to_string(),
                         Err(_) => return session_unresolved_error(),
                     };
-                    if !self.dreamer_run_registered(&bound_session) {
+                    if !self.dreamer.dreamer_run_registered(&bound_session) {
                         return tool_error_result(
                             "Error: list is restricted to dreamer maintenance sessions."
                                 .to_string(),
@@ -13648,6 +13650,127 @@ fn classify_success_response(
             "await_timeout_ms": CLASSIFY_AWAIT_TIMEOUT.as_millis(),
         }
     })
+}
+
+/// The three route facts a model run is dispatched under; a wire request takes
+/// them from its session binding, a scheduled run from the binding of a live
+/// route on the project.
+#[derive(Clone, Copy)]
+pub(crate) struct DreamerRoute<'a> {
+    pub(crate) project_root: &'a Path,
+    pub(crate) harness: &'a str,
+    pub(crate) credential_fingerprints: &'a std::collections::BTreeMap<String, String>,
+}
+
+impl<'a> DreamerRoute<'a> {
+    fn of(binding: &'a SessionBinding) -> Self {
+        Self {
+            project_root: &binding.project_root,
+            harness: &binding.harness,
+            credential_fingerprints: &binding.credential_fingerprints,
+        }
+    }
+}
+
+/// One validated classify payload: the effect-defining inputs the receipt
+/// digests and the chain dispatches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClassifyRequest {
+    pub(crate) prompt_body: String,
+    pub(crate) expected_ids: BTreeSet<String>,
+    pub(crate) model_chain: Vec<String>,
+    pub(crate) timeout_ms: u64,
+}
+
+impl ClassifyRequest {
+    /// Validates the wire `payload` of a `dreamer.run_task` request.
+    fn parse(payload: &serde_json::Map<String, Value>) -> Result<Self, PreparedOutcome> {
+        let Some(prompt_body) = payload.get("prompt_body").and_then(Value::as_str) else {
+            return Err(invalid_params_error(
+                "classify payload requires prompt_body",
+            ));
+        };
+        if prompt_body.len() > MAX_CLASSIFY_PROMPT_BYTES {
+            return Err(PreparedOutcome::Error {
+                code: "payload_too_large".to_string(),
+                message: format!("classify prompt_body exceeds {MAX_CLASSIFY_PROMPT_BYTES} bytes"),
+            });
+        }
+        let Some(items) = payload.get("items").and_then(Value::as_array) else {
+            return Err(invalid_params_error("classify payload requires items"));
+        };
+        let mut expected_ids: BTreeSet<String> = BTreeSet::new();
+        for item in items {
+            let Some(public_claim_id) = item.get("public_claim_id").and_then(Value::as_str) else {
+                return Err(invalid_params_error(
+                    "classify items require a public_claim_id string",
+                ));
+            };
+            if !context_core::claim_operation::is_valid_public_claim_id(public_claim_id) {
+                return Err(invalid_params_error(
+                    "classify items require a well-formed public_claim_id",
+                ));
+            }
+            expected_ids.insert(public_claim_id.to_owned());
+        }
+        let Some(models) = payload.get("model_chain").and_then(Value::as_array) else {
+            return Err(invalid_params_error(
+                "classify payload requires model_chain",
+            ));
+        };
+        if models.is_empty() {
+            return Err(invalid_params_error(
+                "classify model_chain must not be empty",
+            ));
+        }
+        if models.len() > MAX_CLASSIFY_MODEL_CHAIN {
+            return Err(invalid_params_error(format!(
+                "classify model_chain exceeds {MAX_CLASSIFY_MODEL_CHAIN} entries"
+            )));
+        }
+        let mut model_chain = Vec::with_capacity(models.len());
+        for model in models {
+            let Some(model) = model.as_str() else {
+                return Err(invalid_params_error(
+                    "classify model_chain entries must be strings",
+                ));
+            };
+            let canonical = model
+                .split_once('/')
+                .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty());
+            if !canonical {
+                return Err(invalid_params_error(format!(
+                    "classify model {model:?} is not in canonical provider/model form"
+                )));
+            }
+            model_chain.push(model.to_string());
+        }
+        let Some(timeout_ms) = payload
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .filter(|ms| *ms > 0)
+        else {
+            return Err(invalid_params_error(
+                "classify payload requires a positive timeout_ms",
+            ));
+        };
+        Ok(Self {
+            prompt_body: prompt_body.to_string(),
+            expected_ids,
+            model_chain,
+            timeout_ms,
+        })
+    }
+}
+
+/// One classify run as the durable protocol sees it, whoever asked for it.
+pub(crate) struct DreamerRunRequest<'a> {
+    /// The route the model runs are dispatched under.
+    pub(crate) route: DreamerRoute<'a>,
+    pub(crate) ledger_session: &'a str,
+    pub(crate) command_id: &'a str,
+    pub(crate) authority_generation: u64,
+    pub(crate) task: &'a ClassifyRequest,
 }
 
 /// The receipt producer every `dreamer.run_task` request is recorded under.
@@ -22661,7 +22784,7 @@ mod tests {
         let (handler, _store, _dir, project) = handler_with_store(producer, default_test_config());
         let session = "native-dreamer";
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), session));
-        let _registration = handler.register_dreamer_run(session);
+        let _registration = handler.dreamer.register_dreamer_run(session);
 
         let first = native_cache_request(
             session,
@@ -28769,6 +28892,60 @@ mod tests {
                 "a rejected identity must never start a run: {items}"
             );
         }
+    }
+
+    /// The request shape is checked before any authority state is read: a
+    /// malformed payload on a route without MODULE authority, or with a stale
+    /// generation, is an `invalid_params` error that touches no ledger.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_checks_the_payload_shape_before_authority() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let route_root = project.to_str().unwrap();
+        handler.bind_route(test_route(7), binding_with_harness(route_root, "pi", "ses"));
+        let mut payload = claim_native_payload(&[test_claim_id(1)], TEST_CLASSIFY_TIMEOUT_MS);
+        payload.as_object_mut().unwrap().remove("prompt_body");
+        let request = |generation: u64| {
+            json!({
+                "v": 1,
+                "session_id": "ses",
+                "task": CLASSIFY_TASK,
+                "command_id": "shape-first",
+                "authority_generation": generation,
+                "payload": payload,
+            })
+        };
+        // No memories authority at all.
+        let outcome = handler
+            .handle_dreamer_run_task(test_route(7), &request(1))
+            .await;
+        assert_eq!(error_code_of(&outcome), "invalid_params");
+        // MODULE authority at a generation the request does not carry.
+        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+        let generation = store
+            .authority_status("context", "git:identity", "memories")
+            .unwrap()
+            .unwrap()
+            .generation;
+        let outcome = handler
+            .handle_dreamer_run_task(test_route(7), &request(generation + 1))
+            .await;
+        assert_eq!(error_code_of(&outcome), "invalid_params");
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        let operation_key = dreamer_operation_key("ses", "shape-first");
+        assert!(
+            store
+                .lookup_dreamer_receipt(DreamerReceiptKey {
+                    project: "git:identity",
+                    producer: DREAMER_RECEIPT_PRODUCER,
+                    operation_key: &operation_key,
+                })
+                .unwrap()
+                .is_none(),
+            "a rejected request writes no receipt"
+        );
     }
 
     /// A manifest that names an unrequested claim advances the chain instead of ending it.

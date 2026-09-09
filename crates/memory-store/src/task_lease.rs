@@ -16,10 +16,11 @@
 //! module only through the closures `acquire_task_lease` and
 //! `complete_task_lease` take.
 //!
-//! Every kind is fenced on the project's `notes` authority row: its MODULE
+//! Every kind names the authority domain it is fenced on: that row's MODULE
 //! generation is recorded on each claim and revalidated on renew and
-//! complete, and an authority change fences every kind's active claims at
-//! once. Kinds differ in their task identity, phases, and retention only.
+//! complete, and a change of that row fences the active claims of every kind
+//! fenced on it at once. Kinds differ in their authority domain, task
+//! identity, phases, and retention only.
 
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -46,6 +47,9 @@ const CLAIM_COLUMNS: &str = "claim_id, note_id, phase, acquisition_id, \
 pub struct TaskLeaseKind {
     /// The `task_kind` discriminator stored on every row.
     pub task_kind: &'static str,
+    /// The `authority` domain whose MODULE row this kind's leases are fenced
+    /// on; a transition of that row fences every in-flight claim of the kind.
+    pub authority_domain: &'static str,
     /// Prefix of every claim id this kind issues.
     pub claim_id_prefix: &'static str,
     /// Phases a selector may claim.
@@ -218,20 +222,21 @@ pub(crate) fn redaction_error(error: MemoryStoreError) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
-/// Resolve the notes-authority MODULE row every kind's protocol is fenced on.
-/// A MODULE row wins over stale twins under other context store UUIDs,
-/// matching `module_authority_for_project`. Returns `(generation, epoch)`.
+/// Resolve the MODULE authority row a kind's protocol is fenced on. A MODULE
+/// row wins over stale twins under other context store UUIDs, matching
+/// `module_authority_for_project`. Returns `(generation, epoch)`.
 fn module_authority_tx(
     tx: &GuardedConn<'_>,
+    kind: &TaskLeaseKind,
     project: &str,
 ) -> rusqlite::Result<Option<(i64, i64)>> {
     tx.query_row(
         "SELECT generation, note_eval_protocol_epoch
            FROM authority
-          WHERE project = ?1 AND domain = 'notes' AND state = 'MODULE'
+          WHERE project = ?1 AND domain = ?2 AND state = 'MODULE'
           ORDER BY context_store_uuid
           LIMIT 1",
-        params![project],
+        params![project, kind.authority_domain],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
@@ -307,20 +312,32 @@ pub(crate) fn fence_task_claims_tx(
     )
 }
 
-/// Terminally fence every kind's active claims in a project; the authority
-/// every kind is fenced on changed underneath them.
+/// Terminally fence the active claims of every kind fenced on `domain` in a
+/// project; that authority row changed underneath them.
 pub(crate) fn fence_project_claims_tx(
     tx: &GuardedConn<'_>,
+    kinds: &[&TaskLeaseKind],
+    domain: &str,
     project: &str,
     terminal_kind: &str,
     now_ms: i64,
 ) -> rusqlite::Result<usize> {
-    tx.execute(
-        "UPDATE note_eval_claims
-            SET terminal_kind = ?1, terminal_response = ?2, terminal_at_ms = ?3
-          WHERE project = ?4 AND terminal_kind IS NULL",
-        params![terminal_kind, kind_response(terminal_kind), now_ms, project],
-    )
+    let mut fenced = 0;
+    for kind in kinds.iter().filter(|kind| kind.authority_domain == domain) {
+        fenced += tx.execute(
+            "UPDATE note_eval_claims
+                SET terminal_kind = ?1, terminal_response = ?2, terminal_at_ms = ?3
+              WHERE project = ?4 AND task_kind = ?5 AND terminal_kind IS NULL",
+            params![
+                terminal_kind,
+                kind_response(terminal_kind),
+                now_ms,
+                project,
+                kind.task_kind
+            ],
+        )?;
+    }
+    Ok(fenced)
 }
 
 /// Ledger garbage collection: expire overdue active claims, tombstone expired
@@ -568,7 +585,8 @@ impl MemoryStore {
                     }
                 }));
             }
-            let Some((authority_generation, protocol_epoch)) = module_authority_tx(tx, project)?
+            let Some((authority_generation, protocol_epoch)) =
+                module_authority_tx(tx, kind, project)?
             else {
                 return Ok(WriteDisposition::Replay(
                     LeaseAcquireOutcome::AuthorityChanged,
@@ -809,7 +827,7 @@ impl MemoryStore {
                     )?;
                     return Ok(LeaseRenewOutcome::Expired);
                 }
-                match module_authority_tx(tx, project)? {
+                match module_authority_tx(tx, kind, project)? {
                     Some((generation, _)) if generation == row.claim.authority_generation => {}
                     _ => return Ok(LeaseRenewOutcome::AuthorityChanged),
                 }
@@ -918,7 +936,7 @@ impl MemoryStore {
                 if row.claim.expires_at <= now_ms {
                     return terminal("expired", None, &kind_response("expired"));
                 }
-                match module_authority_tx(tx, project)? {
+                match module_authority_tx(tx, kind, project)? {
                     Some((generation, _)) if generation == row.claim.authority_generation => {}
                     _ => {
                         return terminal(
