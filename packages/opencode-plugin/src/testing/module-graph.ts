@@ -93,10 +93,7 @@ export function reachableModules(graph: ModuleGraph, pattern: RegExp): string[] 
 
 export function databaseBinders(graph: Pick<ModuleGraph, "imports">): string[] {
     return Object.entries(graph.imports)
-        .filter(
-            ([path, imports]) =>
-                !DATABASE_BINDING.test(path) && imports.some((edge) => DATABASE_BINDING.test(edge)),
-        )
+        .filter(([, imports]) => imports.some((edge) => DATABASE_BINDING.test(edge)))
         .map(([path]) => path)
         .sort();
 }
@@ -173,11 +170,7 @@ export function databaseUses(
                 }
             }
         }
-        if (
-            ts.isExportDeclaration(node) &&
-            !node.exportClause &&
-            isBindingSpecifier(node.moduleSpecifier)
-        ) {
+        if (ts.isExportDeclaration(node) && isBindingSpecifier(node.moduleSpecifier)) {
             recordEscape(node);
         }
         if (ts.isCallExpression(node)) {

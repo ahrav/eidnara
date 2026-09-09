@@ -18816,12 +18816,18 @@ mod tests {
                 .is_none()
         );
         for response in [&without, &disabled] {
-            assert!(
-                !serde_json::to_string(&response["messages"])
-                    .unwrap()
-                    .contains("data:image/"),
-                "{response}"
-            );
+            let serialized = serde_json::to_string(&response["messages"]).unwrap();
+            for marker in [
+                "data:image/",
+                "<memory-mural>",
+                "image/",
+                "\"type\":\"file\"",
+            ] {
+                assert!(
+                    !serialized.contains(marker),
+                    "{marker} present in {response}"
+                );
+            }
         }
     }
 
@@ -28352,6 +28358,7 @@ mod tests {
         "mural.render",
         "mural.get",
         "ctx_mural",
+        "ctx-mural",
     ];
 
     #[tokio::test(flavor = "current_thread")]
@@ -28407,12 +28414,7 @@ mod tests {
                     .find('"')
                     .expect("unterminated literal in dispatch arms");
                 let literal = &literal[..close];
-                if literal
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_')
-                {
-                    literals.push(literal.to_string());
-                }
+                literals.push(literal.to_string());
                 rest = &rest[open + 1 + close + 1..];
             }
         }
@@ -28422,7 +28424,7 @@ mod tests {
     /// `model` covers the embedding-model listing routes (`models.list`) that the probe set
     /// treats as part of the absent embedding subsystem.
     fn names_absent_subsystem(route: &str) -> bool {
-        route.split(['.', '_']).any(|segment| {
+        route.split(['.', '_', '-', '/', ':']).any(|segment| {
             ["index", "embed", "model", "git", "mural"]
                 .iter()
                 .any(|stem| segment.starts_with(stem))
