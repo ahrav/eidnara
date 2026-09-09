@@ -4419,15 +4419,6 @@ fn stored_disposition(daemon: &Daemon, object_id: &str) -> String {
         .unwrap()
 }
 
-/// The scope id the route stamps on the bound project's rows, read from a row
-/// it wrote.
-async fn project_scope_id(daemon: &Daemon) -> String {
-    daemon.read("explicit_search", None).await["rows"][0]["scope_id"]
-        .as_str()
-        .unwrap()
-        .to_string()
-}
-
 /// An approval object the kernel honors: a live `adr_accepted` decision whose
 /// own admission was recorded by an explicit user, which the store API alone
 /// can create. `scope_id` places it in a project.
@@ -4537,7 +4528,7 @@ async fn a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one(
         "available",
         None,
     );
-    let scope_id = project_scope_id(&daemon).await;
+    let scope_id = daemon.project_scope_id().await;
     let quarantined = daemon
         .commit(
             "quarantine",
@@ -4674,7 +4665,7 @@ async fn a_disposition_needs_a_live_admitted_decision() {
         "available",
         None,
     );
-    let scope_id = project_scope_id(&daemon).await;
+    let scope_id = daemon.project_scope_id().await;
     assert_state(
         &daemon
             .commit(
