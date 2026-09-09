@@ -560,9 +560,12 @@ successor attempt dispatches at most once under the new generation. Every
 producer call that can start or resolve a model run (connect, `start`, the
 await, and the recovery probe) runs under the request's `timeout_ms` deadline;
 `purge_session` after a terminal outcome runs under the producer's own request
-timeout instead, so cleanup still happens once the deadline has passed. No
-request dispatches a model once the project's attempt count has reached
-`DREAMER_ATTEMPT_BUDGET`.
+timeout instead, so cleanup still happens once the deadline has passed. A
+request dispatches a model only after reading the project's attempt count
+below `DREAMER_ATTEMPT_BUDGET`, once before its receipt is written and again
+before each later model; the read and the attempt write are not one atomic
+step, so requests admitted concurrently can each add one attempt past the
+budget. The budget is a bounded guard, not an exact quota.
 Check: `always` - for every `dreamer.run_task` response that consumed a model
 attempt, the response is `ok: true`, `dreamer_run_failed`, or a replayed
 `dreamer_outcome_unknown` only if `lookup_dreamer_receipt` for `(project,
