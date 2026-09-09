@@ -662,8 +662,10 @@ empty canonical composition; `withheld_reads_record_the_verdict_and_inject_nothi
 (`canonical_memory.rs`) pins the record-level distinction; the integration tests
 in `tests/transform_canonical_memory.rs` pin `known_as_of` and `truncated` over a
 real kernel store, reach the withheld arm through the reader with a lagging
-registered consumer (`:287`), and show a memory-disabled pass records no
-composition at all (`:366`). All run in CI under `cargo test --workspace`.
+registered consumer (`a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it`),
+and show a memory-disabled pass records no composition at all
+(`a_memory_disabled_pass_takes_no_canonical_read`). All run in CI under
+`cargo test --workspace`.
 Guarantee: A HARD pass whose canonical memory read was not served (stale,
 abstained, or unavailable) composes no `<project-memory>` block and records
 `ProjectMemoryComposition::Withheld { state }` in `ModuleMeta.project_memory`
@@ -680,10 +682,10 @@ record is `None`. `always` because the record is written on every HARD
 (`ProducerContext::project_memory_composition`, `:561`) from the same pinned
 read every memory surface of the pass composed from, so there is no optional
 path.
-Fault/timing angle: The read is taken once per pass in `lib.rs:8019`, through
+Fault/timing angle: The read is taken once per pass in `lib.rs:8020`, through
 `Handler::project_memory_read` (`lib.rs:4828`), before the `run_transform`
 closure, and the same value is handed to a historian firing the pass triggers
-(`lib.rs:5118`), so a store phase change or lag change after that point cannot
+(`lib.rs:5119`), so a store phase change or lag change after that point cannot
 split one pass between a served block and a withheld record. The
 verdict-to-record mapping is total over `KernelOutcome`
 (`canonical_memory.rs:100-111`, `state.rs` `state_key`).

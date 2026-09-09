@@ -5114,7 +5114,8 @@ impl Handler {
                 model_chain: cfg.model_chain.clone(),
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary,
-                memory_enabled: cfg.memory_enabled,
+                // `project_memory` was read under `binding.config`; the gate must come from the same config or a reload between bind and fire pairs `memory_enabled: true` with no read. commentlint: allow(JUDGE)
+                memory_enabled: binding.config.memory_enabled,
                 project_memory: project_memory.cloned(),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,

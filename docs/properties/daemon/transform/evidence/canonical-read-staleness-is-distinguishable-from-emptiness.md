@@ -56,17 +56,17 @@ Verified at HEAD.
   the additive path pass `ctx.project_memory_rows()` to the renderer, so a
   withheld read renders no block because it has no rows, not because a
   separate flag suppresses it.
-- `crates/daemon/src/lib.rs:8019`: the read is taken once per pass through
+- `crates/daemon/src/lib.rs:8020`: the read is taken once per pass through
   `Handler::project_memory_read` (`lib.rs:4828`), which returns `None` when
   memory is disabled so the kernel store is not consulted, before the
   `run_transform` closure; every attempt of that pass clones the same value
   into its `ProducerContext`, so the m1 revision signal, m0, and additive m0
   compose from one snapshot. A historian firing the pass triggers receives the
-  same pinned value through `HistorianPrepareContext` (`lib.rs:5118`); a
+  same pinned value through `HistorianPrepareContext` (`lib.rs:5119`); a
   withheld verdict renders no block and is logged with its state key
   (`historian_chunk.rs`, `assemble_historian_firing`), so summarization
   continues through a kernel outage while the log keeps the reason. The
-  wrapup route takes its own read through the same helper (`lib.rs:5269`).
+  wrapup route takes its own read through the same helper (`lib.rs:5270`).
 
 ## Failure scenario
 
@@ -81,7 +81,7 @@ rematerialized when the store became ready.
 
 ## Timing windows and dependencies
 
-- The window between the read (`lib.rs:8019`) and the commit is closed to the
+- The window between the read (`lib.rs:8020`) and the commit is closed to the
   verdict: the read result is a value in the context, and a phase or lag change
   after it cannot alter what the pass records.
 - The property depends on the two-variant enum staying exhaustive; a third
