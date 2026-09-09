@@ -272,7 +272,7 @@ purity claim, not a restatement of it.
 | Unit | Decides | Inputs | Output domain | Pure? |
 | --- | --- | --- | --- | --- |
 | `selection::select_reductions_with_outcome` (`selection.rs:1119-1385`) | which tail blocks to reduce and with which payload | `items`, `frozen_keys`, `SelectionContext`, `SelectionConfig` | `Vec<ReductionDecision>` sorted by unique `target_id`, kinds `drop`/`skeleton`/`edit_marker`; empty on Defer | Yes. No clock, no store, no statics. Iterates `HashMap`s internally but every result is a set or is totally sorted before it escapes; see `dec-a-selection-decision-order-is-total-under-hashmap-iteration` |
-| `selection::region_hint` (`:558-571`) | how far to clamp a superseded diff value | one `&str` | `String`, normally `<=40` UTF-16 units plus the sentinel | Yes, and idempotent. But the idempotence guard is also a bypass: see `dec-a-region-hint-clamp-bypassed-by-sentinel-suffix` |
+| `selection::region_hint` (`:536-549`) | how far to clamp a superseded diff value | one `&str` | `String`, normally `<=40` UTF-16 units plus the sentinel | Yes, and idempotent. But the idempotence guard is also a bypass: see `dec-a-region-hint-clamp-bypassed-by-sentinel-suffix` |
 | `selection::skeleton_payload` (`:648-694`) / `canonical_json` (`:597-619`) | the frozen call-skeleton bytes | one `serde_json::Value` | canonical `String` with sorted keys | Yes. Key sort makes bytes independent of map order |
 | `selection::resolve_tool_tier` (`:948-958`) | emergency drop tier of a tool | tool name | `{1,2,3}`, total via the `else` arm | Yes |
 | `selection::select_emergency` (`:995-1084`) | which arcs to evict under force pressure | active arcs, ctx, floor tokens | `HashSet<String>` of arc ids | Yes. Guards non-finite ceiling and usage at `:1001-1009` and refuses sub-`2000`-token reclaim at `:1018` |
@@ -602,7 +602,7 @@ gate and a lower project threshold. The production path reads project values
 from `.eidnara/eidnara.jsonc`; no injected fault is required.
 Confidence: high - [evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
 Verified against the working tree based on
-`0da79d706ea40de75e76af5423dd7fc9b088d8cf`: the classifications at
+`74044960ee91641dec95c8552f15282844a18b13`: the classifications at
 `config.rs:657-693` match the explicit policy, and `:710-755` applies the tiers
 through them. The build-time assertion at `:696-708` rejects privileged keys
 classified as project-allowed; it does not pin the exact permissions of every
@@ -1049,7 +1049,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet - `selection.rs:2537-2549` covers the UTF-16 cap and the
+Exercised: not yet - `selection.rs:2424-2436` covers the UTF-16 cap and the
 surrogate back-off. No test supplies a value that already ends with the
 sentinel.
 Guarantee: An `edit_marker` payload's diff-bearing values are clamped to a
@@ -1065,11 +1065,11 @@ default (`config.rs:128`) and permitted in either tier (`config.rs:680`,
 tool call superseded by a later edit to the same file, whose `oldString`,
 `newString`, or `content` value ends with the literal `...[truncated]`.
 Confidence: high - [evidence](evidence/dec-a-region-hint-clamp-bypassed-by-sentinel-suffix.md).
-`selection.rs:559-561` returns the input unchanged when it ends with
-`TRUNCATION_SENTINEL` (`:71`). Executed the predicate on a 5,014-character
+`selection.rs:537-539` returns the input unchanged when it ends with
+`TRUNCATION_SENTINEL` (`:62`). Executed the predicate on a 5,014-character
 hostile string to confirm it takes the short-circuit arm. The gate is
-`cfg.smart_drops` at `:1229` and `:1236`.
-Existing check: `selection.rs:2537-2549`
+`cfg.smart_drops` at `:1109` and `:1134`.
+Existing check: `selection.rs:2424-2436`
 `edit_marker_region_hint_caps_utf16_and_backs_off_split_surrogate`, which
 covers the other two arms. Status `unaudited`.
 Impact: a superseded edit keeps its full diff instead of a 40-unit hint, so the
