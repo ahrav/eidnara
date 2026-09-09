@@ -369,6 +369,40 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
         expect(h.kernel.objects.get("decision-object-1")?.disposition).toBe("quarantined");
     });
 
+    test("a relaxation that names no approval inherits the one the target's last decision rested on", async () => {
+        const h = harness();
+        await createDecisionOne(h);
+        await dispose(h, "decision-object-1", "quarantine", "quarantine");
+        h.kernel.seedApproval("approval-1", PROJECT);
+        const cited = await h.client().commit({
+            ...intent("relax-cited"),
+            operations: [
+                {
+                    op: "disposition",
+                    object_id: "decision-object-1",
+                    event: "contradict",
+                    approval_object_id: "approval-1",
+                },
+            ],
+        });
+        expect(cited).toMatchObject({
+            dispositions: [{ denied: false, disposition: "contradicted" }],
+        });
+        expect(h.kernel.objects.get("decision-object-1")?.approval_object_id).toBe("approval-1");
+        // The command surface never names an approval; the stored one carries the relaxation.
+        const inherited = await dispose(h, "decision-object-1", "mark_stale", "relax-inherited");
+        expect(inherited).toMatchObject({
+            dispositions: [{ denied: false, disposition: "stale" }],
+        });
+        // Revoking the stored approval takes the inherited authority with it.
+        await dispose(h, "approval-1", "quarantine", "quarantine-approval");
+        await dispose(h, "decision-object-1", "quarantine", "quarantine-again");
+        const revoked = await dispose(h, "decision-object-1", "mark_stale", "relax-revoked");
+        expect(revoked).toMatchObject({
+            dispositions: [{ denied: true, disposition: "quarantined" }],
+        });
+    });
+
     test("a preview reports every surface's verdict and writes nothing", async () => {
         const h = harness();
         await createDecisionOne(h);
