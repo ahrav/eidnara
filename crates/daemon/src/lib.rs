@@ -14173,7 +14173,7 @@ fn note_evaluation_acquire_response(outcome: NoteEvalAcquireOutcome) -> Prepared
     match outcome {
         NoteEvalAcquireOutcome::Claim {
             claim,
-            note,
+            task: note,
             replayed,
         } => respond(json!({
             "result": "claim",

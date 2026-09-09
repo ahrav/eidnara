@@ -22,7 +22,7 @@ are no, and the per-poll cost is linear in the unbounded quantity.
    `:11393`, which is a store-scoped teardown owned by Parts 3 and 4c, and the
    `deleted.saturating_add(if table == "notes" ...)` accounting at `:5460`.
    Neither is age- or volume-driven. Compare the note-evaluation *ledgers*, which
-   do have a reaper: `collect_note_eval_ledgers_tx` (`:13119-13157`) deletes
+   do have a reaper: `task_lease::collect_ledgers_tx` (`:13119-13157`) deletes
    acquisition rows past `NOTE_EVAL_NO_WORK_RETENTION_MS` (`:13146-13150`) and
    terminal claim rows past `NOTE_EVAL_TERMINAL_RETENTION_MS`
    (`:13151-13156`), with an explicit comment on why blanking columns is not
@@ -35,7 +35,8 @@ are no, and the per-poll cost is linear in the unbounded quantity.
    SELECT {NOTE_EVAL_CANDIDATE_COLUMNS} FROM notes
      WHERE project_path = ?1 AND type = 'smart' AND status = 'pending'
        AND id NOT IN (SELECT note_id FROM note_eval_claims
-                       WHERE project = ?1 AND terminal_kind IS NULL)
+                       WHERE project = ?1 AND task_kind = ?2
+                         AND terminal_kind IS NULL)
      ORDER BY id
    ```
    (`:13292-13297`), collected into a `Vec` at `:13298-13301`.
