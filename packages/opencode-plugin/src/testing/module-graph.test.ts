@@ -8,7 +8,7 @@ import {
     databaseBinders,
     databaseUses,
     firstPartyCodeInputs,
-    foldedStrings,
+    literalStrings,
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
@@ -400,6 +400,24 @@ describe("databaseUses", () => {
         ).toEqual(["const DB = Database;"]);
     });
 
+    test("reports a binding loaded through a createRequire-bound function as an escape", () => {
+        expect(
+            databaseUses(
+                [
+                    'import { createRequire } from "node:module";',
+                    "const load = createRequire(import.meta.url);",
+                    'const { DatabaseSync: Sqlite } = load("node:sqlite");',
+                    'const other = load("node:path");',
+                    'const viaModule = module.require("better-sqlite3");',
+                    "",
+                ].join("\n"),
+            ).escapes,
+        ).toEqual([
+            'const { DatabaseSync: Sqlite } = load("node:sqlite");',
+            'const viaModule = module.require("better-sqlite3");',
+        ]);
+    });
+
     test("reports a dynamic load with a computed specifier as an escape", () => {
         expect(
             databaseUses(
@@ -498,6 +516,7 @@ describe("operationLiteralHits", () => {
             'const assembled = "memory" + ".sq" + "lite";',
             'const partial = "memory" + suffix;',
             'const later = join(dir, "store.db");',
+            'const escaped = join(dir, "context\\u002edb");',
             "",
         ].join("\n"),
     );
@@ -514,13 +533,19 @@ describe("operationLiteralHits", () => {
             `${commented}:7`,
             `${commented}:8`,
             `${commented}:10`,
+            `${commented}:11`,
         ]);
         expect(withoutComments("/* a */ b // c\n", "m.ts")).toBe("        b     \n");
         expect(
-            foldedStrings(parseSource('const op = ("claim." + "intent") + ".stage";', "m.ts")).map(
+            literalStrings(parseSource('const op = ("claim." + "intent") + ".stage";', "m.ts")).map(
                 (entry) => entry.value,
             ),
-        ).toEqual(["claim.intent.stage", "claim.intent"]);
+        ).toEqual(["claim.intent.stage", "claim.intent", "claim.", "intent", ".stage"]);
+        expect(
+            literalStrings(
+                parseSource('const f = "context\\u002edb"; const t = `x${y}/store.db`;', "m.ts"),
+            ).map((entry) => entry.value),
+        ).toEqual(["context.db", "x", "/store.db"]);
     });
 
     // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;

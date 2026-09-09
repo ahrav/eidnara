@@ -28993,13 +28993,31 @@ mod tests {
             "embeddings",
             "git",
         ];
-        const COMPARISON_METHODS: [&str; 6] = [
+        /// Methods that test or split a string against a pattern; a literal argument to one of
+        /// them is a spelling the code routes on.
+        const COMPARISON_METHODS: [&str; 22] = [
             "eq",
             "ne",
             "contains",
             "starts_with",
             "ends_with",
             "eq_ignore_ascii_case",
+            "strip_prefix",
+            "strip_suffix",
+            "trim_start_matches",
+            "trim_end_matches",
+            "trim_matches",
+            "split",
+            "splitn",
+            "rsplit",
+            "rsplitn",
+            "split_once",
+            "rsplit_once",
+            "split_terminator",
+            "find",
+            "rfind",
+            "match_indices",
+            "replace",
         ];
 
         struct ProductionLiterals {

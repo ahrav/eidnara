@@ -213,7 +213,7 @@ export function operationLiteralHits(
         for (const [index, line] of withoutComments(source, file, parsed).split("\n").entries()) {
             if (pattern.test(line)) lines.add(index + 1);
         }
-        for (const { line, value } of foldedStrings(parsed)) {
+        for (const { line, value } of literalStrings(parsed)) {
             if (pattern.test(`"${value}"`)) lines.add(line);
         }
         for (const line of [...lines].sort((a, b) => a - b)) hits.push(`${file}:${line}`);
@@ -222,11 +222,12 @@ export function operationLiteralHits(
 }
 
 /**
- * A string the bundler would fold: `"context" + ".db"` or `"claim." + "intent"`. Every `+`
- * expression whose leaves are all string literals yields its concatenation at its first line,
- * inner chains included, so a spelling split across literals is scanned as the value it becomes.
+ * The strings a module evaluates to, as the parser cooks them: every string literal and template
+ * span with escapes decoded (`"context\u002edb"` is `context.db`), and every `+` expression whose
+ * leaves are all string literals folded to its concatenation, inner chains included. Each is
+ * reported at its first line.
  */
-export function foldedStrings(file: ts.SourceFile): { line: number; value: string }[] {
+export function literalStrings(file: ts.SourceFile): { line: number; value: string }[] {
     const folded: { line: number; value: string }[] = [];
     const leafText = (node: ts.Expression): string | undefined => {
         const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
@@ -238,15 +239,15 @@ export function foldedStrings(file: ts.SourceFile): { line: number; value: strin
         }
         return undefined;
     };
+    const lineOf = (node: ts.Node) =>
+        file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
     const visit = (node: ts.Node): void => {
+        if (ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)) {
+            folded.push({ line: lineOf(node), value: node.text });
+        }
         if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
             const value = leafText(node);
-            if (value !== undefined) {
-                folded.push({
-                    line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
-                    value,
-                });
-            }
+            if (value !== undefined) folded.push({ line: lineOf(node), value });
         }
         ts.forEachChild(node, visit);
     };
@@ -296,6 +297,8 @@ export const RETAINED_DATABASE_USES: Record<string, DatabaseUses> = {
     "shared/token-estimator.ts": {
         opens: [],
         escapes: [
+            '        requireFromThisModule("ai-" + "tokenizer"),',
+            '        requireFromThisModule("ai-tokenizer/encoding/" + "claude"),',
             "                import(pathToFileURL(paths.tokenizerPath).href),",
             "                import(pathToFileURL(paths.encodingPath).href),",
         ],
@@ -354,6 +357,21 @@ export function databaseUses(
     };
     const isBindingSpecifier = (node: ts.Expression | undefined) =>
         node !== undefined && ts.isStringLiteralLike(node) && DATABASE_BINDING.test(node.text);
+    // `const load = createRequire(import.meta.url)` makes `load(...)` a require by another name.
+    const loaders = new Set<string>(["require"]);
+    const collectLoaders = (node: ts.Node): void => {
+        if (
+            ts.isVariableDeclaration(node) &&
+            ts.isIdentifier(node.name) &&
+            node.initializer &&
+            ts.isCallExpression(node.initializer) &&
+            /(^|\.)createRequire$/.test(node.initializer.expression.getText(file))
+        ) {
+            loaders.add(node.name.text);
+        }
+        ts.forEachChild(node, collectLoaders);
+    };
+    collectLoaders(file);
 
     const visit = (node: ts.Node): void => {
         if (
@@ -398,7 +416,9 @@ export function databaseUses(
         if (ts.isCallExpression(node)) {
             const callee = node.expression;
             const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
-            const isRequire = ts.isIdentifier(callee) && callee.text === "require";
+            const isRequire =
+                (ts.isIdentifier(callee) && loaders.has(callee.text)) ||
+                callee.getText(file) === "module.require";
             // Non-string-literal specifiers cannot be checked against the binding pattern, so they escape.
             const specifier = node.arguments[0];
             const unresolved = specifier !== undefined && !ts.isStringLiteralLike(specifier);
