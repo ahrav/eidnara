@@ -9,7 +9,9 @@ import {
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
+    PRODUCT_STORE_FILE,
     parseSource,
+    RETAINED_DATABASE_USES,
     reachableModules,
     withoutComments,
 } from "./module-graph";
@@ -79,64 +81,6 @@ const HARNESS_DATABASE_WRITER = "features/context/compaction-marker.ts";
 const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"];
 /** The adapter defines `Database`, so `databaseBinders` cannot include it; the test audits the adapter's constructions directly. */
 const DATABASE_ADAPTER = "shared/sqlite.ts";
-
-/**
- * Every database-relevant line in the retained tree: constructor opens, aliases of the
- * constructor, binding imports, and dynamic loads whose specifier is not a string literal.
- * A module absent here has none. The adapter's own load and the tokenizer's file-URL loads
- * are computed on purpose; the path helper only names the harness database's location.
- */
-const DATABASE_USES: Record<string, DatabaseUses> = {
-    [HARNESS_DATABASE_WRITER]: {
-        opens: ["    const db = new Database(dbPath);"],
-        escapes: [],
-    },
-    "hooks/context/read-session-db.ts": {
-        opens: ["    const db = new Database(dbPath, { readonly: true });"],
-        escapes: [],
-    },
-    [DATABASE_ADAPTER]: {
-        opens: ['    const probe = new Database(":memory:");'],
-        escapes: [
-            "    return (await import(",
-            "const DatabaseImpl: typeof BetterSqlite3 = isBun",
-            "    ? buildBunSqliteDatabaseClass(sqliteModule.Database)",
-            "    : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);",
-            "export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqlite3 {",
-            "    class BunSqliteDatabase extends BunDatabase {",
-            "    return BunSqliteDatabase as unknown as typeof BetterSqlite3;",
-            "export function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {",
-            "    class NodeSqliteDatabase extends DatabaseSync {",
-            "    return NodeSqliteDatabase as unknown as typeof BetterSqlite3;",
-            "export const Database: typeof BetterSqlite3 = DatabaseImpl;",
-        ],
-    },
-    "shared/token-estimator.ts": {
-        opens: [],
-        escapes: [
-            "                import(pathToFileURL(paths.tokenizerPath).href),",
-            "                import(pathToFileURL(paths.encodingPath).href),",
-        ],
-    },
-    "shared/opencode-database-path.ts": {
-        opens: [],
-        escapes: [
-            "function listDatabaseFiles(dirPath: string, filePrefix: string): string[] {",
-            "export function resolveOpenCodeDatabaseCandidates(dataDir: string = getDataDir()): string[] {",
-            '        ...listDatabaseFiles(opencodeRoot, "opencode"),',
-            '        ...listDatabaseFiles(storageRoot, ""),',
-            "export function resolveOpenCodeDatabasePath(dataDir: string = getDataDir()): string {",
-            "    return resolveOpenCodeDatabaseCandidates(dataDir)[0];",
-        ],
-    },
-    "tui/entry.mjs": {
-        opens: [],
-        escapes: ["    await import(runtimeProbe);"],
-    },
-};
-
-/** File names of the Rust-owned product stores, as a path a module could open, with any non-word suffix such as `-wal` or `?mode=ro`; the scan blanks comments before matching. */
-const PRODUCT_STORE_FILE = /["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)(?!\w)/;
 
 type ReportedGraph = Omit<ModuleGraph, "text">;
 
@@ -253,7 +197,7 @@ describe("module graph over the landed tree", () => {
             [HARNESS_DATABASE_WRITER, ...HARNESS_DATABASE_READERS].sort(),
         );
         for (const reader of HARNESS_DATABASE_READERS) {
-            expect(DATABASE_USES[reader]?.opens).toEqual([
+            expect(RETAINED_DATABASE_USES[reader]?.opens).toEqual([
                 "    const db = new Database(dbPath, { readonly: true });",
             ]);
         }
@@ -268,7 +212,7 @@ describe("module graph over the landed tree", () => {
             const found = databaseUses(readFileSync(file, "utf8"), module);
             if (found.opens.length > 0 || found.escapes.length > 0) uses[module] = found;
         }
-        expect(uses).toEqual(DATABASE_USES);
+        expect(uses).toEqual(RETAINED_DATABASE_USES);
         expect(
             databaseUses(readFileSync(join(SRC, DATABASE_ADAPTER), "utf8"), DATABASE_ADAPTER, {
                 allConstructions: true,
@@ -284,7 +228,7 @@ describe("module graph over the landed tree", () => {
                 "        throw new TypeError(",
                 '    const probe = new Database(":memory:");',
             ],
-            escapes: DATABASE_USES[DATABASE_ADAPTER]?.escapes,
+            escapes: RETAINED_DATABASE_USES[DATABASE_ADAPTER]?.escapes,
         });
     }, 120_000);
 });

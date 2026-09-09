@@ -28393,8 +28393,21 @@ mod tests {
             syn::Lit::Str(text) => Some(text.value()),
             syn::Lit::ByteStr(bytes) => Some(String::from_utf8_lossy(&bytes.value()).into_owned()),
             syn::Lit::CStr(text) => Some(text.value().to_string_lossy().into_owned()),
+            syn::Lit::Char(ch) => Some(ch.value().to_string()),
+            syn::Lit::Byte(byte) => Some(char::from(byte.value()).to_string()),
             _ => None,
         }
+    }
+
+    /// The literals a macro invocation carries; `concat!` also contributes the string it
+    /// evaluates to, since fragments such as `"mural"` and `".render"` name nothing alone.
+    fn macro_literals(mac: &syn::Macro) -> Vec<String> {
+        let mut literals = Vec::new();
+        macro_string_literals(mac.tokens.clone(), &mut literals);
+        if mac.path.is_ident("concat") {
+            literals.push(literals.concat());
+        }
+        literals
     }
 
     /// `syn` leaves macro bodies as tokens, so their string literals are collected by hand.
@@ -28519,7 +28532,7 @@ mod tests {
             }
 
             fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-                macro_string_literals(mac.tokens.clone(), &mut self.other_literals);
+                self.other_literals.extend(macro_literals(mac));
                 syn::visit::visit_macro(self, mac);
             }
 
@@ -28843,7 +28856,7 @@ mod tests {
         }
 
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-            macro_string_literals(mac.tokens.clone(), &mut self.0);
+            self.0.extend(macro_literals(mac));
             syn::visit::visit_macro(self, mac);
         }
     }
@@ -28919,8 +28932,7 @@ mod tests {
             }
 
             fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-                let mut literals = Vec::new();
-                macro_string_literals(mac.tokens.clone(), &mut literals);
+                let literals = macro_literals(mac);
                 if mac.path.is_ident("matches") {
                     self.compared.extend(literals.iter().cloned());
                 }
@@ -28956,8 +28968,9 @@ mod tests {
                 syn::visit::visit_arm(self, arm);
             }
 
-            /// A deserializable enum accepts each variant's identifier, or its `rename_all` form,
-            /// as a wire value; the words of the identifier are the spelling.
+            /// A deserializable enum accepts each variant's identifier as written, or its
+            /// `rename_all` form; both are recorded, since every rename rule derives from the
+            /// same word split and the identifier itself is the default.
             fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
                 let deserializable = item.attrs.iter().any(|attr| {
                     attr.path().is_ident("derive")
@@ -28969,7 +28982,9 @@ mod tests {
                 });
                 if deserializable {
                     for variant in &item.variants {
-                        self.compared.push(camel_words(&variant.ident.to_string()));
+                        let ident = variant.ident.to_string();
+                        self.compared.push(camel_words(&ident));
+                        self.compared.push(ident);
                     }
                 }
                 syn::visit::visit_item_enum(self, item);
@@ -29005,6 +29020,10 @@ mod tests {
             );
         }
         assert_eq!(camel_words("MuralRender"), "mural_render");
+        assert!(test_support::names_absent_subsystem(
+            "MURALRender",
+            BARE_STEMS
+        ));
         assert_eq!(camel_words("GitIngest"), "git_ingest");
         assert_eq!(camel_words("ReadOnly"), "read_only");
         for bare in ["git_ingest", "ctx_mural", "embed_query", "GIT_INGEST"] {

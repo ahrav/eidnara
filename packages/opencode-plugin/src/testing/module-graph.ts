@@ -21,6 +21,10 @@ export const DATABASE_BINDING =
 /** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches. */
 export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/;
 
+/** File names of the Rust-owned product stores, as a path a module could open, with any non-word suffix such as `-wal` or `?mode=ro`; the scan blanks comments before matching. */
+export const PRODUCT_STORE_FILE =
+    /["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)(?!\w)/;
+
 export interface ModuleGraph {
     /** Every source module in the bundle, as the bundler names it relative to the working directory. */
     inputs: string[];
@@ -189,6 +193,62 @@ export interface DatabaseUses {
     /** `escapes` contains source lines for value-position identifiers containing `Database`, for binding-module imports that bypass direct constructor matching, and for dynamic loads whose specifier is not a string literal. */
     escapes: string[];
 }
+
+/**
+ * Every database-relevant line in the retained OpenCode tree, keyed by path under its `src`:
+ * constructor opens, aliases of the constructor, binding imports, and dynamic loads whose
+ * specifier is not a string literal. A module absent here has none. The adapter's own load
+ * and the tokenizer's file-URL loads are computed on purpose; the path helper only names the
+ * harness database's location. The Pi bundle reaches a subset of these same modules.
+ */
+export const RETAINED_DATABASE_USES: Record<string, DatabaseUses> = {
+    "features/context/compaction-marker.ts": {
+        opens: ["    const db = new Database(dbPath);"],
+        escapes: [],
+    },
+    "hooks/context/read-session-db.ts": {
+        opens: ["    const db = new Database(dbPath, { readonly: true });"],
+        escapes: [],
+    },
+    "shared/sqlite.ts": {
+        opens: ['    const probe = new Database(":memory:");'],
+        escapes: [
+            "    return (await import(",
+            "const DatabaseImpl: typeof BetterSqlite3 = isBun",
+            "    ? buildBunSqliteDatabaseClass(sqliteModule.Database)",
+            "    : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);",
+            "export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqlite3 {",
+            "    class BunSqliteDatabase extends BunDatabase {",
+            "    return BunSqliteDatabase as unknown as typeof BetterSqlite3;",
+            "export function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {",
+            "    class NodeSqliteDatabase extends DatabaseSync {",
+            "    return NodeSqliteDatabase as unknown as typeof BetterSqlite3;",
+            "export const Database: typeof BetterSqlite3 = DatabaseImpl;",
+        ],
+    },
+    "shared/token-estimator.ts": {
+        opens: [],
+        escapes: [
+            "                import(pathToFileURL(paths.tokenizerPath).href),",
+            "                import(pathToFileURL(paths.encodingPath).href),",
+        ],
+    },
+    "shared/opencode-database-path.ts": {
+        opens: [],
+        escapes: [
+            "function listDatabaseFiles(dirPath: string, filePrefix: string): string[] {",
+            "export function resolveOpenCodeDatabaseCandidates(dataDir: string = getDataDir()): string[] {",
+            '        ...listDatabaseFiles(opencodeRoot, "opencode"),',
+            '        ...listDatabaseFiles(storageRoot, ""),',
+            "export function resolveOpenCodeDatabasePath(dataDir: string = getDataDir()): string {",
+            "    return resolveOpenCodeDatabaseCandidates(dataDir)[0];",
+        ],
+    },
+    "tui/entry.mjs": {
+        opens: [],
+        escapes: ["    await import(runtimeProbe);"],
+    },
+};
 
 export interface DatabaseUsesOptions {
     /** `allConstructions` reports every `new` expression, so an alias whose text does not match `/Database/` still appears in `opens`. */
