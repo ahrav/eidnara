@@ -10414,11 +10414,11 @@ impl Handler {
             // canonical memory is read through the kernel routes and written
             // through the kernel commit path, both served to the host's own
             // memory tool, not through this facade.
-            "get" | "list" => tool_error_result(
+            "get" => tool_error_result(
                 "Error: memory reads are served from canonical kernel state by the host memory tool, not by this module."
                     .to_string(),
             ),
-            "create" | "revise" | "archive" | "restore" | "merge" => tool_error_result(
+            "create" | "revise" | "archive" | "merge" => tool_error_result(
                 "Error: memory mutations are served through the kernel commit path by the host memory tool, not by this module."
                     .to_string(),
             ),
@@ -16482,7 +16482,7 @@ pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
 }
 
 fn ctx_memory_description() -> String {
-    "Read and maintain durable project memories. Memories are addressed by object id (mem_<32hex>) taken from tool results; never use local row IDs. Create standalone facts, revise changed memories, archive or restore lifecycle state, and merge duplicates through the host commit path; revise and merge supersede their targets with one new object and return its id, and no token is passed.".to_string()
+    "Read and maintain durable project memories. Memories are addressed by object id (mem_<32hex>) taken from tool results; never use local row IDs. Create standalone facts, revise changed memories, archive them, and merge duplicates through the host commit path; revise and merge supersede their targets with one new object and return its id, and no token is passed.".to_string()
 }
 
 fn ctx_search_description() -> String {
@@ -16537,7 +16537,7 @@ fn ctx_memory_schema() -> Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "get", "list", "revise", "archive", "restore", "merge"]
+                "enum": ["create", "get", "revise", "archive", "merge"]
             },
             "category": {
                 "type": "string",
@@ -16551,7 +16551,6 @@ fn ctx_memory_schema() -> Value {
                 "maxItems": 20,
                 "items": object_id
             },
-            "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
             "reason": { "type": "string", "maxLength": 4096 },
             "memory_project": { "type": "string" }
         },
@@ -16592,7 +16591,7 @@ fn ctx_memory_schema() -> Value {
             {
                 "required": ["action"],
                 "properties": {
-                    "action": { "enum": ["get", "list", "archive", "restore", "merge"] }
+                    "action": { "enum": ["get", "archive", "merge"] }
                 }
             },
             {
@@ -26516,7 +26515,6 @@ mod tests {
                     "content",
                     "objectId",
                     "objectIds",
-                    "limit",
                     "reason",
                     "memory_project",
                 ],
@@ -27367,7 +27365,10 @@ mod tests {
             resolver,
         );
         handler.bind_route(test_route(7), binding(project.to_str().unwrap(), "token"));
-        for action in ["get", "list"] {
+        for (action, expected) in [
+            ("get", "canonical kernel state"),
+            ("list", "Unknown ctx_memory action"),
+        ] {
             let outcome = call_facade(
                 &handler,
                 "ctx_memory",
@@ -27379,7 +27380,7 @@ mod tests {
             assert!(
                 body["content"][0]["text"]
                     .as_str()
-                    .is_some_and(|text| text.contains("canonical kernel state")),
+                    .is_some_and(|text| text.contains(expected)),
                 "{action}: {body}"
             );
         }
