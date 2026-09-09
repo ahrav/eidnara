@@ -10,6 +10,7 @@ import {
     OPERATION_LITERAL,
     operationLiteralHits,
     reachableModules,
+    withoutComments,
 } from "./module-graph";
 
 const SRC = resolve(import.meta.dir, "..");
@@ -133,9 +134,8 @@ const DATABASE_USES: Record<string, DatabaseUses> = {
     },
 };
 
-/** File names of the Rust-owned product stores, as a path a module could open. */
-const PRODUCT_STORE_FILE =
-    /^(?!\s*(?:\/\/|\*|\/\*)).*["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)["'`]/;
+/** File names of the Rust-owned product stores, as a path a module could open; the scan blanks comments before matching. */
+const PRODUCT_STORE_FILE = /["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)["'`]/;
 
 type ReportedGraph = Omit<ModuleGraph, "text">;
 
@@ -202,7 +202,6 @@ describe("module graph over the landed tree", () => {
         expect(PRODUCT_STORE_FILE.test('join(dir, "memory.sqlite")')).toBe(true);
         expect(PRODUCT_STORE_FILE.test("`${dir}/context.db`")).toBe(true);
         expect(PRODUCT_STORE_FILE.test("Eidnara's own context.db.")).toBe(false);
-        expect(PRODUCT_STORE_FILE.test("     * applies to its own `context.db`.")).toBe(false);
         expect(operationLiteralHits(MODULES, PRODUCT_STORE_FILE)).toEqual([]);
     });
 
@@ -468,10 +467,33 @@ describe("operationLiteralHits", () => {
         file,
         ['const a = "claim.intent.stage";', 'const b = "claim.intent.ack";', ""].join("\n"),
     );
+    const commented = join(dir, "commented.tsx");
+    writeFileSync(
+        commented,
+        [
+            "/**",
+            " * applies to its own `context.db`.",
+            " */",
+            'const a = 1; // trailing "context.db"',
+            '/* compatibility */ writeFileSync(join(dir, "context.db"), data);',
+            "const b = `not // a comment ${x}/store.db`;",
+            "export const X = <div>text {`${y}/kernel.sqlite`}</div>;",
+            "",
+        ].join("\n"),
+    );
     afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
     test("reports every matching line with its one-based number", () => {
         expect(operationLiteralHits([file])).toEqual([`${file}:1`, `${file}:2`]);
+    });
+
+    test("blanks comments but keeps code after a closed block comment, template text, and JSX", () => {
+        expect(operationLiteralHits([commented], PRODUCT_STORE_FILE)).toEqual([
+            `${commented}:5`,
+            `${commented}:6`,
+            `${commented}:7`,
+        ]);
+        expect(withoutComments("/* a */ b // c\n", "m.ts")).toBe("        b     \n");
     });
 
     // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;

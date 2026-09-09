@@ -28386,14 +28386,29 @@ mod tests {
         }
     }
 
+    /// A route can be spelled as a string, a byte string, or a C string; the audits compare all
+    /// three as text.
+    fn literal_text(lit: &syn::Lit) -> Option<String> {
+        match lit {
+            syn::Lit::Str(text) => Some(text.value()),
+            syn::Lit::ByteStr(bytes) => Some(String::from_utf8_lossy(&bytes.value()).into_owned()),
+            syn::Lit::CStr(text) => Some(text.value().to_string_lossy().into_owned()),
+            _ => None,
+        }
+    }
+
     /// `syn` leaves macro bodies as tokens, so their string literals are collected by hand.
     fn macro_string_literals(tokens: proc_macro2::TokenStream, into: &mut Vec<String>) {
         for tree in tokens {
             match tree {
                 proc_macro2::TokenTree::Group(group) => macro_string_literals(group.stream(), into),
                 proc_macro2::TokenTree::Literal(literal) => {
-                    if let Ok(text) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
-                        into.push(text.value());
+                    if let Some(text) = syn::parse_str::<syn::Lit>(&literal.to_string())
+                        .ok()
+                        .as_ref()
+                        .and_then(literal_text)
+                    {
+                        into.push(text);
                     }
                 }
                 _ => {}
@@ -28499,8 +28514,8 @@ mod tests {
                 }
             }
 
-            fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
-                self.other_literals.push(lit.value());
+            fn visit_lit(&mut self, lit: &'ast syn::Lit) {
+                self.other_literals.extend(literal_text(lit));
             }
 
             fn visit_macro(&mut self, mac: &'ast syn::Macro) {
@@ -28710,8 +28725,8 @@ mod tests {
     struct StringLiterals(Vec<String>);
 
     impl<'ast> syn::visit::Visit<'ast> for StringLiterals {
-        fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
-            self.0.push(lit.value());
+        fn visit_lit(&mut self, lit: &'ast syn::Lit) {
+            self.0.extend(literal_text(lit));
         }
 
         fn visit_macro(&mut self, mac: &'ast syn::Macro) {
@@ -28728,6 +28743,7 @@ mod tests {
     /// commentlint: allow(JUDGE)
     #[test]
     fn production_source_spells_no_indexing_embedding_git_or_mural_operation() {
+        use quote::ToTokens;
         use syn::visit::Visit;
 
         const BARE_STEMS: &[&str] = &["mural", "embed", "git"];
@@ -28785,8 +28801,8 @@ mod tests {
                 }
             }
 
-            fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
-                self.literals.push(lit.value());
+            fn visit_lit(&mut self, lit: &'ast syn::Lit) {
+                self.literals.extend(literal_text(lit));
             }
 
             fn visit_macro(&mut self, mac: &'ast syn::Macro) {
@@ -28827,7 +28843,20 @@ mod tests {
                 syn::visit::visit_arm(self, arm);
             }
 
-            fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
+            /// A `#[serde(rename = "...")]` or alias names a wire spelling that appears nowhere
+            /// else, and the deserializer compares input against it; doc text is prose and is
+            /// skipped.
+            fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+                if attr.path().is_ident("doc") {
+                    return;
+                }
+                let mut literals = Vec::new();
+                macro_string_literals(attr.meta.to_token_stream(), &mut literals);
+                if attr.path().is_ident("serde") {
+                    self.compared.extend(literals.iter().cloned());
+                }
+                self.literals.extend(literals);
+            }
         }
 
         for spelling in [

@@ -99,6 +99,36 @@ export function databaseBinders(graph: Pick<ModuleGraph, "imports">): string[] {
         .sort();
 }
 
+/**
+ * Comments are blanked to spaces, never removed, so the scan reports the source line number
+ * of a hit and a closed block comment cannot hide the code that follows it on the same line.
+ */
+export function withoutComments(source: string, fileName = "module.ts"): string {
+    const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
+    const ranges = new Map<number, number>();
+    const collect = (node: ts.Node): void => {
+        for (const range of [
+            ...(ts.getLeadingCommentRanges(source, node.getFullStart()) ?? []),
+            ...(ts.getTrailingCommentRanges(source, node.getEnd()) ?? []),
+        ]) {
+            ranges.set(range.pos, range.end);
+        }
+        ts.forEachChild(node, collect);
+    };
+    collect(file);
+    // A shebang or leading comment before the first statement attaches to the end-of-file token.
+    for (const range of ts.getLeadingCommentRanges(source, file.endOfFileToken.getFullStart()) ??
+        []) {
+        ranges.set(range.pos, range.end);
+    }
+    let out = source;
+    for (const [pos, end] of ranges) {
+        const blank = source.slice(pos, end).replace(/[^\n]/g, " ");
+        out = out.slice(0, pos) + blank + out.slice(end);
+    }
+    return out;
+}
+
 /** Operation names are string literals, not import edges, so the metafile cannot see them. */
 export function operationLiteralHits(
     files: string[],
@@ -107,7 +137,7 @@ export function operationLiteralHits(
     assertStatelessPattern("operationLiteralHits", pattern);
     const hits: string[] = [];
     for (const file of files) {
-        const lines = readFileSync(file, "utf8").split("\n");
+        const lines = withoutComments(readFileSync(file, "utf8"), file).split("\n");
         for (const [index, line] of lines.entries()) {
             if (pattern.test(line)) hits.push(`${file}:${index + 1}`);
         }
