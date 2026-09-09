@@ -18,7 +18,8 @@ export const BUNDLE_EXTERNALS = [
 export const DATABASE_BINDING =
     /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|(?:^|\/)shared\/sqlite(?:\.ts)?$/;
 
-export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[A-Za-z_][A-Za-z0-9_.]*["'`]/;
+/** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches. */
+export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/;
 
 export interface ModuleGraph {
     /** Every source module in the bundle, as the bundler names it relative to the working directory. */
@@ -197,11 +198,16 @@ export function databaseUses(
         }
         if (ts.isIdentifier(node) && /Database/.test(node.text)) {
             const parent = node.parent;
+            // `isPartOfTypeNode` accepts `implements` and rejects `extends`; declaration names and
+            // `typeof` operands are type-only positions it does not classify.
             const isTypeUse =
-                ts.isTypeReferenceNode(parent) ||
+                ts.isPartOfTypeNode(node) ||
                 ts.isTypeQueryNode(parent) ||
                 ts.isQualifiedName(parent) ||
-                (ts.isTypeAliasDeclaration(parent) && parent.name === node) ||
+                ((ts.isTypeAliasDeclaration(parent) ||
+                    ts.isInterfaceDeclaration(parent) ||
+                    ts.isTypeParameterDeclaration(parent)) &&
+                    parent.name === node) ||
                 (ts.isExportSpecifier(parent) &&
                     (parent.isTypeOnly || parent.parent.parent.isTypeOnly));
             const isOpen = ts.isNewExpression(parent) && parent.expression === node;

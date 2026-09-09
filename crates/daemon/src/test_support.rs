@@ -163,3 +163,11 @@ fn compartment(start: i64, end: i64, title: &str, content: &str) -> DecayRenderC
         ..Default::default()
     }
 }
+
+/// A name belongs to an absent subsystem when one of its segments starts with a stem. Segments
+/// split on the punctuation wire names and JSON pointers use, so `digital_clock` does not match
+/// the stem `git` while `git_commit_indexing` does.
+pub fn names_absent_subsystem(name: &str, stems: &[&str]) -> bool {
+    name.split(['.', '_', '-', '/', ':'])
+        .any(|segment| stems.iter().any(|stem| segment.starts_with(stem)))
+}

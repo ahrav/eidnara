@@ -135,6 +135,8 @@ describe("module graph over the landed tree", () => {
         expect(OPERATION_LITERAL.test('"claim.intent.stage"')).toBe(true);
         expect(OPERATION_LITERAL.test("'dreamer.run_task'")).toBe(true);
         expect(OPERATION_LITERAL.test("`dreamer.run_task`")).toBe(true);
+        expect(OPERATION_LITERAL.test('"claim.intent-stage"')).toBe(true);
+        expect(OPERATION_LITERAL.test("`dreamer.${task}`")).toBe(true);
         expect(OPERATION_LITERAL.test('"dreamer_inference"')).toBe(false);
         expect(OPERATION_LITERAL.test("claim.claim_id")).toBe(false);
         expect(operationLiteralHits(MODULES)).toEqual([]);
@@ -172,6 +174,13 @@ describe("module graph over the landed tree", () => {
         expect(readFileSync(join(SRC, HARNESS_DATABASE_WRITER), "utf8")).toMatch(
             /const dbPath = getOpenCodeDbPath\(\);/,
         );
+        // No graph reaches these, so `databaseBinders` cannot see their imports.
+        for (const orphan of AWAITING_CONSUMER.keys()) {
+            expect(databaseUses(readFileSync(join(SRC, orphan), "utf8"), orphan)).toEqual({
+                opens: [],
+                escapes: [],
+            });
+        }
         expect(
             databaseUses(readFileSync(join(SRC, DATABASE_ADAPTER), "utf8"), DATABASE_ADAPTER, {
                 allConstructions: true,
@@ -340,6 +349,31 @@ describe("databaseUses", () => {
         expect(databaseUses("const probe = new DatabaseSync(':memory:');").opens).toEqual([
             "const probe = new DatabaseSync(':memory:');",
         ]);
+    });
+
+    test("reports no escape for declaration names and type-only positions", () => {
+        expect(
+            databaseUses(
+                [
+                    'import { Database } from "../../shared/sqlite";',
+                    "interface DatabaseRow {",
+                    "    id: number;",
+                    "}",
+                    "function pick<DatabaseLike>(row: DatabaseLike): DatabaseLike {",
+                    "    return row;",
+                    "}",
+                    "class Facade implements Database {}",
+                    'type Native = import("better-sqlite3").Database;',
+                    "function isStore(value: unknown): value is Database {",
+                    "    return value instanceof Database;",
+                    "}",
+                    "",
+                ].join("\n"),
+            ),
+        ).toEqual({
+            opens: [],
+            escapes: ["    return value instanceof Database;"],
+        });
     });
 
     test("under allConstructions, an alias of an implementation constructor is both an escape and an open", () => {

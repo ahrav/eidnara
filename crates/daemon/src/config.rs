@@ -1869,6 +1869,25 @@ mod tests {
             "/retrieval",
             "/synapse",
         ];
+        const ABSENT_STEMS: &[&str] = &["mural", "embed", "git", "index", "retriev", "synapse"];
+        for pointer in [
+            "/memory/git_commit_indexing",
+            "/message_index/enabled",
+            "/embeddings/model",
+            "/experimental/mural",
+            "/retrieval/enabled",
+        ] {
+            assert!(
+                crate::test_support::names_absent_subsystem(pointer, ABSENT_STEMS),
+                "{pointer}"
+            );
+        }
+        for pointer in ["/ui/digital_clock", "/memory/enabled", "/historian/model"] {
+            assert!(
+                !crate::test_support::names_absent_subsystem(pointer, ABSENT_STEMS),
+                "{pointer}"
+            );
+        }
         for key in ConfigKey::ALL {
             for prefix in ABSENT_PREFIXES {
                 assert!(
@@ -1876,12 +1895,10 @@ mod tests {
                     "{key:?} would let a tier configure an absent subsystem"
                 );
             }
-            for fragment in ["mural", "embed", "git", "index", "retriev", "synapse"] {
-                assert!(
-                    !key.pointer().contains(fragment),
-                    "{key:?} would let a tier configure an absent subsystem"
-                );
-            }
+            assert!(
+                !crate::test_support::names_absent_subsystem(key.pointer(), ABSENT_STEMS),
+                "{key:?} would let a tier configure an absent subsystem"
+            );
         }
         let hostile = serde_json::json!({
             "mural": { "enabled": true, "model": "evil/vision" },

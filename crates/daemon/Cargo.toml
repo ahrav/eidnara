@@ -99,3 +99,4 @@ filetime = "0.2"
 # The dispatcher route audit reads this crate's `match` arm patterns from its own syntax tree.
 syn = { version = "2", features = ["full", "visit"] }
 quote = "1"
+proc-macro2 = "1"

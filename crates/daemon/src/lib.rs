@@ -28390,15 +28390,20 @@ mod tests {
     /// dispatchers' `match` arm patterns. Each arm must use string-literal patterns or `_`; the
     /// parser fails on a constant or binding pattern instead of skipping the route it names.
     /// The `_` arm must reject the request because delegating would route every unlisted
-    /// spelling. commentlint: allow(JUDGE)
+    /// spelling. Outside the audited match a dispatcher may name only request-envelope fields
+    /// and may read the discriminator only where it binds it, so a route decision cannot move
+    /// ahead of the match. commentlint: allow(JUDGE)
     fn dispatcher_route_literals() -> Vec<String> {
         use quote::ToTokens;
         use syn::visit::Visit;
 
-        const DISPATCHERS: [(&str, &str); 2] = [
-            ("dispatch_value_with_inbound_bytes", "method"),
-            ("handle_facade_value", "name"),
+        /// Dispatcher, discriminator, and how often the body reads the discriminator outside the
+        /// match: once for the `if let` that binds `method`, never for `name`.
+        const DISPATCHERS: [(&str, &str, usize); 2] = [
+            ("dispatch_value_with_inbound_bytes", "method", 1),
+            ("handle_facade_value", "name", 0),
         ];
+        const ENVELOPE_FIELDS: [&str; 4] = ["method", "kind", "name", "arguments"];
 
         fn pattern_literals(pat: &syn::Pat, literals: &mut Vec<String>) {
             match pat {
@@ -28419,16 +28424,37 @@ mod tests {
             }
         }
 
+        /// `syn` leaves macro bodies as tokens, so their string literals are collected by hand.
+        fn macro_string_literals(tokens: proc_macro2::TokenStream, into: &mut Vec<String>) {
+            for tree in tokens {
+                match tree {
+                    proc_macro2::TokenTree::Group(group) => {
+                        macro_string_literals(group.stream(), into)
+                    }
+                    proc_macro2::TokenTree::Literal(literal) => {
+                        if let Ok(text) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
+                            into.push(text.value());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         struct Dispatcher<'a> {
             scrutinee: &'a str,
             rejecting_body: &'a str,
             matches: usize,
+            inside_audited: usize,
             literals: Vec<String>,
+            outside_literals: Vec<String>,
+            outside_reads: usize,
         }
 
         impl<'ast> Visit<'ast> for Dispatcher<'_> {
             fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
-                if expr.expr.to_token_stream().to_string() == self.scrutinee {
+                let audited = expr.expr.to_token_stream().to_string() == self.scrutinee;
+                if audited {
                     self.matches += 1;
                     for arm in &expr.arms {
                         if matches!(arm.pat, syn::Pat::Wild(_)) {
@@ -28446,9 +28472,36 @@ mod tests {
                         }
                         pattern_literals(&arm.pat, &mut self.literals);
                     }
+                    self.inside_audited += 1;
                 }
                 syn::visit::visit_expr_match(self, expr);
+                if audited {
+                    self.inside_audited -= 1;
+                }
             }
+
+            fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+                if self.inside_audited == 0 {
+                    self.outside_literals.push(lit.value());
+                }
+            }
+
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                if self.inside_audited == 0 {
+                    macro_string_literals(mac.tokens.clone(), &mut self.outside_literals);
+                }
+                syn::visit::visit_macro(self, mac);
+            }
+
+            fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+                if self.inside_audited == 0 && path.to_token_stream().to_string() == self.scrutinee
+                {
+                    self.outside_reads += 1;
+                }
+                syn::visit::visit_expr_path(self, path);
+            }
+
+            fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
         }
 
         struct Dispatchers {
@@ -28459,17 +28512,37 @@ mod tests {
         impl<'ast> Visit<'ast> for Dispatchers {
             fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
                 let name = function.sig.ident.to_string();
-                if let Some((_, scrutinee)) = DISPATCHERS.iter().find(|(f, _)| *f == name) {
+                if let Some((_, scrutinee, binding_reads)) =
+                    DISPATCHERS.iter().find(|(f, _, _)| *f == name)
+                {
                     let mut dispatcher = Dispatcher {
                         scrutinee,
                         rejecting_body: &self.rejecting_body,
                         matches: 0,
+                        inside_audited: 0,
                         literals: Vec::new(),
+                        outside_literals: Vec::new(),
+                        outside_reads: 0,
                     };
                     dispatcher.visit_block(&function.block);
                     assert_eq!(
                         dispatcher.matches, 1,
                         "{name} must match on `{scrutinee}` exactly once"
+                    );
+                    let routing_outside: Vec<&String> = dispatcher
+                        .outside_literals
+                        .iter()
+                        .filter(|literal| !ENVELOPE_FIELDS.contains(&literal.as_str()))
+                        .collect();
+                    assert!(
+                        routing_outside.is_empty(),
+                        "{name} names {routing_outside:?} outside `match {scrutinee}`; \
+                         route decisions belong in the audited match"
+                    );
+                    assert_eq!(
+                        dispatcher.outside_reads, *binding_reads,
+                        "{name} reads `{scrutinee}` outside `match {scrutinee}`; \
+                         route decisions belong in the audited match"
                     );
                     let slot = self
                         .functions
@@ -28488,7 +28561,7 @@ mod tests {
             syn::parse_str("unrecognized_request_error(&request)").expect("rejecting body parses");
         let mut dispatchers = Dispatchers {
             rejecting_body: rejecting_body.to_token_stream().to_string(),
-            functions: DISPATCHERS.iter().map(|(f, _)| (*f, None)).collect(),
+            functions: DISPATCHERS.iter().map(|(f, _, _)| (*f, None)).collect(),
         };
         dispatchers.visit_file(&file);
         dispatchers
@@ -28500,12 +28573,10 @@ mod tests {
 
     /// `model` covers the embedding-model listing routes (`models.list`) that the probe set
     /// treats as part of the absent embedding subsystem.
+    const ABSENT_ROUTE_STEMS: &[&str] = &["index", "embed", "model", "git", "mural"];
+
     fn names_absent_subsystem(route: &str) -> bool {
-        route.split(['.', '_', '-', '/', ':']).any(|segment| {
-            ["index", "embed", "model", "git", "mural"]
-                .iter()
-                .any(|stem| segment.starts_with(stem))
-        })
+        test_support::names_absent_subsystem(route, ABSENT_ROUTE_STEMS)
     }
 
     #[test]

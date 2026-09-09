@@ -482,6 +482,7 @@ dependencies = [
  "libc",
  "memchr",
  "memory-store",
+ "proc-macro2",
  "proptest",
  "quote",
  "regex",
