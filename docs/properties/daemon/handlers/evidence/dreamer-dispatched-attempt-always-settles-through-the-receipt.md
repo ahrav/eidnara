@@ -15,8 +15,10 @@ write on the failure path) no longer exists.
 
 Verified at HEAD. References are to `crates/daemon/src/lib.rs` unless stated.
 
-- `handle_dreamer_run_task` validates the request, passes the memories
-  authority `MODULE` gate, takes the in-process duplicate guard, then judges the
+- `handle_dreamer_run_task` validates the request shape (`ClassifyRequest::parse`)
+  and hands `DreamerRuntime::run_dreamer_task` the parsed task plus the route
+  facts (`DreamerRoute`); that shared protocol passes the memories authority
+  `MODULE` gate, takes the in-process duplicate guard, then judges the
   per-project attempt budget from `count_dreamer_attempts` before any receipt
   is written: an exhausted project with no receipt for the command answers
   `dreamer_budget_exhausted` and writes nothing; a command the ledger already
@@ -32,28 +34,28 @@ Verified at HEAD. References are to `crates/daemon/src/lib.rs` unless stated.
   is the run identity the runtime keys on. `Complete`
   replays; `DigestConflict` and `BindingMismatch` answer
   `dreamer_request_conflict` with no producer constructed; `InProgress`
-  goes to `resume_dreamer_receipt` (`:9880`).
+  goes to `resume_dreamer_receipt` (`:9886`).
 - `resume_dreamer_receipt` reads `list_dreamer_attempts` and picks the newest
   attempt at the open generation whose terminal is not `not_sent`. No such
   attempt: `take_over_dreamer_receipt` moves the fence to `g + 1` (Applied) or
   the request is `dreamer_ledger_fenced`. An ended attempt: complete the
-  receipt `unknown` through `complete_receipt_as_unknown` (`:13681`), leaving
+  receipt `unknown` through `complete_receipt_as_unknown` (`:13810`), leaving
   the attempt's own terminal in place. An open attempt with a handle: connect
   under the attempt's recorded `project_root` and `harness`, bind the recorded
   child session, and call `status`; `Missing` settles `unknown`,
   `Active` or `Terminal` answers `dreamer_outcome_unknown` with no write, a
   connect or status error answers the same. An open attempt with no handle:
   settle `unknown`. Settling an open attempt goes through
-  `settle_dispatched_attempt_as_unknown` (`:13661`), which writes the attempt
+  `settle_dispatched_attempt_as_unknown` (`:13790`), which writes the attempt
   terminal best-effort and then completes the receipt through the same helper,
   matching `Applied`, `Fenced`, and `Err` separately.
-- In the chain loop, `begin_dreamer_attempt` precedes `start` (`:9654`), and
-  `record_dreamer_run_handle` follows a successful `start` (`:9700`); a handle
+- In the chain loop, `begin_dreamer_attempt` precedes `start` (`:9660`), and
+  `record_dreamer_run_handle` follows a successful `start` (`:9706`); a handle
   write that is `Fenced` or fails purges the session and settles `unknown`.
   `finish_dreamer_attempt` records the attempt terminal; when it does not land,
   a usable result is still offered to `complete_dreamer_receipt` first, and
   otherwise the request settles `unknown`.
-- The exhausted-chain write (`:9831`) and the success write (`:9846`) match
+- The exhausted-chain write (`:9837`) and the success write (`:9852`) match
   `Applied`, `Fenced`, and `Err`; only `Applied` answers with the receipt's
   recorded response, read back through `read_dream_task_response`.
 - `attempt_child_session_id` (`crates/daemon/src/classify.rs`) hashes the

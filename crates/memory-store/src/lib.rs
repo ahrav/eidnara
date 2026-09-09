@@ -42,7 +42,8 @@ use std::sync::{
 use std::time::Instant;
 use storage::GuardedConn;
 use storage::{SqliteStore, open_sqlite};
-use task_lease::{LeaseCompletion, LeaseSelected, TaskLeaseKind};
+pub use task_lease::TaskLeaseKind;
+use task_lease::{LeaseCompletion, LeaseSelected};
 
 /// Foreign types that appear in this crate's public signatures, re-exported so a consumer
 /// can name them through `memory_store` alone. `StorageDescriptor` is the argument of
@@ -3784,6 +3785,7 @@ const NOTE_ARTIFACT_REPAIR_BATCH: i64 = 500;
 /// Smart-note evaluation: the first task kind on the shared lease ledger.
 pub(crate) const NOTE_EVALUATION: TaskLeaseKind = TaskLeaseKind {
     task_kind: "note_evaluation",
+    authority_domain: "notes",
     claim_id_prefix: "nec:",
     phases: &["compile", "due", "liveness", "fallback"],
     lease_ms: NOTE_EVAL_CLAIM_LEASE_MS,
@@ -3793,11 +3795,141 @@ pub(crate) const NOTE_EVALUATION: TaskLeaseKind = TaskLeaseKind {
     ledger_cap: NOTE_EVAL_LEDGER_CAP,
 };
 
-pub use task_lease::{
-    LeaseAbandonOutcome as NoteEvalAbandonOutcome, LeaseAcquireOutcome,
-    LeaseClaim as NoteEvalClaim, LeaseCompleteOutcome as NoteEvalCompleteOutcome,
-    LeaseRenewOutcome as NoteEvalRenewOutcome,
+/// A scheduled Dreamer task is leased for longer than one classify request
+/// can run (`CLASSIFY_MAX_REQUEST_TIMEOUT` plus recovery), so a live run never
+/// has to renew.
+pub const DREAMER_TASK_LEASE_MS: i64 = 20 * 60 * 1_000;
+/// Each task is held by at most one live claim per project, and a handful of
+/// `no_work` decisions is all a scheduler tick leaves behind, so the
+/// per-project ledger stays small.
+pub const DREAMER_TASK_LEDGER_CAP: i64 = 64;
+
+/// Scheduled Dreamer tasks: fenced on the `memories` authority the runs write
+/// under, so a memories transition ends every in-flight task like a notes
+/// transition ends every note evaluation.
+pub const DREAMER_TASK: TaskLeaseKind = TaskLeaseKind {
+    task_kind: "dreamer_task",
+    authority_domain: "memories",
+    claim_id_prefix: "dtc:",
+    phases: &["run"],
+    lease_ms: DREAMER_TASK_LEASE_MS,
+    no_work_retention_ms: NOTE_EVAL_NO_WORK_RETENTION_MS,
+    terminal_retention_ms: NOTE_EVAL_TERMINAL_RETENTION_MS,
+    response_redact_ms: NOTE_EVAL_RESPONSE_REDACT_MS,
+    ledger_cap: DREAMER_TASK_LEDGER_CAP,
 };
+
+/// Every kind on the shared ledger, so an authority transition can fence the
+/// kinds that domain governs.
+const LEASE_KINDS: [&TaskLeaseKind; 2] = [&NOTE_EVALUATION, &DREAMER_TASK];
+
+pub use task_lease::{
+    LeaseAbandonOutcome as NoteEvalAbandonOutcome, LeaseAcquireOutcome, LeaseClaim,
+    LeaseClaim as NoteEvalClaim, LeaseCompleteOutcome,
+    LeaseCompleteOutcome as NoteEvalCompleteOutcome, LeaseRenewOutcome as NoteEvalRenewOutcome,
+};
+
+/// The outcome of leasing one scheduled Dreamer task; the claim's `note_id` is
+/// the task id and its `source_revision` the due instant the task was leased for.
+pub type DreamerTaskAcquireOutcome = LeaseAcquireOutcome<()>;
+
+impl MemoryStore {
+    /// Leases `task_id` for the run due at `due_at_ms`. A task another live
+    /// claim holds is `NoWork`; the caller's own expired or rebound slot is
+    /// recovered by the shared protocol.
+    #[allow(clippy::too_many_arguments)]
+    pub fn acquire_dreamer_task(
+        &self,
+        project: &str,
+        acquisition_id: &str,
+        scheduler_instance: &str,
+        slot: i64,
+        registration_generation: i64,
+        task_id: i64,
+        due_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<DreamerTaskAcquireOutcome, MemoryStoreError> {
+        self.acquire_task_lease(
+            &DREAMER_TASK,
+            project,
+            acquisition_id,
+            scheduler_instance,
+            slot,
+            registration_generation,
+            now_ms,
+            |tx| {
+                let held: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM note_eval_claims
+                      WHERE project = ?1 AND task_kind = ?2 AND note_id = ?3
+                        AND terminal_kind IS NULL",
+                    params![project, DREAMER_TASK.task_kind, task_id],
+                    |row| row.get(0),
+                )?;
+                if held > 0 {
+                    return Ok(task_lease::LeaseSelected::NoWork {
+                        cycle_exhausted: false,
+                    });
+                }
+                Ok(task_lease::LeaseSelected::Claim {
+                    note_id: task_id,
+                    phase: "run".to_string(),
+                    task: (),
+                    source_revision: due_at_ms,
+                    state_version: 0,
+                    policy_version: 0,
+                })
+            },
+            |_, _| Ok(Some(())),
+        )
+    }
+
+    /// Records the run's terminal response against the claim; a completion
+    /// under a changed memories authority or an expired lease is a conflict.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_dreamer_task(
+        &self,
+        project: &str,
+        claim_id: &str,
+        completion_id: &str,
+        scheduler_instance: &str,
+        slot: i64,
+        response_json: &str,
+        now_ms: i64,
+    ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
+        self.complete_task_lease(
+            &DREAMER_TASK,
+            project,
+            claim_id,
+            completion_id,
+            scheduler_instance,
+            slot,
+            now_ms,
+            |_, _| {
+                Ok(LeaseCompletion::Applied {
+                    response_json: response_json.to_string(),
+                })
+            },
+        )
+    }
+
+    pub fn abandon_dreamer_task(
+        &self,
+        project: &str,
+        claim_id: &str,
+        scheduler_instance: &str,
+        slot: i64,
+        now_ms: i64,
+    ) -> Result<task_lease::LeaseAbandonOutcome, MemoryStoreError> {
+        self.abandon_task_lease(
+            &DREAMER_TASK,
+            project,
+            claim_id,
+            scheduler_instance,
+            slot,
+            now_ms,
+        )
+    }
+}
 
 pub type NoteEvalAcquireOutcome = LeaseAcquireOutcome<StoredNote>;
 
@@ -12999,18 +13131,18 @@ impl MemoryStore {
                         "DELETE FROM authority_seed_rows WHERE context_store_uuid = ?1 AND project = ?2 AND domain = ?3",
                         params![context_store_uuid, project, domain],
                     )?;
-                    if domain == "notes" {
-                        // A claim surviving from an earlier MODULE period must
-                        // not block its note under the new generation for a
-                        // full lease; completion is already generation-fenced,
-                        // so terminalize it like the drain transition does.
-                        task_lease::fence_project_claims_tx(
-                            tx,
-                            project,
-                            "authority_changed",
-                            current_time_ms(),
-                        )?;
-                    }
+                    // A claim surviving from an earlier MODULE period must
+                    // not block its task under the new generation for a
+                    // full lease; completion is already generation-fenced,
+                    // so terminalize it like the drain transition does.
+                    task_lease::fence_project_claims_tx(
+                        tx,
+                        &LEASE_KINDS,
+                        domain,
+                        project,
+                        "authority_changed",
+                        current_time_ms(),
+                    )?;
                     tx.execute(
                         "UPDATE authority SET state = 'PREPARING', generation = generation + 1,
                                 checksum_expected = NULL, checksum_actual = NULL, checksum_ok = NULL
@@ -13152,18 +13284,18 @@ impl MemoryStore {
                         },
                     )));
                 }
-                if domain == "notes" {
-                    // Same fence as the drain transition: a stale claim from a
-                    // prior MODULE period cannot complete under the new
-                    // generation, but left active it blocks its note for a
-                    // full lease.
-                    task_lease::fence_project_claims_tx(
-                        tx,
-                        project,
-                        "authority_changed",
-                        current_time_ms(),
-                    )?;
-                }
+                // Same fence as the drain transition: a stale claim from a
+                // prior MODULE period cannot complete under the new
+                // generation, but left active it blocks its task for a
+                // full lease.
+                task_lease::fence_project_claims_tx(
+                    tx,
+                    &LEASE_KINDS,
+                    domain,
+                    project,
+                    "authority_changed",
+                    current_time_ms(),
+                )?;
                 tx.execute(
                     "UPDATE authority SET state = 'MODULE', generation = generation + 1,
                             note_eval_protocol_epoch = CASE WHEN domain = 'notes' THEN 2
@@ -13270,18 +13402,18 @@ impl MemoryStore {
                     )));
                 }
                 let next_state = if verified { "MODULE" } else { "TS" };
-                if domain == "notes" {
-                    // Same fence as the drain transition: a stale claim from a
-                    // prior MODULE period cannot complete under the new
-                    // generation, but left active it blocks its note for a
-                    // full lease.
-                    task_lease::fence_project_claims_tx(
-                        tx,
-                        project,
-                        "authority_changed",
-                        current_time_ms(),
-                    )?;
-                }
+                // Same fence as the drain transition: a stale claim from a
+                // prior MODULE period cannot complete under the new
+                // generation, but left active it blocks its task for a
+                // full lease.
+                task_lease::fence_project_claims_tx(
+                    tx,
+                    &LEASE_KINDS,
+                    domain,
+                    project,
+                    "authority_changed",
+                    current_time_ms(),
+                )?;
                 let update_sql = if verified && domain == "notes" {
                     "UPDATE authority
                         SET state = ?1, generation = generation + 1,
@@ -13478,14 +13610,14 @@ impl MemoryStore {
                     params![domain],
                     |row| row.get(0),
                 )?;
-                if domain == "notes" {
-                    task_lease::fence_project_claims_tx(
-                        tx,
-                        project,
-                        "authority_changed",
-                        now_ms,
-                    )?;
-                }
+                task_lease::fence_project_claims_tx(
+                    tx,
+                    &LEASE_KINDS,
+                    domain,
+                    project,
+                    "authority_changed",
+                    now_ms,
+                )?;
                 let next_generation = current.generation + 1;
                 let token = mint_coordinator_token(lease, lease_expires_at, next_generation);
                 coordinated
@@ -22643,6 +22775,260 @@ mod tests {
                 .unwrap(),
             NoteEvalAcquireOutcome::AuthorityChanged
         );
+    }
+
+    /// Moves `EVAL_PROJECT` to `MODULE` authority for `domain` and returns the
+    /// generation it holds.
+    fn activate_domain(store: &MemoryStore, domain: &str) -> u64 {
+        let preparing = store
+            .authority_begin_prepare("ctx", EVAL_PROJECT, domain)
+            .unwrap();
+        store
+            .authority_finish_prepare(
+                "ctx",
+                EVAL_PROJECT,
+                domain,
+                preparing.generation,
+                "hash",
+                "hash",
+                true,
+            )
+            .unwrap()
+            .generation
+    }
+
+    fn dreamer_acquire(
+        store: &MemoryStore,
+        acquisition_id: &str,
+        registration_generation: i64,
+        due_at_ms: i64,
+        now_ms: i64,
+    ) -> DreamerTaskAcquireOutcome {
+        store
+            .acquire_dreamer_task(
+                EVAL_PROJECT,
+                acquisition_id,
+                "sched",
+                0,
+                registration_generation,
+                1,
+                due_at_ms,
+                now_ms,
+            )
+            .unwrap()
+    }
+
+    /// A Dreamer task leases under the memories authority, not the notes
+    /// authority the note-evaluation kind uses.
+    #[test]
+    fn dreamer_task_lease_is_gated_by_memories_authority_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        assert_eq!(
+            dreamer_acquire(&store, "acq-1", 1, 100, 100),
+            LeaseAcquireOutcome::AuthorityChanged,
+            "notes authority alone does not admit a Dreamer task"
+        );
+        let memories_generation = activate_domain(&store, "memories");
+        let claim = match dreamer_acquire(&store, "acq-1", 1, 100, 100) {
+            LeaseAcquireOutcome::Claim { claim, .. } => claim,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(claim.authority_generation, memories_generation as i64);
+        assert_eq!(claim.note_id, 1, "the task id");
+        assert_eq!(claim.source_revision, 100, "the due instant");
+        assert!(claim.claim_id.starts_with("dtc:"));
+    }
+
+    /// A slot another live claim holds is `no_work`; the acquisition that
+    /// leased it replays its claim; expiry frees the task for a fresh lease and
+    /// turns the old claim's completion into a conflict.
+    #[test]
+    fn dreamer_task_lease_is_exclusive_until_completion_or_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        activate_domain(&store, "memories");
+        let claim = match dreamer_acquire(&store, "acq-1", 1, 100, 100) {
+            LeaseAcquireOutcome::Claim { claim, .. } => claim,
+            other => panic!("{other:?}"),
+        };
+        // The holder's own acquisition id replays the live claim and renews
+        // its lease from that instant.
+        let renewed = match dreamer_acquire(&store, "acq-1", 1, 100, 200) {
+            LeaseAcquireOutcome::Claim {
+                claim,
+                replayed: true,
+                ..
+            } => claim,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(renewed.claim_id, claim.claim_id);
+        let expired_at = 200 + DREAMER_TASK_LEASE_MS;
+        assert_eq!(renewed.expires_at, expired_at);
+        // A different scheduler instance asking for the same task gets no work
+        // while the lease is live, right up to the expiry instant.
+        let other = |acquisition_id: &str, now_ms: i64| {
+            store
+                .acquire_dreamer_task(EVAL_PROJECT, acquisition_id, "other", 0, 1, 1, 100, now_ms)
+                .unwrap()
+        };
+        assert_eq!(
+            other("other-1", expired_at - 1),
+            LeaseAcquireOutcome::NoWork {
+                replayed: false,
+                cycle_exhausted: false
+            }
+        );
+        assert_eq!(
+            other("other-1", expired_at - 1),
+            LeaseAcquireOutcome::NoWork {
+                replayed: true,
+                cycle_exhausted: false
+            },
+            "the same acquisition id replays its decision"
+        );
+        // At expiry the claim is collected: a fresh acquisition leases the task
+        // and the old claim can no longer complete.
+        let fresh = match other("other-2", expired_at) {
+            LeaseAcquireOutcome::Claim {
+                claim, replayed, ..
+            } => {
+                assert!(!replayed);
+                claim
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_ne!(fresh.claim_id, claim.claim_id);
+        assert_eq!(
+            store
+                .complete_dreamer_task(
+                    EVAL_PROJECT,
+                    &claim.claim_id,
+                    "comp-1",
+                    "sched",
+                    0,
+                    "{}",
+                    expired_at + 1,
+                )
+                .unwrap(),
+            LeaseCompleteOutcome::Conflict { kind: "expired" }
+        );
+        // The live claim completes once and replays its response after that.
+        assert!(matches!(
+            store
+                .complete_dreamer_task(
+                    EVAL_PROJECT,
+                    &fresh.claim_id,
+                    "comp-2",
+                    "other",
+                    0,
+                    r#"{"ok":true}"#,
+                    expired_at + 2,
+                )
+                .unwrap(),
+            LeaseCompleteOutcome::Applied { .. }
+        ));
+        assert!(matches!(
+            store
+                .complete_dreamer_task(
+                    EVAL_PROJECT,
+                    &fresh.claim_id,
+                    "comp-2",
+                    "other",
+                    0,
+                    r#"{"ok":true}"#,
+                    expired_at + 3,
+                )
+                .unwrap(),
+            LeaseCompleteOutcome::Replayed { .. }
+        ));
+        assert!(matches!(
+            other("other-2", expired_at + 4),
+            LeaseAcquireOutcome::Terminal { ref kind, .. } if kind == "applied"
+        ));
+        // Abandonment releases the task to the next acquisition.
+        let claim = match other("other-3", expired_at + 5) {
+            LeaseAcquireOutcome::Claim { claim, .. } => claim,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            store
+                .abandon_dreamer_task(EVAL_PROJECT, &claim.claim_id, "other", 0, expired_at + 6)
+                .unwrap(),
+            NoteEvalAbandonOutcome::Abandoned
+        );
+        assert!(matches!(
+            other("other-4", expired_at + 7),
+            LeaseAcquireOutcome::Claim {
+                replayed: false,
+                ..
+            }
+        ));
+    }
+
+    /// An authority transition fences only the lease kinds its domain governs:
+    /// a memories drain ends Dreamer claims and leaves note-evaluation claims
+    /// usable, and a notes drain does the reverse.
+    #[test]
+    fn authority_transitions_fence_leases_per_domain() {
+        for (drained, fenced_dreamer) in [("memories", true), ("notes", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = note_eval_store(dir.path());
+            activate_domain(&store, "memories");
+            eval_note(&store, "watch the build");
+            let note_claim = eval_claim(&store, "note-acq", 0, 10);
+            let dreamer_claim = match dreamer_acquire(&store, "acq-1", 1, 100, 10) {
+                LeaseAcquireOutcome::Claim { claim, .. } => claim,
+                other => panic!("{other:?}"),
+            };
+            store
+                .authority_begin_drain("ctx", EVAL_PROJECT, drained, "lease", 1_000_000, 20)
+                .unwrap();
+            let dreamer_completion = store
+                .complete_dreamer_task(
+                    EVAL_PROJECT,
+                    &dreamer_claim.claim_id,
+                    "comp-d",
+                    "sched",
+                    0,
+                    "{}",
+                    30,
+                )
+                .unwrap();
+            let note_renewal = store
+                .renew_note_evaluation_claim(EVAL_PROJECT, &note_claim.claim_id, "eval-a", 0, 1, 30)
+                .unwrap();
+            if fenced_dreamer {
+                assert_eq!(
+                    dreamer_completion,
+                    LeaseCompleteOutcome::Conflict {
+                        kind: "authority_changed"
+                    },
+                    "{drained}"
+                );
+                assert!(
+                    matches!(note_renewal, NoteEvalRenewOutcome::Renewed { .. }),
+                    "{drained}: {note_renewal:?}"
+                );
+                assert_eq!(
+                    dreamer_acquire(&store, "acq-2", 1, 100, 40),
+                    LeaseAcquireOutcome::AuthorityChanged,
+                    "{drained}"
+                );
+            } else {
+                assert!(
+                    matches!(dreamer_completion, LeaseCompleteOutcome::Applied { .. }),
+                    "{drained}: {dreamer_completion:?}"
+                );
+                assert!(
+                    matches!(
+                        note_renewal,
+                        NoteEvalRenewOutcome::TerminalReplay { ref kind, .. } if kind == "authority_changed"
+                    ),
+                    "{drained}: {note_renewal:?}"
+                );
+            }
+        }
     }
 
     #[test]

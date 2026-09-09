@@ -546,16 +546,17 @@ does not change unless `list_dreamer_attempts` holds no row at `g` other than
 `not_sent` rows, in which case the receipt moves to `g + 1` and exactly one
 attempt row is written under it before the answer. `always` because
 the receipt is the retry contract for every outcome that spent a billable call;
-the in-flight duplicate guard at the top of `handle_dreamer_run_task` answers
+the in-flight duplicate guard at the top of `run_dreamer_task` answers
 `dreamer_run_failed` with no receipt and no attempt, by design, and is outside
 this condition.
 Fault/timing angle: `begin_dreamer_receipt` runs before any producer is
-constructed (`lib.rs`, `handle_dreamer_run_task`), so a `Complete` receipt
-replays and an `in_progress` one goes to `resume_dreamer_receipt` (`lib.rs:9880`)
+constructed (`lib.rs`, `DreamerRuntime::run_dreamer_task`), so a `Complete`
+receipt replays and an `in_progress` one goes to `resume_dreamer_receipt`
+(`lib.rs:9886`)
 before any connect. The attempt row precedes the model call and the run handle
-is recorded right after `start` returns (`lib.rs:9700`); a handle write that does
+is recorded right after `start` returns (`lib.rs:9706`); a handle write that does
 not land settles the attempt and receipt `unknown` through
-`settle_dispatched_attempt_as_unknown` (`lib.rs:13661`), as does an attempt
+`settle_dispatched_attempt_as_unknown` (`lib.rs:13790`), as does an attempt
 terminal that cannot be recorded. On resume, the newest attempt at the open
 generation that is not `not_sent` is the dispatch marker: an ended one settles
 `unknown` through `complete_receipt_as_unknown`, keeping its own terminal; an
