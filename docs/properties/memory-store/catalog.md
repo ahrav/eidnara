@@ -1373,8 +1373,10 @@ Open questions:
 ## Group D: the claim intent ledger
 
 Every record in this group is invalidated at HEAD: the claim-intent ledger, its
-tables, and its tests are gone from `crates/memory-store` (see Provenance). The
-group is kept as the record of the source tree.
+tables, and its tests are gone from `crates/memory-store`. The group is kept as
+the record of the source tree; its `file:line` references are host-repository
+citations at `eb6da6109` (see Provenance) and name code that no longer exists
+here.
 
 Four records on the durable row that records a claim command staged *before* the host
 mutated `context.db`. An intent is keyed by `(producer, operation_key)` alone
@@ -1401,8 +1403,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - no test asserts that a control row appears after an authority
 transition. `tests/claim_intent_ledger.rs:178-179` and `:169-228` deliberately assert
 the *authority-row* fence instead, and the comment at `:11-15` shows the fixture was
@@ -1454,8 +1457,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:133-166` covers restart survival
 (`:148-151`), an incarnation binding mismatch (`:153-161`), and a digest conflict
 (`:162-165`). `format_epoch`, `authority_project`, and `authority_generation`
@@ -1503,8 +1507,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:85-131` walks staged to
 context-committed to acknowledged, and `:169-228` and `:346-401` reach
 terminal-rejected. No test attempts an illegal transition out of a terminal state, and
@@ -1555,8 +1560,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:337-401` proves a staged replay is
 refused once the authority is draining, which is the fence, not the effect count.
 Nothing in this crate observes the context effect, because the effect lands in a
@@ -1957,8 +1963,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - nothing in `context-core` asserts transition legality, because
 `context-core` does not model it. `crates/memory-store/tests/claim_intent_ledger.rs` exercises
 acknowledgements, and Group D's `intent-terminal-state-is-entered-at-most-once` is where
