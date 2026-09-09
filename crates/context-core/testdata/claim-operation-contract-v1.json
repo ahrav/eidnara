@@ -5,7 +5,6 @@
     "digestProtocols": {
         "request": "eidnara-claim-request-v1",
         "mutationToken": "eidnara-claim-mutation-token-v1",
-        "snapshotVector": "eidnara-claim-snapshot-vector-v1",
         "applicabilityHeads": "eidnara-claim-applicability-heads-v1",
         "policyHeads": "eidnara-claim-policy-heads-v1"
     },
@@ -201,25 +200,6 @@
             },
             "canonical": "{\"approvalCount\":1,\"artifactCount\":1,\"artifactEventCount\":1,\"dispositionCount\":2,\"maturitySeq\":3,\"verificationCount\":4}",
             "digest": "4af4eb0067c5d38824222a9278114987b26f443cd1f67a8565ad951d502c3f8d"
-        }
-    ],
-    "snapshotVectors": [
-        {
-            "vector": {
-                "vectorVersion": 1,
-                "databaseIncarnationId": "00112233445566778899aabbccddeeff",
-                "workspaceEpoch": "ws-epoch-7",
-                "projectGenerations": {
-                    "1": 12,
-                    "2": 3
-                },
-                "policyGenerations": {
-                    "1": 12,
-                    "2": 4
-                }
-            },
-            "canonical": "{\"databaseIncarnationId\":\"00112233445566778899aabbccddeeff\",\"policyGenerations\":{\"1\":12,\"2\":4},\"projectGenerations\":{\"1\":12,\"2\":3},\"vectorVersion\":1,\"workspaceEpoch\":\"ws-epoch-7\"}",
-            "digest": "99493e5c7146a7bb2cd8d97207e743d6c14800be4af665ccd8655cc8bd46e651"
         }
     ],
     "results": {
