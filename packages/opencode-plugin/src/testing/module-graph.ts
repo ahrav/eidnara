@@ -276,14 +276,18 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
     // the literal-shaped body is what a `/^claim\.intent\.stage$/.test(op)` dispatch compares.
     const regexBody = (text: string): string => {
         const body = text.slice(1, text.lastIndexOf("/"));
-        return body
-            .replace(/^\^/, "")
-            .replace(/\$$/, "")
-            .replace(
-                /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g,
-                (_, x, u, b) => String.fromCodePoint(Number.parseInt(x ?? u ?? b, 16)),
-            )
-            .replace(/\\(.)/g, "$1");
+        return (
+            body
+                .replace(/^\^/, "")
+                .replace(/\$$/, "")
+                // `[.]` matches exactly one character; a wider class stays as written.
+                .replace(/\[([^\]\\^])\]/g, "$1")
+                .replace(
+                    /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g,
+                    (_, x, u, b) => String.fromCodePoint(Number.parseInt(x ?? u ?? b, 16)),
+                )
+                .replace(/\\(.)/g, "$1")
+        );
     };
     const lineOf = (node: ts.Node) =>
         file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
@@ -429,6 +433,13 @@ export function databaseUses(
             factories.has(node.initializer.getText(file).split(".").pop() ?? "")
         ) {
             factories.add(node.name.text);
+        }
+        // `const { createRequire: make } = mod;` destructures it under another name.
+        if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
+            const property = node.propertyName ?? node.name;
+            if (ts.isIdentifier(property) && factories.has(property.text)) {
+                factories.add(node.name.text);
+            }
         }
         ts.forEachChild(node, collectFactories);
     };

@@ -28949,6 +28949,7 @@ mod tests {
 
         fn child_path(
             declaring: &std::path::Path,
+            is_root: bool,
             item: &syn::ItemMod,
         ) -> Option<std::path::PathBuf> {
             let dir = declaring.parent().expect("module file has a directory");
@@ -28972,9 +28973,9 @@ mod tests {
                 return Some(path);
             }
             let stem = declaring.file_stem().and_then(|stem| stem.to_str())?;
-            let base = if matches!(stem, "mod" | "lib" | "main")
-                || dir.file_name().is_some_and(|name| name == "bin")
-            {
+            // A crate root and a `mod.rs` own their directory; any other file owns the
+            // directory named after it.
+            let base = if is_root || stem == "mod" {
                 dir.to_path_buf()
             } else {
                 dir.join(stem)
@@ -28994,6 +28995,7 @@ mod tests {
         /// Files reachable only through a test-gated declaration, classified without being
         /// scanned, so a fixture module's own children are not reported as orphans.
         fn walk_test_only(path: &std::path::PathBuf, tree: &mut ModuleTree) {
+            let is_root = false;
             if tree.test_only.contains(path) {
                 return;
             }
@@ -29004,14 +29006,14 @@ mod tests {
             for item in &file.items {
                 if let syn::Item::Mod(module) = item
                     && module.content.is_none()
-                    && let Some(child) = child_path(path, module)
+                    && let Some(child) = child_path(path, is_root, module)
                 {
                     walk_test_only(&child, tree);
                 }
             }
         }
 
-        fn walk(path: &std::path::PathBuf, tree: &mut ModuleTree) {
+        fn walk(path: &std::path::PathBuf, is_root: bool, tree: &mut ModuleTree) {
             if tree.production.iter().any(|(seen, _)| seen == path) {
                 return;
             }
@@ -29026,7 +29028,7 @@ mod tests {
                     _ => None,
                 })
                 .map(|module| {
-                    let child = child_path(path, module).unwrap_or_else(|| {
+                    let child = child_path(path, is_root, module).unwrap_or_else(|| {
                         panic!(
                             "{}: cannot resolve `{}`",
                             path.display(),
@@ -29041,7 +29043,7 @@ mod tests {
                 if test_only {
                     walk_test_only(&child, tree);
                 } else {
-                    walk(&child, tree);
+                    walk(&child, false, tree);
                 }
             }
         }
@@ -29051,7 +29053,7 @@ mod tests {
             test_only: Vec::new(),
         };
         for root in roots {
-            walk(root, &mut tree);
+            walk(root, true, &mut tree);
         }
         tree
     }
@@ -29318,9 +29320,11 @@ mod tests {
 
             fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
                 if COMPARISON_METHODS.contains(&call.method.to_string().as_str()) {
+                    reject_unevaluable_macros(&call.receiver);
                     self.compared
                         .extend(compared_strings(&call.receiver, &self.consts));
                     for arg in &call.args {
+                        reject_unevaluable_macros(arg);
                         self.compared.extend(compared_strings(arg, &self.consts));
                     }
                 }
@@ -29360,10 +29364,17 @@ mod tests {
                             continue;
                         }
                         let ident = variant.ident.to_string();
-                        self.compared.push(match &rule {
-                            Some(rule) => serde_rename(rule, &ident),
-                            None => ident,
-                        });
+                        match rule.as_deref() {
+                            Some(rule @ ("camelCase" | "PascalCase")) => {
+                                // These rules keep the identifier's word boundaries, so the
+                                // wire value is classified by the words serde would split
+                                // it into under snake_case as well as by its exact text.
+                                self.compared.push(serde_rename(rule, &ident));
+                                self.compared.push(camel_words(&ident));
+                            }
+                            Some(rule) => self.compared.push(serde_rename(rule, &ident)),
+                            None => self.compared.push(ident),
+                        }
                     }
                 }
                 syn::visit::visit_item_enum(self, item);
