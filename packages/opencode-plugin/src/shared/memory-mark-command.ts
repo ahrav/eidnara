@@ -177,12 +177,13 @@ export function formatMemoryMarkOutcome(outcome: MemoryMarkOutcome, args: Memory
     const title = "## Eidnara Memory";
     switch (outcome.kind) {
         case "needs_confirmation":
+            // The re-run line comes first: OpenCode shows this reply as a toast that keeps only its opening characters, and the surface list below can run past that cut. commentlint: allow(JUDGE)
             return [
                 `${title} — Confirmation Needed`,
                 "",
-                formatMemoryMarkConfirmation(outcome.preview),
-                "",
                 `Nothing was written. Re-run with ${MEMORY_MARK_CONFIRM_FLAG} to apply: \`/${MEMORY_MARK_COMMAND} ${args.event} ${args.objectId} ${MEMORY_MARK_CONFIRM_FLAG}\``,
+                "",
+                formatMemoryMarkConfirmation(outcome.preview),
             ].join("\n");
         case "declined":
             return `${title} — Not Applied\n\n${args.event} on ${args.objectId} was declined; nothing was written.`;
