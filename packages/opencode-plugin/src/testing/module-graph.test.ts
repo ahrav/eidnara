@@ -432,6 +432,10 @@ describe("databaseUses", () => {
                     'const { ["createRequire"]: computed } = mod;',
                     "const viaComputed = computed(import.meta.url);",
                     'const bunSql = viaComputed("bun:sqlite");',
+                    "const run = load;",
+                    'const ran = run("bun:sqlite");',
+                    "const { require: unrelated } = someObject;",
+                    'const notALoad = unrelated("bun:sqlite");',
                     "",
                 ].join("\n"),
             ).escapes,
@@ -443,6 +447,7 @@ describe("databaseUses", () => {
             'const better = local("better-sqlite3");',
             'const nodeSql = viaPick("node:sqlite");',
             'const bunSql = viaComputed("bun:sqlite");',
+            'const ran = run("bun:sqlite");',
         ]);
     });
 

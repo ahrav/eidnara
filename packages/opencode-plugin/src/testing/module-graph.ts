@@ -459,25 +459,25 @@ export function databaseUses(
         }
         ts.forEachChild(node, collectFactories);
     };
-    // Aliases can be declared after their use, so repeat until the set stops growing.
-    for (let size = -1; size !== factories.size; ) {
-        size = factories.size;
-        collectFactories(file);
-    }
     const loaders = new Set<string>(["require"]);
     const collectLoaders = (node: ts.Node): void => {
-        if (
-            ts.isVariableDeclaration(node) &&
-            ts.isIdentifier(node.name) &&
-            node.initializer &&
-            ts.isCallExpression(node.initializer)
-        ) {
-            const factory = node.initializer.expression.getText(file).split(".").pop() ?? "";
-            if (factories.has(factory)) loaders.add(node.name.text);
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+            // `const load = createRequire(...)` makes a loader; `const run = load;` aliases one.
+            if (ts.isCallExpression(node.initializer)) {
+                const factory = node.initializer.expression.getText(file).split(".").pop() ?? "";
+                if (factories.has(factory)) loaders.add(node.name.text);
+            } else if (ts.isIdentifier(node.initializer) && loaders.has(node.initializer.text)) {
+                loaders.add(node.name.text);
+            }
         }
         ts.forEachChild(node, collectLoaders);
     };
-    collectLoaders(file);
+    // Aliases can be declared after their use, so repeat until neither set grows.
+    for (let size = -1; size !== factories.size + loaders.size; ) {
+        size = factories.size + loaders.size;
+        collectFactories(file);
+        collectLoaders(file);
+    }
 
     const visit = (node: ts.Node): void => {
         if (
