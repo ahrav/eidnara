@@ -322,9 +322,25 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
     // the literal-shaped body is what a `/^claim\.intent\.stage$/.test(op)` dispatch compares.
     // A private-use marker prevents expansion from treating escaped `|`, `(`, or `[` as syntax.
     const regexTexts = (body: string): string[] => {
-        const reduced = body
+        // A bare `.` or a shorthand class outside a bracket class matches any character of its
+        // kind, so it becomes an explicit class over the audited alphabet.
+        const wordChars = [...WILDCARD_ALPHABET].filter((ch) => /[\w]/.test(ch)).join("");
+        const nonWordChars = [...WILDCARD_ALPHABET].filter((ch) => !/[\w]/.test(ch)).join("");
+        const shorthand: Record<string, string> = {
+            ".": WILDCARD_ALPHABET,
+            "\\w": wordChars,
+            "\\W": nonWordChars,
+            "\\S": WILDCARD_ALPHABET,
+            "\\D": WILDCARD_ALPHABET,
+        };
+        const withWildcards = body
             .replace(/^\^/, "")
             .replace(/\$$/, "")
+            .replace(/\\.|\[(?:\\.|[^\]])*\]|\./g, (token) => {
+                const members = shorthand[token];
+                return members === undefined || members === "" ? token : `[${members}]`;
+            });
+        const reduced = withWildcards
             .replace(
                 /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g,
                 (_, x, u, b) => `\uE000${String.fromCodePoint(Number.parseInt(x ?? u ?? b, 16))}`,
@@ -492,7 +508,9 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             node.arguments?.[0] !== undefined
         ) {
             const bodies = leafTexts(node.arguments[0]) ?? [];
-            const flags = node.arguments[1] ? (leafTexts(node.arguments[1]) ?? [""]) : [""];
+            // Flags the folder cannot evaluate may include `i`, so the body is audited as if
+            // they did.
+            const flags = node.arguments[1] ? (leafTexts(node.arguments[1]) ?? ["i"]) : [""];
             for (const body of bodies) for (const flag of flags) pushRegex(node, body, flag);
         }
         if (
@@ -508,17 +526,28 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
     // until no binding gains a value. A shadowing declaration that reads its own name
     // (`const p = p + "x"`) would grow forever, so passes are bounded.
     let bindingValues = 0;
+    const bind = (name: ts.Identifier, value: ts.Expression): void => {
+        const known = bindings.get(name.text) ?? [];
+        const merged = [...new Set([...known, ...(leafTexts(value) ?? [])])];
+        if (merged.length > 1024) {
+            throw new RangeError(`binding ${name.text} has more than 1024 values`);
+        }
+        if (merged.length > known.length) {
+            bindings.set(name.text, merged);
+            bindingValues += merged.length - known.length;
+        }
+    };
+    // `let prefix; prefix = "claim";` binds through an assignment rather than an initializer.
     const collectBindings = (node: ts.Node): void => {
         if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-            const known = bindings.get(node.name.text) ?? [];
-            const merged = [...new Set([...known, ...(leafTexts(node.initializer) ?? [])])];
-            if (merged.length > 1024) {
-                throw new RangeError(`binding ${node.name.text} has more than 1024 values`);
-            }
-            if (merged.length > known.length) {
-                bindings.set(node.name.text, merged);
-                bindingValues += merged.length - known.length;
-            }
+            bind(node.name, node.initializer);
+        }
+        if (
+            ts.isBinaryExpression(node) &&
+            node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isIdentifier(node.left)
+        ) {
+            bind(node.left, node.right);
         }
         ts.forEachChild(node, collectBindings);
     };
@@ -746,11 +775,15 @@ export function databaseUses(
         }
         if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
             const property = node.propertyName ?? node.name;
+            // A computed key that is not a plain literal may spell `constructor`.
             const key = ts.isIdentifier(property)
                 ? property.text
                 : ts.isStringLiteralLike(property)
                   ? property.text
-                  : undefined;
+                  : ts.isComputedPropertyName(property) &&
+                      ts.isStringLiteralLike(property.expression)
+                    ? property.expression.text
+                    : "constructor";
             if (key === "constructor") constructorAliases.add(node.name.text);
         }
         ts.forEachChild(node, collectConstructorAliases);

@@ -175,16 +175,25 @@ pub fn names_absent_subsystem(name: &str, words: &[&str]) -> bool {
         .any(|segment| words.contains(&segment.to_ascii_lowercase().as_str()))
 }
 
-/// A lowercase-starting segment splits at uppercase boundaries; a PascalCase proper name such as
-/// `GitHub` remains whole.
+/// A lowercase-starting segment splits where a lowercase letter meets an uppercase one and
+/// where an uppercase run ends before a lowercase letter, so `renderMURALNow` yields `render`,
+/// `MURAL`, and `Now`; a PascalCase proper name such as `GitHub` remains whole.
 fn camel_segments(segment: &str) -> Vec<&str> {
     let mut parts = vec![segment];
     if !segment.starts_with(|ch: char| ch.is_ascii_lowercase()) {
         return parts;
     }
+    let chars: Vec<(usize, char)> = segment.char_indices().collect();
     let mut start = 0;
-    for (index, ch) in segment.char_indices() {
-        if index > 0 && ch.is_ascii_uppercase() {
+    for window in 1..chars.len() {
+        let (index, ch) = chars[window];
+        let previous = chars[window - 1].1;
+        let next_lower = chars
+            .get(window + 1)
+            .is_some_and(|(_, next)| next.is_ascii_lowercase());
+        let boundary = ch.is_ascii_uppercase()
+            && (previous.is_ascii_lowercase() || (previous.is_ascii_uppercase() && next_lower));
+        if boundary {
             parts.push(&segment[start..index]);
             start = index;
         }

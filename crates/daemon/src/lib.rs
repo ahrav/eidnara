@@ -18845,6 +18845,17 @@ mod tests {
         for (label, mural) in refusals {
             oc_request["mural"] = mural;
             let refused = call_transform_request_on_channel(&handler, 7, oc_request.clone()).await;
+            // A refused mural is ignored, not an error: the transform still succeeds.
+            assert!(
+                matches!(refused["action"].as_str(), Some("HARD" | "SOFT" | "SOFT+")),
+                "{label}: {refused}"
+            );
+            assert!(
+                refused["messages"]
+                    .as_array()
+                    .is_some_and(|messages| !messages.is_empty()),
+                "{label}: {refused}"
+            );
             assert!(
                 store
                     .load_project_mural_artifact(project)
@@ -29167,11 +29178,14 @@ mod tests {
                 continue;
             }
             if section == "package" {
-                if line.starts_with("autobins") && line.ends_with("false") {
-                    autobins = false;
-                }
-                if line.starts_with("autolib") && line.ends_with("false") {
-                    autolib = false;
+                // `autobins = false # comment` still turns discovery off.
+                if let Some((key, value)) = line.split_once('=') {
+                    let value = value.split('#').next().unwrap_or("").trim();
+                    match key.trim() {
+                        "autobins" if value == "false" => autobins = false,
+                        "autolib" if value == "false" => autolib = false,
+                        _ => {}
+                    }
                 }
                 continue;
             }
@@ -29245,6 +29259,24 @@ mod tests {
             }
         }
 
+        /// A lexically normalized path, so `src/outer/../routes.rs` and `src/routes.rs` compare
+        /// equal when the orphan pass lists the file under its plain name.
+        fn normalized(path: std::path::PathBuf) -> std::path::PathBuf {
+            let mut out = std::path::PathBuf::new();
+            for component in path.components() {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        if !out.pop() {
+                            out.push(component);
+                        }
+                    }
+                    other => out.push(other),
+                }
+            }
+            out
+        }
+
         /// rustc resolves `#[path]` relative to the declaring file at file level and relative
         /// to the inline module directory inside an inline module block; `path_base` selects the
         /// applicable directory.
@@ -29266,7 +29298,7 @@ mod tests {
                 else {
                     return None;
                 };
-                Some(path_base.join(path.value()))
+                Some(normalized(path_base.join(path.value())))
             })
         }
 
@@ -29487,7 +29519,19 @@ mod tests {
                             );
                         };
                         let dir = self.declaring.parent().expect("file has a directory");
-                        self.found.push((dir.join(literal.value()), self.test_only));
+                        self.found
+                            .push((normalized(dir.join(literal.value())), self.test_only));
+                    }
+                    // A local macro whose body invokes `include!` splices a file the walker
+                    // cannot see through the invocation, so the definition fails the audit.
+                    if mac.path.is_ident("macro_rules") {
+                        assert!(
+                            !tokens_invoke_include(mac.tokens.clone()),
+                            "{}: `{}` defines a macro that invokes include!; the audit cannot \
+                             follow it",
+                            self.declaring.display(),
+                            mac.to_token_stream()
+                        );
                     }
                     syn::visit::visit_macro(self, mac);
                 }
@@ -29552,6 +29596,30 @@ mod tests {
     /// spelling the audit never sees, and so could a macro nested inside one of these, so both
     /// fail the test.
     const VISIBLE_MACROS: [&str; 6] = ["concat", "stringify", "format", "matches", "json", "vec"];
+
+    /// Whether a token stream contains an `include!` invocation at any depth.
+    fn tokens_invoke_include(tokens: proc_macro2::TokenStream) -> bool {
+        let mut saw_include = false;
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Group(group) => {
+                    if tokens_invoke_include(group.stream()) {
+                        return true;
+                    }
+                    saw_include = false;
+                }
+                proc_macro2::TokenTree::Ident(ident) => saw_include = ident == "include",
+                proc_macro2::TokenTree::Punct(punct) => {
+                    if saw_include && punct.as_char() == '!' {
+                        return true;
+                    }
+                    saw_include = false;
+                }
+                proc_macro2::TokenTree::Literal(_) => saw_include = false,
+            }
+        }
+        false
+    }
 
     fn nests_a_macro(tokens: proc_macro2::TokenStream) -> bool {
         let mut previous_ident = false;
@@ -29797,20 +29865,61 @@ mod tests {
             rest
         }
 
+        /// A bare `.` or a shorthand class outside a bracket class matches any character of
+        /// its kind, so it becomes an explicit class over the audited alphabet; a shorthand
+        /// that admits no alphabet character stays as written.
         fn reduce(pattern: &str) -> String {
             let mut text = strip_flag_groups(pattern)
                 .trim_start_matches('^')
                 .trim_end_matches('$')
                 .to_string();
+            let word: String = WILDCARD_ALPHABET
+                .chars()
+                .filter(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            let non_word: String = WILDCARD_ALPHABET
+                .chars()
+                .filter(|ch| !(ch.is_alphanumeric() || *ch == '_'))
+                .collect();
             let mut out = String::new();
+            let mut in_class = false;
             let mut chars = text.drain(..).peekable();
             while let Some(ch) = chars.next() {
                 match ch {
                     '\\' => {
-                        if let Some(escaped) = chars.next() {
-                            out.push('\u{0}');
-                            out.push(escaped);
+                        let Some(escaped) = chars.next() else {
+                            continue;
+                        };
+                        let shorthand = match escaped {
+                            'w' if !in_class => Some(word.as_str()),
+                            'W' if !in_class => Some(non_word.as_str()),
+                            'S' | 'D' if !in_class => Some(WILDCARD_ALPHABET),
+                            _ => None,
+                        };
+                        match shorthand {
+                            Some(members) if !members.is_empty() => {
+                                out.push('[');
+                                out.push_str(members);
+                                out.push(']');
+                            }
+                            _ => {
+                                out.push('\u{0}');
+                                out.push(escaped);
+                            }
                         }
+                    }
+                    '[' if !in_class => {
+                        in_class = true;
+                        out.push(ch);
+                    }
+                    ']' if in_class => {
+                        in_class = false;
+                        out.push(ch);
+                    }
+                    '.' if !in_class => {
+                        out.push('[');
+                        out.push_str(WILDCARD_ALPHABET);
+                        out.push(']');
                     }
                     other => out.push(other),
                 }
@@ -30605,6 +30714,9 @@ mod tests {
         assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
         assert!(regex_texts(r"^[^x]ural[.]render$").contains(&"mural.render".to_string()));
         assert!(!regex_texts(r"^[^m]ural[.]render$").contains(&"mural.render".to_string()));
+        assert!(regex_texts(r"^mu.al[.]render$").contains(&"mural.render".to_string()));
+        assert!(regex_texts(r"^mu\wal\.render$").contains(&"mural.render".to_string()));
+        assert_eq!(regex_texts(r"^\d+$"), ["d+"]);
         assert!(
             std::panic::catch_unwind(|| regex_texts(r"^[^x][^x][^x][^x][^x][.]render$")).is_err(),
             "a quantifier-free pattern past the class budget must fail the audit"
@@ -30667,7 +30779,14 @@ mod tests {
                 "{bare}"
             );
         }
-        for camel in ["muralRender", "embedQuery", "gitIngest", "renderMural"] {
+        for camel in [
+            "muralRender",
+            "embedQuery",
+            "gitIngest",
+            "renderMural",
+            "renderMURAL",
+            "renderMURALNow",
+        ] {
             assert!(
                 test_support::names_absent_subsystem(camel, BARE_WORDS),
                 "{camel}"

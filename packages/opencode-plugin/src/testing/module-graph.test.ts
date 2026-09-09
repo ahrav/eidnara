@@ -426,6 +426,8 @@ describe("databaseUses", () => {
                     "const Chained = Ctor;",
                     'const Folded = (handle as any)["constr" + "uctor"];',
                     "const Keyed = handle[key];",
+                    'const { ["constr" + "uctor"]: Computed } = handle;',
+                    "const viaComputed = new Computed(productPath);",
                     "const viaFolded = new Folded(productPath);",
                     "const viaKeyed = new Keyed(productPath);",
                     "const viaCtor = new Ctor(productPath);",
@@ -440,6 +442,7 @@ describe("databaseUses", () => {
             ).escapes,
         ).toEqual([
             "const again = new handle.constructor(productPath);",
+            "const viaComputed = new Computed(productPath);",
             "const viaFolded = new Folded(productPath);",
             "const viaKeyed = new Keyed(productPath);",
             "const viaCtor = new Ctor(productPath);",
@@ -892,6 +895,30 @@ describe("operationLiteralHits", () => {
         expect(negated).toContain("claim.intent.stage");
         expect(negated).not.toContain("claim");
         expect(negated.filter((value) => value.endsWith("laim")).length).toBeGreaterThan(1);
+        const wild = literalStrings(
+            parseSource(
+                "const dot = /^cl.im[.]intent$/; const word = /^cl\\wim\\.read$/; const digits = /^\\d+$/;",
+                "m.ts",
+            ),
+        ).map((entry) => entry.value);
+        expect(wild).toContain("claim.intent");
+        expect(wild).toContain("claim.read");
+        expect(wild).toContain("d+");
+        expect(
+            literalStrings(
+                parseSource(
+                    'const dyn = new RegExp("^STORE[.]DB$", runtimeFlags); let late; late = "claim"; const op = late + ".intent.stage";',
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual([
+            "STORE.DB",
+            "store.db",
+            "^STORE[.]DB$",
+            "claim",
+            "claim.intent.stage",
+            ".intent.stage",
+        ]);
         expect(() =>
             literalStrings(parseSource("const wide = /^[^x][^x][^x][^x][^x][.]intent$/;", "m.ts")),
         ).toThrow(RangeError);
