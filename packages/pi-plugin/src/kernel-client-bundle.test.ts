@@ -18,7 +18,9 @@ const CLIENT_ENTRY = resolve(
 const PI_ENTRY = resolve(import.meta.dir, "kernel-client-pi.ts");
 const CLAIM_STORAGE_PATTERN = /storage-claim/;
 /** Reads the harness's own `opencode.db` read-only; the shared plugin names its single writer. */
-const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"];
+const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"].map((reader) =>
+    resolve(import.meta.dir, "../../opencode-plugin/src", reader),
+);
 /** A binding left external (`node:sqlite`, `bun:sqlite`, `better-sqlite3`) or a source module under a `sqlite` path segment. */
 const SQLITE_PATTERN =
     /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|\/sqlite(?:\.|-|\/)/;
@@ -103,7 +105,7 @@ describe("Pi kernel-client bundle reachability", () => {
         const sources = new Set<string>();
         for (const graph of Object.values(buildEntryGraphs())) {
             for (const binder of databaseBinders(graph)) {
-                expect(HARNESS_DATABASE_READERS).toContain(binder.replace(/^.*\/src\//, ""));
+                expect(HARNESS_DATABASE_READERS).toContain(resolve(PACKAGE_ROOT, binder));
             }
             for (const input of graph.inputs) {
                 if (!input.includes("/node_modules/")) sources.add(resolve(PACKAGE_ROOT, input));
