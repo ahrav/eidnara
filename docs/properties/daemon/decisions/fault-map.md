@@ -8,17 +8,13 @@ active; liveness checks need a bounded fault-free window; rare branches need
 deterministic injection to be reachable at all; and coverage checks assert
 independent preconditions, never the violation.
 
-Provenance as in [existing-checks.md](existing-checks.md). `HEAD` is `e447c927`.
-The one CI step that matters moved across `76cd6f41..HEAD`:
-`cargo test -p daemon --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
-`ci.yml:172` at `HEAD`, and the build-only step above it is `:165` and `:169`
-respectively. All four were verified directly and both pairs are cited wherever
-the steps appear.
-
-The budget-range and classified-tier rows, the F2 input guidance, and the
-ignored-key coverage marker are verified against the working tree based on
-`735f58dcb1002505c7aeb8a96505a4d210c4782b` on 2026-09-09. Other entries retain
-the historical provenance above.
+Config-derived rows, config coverage markers, and CI execution facts use
+`74044960ee91641dec95c8552f15282844a18b13`, as does
+[existing-checks.md](existing-checks.md). The source catalog's `e447c927` and
+`76cd6f41` references describe its historical tree, not this revision. Unrelated
+codec and decision-unit assessments retain that source-catalog provenance; this
+config refresh does not present them as newly verified findings. Historical
+evaluation is separated in [portfolio-evaluation.md](portfolio-evaluation.md#historical-evaluation).
 
 Five framing points specific to this part.
 
@@ -34,11 +30,11 @@ pause, no second process to spawn, no store to corrupt, and no two-pass sequence
 to arrange. Contrast 4e, where eleven of 24 records needed seeded frozen units and
 three needed a second render.
 
-**Second, the binding constraint is therefore not a fault. It is `F0`.** None of
-the 192 in-crate checks runs in CI, and unlike 4b and 4d there is not even an
-integration binary that reaches this scope: all seven have zero 4f content. Every
-capability below is cheap, and every one of them adds tests to a suite no
-automation executes.
+**Test execution is available.** The workspace nextest job includes daemon library
+and integration targets (`.github/workflows/ci.yml:413-417`). The user-budget
+reader integration check reaches the config loader and canonical-memory reader
+(`crates/daemon/tests/transform_canonical_memory.rs:448-539`). The source-catalog
+`F0` blocker is retired; execution does not establish test adequacy.
 
 **Third, one capability is a build flag rather than a fault, and in this part it
 buys less than it did in 4e.** All three 4f assertion sites are `debug_assert!`
@@ -50,15 +46,13 @@ that `:252`'s violation is silent because `take` at `:265` saturates, and that
 `:251`'s is not silent because the slice at `:258` panics on the same condition in
 every profile.
 
-**Fourth, the sharpest single item on this list is free, is documented, and is not
-a fault at all.** `CONFIGURATION.md:763` (source-catalog path, not present at HEAD) states that with `smart_drops` off "the
-messages sent to the model are byte-identical to the age-based-only behavior" and
-that "the entire feature is inert". The flag is one boolean, defaulting `false` at
-`config.rs:135` and set from either tier at `:467-469` and `:541-543`. That is a
-whole-pipeline byte-equality oracle obtainable by flipping one field and running
-twice, and **nothing takes it** (`lens-c1-claims-and-config.md:488-498`, register
-entry C1-30). It is ranked second below only because `F0` governs whether any test
-runs at all.
+**The `smart_drops` differential is a historical investigation lead, not a CI
+blocker.** The flag defaults to `false` (`config.rs:128`) and is project-allowed
+(`config.rs:673-681`), with the shared parser at `config.rs:890-894`. The source
+catalog proposed comparing disabled-feature output against an age-only baseline.
+A valid comparison needs that baseline and a workload, not merely two config
+resolutions. This refresh adds no property and makes no whole-pipeline adequacy
+claim from the flag's parser.
 
 **Fifth, this part has no `sometimes` and no liveness record, which changes what
 the coverage-check section has to do.** The 27 records are 26 `safety` and one
@@ -76,26 +70,28 @@ this part the defect is almost always easier to name than its precondition.
 
 ## Fault classes required
 
-`F0` is listed first because it is not a fault. It is a workflow change, and it
-governs what every other class on this list can prove.
+`F0` is an available execution capability, not a fault or an outstanding workflow
+change. Execution and oracle adequacy are separate questions.
 
 | Class | Description | Available today |
 | --- | --- | --- |
-| **F0** test execution in CI | Any workflow job that builds and runs `daemon --lib` | **No.** Verified across all five files in `.github/workflows/`. The only `daemon` test invocation is `cargo test -p daemon --test lifecycle_cli` (`ci.yml:168` at `76cd6f41`, `:172` at `HEAD`), which selects one integration binary and does not build `--lib`, so none of the 192 in-crate checks compiles. The step above it is build-only (`:165` / `:169`). There is no `--lib`, no `nextest -p daemon`, and no `--workspace` Rust test job. `scripts/test-rust.sh` (`cargo nextest run --workspace`) is wired into root `package.json` as `test:rust` and no workflow calls it. There is no integration binary to fall back on: all seven under `crates/daemon/tests/` have zero 4f content, and `release_contract_conformance.rs` reaches no 4f file even if it ran. Cost: a workflow change and no new infrastructure |
+| **F0** test execution in CI | A workspace job that runs daemon library and integration targets | **Yes.** `.github/workflows/ci.yml:413-417` runs workspace nextest with all targets and features across two partitions. No CI change is required for the config checks. The budget-reader integration check is listed in [existing-checks.md](existing-checks.md#config-reader-integration-check) with status `unaudited` |
 | **F1** arbitrary input to each decoder | A `Vec<serde_json::Value>` of arbitrary shape handed to `decode_opencode` or `decode_pi` | **Yes, and it needs no fault. This is the cheapest capability in the part.** Both decoders return `DecodedHarnessMessages` with **no error type at all** (`codec/opencode.rs:23-25`, `codec/pi.rs:19-21`), so totality is free and the interesting question inverts from "does it reject" to "what does it silently accept". An arbitrary `Vec<Value>` is the whole enabling state; the interesting members are a bare string or number as an array element, a `parts` value that is an object rather than an array, and a part whose `type` is absent. The only decoder inputs anywhere today are the two goldens' single cases plus well-formed hand-built fixtures across `codec/opencode.rs:1322-2186` (17 tests) and `codec/pi.rs:1078-1499` (14 tests) |
 | **F2** configuration values at and beyond documented bounds | A user-tier value exercises parsing and range behavior; a project-tier value exercises only keys permitted by the tier policy | **Yes.** Resolve fixtures through `merge_tiers_with_warnings` (`config.rs:710-755`) and inspect the effective config and warning vector. In particular, supply `memory.injection_budget_tokens` above `20000` or below `500` in the user tier with no project tier: its parser applies only `.max(1.0)` (`:847-851`). A project value is rejected before parsing (`:729-732`) and cannot exercise this range property. The Group A rows specify the per-property enabling state |
-| **F3** a malformed configuration file | A `eidnara.jsonc` whose syntax error survives `strip_jsonc`, for example an unterminated string | **Yes, and it needs no fault beyond writing one bad file.** The path is `fs::read_to_string` succeeding and `serde_json::from_str` failing, which the resolution absorbs into defaults. `config.rs:1191-1229` already covers the mtime cache, so the fixture scaffolding for writing a config file and resolving it exists; only the malformed content is new. The oracle is the presence of a warning naming the path, and the observable consequence is a `no_models` no-fire reason that points at model configuration rather than at a parse failure |
+| **F3** a malformed configuration file | An `eidnara.jsonc` whose syntax error survives `strip_jsonc`, for example an unterminated string | **Yes, with an existing check.** `read_tier_cached` records parse/read warnings (`config.rs:362-393`), and `effective_with_warnings` returns them (`config.rs:262-282`). The malformed/unreadable/missing fixture at `config.rs:2133-2182` asserts path-specific warnings, repeated warnings, and same-mtime repair; status `unaudited`. The silent-failure defect premise is invalidated |
 | **F4** building and running in release | The same suite compiled with `debug_assertions` off | **Yes, and it is a build flag rather than a fault, but it buys less here than in 4e.** `cargo test -p daemon --lib --release` drops all three `debug_assert` sites (`codec/opencode.rs:251`, `:252`, `:466`) and stops compiling the one test gated `#[cfg(debug_assertions)]` at `:2077`. **Verified: no `cfg(not(debug_assertions))` exists anywhere in 4f**, so unlike 4e there is no release arm with distinct behaviour to execute. What `F4` establishes is three absences: `:466` enforces nothing while `duplicate_tool_use_locations` at `:465` still runs and its result is discarded; `:252`'s violation is silent because `take` at `:265` saturates; and `:251`'s violation is **not** silent, because `&messages[replace_from..]` at `:258` panics on the same condition in every profile. Cost: one extra invocation |
 | **F5** harness input carrying unknown or omitted types | One session entry or message part whose `type` the decoder does not recognise, or a required class the goldens omit | **Yes, and it needs no fault.** One hand-built element. Pi: an entry with an unrecognised `type` and no `role` key, for example `{"type": "tool_use_v2", "data": {}}`, or the degenerate `{"type": "message"}` with no `message` key, which the decode loop drops from `decoded` and from the sidecar alike (`codec/pi.rs:41-50`, `:661-669`, `:681-686`). OpenCode: a part in `{snapshot, patch, agent, retry}`, which is preserved as raw for re-encode (`codec/opencode.rs:194-204`) and omitted from `content` (`:193`). Plus the two classes the goldens declare missing: an OpenCode `subtask` part and a Pi assistant `thinking` part carrying `redacted: true`. Verified at `HEAD` that `opencode-golden.json` covers 11 of 12 required classes with `subtask` declared missing, and `pi-golden.json` covers 12 of 13 with `redacted_thinking` declared missing, and that `assert_coverage_or_recorded_missing` (`codec/mod.rs:254-271`) passes on both |
 | **F6** caller-supplied block identity | A wire ingress block whose `provider_extras` already carries a `_eidnara_codec` stamp the decoder did not write, or two byte-identical native parts in one message | **Yes, and it needs no fault.** `TransformRequest.messages` is `Vec<IngressMessage>` (`transform.rs:781`) and `WireBlock`'s `Deserialize` (`memory-store/src/lib.rs:207-221`) reads `provider_extras` verbatim, so a caller can supply plausible `blockIndex`, `nativeIndex` and `decodedFingerprint` values under the string key `_eidnara_codec` (`codec/sidecar.rs:131`). `stamped_block_identity` (`:177-183`) returns `Some` for any three well-formed values, and `stamp_block_identity` (`:158-175`) is the only writer **by convention, not by encapsulation**. The collision half needs only one OpenCode message with two byte-identical parts. The file has zero tests, so both halves are unexercised in either direction |
-| **F7** cross-implementation differential | The same fixed inputs run through two implementations, or through one implementation with a documented-inert feature on and off | **Split, and the two halves differ by an order of magnitude in cost.** The **in-Rust half is free and is the highest-value item in the part**: `CONFIGURATION.md:763` (source-catalog path, not present at HEAD) promises byte-identical output with `smart_drops` off, and the flag is one boolean (`config.rs:135`, `:467-469`, `:541-543`), so a flag-off run against a pre-feature run is a whole-pipeline byte-equality oracle. Nothing takes it. The **cross-language half does not exist as an executable comparison.** `PARITY.md:13-15` states the master parity claim, and the register records it as `NOT FOUND` as an oracle inside `daemon`: the two decoders are structurally independent and produce the same type (`codec/sidecar.rs:28`), so the comparison is cheap and is not made. Eight of the thirteen `NOT FOUND` claims are cross-implementation parity claims whose oracle lives in TypeScript and is never read from this crate. The one two-legged fixture, `cache-ttl-routing-vectors.json` (5 cases), is gated only on its TypeScript leg (`prompt-surface.test.ts:105` via `ci.yml:257` (source-catalog line, not present at HEAD)); the Rust leg (`config.rs:760`) runs nowhere |
+| **F7** cross-implementation differential | The same inputs and an independently defined comparison implementation or baseline | **Available for direct Rust comparisons; broader parity remains a separate investigation.** The `smart_drops` parser is shared across permitted tiers (`config.rs:717-733`, `config.rs:890-894`), but that alone is not a byte-equality oracle. The Rust TTL fixture test at `config.rs:1133-1160` is included in workspace nextest (`.github/workflows/ci.yml:413-417`). It consumes five frozen routing vectors, not a live TypeScript implementation. The source-catalog TypeScript consumer is not present at its cited path; the claim that only its leg runs is retired |
 
 Three availability caveats that cut across classes.
 
-- **`F2`'s and `F3`'s enabling state is a file, and `config.rs` is the one impure
-  unit in the part.** `ConfigCache` reads the filesystem and caches on mtime
-  (`config.rs:254-266`), so a config fixture must control the mtime as well as the
-  content. `config.rs:1191-1229` already does this, so the pattern exists.
+- **F3 uses a file; F2 can use the in-memory merge.** `ConfigCache` reads the
+  filesystem and caches on mtime
+  (`config.rs:362-393`). A successfully cached tier needs a changed mtime to
+  observe changed bytes, as `config.rs:2093-2130` checks. A failed tier bypasses
+  that fast path and can recover without an mtime change (`config.rs:2162-2175`).
+  In-memory F2 merge checks do not require filesystem state.
 - **`F6`'s trust half proves the module's behaviour on a hand-built ingress
   message without establishing that a production route supplies one.** Whether a
   non-module actor can choose `provider_extras` on a production route is a route
@@ -110,49 +106,51 @@ Three availability caveats that cut across classes.
 
 All 27 records, grouped as the catalog groups them, meaning by the thing a single
 test fixture would have to build. "Non-vacuous today" means a developer can
-construct the required state with the current harness. It does **not** mean the
-check runs anywhere; under `F0` none of them do.
+construct the required state with the current harness, not that an existing
+check proves the property. The two invalidated config premises are retained as
+regression contracts and excluded from open-defect totals.
 
 One reachability precondition is stated once rather than per row. No decision unit
 or codec in scope sits behind a Cargo feature gate, no unit in scope reads a clock
 or a store, and the only profile-dependent code in the part is the three
 `debug_assert` sites in `codec/opencode.rs`. The `explicit-config-only` records are
-exactly the eight the catalog labels so.
+seven among all retained records, including the two invalidated config premises,
+and five among the active records.
 
 ### Group A: the configuration contract as a defect surface
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1 | A user or project `eidnara.jsonc` containing `execute_threshold_percentage` below `20`, for example `5` (F2) | **Yes, and it is one of the five records F2 unblocks on one fixture.** One resolution. The clamp is verified at `config.rs:568-570`, `.clamp(1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE)` with the ceiling `90.0` at `:28`, against a documented range of `20-90` (`CONFIGURATION.md:167` (source-catalog path, not present at HEAD)). The existing check covers the **upper** bound only: `project_threshold_may_only_raise` (`config.rs:829-835`). The oracle is the resolved value plus the warning vector, and the record adopts 4b's queued gap `portfolio-evaluation.md:390` (G4) |
+| dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1 | A user-tier threshold below `20`, such as `5`, with no project tier (F2) | **Yes.** `config.rs:750-752` clamps to `[1, 90]` without a range warning. `project_threshold_may_only_raise` (`config.rs:1297-1302`) covers the upper clamp only; status `unaudited`. A project-only low value is rejected by tier policy, so it cannot stand in for the user-range check. The historical `20-90` contract and its unresolved authority are recorded in the [evidence](evidence/dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1.md) |
 | dec-a-memory-injection-budget-documented-range-has-no-implementing-code | A user-tier `eidnara.jsonc` with `memory.injection_budget_tokens` above `20000` or below `500`, with the project tier absent (F2) | **Yes.** The standard key and deprecated fallback apply `.max(1.0)` without the source-catalog `500-20000` range (`config.rs:847-864`). Both keys are user-only (`:664-672`). Assert the range or a key-specific warning from the user-only resolution. A separate project-rejection fixture must not substitute for that assertion: its ignored-key warning would pass without exercising the range. See the [budget evidence](evidence/dec-a-memory-injection-budget-documented-range-has-no-implementing-code.md) |
-| dec-a-commit-cluster-trigger-config-is-inert-in-this-crate | **A non-default `commit_cluster_trigger` value, plus a trigger workload.** Neither alone. This cell previously read "None for the divergence itself; it holds on a default build", which is the claim a disposition pass retired | **Partial, and the wiring half is not the free win this row claimed.** The check is that the `TriggerContext` built at `lib.rs:4962-4963` carries the configured values. This row previously said "today it carries the hardwired `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` (`lib.rs:605`) and `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:607`), so the assertion fails with no fault at all". **It does not fail at defaults, because the documented defaults *are* those constants**: `CONFIGURATION.md:237-238` (source-catalog path, not present at HEAD) gives `true` and `3`, and the constants are `true` and `3`, both printed and confirmed. A context built from the constants satisfies "carries the configured value" whenever the configuration is default, so the assertion needs a non-default value to have any content. Set `min_clusters` to `2` — the value `lib.rs:16500-16501` already uses — and assert on the constructed context; that is the cheap half and it is not free. The behavioural half additionally needs a tail with at least the configured cluster count and one `trigger_budget` of tokens. Note the call site is 4b/4c code reading a 4f contract, so the assertion crosses a sub-part boundary. `boundary.rs:2226-2227` pins the constant against a golden value, which pins the default and not the configurability |
-| dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list | Distinct valid user and project values for every consumed key, both boolean directions, and both threshold directions (F2) | **Yes.** Compare effective values and warning keys against the [catalog's explicit policy](catalog.md#dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list), not the implementation's classification. The merge warns for all supplied user-only keys and rejected weakening candidates (`config.rs:723-747`). The hostile fixture (`:1703-1805`) asserts selected outputs but derives its ignored-key count from `tier_class`; exercise is partial, although the full independent check is constructible |
-| dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller | A config with `memory.auto_search.score_threshold: 0.99`, `memory.auto_search.min_prompt_chars: 0`, or `caveman_text_compression.min_chars: 50` (F2) | **Yes, and the oracle is a comparison the merge path already materialises.** For every resolution where an input leaf differs from the resolved leaf, the warning vector should name that leaf; today no clamp reports itself. All three clamps verified: `clamp(0.3, 0.95)` at `config.rs:591`, `clamp(5, 500)` at `:595` with a `0` silently discarded by `positive_usize_at` (`:623-629`), and `clamp(100, 10_000)` at `:607`. **`min_prompt_chars: 0`, the natural spelling of "hint on every prompt", silently becomes `20`** |
-| dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian | A user `eidnara.jsonc` with a syntax error `strip_jsonc` does not repair, for example an unterminated string (F3) | **Partial, and the fault is free while the record's original oracle was impossible.** Producing the state is the cheapest thing outside Group C: one bad file and one `effective_config` call, and `config.rs:1181` already covers JSONC stripping and `:1191` the mtime cache, so only the malformed content is new. **But the check as written asked for a warning naming the path, and no channel exists to carry one.** `read_tier_cached` (`config.rs:254-266`) is `fn(&mut TierConfig, PathBuf) -> Option<Value>`: no warnings sink, no `Result`, and `:261-264` collapses both the read error and the parse error to `None`. By the time `merge_tiers_with_warnings` builds its warning vector, an unparseable file and an absent file are the same `None`. And `emit_warnings` (`:275-279`) only `eprintln!`s, which a sibling record already flags as possibly discarded under the daemon host. The record now asserts the observable consequence instead — the resolved config equals `DaemonConfig::default()`, which it does, so the assertion fails on the current build — plus a static enumeration of the signature. The observable surface today is a `no_models` no-fire reason, which points a reader at model configuration rather than at a parse failure. There is a separate same-mtime window the record names, and it is not needed for the primary check |
+| dec-a-commit-cluster-trigger-config-is-inert-in-this-crate | A nondefault user `commit_cluster_trigger` value and a workload that distinguishes it from the defaults | **Partial.** The production context uses `true` and `3` from constants (`lib.rs:640-641`, `lib.rs:4983-5005`), not parsed config. Default-valued input cannot distinguish those mechanisms. Observe the constructed context or use a workload whose commit-cluster trigger differs under the requested value (`boundary.rs:814-819`). The default-constant check (`boundary.rs:2011-2015`) is not a config-wiring check; status `unaudited` |
+| dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list | Distinct valid user and project values for every consumed key, both boolean directions, and both threshold directions (F2) | **Yes.** Compare effective values and warning keys against the [catalog's explicit policy](catalog.md#dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list), not the implementation's classification. The merge warns for all supplied user-only keys and rejected weakening candidates (`config.rs:723-747`). The hostile fixture (`config.rs:1705-1815`) asserts selected outputs but derives its ignored-key count from `tier_class`; exercise is partial, although the full independent check is constructible |
+| dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller | One user-tier leaf: score threshold `0.99`, minimum prompt characters `0`, or caveman minimum characters `50`, with no project tier (F2) | **Yes.** `apply_key` clamps the score, prompt minimum, and caveman minimum at `config.rs:827-846`. `positive_usize_at` rejects zero (`config.rs:955-961`), so a user-only prompt minimum of zero leaves the default `20`. The merge returns warnings but these branches emit no range warning. Assert the altered value and a key-specific range diagnostic, not an unrelated tier-rejection or deprecation warning |
+| dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian | A malformed user file, an unreadable project path, and missing-file controls (F3) | **Invalidated premise; retained regression contract.** `config.rs:362-393` stores read/parse warnings, `config.rs:262-282` collects them, and `config.rs:250-257` plus `config.rs:402-406` emit them. The existing fixture at `config.rs:2133-2182` observes the warnings without changing any signature; status `unaudited`. Fallback to defaults does not imply silent failure |
 
 ### Group B: model-chain resolution
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| dec-a-model-key-lookup-walk-has-two-implementations-that-disagree | A per-model map keyed only by a `provider/*` wildcard. On the `cache_ttl` side it resolves; on the scheduler side it falls to `default`. Reaching the scheduler side **from production** additionally needs `ExecuteThresholdConfig::ByModel`, which no code in this crate constructs | **Yes for the differential; the production consequence is latent, and the two must not be conflated.** The check is a pure differential over two in-crate functions, `config.rs`'s walk at `:176-200` and `scheduler::model_key_lookup_order`, and a wildcard-keyed map discriminates them. That test is writable today with no fault. What it cannot show is a live divergence, because `number_at` (`config.rs:631-637`) returns `None` for a JSON object so the execute-threshold map is never consulted (4b's `sel-per-model-and-token-thresholds-inert-in-module`). `config.rs:760-785` pins **one** implementation against the shared TypeScript vectors; **no differential between the two Rust implementations exists** |
-| dec-a-model-chain-dedup-is-adjacent-only | A user config with `historian.module_model: "a"` and `historian.module_fallback_models: ["b", "a"]` (F2) | **Yes.** One resolution. `dedup()` at `config.rs:571` removes adjacent repeats only, so the chain `[a, b, a]` survives intact. No existing check. The reason the author cares is stated in the code: `config.rs:384-389` says a wrong chain "would burn permanent-classified advances every fire", so the consequence is a duplicated model attempted twice in one firing |
+| dec-a-model-key-lookup-walk-has-two-implementations-that-disagree | Equivalent maps with distinct wildcard and default values, resolved for the same qualified model key | **Yes by direct call.** The TTL walk includes `provider/*` (`config.rs:151-207`); the scheduler walk does not (`scheduler.rs:779-830`). The daemon adapter builds only a scalar threshold (`transform.rs:5447-5454`), but the scheduler golden deserializes map variants and exercises them (`scheduler.rs:923-932`, `scheduler.rs:1011-1013`, `scheduler.rs:1087-1096`). That separate test and the TTL vectors (`config.rs:1133-1160`) do not compare both walks on one wildcard-only map |
+| dec-a-model-chain-dedup-is-adjacent-only | User primary `a` and fallbacks `[b, a]` (F2) | **Invalidated premise; retained regression contract.** The merge calls `dedup_preserving_order` (`config.rs:750-754`), whose `HashSet` plus `retain` keeps the first occurrence (`config.rs:950-953`). `[a, b, a]` becomes `[a, b]`. The non-adjacent-repeat test at `config.rs:2185-2194` asserts ordering too; status `unaudited` |
 
 ### Group C: totality, determinism, and the one clamp with a bypass
 
-These six are the cheapest records in the catalog. Every one is a direct call on a
+These seven records use direct calls on a
 pure function with a hand-written argument, and **four of them are guards that
 hold rather than defects**, which is why they are recorded: they fix the boundary
 so a later change that drops a guard is visible.
 
 | Property | Required faults and enabling state | Non-vacuous today |
 | --- | --- | --- |
-| dec-a-cache-ttl-parse-is-total-over-arbitrary-strings | A `cache_ttl` string. `"0"`, `"5S"`, `"99999999999999999999h"` and `"5\u{20ac}"` are the interesting inputs, all accepted by `config.rs:486-491` as non-empty trimmed strings. No fault | **Yes, and it is the single cheapest oracle in the part.** One function call per input. `scheduler.rs:1417-1424` `parse_cache_ttl_never_returns_u64_max` and `:1427-1435` `never_ttl_predicates_are_always_false` already exist. **The finding is that the parse is sound and the hazard is downstream**: `"0"` parses to 0 ms and forces execution every pass, which no documentation mentions, and any unparseable string is swallowed into the `5m` default by `scheduler_ttl_ms` (`:810-812`) with no report |
+| dec-a-cache-ttl-parse-is-total-over-arbitrary-strings | Direct string inputs, or user-only TTL strings such as `"0"`, `"5S"`, a long digit run, and a multibyte suffix (`config.rs:924-945`) | **Yes.** `parse_cache_ttl` returns a `Result` and saturates oversized results (`scheduler.rs:365-398`). The `never` tests at `scheduler.rs:1378-1405` remain `unaudited`. Zero hard expiry requires positive prior time and elapsed time (`scheduler.rs:405-407`), and later scheduler gates apply (`scheduler.rs:689-732`). Invalid strings use the default without a parse diagnostic (`scheduler.rs:771-773`) |
 | dec-a-boundary-budget-derivation-is-total-over-non-finite-input | A `BoundaryContext` whose `context_limit`, `execute_threshold_percentage` or `usage_percentage` is `f64::INFINITY` or `f64::NAN`. No fault | **Yes by direct call; production reachability is a separate and narrower question.** A struct literal with `f64::NAN` is the whole enabling state, and no test targets non-finite input today. Reaching it *from production* needs a host-supplied usage reading, since `lib.rs:4950-4959` builds the context from request and store values. **This is the guarded analogue of Part 3's decay totality defect and, over the three fields it validates, the guard holds**: `boundary.rs:339-341` returns `TRIGGER_BUDGET_MIN` for non-finite and non-positive input, which `CONFIGURATION.md:238` (source-catalog path, not present at HEAD) does not mention. The `trigger_budget` passthrough that this cell used to fold in as "the one place a caller could still inject a non-finite value" is no longer part of this record; it is the row below |
 | dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic | A `BoundaryContext` with `trigger_budget: Some(f64::NAN)` and a non-empty message set. No fault | **Yes, and it is the cheapest falsifying oracle in the part.** One struct literal and one call: `BoundaryContext.trigger_budget` is a `pub` field and both read sites are reachable in-crate. `boundary.rs:377-379` and `:756-761` read it through `unwrap_or_else` with no `is_finite` gate on the `Some` arm, unlike the three neighbouring fields. `derive_protected_tail_token_target`'s own postcondition survives, because `f64::min` at `:383` returns the non-NaN operand and `n` stays finite, but `:399` stores the raw NaN into the returned struct and `:802`'s `tail_size_bar: trigger_budget * TAIL_SIZE_TRIGGER_MULTIPLIER` is a bare multiply with nothing to absorb it. So `TriggerProgress.tail_size_bar` is NaN, and that struct is carried into the transform response at `lib.rs:4982` and divided at `:5002`. **Unlike every other row in this table, this oracle fails on the current build**, and the evidence was already written: the budget record's evidence file lists this exact case as test-plan item 4 and states it fails today |
-| dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes | `historian.context_limit_tokens` at an extreme. **A configured `0` is impossible**, because `positive_usize_at` (`config.rs:623-629`) discards it, so reaching the extremes needs a very large configured limit or a direct call | **Yes by direct call.** `config.rs:972-978` `historian_budget_derivation_clamps_at_both_bounds` already covers `1`, `32_000` and `128_000`. The value of the record is as the paired positive result to the Part 3 defect class: the rounding-then-clamp order cannot produce a value outside `[8000, 50000]`, and the saturating cast degrades an absurd configured limit to the documented maximum rather than wrapping to a tiny budget |
+| dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes | Direct calls with zero and `usize::MAX`; a configured zero is rejected by `positive_usize_at` (`config.rs:955-961`) | **Yes by direct call.** The final integer clamp enforces `[8000, 50000]` (`config.rs:28-29`, `config.rs:39-46`). The maximum input reaches that clamp after quartering, without needing cast saturation. `historian_budget_derivation_clamps_at_both_bounds` (`config.rs:1449-1455`) covers both clamp arms and an interior value but omits the two extremes; status `unaudited` |
 | dec-a-escalation-bands-stay-ordered-for-every-threshold | **None.** A threshold of `f64::NAN`, a negative threshold, or a threshold above `90` are the interesting inputs | **Yes.** One call per threshold. `scheduler.rs:1238` and the golden constant assertions at `boundary.rs:2226-2227` are the existing checks. The consequence the record pins is precise: if a threshold could push the force band to or past `95`, the `Force85` arm at `scheduler.rs:525` would become unreachable and the emergency arm would absorb the whole force band, changing which passes bypass mid-turn deferral. The cap makes that impossible |
 | dec-a-selection-decision-order-is-total-under-hashmap-iteration | **None for the property.** Refuting it needs an input where one `target_id` receives two same-rank decisions with different payloads, which requires duplicate `SelItem` ids mapped to different `arc_id`s | **Yes, and the cheap form is a repeat-call equality plus a postcondition scan.** Both conjuncts are directly assertable: repeated calls on identical inputs return equal `Vec<ReductionDecision>`, and no two distinct arcs emit a decision for the same `target_id`. `selection.rs:2836` `drop_wins_over_edit_marker` plus the differential golden `selection.rs:32-33` names as the arbiter are the existing checks. **The cross-process form is also cheap** (two `cargo test` invocations give two `HashMap` seeds) and is the form that would catch a genuine iteration-order dependence, since both hash-iterating loops (`selection.rs:1305`, `:1397-1405`) are made order-insensitive downstream today. The header stakes the cache invariant on this: if it fails, a defer pass replays different bytes than the freeze produced |
-| dec-a-region-hint-clamp-bypassed-by-sentinel-suffix | `smart_drops: true`, off by default (`config.rs:135`, `CONFIGURATION.md:752` (source-catalog path, not present at HEAD)), plus an `edit` or `write` tool call superseded by a later edit to the same file whose `oldString`, `newString` or `content` value **ends with the literal `...[truncated]`** (F2 for the flag) | **Yes, and no adversary is required.** One config flip and one fixture. `selection.rs:2537-2549` `edit_marker_region_hint_caps_utf16_and_backs_off_split_surrogate` covers the other two arms of `region_hint` and not this one. The bypass is the idempotence guard doing double duty: a value that already ends with the sentinel is returned unclamped, so a superseded edit keeps its full diff instead of a 40-unit hint. **The content is harness-supplied, so a file whose text legitimately ends with that marker is enough**, and the accounting believes the reduction reclaimed something it did not |
+| dec-a-region-hint-clamp-bypassed-by-sentinel-suffix | `smart_drops: true`, off by default (`config.rs:128`) and allowed in either tier (`config.rs:673-681`, `config.rs:890-894`), plus a superseded edit/write value ending with `...[truncated]` | **Yes.** The suffix arm returns the input unchanged (`selection.rs:536-549`). The UTF-16 boundary check at `selection.rs:2424-2436` does not supply a sentinel-suffixed input; status `unaudited`. A direct oversized suffix input distinguishes that arm from the ordinary length clamp |
 
 ### Group D: decoder acceptance with no rejection channel
 
@@ -186,78 +184,42 @@ so a later change that drops a guard is visible.
 | codec-b-declared-missing-capture-classes-are-never-decoded | One OpenCode message with a `subtask` part; one Pi assistant entry with a `thinking` part carrying `redacted: true` (F5) | **Yes, and the blocker is that nobody added a case rather than that anyone cannot.** Both fixtures were read at `HEAD`: `opencode-golden.json` covers 11 of 12 required classes with `subtask` in `missing_capture_classes`, `pi-golden.json` covers 12 of 13 with `redacted_thinking`, and `assert_coverage_or_recorded_missing` (`codec/mod.rs:254-271`) passes on both because listing a required class clears it. Its own message, "codec golden neither covers nor records missing classes" (`:267-270`), is honest that it is a bookkeeping gate. **The two halves are not equally valuable**: deleting the `subtask` arm would not move the golden, since the part would fall to `:194-204` and still become an opaque block, whereas Pi's `:199-211` produces `BlockKind::RedactedReasoning` against `:212-217`'s `BlockKind::Reasoning` with a signature, and the two round-trip through different encoder arms (`:543-548` versus `:536-542`) |
 | codec-b-pi-encoder-can-return-a-shorter-array-than-it-was-given | For the `codec/pi.rs:371` drop, a message whose meta role is `toolResult` but whose wire content holds no `ToolResult` block, which the transform can produce by reducing a decoded tool-result message. For the `:396-397` drop, a wire message with empty `content` whose matched meta's raw is not a Pi message | **Yes via the `:371` drop; the `:396-397` half may be unreachable by construction.** The first drop is directly constructible and refutes `encode_pi(msgs, sidecar).len() == msgs.len()`, so the check is non-vacuous. The second may be unreachable, since only `decode_opaque_entry` produces such a raw and those messages carry exactly one opaque block; that half is recorded and not resolved. `codec/pi.rs:1469-1484` pins the cleared-content drop. **Reachability is the caveat, not constructibility**: there is no production caller, so the record exists because the function is a public export (`codec/mod.rs:10`, `lib.rs:12`) whose contract differs from its OpenCode twin, and 4e's lens already notes the Pi encode path is off-route |
 
-**Totals: 23 non-vacuous today, 4 partial, 0 blocked outright**, over 27 records.
-Against a pre-disposition **26 non-vacuous, 0 partial, 0 blocked** over 26 records.
+**Retained records: 27; active: 25; invalidated config premises: 2.** The active
+rows contain 23 `Yes` and 2 `Partial` labels, counted directly rather than
+subtracting from the historical headline. The partial rows are commit-trigger
+configuration and decoder allocation observation. This is a label census, not
+a fresh adequacy verdict for unrelated records. The invalidated rows retain
+executable regression contracts.
 
-**The old 26-of-26 was the headline of this file and it was wrong, so the
-correction goes here rather than in a footnote.** An independent evaluation found
-that three of the twenty-six counted checks have no runtime observability at all,
-and re-reading each against the code confirms it. One record was added by a split,
-and it is non-vacuous, which is why the denominator moved by one and the numerator
-by three:
+### Config disposition
 
-- **`dec-a-commit-cluster-trigger-config-is-inert-in-this-crate` → `Partial`.**
-  Its check is that the `TriggerContext` at `lib.rs:4962-4963` carries the
-  *configured* `enabled` and `min_clusters`. At defaults the configured and
-  hardwired values are identical — `CONFIGURATION.md:237-238` (source-catalog path, not present at HEAD) documents `true` and
-  `3`, `lib.rs:605` and `:607` hardwire `true` and `3` — so a context built from
-  the constants satisfies the assertion. This file's own row said the assertion
-  "fails with no fault at all", which is false at defaults. Non-vacuity needs a
-  non-default config value **and** a trigger workload, together, and the row now
-  says so.
+The historical 26-of-26 and 23-of-27 headlines are not the current row census.
+Their investigation is retained in the historical portfolio evaluation. The
+config-related dispositions are:
+
+- **Commit-trigger configuration remains partial.** `lib.rs:5001-5002` uses
+  constants rather than config. A nondefault input and a distinguishing workload
+  or context observation are necessary; default-valued input cannot expose the
+  wiring gap.
 - **`dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian`
-  → `Partial`.** Its check was that a warning naming the path is emitted. There is
-  no channel for one: `read_tier_cached` (`config.rs:254-266`) takes
-  `(&mut TierConfig, PathBuf)`, returns `Option<Value>`, and maps both the read and
-  the parse error to `None` at `:261-264`. No warnings sink, no `Result`. The
-  observable substitute is the consequence — the resolved config equals
-  `DaemonConfig::default()` — plus a static enumeration of the signature, and the
-  record now asserts that instead.
-- **`codec-b-harness-decoders-accept-every-input-with-no-rejection-channel` →
-  `Partial`.** Its return and consistency clauses are non-vacuous over an arbitrary
-  `Vec<Value>` and stay so. Its third clause, "allocation is bounded by a constant
-  multiple of input size", is not observable from a decode call: the functions
-  return `DecodedHarnessMessages` and expose no allocation accounting, so proving
-  it needs a counting `#[global_allocator]`, a `dhat`-style profiler, or a
-  `Vec::capacity` sweep, none of which the tree has. That clause is now recorded as
-  discharged by reading rather than by assertion.
-- **`dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic`
-  → `Yes`, and it is the cheapest falsifying oracle in the part.** New record, split
-  out of the budget-derivation record. One `BoundaryContext` literal with
-  `trigger_budget: Some(f64::NAN)`, one call, and `TriggerProgress.tail_size_bar`
-  (`boundary.rs:802`) is NaN. It fails on the current build, which none of the
-  guards cluster's oracles do.
+  is invalidated.** The historical demotion to `Partial` rested on an absent
+  diagnostic channel. Tier warning storage and collection now make the original
+  path-bearing warning directly observable (`config.rs:362-393`,
+  `config.rs:262-282`). The existing test has status `unaudited`.
+- **The adjacent-only model-chain premise is invalidated.** Full deduplication
+  and the non-adjacent-repeat check exist (`config.rs:950-953`,
+  `config.rs:2185-2194`); the regression contract remains.
 
-**The corrected distribution is still the finding, and it needs naming precisely
-rather than celebrating.** 4d reached 22 of 24 because its surface is
-request-shaped, and 4e reached 22 of 24 because its surface is fixture-shaped.
-**4f reaches 23 of 27 because its surface is argument-shaped.** Fifteen of the 27
-need nothing but a struct literal, a JSON string, or a `Vec<Value>` passed to a
-pure function, and none of the 27 needs a clock, a store mutation, a second
-process, a second pass, or a seam. Group C in particular is seven records whose
-entire enabling state is a hand-written function argument.
+### Reachability qualifications
 
-**And the shape of the three demotions is worth stating, because it is one error
-repeated.** All three counted a check as observable when the observation channel
-does not exist: a value that is indistinguishable from its own default, a warning
-with no return path, and an allocation with no accounting. Constructibility of the
-*input* was verified in every case and mistaken for constructibility of the
-*oracle*. That is a different failure from the sibling parts' — 4d and 4e's
-demotions were about missing fixtures — and it is cheaper to catch, because the
-question is mechanical: name the value the oracle reads, and the code path that
-returns it to the test.
+Constructing an input is not the same as observing its oracle. Config tests can
+inspect merge values and returned warnings without changing runtime interfaces.
 
-**Three caveats keep the 23 honest, and they are about reachability rather than
-constructibility.** METHOD.md keeps those axes separate and so does this table.
-
-- `dec-a-model-key-lookup-walk-has-two-implementations-that-disagree`: the
-  differential is writable, and the divergence it would demonstrate is latent
-  because **nothing anywhere in the repository** constructs
-  `ExecuteThresholdConfig::ByModel`. `grep -rn 'ByModel' --include='*.rs'` returns
-  two hits, the variant declaration at `scheduler.rs:115` and the match arm at
-  `:456`. Not production, not a test. The catalog's label moved from
-  `explicit-config-only` to `test-only` for this reason, since `config.rs`'s
-  `number_at` (`:631-636`) discards an object form before any enum is chosen.
+- The model-walk differential remains `test-only` for the in-tree config route:
+  `number_at` rejects an object (`config.rs:963-968`), and the transform adapter
+  constructs a scalar threshold (`transform.rs:5447-5454`). The scheduler golden
+  does deserialize map variants, so the old claim that no test constructs them
+  is false. Separate map tests do not supply the missing differential oracle.
 - `codec-b-pi-decoder-drops-unrecognised-entry-types-without-a-record` and
   `codec-b-pi-encoder-can-return-a-shorter-array-than-it-was-given` are labelled
   `test-only` in the catalog, and the second has no production caller at all.
@@ -266,14 +228,9 @@ constructibility.** METHOD.md keeps those axes separate and so does this table.
   the module's behaviour on a hand-built input; whether a production route can
   supply that input is an unresolved route question.
 
-**But the binding constraint here is `F0`, not any fault class, and 4f's position
-is the worst of the three parts on that axis.** 4d had 22 constructible records
-against a suite no automation executes, with ten integration binaries as a
-fallback. 4e had 22 with no integration fallback. **4f has 23 constructible
-records, no integration fallback, and the one integration binary the brief names
-would not cover this scope even if it ran**: `release_contract_conformance.rs`
-reaches no 4f file, while its own header at `:1-8` argues its drift "must fail the
-build, not the deployment".
+`F0` is not an open blocker. Workspace CI executes the Rust test targets, and
+the config-reader integration check exercises a nondefault user budget. Test
+execution, property constructibility, and oracle adequacy remain separate facts.
 
 ## Coverage checks to add
 
@@ -287,11 +244,11 @@ duplicates an existing marker.
 | `CONFIG_RESOLUTION_CHANGED_A_SUPPLIED_LEAF` | A resolution in which an input leaf differed from the resolved leaf, whether by a clamp, a discard, or a tier drop | The ordinary shape of every clamping resolution, and clamping is the design. It records that the campaign observed a value being altered at all, not that a warning was owed |
 | `CONFIG_RESOLUTION_EMITTED_AN_IGNORED_KEY_WARNING` | The tier merge emitted a warning for a supplied user-only key or a rejected weakening candidate (`config.rs:723-747`) | Legal rejection on a correct implementation. Pair with the supplied input and effective-value observation; an ignored-project-key warning does not exercise the user-tier budget parser |
 | `CONFIG_PROJECT_TIER_CHANGED_A_RESOLVED_LEAF` | A project-tier value changed a leaf of `DaemonConfig` | Legal for the documented project-writable set, so it fires on correct operation. The precondition of the allow-list record, stated as a tier-provenance fact |
-| `CONFIG_FILE_READ_SUCCEEDED_AND_PARSE_FAILED` | `fs::read_to_string` returned `Ok` and `serde_json::from_str` returned `Err` on the same file | Legal as written: the resolution absorbs the failure into defaults. It records the input-domain fact and does not assert that a warning was owed |
+| `CONFIG_FILE_READ_SUCCEEDED_AND_PARSE_FAILED` | `read_bounded_config` returned `Ok` and `serde_json::from_str` returned `Err` on the same file (`config.rs:370-379`) | A legal input-domain fact. The tier contributes no value and produces a path-bearing warning; the marker does not assert a missing warning |
 | `HISTORIAN_CHAIN_WAS_ASSEMBLED_FROM_TWO_CONFIG_KEYS` | The resolved `model_chain` drew from `historian.module_model` and `historian.module_fallback_models` in one resolution | Legal input and is the documented way to configure a chain. The independent precondition of the adjacent-only dedup record, without asserting the chain contained a repeat |
-| `HISTORIAN_CHAIN_DEDUP_REMOVED_AN_ELEMENT` | `dedup()` at `config.rs:571` shortened the chain | Legal and is `dedup`'s purpose. Witnessing it alongside the marker above is what shows the campaign reached the dedup at all, which the record's confidence depends on |
-| `CACHE_TTL_PARSE_RETURNED_ERR_AND_THE_DEFAULT_WAS_SUBSTITUTED` | `scheduler_ttl_ms` (`scheduler.rs:810-812`) swallowed a `CacheTtlParseError` into `DEFAULT_CACHE_TTL_MS` | Legal as written and is the fallback's purpose. The precondition of the silent-substitution half of the TTL record |
-| `CACHE_TTL_RESOLVED_TO_ZERO_MILLISECONDS` | A configured `cache_ttl` of `"0"` parsed to `Ok(0)` | Legal: the parse is total and `0` is a valid result. It records the input-domain fact whose consequence is a forced execution every pass, without asserting that forcing is wrong |
+| `HISTORIAN_CHAIN_DEDUP_REMOVED_AN_ELEMENT` | `dedup_preserving_order` at `config.rs:950-953` shortened the assembled chain | Legal behavior of the retained regression contract. It witnesses deduplication, not the obsolete adjacent-only defect |
+| `CACHE_TTL_PARSE_RETURNED_ERR_AND_THE_DEFAULT_WAS_SUBSTITUTED` | `scheduler_ttl_ms` (`scheduler.rs:771-773`) replaced a `CacheTtlParseError` with `DEFAULT_CACHE_TTL_MS` | Legal fallback behavior. It witnesses substitution, not the absence of a diagnostic |
+| `CACHE_TTL_RESOLVED_TO_ZERO_MILLISECONDS` | A configured `cache_ttl` of `"0"` parsed to `Ok(0)` | Legal input-domain fact. Pair with positive prior and elapsed timestamps to exercise hard expiry; the marker does not assert a final pass decision |
 | `BOUNDARY_BUDGET_DERIVED_FROM_A_NON_FINITE_OR_NON_POSITIVE_LIMIT` | The guard at `boundary.rs:340-342` returned `TRIGGER_BUDGET_MIN` because `context_limit` was non-finite or non-positive | Legal and is the guard's purpose. **This is the positive precondition that makes the totality record meaningful**, rather than asserting that the guard's absence would be a defect |
 | `ESCALATION_BANDS_DERIVED_FROM_AN_OUT_OF_RANGE_THRESHOLD` | `escalation_bands` was called with a threshold that was `NaN`, negative, or above `90` | Legal input, because the function is total over `f64`. It records that the campaign reached the extremes rather than only the default `65` |
 | `SELECTION_MERGED_TWO_CANDIDATE_DECISIONS_FOR_ONE_TARGET` | The merge chose between two candidate decisions naming one `target_id` | Legal and is exactly what "drop beats edit_marker" (`selection.rs:26-27`) describes. The precondition of the determinism record, stated as a merge-provenance fact rather than as an ordering violation |
@@ -313,7 +270,7 @@ duplicates an existing marker.
 | `ROUND_TRIP_INPUT_CONTAINED_A_MUTATED_BLOCK` | A round-trip case included a block that did **not** short-circuit at `codec/opencode.rs:763-765` or `codec/pi.rs:463-465` | Legal, and is the only condition under which the round-trip oracle carries information. **This is the marker that measures the record's real gap**, since the retained-raw path makes identity nearly automatic for unmutated input |
 | `GOLDEN_COVERAGE_GATE_CLEARED_A_CLASS_VIA_MISSING_CAPTURE_CLASSES` | The filter at `codec/mod.rs:262-266` cleared a required class because it appeared in `missing_capture_classes` rather than in `coverage` | Legal by construction and is the mechanism being reported. It records which list satisfied the gate, not that the gate is wrong |
 | `PI_ENCODE_INPUT_CARRIED_A_TOOLRESULT_META_WITH_NO_TOOLRESULT_BLOCK` | A message reaching `encode_pi` whose meta role was `toolResult` while its wire content held no `ToolResult` block | An input-domain fact the transform can legitimately produce by reducing a decoded tool-result message. The precondition of the shorter-array record, without asserting the array shortened |
-| `COMMIT_CLUSTER_TRIGGER_CONTEXT_BUILT_FROM_HARDWIRED_CONSTANTS` | The `TriggerContext` at `lib.rs:4962-4964` was built from `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` (`lib.rs:605`) and `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:607`) rather than from resolved config | A structural fact about the call site, true today with fully correct behaviour. The precondition of the inert-config record |
+| `COMMIT_CLUSTER_TRIGGER_CONTEXT_BUILT_FROM_HARDWIRED_CONSTANTS` | The `TriggerContext` uses fixed values at `lib.rs:5001-5002`, defined at `lib.rs:640-641` | A structural fact, not a failed config assertion. Pair it with a nondefault supplied value and a distinguishing workload or context observation |
 
 ### The one `reachable` record, checked against METHOD.md
 
@@ -431,44 +388,24 @@ records unblocked per capability. **Every item on this list is cheap, which is t
 distinguishing fact about this part**, so the ranking turns on value rather than on
 effort once `F0` is answered.
 
-1. **`F0`, running the 192 existing checks in CI at all. This remains the
-   prerequisite.** A workflow change and nothing else: `cargo test -p daemon
-   --lib` alongside the existing `--test lifecycle_cli` step (`ci.yml:168` at
-   `76cd6f41`, `:172` at `HEAD`), or calling the `scripts/test-rust.sh` lane that
-   already exists in `package.json` and that no workflow invokes. It unblocks
-   **zero** new records and **protects 192 existing checks**: 153 file-local across
-   the ten 4f files that have any, plus 39 drawn from `transform.rs`. **Nothing
-   else on this list matters until this is done**, because everything added below
-   is added to a suite no automation executes. Unlike 4d there is no integration
-   binary to fall back on: all seven have zero 4f content, so `--lib` is the only
-   lane that reaches this scope. One blocker is named and bounded: `ci.yml:719-721` (source-catalog line, not present at HEAD)
-   states Rust is absent from the e2e lanes because private `../commons` and
-   `../subconscious` path-deps are not provisioned, and `ci.yml:163-164` provisions
-   metadata-only stubs. Whether that constraint reaches `--lib` is an open question
-   rather than a settled no.
-2. **The `smart_drops` whole-pipeline differential. This is the single
-   highest-value item in the part, and it is free.** State it plainly:
-   **`CONFIGURATION.md:763` (source-catalog path, not present at HEAD) promises that with the flag off "the messages sent to
-   the model are byte-identical to the age-based-only behavior" and that "the entire
-   feature is inert"; the flag is one boolean (`config.rs:135`, `:467-469`,
-   `:541-543`); and nothing takes the oracle.** A flag-off run against a
-   pre-feature run is a byte-equality check over the whole selection pipeline
-   obtained by flipping one field and running twice. It requires no fixture design,
-   no seam, no new dependency and no new fault class, and it is the strongest
-   testable statement in the entire configuration document. It sits above every
-   per-record capability below because it is the only item on the list whose oracle
-   covers a pipeline rather than a function, and `CONFIGURATION.md:767` (source-catalog path, not present at HEAD) names the
-   validation strategy currently in place instead: "The default stays off while
-   cache stability is being validated in the wild." **Field observation is standing
-   in for a free test.**
+1. **`F0` is satisfied by workspace CI.** The nextest job at
+   `.github/workflows/ci.yml:413-417` includes daemon library and integration
+   targets. Retain those checks; no additional test-execution lane is required
+   for the config properties.
+2. **The `smart_drops` comparison remains an investigation lead.** Its flag
+   defaults to false (`config.rs:128`) and both permitted tiers use the same
+   parser (`config.rs:890-894`). Comparing disabled-feature output requires an
+   independently defined age-only baseline and a workload. The historical lead
+   is preserved without claiming that a flag flip alone proves byte equality.
 3. **`F2`, configuration values at and beyond documented bounds. The widest
-   capability per fixture.** One config resolution makes **five** records
-   non-vacuous:
+   capability per fixture.** In-memory config resolution makes **four active**
+   records constructible:
    `dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1`,
    `dec-a-memory-injection-budget-documented-range-has-no-implementing-code`,
-   `dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list`,
-   `dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller`, and
-   `dec-a-model-chain-dedup-is-adjacent-only`. The oracle in every case is the
+   `dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list`, and
+   `dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller`.
+   The invalidated model-chain premise retains an existing
+   regression check instead of an open campaign. The oracle in every case is the
    resolved struct plus the returned warning vector, both of which the merge path
    already materialises, so no new plumbing is needed. **The same fixture answers a
    documentation question the register raised**: eight of the thirteen `NOT FOUND`
@@ -522,59 +459,35 @@ effort once `F0` is answered.
    `codec/sidecar.rs` at all**, 339 lines with no test module that owns the block
    identity everything downstream keys on, so its per-line value is the highest on
    the list.
-8. **`F3`, a malformed configuration file. One bad file, one record.** It makes
-   `dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian`
-   valid. Eighth on records-per-cost and not on difficulty: the fixture pattern
-   already exists at `config.rs:1181` and `:1191`. The consequence is worth the one
-   test on its own, because the observable surface of a config typo today is a
-   `no_models` no-fire reason that points a reader at model configuration rather
-   than at a parse failure.
-9. **`F7` cross-language, last on cost and first on consequence.** This is the
-   tension worth stating rather than hiding, and 4f's version is the worst of the
-   three parts. 4e's gap was that the frozen artifact both sides share has its
-   provenance guard on the unrun leg. **4f has no provenance guard at all**:
-   verified that no 4f file contains any `provenance`, `input_sha256` or
-   `generator_version` fixture assertion, across eight fixtures, and that the two
-   `generated_from` and `projection_oracle` fields which do exist are never
-   deserialized (`codec/mod.rs:28-34`, `:41-47`). Of those eight fixtures, seven
-   are one-legged and replayed by Rust only; the one two-legged fixture,
-   `cache-ttl-routing-vectors.json` (5 cases), **is gated only on its TypeScript
-   leg** (`prompt-surface.test.ts:105` via `ci.yml:257` (source-catalog line, not present at HEAD)) while the Rust leg
-   (`config.rs:760`) runs nowhere. The **cheap half is therefore `F0` again**:
-   running the Rust suite puts every one of those goldens under automation without
-   writing a line of test code. The **expensive half** is an executable
-   cross-implementation oracle, and none exists to extend: `PARITY.md:13-15`'s
-   master parity claim is `NOT FOUND` as an oracle inside `daemon`, and eight of
-   the thirteen `NOT FOUND` claims are parity claims whose oracle lives in
-   TypeScript and is never read from this crate.
+8. **`F3` has an existing regression check, not an open silent-failure defect.**
+   `config.rs:2133-2182` checks malformed, unreadable, repeated, repaired, and
+   missing tiers through `effective_with_warnings`. Its status is `unaudited`.
+9. **The TTL fixture's Rust leg runs in workspace CI.**
+   `cache_ttl_resolution_matches_shared_typescript_vectors`
+   (`config.rs:1133-1160`) checks five frozen cases. It does not run TypeScript,
+   and no literal reference to that fixture's name is found under `packages/`. The
+   historical claim that only the TypeScript leg executes is false; a live
+   cross-language comparison remains separate from the existing frozen-vector
+   check. Status of the existing check: `unaudited`.
 
-### Why this part's cheap oracles are worth more than their cost suggests
+### Config oracle boundaries
 
-One framing note, because it changes the priority rather than the analysis.
-**Under the project's Rust-first decision (`../README.md:46-58`), this sub-part's
-configuration and codec surface is the one that survives.** All transforms are
-moving to Rust, Part 5 is parked, and the records that describe a transitional
-state are the TypeScript transform records in 5c. 4f is the layer that both reads
-the user's configuration and owns the bytes entering and leaving the crate, so it
-is on the path that is becoming the default rather than the path being retired. The
-consequence for this map is direct: **a `NOT FOUND` parity claim against a
-TypeScript twin becomes less recoverable over time, not more**, because the twin is
-being retired while the obligation stated in `config.rs:17-18`, `:20-22`, `:23-24`
-and `lib.rs:604`, `:606` stays in the source. The cheap oracles ranked above are
-the ones that would still be meaningful after the twin is gone, and they cost a
-fixture each.
+The reader's comments tie several defaults to TypeScript (`config.rs:20-25`),
+but matching a constant or a frozen fixture is not a live cross-language proof.
+Use the explicit tier policy, value parser, warning kind, and actual consumer
+route to define each config oracle. Do not infer a product-wide parity result
+from the absence of a key in this reader.
 
 ## Records that need a product decision rather than a harness
 
-No amount of test infrastructure resolves these, and each is a live open question
-from at least one lens.
+This list retains source-catalog questions outside the bounded config refresh.
+The explicit config and CI dispositions below supersede their historical
+premises; unrelated questions are not new HEAD findings.
 
-- **Which build profile does the distributed `eidnara-host` use?** CI builds debug
-  (`ci.yml:169` at `HEAD`, `:165` at `76cd6f41`, no `--release`), which selects the
-  arms that do enforce. Every release-profile statement in this part is conditional
-  on the answer, and it decides whether `assert_unique_tool_use_ids` enforces
-  anything in production at all. Unresolved, needs the release pipeline. 4e's lens
-  A and lens C left the same question open. (needs human input)
+- **Which build profile does a particular distributed artifact use?** The CI
+  payload smoke builds without `--release` (`.github/workflows/ci.yml:625-629`),
+  but that does not determine every distributed artifact's profile. The release
+  pipeline is the evidence source for that separate question.
 - **Should a `debug_assert!` whose condition is independently enforced by the
   language in release be catalogued differently from one that is not?**
   `codec/opencode.rs:251` is re-checked by the slice at `:258`; `:252` is consumed
@@ -589,15 +502,12 @@ from at least one lens.
   self-referential, or was an independent expected output intended?** Each fixture
   carries a `projection_oracle` field that nothing deserializes, which suggests the
   latter. Unresolved.
-- **Should the documented-but-inert-or-divergent key count be nine or thirteen?**
-  The two sibling lenses disagree only about granularity, and the catalog picked 13
-  and said so. Two counts in one part directory would read as a contradiction, so
-  the rule needs stating once. (needs human input)
-- **Is `output_reserve` in 4f scope?** `CONFIGURATION.md:315` (source-catalog path, not present at HEAD) names "the module's
-  plausibility floor", which is `scheduler.rs:33`, squarely in 4f, while the key
-  itself is parsed elsewhere and has zero occurrences in `crates/daemon/src`. If
-  the answer is no, the claim still stands as a documentation defect and needs an
-  owner. (needs human input)
+- **The nine/thirteen count debate is historical.** The current parser census is
+  25 registered keys across 22 parsed display rows, plus nine unparsed display
+  rows in the comparison table. It is not a product-wide defect count.
+- **`output_reserve` remains a cross-component lead.** It is absent from the
+  consumed-key table (`config.rs:588-618`). Its behavior elsewhere is outside
+  this reader audit; absence here does not establish a product defect.
 - **Is `PARITY.md` a claim source for `daemon` at all?** It is titled "Pi to
   OpenCode: Intentional Divergences" and describes two TypeScript plugins. If its
   scope is TypeScript only, four register claims move from "contradicted" or "NOT
@@ -609,13 +519,13 @@ from at least one lens.
 - **Do the four undocumented but effective keys belong in `CONFIGURATION.md` (source-catalog path, not present at HEAD)?**
   `memory.user_profile_budget_tokens`, `historian.module_model` with
   `module_fallback_models`, `historian.context_limit_tokens`, and
-  `prompt_surface.guidance_override_text`. `config.rs:1-9` reads as a public
-  contract and names its TypeScript twin three times, which is the posture of a
-  documented surface. (needs human input)
-- **Should `release_contract_conformance.rs` be inventoried by 4f at all, and
-  should it run?** The brief names it, its content reaches no 4f file, and its own
-  header (`:1-8`) argues its drift "must fail the build, not the deployment" while
-  no workflow runs it. The scope map raised this at `:681`. (needs human input)
+  `prompt_surface.guidance_override_text`. These keys are part of the consumed
+  pointer table (`config.rs:588-618`), but the historical configuration document
+  is absent here. Which user-facing document should own them? (needs human input)
+- **The historical request to execute `release_contract_conformance.rs` is no
+  longer a CI gap.** Workspace nextest selects integration targets
+  (`.github/workflows/ci.yml:413-417`). Its ownership in a property catalog is
+  separate from whether CI selects the target.
 - **Does `caveman.rs` belong to 4e or 4f?** The scope map says 4e (`:590`), 4e's
   inventory counts its single test, and the brief assigns the file here. One test
   and 651 production lines are currently double-counted. (needs human input)
@@ -623,8 +533,7 @@ from at least one lens.
   did?** Without 4b's per-test bucket assignment the union of the three parts over
   `transform.rs` can only be bracketed at 253 to 262 of 280, and the orphan
   remainder at 18 to 27. Unresolved, needs 4b's enumeration.
-- **Does a test that never runs in CI count as `Exercised: partial` or
-  `Exercised: not yet`?** It governs every `Existing check:` line in this part, and
-  for `codec/opencode.rs:2079` the question is sharper because the test does not
-  compile in a release test build. 4b, 4c, 4d, 4e, the scope map (`:681`) and both
-  4f sibling lenses raised it. (needs human input)
+- **The blanket absent-CI premise is retired.** The
+  [current inventory](existing-checks.md#ci-execution) identifies workspace test
+  selection. Execution profile, constructed case, and oracle adequacy are
+  separate facts; every existing check remains `unaudited`.

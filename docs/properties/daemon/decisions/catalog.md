@@ -1,5 +1,12 @@
 # Part 4f property catalog: decision units, configuration, and harness codecs
 
+Config-derived records, their code references, and CI execution facts are
+refreshed against `74044960ee91641dec95c8552f15282844a18b13`. Unrelated
+decision-unit and codec investigations retain the source-catalog provenance
+below; their discovery-time coordinates are not newly verified HEAD evidence.
+An active record states an obligation to test, not that its historical defect
+assessment has been reproduced in this tree.
+
 Scope: sub-part 4f of `crates/daemon`, the decision layer every transform pass
 consults plus the two harness codecs that own the bytes entering and leaving the
 crate. `src/codec/` is 4,323 lines across four files, `src/selection.rs` is 3,365,
@@ -23,31 +30,31 @@ supply or consume these units are 4b, 4c and 4d code reading a 4f contract, and
 against two codecs, so the profile axis is larger than the codec axis and is left
 to a later pass.
 
-Provenance in [../README.md](../../README.md). System
-`/local/home/ahrav/scratch/eidnara`, `HEAD` = `e447c927` ("refactor(shm):
-trim final review leftovers"), which all four lens agents read. Method contract in
-[../METHOD.md](../../METHOD.md). The CI reference drift the lenses record is a pure
-file move: the only `daemon` test invocation,
-`cargo test -p daemon --test lifecycle_cli`, is `ci.yml:172` at `HEAD` and
-`ci.yml:168` at `76cd6f41`, and the build-only step above it is `:169` at `HEAD`
-and `:165` at `76cd6f41`. The `run:` text is byte-identical at both commits, and
-records may cite either numbering.
+The source-catalog provenance is recorded in [../README.md](../../README.md).
+Its `e447c927` and `76cd6f41` CI observations are historical, not the execution
+contract for this tree. The config-derived records and execution inventory use
+`74044960ee91641dec95c8552f15282844a18b13`; see
+[existing-checks.md](existing-checks.md). The method contract is
+[METHOD.md](../../METHOD.md).
 
 ### Reconstruction provenance
 
-This file was rebuilt from `_lenses/` after the working tree was cleaned and the
-synthesized `catalog.md` was lost. Every record is taken verbatim from the lens
-file that produced it, `_lenses/lens-a-decision-units-and-config.md` (14 records,
+The initial reconstruction rebuilt this file from `_lenses/` after the working
+tree was cleaned and the synthesized `catalog.md` was lost. It copied records
+from `_lenses/lens-a-decision-units-and-config.md` (14 records,
 `dec-a-` prefix) and `_lenses/lens-b-harness-codecs.md` (12 records, `codec-b-`
-prefix), with two mechanical adjustments and no re-derivation: evidence links are
+prefix), with two mechanical adjustments and no re-derivation: evidence links were
 rewritten from the lens-relative `../evidence/` to the catalog-relative
-`evidence/`, and field paragraphs are rewrapped to about 80 columns. Content
+`evidence/`, and field paragraphs were rewrapped to about 80 columns. Content
 equality against the lens text was checked mechanically, token by token, after
 rewrapping. `_lenses/lens-c1-claims-and-config.md` and
 `_lenses/lens-c2-check-inventory.md` proposed no records; they supply the claims
 register, the configuration contract table, the release-behaviour divergence and
 the check inventory this header cites. `portfolio-evaluation.md` records the
 independent evaluation and the four refinements it accepted.
+
+That reconstruction account is historical. The current config-derived records
+and evidence include the corrections identified in this refresh.
 
 **The grouping below is mine.** The lens files produced two flat record lists, and
 neither proposed group headings, so the seven groups are a synthesis choice: they
@@ -118,6 +125,13 @@ it is not applied here.
   source tree.
 
 ## What this part is about
+
+### Historical discovery framing
+
+The discovery narrative and route counts in this subsection describe the source
+catalog. They are not current product-wide defect or coverage counts. Current
+config behavior is recorded in the configuration table and records below; the
+current execution inventory follows this historical subsection.
 
 4f is where the crate decides things and where it talks to the outside world. The
 decision units are pure by their own headers and that claim survives inspection;
@@ -235,25 +249,20 @@ than default-production, and the split record says so. The nearest *reachable*
 hazard remains a different one: a `cache_ttl` of `"0"` parses to 0 ms and forces
 execution every pass, which no documentation mentions.
 
-**Coverage is 192 in-crate tests, none in CI, and the file that owns block
-identity has none.** 192 tests reach full scope-map 4f: 153 file-local across the
-ten 4f files plus 39 of the 280 tests in `transform.rs`'s flat `mod tests`.
-Restricted to the brief's named files the figure is 164, being 146 file-local plus
-18. The three-way reconciliation against the sibling sub-parts holds: all three
-inventories agree on 285 attributes total and 280 in the flat module, and each
-reports its own reach tier as unusable for the same structural reason, 4b through
-its driver set, 4e through its helper fixpoint returning 190, and 4f through a
-type-mention rule returning 87 because the shared fixture driver's signature
-promotes the whole driver population. Use 39 for behaviour and 18 for the
-brief-named subset. There is no integration test in scope, and
-`tests/release_contract_conformance.rs` does not run despite its own header
-(`:1-8`) arguing that its equalities are load-bearing at runtime and that "the
-drift must fail the build, not the deployment"; the drift fails no build. Two
-further facts belong here because several records depend on them:
-**`codec/sidecar.rs` has zero tests across 339 lines while owning block identity**,
-its three entry points reached only transitively, and **both harness goldens are a
-single case each**, with an oracle derived from the test's own input and one
-required block class declared missing so the coverage gate passes without it.
+### Current config and execution evidence
+
+The [file-local inventory](existing-checks.md#file-local-census) counts 180 tests
+across the eleven scope files, including 43 in `config.rs` and three in
+`codec/sidecar.rs`. This is not a transitive attribution over `transform.rs` or
+`lib.rs`; the old 192-test figure measures a different, historical population.
+
+Workspace nextest includes daemon library and integration targets
+(`.github/workflows/ci.yml:413-417`). The budget-reader integration check loads
+a 500-token user config, asserts row trimming, and checks revision stability
+after an excluded-row edit
+(`crates/daemon/tests/transform_canonical_memory.rs:448-539`). The absence of
+CI or integration execution is therefore not an open config-layer gap. Every
+check remains `unaudited`; source inclusion does not establish oracle adequacy.
 
 ## Decision unit table
 
@@ -274,9 +283,10 @@ purity claim, not a restatement of it.
 | `scheduler::parse_cache_ttl` (`:385-419`) + `escalation_bands` (`:187-198`) | the idle TTL in ms, and the force/emergency bands | a TTL string; the effective threshold | `Result<u64, CacheTtlParseError>`; bands with force in `[85, 92]`, emergency fixed at `95` | Yes and total: `dec-a-cache-ttl-parse-is-total-over-arbitrary-strings`, `dec-a-escalation-bands-stay-ordered-for-every-threshold` |
 
 `config.rs` itself is not pure: `ConfigCache` reads the filesystem and caches on
-mtime (`:254-266`). Its two derived helpers are pure:
-`derive_historian_chunk_tokens` (`:45-48`) and
-`resolve_cache_ttl_with_provenance` (`:159-200`).
+path and mtime, except that failures bypass the cache fast path
+(`config.rs:362-393`). Its two derived helpers are pure:
+`derive_historian_chunk_tokens` (`config.rs:39-46`) and
+`resolve_cache_ttl_with_provenance` (`config.rs:151-207`).
 
 `session_resolver.rs` holds no decision worth a record.
 `MissingSessionResolver::resolve_session` (`:44-52`) returns `Ok(None)`
@@ -305,7 +315,7 @@ no process-local timezone or locale read in 4f scope.
 
 ## Configuration contract table (key | code default | documented default | enforced bound | takes effect here?)
 
-Thirty leaves. Selection rule: every key `config.rs` parses, plus every
+Thirty-one rows. Selection rule: every key `config.rs` parses, plus every
 documented key whose description names behaviour `daemon` performs. "Enforced
 bound" is the bound the Rust code actually applies, which is the column the
 sibling table did not carry. "Takes effect here?" means the parsed value reaches
@@ -314,13 +324,14 @@ a decision inside `daemon`.
 The Rust config citations in this table are verified against the classified
 reader. Code columns name their source file explicitly; shorthand references
 in the documented-default column refer to the historical `CONFIGURATION.md`,
-which is absent at HEAD.
+which is absent at HEAD. "Undocumented" and documentation divergences refer to
+that source-catalog contract, not a census of all current user-facing docs.
 
 | Key | Code default | Documented default | Enforced bound | Takes effect here? |
 | --- | --- | --- | --- | --- |
 | `execute_threshold_percentage` (scalar) | `65.0` (`config.rs:21`, `config.rs:115`) | `65`, range `20-90` (`CONFIGURATION.md:167` (source-catalog path, not present at HEAD)) | `clamp(1.0, 90.0)` (`config.rs:750-752`); project tier may only raise (`config.rs:682-686`, `config.rs:734-744`) | Yes. **Divergent**: documented lower bound `20`, enforced `1` |
 | `execute_threshold_percentage` (object form) | not parsed | documented, example at `:791` | none | **No.** `number_at` (`config.rs:963-968`) returns `None` for an object; 4b's `sel-per-model-and-token-thresholds-inert-in-module` |
-| `execute_threshold_tokens` | not parsed | documented (`:168`, `:319-338`), doc claims clamp to `90% x context_limit` | none | **No.** Same 4b record. The documented clamp has no implementing code |
+| `execute_threshold_tokens` | not parsed | documented (`:168`, `:319-338`), doc claims clamp to `90% x context_limit` | none in the config reader | Not through this reader: the adapter sets token thresholds to `None` (`transform.rs:5447-5454`). The scheduler does implement a token cap when supplied directly (`scheduler.rs:419-427`); parser absence is not implementation absence |
 | `compaction.enabled` | `true` (`config.rs:116`) | `true` (`:172`) | none; user-only (`config.rs:663-672`) | Yes, user tier (`config.rs:812-816`); project warns (`config.rs:729-732`) |
 | `memory.enabled` | `true` (`config.rs:117`) | `true` (`:589`) | none | Yes, both tiers (`config.rs:817-821`, `config.rs:717-733`) |
 | `memory.injection_budget_tokens` | `4000.0` (`config.rs:23`, `config.rs:123`) | `4000`, range `500-20000` (`:591`) | `.max(1.0)` only (`config.rs:847-851`) | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`); project warns (`config.rs:729-732`). **Divergent**: neither documented bound exists |
@@ -337,73 +348,42 @@ which is absent at HEAD.
 | `temporal_awareness` | `true` (`config.rs:126`) | `true` (`:650`) | none | Yes, both tiers (`config.rs:900-904`, `config.rs:717-733`) |
 | `dreamer.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:121`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:875-879`); the schedule is `UserOnly` (`config.rs:667-672`), the flag is `ProjectRaiseOnly` and a project may only close the gate (`config.rs:687-692`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
 | `historian.model`, `historian.fallback_models` | empty chain (`config.rs:114`) | documented with **no user-only marker** (`:448-449`) | `dedup_preserving_order` (`config.rs:750-753`, `config.rs:950-953`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:788-806`); project warns (`config.rs:729-732`) |
-| `historian.module_model`, `historian.module_fallback_models` | absent | **undocumented** | none | Yes, user-only (`config.rs:659-672`); a non-empty module model selects the module chain instead of the plugin chain (`config.rs:774-806`) |
+| `historian.module_model`, `historian.module_fallback_models` | absent | **undocumented** | `dedup_preserving_order` (`config.rs:753`, `config.rs:950-953`) | Yes, user-only (`config.rs:659-672`); a non-empty module model selects the module chain instead of the plugin chain (`config.rs:774-806`) |
 | `historian.context_limit_tokens` | `128_000` (`config.rs:32`, `config.rs:122`) | **undocumented** | `> 0` via `positive_usize_at` (`config.rs:955-961`), applied at `config.rs:885-889` | Yes, user-only (`config.rs:668-672`); project warns (`config.rs:729-732`) |
-| `cache_ttl` (string or object) | `"5m"` (`config.rs:129`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:771-773`); `"never"` maps to `u64::MAX` (`scheduler.rs:365-368`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:924-945`); project warns (`config.rs:729-732`); the TypeScript strip removes it from project config (`project-security.ts:386-391`). **Divergent**: `"0"` parses to `0` ms and forces execution every pass, undocumented |
+| `cache_ttl` (string or object) | `"5m"` (`config.rs:129`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:771-773`); `"never"` maps to `u64::MAX` (`scheduler.rs:365-368`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:924-945`); project warns (`config.rs:729-732`); the TypeScript strip removes it from project config (`project-security.ts:386-391`). `"0"` produces zero ms: hard expiry needs a positive prior timestamp and positive elapsed time (`scheduler.rs:400-407`), and later scheduler gates still apply (`scheduler.rs:689-732`) |
 | `prompt_surface.guidance_override_path` | `None` (`config.rs:127`) | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `CONFIGURATION.md:88`) | Yes, from the user tier after merging (`config.rs:278-279`, `config.rs:408-490`); project warns (`config.rs:729-732`) |
 | `prompt_surface.guidance_override_text` | `None` (`config.rs:127`) | **undocumented** | exactly one guidance marker (`config.rs:905-920`) | Yes, user-only (`config.rs:670-672`), but a configured path resets it to `None` first (`config.rs:424`); project warns (`config.rs:729-732`) |
-| `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none | **Not in Rust; honoured in TypeScript.** Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` (`lib.rs:605`) at `lib.rs:4962`. `plugin/src/config/schema/eidnara.ts` parses it and `pi-plugin/src/context-handler.ts` consumes it |
-| `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none | **Not in Rust; honoured in TypeScript.** Rust hardwires `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:607`) at `lib.rs:4963`. Same TypeScript parse and consumer as the flag |
-| `protected_tags` | not parsed by `config.rs` | `20`, range `1-100` (`:165`) | none from config; the request field defaults to a hardwired `20` at `lib.rs:603` | **Not through config; yes through the request.** `transform.rs:682-684` declares it `#[serde(default = "default_protected_tags")]`, and `rust-mode-transform.ts:1355` and `:2031` send it. 4b's `sel-protected-tags-not-read-from-module-config` is correct about the config route and is not a claim that the value never arrives |
-| `clear_reasoning_age` | not parsed by `config.rs` | `50` (`:169`) | none from config; the request field defaults at `default_clear_reasoning_age` | **Not through config; yes through the request.** `transform.rs:693-697` declares it and `rust-mode-transform.ts:1398` and `:2014` send it. This row already said "Present in `daemon/src` only as a request field", so the fact was recorded and the column was wrong |
-| `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/daemon/src`; `pi-plugin/src/index.ts:676` reads it and `:1297`, `:1313`, `:1332` thread it. `historian_producer.rs:209-227` carries private Rust timeouts unrelated to the key. 4a scope, lead only |
-| `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | none | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/daemon/src`; `pi-plugin/src/index.ts:693` and `:1229` read it |
-| `output_reserve` | not parsed | automatic; `0` disables (`:164`, `:308-315`) | none in this crate, though `:315` names "the module's plausibility floor" | **Not in Rust; honoured in TypeScript.** Zero occurrences in `crates/daemon/src`; `pi-plugin/src/config/index.ts:427` and `:600` call `setOutputReserveConfig` on it. See C1-28 |
+| `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none from config | The daemon supplies constant `true` (`lib.rs:640`, `lib.rs:5001`). TypeScript routing in the original catalog is historical, not verified by this reader audit |
+| `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none from config | The daemon supplies constant `3` (`lib.rs:641`, `lib.rs:5002`). The boundary consumes it at `boundary.rs:814-819` |
+| `protected_tags` | not parsed by `config.rs` | `20`, range `1-100` (`:165`) | no config-reader bound; the request default is `20` (`transform.rs:797-799`) | It has a request field (`transform.rs:629-631`), so absence from config does not mean the value cannot arrive |
+| `clear_reasoning_age` | not parsed by `config.rs` | `50` (`:169`) | no config-reader bound | It has a request field (`transform.rs:640-644`) and a default helper (`transform.rs:765-767`); absence from config is not product-wide absence |
+| `historian_timeout_ms` | not parsed | `300_000` (`:170`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). The historical TypeScript-consumer lead is outside this reader audit |
+| `history_budget_percentage` | not parsed | `0.15`, range `0.05-0.5` (`:171`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). No product-wide absence claim is made |
+| `output_reserve` | not parsed | automatic; `0` disables (`:164`, `:308-315`) | none from this reader | Not in the consumed-key table (`config.rs:588-618`). Its historical cross-component routing lead is not a config-reader implementation claim |
 
-The table has 31 rows because `output_reserve` is promoted from the sibling's
-out-of-scope bucket by C1-28. Treat the leaf count as 31 and the sibling's 30
-named leaves as a subset.
+The table has 31 display rows, not 31 distinct consumed keys. The two model
+families and the schedule/legacy-flag pair each combine two keys in one row.
 
 ### Totals
 
-Two views. The first is the documentation-shaped one this catalog synthesized. The
-second is the route-aware one that supersedes it as the headline, restated here so
-the two are side by side and a reader can see which rows moved.
+The 22 parsed display rows represent all 25 registered keys
+(`config.rs:560-586`). Nine display rows describe a shape or key this reader
+does not parse. That is a parser census, not a product-wide defect count.
 
-| Category | Count | Members |
+| Reader classification | Keys | Evidence |
 | --- | --- | --- |
-| Documented leaves in the table | 26 | all rows except the four undocumented leaves and the deprecated `memory.budget_tokens` |
-| Undocumented but effective | 4 | `memory.user_profile_budget_tokens`, `historian.module_model` with `module_fallback_models`, `historian.context_limit_tokens`, `prompt_surface.guidance_override_text` |
-| Documented and **not parsed by `config.rs`** | 6 | `execute_threshold_percentage` object form, `execute_threshold_tokens`, `commit_cluster_trigger.enabled`, `commit_cluster_trigger.min_clusters`, `protected_tags`, `clear_reasoning_age`. **Previously labelled "inert", which is wrong for the last two**: both are request-supplied and consumed at `transform.rs:682-697`. The label is now the literal fact — `config.rs` does not parse them — and the route matrix says what each one does instead |
-| Documented and effective but **divergent** (bound, tier policy, or default disagrees) | 7 | `execute_threshold_percentage` scalar, `memory.injection_budget_tokens`, `memory.auto_search.min_prompt_chars`, `caveman_text_compression.min_chars`, `review-user-memories` schedule, `historian.model` with `fallback_models`, `cache_ttl` |
-| **Absent from `crates/daemon/src`** and describing module behaviour | 3 | `historian_timeout_ms`, `history_budget_percentage`, `output_reserve`. **Previously labelled "absent everywhere", which is wrong**: all three have TypeScript consumers (`pi-plugin/src/index.ts:676`, `:693`; `pi-plugin/src/config/index.ts:427`). They are TypeScript-only, not absent |
-| Deprecated, absent from the documented table, still honoured | 1 | `memory.budget_tokens` |
+| User-only | 14 | `config.rs:659-672` |
+| Project-allowed | 9 | `config.rs:673-681` |
+| Project-raise-only | 2 | `config.rs:682-692` |
+| Total registered | 25 | `config.rs:560-586`, `config.rs:588-618` |
+| Privileged subset | 12 | `config.rs:627-640`; overlaps the tier classes above |
 
-Route-aware view, which is the one to cite:
-
-| Route | Count | Defect count on that route |
-| --- | --- | --- |
-| Parsed by the Rust config reader | 24 | **7 divergent** |
-| Request-supplied, consumed as a Rust request field | 2 | 0 divergent; both are correctly outside `config.rs` |
-| Honoured only in TypeScript | 6 documented keys (7 leaf names) | 6, in the sense that the Rust reader cannot honour any of them |
-| Truly absent from Rust and TypeScript alike | 0 | — |
-
-**The old "13 documented keys either do nothing here or disagree with their own
-documentation" is retired.** It summed 7 divergences, 4 TypeScript-only keys, and
-2 request-supplied keys into one product-wide figure, and the three routes have
-different consequences under the Rust-first decision. This is a superset of the
-sibling's headline nine
-([lens-a-decision-units-and-config.md:119-129](_lenses/lens-a-decision-units-and-config.md)),
-and both numbers are now superseded rather than reconciled. The four leaves this
-lens added over the sibling, and why the sibling did not count them, are still
-worth recording because two of them survive as genuine divergences:
-`clear_reasoning_age` (named inside a 4b evidence file but not among the headline
-keys, and now known to be request-supplied rather than inert),
-`memory.auto_search.min_prompt_chars` and `caveman_text_compression.min_chars` (the
-sibling recorded the clamps as invisible to the caller but not as documentation
-divergences, and both remain divergent on the Rust-parsed route), and the
-`review-user-memories` default (the sibling filed it as a lead rather than counting
-it, and it remains divergent). So of the four, three stay and one moves route.
-
-A further nine documented keys have zero occurrences in `crates/daemon/src`
-and describe behaviour outside the module: `toast_duration_ms` (`:166`),
-`memory.retrieval_count_promotion_threshold` (`:593`),
-`memory.git_commit_indexing.*` (`:665-667`), `fail_closed_blocking` (`:161`),
-`allow_home_project` (`:159`), `auto_update` (`:160`), `keep_subagents` (`:174`),
-`historian.thinking_level` (`:452`), and `historian.two_pass` (`:454`, present in
-`daemon/src` as a request field only). They are not defects in 4f and are
-listed so a future conformance check can exclude them deliberately rather than by
-omission.
+The source-catalog nine/thirteen-defect debate and 24-key route matrix are
+historical framing, preserved in the
+[portfolio evaluation](portfolio-evaluation.md#historical-evaluation). They do
+not establish current product routing or current documentation coverage. The
+records below state which historical contractual questions remain open without
+changing runtime policy.
 
 ## Index
 
@@ -437,27 +417,18 @@ omission.
 | [codec-b-declared-missing-capture-classes-are-never-decoded](#codec-b-declared-missing-capture-classes-are-never-decoded) | reachability | high |
 | [codec-b-pi-encoder-can-return-a-shorter-array-than-it-was-given](#codec-b-pi-encoder-can-return-a-shorter-array-than-it-was-given) | safety | high |
 
-**Twenty-seven records**, against 26 before a disposition pass split
-`dec-a-boundary-budget-derivation-is-total-over-non-finite-input` in two. METHOD
-step 7 requires the distributions to be recorded here, and the synthesis omitted
-them, so they are stated for the first time rather than corrected.
+**Twenty-seven retained records: twenty-five active and two invalidated.** The
+adjacent-only model-chain and silent malformed-config premises are invalidated
+by the implementation at `74044960ee91641dec95c8552f15282844a18b13`. Their
+guarantees, evidence files, and unaudited existing checks remain in the catalog.
 
-Semantics distribution: **twenty-six `always`** — twenty-three bare, plus
-`codec-b-wire-level-tool-use-uniqueness-guard-has-no-release-behaviour`'s
-`always(!duplicate)` and two `always(!X)`, on
-`dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian`
-and the new
-`dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic`,
-all three of which are `always` over a forbidden state per METHOD's first
-check-semantics rule — plus **zero `always-or-unreached`**, **zero `sometimes`**,
-**one `reachable`**, **zero `unreachable`**. The absence of `sometimes` is worth
-naming rather than passing over: 4f's surface is argument-shaped, so almost every
-obligation is a statement about all inputs rather than about an operational state
-that must occur, and the one `reachable` record is the sole exception. It is also
-what makes 4f's zero-liveness position defensible; see
-[portfolio-evaluation.md](portfolio-evaluation.md).
+Semantics distribution over all retained records: **twenty-six `always`, zero
+`always-or-unreached`, zero `sometimes`, one `reachable`, zero `unreachable`**.
+The active subset has twenty-four `always` and one `reachable`. The two retained
+invalidated records use `always` for their regression contracts.
 
 Type distribution: **twenty-six safety, one reachability, zero liveness**.
+The active subset has twenty-four safety and one reachability record.
 
 Reachability distribution: **sixteen `default-production`, seven
 `explicit-config-only`, four `test-only`**, against 16/8/2 before. Two labels
@@ -465,33 +436,35 @@ moved, both away from `explicit-config-only` and both because a configuration
 cannot in fact construct the state:
 `dec-a-model-key-lookup-walk-has-two-implementations-that-disagree`, whose
 differential needs `ExecuteThresholdConfig::ByModel` and where `number_at`
-(`config.rs:631-636`) discards an object form before any enum is chosen; and the
+(`config.rs:963-968`) discards an object form before any enum is chosen; and the
 new trigger-budget record, whose only `Some` sites are two test literals. Both
 relabels are recorded at the records.
 
 Confidence: twenty-seven high, zero medium, zero low.
 
+The two invalidations leave the active reachability distribution at sixteen
+`default-production`, five `explicit-config-only`, and four `test-only`. These
+are record counts, not a claim that every historical evidence file has been
+revalidated.
+
 ---
 
 ## Group A: the configuration contract as a defect surface
 
-Six records on the gap between `CONFIGURATION.md` (source-catalog path, not present at HEAD) and `config.rs`. Two are
-documented bounds with no implementing code, one is a documented feature whose
-value is parsed nowhere because the behaviour is hardwired, one is a tier policy
-the documentation does not state and the code enforces silently, one is the set of
-clamps and discards that change a user's value with no signal back, and the last is
-what happens when the file itself does not parse. They share a fixture: resolve a
-config with a known-out-of-contract value and compare the resolved struct against
-the document, so one conformance harness serves all six.
+Six retained records cover bounds, commit-trigger configuration, explicit tier
+permissions, clamp diagnostics, and malformed files. Five are active. The
+malformed-file silence premise is invalidated: resolution reports read and parse
+failures. Tier-policy warnings and file warnings do not settle clamp diagnostics;
+each property needs its own input and warning oracle.
 
 ### dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1
 
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet - no test supplies a threshold below `20`.
-`config.rs:829-835` pins the upper clamp (`91 -> 90`) and `:837-841` pins the
-default `65`; neither touches the low end.
+Exercised: not yet - the lower-bound reporting case is not covered.
+`config.rs:1297-1302` pins the upper clamp (`91 -> 90`) and
+`config.rs:1305-1308` pins the default `65`.
 Guarantee: A configured `execute_threshold_percentage` that the documentation
 forbids is rejected or reported, not silently accepted as the effective
 threshold.
@@ -499,26 +472,24 @@ Check: `always` - after `merge_tiers_with_warnings`,
 `execute_threshold_percentage >= 20.0`, or the returned warning vector names
 `/execute_threshold_percentage`. These semantics because the clamp runs on
 every config resolution, so there is no optional path.
-Fault/timing angle: none. The value is fixed at route bind and persists for the
-life of the binding.
-Required faults and enabling state: a user or project `eidnara.jsonc`
-containing `execute_threshold_percentage` below `20`, for example `5`.
+Fault/timing angle: none for the merge check.
+Required faults and enabling state: a user-tier `eidnara.jsonc` containing
+`execute_threshold_percentage` below `20`, for example `5`, with the project
+tier absent. A project-only value cannot lower the default and its rejection
+warning must not substitute for a user-tier range diagnostic.
 Confidence: high - [evidence](evidence/dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1.md).
-Both sides read at `HEAD`: `CONFIGURATION.md:167` (source-catalog path, not present at HEAD) documents `number (20-90)`;
-`config.rs:568-570` clamps to `[1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE]` with
-the constant `90.0` at `:28`. Traced the consequence into
-`scheduler.rs:462-464` and `:492`.
-Existing check: `config.rs:829-835` `project_threshold_may_only_raise` covers
-the upper bound only. Status `unaudited`. This record adopts 4b's queued gap
-`portfolio-evaluation.md:390` (G4), which that part recorded as uncovered.
-Impact: a threshold of `5` makes `should_execute` return `Execute` on
-essentially every pass, so every pass busts the provider prefix cache. A
-threshold of `1` is the floor the code will accept.
+The source-catalog quotation gives `20-90`; its `CONFIGURATION.md` is absent
+at HEAD. The verified implementation clamps to `[1, 90]`
+(`config.rs:750-752`, ceiling at `config.rs:27`). Whether the historical lower
+bound is still the intended daemon contract needs confirmation.
+Existing check: `config.rs:1297-1302` `project_threshold_may_only_raise` covers
+the upper bound only. Status `unaudited`.
+Impact: a user can select a threshold below the historical documented range
+without a range warning. Scheduler gates and workload still determine whether
+a particular pass executes.
 Open questions:
-- Should `config.rs` enforce `20` or should `CONFIGURATION.md` (source-catalog path, not present at HEAD) be corrected to
-  `1-90`? The TypeScript schema is the stated twin for the default
-  (`config.rs:17-19`), so the two implementations may already disagree on the
-  bound. (needs human input)
+- Is the historical lower bound of twenty the intended daemon contract, or is
+  the implemented floor of one intended? (needs human input)
 
 ### dec-a-memory-injection-budget-documented-range-has-no-implementing-code
 
@@ -542,14 +513,17 @@ with `memory.injection_budget_tokens` set above `20000` (or below `500`).
 Confidence: high - [evidence](evidence/dec-a-memory-injection-budget-documented-range-has-no-implementing-code.md).
 The source-catalog contract quotes `CONFIGURATION.md:591` as `500-20000` with
 default `4000`; that document is absent at HEAD. At
-`c73ed613dc9c48f4ad789925034f6eb081fca260`, `config.rs:847-864` applies only
+`74044960ee91641dec95c8552f15282844a18b13`, `config.rs:847-864` applies only
 `.max(1.0)` to the standard key and legacy fallback. Both keys are user-only
 (`:664-672`); project values warn without reaching those assignments
 (`:723-733`). `lib.rs:4832-4845` passes the configured budget to the canonical
 memory reader.
 Existing check: none for standard-key range enforcement. The default,
 precedence, and tier-policy checks named above remain `unaudited`; project
-rejection is not evidence that a user-tier range is enforced.
+rejection is not evidence that a user-tier range is enforced. The reader
+integration check at `crates/daemon/tests/transform_canonical_memory.rs:448-539`
+loads a 500-token user value and checks trimming and revision stability; status
+`unaudited`. It does not supply an out-of-range budget.
 Impact: a user configuration can silently select a memory budget outside the
 documented range. The budget reaches canonical memory trimming; a large value
 does not remove the reader's separate row and byte caps.
@@ -560,68 +534,34 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `lib.rs:16500-16501`, `:16573-16574`, and `:16767-16768`
-drive `TriggerContext` with `min_commit_clusters: 2` and both settings of the
-enable flag, so the boundary logic is covered. Nothing covers the
-config-to-context wiring, because there is none.
+Exercised: partial - direct test contexts use `min_commit_clusters: 2` and
+enabled and disabled flags (`lib.rs:16664-16674`, `lib.rs:16929-16940`). They
+do not load those controls from config. Existing checks remain `unaudited`.
 Guarantee: A configured `commit_cluster_trigger` reaches the module's trigger
 decision, or the module reports that it cannot honour the key.
-Check: `always` - for every resolved configuration, the `TriggerContext` built
-at `lib.rs:4962-4963` carries the configured `enabled` and `min_clusters`.
-`always` because `prepare_historian_fire` constructs this context on every
-transform pass that evaluates a trigger. **This check is not observable at
-defaults and the record previously claimed it was.** At defaults the documented
-values and the hardwired constants are the same values —
-`CONFIGURATION.md:237-238` (source-catalog path, not present at HEAD) documents `enabled: true` and `min_clusters: 3`, and
-`lib.rs:605` and `:607` hardwire `true` and `3`, both printed and confirmed — so
-"the context carries the configured value" is satisfied by a context that reads
-the constant. The check can only fire against a **non-default configuration**, and
-even then only if the oracle can see the context: `TriggerContext` is built inline
-inside `prepare_historian_fire` and passed to `check_compartment_trigger_with_index`
-at `lib.rs:4964-4966`, so observing it means either an in-crate assertion at that
-site or inferring it from a behavioural difference, which needs the trigger
-workload below.
+Check: `always` - for each supplied commit-cluster control, the production
+trigger context carries the requested value or resolution reports that the
+control is unsupported. `always` because every trigger evaluation constructs
+the context. The context is built inline at `lib.rs:4983-5005`; use a direct
+observation or a workload that distinguishes it from the requested value.
 Fault/timing angle: none.
-Required faults and enabling state: **a non-default `commit_cluster_trigger`
-value, and a trigger workload, together.** Neither alone suffices. This line
-previously read "none for the divergence itself; it holds on a default build",
-which is the claim the disposition retired: on a default build the configured and
-hardwired values coincide, so nothing distinguishes wiring from hardwiring. The
-cheap form is `commit_cluster_trigger.min_clusters` set to something other than
-`3` — `2` is what `lib.rs:16500-16501` and `:16573-16574` already use for the
-boundary logic — plus an in-crate assertion on the constructed context. The
-behavioural form additionally needs a tail with at least the configured number of
-commit clusters and one `trigger_budget` of tokens, so the trigger's verdict
-changes with the value.
+Required faults and enabling state: a nondefault user `commit_cluster_trigger`
+value plus context observation or a discriminating trigger workload. Defaults
+of `true` and `3` match the constants and cannot expose the wiring gap. A
+behavioral check must isolate the commit-cluster arm from other fire reasons.
 Confidence: high - [evidence](evidence/dec-a-commit-cluster-trigger-config-is-inert-in-this-crate.md).
-`CONFIGURATION.md:237-238` (source-catalog path, not present at HEAD) documents both keys. `config.rs` has zero
-occurrences of `commit_cluster` or `min_clusters`. `lib.rs:605` and `:607` are
-the hardwired constants, passed at `:4962-4963`; `boundary.rs:850-855` consumes
-them. Confidence is in the mechanism, which is fully verified, and not in the
-check's observability, which the `Check:` line now bounds. The key is
-TypeScript-honoured rather than inert product-wide:
-`plugin/src/config/schema/eidnara.ts` parses it and
-`pi-plugin/src/context-handler.ts` consumes it, so the slug's word "inert" is true
-of this crate and false of the product. The slug is left unchanged because
-renaming it would break the index, the evidence filename, and two sibling
-citations; the scope qualifier is in the guarantee.
-Existing check: none for the wiring. `boundary.rs:2226-2227` asserts the
-constant `DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER` against a golden value,
-which pins the default and not the configurability. Status `unaudited`.
-Impact: a user who disables the commit-cluster trigger still gets
-commit-cluster-driven historian fires, each of which spends a model call and
-replaces raw conversation with generated summary text. Under the Rust-first
-decision the impact grows rather than shrinks, because the TypeScript component
-that does honour the key is the component being removed.
+The config fields and pointer table omit these controls (`config.rs:80-109`,
+`config.rs:588-618`). `lib.rs:640-641` defines the constants, used at
+`lib.rs:5001-5002`; `boundary.rs:814-819` consumes the context. Confidence is
+in this daemon mechanism, not a product-wide TypeScript routing claim.
+Existing check: none for the config wiring. The default-constant assertion at
+`boundary.rs:2011-2015` and the direct contexts above remain `unaudited`.
+Impact: a supplied disabling flag or higher cluster count does not change the
+daemon's commit-cluster trigger. The historical configurability claim is not
+implemented by this reader.
 Open questions:
-- Does any harness leg carry these controls in the transform request instead? I
-  found no request field for either, and a disposition pass re-checked: `grep`
-  for `commit_cluster` and `min_clusters` across `crates/daemon/src` returns
-  only `historian_chunk.rs`'s counting field, `lib.rs`'s two constants and their
-  one production use at `:4962-4963`, three test-only literals, and
-  `boundary.rs`'s context field. There is no request field. Resolved against
-  Rust; the TypeScript sender's own consumption is
-  `pi-plugin/src/context-handler.ts`, which is outside 4f scope.
+- Is the source-catalog configurability obligation intended for the daemon
+  reader? The original configuration document is absent here. (needs human input)
 
 ### dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list
 
@@ -687,27 +627,30 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - `config.rs:930-970` exercises `auto_search` and `caveman`
-values inside their clamps and asserts the resulting values. No test supplies
-an out-of-range value and asserts either the clamped result or a warning.
+Exercised: partial - `config.rs:1407-1446` exercises ordinary auto-search and
+caveman overrides. `config.rs:1297-1302` checks the upper threshold clamp, but
+neither checks a clamp-reporting warning.
 Guarantee: When a configured value is altered by a clamp or discarded as out of
 domain, the resolution reports which key was altered.
-Check: `always` - for every resolution where an input leaf differs from the
-resolved leaf, the warning vector names that leaf. `always` because the merge
-path always produces the vector.
+Check: `always` - when an isolated supplied leaf is clamped or discarded as out
+of domain, the warning vector names that leaf and its range or rejection.
+`always` applies to every resolution. Tier rejection and legacy-key deprecation
+warnings do not substitute for a range diagnostic.
 Fault/timing angle: none.
-Required faults and enabling state: a config with
+Required faults and enabling state: a user-only config with
 `memory.auto_search.score_threshold: 0.99`,
 `memory.auto_search.min_prompt_chars: 0`, or
 `caveman_text_compression.min_chars: 50`.
 Confidence: high - [evidence](evidence/dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller.md).
-Enumerated every clamp: `config.rs:568-570`, `:591`, `:595`, `:607`, and the
-`.max(1.0)` calls at `:442`, `:453`, `:527`. `positive_usize_at` (`:623-629`)
-filters `*v > 0`. `emit_warnings` (`:275-279`) prints and drops.
+The threshold clamp is at `config.rs:750-752`, auto-search and caveman clamps
+at `config.rs:827-846`, and budget floors at `config.rs:847-869`.
+`positive_usize_at` rejects zero (`config.rs:955-961`). None reports a range
+warning. The warning-returning merge and file resolver are observable from tests
+(`config.rs:710-755`, `config.rs:262-282`).
 Existing check: none for the clamp reporting. Status `unaudited`.
-Impact: a user tuning auto-search or caveman sees no effect from a value
-outside the clamp and no explanation. `min_prompt_chars: 0`, the natural
-spelling of "hint on every prompt", silently becomes `20`.
+Impact: a user can receive a different effective value without an explanation.
+With only a user tier, `min_prompt_chars: 0` leaves the default `20`; an allowed
+project zero instead preserves the earlier user value.
 Open questions:
 - Is the stderr line from `emit_warnings` visible in any harness the module
   runs under? The module runs as a daemon component, so stderr may be
@@ -718,89 +661,51 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only
-Status: active
-Exercised: partial - `config.rs:1191-1229` covers the mtime cache with
-well-formed files, and `:1181-1189` covers JSONC stripping of comment-like
-strings. No test writes a syntactically invalid file and asserts the outcome.
+Status: invalidated
+Exercised: yes - `config.rs:2133-2182` constructs malformed and unreadable
+tiers and asserts path-specific warnings, repeated warnings, same-mtime repair,
+and silent missing tiers. Test adequacy remains `unaudited`.
 Guarantee: A configuration file that exists but cannot be parsed produces a
 distinguishable signal rather than the same result as an absent file.
-Check: `always(!X)` - and the check this record originally carried is not
-implementable, so the disposition states the implementable substitute rather than
-deleting the record. The original read: `always` — whenever `fs::read_to_string`
-succeeds and `serde_json::from_str` fails, the resolution emits a warning naming
-the path.
-There is no return channel for such a warning to travel on. `read_tier_cached`
-(`config.rs:254-266`) has the signature
-`fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value>`: no
-`warnings: &mut Vec<String>` parameter, no `Result`, and `:261-264` maps both the
-read error and the parse error to `None` with `.ok()` and a bare `Err(_) => None`.
-The warning vector that the sibling clamp records assert against is built inside
-`merge_tiers_with_warnings`, which runs on the parsed `Value` and therefore cannot
-distinguish "file absent" from "file unparseable" — by then both are `None`. And
-even if a warning existed, `emit_warnings` (`:275-279`) only `eprintln!`s it and
-returns `()`, which the sibling record
-[dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller](#dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller)
-already flags as possibly discarded by the daemon host.
-
-The implementable substitute, and what this record now asserts: `always(!X)` over
-the *observable consequence*, plus an enumeration for the mechanism.
-**Consequence half:** for a user config file that exists and does not parse, the
-resolved `DaemonConfig` is not equal to `DaemonConfig::default()` **or** some
-distinguishable signal exists. Today it is equal, which is the defect, so the
-assertion fails on the current build and that is the point of the record.
-`always` rather than `always-or-unreached` because the read path executes on every
-`effective_config` call. **Mechanism half:** the enumeration that
-`read_tier_cached`'s signature admits no diagnostic channel, which is a static
-fact and needs no fixture. The consequence half is the falsifiable one; the
-mechanism half is what makes the defect a design gap rather than a missing
-`eprintln!`.
-Fault/timing angle: none for the parse itself. There is a separate same-mtime
-window: `read_tier_cached` keys on `(path, mtime)` (`config.rs:256`), so an
-edit landing inside the filesystem's mtime granularity is not observed.
+Check: `always` - an unusable tier produces a warning naming its path and
+failure kind on each resolution; a missing tier does not. These semantics apply
+to every file resolution, including repeated failures.
+Fault/timing angle: failed reads bypass the mtime fast path
+(`config.rs:363-366`). Successful cached values can still conceal a same-mtime
+edit, which is a separate condition and not evidence of silent parse failure.
 Required faults and enabling state: a user `eidnara.jsonc` with a syntax
 error that `strip_jsonc` does not repair, for example an unterminated string.
 Confidence: high - [evidence](evidence/dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian.md).
-`config.rs:261-264` discards both the parse error and the read error. Traced
-the default `model_chain: Vec::new()` (`:121`) to `lib.rs:5020-5028`, which
-records `no_fire: "no_models"`. A disposition pass re-read `:254-266` and
-confirmed the absence of any warning parameter or `Result` on the function.
-Existing check: none. Status `unaudited`.
-Impact: a typo in the user config silently disables autonomous historian
-firing. The only surface is a `no_models` no-fire reason, which points at model
-configuration rather than at a parse failure.
-Open questions:
-- Is the mtime-granularity window worth a separate record, or is it subsumed
-  here? An edit that changes bytes without changing mtime serves stale config
-  until the next mtime change. Unresolved, needs a scoping decision at
-  synthesis.
-- Where should the diagnostic channel live? `read_tier_cached` would have to
-  return a `Result` or take a warnings sink, and `effective_config`'s callers
-  would have to carry it. That is a signature change across the config module,
-  which is why the record's original check was not merely unwritten but
-  unwritable. (needs human input)
+`read_tier_cached` stores both the value and warning (`config.rs:362-393`);
+`effective_with_warnings` collects tier warnings (`config.rs:262-282`), and
+the public resolution path emits them (`config.rs:250-257`,
+`config.rs:402-406`). Defaults can still apply, but the failure is not silent.
+Existing check: `unreadable_and_malformed_tiers_warn_while_missing_tiers_stay_silent`
+at `config.rs:2133-2182`. Status `unaudited`.
+Impact: losing this diagnostic would make an ignored broken file appear absent.
+The existing fallback policy is not a last-known-good policy.
+Open questions: None for the config-reader signal. Launcher-specific display of
+stderr is outside this record.
+
+Invalidated: at `74044960ee91641dec95c8552f15282844a18b13`, the read-warning
+storage, collection, and emission paths disprove the silent-failure premise.
+The guarantee and existing check remain recorded; this is not an open defect.
 
 ## Group B: model-chain resolution
 
-Two records on how the historian's model chain is built, kept together because
-both are properties of the same walk and neither is visible in the resolved value.
-The first is that the key lookup has two implementations that do not agree, so
-which one runs decides whether a configured model is found at all. The second is
-that the chain's deduplication is adjacent-only, so a repeated model separated by
-one other entry survives and is billed twice. Both are cheap to check against a
-constructed config and neither has a test.
+The lookup record compares per-model configuration walks. The model-chain record
+retains an invalidated adjacent-only defect premise: full deduplication and its
+non-adjacent-repeat check exist. The two concerns have different oracles.
 
 ### dec-a-model-key-lookup-walk-has-two-implementations-that-disagree
 
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - for the differential this record actually asserts. The
-existing tests exercise **one** of the two walks: `config.rs:721-744` and
-`:760-785` drive the `config.rs` walk, including a shared TypeScript vector set.
-Neither compares it against the scheduler walk, and the scheduler walk has no
-wildcard test because it has no wildcard. This line previously read `partial —`
-against those two tests, which credited coverage of one implementation as partial
-coverage of a differential between two.
+Exercised: not yet - no check compares both Rust walks on the same wildcard-only
+map. Config routing tests (`config.rs:1089-1115`, `config.rs:1133-1160`) and
+the scheduler golden (`scheduler.rs:1087-1096`) exercise each implementation
+separately. Each existing check remains `unaudited`.
 Guarantee: Every consumer of a per-model configuration map resolves a given
 model key through the same documented walk.
 Check: `always` - for every model key and every map, `config.rs`'s walk and
@@ -808,94 +713,62 @@ Check: `always` - for every model key and every map, `config.rs`'s walk and
 each walk runs on every resolution for its own consumer.
 Fault/timing angle: none.
 Required faults and enabling state: a per-model map keyed only by a
-`provider/*` wildcard. On the `cache_ttl` side this resolves; on the scheduler
-side it would fall to `default`. **The scheduler side additionally needs
-`ExecuteThresholdConfig::ByModel`, and nothing constructs that variant anywhere
-in the repository**, which is what forces the reachability label below.
+`provider/*` wildcard, with distinct wildcard and default values. Compare a TTL
+map with a scheduler percentage map through direct calls. The daemon's config
+adapter selects a scalar threshold, not the scheduler map path
+(`transform.rs:5447-5454`).
 Confidence: high - [evidence](evidence/dec-a-model-key-lookup-walk-has-two-implementations-that-disagree.md).
-`CONFIGURATION.md:70` (source-catalog path, not present at HEAD) states the walk and says `cache_ttl` shares it.
-`config.rs:159-200` includes the wildcard at `:196`; `scheduler.rs:849-870` has
-no wildcard step, and `:818-829` and `:832-847` fall to `"default"`.
-`config.rs:113-114` calls the walk "shared".
-Existing check: `config.rs:760-785`
-`cache_ttl_resolution_matches_shared_typescript_vectors` pins one
-implementation against TypeScript vectors. No differential test between the two
-Rust implementations. Status `unaudited`.
-Impact: today the divergence is latent because `ByModel` is unconstructed
-everywhere (see 4b's `sel-per-model-and-token-thresholds-inert-in-module`). If the
-per-model threshold path is ever wired, a wildcard-keyed config will resolve
-differently from the same wildcard on `cache_ttl`, and the documentation says
-it will not.
+The TTL walk includes the wildcard (`config.rs:151-207`); the scheduler walk
+does not (`scheduler.rs:810-830`), and its consumers fall back to `default`
+(`scheduler.rs:779-808`). The original shared-walk contract comes from the
+absent source-catalog `CONFIGURATION.md`, not a newly verified current document.
+Existing check: `cache_ttl_resolution_matches_shared_typescript_vectors`
+(`config.rs:1133-1160`) pins the TTL resolver. The scheduler golden
+deserializes per-model thresholds (`scheduler.rs:923-932`,
+`scheduler.rs:1011-1013`; object cases at
+`crates/daemon/testdata/scheduler-golden.json:87-106`) and resolves them at
+`scheduler.rs:1087-1096`. These are not a differential test. Status `unaudited`.
+Impact: callers of the two map APIs can select different entries for the same
+qualified key. The daemon's scalar config route does not exercise that divergence.
 Open questions:
 - Should the two walks be one function? They already agree on the exact, bare,
   and dash-stripped steps, which is the duplication the repository's own
   duplication policy targets. (needs human input)
 
-> Disposition note on this record's reachability label, and on the two halves the
-> label collapses. **The label was `explicit-config-only` and that was wrong: no
-> configuration can construct the state this record's check needs.** The check is a
-> differential between two walks, and reaching the scheduler walk with a per-model
-> map requires `ExecuteThresholdConfig::ByModel` (`scheduler.rs:456-458`).
-> `config.rs` cannot build that variant: `number_at` (`:631-636`) returns
-> `Option<f64>` from `Value::as_f64` and yields `None` for an object, and the one
-> assignment to `execute_threshold_percentage` (`:430-432`) takes that `f64`
-> directly, so an object-form `execute_threshold_percentage` in a config file is
-> discarded before any enum is chosen. So config cannot reach it, and
-> `explicit-config-only` asserts precisely that config can.
->
-> **The relabel to `test-only` is the correct class and it overstates what exists,
-> so the overstatement is recorded here rather than hidden.**
-> `grep -rn 'ByModel' --include='*.rs'` over the whole tree returns exactly two
-> hits, both in `scheduler.rs`: the variant declaration at `:115` and the match arm
-> at `:456`. **Nothing constructs it — not production, not a test, not a fixture.**
-> `test-only` is nonetheless right under METHOD's three-way vocabulary, because the
-> class names the only route by which the state *can* be reached and that route is
-> a direct in-crate call: `ExecuteThresholdConfig` is `pub` at `:111` with
-> `#[serde(untagged)] Deserialize`, and `model_key_lookup_order` at `:849` is
-> private, so an in-crate `#[cfg(test)]` caller is the whole reachable set. The
-> label describes the class, not the census.
->
-> **The split the evaluation offered as its alternative is recorded in prose rather
-> than as a second record, and here is the split.** The record bundles two claims
-> with different reachability: (a) the `config.rs` walk resolves a wildcard-keyed
-> `cache_ttl` map correctly, which *is* `explicit-config-only` and is the half
-> `config.rs:760-785` already pins against TypeScript vectors; and (b) the two
-> walks agree, which is `test-only` and unconstructed. The record's `Guarantee:`
-> and `Check:` are both (b), so (b) governs the label. A second record for (a) was
-> considered and rejected: it would assert that one implementation matches an
-> external vector set, which is what the existing test already does, so it would be
-> a record with no gap behind it. Splitting the record would raise the part's count
-> to 27 for no new obligation, and METHOD prefers reframing to proliferation.
+The `test-only` label applies to the in-tree differential, not to the existence
+of scheduler map tests. The daemon adapter constructs a scalar, while golden
+deserialization constructs `ByModel`. The scheduler module is public
+(`lib.rs:31`), so this label does not exclude external library callers. The
+[historical investigation](evidence/dec-a-model-key-lookup-walk-has-two-implementations-that-disagree.md#historical-investigation)
+retains the earlier relabeling rationale without keeping its false no-construction
+claim active.
 
 ### dec-a-model-chain-dedup-is-adjacent-only
 
 Type: safety
 Reachability: explicit-config-only
-Status: active
-Exercised: partial - `config.rs:1119-1137` and `:1138-1153` cover chain
-construction from `module_model` and the plugin-key fallback. `:1154-1165`
-covers a blank `module_model`. No test repeats a model at a non-adjacent
-position.
+Status: invalidated
+Exercised: yes - `config.rs:2185-2194` supplies non-adjacent repeats and
+asserts first-occurrence order. Test adequacy remains `unaudited`.
 Guarantee: The resolved historian model chain contains no duplicate model id.
 Check: `always` - after config resolution, `model_chain` has no repeated
-element. `always` because `dedup()` runs on every resolution at
-`config.rs:571`.
+element. `always` because `dedup_preserving_order` runs on every merge at
+`config.rs:753`.
 Fault/timing angle: none.
 Required faults and enabling state: a user config with
 `historian.module_model: "a"` and
 `historian.module_fallback_models: ["b", "a"]`.
-Confidence: high - [evidence](evidence/dec-a-model-chain-dedup-is-adjacent-only.md). `Vec::dedup`
-removes only consecutive runs, so `["a","b","a"]` is unchanged.
-`historian.rs:1256` iterates the chain as ordered attempts, and `:1300`,
-`:1380`, and `:1443` slice it as a remaining-candidates list.
-Existing check: none. Status `unaudited`.
-Impact: a duplicated model is attempted twice in one firing.
-`config.rs:384-389` explains why the author cares about chain hygiene: a wrong
-chain "would burn permanent-classified advances every fire".
-Open questions:
-- Is a repeated attempt actually harmful, or is it an acceptable retry? The
-  comment at `:384-389` suggests the author treats wasted advances as a cost,
-  but it is about namespace mixing rather than duplication. (needs human input)
+Confidence: high - [evidence](evidence/dec-a-model-chain-dedup-is-adjacent-only.md).
+The helper uses `HashSet` insertion with `retain` (`config.rs:950-953`), so
+`["a", "b", "a"]` becomes `["a", "b"]` without sorting.
+Existing check: `model_chain_drops_repeats_anywhere_and_keeps_first_occurrence_order`
+at `config.rs:2185-2194`. Status `unaudited`.
+Impact: a regression could spend a bounded fallback attempt on a repeated model.
+Open questions: None.
+
+Invalidated: at `74044960ee91641dec95c8552f15282844a18b13`, full-chain
+deduplication disproves the adjacent-only premise. The uniqueness guarantee and
+existing check remain as a regression contract.
 
 ## Group C: totality, determinism, and the two exceptions
 
@@ -926,36 +799,35 @@ result, and two defects.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `scheduler.rs:1417-1424` covers `never` in four cases,
-`5m`, and one malformed string. Nothing covers `"0"`, an uppercase unit, an
-overflowing digit run, or a multi-byte trailing character.
-Guarantee: `parse_cache_ttl` returns for every `&str` without panicking, and
-any accepted value yields a millisecond count that no finite elapsed time can
-misinterpret.
+Exercised: partial - the golden parser cases (`scheduler.rs:1082-1085`) and
+sentinel tests (`scheduler.rs:1378-1405`) cover ordinary TTLs, malformed input,
+and `never`. They do not cover zero, an uppercase unit, an overflowing digit
+run, or a multibyte trailing character. Existing checks remain `unaudited`.
+Guarantee: `parse_cache_ttl` returns for every `&str` without panicking and maps
+`never` or an overflowing duration to the non-expiring `u64::MAX` sentinel.
 Check: `always` - for every input string, the call returns `Ok(n)` or
-`Err(CacheTtlParseError)`, never panics, and never yields a value from a
-non-finite intermediate. `always` because the scheduler parses the configured
-TTL on every `decide` call through `scheduler_ttl_ms`.
-Fault/timing angle: none in the parse. The consequence has one:
-`ttl_hard_expired` compares
-`now_ms.saturating_sub(last_response_time_ms) > ttl_ms`, so a `ttl_ms` of `0`
-makes every pass past the first look idle-expired.
+`Err(CacheTtlParseError)` without panicking. Non-finite or oversized computed
+durations yield `u64::MAX`, which neither expiry predicate can exceed.
+`always` because the scheduler parses the configured TTL on every `decide`
+call through `scheduler_ttl_ms`.
+Fault/timing angle: none in parsing. Hard expiry requires a positive prior
+timestamp and elapsed time strictly greater than the TTL
+(`scheduler.rs:405-407`); a second call alone does not establish those conditions.
 Required faults and enabling state: a `cache_ttl` string. `"0"`, `"5S"`,
 `"99999999999999999999h"`, and `"5\u{20ac}"` are the interesting inputs; all
-are accepted by `config.rs:486-491` as non-empty trimmed strings.
+are accepted from the user tier by `config.rs:924-945` as non-empty trimmed
+strings. A project TTL is ignored before this parser.
 Confidence: high - [evidence](evidence/dec-a-cache-ttl-parse-is-total-over-arbitrary-strings.md).
-Read `scheduler.rs:385-419`, then executed the function's exact logic on nine
-inputs. Confirmed `"0" -> Ok(0)`, `"5S" -> Err`, `"never"`/`"NEVER"` ->
-`u64::MAX`, the overflow arm at `:414-418` -> `u64::MAX`, and that the
-`len_utf8` slice at `:397` keeps a multi-byte trailing character on a character
-boundary.
-Existing check: `scheduler.rs:1417-1424`
-`parse_cache_ttl_never_returns_u64_max` and `:1427-1435`
-`never_ttl_predicates_are_always_false`. Status `unaudited`.
-Impact: the parse itself is sound, which is the finding. The reachable hazard
-is downstream: `"0"` forces a hard idle expiry on every pass, and any
-unparseable string is swallowed into the `5m` default by `scheduler_ttl_ms`
-(`:810-812`) with no report.
+The parser returns a `Result`, slices at a character boundary, and saturates
+oversized results (`scheduler.rs:365-398`). Zero parses to zero milliseconds;
+uppercase units are rejected while `never` is case-insensitive.
+Existing check: `parse_cache_ttl_never_returns_u64_max`
+(`scheduler.rs:1378-1385`), `never_ttl_predicates_are_always_false`
+(`scheduler.rs:1388-1393`), and the golden parser loop above. Status `unaudited`.
+Impact: an invalid user TTL silently uses the scheduler default
+(`scheduler.rs:771-773`). Zero requests expiry when its timestamp preconditions
+hold; band selection and boundary deferral still govern the final pass
+(`scheduler.rs:689-732`). The parser's range guarantee remains intact.
 Open questions:
 - Is `cache_ttl: "0"` intended as "always expire" or should it be rejected?
   `CONFIGURATION.md:163` (source-catalog path, not present at HEAD) documents neither. (needs human input)
@@ -1076,7 +948,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - `config.rs:972-978` covers `1`, `32_000`, `128_000`,
+Exercised: partial - `config.rs:1449-1455` covers `1`, `32_000`, `128_000`,
 `200_000`, and `400_000`, so both clamp arms are hit. Neither `0` nor
 `usize::MAX` is covered.
 Guarantee: `derive_historian_chunk_tokens` returns a value in
@@ -1086,18 +958,18 @@ Check: `always` - for every input, the result is in `[8000, 50000]`. `always`
 because every historian firing derives the budget from the configured limit.
 Fault/timing angle: none.
 Required faults and enabling state: `historian.context_limit_tokens` set to `0`
-is impossible, because `positive_usize_at` (`config.rs:623-629`) discards it.
+is impossible, because `positive_usize_at` (`config.rs:955-961`) discards it.
 Reaching the extremes needs a very large configured limit or a direct call.
 Confidence: high - [evidence](evidence/dec-a-derive-historian-chunk-tokens-is-total-at-both-integer-extremes.md).
-`config.rs:45-48`. Executed the exact body: `usize::MAX -> 50000` because a
-float-to-integer `as` cast saturates rather than wrapping, `0 -> 8000`,
-`1 -> 8000`. Traced the three call sites at `lib.rs:4700`, `:5087`, `:5250`.
-Existing check: `config.rs:972-978`
+The final integer clamp (`config.rs:39-46`) enforces the ordered constants
+`8000` and `50000` (`config.rs:28-29`). The maximum input reaches the upper
+clamp after quartering; it does not need a saturating float-to-integer cast.
+The reattach builder and firing assemblers pass the effective context limit
+(`lib.rs:4708-4714`, `lib.rs:5114-5119`, `lib.rs:5270-5276`).
+Existing check: `config.rs:1449-1455`
 `historian_budget_derivation_clamps_at_both_bounds`. Status `unaudited`.
-Impact: low on its own. It matters as the paired positive result to the Part 3
-defect class: the rounding-then-clamp order here cannot produce a value outside
-the declared range, and the saturating cast means an absurd configured limit
-degrades to the documented maximum rather than wrapping to a tiny budget.
+Impact: a regression could produce an out-of-range historian chunk budget.
+The final integer clamp bounds even an extremely large configured limit.
 Open questions: None.
 
 ### dec-a-escalation-bands-stay-ordered-for-every-threshold
@@ -1188,7 +1060,8 @@ sentinel. `always` because `region_hint` runs on every diff key of every
 superseded edit.
 Fault/timing angle: none.
 Required faults and enabling state: `smart_drops: true`, which is off by
-default (`config.rs:135`, `CONFIGURATION.md:752` (source-catalog path, not present at HEAD)), plus an `edit` or `write`
+default (`config.rs:128`) and permitted in either tier (`config.rs:680`,
+`config.rs:890-894`), plus an `edit` or `write`
 tool call superseded by a later edit to the same file, whose `oldString`,
 `newString`, or `content` value ends with the literal `...[truncated]`.
 Confidence: high - [evidence](evidence/dec-a-region-hint-clamp-bypassed-by-sentinel-suffix.md).
@@ -1285,8 +1158,9 @@ Existing check: partial and indirect. `codec/mod.rs:78-89` and `:201-212`
 assert decode determinism (`decoded == decoded_again`) over the goldens, which
 pins purity but not totality. `codec/opencode.rs:1322-2186` (17 tests) and
 `codec/pi.rs:1078-1499` (14 tests) all use well-formed fixtures. Status
-`unaudited`. CI runs only `cargo test -p daemon --test lifecycle_cli`
-(`.github/workflows/ci.yml:172`), so none of these execute in CI.
+`unaudited`. Workspace nextest includes daemon library tests
+(`.github/workflows/ci.yml:413-417`); the source-catalog absent-CI premise is
+not current evidence about these checks.
 Impact: the failure mode is not a crash, it is a fabricated message. A harness
 that ships a malformed element gets a zero-block `"user"` message that occupies
 an ordinal, enters the sidecar, participates in boundary selection, and is
@@ -1982,7 +1856,8 @@ Open questions:
 Grouped by shared mechanism rather than by the group headings above, because the
 mechanism is what decides whether one check can stand in for another. Every
 dominance statement is a hypothesis offered to guide ordering, not a verified
-claim; none of these records has an executing check.
+claim. Existing checks and their execution are recorded in
+[existing-checks.md](existing-checks.md); adequacy remains `unaudited`.
 
 - **One document, one resolver, and every way they disagree.**
   [dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1](#dec-a-execute-threshold-lower-bound-is-documented-20-and-enforced-1),
@@ -2001,14 +1876,11 @@ claim; none of these records has an executing check.
   [dec-a-model-key-lookup-walk-has-two-implementations-that-disagree](#dec-a-model-key-lookup-walk-has-two-implementations-that-disagree),
   [dec-a-model-chain-dedup-is-adjacent-only](#dec-a-model-chain-dedup-is-adjacent-only),
   [dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian](#dec-a-malformed-config-silently-resolves-to-defaults-and-stops-the-historian).
-  The three ways the historian's model chain can be wrong: found by the wrong walk,
-  deduplicated too weakly, or empty because the file did not parse and the error was
-  discarded. Hypothesis: no dominance, because the oracles differ in kind, but they
-  compose into the sharpest scenario in the part. A malformed config yields an empty
-  chain and a `no_fire: "no_models"` verdict that reads as a healthy decision, so
-  the operator-visible signal for a broken file is identical to the signal for a
-  deliberately disabled historian. That composition is worth one integration test on
-  its own.
+  These are distinct concerns, not three open model-chain defects. Full
+  deduplication removes repeated models, and unusable files produce path-bearing
+  warnings. Those two defect premises are invalidated, while their regression
+  contracts remain. The per-model lookup differential has a different input and
+  oracle.
 - **Guards that hold, recorded so a later change is visible.**
   [dec-a-cache-ttl-parse-is-total-over-arbitrary-strings](#dec-a-cache-ttl-parse-is-total-over-arbitrary-strings),
   [dec-a-boundary-budget-derivation-is-total-over-non-finite-input](#dec-a-boundary-budget-derivation-is-total-over-non-finite-input),
@@ -2020,8 +1892,9 @@ claim; none of these records has an executing check.
   a property test in a few lines. Hypothesis: none dominates another, and their value
   is not defect-finding but boundary-fixing, since Part 3's analogous unit failed
   exactly here. The one live hazard sits inside the first: a `cache_ttl` of `"0"`
-  parses to 0 ms and forces execution every pass, so the totality record and the
-  configuration cluster meet on one key.
+  parses to zero ms and expires when its timestamp preconditions hold, subject to
+  later scheduler gates. The totality record and configuration cluster meet on
+  one key without implying unconditional execution.
 - **The two doors in the guard wall, and they are different shapes.**
   [dec-a-region-hint-clamp-bypassed-by-sentinel-suffix](#dec-a-region-hint-clamp-bypassed-by-sentinel-suffix),
   [dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic](#dec-a-caller-supplied-trigger-budget-is-the-one-unvalidated-float-and-reaches-a-diagnostic).
@@ -2100,19 +1973,9 @@ record needs, so the question reduces to whether two *retained* taggable blocks 
 follow a full-drop tool block in one message. Recorded as unresolved on both sides
 rather than answered.
 
-**The release-profile question is one question across three sub-parts.** 4e's
-duplicate-id belt, this part's encode-side uniqueness guard, and this part's sidecar
-slice all behave differently under `debug_assertions`, and all three are blocked on
-the same fact: CI builds without `--release` (`ci.yml:169` at `HEAD`), so the
-artifact CI produces selects the debug arm, and whether the distributed
-`eidnara-host` matches is unresolved and needs the release pipeline. Any conformance
-work on either sub-part should answer it once.
-
-**The parity-claim shape recurs.** 4a found five in-crate tests asserting
-TypeScript parity by construction with nothing executing the comparison, and 4e
-found a frozen shared fixture whose provenance guard lives only in the leg CI does
-not run. This part's register is the same shape at larger scale: 8 of its 13
-`NOT FOUND` claims are cross-implementation parity claims whose oracle lives in
-TypeScript and is never read. The three findings are one architectural fact rather
-than three defects, and it is the strongest argument in the project for a single
-cross-language conformance lane.
+**Build-profile and parity questions need their own evidence.** The CI payload
+smoke builds `eidnara-host` without `--release`
+(`.github/workflows/ci.yml:625-629`); that does not identify every distributed
+artifact's profile. Likewise, workspace execution of frozen-vector checks does
+not establish a live cross-language comparison. The original cross-part
+investigations remain historical leads, not blockers on config-test execution.
