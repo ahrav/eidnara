@@ -59,7 +59,7 @@ pub use cas::{
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DomainSpec, Envelope, KnownAsOf,
-    OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, RemediationTarget,
+    OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, Preview, RemediationTarget,
     RepositoryProvenance, Sensitivity, StagingCandidateRow, StagingCandidateSpec, TokenCheck,
     TokenConflict,
 };

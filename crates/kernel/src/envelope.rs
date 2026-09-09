@@ -257,6 +257,19 @@ pub struct Envelope<'tx> {
     poisoned: Option<KernelError>,
 }
 
+/// No `&mut Envelope` is reachable, so nothing lands in the log. The one mutation, [`Preview::preview_admission`], seeds the same-transaction prior cache the way `record_admission` does inside a commit, so a later operation in the same preview is judged against an earlier one's decision as the commit judges it. The authority cascade over a decision's dependents is not simulated. commentlint: allow(JUDGE)
+pub struct Preview<'tx> {
+    pub(super) envelope: Envelope<'tx>,
+}
+
+impl<'tx> std::ops::Deref for Preview<'tx> {
+    type Target = Envelope<'tx>;
+
+    fn deref(&self) -> &Envelope<'tx> {
+        &self.envelope
+    }
+}
+
 impl Envelope<'_> {
     /// A recorded failure is returned by every later mutation and by `commit`, so a caller that discards a mutation's `Err` cannot commit a transaction whose change set no longer describes its writes. Every public mutator on the envelope goes through this gate. commentlint: allow(JUDGE)
     pub(super) fn guarded<T>(
@@ -603,20 +616,24 @@ impl KernelStore {
         })
     }
 
-    /// `read` holds the envelope by shared reference over a read transaction, so its mutators are unreachable and nothing lands in the log.
     /// The envelope's `commit_seq` is the sequence the next commit would take, so `check_token` judges a token from the tip the way that commit would.
+    /// The reader is polled for until `deadline` and held for the whole of `read`, which is the caller's to bound: a pooled reader is shared with every other read path.
     pub fn preview<T>(
         &self,
-        read: impl FnOnce(&Envelope<'_>) -> Result<T, KernelError>,
+        deadline: Instant,
+        read: impl FnOnce(&mut Preview<'_>) -> Result<T, KernelError>,
     ) -> Result<(i64, T), KernelError> {
-        self.read_snapshot(0, |tx, tip| {
-            read(&Envelope {
-                tx,
-                commit_seq: tip + 1,
-                changes: Vec::new(),
-                admission_ordinal: 0,
-                admission_latest: HashMap::new(),
-                poisoned: None,
+        let mut reader = self.lock_reader_within(&AcquireLimit::until(deadline))?;
+        read_snapshot_on(&mut reader, 0, |tx, tip| {
+            read(&mut Preview {
+                envelope: Envelope {
+                    tx,
+                    commit_seq: tip + 1,
+                    changes: Vec::new(),
+                    admission_ordinal: 0,
+                    admission_latest: HashMap::new(),
+                    poisoned: None,
+                },
             })
         })
     }
@@ -676,19 +693,7 @@ impl KernelStore {
             return Err(KernelError::InvalidInput);
         }
         let mut reader = self.lock_reader()?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(map_sqlite)?;
-        let tip = tx
-            .prepare_cached("SELECT COALESCE(MAX(commit_seq),0) FROM commit_log")
-            .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
-            .map_err(map_sqlite)?;
-        if requested > tip {
-            return Err(KernelError::FutureSnapshot);
-        }
-        let result = read(&tx, tip)?;
-        tx.commit().map_err(map_sqlite)?;
-        Ok((tip, result))
+        read_snapshot_on(&mut reader, requested, read)
     }
 
     pub fn stage_candidate(
@@ -967,6 +972,27 @@ pub(super) fn replace_alignment_projection_tx(
         return Ok(removed);
     }
     Ok(rows.len())
+}
+
+/// The deferred transaction makes `tip` and `read` observe one snapshot.
+fn read_snapshot_on<T>(
+    reader: &mut Connection,
+    requested: i64,
+    read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
+) -> Result<(i64, T), KernelError> {
+    let tx = reader
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(map_sqlite)?;
+    let tip = tx
+        .prepare_cached("SELECT COALESCE(MAX(commit_seq),0) FROM commit_log")
+        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
+        .map_err(map_sqlite)?;
+    if requested > tip {
+        return Err(KernelError::FutureSnapshot);
+    }
+    let result = read(&tx, tip)?;
+    tx.commit().map_err(map_sqlite)?;
+    Ok((tip, result))
 }
 
 /// The receipt a repeat of `intent` replays; a stored key under a different

@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use host_runtime::RouteHandle;
-use kernel::{DecisionRow, KernelError, KernelStore, Surface, SurfaceVisibility, VisibleRow};
+use kernel::{DecisionRow, KernelError, KernelStore, Surface, VisibleRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -250,11 +250,7 @@ pub(crate) fn read_visible(
 fn row_json(row: &VisibleRow, decision: Option<&DecisionRow>, known_as_of: i64) -> Value {
     json!({
         "object": row.object,
-        "visibility": match row.visibility {
-            SurfaceVisibility::Hidden => "hidden",
-            SurfaceVisibility::Visible => "visible",
-            SurfaceVisibility::Labeled => "labeled",
-        },
+        "visibility": row.visibility.as_str(),
         "labeled": row.labeled,
         "scope_id": row.scope_id,
         "token": {"object_id": row.object.object_id, "known_as_of": known_as_of},

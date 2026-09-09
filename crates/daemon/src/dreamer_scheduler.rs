@@ -603,7 +603,11 @@ mod tests {
 
     /// Replays `acquisition` for the scheduler's own identity, which reports the
     /// slot's recorded decision without changing it.
-    fn slot_state(store: &MemoryStore, identity: &str, due: i64) -> LeaseAcquireOutcome<()> {
+    fn slot_state(
+        store: &MemoryStore,
+        identity: &str,
+        due: i64,
+    ) -> memory_store::DreamerTaskAcquireOutcome {
         store
             .acquire_dreamer_task(
                 identity,

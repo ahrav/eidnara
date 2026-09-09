@@ -40,7 +40,7 @@ unless stated.
   runs the predecessor's slot and `run_dreamer_task` finds the interrupted
   receipt under that command id.
 - The registration generation is allocated on first use from
-  `next_dreamer_scheduler_generation` (`crates/memory-store/src/lib.rs:3939`),
+  `next_dreamer_scheduler_generation` (`crates/memory-store/src/lib.rs:3957`),
   one above the highest generation the instance has on the ledger. A live
   claim is never reclaimed, so the successor always outranks it; wall time is
   not used, so a clock step backwards cannot rank the successor below its
@@ -48,24 +48,24 @@ unless stated.
 - Lease and completion instants are read from the clock as each operation
   happens (`:308`, `:354`), so a long run for one project does not shorten the
   lease of the project behind it in the same tick.
-- `SchedulerBridge::scheduled_projects` (`crates/daemon/src/lib.rs:13742`)
+- `SchedulerBridge::scheduled_projects` (`crates/daemon/src/lib.rs:13775`)
   takes the most recently bound binding on each route root
   (`RouteBindings::latest_per_root`, `lib.rs:277`; each bind is stamped with a
   sequence at `lib.rs:235`), reads the schedule from that binding's
   configuration, the tier-merged value the route was bound under, and admits a
-  root only when `memories_authority_for_route` (`lib.rs:13685`) answers
+  root only when `memories_authority_for_route` (`lib.rs:13714`) answers
   `Module`. That helper is the same one `run_dreamer_task` uses, so a store
   `Err` is an `Err` from `scheduled_projects`, not a missing project. Roots
   that resolve to one authority project collapse to the most recently bound
   root, so the scheduler's due table, keyed by project, sees one schedule per
   project. The schedule key is `TierClass::UserOnly`
-  (`crates/daemon/src/config.rs:660-679`), so a project tier's value is
+  (`crates/daemon/src/config.rs:663-678`), so a project tier's value is
   dropped with a warning during the merge and never reaches a binding.
-- `SchedulerBridge::run_task` (`lib.rs:13790`) refuses with `NotRunnable` when
+- `SchedulerBridge::run_task` (`lib.rs:13823`) refuses with `NotRunnable` when
   no live route is bound to the project or the task has no Rust-owned inputs
   (`DreamerRuntime::classify_inputs`, `lib.rs:3101`, `None` on this HEAD), and
   otherwise calls `run_dreamer_task` under `SCHEDULER_LEDGER_SESSION`
-  (`lib.rs:13808`). `binding_for_root` (`lib.rs:13796`) takes the same most
+  (`lib.rs:13841`). `binding_for_root` (`lib.rs:13759`) takes the same most
   recently bound binding that `scheduled_projects` read the schedule from. The
   not-runnable reply is recorded on the lease so the slot is not retried every
   tick.
