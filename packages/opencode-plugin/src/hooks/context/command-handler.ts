@@ -4,6 +4,13 @@ import type { SidekickConfig } from "../../config/schema/eidnara";
 import { runSidekick } from "../../features/context/sidekick/agent";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
+import type { KernelClientResolver } from "../../shared/kernel-client";
+import {
+    formatMemoryMarkOutcome,
+    MEMORY_MARK_COMMAND,
+    parseMemoryMarkArgs,
+    runMemoryMarkCommand,
+} from "../../shared/memory-mark-command";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
 import {
     formatTailHygiene,
@@ -351,6 +358,41 @@ async function executeAugmentation(
     throwSentinel("CTX-AUG");
 }
 
+/** OpenCode's command path has no dialog, so the confirmation is the reply itself: the user re-issues the command with the confirm flag. commentlint: allow(JUDGE) */
+export const MEMORY_MARK_ACTOR = "user:opencode";
+
+async function executeMemoryMark(
+    deps: {
+        kernelClient?: KernelClientResolver;
+        isSessionDeleted?: (sessionId: string) => boolean;
+        resolveProjectRoot?: (sessionId: string) => Promise<string> | string;
+    },
+    sessionId: string,
+    rawArguments: string,
+): Promise<string> {
+    const parsed = parseMemoryMarkArgs(rawArguments);
+    if (!parsed.ok) return `## Eidnara Memory — Invalid Arguments\n\n${parsed.message}`;
+    if (!deps.kernelClient) {
+        return formatMemoryMarkOutcome(
+            { kind: "refused", step: "preview", state: { kind: "disabled" } },
+            parsed.args,
+        );
+    }
+    const projectRoot = (await deps.resolveProjectRoot?.(sessionId)) ?? process.cwd();
+    const isSessionDeleted = () => deps.isSessionDeleted?.(sessionId) === true;
+    if (isSessionDeleted()) throwSentinel(MEMORY_MARK_COMMAND);
+    const outcome = await runMemoryMarkCommand({
+        client: deps.kernelClient({ sessionId, projectRoot }),
+        sessionId,
+        actor: MEMORY_MARK_ACTOR,
+        args: parsed.args,
+        isCancelled: isSessionDeleted,
+    });
+    // A session deleted mid-command gets no notification, which would recreate daemon state for it.
+    if (isSessionDeleted()) throwSentinel(MEMORY_MARK_COMMAND);
+    return formatMemoryMarkOutcome(outcome, parsed.args);
+}
+
 export function createEidnaraCommandHandler(deps: {
     /** Command paths use boot-resolved mode and must not reread configuration. */
     compactionOff?: boolean;
@@ -366,6 +408,8 @@ export function createEidnaraCommandHandler(deps: {
         params: NotificationParams,
     ) => Promise<void>;
     moduleClient: RustModeModuleClient;
+    /** Resolves the kernel client `/ctx-memory-mark` previews and commits through; the command answers `disabled` when absent. */
+    kernelClient?: KernelClientResolver;
     /** The daemon keys session state by `(session, project_root)`; commands route by the same directory the transform resolved for the session. */
     resolveProjectRoot?: (sessionId: string) => Promise<string> | string;
     sidekick?: {
@@ -394,6 +438,7 @@ export function createEidnaraCommandHandler(deps: {
     const isRecompCommand = (command: string): boolean => command === "ctx-recomp";
     const isWrapupCommand = (command: string): boolean => command === "ctx-wrapup";
     const isAugCommand = (command: string): boolean => command === "ctx-aug";
+    const isMemoryMarkCommand = (command: string): boolean => command === MEMORY_MARK_COMMAND;
     const callRust = async (
         method: Parameters<RustModeModuleClient["call"]>[0]["method"],
         body: Record<string, unknown>,
@@ -426,8 +471,9 @@ export function createEidnaraCommandHandler(deps: {
             const isRecomp = isRecompCommand(input.command);
             const isWrapup = isWrapupCommand(input.command);
             const isAug = isAugCommand(input.command);
+            const isMemoryMark = isMemoryMarkCommand(input.command);
 
-            if (!isStatus && !isFlush && !isRecomp && !isWrapup && !isAug) {
+            if (!isStatus && !isFlush && !isRecomp && !isWrapup && !isAug && !isMemoryMark) {
                 return;
             }
 
@@ -447,6 +493,10 @@ export function createEidnaraCommandHandler(deps: {
             if (isAug) {
                 await executeAugmentation(deps, sessionId, input.arguments, params);
                 return; // executeAugmentation throws sentinel internally
+            }
+
+            if (isMemoryMark) {
+                result = await executeMemoryMark(deps, sessionId, input.arguments);
             }
 
             if (isFlush) {

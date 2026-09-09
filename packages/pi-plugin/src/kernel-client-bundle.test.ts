@@ -115,6 +115,18 @@ describe("Pi kernel-client bundle reachability", () => {
         expect(operationLiteralHits([...sources])).toEqual([]);
     }, 120_000);
 
+    it("the memory disposition command ships in the main entry through the shared kernel client", () => {
+        const graph = buildEntryGraphs()[join(SRC, "index.ts")];
+        expect(graph).toBeDefined();
+        const inputs = new Set((graph?.inputs ?? []).map((input) => resolve(PACKAGE_ROOT, input)));
+        for (const module of [
+            "src/commands/ctx-memory-mark.ts",
+            "../opencode-plugin/src/shared/memory-mark-command.ts",
+        ]) {
+            expect(inputs).toContain(resolve(PACKAGE_ROOT, module));
+        }
+    }, 120_000);
+
     it("the shipped entry points bundle under the build script's externals", () => {
         const graphs = buildEntryGraphs();
         expect(Object.keys(graphs).sort()).toEqual([...BUILD_ENTRIES].sort());

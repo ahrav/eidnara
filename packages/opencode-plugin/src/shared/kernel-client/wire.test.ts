@@ -3,6 +3,7 @@ import {
     isMemoryDecisionRow,
     parseCommitResponse,
     parseKernelResponse,
+    parsePreviewResponse,
     parseReadResponse,
 } from "./wire";
 
@@ -235,7 +236,38 @@ describe("parseCommitResponse", () => {
             known_as_of: 3,
             tokens: [{ object_id: "o1", known_as_of: 3 }],
             merged: ["o1"],
+            dispositions: [],
         });
+    });
+
+    test("dispositions are typed and a malformed entry fails the whole reply", () => {
+        const disposition = {
+            object_id: "o1",
+            event: "quarantine",
+            outcome: "quarantine",
+            previous_disposition: "active",
+            disposition: "quarantined",
+            denied: false,
+        };
+        const parsed = parseCommitResponse({
+            state: { kind: "available" },
+            receipt: { commit_seq: 3, replayed: false },
+            known_as_of: 3,
+            tokens: [{ object_id: "o1", known_as_of: 3 }],
+            merged: [],
+            dispositions: [disposition],
+        });
+        expect(parsed.payload?.dispositions).toEqual([disposition]);
+        const malformed = parseCommitResponse({
+            state: { kind: "available" },
+            receipt: { commit_seq: 3, replayed: false },
+            known_as_of: 3,
+            tokens: [],
+            merged: [],
+            dispositions: [{ ...disposition, event: "approve" }],
+        });
+        expect(malformed.state).toEqual(UNRECOGNIZED);
+        expect(malformed.payload).toBeNull();
     });
 
     test("a daemon that omits merged reports no merges", () => {
@@ -286,6 +318,84 @@ describe("parseCommitResponse", () => {
     test("a conflict passes through untouched", () => {
         const parsed = parseCommitResponse({ state: { kind: "conflict", reason: "retracted" } });
         expect(parsed.state).toEqual({ kind: "conflict", reason: "retracted" });
+        expect(parsed.payload).toBeNull();
+    });
+});
+
+describe("parsePreviewResponse", () => {
+    const preview = {
+        object_id: "o1",
+        event: "mark_stale",
+        outcome: "deny",
+        previous_disposition: "active",
+        disposition: "stale",
+        denied: false,
+        current: { auto_inject: "visible", auto_search: "visible", explicit_search: "visible" },
+        projected: { auto_inject: "hidden", auto_search: "hidden", explicit_search: "labeled" },
+        visibility_changes: true,
+    };
+
+    test("previews are typed with both surface verdicts", () => {
+        const parsed = parsePreviewResponse({
+            state: { kind: "available" },
+            known_as_of: 7,
+            previews: [preview],
+        });
+        expect(parsed.payload).toEqual({ known_as_of: 7, previews: [preview] });
+    });
+
+    test("an unknown surface verdict, a missing flag, or a flag that contradicts the verdicts fails the reply", () => {
+        for (const broken of [
+            { ...preview, current: { ...preview.current, auto_inject: "shown" } },
+            { ...preview, projected: undefined },
+            { ...preview, visibility_changes: "yes" },
+            // Served surfaces would hide, so the flag must be true; a false flag would skip the confirmation.
+            { ...preview, visibility_changes: false },
+            // A hidden object becoming labeled changes nothing served, so the flag must be false.
+            {
+                ...preview,
+                current: {
+                    auto_inject: "hidden",
+                    auto_search: "hidden",
+                    explicit_search: "hidden",
+                },
+                visibility_changes: true,
+            },
+        ]) {
+            const parsed = parsePreviewResponse({
+                state: { kind: "available" },
+                known_as_of: 7,
+                previews: [broken],
+            });
+            expect(parsed.state).toEqual(UNRECOGNIZED);
+            expect(parsed.payload).toBeNull();
+        }
+    });
+
+    test("a replayed identity carries the receipt and no previews", () => {
+        const replayed = parsePreviewResponse({
+            state: { kind: "available" },
+            known_as_of: 7,
+            receipt: { commit_seq: 5, replayed: true },
+            previews: [],
+        });
+        expect(replayed.payload).toEqual({
+            known_as_of: 7,
+            previews: [],
+            receipt: { commit_seq: 5, replayed: true },
+        });
+        const contradictory = parsePreviewResponse({
+            state: { kind: "available" },
+            known_as_of: 7,
+            receipt: { commit_seq: 5, replayed: true },
+            previews: [preview],
+        });
+        expect(contradictory.state).toEqual(UNRECOGNIZED);
+    });
+
+    test("a non-available state carries no payload", () => {
+        const parsed = parsePreviewResponse({ state: { kind: "invalid", reason: "not_found" } });
+        expect(parsed.state).toEqual({ kind: "invalid", reason: "not_found" });
         expect(parsed.payload).toBeNull();
     });
 });

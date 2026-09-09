@@ -1,6 +1,8 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import { KernelClient } from "../../shared/kernel-client";
+import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import {
     __resetNotificationStateForTests,
     type RpcNotification,
@@ -603,6 +605,77 @@ describe("createEidnaraCommandHandler", () => {
             await expectSentinel(run("ctx-wrapup", "ses-wrapup-tui"), "ctx-wrapup");
 
             expect(sendNotification.mock.calls.at(-1)?.[2]).toEqual({ forcePersist: false });
+        });
+    });
+
+    describe("ctx-memory-mark", () => {
+        function kernelResolver(kernel: FakeKernel) {
+            const transport = new FakeKernelTransport(kernel);
+            return ({ sessionId, projectRoot }: { sessionId: string; projectRoot: string }) =>
+                new KernelClient({ transport, enabled: true, sessionId, projectRoot });
+        }
+
+        it("applies a tightening on a labeled memory without asking and reports the receipt", async () => {
+            const kernel = new FakeKernel();
+            kernel.seedDecision({
+                object_id: "mem_rule",
+                decision_kind: "PROJECT_RULES",
+                summary: "rule",
+            });
+            const { run, texts } = setup(undefined, {
+                kernelClient: kernelResolver(kernel),
+                resolveProjectRoot: () => "/repo/project",
+            });
+
+            await expectSentinel(
+                run("ctx-memory-mark", "ses-mark", "mark_stale mem_rule"),
+                "ctx-memory-mark",
+            );
+
+            expect(texts().join("\n")).toContain("Applied");
+            expect(texts().join("\n")).toContain("active -> stale");
+            expect(kernel.objects.get("mem_rule")?.disposition).toBe("stale");
+        });
+
+        it("asks for the confirm flag when a served surface would change, and writes nothing", async () => {
+            const kernel = new FakeKernel();
+            kernel.seedDecision({
+                object_id: "mem_verified",
+                decision_kind: "PROJECT_RULES",
+                summary: "verified",
+                labeled: false,
+            });
+            const { run, texts } = setup(undefined, {
+                kernelClient: kernelResolver(kernel),
+                resolveProjectRoot: () => "/repo/project",
+            });
+
+            await expectSentinel(
+                run("ctx-memory-mark", "ses-mark", "quarantine mem_verified"),
+                "ctx-memory-mark",
+            );
+            expect(texts().join("\n")).toContain("Confirmation Needed");
+            expect(texts().join("\n")).toContain("/ctx-memory-mark quarantine mem_verified --yes");
+            expect(kernel.receipts.size).toBe(0);
+
+            await expectSentinel(
+                run("ctx-memory-mark", "ses-mark", "quarantine mem_verified --yes"),
+                "ctx-memory-mark",
+            );
+            expect(texts().at(-1)).toContain("Applied");
+            expect(kernel.objects.get("mem_verified")?.disposition).toBe("quarantined");
+        });
+
+        it("reports usage for malformed arguments and disabled when no kernel client is wired", async () => {
+            const { run, texts } = setup();
+            await expectSentinel(run("ctx-memory-mark", "ses-mark", "stale"), "ctx-memory-mark");
+            expect(texts().at(-1)).toContain("Invalid Arguments");
+
+            await expectSentinel(
+                run("ctx-memory-mark", "ses-mark", "mark_stale mem_rule"),
+                "ctx-memory-mark",
+            );
+            expect(texts().at(-1)).toContain("disabled");
         });
     });
 

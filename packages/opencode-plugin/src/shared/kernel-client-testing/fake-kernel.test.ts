@@ -32,6 +32,30 @@ function decisionSpec(objectId: string): Record<string, unknown> {
     };
 }
 
+describe("FakeKernel disposition tokens", () => {
+    it("advances the token for an object inserted and disposed in one envelope, not for a disposition alone", () => {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: "mem_old",
+            decision_kind: "ARCHITECTURE",
+            summary: "old",
+        });
+        const before = kernel.tip;
+        const reply = kernel.reply(
+            commitCall([
+                { op: "insert_decision", spec: decisionSpec("mem_new") },
+                { op: "disposition", object_id: "mem_new", event: "mark_stale" },
+                { op: "disposition", object_id: "mem_old", event: "mark_stale" },
+            ]),
+        );
+        expect(reply).toMatchObject({ state: { kind: "available" } });
+        expect(kernel.lastChange.get("mem_new")).toBe(kernel.tip);
+        expect(kernel.lastChange.get("mem_old")).toBe(before);
+        expect(kernel.objects.get("mem_new")?.disposition).toBe("stale");
+        expect(kernel.objects.get("mem_old")?.disposition).toBe("stale");
+    });
+});
+
 describe("FakeKernel commit prevalidation", () => {
     it("rejects two inserts of one id in a single envelope and applies nothing", () => {
         const kernel = new FakeKernel();
