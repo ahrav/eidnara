@@ -46,10 +46,10 @@ Verified at HEAD.
   the recorded reason is the serialized `kind` tag joined with the serialized
   `reason` by `:`, read from the same wire object the TypeScript client derives
   its `stateKey` from, so the two cannot drift.
-- `crates/memory-store/src/lib.rs:1320-1343` (`ProjectMemoryComposition`):
+- `crates/memory-store/src/lib.rs:1322-1336` (`ProjectMemoryComposition`):
   `#[serde(tag = "kind")]` with variants `canonical` and `withheld`, so the two
   records differ on the wire and in the durable blob, not only in Rust.
-- `crates/daemon/src/transform.rs:2618`, `:4262`, `:4433`: every HARD arm
+- `crates/daemon/src/transform.rs:2622`, `:4266`, `:4437`: every HARD arm
   (compaction-off, compaction-on, and the re-cut arm) writes
   `meta.project_memory = ctx.project_memory_composition()` next to the frozen
   m0 bytes, inside the same `TransformCommit`. The accessor (`:561`) maps a
@@ -59,17 +59,25 @@ Verified at HEAD.
   the additive path pass `ctx.project_memory_rows()` to the renderer, so a
   withheld read renders no block because it has no rows, not because a
   separate flag suppresses it.
-- `crates/daemon/src/lib.rs:8020`: the read is taken once per pass through
-  `Handler::project_memory_read` (`lib.rs:4828`), which returns `None` when
+- `crates/daemon/src/lib.rs:7994`: the read is taken once per pass through
+  `Handler::project_memory_read` (`lib.rs:4834`), which returns `None` when
   memory is disabled so the kernel store is not consulted, before the
   `run_transform` closure; every attempt of that pass clones the same value
   into its `ProducerContext`, so the m1 revision signal, m0, and additive m0
   compose from one snapshot. A historian firing the pass triggers receives the
-  same pinned value through `HistorianPrepareContext` (`lib.rs:5119`); a
-  withheld verdict renders no block and is logged with its state key
-  (`historian_chunk.rs`, `assemble_historian_firing`), so summarization
-  continues through a kernel outage while the log keeps the reason. The
-  wrapup route takes its own read through the same helper (`lib.rs:5270`).
+  same pinned value through `HistorianPrepareContext` (`lib.rs:5104`). The
+  wrapup route takes its own read through the same helper (`lib.rs:5244`).
+- `crates/daemon/src/historian_chunk.rs:681-687`: the assembler gates the read
+  on `memory_enabled` once, renders the block from that gated read's `rows()`,
+  and (`:734`) records the same gated read's `composition()` on
+  `AssembledHistorianFiring.project_memory`, so a withheld read renders no
+  block and carries `Withheld { state }`, a served read with zero rows renders
+  no block and carries `Canonical { .. }`, and a gated-off read carries `None`.
+  `prepare_historian_fire` copies that record into the fired
+  `HistorianDiagnostics.project_memory` (`lib.rs:5148`), which the transform
+  response returns under `historian`; every not-fired diagnostics literal
+  leaves it `None`. Summarization continues through a kernel outage while the
+  diagnostics keep the reason.
 
 ## Failure scenario
 
@@ -84,7 +92,7 @@ rematerialized when the store became ready.
 
 ## Timing windows and dependencies
 
-- The window between the read (`lib.rs:8020`) and the commit is closed to the
+- The window between the read (`lib.rs:7994`) and the commit is closed to the
   verdict: the read result is a value in the context, and a phase or lag change
   after it cannot alter what the pass records.
 - The property depends on the two-variant enum staying exhaustive; a third
@@ -92,7 +100,7 @@ rematerialized when the store became ready.
 - The distinction reaches the m1 revision signal through
   `ProjectMemoryComposition::revision()` (`None` when withheld), so a served
   read with rows changes the external revision and forces the HARD that
-  rematerializes m0 (`transform.rs:13342` pins this). The digest covers only
+  rematerializes m0 (`transform.rs:13346` pins this). The digest covers only
   the rows the block renders, so a change to a row the budget excludes, or a
   flip of the read cap's `truncated` flag, leaves the revision alone
   (`canonical_memory.rs` tests `rows_past_the_memory_budget_are_neither_injected_nor_digested`
@@ -110,12 +118,28 @@ rematerialized when the store became ready.
 3. Assert the withheld record is not equal to the empty record.
 
 `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`
-(`transform.rs:13278`) constructs exactly this at the injected-context seam;
+(`transform.rs:13282`) constructs exactly this at the injected-context seam;
 `a_lagging_consumer_withholds_the_block_and_acknowledging_restores_it`
 (`tests/transform_canonical_memory.rs`) reaches the withheld arm through the
 reader itself, with a registered consumer trailing the published outbox by the
 position threshold, and then shows the block return once the consumer
 acknowledges.
+
+For the historian, the same three steps run over `HistorianAssemblerConfig`
+and the fired `HistorianDiagnostics`:
+`a_withheld_memory_read_renders_no_block_and_records_its_verdict`
+(`historian_chunk.rs:1369`) assembles withheld, empty, served, and gated-off
+reads at the assembler seam;
+`a_withheld_historian_memory_read_is_recorded_and_differs_from_an_empty_block`
+(`lib.rs:28544`) fires the historian through the handler with the kernel store
+still opening (`Withheld { state: "unavailable:store_starting" }`) and again
+with an open, empty store (`Canonical { .. }`), and asserts the two records
+differ while neither captured prompt carries the block; and
+`historian_prompt_composes_project_memory_from_canonical_rows`
+(`lib.rs:28420`) commits verified, quarantined, retired, superseded, and
+other-project decisions to a real kernel store and checks the captured prompt
+carries only the verified row, with the diagnostics pinning `known_as_of` to
+the store tip.
 
 ## Investigation log
 

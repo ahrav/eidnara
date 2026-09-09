@@ -3,119 +3,16 @@
 
 mod support;
 
-use daemon::kernel_route_fixtures::{admission, intent};
+use daemon::kernel_route_fixtures::{
+    admission, commit_verified_memory, decision_spec_in_domain, intent, memory_decision_spec,
+    verify_decision,
+};
 use kernel::{
-    DecisionPayload, DecisionSpec, DomainSpec, Envelope, EventKind, KernelError, KernelStore,
-    ObservationPayload, ObservationSpec, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass,
+    DomainSpec, EventKind, KernelStore, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass,
     TaintClass,
 };
 use serde_json::{Value, json};
 use support::kernel_daemon::{DOMAIN, KernelDaemon, SESSION, insert_decision, state_kind};
-
-/// The kernel domain the reader admits; the fixture's other rows stay in
-/// `DOMAIN` so a test can show that a positive-kind decision elsewhere is not
-/// injected.
-const MEMORY_DOMAIN: &str = "memory";
-
-fn decision_spec(object_id: &str, scope_id: &str, kind: &str, summary: &str) -> DecisionSpec {
-    decision_spec_in_domain(object_id, scope_id, MEMORY_DOMAIN, kind, summary)
-}
-
-fn decision_spec_in_domain(
-    object_id: &str,
-    scope_id: &str,
-    domain_id: &str,
-    kind: &str,
-    summary: &str,
-) -> DecisionSpec {
-    DecisionSpec {
-        decision_id: format!("{object_id}-decision"),
-        object_id: object_id.to_string(),
-        domain_id: domain_id.to_string(),
-        proposition_id: None,
-        scope_id: Some(scope_id.to_string()),
-        anchor_id: None,
-        evidence_id: None,
-        decision_kind: kind.to_string(),
-        payload: DecisionPayload {
-            summary: summary.to_string(),
-            rationale: String::new(),
-        },
-        source_kind: "repo".to_string(),
-        source_id: format!("{object_id}-lineage"),
-        source_revision: 1,
-        sensitivity: Sensitivity::Normal,
-    }
-}
-
-/// Verifies `object_id` against an observation of its own lineage: the trusted
-/// code observation lifts the decision to the maturity the automatic surface
-/// serves.
-fn verify(envelope: &mut Envelope<'_>, object_id: &str) -> Result<(), KernelError> {
-    let observation = format!("{object_id}-observed");
-    envelope.insert_observation(ObservationSpec {
-        observation_id: observation.clone(),
-        object_id: observation.clone(),
-        domain_id: DOMAIN.to_string(),
-        proposition_id: None,
-        scope_id: None,
-        anchor_id: None,
-        evidence_id: None,
-        observation_kind: "code_present".to_string(),
-        payload: ObservationPayload {
-            summary: "code present".to_string(),
-            classification: "code_present".to_string(),
-            detail: None,
-        },
-        observed_at: 1,
-        dependencies: Vec::new(),
-        source_kind: "repo".to_string(),
-        source_id: format!("{object_id}-lineage"),
-        source_revision: 1,
-        sensitivity: Sensitivity::Normal,
-    })?;
-    envelope.record_admission(admission(
-        object_id,
-        EventKind::CodeObserved,
-        Some(&observation),
-        (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
-    ))?;
-    Ok(())
-}
-
-/// `object_registry.domain_id` requires this domain; direct store writes bypass the route that creates it.
-fn ensure_memory_domain(envelope: &mut Envelope<'_>) -> Result<(), KernelError> {
-    if envelope.domain_exists(MEMORY_DOMAIN)? {
-        return Ok(());
-    }
-    envelope.insert_domain(DomainSpec {
-        domain_id: MEMORY_DOMAIN.to_string(),
-        object_id: format!("domain:{MEMORY_DOMAIN}"),
-        name: MEMORY_DOMAIN.to_string(),
-        source_kind: "repo".to_string(),
-        source_id: format!("domain:{MEMORY_DOMAIN}"),
-        source_revision: 1,
-        sensitivity: Sensitivity::Normal,
-    })
-}
-
-fn commit_verified_memory(
-    store: &KernelStore,
-    key: &str,
-    object_id: &str,
-    scope_id: &str,
-    kind: &str,
-    summary: &str,
-) {
-    store
-        .commit(intent(key), |envelope| {
-            ensure_memory_domain(envelope)?;
-            envelope.insert_decision(decision_spec(object_id, scope_id, kind, summary))?;
-            verify(envelope, object_id)?;
-            Ok(String::new())
-        })
-        .unwrap();
-}
 
 fn transform_request(fingerprint: &str) -> Value {
     json!({
@@ -191,13 +88,13 @@ async fn transform_composes_project_memory_from_canonical_rows_and_observes_abse
                     ..ScopeTermSpec::default()
                 }],
             })?;
-            envelope.insert_decision(decision_spec(
+            envelope.insert_decision(memory_decision_spec(
                 "mem-other",
                 "scope-other",
                 "PROJECT_RULES",
                 "Other project rule.",
             ))?;
-            verify(envelope, "mem-other")?;
+            verify_decision(envelope, "mem-other")?;
             Ok(String::new())
         })
         .unwrap();
@@ -210,14 +107,14 @@ async fn transform_composes_project_memory_from_canonical_rows_and_observes_abse
                 "ARCHITECTURE",
                 "Architecture from another domain.",
             ))?;
-            verify(envelope, "note-arch")?;
+            verify_decision(envelope, "note-arch")?;
             Ok(String::new())
         })
         .unwrap();
     store
         .commit(intent("shape"), |envelope| {
             envelope.retire_decision("mem-retired")?;
-            let mut replacement = decision_spec(
+            let mut replacement = memory_decision_spec(
                 "mem-new",
                 &scope_id,
                 "ARCHITECTURE",
@@ -314,7 +211,7 @@ fn emit_outbox_rows(store: &KernelStore, first: i64, count: i64) {
     store
         .commit(intent(&format!("domains-{first}-{count}")), |envelope| {
             for index in first..first + count {
-                envelope.insert_domain(kernel::DomainSpec {
+                envelope.insert_domain(DomainSpec {
                     domain_id: format!("lag-domain-{index}"),
                     object_id: format!("lag-object-{index}"),
                     name: format!("lag-{index}"),
@@ -515,7 +412,7 @@ async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
     // revision holds and the frozen m0 is kept.
     store
         .commit(intent("edit-long"), |envelope| {
-            let mut replacement = decision_spec(
+            let mut replacement = memory_decision_spec(
                 "mem-long-2",
                 &scope_id,
                 "PROJECT_RULES",
@@ -524,7 +421,7 @@ async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
             replacement.source_id = "mem-long-lineage".to_string();
             replacement.source_revision = 2;
             envelope.supersede_decision("mem-long", replacement)?;
-            verify(envelope, "mem-long-2")?;
+            verify_decision(envelope, "mem-long-2")?;
             Ok(String::new())
         })
         .unwrap();

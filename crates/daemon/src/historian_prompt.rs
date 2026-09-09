@@ -96,7 +96,7 @@ pub struct CompartmentPromptInputs<'a> {
     pub seed_examples: &'a str,
     /// Prior same-session compartment XML.
     pub session_references: &'a str,
-    /// Claim-native project memory block.
+    /// Canonical project memory block.
     pub project_memory: &'a str,
     /// Historical transcript placed inside `<new_messages>`.
     pub input_source: &'a str,
