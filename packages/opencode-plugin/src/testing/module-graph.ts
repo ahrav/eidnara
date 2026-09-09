@@ -246,26 +246,36 @@ export function operationLiteralHits(
  */
 export function literalStrings(file: ts.SourceFile): { line: number; value: string }[] {
     const folded: { line: number; value: string }[] = [];
-    // Bindings whose initializer folds to a string, keyed by name without regard to scope.
-    // Resolving to a shadowing binding produces an extra fold, never a missed one.
-    const bindings = new Map<string, string>();
-    const leafText = (node: ts.Expression): string | undefined => {
+    // Bindings whose initializers fold to strings, keyed by name without regard to scope, so a
+    // shadowed name keeps every value it is ever given.
+    const bindings = new Map<string, string[]>();
+    // Every string an expression can evaluate to under the bindings, or `undefined` when a leaf
+    // is not foldable. A product past 1024 values fails the scan rather than dropping any.
+    const product = (parts: (string[] | undefined)[]): string[] | undefined => {
+        let values = [""];
+        for (const part of parts) {
+            if (part === undefined) return undefined;
+            const next: string[] = [];
+            for (const head of values) for (const tail of part) next.push(head + tail);
+            if (next.length > 1024)
+                throw new RangeError("a folded string has more than 1024 values");
+            values = [...new Set(next)];
+        }
+        return values;
+    };
+    const leafTexts = (node: ts.Expression): string[] | undefined => {
         const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
-        if (ts.isStringLiteralLike(inner)) return inner.text;
+        if (ts.isStringLiteralLike(inner)) return [inner.text];
         if (ts.isIdentifier(inner)) return bindings.get(inner.text);
         if (ts.isBinaryExpression(inner) && inner.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-            const left = leafText(inner.left);
-            const right = leafText(inner.right);
-            return left !== undefined && right !== undefined ? left + right : undefined;
+            return product([leafTexts(inner.left), leafTexts(inner.right)]);
         }
         if (ts.isTemplateExpression(inner)) {
-            let value = inner.head.text;
+            const parts: (string[] | undefined)[] = [[inner.head.text]];
             for (const span of inner.templateSpans) {
-                const substituted = leafText(span.expression);
-                if (substituted === undefined) return undefined;
-                value += substituted + span.literal.text;
+                parts.push(leafTexts(span.expression), [span.literal.text]);
             }
-            return value;
+            return product(parts);
         }
         // `"context".concat(".db")` with a foldable receiver and arguments.
         if (
@@ -273,8 +283,7 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             ts.isPropertyAccessExpression(inner.expression) &&
             inner.expression.name.text === "concat"
         ) {
-            const parts = [inner.expression.expression, ...inner.arguments].map(leafText);
-            return parts.every((part) => part !== undefined) ? parts.join("") : undefined;
+            return product([inner.expression.expression, ...inner.arguments].map(leafTexts));
         }
         // `"CONTEXT.DB".toLowerCase()` and the other case conversions of a foldable receiver.
         if (
@@ -283,11 +292,10 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             inner.arguments.length === 0 &&
             /^to(?:Locale)?(?:Lower|Upper)Case$/.test(inner.expression.name.text)
         ) {
-            const receiver = leafText(inner.expression.expression);
+            const receiver = leafTexts(inner.expression.expression);
             if (receiver === undefined) return undefined;
-            return /Lower/.test(inner.expression.name.text)
-                ? receiver.toLowerCase()
-                : receiver.toUpperCase();
+            const lower = /Lower/.test(inner.expression.name.text);
+            return receiver.map((value) => (lower ? value.toLowerCase() : value.toUpperCase()));
         }
         // `["claim", "intent"].join(".")` with every element and the separator foldable.
         if (
@@ -297,15 +305,13 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             ts.isArrayLiteralExpression(inner.expression.expression) &&
             inner.arguments.length <= 1
         ) {
-            const separator = inner.arguments[0] ? leafText(inner.arguments[0]) : ",";
-            if (separator === undefined) return undefined;
-            const parts: string[] = [];
-            for (const element of inner.expression.expression.elements) {
-                const part = leafText(element);
-                if (part === undefined) return undefined;
-                parts.push(part);
+            const separator = inner.arguments[0] ? leafTexts(inner.arguments[0]) : [","];
+            const parts: (string[] | undefined)[] = [];
+            for (const [index, element] of inner.expression.expression.elements.entries()) {
+                if (index > 0) parts.push(separator);
+                parts.push(leafTexts(element));
             }
-            return parts.join(separator);
+            return product(parts);
         }
         return undefined;
     };
@@ -365,6 +371,42 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
                 }
                 return;
             }
+            // `?` and `{m,n}` on one character or an enumerable class spell out exact texts; the
+            // whole text's quantifiers must multiply to at most 64 variants, so expanding them
+            // can never trip the cap on a pattern that is not literal-shaped.
+            const quantifierPattern =
+                /(\uE000.|\[(?:\uE000.|[^\]\uE000])*\]|[^\uE000\]?*+{}()|])(\?|\{(\d+)(?:,(\d+))?\})/g;
+            const variantsOf = (match: RegExpExecArray): number | undefined => {
+                const [, atom, quantifier, low, high] = match;
+                if (match.index > 0 && value.startsWith("\uE000", match.index - 1))
+                    return undefined;
+                const from = quantifier === "?" ? 0 : Number(low);
+                const to = quantifier === "?" ? 1 : Number(high ?? low);
+                const choices = atom.startsWith("[") ? classMembers(atom.slice(1, -1))?.length : 1;
+                if (choices === undefined || to < from || to > 16) return undefined;
+                let variants = 0;
+                for (let count = from; count <= to; count++) variants += choices ** count;
+                return variants;
+            };
+            let budget = 1;
+            let first: RegExpExecArray | undefined;
+            for (const match of value.matchAll(quantifierPattern)) {
+                const variants = variantsOf(match);
+                if (variants === undefined) continue;
+                budget *= variants;
+                first ??= match;
+            }
+            if (first !== undefined && budget <= 64) {
+                const [whole, atom, quantifier, low, high] = first;
+                const from = quantifier === "?" ? 0 : Number(low);
+                const to = quantifier === "?" ? 1 : Number(high ?? low);
+                const prefix = value.slice(0, first.index);
+                const suffix = value.slice(first.index + whole.length);
+                for (let count = from; count <= to; count++) {
+                    expand(prefix + atom.repeat(count) + suffix);
+                }
+                return;
+            }
             // A quantified class (`[0-9a-f]{7,12}`) matches a run, not one character, and stays
             // as written.
             const cls = /\[((?:\uE000.|[^\]\uE000])*)\](?![*+?{])/.exec(value);
@@ -412,36 +454,39 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             isRegExpConstructor(node.expression) &&
             node.arguments?.[0] !== undefined
         ) {
-            const body = leafText(node.arguments[0]);
-            const flags = node.arguments[1] ? leafText(node.arguments[1]) : "";
-            if (body !== undefined) pushRegex(node, body, flags ?? "");
+            const bodies = leafTexts(node.arguments[0]) ?? [];
+            const flags = node.arguments[1] ? (leafTexts(node.arguments[1]) ?? [""]) : [""];
+            for (const body of bodies) for (const flag of flags) pushRegex(node, body, flag);
         }
         if (
             (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
             ts.isTemplateExpression(node) ||
             ts.isCallExpression(node)
         ) {
-            const value = leafText(node);
-            if (value !== undefined) folded.push({ line: lineOf(node), value });
+            for (const value of leafTexts(node) ?? []) folded.push({ line: lineOf(node), value });
         }
         ts.forEachChild(node, visit);
     };
     // Bindings can refer to declarations collected in earlier passes, so collection repeats
-    // until no new values are resolved.
+    // until no binding gains a value. A shadowing declaration that reads its own name
+    // (`const p = p + "x"`) would grow forever, so passes are bounded.
+    let bindingValues = 0;
     const collectBindings = (node: ts.Node): void => {
-        if (
-            ts.isVariableDeclaration(node) &&
-            ts.isIdentifier(node.name) &&
-            node.initializer &&
-            !bindings.has(node.name.text)
-        ) {
-            const value = leafText(node.initializer);
-            if (value !== undefined) bindings.set(node.name.text, value);
+        if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+            const known = bindings.get(node.name.text) ?? [];
+            const merged = [...new Set([...known, ...(leafTexts(node.initializer) ?? [])])];
+            if (merged.length > 1024) {
+                throw new RangeError(`binding ${node.name.text} has more than 1024 values`);
+            }
+            if (merged.length > known.length) {
+                bindings.set(node.name.text, merged);
+                bindingValues += merged.length - known.length;
+            }
         }
         ts.forEachChild(node, collectBindings);
     };
-    for (let size = -1; size !== bindings.size; ) {
-        size = bindings.size;
+    for (let pass = 0, seen = -1; pass < 32 && seen !== bindingValues; pass++) {
+        seen = bindingValues;
         collectBindings(file);
     }
     visit(file);
@@ -622,11 +667,49 @@ export function databaseUses(
         }
         ts.forEachChild(node, collectLoaders);
     };
-    // Aliases can be declared after their use, so repeat until neither set grows.
-    for (let size = -1; size !== factories.size + loaders.size; ) {
-        size = factories.size + loaders.size;
+    // `const Ctor = db.constructor`, `const { constructor: Ctor } = db`, and `Again = Ctor`
+    // reach whatever class `db` is without naming it; `new Ctor(...)` is then an escape.
+    const constructorAliases = new Set<string>();
+    const isConstructorSource = (value: ts.Expression): boolean =>
+        (ts.isPropertyAccessExpression(value) && value.name.text === "constructor") ||
+        (ts.isElementAccessExpression(value) &&
+            ts.isStringLiteralLike(value.argumentExpression) &&
+            value.argumentExpression.text === "constructor") ||
+        (ts.isIdentifier(value) && constructorAliases.has(value.text));
+    const collectConstructorAliases = (node: ts.Node): void => {
+        if (
+            ts.isVariableDeclaration(node) &&
+            ts.isIdentifier(node.name) &&
+            node.initializer &&
+            isConstructorSource(node.initializer)
+        ) {
+            constructorAliases.add(node.name.text);
+        }
+        if (
+            ts.isBinaryExpression(node) &&
+            node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isIdentifier(node.left) &&
+            isConstructorSource(node.right)
+        ) {
+            constructorAliases.add(node.left.text);
+        }
+        if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) {
+            const property = node.propertyName ?? node.name;
+            const key = ts.isIdentifier(property)
+                ? property.text
+                : ts.isStringLiteralLike(property)
+                  ? property.text
+                  : undefined;
+            if (key === "constructor") constructorAliases.add(node.name.text);
+        }
+        ts.forEachChild(node, collectConstructorAliases);
+    };
+    // Aliases can be declared after their use, so repeat until no set grows.
+    for (let size = -1; size !== factories.size + loaders.size + constructorAliases.size; ) {
+        size = factories.size + loaders.size + constructorAliases.size;
         collectFactories(file);
         collectLoaders(file);
+        collectConstructorAliases(file);
     }
     let namesBinding = options.allConstructions === true;
     const findBinding = (node: ts.Node): void => {
@@ -650,8 +733,9 @@ export function databaseUses(
         // a module with no binding specifier cannot reach a database.
         if (
             ts.isNewExpression(node) &&
-            !ts.isIdentifier(node.expression) &&
-            (namesBinding || /\bconstructor\b/.test(node.expression.getText(file)))
+            ((!ts.isIdentifier(node.expression) &&
+                (namesBinding || /\bconstructor\b/.test(node.expression.getText(file)))) ||
+                (ts.isIdentifier(node.expression) && constructorAliases.has(node.expression.text)))
         ) {
             recordEscape(node);
         }

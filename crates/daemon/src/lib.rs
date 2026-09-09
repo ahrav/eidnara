@@ -28974,6 +28974,53 @@ mod tests {
         }
     }
 
+    /// The outer attributes of an expression in statement position, where rustc honors `cfg`
+    /// on every expression kind, including `#[cfg(test)] { .. }` and `#[cfg(test)] if ..`.
+    fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
+        match expr {
+            syn::Expr::Array(e) => &e.attrs,
+            syn::Expr::Assign(e) => &e.attrs,
+            syn::Expr::Async(e) => &e.attrs,
+            syn::Expr::Await(e) => &e.attrs,
+            syn::Expr::Binary(e) => &e.attrs,
+            syn::Expr::Block(e) => &e.attrs,
+            syn::Expr::Break(e) => &e.attrs,
+            syn::Expr::Call(e) => &e.attrs,
+            syn::Expr::Cast(e) => &e.attrs,
+            syn::Expr::Closure(e) => &e.attrs,
+            syn::Expr::Const(e) => &e.attrs,
+            syn::Expr::Continue(e) => &e.attrs,
+            syn::Expr::Field(e) => &e.attrs,
+            syn::Expr::ForLoop(e) => &e.attrs,
+            syn::Expr::Group(e) => &e.attrs,
+            syn::Expr::If(e) => &e.attrs,
+            syn::Expr::Index(e) => &e.attrs,
+            syn::Expr::Infer(e) => &e.attrs,
+            syn::Expr::Let(e) => &e.attrs,
+            syn::Expr::Lit(e) => &e.attrs,
+            syn::Expr::Loop(e) => &e.attrs,
+            syn::Expr::Macro(e) => &e.attrs,
+            syn::Expr::Match(e) => &e.attrs,
+            syn::Expr::MethodCall(e) => &e.attrs,
+            syn::Expr::Paren(e) => &e.attrs,
+            syn::Expr::Path(e) => &e.attrs,
+            syn::Expr::Range(e) => &e.attrs,
+            syn::Expr::RawAddr(e) => &e.attrs,
+            syn::Expr::Reference(e) => &e.attrs,
+            syn::Expr::Repeat(e) => &e.attrs,
+            syn::Expr::Return(e) => &e.attrs,
+            syn::Expr::Struct(e) => &e.attrs,
+            syn::Expr::Try(e) => &e.attrs,
+            syn::Expr::TryBlock(e) => &e.attrs,
+            syn::Expr::Tuple(e) => &e.attrs,
+            syn::Expr::Unary(e) => &e.attrs,
+            syn::Expr::Unsafe(e) => &e.attrs,
+            syn::Expr::While(e) => &e.attrs,
+            syn::Expr::Yield(e) => &e.attrs,
+            _ => &[],
+        }
+    }
+
     /// The attributes a production build applies: each plain attribute as written, plus the
     /// payload of every `cfg_attr` whose predicate can hold outside a test build, flattened
     /// recursively. A `cfg_attr` behind `test` contributes nothing.
@@ -29051,6 +29098,41 @@ mod tests {
         }
     }
 
+    /// `syn` rejects invalid basic-string syntax before it can become a path.
+    fn toml_string(value: &str) -> String {
+        let value = value.trim();
+        if let Some(rest) = value.strip_prefix('\'')
+            && let Some(close) = rest.find('\'')
+        {
+            let after = rest[close + 1..].trim();
+            assert!(
+                after.is_empty() || after.starts_with('#'),
+                "unsupported TOML after a literal string: {value}"
+            );
+            return rest[..close].to_string();
+        }
+        if let Some(body) = value.strip_prefix('"') {
+            let end = body
+                .char_indices()
+                .scan(false, |escaped, (index, ch)| {
+                    let close = ch == '"' && !*escaped;
+                    *escaped = ch == '\\' && !*escaped;
+                    Some((index, close))
+                })
+                .find_map(|(index, close)| close.then_some(index + 1))
+                .unwrap_or_else(|| panic!("unterminated TOML string: {value}"));
+            let after = value[end + 1..].trim();
+            assert!(
+                after.is_empty() || after.starts_with('#'),
+                "unsupported TOML after a basic string: {value}"
+            );
+            let literal: syn::LitStr =
+                syn::parse_str(&value[..=end]).unwrap_or_else(|_| panic!("TOML string: {value}"));
+            return literal.value();
+        }
+        panic!("Cargo target path is not a TOML string: {value}");
+    }
+
     /// Every root Cargo compiles into a shipped artifact: the auto-discovered `src/lib.rs`,
     /// `src/main.rs`, `src/bin/*.rs`, and `src/bin/*/main.rs`, plus each explicit `[lib]` or
     /// `[[bin]]` `path`. An explicit target outside `src/` would escape the orphan check, so it
@@ -29084,7 +29166,7 @@ mod tests {
             }
             if let Some(value) = line.strip_prefix("path") {
                 let value = value.trim_start().trim_start_matches('=').trim();
-                let target = manifest_dir.join(value.trim_matches('"'));
+                let target = manifest_dir.join(toml_string(value));
                 assert!(
                     target.starts_with(&src),
                     "Cargo target {} lies outside src/ and the audit cannot classify it",
@@ -29563,6 +29645,18 @@ mod tests {
             }
         }
 
+        fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+            let attrs: &[syn::Attribute] = match stmt {
+                syn::Stmt::Local(local) => &local.attrs,
+                syn::Stmt::Expr(expr, _) => expr_attrs(expr),
+                syn::Stmt::Macro(mac) => &mac.attrs,
+                syn::Stmt::Item(_) => &[],
+            };
+            if !is_test_only(attrs) {
+                syn::visit::visit_stmt(self, stmt);
+            }
+        }
+
         fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
             self.record(&item.ident, &item.expr);
             syn::visit::visit_item_const(self, item);
@@ -29766,9 +29860,111 @@ mod tests {
                     _ => {}
                 }
             }
+            // `?` and `{n,m}` on one character or an enumerable class spell out exact texts;
+            // the text's quantifiers must multiply to at most 64 variants, so expanding them
+            // never trips the cap on a pattern that is not literal-shaped.
+            let quantified = quantified_atoms(&bytes);
+            let budget: usize = quantified
+                .iter()
+                .map(|atom| atom.variants)
+                .try_fold(1usize, |acc, variants| acc.checked_mul(variants))
+                .unwrap_or(usize::MAX);
+            if let Some(first) = quantified.first()
+                && budget <= 64
+            {
+                let atom: String = bytes[first.start..first.atom_end].iter().collect();
+                let prefix: String = bytes[..first.start].iter().collect();
+                let suffix: String = bytes[first.quantifier_end..].iter().collect();
+                for count in first.from..=first.to {
+                    let repeated = atom.repeat(count as usize);
+                    expand(pattern, &format!("{prefix}{repeated}{suffix}"), out);
+                }
+                return;
+            }
             for alternative in split_unescaped(text, '|') {
                 push_text(pattern, alternative, out);
             }
+        }
+
+        struct QuantifiedAtom {
+            start: usize,
+            atom_end: usize,
+            from: u32,
+            to: u32,
+            quantifier_end: usize,
+            /// How many texts the atom yields across its repetition counts.
+            variants: usize,
+        }
+
+        /// Every `?` or `{n}`/`{n,m}` quantifier on one character (escaped or plain) or on an
+        /// enumerable class, in order; a quantifier past 16 repetitions or on anything else is
+        /// left out.
+        fn quantified_atoms(bytes: &[char]) -> Vec<QuantifiedAtom> {
+            let mut atoms = Vec::new();
+            let mut index = 0;
+            while index < bytes.len() {
+                let start = index;
+                let atom_end = match bytes[index] {
+                    '\u{0}' => index + 2,
+                    '[' => {
+                        let mut close = index + 1;
+                        while close < bytes.len() && bytes[close] != ']' {
+                            close += if bytes[close] == '\u{0}' { 2 } else { 1 };
+                        }
+                        close + 1
+                    }
+                    ']' | '?' | '*' | '+' | '{' | '}' | '(' | ')' | '|' => {
+                        index += 1;
+                        continue;
+                    }
+                    _ => index + 1,
+                };
+                if atom_end > bytes.len() {
+                    break;
+                }
+                let range = match bytes.get(atom_end) {
+                    Some('?') => Some((0, 1, atom_end + 1)),
+                    Some('{') => {
+                        bytes[atom_end..]
+                            .iter()
+                            .position(|&ch| ch == '}')
+                            .and_then(|close| {
+                                let body: String =
+                                    bytes[atom_end + 1..atom_end + close].iter().collect();
+                                let (low, high) = body.split_once(',').unwrap_or((&body, &body));
+                                let from = low.trim().parse::<u32>().ok()?;
+                                let to = high.trim().parse::<u32>().ok()?;
+                                Some((from, to, atom_end + close + 1))
+                            })
+                    }
+                    _ => None,
+                };
+                if let Some((from, to, quantifier_end)) = range
+                    && from <= to
+                    && to <= 16
+                {
+                    let choices = if bytes[start] == '[' {
+                        class_members(&bytes[start + 1..atom_end - 1]).map(|members| members.len())
+                    } else {
+                        Some(1)
+                    };
+                    if let Some(choices) = choices {
+                        let variants = (from..=to).map(|count| choices.pow(count)).sum();
+                        atoms.push(QuantifiedAtom {
+                            start,
+                            atom_end,
+                            from,
+                            to,
+                            quantifier_end,
+                            variants,
+                        });
+                    }
+                    index = quantifier_end;
+                } else {
+                    index = atom_end;
+                }
+            }
+            atoms
         }
 
         fn split_unescaped(text: &str, separator: char) -> Vec<&str> {
@@ -29968,14 +30164,13 @@ mod tests {
             }
 
             fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
-                let attrs = match stmt {
-                    syn::Stmt::Local(local) => Some(&local.attrs),
-                    syn::Stmt::Expr(syn::Expr::Call(call), _) => Some(&call.attrs),
-                    syn::Stmt::Expr(syn::Expr::MethodCall(call), _) => Some(&call.attrs),
-                    syn::Stmt::Expr(syn::Expr::Macro(mac), _) => Some(&mac.attrs),
-                    _ => None,
+                let attrs: &[syn::Attribute] = match stmt {
+                    syn::Stmt::Local(local) => &local.attrs,
+                    syn::Stmt::Expr(expr, _) => expr_attrs(expr),
+                    syn::Stmt::Macro(mac) => &mac.attrs,
+                    syn::Stmt::Item(_) => &[],
                 };
-                if !attrs.is_some_and(|attrs| is_test_only(attrs)) {
+                if !is_test_only(attrs) {
                     syn::visit::visit_stmt(self, stmt);
                 }
             }
@@ -30230,6 +30425,17 @@ mod tests {
         );
         assert_eq!(regex_texts(r"^[a-c]\.db$"), ["a.db", "b.db", "c.db"]);
         assert_eq!(regex_texts(r"^[0-9a-f]{7,12}$"), ["[0-9a-f]{7,12}"]);
+        assert_eq!(
+            regex_texts(r"^clai{1}m[.]intent[.]stage$"),
+            ["claim.intent.stage"]
+        );
+        assert_eq!(regex_texts(r"^colou?r$"), ["color", "colour"]);
+        assert_eq!(
+            regex_texts(r"^[ck]{1,2}laim$"),
+            ["claim", "klaim", "cclaim", "cklaim", "kclaim", "kklaim"]
+        );
+        assert_eq!(regex_texts(r"^a{2,3}$"), ["aa", "aaa"]);
+        assert_eq!(regex_texts(r"^\?{2}$"), ["??"]);
         assert_eq!(regex_texts(r"^[ab]+$"), ["[ab]+"]);
         assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
         assert_eq!(regex_texts(r"^[a-zA-Z0-9_-]+$"), ["[a-zA-Z0-9_-]+"]);

@@ -412,10 +412,26 @@ describe("databaseUses", () => {
                 [
                     'const names = new Intl.DisplayNames(["en"], { type: "language" });',
                     "const again = new handle.constructor(productPath);",
+                    "const Ctor = handle.constructor;",
+                    "const { constructor: Picked } = handle;",
+                    "let Late;",
+                    'Late = handle["constructor"];',
+                    "const Chained = Ctor;",
+                    "const viaCtor = new Ctor(productPath);",
+                    "const viaPicked = new Picked(productPath);",
+                    "const viaLate = new Late(productPath);",
+                    "const viaChained = new Chained(productPath);",
+                    "const plain = new Map();",
                     "",
                 ].join("\n"),
             ).escapes,
-        ).toEqual(["const again = new handle.constructor(productPath);"]);
+        ).toEqual([
+            "const again = new handle.constructor(productPath);",
+            "const viaCtor = new Ctor(productPath);",
+            "const viaPicked = new Picked(productPath);",
+            "const viaLate = new Late(productPath);",
+            "const viaChained = new Chained(productPath);",
+        ]);
     });
 
     test("reports aliased, namespace, default, re-exported, and dynamic binding imports as escapes", () => {
@@ -800,6 +816,47 @@ describe("operationLiteralHits", () => {
                 ),
             ).map((entry) => entry.value),
         ).toEqual(["claim.intent.stage", ".intent.stage", "claim", "im", "cla"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    [
+                        'const prefix = "kernel";',
+                        "{",
+                        '    const prefix = "claim";',
+                        '    const op = prefix + ".intent.stage";',
+                        "}",
+                        "",
+                    ].join("\n"),
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual([
+            "kernel",
+            "claim",
+            "kernel.intent.stage",
+            "claim.intent.stage",
+            ".intent.stage",
+        ]);
+        expect(
+            literalStrings(
+                parseSource(
+                    "const q = /^clai{1}m[.]intent[.]stage$/; const o = /^colou?r$/; const c = /^[ck]{1,2}laim$/; const r = /^a{2,3}$/;",
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual([
+            "claim.intent.stage",
+            "color",
+            "colour",
+            "claim",
+            "klaim",
+            "cclaim",
+            "cklaim",
+            "kclaim",
+            "kklaim",
+            "aa",
+            "aaa",
+        ]);
         const ten = "(a|b)".repeat(10);
         expect(literalStrings(parseSource(`const r = /^${ten}$/;`, "m.ts")).length).toBe(1024);
         expect(() => literalStrings(parseSource(`const r = /^${ten}(a|b)$/;`, "m.ts"))).toThrow(
