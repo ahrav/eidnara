@@ -116,6 +116,13 @@ pub(crate) enum TickEvent {
         due_at_ms: i64,
         reason: String,
     },
+    /// The lease ledger could not be read or written, so the slot has no
+    /// claim and is not consumed; it stays due and a later tick retries it.
+    Retained {
+        project: String,
+        due_at_ms: i64,
+        reason: String,
+    },
     /// The host could not report its projects, so nothing ran and no due
     /// instant moved; the next tick sees the same slots.
     Deferred { reason: String },
@@ -148,15 +155,15 @@ impl DreamerScheduler {
     }
 
     /// Runs ticks until `cancel`, sleeping until the earliest due instant or
-    /// the idle poll, whichever comes first. A deferred tick leaves its slots
-    /// due, so the loop waits the idle poll before retrying the host instead
-    /// of re-ticking at once against a failing store.
+    /// the idle poll, whichever comes first. After a deferred tick or a
+    /// retained slot the loop waits the idle poll, not the zero distance to
+    /// the slot that is still due, so a failing store is not re-ticked at once.
     pub(crate) async fn run(mut self, host: Arc<dyn SchedulerHost>, cancel: CancellationToken) {
         loop {
             if cancel.is_cancelled() {
                 return;
             }
-            let mut deferred = false;
+            let mut store_failed = false;
             for event in self.tick(host.as_ref()).await {
                 match event {
                     TickEvent::Ran { .. } => {}
@@ -169,15 +176,25 @@ impl DreamerScheduler {
                             "daemon: dreamer scheduler skipped {project} slot {due_at_ms}: {reason}"
                         );
                     }
+                    TickEvent::Retained {
+                        project,
+                        due_at_ms,
+                        reason,
+                    } => {
+                        store_failed = true;
+                        eprintln!(
+                            "daemon: dreamer scheduler could not lease {project} slot {due_at_ms}, which stays due: {reason}"
+                        );
+                    }
                     TickEvent::Deferred { reason } => {
-                        deferred = true;
+                        store_failed = true;
                         eprintln!(
                             "daemon: dreamer scheduler could not read its projects: {reason}"
                         );
                     }
                 }
             }
-            let wait = if deferred {
+            let wait = if store_failed {
                 IDLE_POLL
             } else {
                 self.earliest_due()
@@ -225,8 +242,11 @@ impl DreamerScheduler {
         let due = self.due_projects(&projects, now_ms);
         let mut events = Vec::new();
         for (due_at_ms, project) in due {
-            events.push(self.run_slot(host, project, due_at_ms).await);
-            self.advance(project, now_ms);
+            let event = self.run_slot(host, project, due_at_ms).await;
+            if !matches!(event, TickEvent::Retained { .. }) {
+                self.advance(project, now_ms);
+            }
+            events.push(event);
         }
         events
     }
@@ -293,9 +313,14 @@ impl DreamerScheduler {
             due_at_ms,
             reason,
         };
+        let retained = |reason: String| TickEvent::Retained {
+            project: project.project.clone(),
+            due_at_ms,
+            reason,
+        };
         let registration_generation = match self.registration_generation(store) {
             Ok(generation) => generation,
-            Err(error) => return skipped(format!("no registration generation: {error}")),
+            Err(error) => return retained(format!("no registration generation: {error}")),
         };
         let claim: LeaseClaim = match store.acquire_dreamer_task(
             &project.project,
@@ -326,7 +351,7 @@ impl DreamerScheduler {
             Ok(LeaseAcquireOutcome::Invalid) => {
                 return skipped("the lease ledger refused the acquisition".to_string());
             }
-            Err(error) => return skipped(format!("lease acquisition failed: {error}")),
+            Err(error) => return retained(format!("lease acquisition failed: {error}")),
         };
         // The claim's `source_revision` is the due instant it was leased for:
         // this slot's for a fresh claim, an earlier one for a rebound claim.
@@ -566,7 +591,9 @@ mod tests {
                 TickEvent::Ran {
                     project, due_at_ms, ..
                 } => Some((project.as_str(), *due_at_ms)),
-                TickEvent::Skipped { .. } | TickEvent::Deferred { .. } => None,
+                TickEvent::Skipped { .. }
+                | TickEvent::Retained { .. }
+                | TickEvent::Deferred { .. } => None,
             })
             .collect()
     }
@@ -797,6 +824,43 @@ mod tests {
         );
     }
 
+    /// A lease the ledger could not answer for is not a lease that was
+    /// refused: the slot keeps its due instant and the next tick leases and
+    /// runs that slot, not the one after it.
+    #[tokio::test]
+    async fn a_failed_lease_acquisition_retains_the_slot_for_the_next_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![project(&store, "git:a", "*/15 * * * *")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = DreamerScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        let due = T0 + 15 * MINUTE_MS;
+
+        clock.advance(15 * MINUTE);
+        store.fail_next_dreamer_task_acquire_for_test();
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(
+                &events[..],
+                [TickEvent::Retained { project, due_at_ms, reason }]
+                    if project == "git:a" && *due_at_ms == due
+                        && reason.contains("injected dreamer task acquire failure")
+            ),
+            "{events:?}"
+        );
+        assert!(host.runs.lock().unwrap().is_empty(), "nothing ran");
+        assert_eq!(scheduler.earliest_due(), Some(due), "the slot is still due");
+
+        clock.advance(MINUTE);
+        assert_eq!(ran(&scheduler.tick(&host).await), vec![("git:a", due)]);
+        assert_eq!(
+            host.runs.lock().unwrap().as_slice(),
+            &[("git:a".to_string(), command(due))]
+        );
+        assert_eq!(scheduler.earliest_due(), Some(due + 15 * MINUTE_MS));
+    }
+
     /// A restarted scheduler outranks its predecessor from the ledger, not
     /// the wall clock, so a clock that stepped back still recovers the
     /// predecessor's live claim, and the run it dispatches is the interrupted
@@ -997,29 +1061,39 @@ mod tests {
     /// A deferred tick leaves a slot due, which would otherwise make the loop
     /// re-tick at once; a failing store is retried at the idle poll instead.
     #[tokio::test]
-    async fn run_waits_the_idle_poll_after_a_deferred_tick() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path());
-        let host = Arc::new(scripted(
-            &store,
-            vec![project(&store, "git:a", "*/15 * * * *")],
-        ));
-        let clock = ManualClock::parked_at(T0 + 1_000);
-        let mut scheduler = DreamerScheduler::new(clock.shared());
-        assert!(scheduler.tick(host.as_ref()).await.is_empty());
-        clock.advance(15 * MINUTE);
-        *host.fail_projects_once.lock().unwrap() = Some("store unavailable".to_string());
+    async fn run_waits_the_idle_poll_after_a_deferred_tick_or_a_retained_slot() {
+        for fail_at_lease in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(dir.path());
+            let host = Arc::new(scripted(
+                &store,
+                vec![project(&store, "git:a", "*/15 * * * *")],
+            ));
+            let clock = ManualClock::parked_at(T0 + 1_000);
+            let mut scheduler = DreamerScheduler::new(clock.shared());
+            assert!(scheduler.tick(host.as_ref()).await.is_empty());
+            clock.advance(15 * MINUTE);
+            if fail_at_lease {
+                store.fail_next_dreamer_task_acquire_for_test();
+            } else {
+                *host.fail_projects_once.lock().unwrap() = Some("store unavailable".to_string());
+            }
 
-        let cancel = CancellationToken::new();
-        let dyn_host: Arc<dyn SchedulerHost> = Arc::clone(&host) as Arc<dyn SchedulerHost>;
-        let running = tokio::spawn(scheduler.run(dyn_host, cancel.clone()));
-        tokio::task::yield_now().await;
-        assert_eq!(clock.sleeps(), vec![IDLE_POLL], "not an immediate re-tick");
-        assert!(host.runs.lock().unwrap().is_empty());
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(5), running)
-            .await
-            .expect("run returns once cancelled")
-            .unwrap();
+            let cancel = CancellationToken::new();
+            let dyn_host: Arc<dyn SchedulerHost> = Arc::clone(&host) as Arc<dyn SchedulerHost>;
+            let running = tokio::spawn(scheduler.run(dyn_host, cancel.clone()));
+            tokio::task::yield_now().await;
+            assert_eq!(
+                clock.sleeps(),
+                vec![IDLE_POLL],
+                "{fail_at_lease}: not an immediate re-tick"
+            );
+            assert!(host.runs.lock().unwrap().is_empty());
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(5), running)
+                .await
+                .expect("run returns once cancelled")
+                .unwrap();
+        }
     }
 }

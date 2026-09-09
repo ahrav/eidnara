@@ -648,7 +648,7 @@ Reachability: explicit-config-only - the scheduler runs on every daemon once
 the store opens (`lib.rs:3650`), but it has a project to run only when the user
 tier sets `/dreamer/tasks/review-user-memories/schedule`, a `UserOnly` key
 (`config.rs:663-678`) that the project tier cannot set, and the route's
-memories authority is `MODULE` (`lib.rs:13775`). No task has Rust-owned
+memories authority is `MODULE` (`lib.rs:13789`). No task has Rust-owned
 classify inputs yet (`DreamerRuntime::classify_inputs`, `lib.rs:3101`), so on
 this HEAD a due slot ends `dreamer_task_not_runnable` without a dispatch.
 Status: active
@@ -656,7 +656,8 @@ Exercised: yes - `dreamer_scheduler::tests` in
 `crates/daemon/src/dreamer_scheduler.rs` drive `tick` with a manual clock over
 a real store: due-ness, oldest-first backlog with no back-fill, per-acquisition
 lease instants, schedule change and removal, a deferred tick that keeps the
-pending slot when the host cannot report its projects, recovery of a
+pending slot when the host cannot report its projects, a retained slot when the
+ledger cannot answer the lease, recovery of a
 predecessor's live claim under its own slot with the successor's generation
 taken from the ledger, expired-versus-live predecessor leases, a not-runnable
 slot ending `applied`, cancellation of a parked loop, and the idle-poll wait
@@ -671,15 +672,27 @@ the loader's output for a hostile project tier and for a user tier.
 `dreamer_scheduler_bridge_reports_a_store_failure_instead_of_no_projects`,
 `dreamer_scheduler_bridge_follows_the_most_recent_binding_on_a_root`, and
 `dreamer_scheduler_bridge_reports_a_project_once_across_its_roots` cover the
-bridge's store-failure, binding-selection, and per-project collapse contracts.
+bridge's store-failure, binding-selection, and per-project collapse contracts,
+including a newest root without a schedule unscheduling a project whose older
+roots still carry one.
+`dreamer_scheduler_bridge_refuses_a_root_that_moved_to_another_project` rebinds
+the leased project's root to a second `MODULE` project at the same generation
+and shows the run is refused with no dispatch and no receipt under either.
+`a_failed_lease_acquisition_retains_the_slot_for_the_next_tick` and
+`run_waits_the_idle_poll_after_a_deferred_tick_or_a_retained_slot` cover a
+lease the ledger could not answer for: the slot stays due, runs on the next
+tick under its own command id, and the loop waits the idle poll first.
 Guarantee: For every project and due instant, the scheduler dispatches at most
 one model run, and only through `DreamerRuntime::run_dreamer_task` under the
 command id `slot_command_id(task, due_at_ms)`, after `acquire_dreamer_task`
 returned a claim for the task; a restarted scheduler that is handed a
 predecessor's live claim runs that claim's slot, so the interrupted receipt is
-resumed rather than a second one opened; a project without a user-tier schedule
-or without `MODULE` memories authority is never leased; a store failure while
-reading the projects defers the tick and leaves every pending slot due.
+resumed rather than a second one opened; a run whose route resolves to a
+project other than the leased one is refused before any receipt is written; a
+project without a user-tier schedule on its most recently bound root, or
+without `MODULE` memories authority, is never leased; a store failure while
+reading the projects defers the tick and leaves every pending slot due, and a
+store failure while leasing a slot leaves that slot due.
 Check: `always` - for every `TickEvent::Ran { project, due_at_ms }`, the
 ledger holds exactly one `dreamer_task` claim whose `note_id` is the task id
 and whose `source_revision` is `due_at_ms`, and the receipt for
@@ -689,41 +702,55 @@ slot_command_id(task, due_at_ms)))` has at most one attempt row that is not
 slot; the lease is what serialises schedulers and the receipt is what
 serialises retries, and the property holds only when both keys agree.
 Fault/timing angle: The scheduler leases before it runs (`run_slot`,
-`dreamer_scheduler.rs:284`) and derives the command id from the claim's
-`source_revision`, not the slot that came due (`:333`), so a claim rebound from
+`dreamer_scheduler.rs:304`) and derives the command id from the claim's
+`source_revision`, not the slot that came due (`:358`), so a claim rebound from
 a predecessor names the predecessor's slot. Lease and completion instants are
 read from the clock as each happens, so a long run does not shorten the next
 project's lease. A daemon that dies between `acquire` and `complete` leaves a
 live claim; the successor's registration generation comes from
-`next_dreamer_scheduler_generation` (`memory-store:3957`), above every
+`next_dreamer_scheduler_generation` (`memory-store:3966`), above every
 generation the instance recorded, so the shared protocol rebinds the claim to
 the successor rather than refusing it. A lease that expired first is collected
 and the successor leases a fresh claim for its own slot; the predecessor's
 receipt then waits for a request with its command id, which no scheduler
 issues, and stays `in_progress`. A store failure inside
 `SchedulerBridge::scheduled_projects` is an `Err`, not an empty list
-(`memories_authority_for_route`, `lib.rs:13714`, shared with the wire route);
-`tick` returns `TickEvent::Deferred` (`:223`) without reconciling the due
-table, and `run` waits the idle poll before retrying (`:154`). Bindings freeze
-configuration at bind, so `RouteBindings` (`lib.rs:235`) stamps each bind with
-a sequence and the bridge takes the most recently bound binding per root and
-the most recently bound root per project; `binding_for_root` follows the same
-choice, so the harness a run dispatches under is the one whose schedule put
-the project on the scheduler.
+(`memories_authority_for_route`, `lib.rs:13726`, shared with the wire route);
+`tick` returns `TickEvent::Deferred` (`:240`) without reconciling the due
+table, and `run` waits the idle poll before retrying (`:161`). A store failure
+from the generation lookup or from `acquire_dreamer_task` is
+`TickEvent::Retained` (`run_slot`, `:316`): `tick` does not advance that
+project (`:246`), so the slot stays due, and `run` waits the idle poll as after
+a deferred tick. Every other acquisition outcome is a ledger decision and
+consumes the slot. Bindings freeze configuration at bind, so `RouteBindings`
+(`lib.rs:235`) stamps each bind with a sequence and the bridge collapses roots
+to the most recently bound binding per root and the most recently bound root
+per project before it reads the schedule, so a newest binding without a
+schedule unschedules the project; `binding_for_root` follows the same choice,
+so the harness a run dispatches under is the one whose schedule put the project
+on the scheduler. The route is resolved again inside `run_dreamer_task`;
+`DreamerRunRequest::leased_project` names the project the lease is on, and a
+route that now resolves to another project is refused as
+`authority_project_mismatch` (`lib.rs:9570`) before any receipt is written,
+because an equal generation on the other project would otherwise pass the
+generation check.
 Required faults and enabling state: A user-tier schedule on a bound route with
 `MODULE` memories authority; for recovery, a tick dropped between `acquire`
 and `complete` while the producer is awaiting output, and a successor started
 within `DREAMER_TASK_LEASE_MS` (20 min) of the interrupted slot; for the
 deferred tick, a store read failure during `scheduled_projects` while a slot
-is due.
+is due; for the retained slot, a store failure during `acquire_dreamer_task`
+while a slot is due; for the refused run, a root rebound to a second `MODULE`
+project between `scheduled_projects` and `run_task`.
 Confidence: high - [evidence](evidence/scheduled-dreamer-slot-runs-once-through-lease-and-receipt.md).
 The lease and receipt keys are derived from one value in one function; the
 recovery tests observe the ledger and the producer, not the scheduler's own
 events.
 Existing check: the tests named under Exercised.
 Impact: A second billable model call for one slot after a restart, an
-unattended run a project tier switched on, or a slot silently lost to a
-transient store error.
+unattended run a project tier switched on or an older root kept on after the
+user removed the schedule, a run receipted under a project the lease does not
+name, or a slot silently lost to a transient store error.
 Open questions:
 
 - A predecessor slot whose lease expired before the successor's first slot
