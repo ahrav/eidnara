@@ -29922,10 +29922,19 @@ mod tests {
                         let Some(escaped) = chars.next() else {
                             continue;
                         };
+                        // `\p{..}` and `\P{..}` are wildcards over the alphabet, like `\S`;
+                        // the braced property name is consumed with them.
+                        if matches!(escaped, 'p' | 'P') && chars.peek() == Some(&'{') {
+                            for brace in chars.by_ref() {
+                                if brace == '}' {
+                                    break;
+                                }
+                            }
+                        }
                         let shorthand = match escaped {
                             'w' => Some(word.as_str()),
                             'W' => Some(non_word.as_str()),
-                            'S' | 'D' => Some(WILDCARD_ALPHABET),
+                            'S' | 'D' | 'p' | 'P' => Some(WILDCARD_ALPHABET),
                             _ => None,
                         };
                         match shorthand {
@@ -30804,6 +30813,8 @@ mod tests {
             ["mural.render"]
         );
         assert!(regex_texts(r"^[\w]ural[.]render$").contains(&"mural.render".to_string()));
+        assert!(regex_texts(r"^\p{L}ural[.]render$").contains(&"mural.render".to_string()));
+        assert!(regex_texts(r"^[\p{L}]ural[.]render$").contains(&"mural.render".to_string()));
         assert!(
             std::panic::catch_unwind(|| regex_texts(r"^[^x][^x][^x][^x][^x][.]render$")).is_err(),
             "a quantifier-free pattern past the class budget must fail the audit"

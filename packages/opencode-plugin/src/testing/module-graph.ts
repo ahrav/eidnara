@@ -272,6 +272,13 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
         const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
         if (ts.isStringLiteralLike(inner)) return [inner.text];
         if (ts.isIdentifier(inner)) return bindings.get(inner.text);
+        // `flag ? "claim" : "kernel"` evaluates to either branch.
+        if (ts.isConditionalExpression(inner)) {
+            const whenTrue = leafTexts(inner.whenTrue);
+            const whenFalse = leafTexts(inner.whenFalse);
+            if (whenTrue === undefined || whenFalse === undefined) return undefined;
+            return [...new Set([...whenTrue, ...whenFalse])];
+        }
         if (ts.isBinaryExpression(inner) && inner.operatorToken.kind === ts.SyntaxKind.PlusToken) {
             return product([leafTexts(inner.left), leafTexts(inner.right)]);
         }
@@ -347,10 +354,15 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             .replace(/\$$/, "")
             // A lookaround constrains a match without contributing characters to it.
             .replace(/\(\?<?[=!](?:\\.|\[(?:\\.|[^\]])*\]|[^()])*\)/g, "")
-            .replace(/\\.|\[(?:\\.|[^\]])*\]|\./g, (token) => {
+            .replace(/\\[pP]\{[^}]*\}|\\.|\[(?:\\.|[^\]])*\]|\./g, (token) => {
+                // A Unicode property escape is a wildcard over the alphabet, like `\S`.
+                if (/^\\[pP]\{/.test(token)) return `[${WILDCARD_ALPHABET}]`;
                 if (token.startsWith("[")) {
-                    // Inside a class, `\w` contributes its alphabet members alongside the others.
-                    return token.replace(/\\[wWSD]/g, (inner) => shorthand[inner] ?? inner);
+                    // Inside a class, `\w` and `\p{..}` contribute alphabet members alongside
+                    // the others.
+                    return token.replace(/\\[pP]\{[^}]*\}|\\[wWSD]/g, (inner) =>
+                        /^\\[pP]/.test(inner) ? WILDCARD_ALPHABET : (shorthand[inner] ?? inner),
+                    );
                 }
                 const members = shorthand[token];
                 return members === undefined || members === "" ? token : `[${members}]`;
@@ -528,6 +540,7 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
         if (
             (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
             ts.isTemplateExpression(node) ||
+            ts.isConditionalExpression(node) ||
             ts.isCallExpression(node)
         ) {
             for (const value of leafTexts(node) ?? []) folded.push({ line: lineOf(node), value });

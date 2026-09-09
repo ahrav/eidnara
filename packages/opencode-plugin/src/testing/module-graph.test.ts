@@ -939,6 +939,31 @@ describe("operationLiteralHits", () => {
         expect(wild).toContain("d");
         expect(
             literalStrings(
+                parseSource(
+                    "const prop = /^cl\\p{ASCII}im[.]intent$/u; const inClass = /^[\\p{L}]laim$/u;",
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(expect.arrayContaining(["claim.intent", "claim"]));
+        expect(
+            literalStrings(
+                parseSource(
+                    'const prefix = flag ? "claim" : "kernel"; const op = prefix + ".intent.stage"; const partial = flag ? "claim" : dynamic;',
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual([
+            "claim",
+            "kernel",
+            "claim",
+            "kernel",
+            "claim.intent.stage",
+            "kernel.intent.stage",
+            ".intent.stage",
+            "claim",
+        ]);
+        expect(
+            literalStrings(
                 parseSource("const guarded = /(?<![\\w$.])claim(?![\\w$])[.]read/;", "m.ts"),
             ).map((entry) => entry.value),
         ).toEqual(["claim.read"]);
