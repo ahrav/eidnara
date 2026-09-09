@@ -520,29 +520,34 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet - `config.rs:843-849` pins the default `4000` and `:851-874`
-pins key precedence and the deprecated fallback. No test supplies a value
-outside `500-20000`.
+Exercised: partial - `config.rs:1311-1314` pins the default `4000` and
+`:1317-1350` pins precedence, the deprecated fallback, and project rejection.
+The fallback cases at `:1884-1902` accept `128`, but no check asserts the
+documented range for the standard user-tier key.
 Guarantee: A configured `memory.injection_budget_tokens` outside the documented
 range is rejected, clamped to the documented range, or reported.
-Check: `always` - after config resolution,
+Check: `always` - after resolving a user-tier standard-key value,
 `500.0 <= memory_budget_tokens <= 20000.0`, or a warning names the key.
-`always` because the parse runs on every resolution for both tiers.
+`always` because each resolution must enforce or report the range. Keep the
+project tier absent so an ignored-project-key warning cannot satisfy this
+range check without exercising the value parser.
 Fault/timing angle: none.
-Required faults and enabling state: a project `.eidnara/eidnara.jsonc`
+Required faults and enabling state: a user-tier `eidnara.jsonc`
 with `memory.injection_budget_tokens` set above `20000` (or below `500`).
 Confidence: high - [evidence](evidence/dec-a-memory-injection-budget-documented-range-has-no-implementing-code.md).
-`CONFIGURATION.md:591` (source-catalog path, not present at HEAD) documents `number (500-20000)` default `4000`.
-`config.rs:441-445` and `:526-528` apply only `.max(1.0)`. Traced the value to
-`lib.rs:8293` and into `trim_claims_to_budget` at `transform.rs:2657`.
-Existing check: none for the range. `config.rs:876-911`
-`rust_only_budget_leaves_are_user_tier_only_and_warn_when_project_supplies_them`
-proves that the *user-profile* budget is user-tier-only, which by contrast
-confirms the injection budget is deliberately project-writable. Status
-`unaudited`.
-Impact: a repository config can raise the memory-injection trim budget without
-limit, inflating the frozen `m0` baseline that every subsequent pass replays
-verbatim.
+The source-catalog contract quotes `CONFIGURATION.md:591` as `500-20000` with
+default `4000`; that document is absent at HEAD. At
+`c73ed613dc9c48f4ad789925034f6eb081fca260`, `config.rs:847-864` applies only
+`.max(1.0)` to the standard key and legacy fallback. Both keys are user-only
+(`:664-672`); project values warn without reaching those assignments
+(`:723-733`). `lib.rs:4832-4845` passes the configured budget to the canonical
+memory reader.
+Existing check: none for standard-key range enforcement. The default,
+precedence, and tier-policy checks named above remain `unaudited`; project
+rejection is not evidence that a user-tier range is enforced.
+Impact: a user configuration can silently select a memory budget outside the
+documented range. The budget reaches canonical memory trimming; a large value
+does not remove the reader's separate row and byte caps.
 Open questions: None.
 
 ### dec-a-commit-cluster-trigger-config-is-inert-in-this-crate
