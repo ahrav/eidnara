@@ -28259,8 +28259,13 @@ mod tests {
                 let close = literal
                     .find('"')
                     .expect("unterminated literal in dispatch arms");
-                let literal = &literal[..close];
-                literals.push(literal.to_string());
+                let candidate = &literal[..close];
+                // Only pattern literals name routes; a body literal such as the `echo`
+                // response key is followed by neither `=>` nor `|`.
+                let after = literal[close + 1..].trim_start();
+                if after.starts_with("=>") || after.starts_with('|') {
+                    literals.push(candidate.to_string());
+                }
                 rest = &rest[open + 1 + close + 1..];
             }
         }
