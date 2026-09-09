@@ -339,6 +339,7 @@ function bareBaseline<T extends number | undefined>(
  * Only user config may set `system_prompt_injection`: a project `enabled: true` or a replaced `skip_signatures` array would undo the user's injection opt-outs.
  * Only user config may set `commit_cluster_trigger`: a project `enabled: true` or a lower `min_clusters` would make the historian fire after fewer commits.
  * Only user config may set hidden-agent `maxSteps`, `maxTokens`, and `timeout_ms`, and top-level `historian_timeout_ms`: the project tier replaces the leaf, so a project value could raise a cost bound the user set.
+ * Only user config may set `cache_ttl`: the scheduler fires the historian once the TTL has elapsed since the last response, so a project `"0"` would make it run on every pass.
  * Only user config may set top-level `enabled`: a project `true` would reactivate a plugin the user disabled, and a project `false` would switch off the user's context-window management, which the `compaction.enabled` rule already reserves for user config.
  * Only user config may set `mural.model` so repositories cannot select a provider for project memory.
  * Project config must not set `pi.subagent_extensions` because it controls extensions loaded by Pi child processes.
@@ -379,6 +380,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.historian_timeout_ms;
         warnings.push(
             "Ignoring historian_timeout_ms from project config (security: the historian timeout is a user-level cost bound; a repository cannot raise it).",
+        );
+    }
+
+    if ("cache_ttl" in projectRaw) {
+        delete projectRaw.cache_ttl;
+        warnings.push(
+            "Ignoring cache_ttl from project config (security: the cache TTL is the idle interval after which the historian fires on its own; a repository cannot shorten it).",
         );
     }
 

@@ -446,10 +446,36 @@ async fn a_memory_disabled_pass_takes_no_canonical_read() {
 /// digested into the revision.
 #[tokio::test]
 async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
-    let daemon = KernelDaemon::start_with_project_config(Some(
-        json!({"memory": {"injection_budget_tokens": 60}}),
-    ))
-    .await;
+    const CHILD: &str = "EIDNARA_TEST_CANONICAL_MEMORY_USER_CONFIG";
+    if std::env::var_os(CHILD).is_none() {
+        let config_home = tempfile::tempdir().unwrap();
+        let config_dir = config_home.path().join("eidnara");
+        std::fs::create_dir(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("eidnara.jsonc"),
+            r#"{"memory": {"injection_budget_tokens": 500}}"#,
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(stringify!(
+                rows_past_the_configured_budget_are_dropped_by_the_reader
+            ))
+            .arg("--nocapture")
+            .env("XDG_CONFIG_HOME", config_home.path())
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "user-config reader test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let daemon = KernelDaemon::start().await;
     let asserted = daemon.commit("asserted", vec![insert_decision(1)]).await;
     assert_eq!(state_kind(&asserted), "available");
     let scope_id = daemon.read("explicit_search", None, None).await["rows"][0]["scope_id"]

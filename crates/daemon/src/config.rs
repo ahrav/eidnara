@@ -1,10 +1,13 @@
 //! This module reads JSONC config for autonomous historian firing.
 //!
 //! The reader loads user and project tiers directly without a daemon config plane.
-//! The reader enforces per-leaf trust policy during reads.
-//! Project config may only raise the execute threshold, causing historian firing less often.
-//! Project config may override trusted memory, auto-search, caveman, promotion, and privacy settings.
-//! User-profile and historian budgets remain user-tier only.
+//! Every key it consumes is a [`ConfigKey`] with one [`TierClass`]: the user
+//! tier sets any key; project values apply only as their class permits.
+//! Model selection, memory and user-profile budgets, historian context and cache
+//! TTL, unattended task schedules, and docs injection are user-only.
+//! Projects may only raise the execute threshold or close the user-memory gate.
+//! No environment variable supplies a configuration value.
+//!
 //! The Rust module uses stricter model-selection policy than the TypeScript implementation.
 
 use std::fs;
@@ -409,7 +412,7 @@ fn resolve_user_guidance_override(
     warnings: &mut Vec<String>,
 ) {
     let Some(configured_path) = user
-        .and_then(|value| value.pointer("/prompt_surface/guidance_override_path"))
+        .and_then(|value| value.pointer(ConfigKey::PromptSurfaceGuidanceOverridePath.pointer()))
         .and_then(Value::as_str)
     else {
         return;
@@ -499,6 +502,211 @@ fn guidance_marker_count(content: &str) -> usize {
         .count()
 }
 
+/// Who may set a configuration key. Every key the tier merge consumes carries
+/// exactly one class; the project tier is applied through this class only.
+#[derive(Debug, Clone, Copy)]
+pub enum TierClass {
+    /// The project tier is ignored with a warning.
+    UserOnly,
+    /// The project tier overrides the user tier.
+    ProjectAllowed,
+    /// The project tier may only raise the bar: a higher threshold or a closed
+    /// gate. `tighter(before, after)` decides whether the project's value moved
+    /// the effective config in that direction; any other change is ignored with
+    /// a warning.
+    ProjectRaiseOnly {
+        tighter: fn(&DaemonConfig, &DaemonConfig) -> bool,
+    },
+}
+
+/// Every JSON pointer the tier merge reads. A key is read by `apply_key` and
+/// classified by `tier_class`; both matches are exhaustive, so a variant added
+/// without a read or a classification does not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKey {
+    HistorianModuleModel,
+    HistorianModuleFallbackModels,
+    HistorianModel,
+    HistorianFallbackModels,
+    ExecuteThresholdPercentage,
+    CompactionEnabled,
+    MemoryEnabled,
+    AutoSearchEnabled,
+    AutoSearchScoreThreshold,
+    AutoSearchMinPromptChars,
+    CavemanEnabled,
+    CavemanMinChars,
+    MemoryInjectionBudgetTokens,
+    MemoryBudgetTokens,
+    UserProfileBudgetTokens,
+    MemoryAutoPromote,
+    DreamerReviewUserMemoriesSchedule,
+    UserMemoriesEnabled,
+    HistorianContextLimitTokens,
+    SmartDrops,
+    DreamerInjectDocs,
+    TemporalAwareness,
+    PromptSurfaceGuidanceOverrideText,
+    PromptSurfaceGuidanceOverridePath,
+    CacheTtl,
+}
+
+impl ConfigKey {
+    /// Application order. `DreamerReviewUserMemoriesSchedule` follows
+    /// `UserMemoriesEnabled` so a schedule wins when a tier sets both. Every
+    /// other key that defers to a sibling (`HistorianModel` to
+    /// `HistorianModuleModel`, `MemoryBudgetTokens` to
+    /// `MemoryInjectionBudgetTokens`) checks the sibling's presence in the tier.
+    pub const ALL: &'static [Self] = &[
+        Self::HistorianModuleModel,
+        Self::HistorianModuleFallbackModels,
+        Self::HistorianModel,
+        Self::HistorianFallbackModels,
+        Self::ExecuteThresholdPercentage,
+        Self::CompactionEnabled,
+        Self::MemoryEnabled,
+        Self::AutoSearchEnabled,
+        Self::AutoSearchScoreThreshold,
+        Self::AutoSearchMinPromptChars,
+        Self::CavemanEnabled,
+        Self::CavemanMinChars,
+        Self::MemoryInjectionBudgetTokens,
+        Self::MemoryBudgetTokens,
+        Self::UserProfileBudgetTokens,
+        Self::MemoryAutoPromote,
+        Self::UserMemoriesEnabled,
+        Self::DreamerReviewUserMemoriesSchedule,
+        Self::HistorianContextLimitTokens,
+        Self::SmartDrops,
+        Self::DreamerInjectDocs,
+        Self::TemporalAwareness,
+        Self::PromptSurfaceGuidanceOverrideText,
+        Self::PromptSurfaceGuidanceOverridePath,
+        Self::CacheTtl,
+    ];
+
+    pub const fn pointer(self) -> &'static str {
+        match self {
+            Self::HistorianModuleModel => "/historian/module_model",
+            Self::HistorianModuleFallbackModels => "/historian/module_fallback_models",
+            Self::HistorianModel => "/historian/model",
+            Self::HistorianFallbackModels => "/historian/fallback_models",
+            Self::ExecuteThresholdPercentage => "/execute_threshold_percentage",
+            Self::CompactionEnabled => "/compaction/enabled",
+            Self::MemoryEnabled => "/memory/enabled",
+            Self::AutoSearchEnabled => "/memory/auto_search/enabled",
+            Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
+            Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
+            Self::CavemanEnabled => "/caveman_text_compression/enabled",
+            Self::CavemanMinChars => "/caveman_text_compression/min_chars",
+            Self::MemoryInjectionBudgetTokens => "/memory/injection_budget_tokens",
+            Self::MemoryBudgetTokens => "/memory/budget_tokens",
+            Self::UserProfileBudgetTokens => "/memory/user_profile_budget_tokens",
+            Self::MemoryAutoPromote => "/memory/auto_promote",
+            Self::DreamerReviewUserMemoriesSchedule => {
+                "/dreamer/tasks/review-user-memories/schedule"
+            }
+            Self::UserMemoriesEnabled => "/user_memories/enabled",
+            Self::HistorianContextLimitTokens => "/historian/context_limit_tokens",
+            Self::SmartDrops => "/smart_drops",
+            Self::DreamerInjectDocs => "/dreamer/inject_docs",
+            Self::TemporalAwareness => "/temporal_awareness",
+            Self::PromptSurfaceGuidanceOverrideText => "/prompt_surface/guidance_override_text",
+            Self::PromptSurfaceGuidanceOverridePath => "/prompt_surface/guidance_override_path",
+            Self::CacheTtl => "/cache_ttl",
+        }
+    }
+
+    /// Whether this key can select a model, spend model budget, run an
+    /// unattended task, or widen what such a task reads. Privileged keys are
+    /// never `ProjectAllowed`; a `const` assertion below checks that at compile
+    /// time.
+    ///
+    /// `cache_ttl` is the idle interval after which the historian fires on its
+    /// own (`scheduler::should_execute`), so it spends model budget.
+    pub const fn privileged(self) -> bool {
+        match self {
+            Self::HistorianModuleModel
+            | Self::HistorianModuleFallbackModels
+            | Self::HistorianModel
+            | Self::HistorianFallbackModels
+            | Self::MemoryInjectionBudgetTokens
+            | Self::MemoryBudgetTokens
+            | Self::UserProfileBudgetTokens
+            | Self::HistorianContextLimitTokens
+            | Self::DreamerReviewUserMemoriesSchedule
+            | Self::UserMemoriesEnabled
+            | Self::DreamerInjectDocs
+            | Self::CacheTtl => true,
+            Self::ExecuteThresholdPercentage
+            | Self::CompactionEnabled
+            | Self::MemoryEnabled
+            | Self::AutoSearchEnabled
+            | Self::AutoSearchScoreThreshold
+            | Self::AutoSearchMinPromptChars
+            | Self::CavemanEnabled
+            | Self::CavemanMinChars
+            | Self::MemoryAutoPromote
+            | Self::SmartDrops
+            | Self::TemporalAwareness
+            | Self::PromptSurfaceGuidanceOverrideText
+            | Self::PromptSurfaceGuidanceOverridePath => false,
+        }
+    }
+
+    pub const fn tier_class(self) -> TierClass {
+        match self {
+            Self::HistorianModuleModel
+            | Self::HistorianModuleFallbackModels
+            | Self::HistorianModel
+            | Self::HistorianFallbackModels
+            | Self::CompactionEnabled
+            | Self::MemoryInjectionBudgetTokens
+            | Self::MemoryBudgetTokens
+            | Self::UserProfileBudgetTokens
+            | Self::DreamerReviewUserMemoriesSchedule
+            | Self::HistorianContextLimitTokens
+            | Self::DreamerInjectDocs
+            | Self::PromptSurfaceGuidanceOverrideText
+            | Self::PromptSurfaceGuidanceOverridePath
+            | Self::CacheTtl => TierClass::UserOnly,
+            Self::MemoryEnabled
+            | Self::AutoSearchEnabled
+            | Self::AutoSearchScoreThreshold
+            | Self::AutoSearchMinPromptChars
+            | Self::CavemanEnabled
+            | Self::CavemanMinChars
+            | Self::MemoryAutoPromote
+            | Self::SmartDrops
+            | Self::TemporalAwareness => TierClass::ProjectAllowed,
+            Self::ExecuteThresholdPercentage => TierClass::ProjectRaiseOnly {
+                tighter: |before, after| {
+                    after.execute_threshold_percentage > before.execute_threshold_percentage
+                },
+            },
+            Self::UserMemoriesEnabled => TierClass::ProjectRaiseOnly {
+                tighter: |before, after| {
+                    before.user_memory_collection_enabled && !after.user_memory_collection_enabled
+                },
+            },
+        }
+    }
+}
+
+/// Every privileged key denies the project tier. A privileged key classified
+/// `ProjectAllowed` fails to compile.
+const _: () = {
+    let mut index = 0;
+    while index < ConfigKey::ALL.len() {
+        let key = ConfigKey::ALL[index];
+        assert!(
+            !(key.privileged() && matches!(key.tier_class(), TierClass::ProjectAllowed)),
+            "a privileged configuration key is project-allowed"
+        );
+        index += 1;
+    }
+};
+
 fn merge_tiers_with_warnings(
     user: Option<&Value>,
     project: Option<&Value>,
@@ -507,110 +715,213 @@ fn merge_tiers_with_warnings(
     let mut warnings = Vec::new();
 
     if let Some(user) = user {
-        let module_model = user
-            .pointer("/historian/module_model")
-            .and_then(Value::as_str)
+        for key in ConfigKey::ALL {
+            apply_key(&mut cfg, user, *key, &mut warnings);
+        }
+    }
+
+    if let Some(project) = project {
+        for key in ConfigKey::ALL {
+            if project.pointer(key.pointer()).is_none() {
+                continue;
+            }
+            match key.tier_class() {
+                TierClass::UserOnly => warnings.push(format!(
+                    "ignoring {} from project tier; setting is user-tier only",
+                    key.pointer()
+                )),
+                TierClass::ProjectAllowed => apply_key(&mut cfg, project, *key, &mut warnings),
+                TierClass::ProjectRaiseOnly { tighter } => {
+                    let mut candidate = cfg.clone();
+                    apply_key(&mut candidate, project, *key, &mut warnings);
+                    if tighter(&cfg, &candidate) {
+                        cfg = candidate;
+                    } else if candidate != cfg {
+                        warnings.push(format!(
+                            "ignoring {} from project tier; project tier may only raise it",
+                            key.pointer()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    cfg.execute_threshold_percentage = cfg
+        .execute_threshold_percentage
+        .clamp(1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE);
+    dedup_preserving_order(&mut cfg.model_chain);
+    (cfg, warnings)
+}
+
+/// Read one key from `tier` into `cfg`. Absent or malformed leaves leave `cfg`
+/// unchanged.
+fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mut Vec<String>) {
+    let pointer = key.pointer();
+    let trimmed_str = |value: &Value| {
+        value
+            .as_str()
             .map(str::trim)
-            .filter(|s| !s.is_empty());
-        if let Some(model) = module_model {
-            cfg.model_chain.push(model.to_string());
-            if let Some(fallbacks) = user
-                .pointer("/historian/module_fallback_models")
-                .and_then(Value::as_array)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let extend_models = |chain: &mut Vec<String>| {
+        if let Some(models) = tier.pointer(pointer).and_then(Value::as_array) {
+            chain.extend(models.iter().filter_map(trimmed_str));
+        }
+    };
+    match key {
+        ConfigKey::HistorianModuleModel => {
+            if let Some(model) = tier.pointer(pointer).and_then(trimmed_str) {
+                cfg.model_chain.push(model);
+            }
+        }
+        ConfigKey::HistorianModuleFallbackModels => {
+            if tier
+                .pointer(ConfigKey::HistorianModuleModel.pointer())
+                .and_then(trimmed_str)
+                .is_some()
             {
-                cfg.model_chain.extend(
-                    fallbacks
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned),
+                extend_models(&mut cfg.model_chain);
+            }
+        }
+        ConfigKey::HistorianModel => {
+            if tier
+                .pointer(ConfigKey::HistorianModuleModel.pointer())
+                .and_then(trimmed_str)
+                .is_none()
+                && let Some(model) = tier.pointer(pointer).and_then(trimmed_str)
+            {
+                cfg.model_chain.push(model);
+            }
+        }
+        ConfigKey::HistorianFallbackModels => {
+            if tier
+                .pointer(ConfigKey::HistorianModuleModel.pointer())
+                .and_then(trimmed_str)
+                .is_none()
+            {
+                extend_models(&mut cfg.model_chain);
+            }
+        }
+        ConfigKey::ExecuteThresholdPercentage => {
+            if let Some(threshold) = number_at(tier, pointer) {
+                cfg.execute_threshold_percentage = threshold;
+            }
+        }
+        ConfigKey::CompactionEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.compaction_enabled = enabled;
+            }
+        }
+        ConfigKey::MemoryEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.memory_enabled = enabled;
+            }
+        }
+        ConfigKey::AutoSearchEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.auto_search.enabled = enabled;
+            }
+        }
+        ConfigKey::AutoSearchScoreThreshold => {
+            if let Some(threshold) = number_at(tier, pointer) {
+                cfg.auto_search.score_threshold = threshold.clamp(0.3, 0.95);
+            }
+        }
+        ConfigKey::AutoSearchMinPromptChars => {
+            if let Some(min_prompt_chars) = positive_usize_at(tier, pointer) {
+                cfg.auto_search.min_prompt_chars = min_prompt_chars.clamp(5, 500);
+            }
+        }
+        ConfigKey::CavemanEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.caveman.enabled = enabled;
+            }
+        }
+        ConfigKey::CavemanMinChars => {
+            if let Some(min_chars) = positive_usize_at(tier, pointer) {
+                cfg.caveman.min_size = min_chars.clamp(100, 10_000);
+            }
+        }
+        ConfigKey::MemoryInjectionBudgetTokens => {
+            if let Some(budget) = number_at(tier, pointer) {
+                cfg.memory_budget_tokens = budget.max(1.0);
+            }
+        }
+        ConfigKey::MemoryBudgetTokens => {
+            if number_at(tier, ConfigKey::MemoryInjectionBudgetTokens.pointer()).is_none()
+                && let Some(budget) = number_at(tier, pointer)
+            {
+                cfg.memory_budget_tokens = budget.max(1.0);
+            }
+            if tier.pointer(pointer).is_some() {
+                warnings.push(
+                    "deprecated key /memory/budget_tokens in user tier; use /memory/injection_budget_tokens"
+                        .to_string(),
                 );
             }
-        } else {
-            if let Some(model) = user.pointer("/historian/model").and_then(Value::as_str)
-                && !model.trim().is_empty()
+        }
+        ConfigKey::UserProfileBudgetTokens => {
+            if let Some(budget) = number_at(tier, pointer) {
+                cfg.user_profile_budget_tokens = budget.max(1.0);
+            }
+        }
+        ConfigKey::MemoryAutoPromote => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.auto_promote = enabled;
+            }
+        }
+        ConfigKey::DreamerReviewUserMemoriesSchedule => {
+            if let Some(schedule) = tier.pointer(pointer).and_then(Value::as_str) {
+                cfg.user_memory_collection_enabled = !schedule.trim().is_empty();
+            }
+        }
+        ConfigKey::UserMemoriesEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.user_memory_collection_enabled = enabled;
+            }
+        }
+        ConfigKey::HistorianContextLimitTokens => {
+            if let Some(limit) = positive_usize_at(tier, pointer) {
+                cfg.historian_context_limit_tokens = limit;
+            }
+        }
+        ConfigKey::SmartDrops => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.smart_drops = enabled;
+            }
+        }
+        ConfigKey::DreamerInjectDocs => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.inject_docs = enabled;
+            }
+        }
+        ConfigKey::TemporalAwareness => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.temporal_awareness = enabled;
+            }
+        }
+        ConfigKey::PromptSurfaceGuidanceOverrideText => {
+            if let Some(guidance) = tier
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
             {
-                cfg.model_chain.push(model.trim().to_string());
-            }
-            if let Some(fallbacks) = user
-                .pointer("/historian/fallback_models")
-                .and_then(Value::as_array)
-            {
-                cfg.model_chain.extend(
-                    fallbacks
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned),
-                );
+                let markers = guidance_marker_count(guidance);
+                if markers == 1 {
+                    cfg.prompt_surface_guidance_override = Some(guidance.to_string());
+                } else {
+                    warnings.push(format!(
+                        "prompt_surface.guidance_override_text must contain exactly one {GUIDANCE_MARKER:?} section marker; found {markers}. Using built-in guidance."
+                    ));
+                }
             }
         }
-        if let Some(threshold) = number_at(user, "/execute_threshold_percentage") {
-            cfg.execute_threshold_percentage = threshold;
-        }
-        if let Some(enabled) = user.pointer("/compaction/enabled").and_then(Value::as_bool) {
-            cfg.compaction_enabled = enabled;
-        }
-        if let Some(enabled) = user.pointer("/memory/enabled").and_then(Value::as_bool) {
-            cfg.memory_enabled = enabled;
-        }
-        apply_auto_search_config(&mut cfg.auto_search, user);
-        apply_caveman_config(&mut cfg.caveman, user);
-        if let Some(budget) = number_at(user, "/memory/injection_budget_tokens") {
-            cfg.memory_budget_tokens = budget.max(1.0);
-        } else if let Some(budget) = number_at(user, "/memory/budget_tokens") {
-            cfg.memory_budget_tokens = budget.max(1.0);
-        }
-        if user.pointer("/memory/budget_tokens").is_some() {
-            warnings.push(
-                "deprecated key /memory/budget_tokens in user tier; use /memory/injection_budget_tokens"
-                    .to_string(),
-            );
-        }
-        if let Some(budget) = number_at(user, "/memory/user_profile_budget_tokens") {
-            cfg.user_profile_budget_tokens = budget.max(1.0);
-        }
-        if let Some(enabled) = user
-            .pointer("/memory/auto_promote")
-            .and_then(Value::as_bool)
-        {
-            cfg.auto_promote = enabled;
-        }
-        if let Some(enabled) = user_memory_collection_at(user) {
-            cfg.user_memory_collection_enabled = enabled;
-        }
-        if let Some(limit) = positive_usize_at(user, "/historian/context_limit_tokens") {
-            cfg.historian_context_limit_tokens = limit;
-        }
-        if let Some(enabled) = user.pointer("/smart_drops").and_then(Value::as_bool) {
-            cfg.smart_drops = enabled;
-        }
-        if let Some(enabled) = user
-            .pointer("/dreamer/inject_docs")
-            .and_then(Value::as_bool)
-        {
-            cfg.inject_docs = enabled;
-        }
-        if let Some(enabled) = user.pointer("/temporal_awareness").and_then(Value::as_bool) {
-            cfg.temporal_awareness = enabled;
-        }
-        if let Some(guidance) = user
-            .pointer("/prompt_surface/guidance_override_text")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-        {
-            let markers = guidance_marker_count(guidance);
-            if markers == 1 {
-                cfg.prompt_surface_guidance_override = Some(guidance.to_string());
-            } else {
-                warnings.push(format!(
-                    "prompt_surface.guidance_override_text must contain exactly one {GUIDANCE_MARKER:?} section marker; found {markers}. Using built-in guidance."
-                ));
-            }
-        }
-        match user.pointer("/cache_ttl") {
+        // The path is resolved against the user config directory in
+        // `resolve_user_guidance_override`, which runs after the merge.
+        ConfigKey::PromptSurfaceGuidanceOverridePath => {}
+        ConfigKey::CacheTtl => match tier.pointer(pointer) {
             Some(Value::String(cache_ttl)) => {
                 if !cache_ttl.trim().is_empty() {
                     cfg.cache_ttl = cache_ttl.trim().to_string();
@@ -631,122 +942,14 @@ fn merge_tiers_with_warnings(
                 }
             }
             _ => {}
-        }
+        },
     }
-
-    if let Some(project) = project {
-        if let Some(project_threshold) = number_at(project, "/execute_threshold_percentage")
-            && project_threshold > cfg.execute_threshold_percentage
-        {
-            cfg.execute_threshold_percentage = project_threshold;
-        }
-        warn_ignored_project_key(project, "/compaction/enabled", &mut warnings);
-        if let Some(enabled) = project.pointer("/memory/enabled").and_then(Value::as_bool) {
-            cfg.memory_enabled = enabled;
-        }
-        apply_auto_search_config(&mut cfg.auto_search, project);
-        apply_caveman_config(&mut cfg.caveman, project);
-        if let Some(budget) = number_at(project, "/memory/injection_budget_tokens") {
-            cfg.memory_budget_tokens = budget.max(1.0);
-        }
-        if let Some(enabled) = project
-            .pointer("/memory/auto_promote")
-            .and_then(Value::as_bool)
-        {
-            cfg.auto_promote = enabled;
-        }
-        if let Some(enabled) = user_memory_collection_at(project) {
-            cfg.user_memory_collection_enabled = enabled;
-        }
-        warn_ignored_project_key(project, "/memory/budget_tokens", &mut warnings);
-        warn_ignored_project_key(project, "/memory/user_profile_budget_tokens", &mut warnings);
-        warn_ignored_project_key(project, "/historian/context_limit_tokens", &mut warnings);
-        if let Some(enabled) = project.pointer("/smart_drops").and_then(Value::as_bool) {
-            cfg.smart_drops = enabled;
-        }
-        if let Some(enabled) = project
-            .pointer("/dreamer/inject_docs")
-            .and_then(Value::as_bool)
-        {
-            cfg.inject_docs = enabled;
-        }
-        if let Some(enabled) = project
-            .pointer("/temporal_awareness")
-            .and_then(Value::as_bool)
-        {
-            cfg.temporal_awareness = enabled;
-        }
-        warn_ignored_project_key(
-            project,
-            "/prompt_surface/guidance_override_text",
-            &mut warnings,
-        );
-        warn_ignored_project_key(
-            project,
-            "/prompt_surface/guidance_override_path",
-            &mut warnings,
-        );
-    }
-
-    cfg.execute_threshold_percentage = cfg
-        .execute_threshold_percentage
-        .clamp(1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE);
-    dedup_preserving_order(&mut cfg.model_chain);
-    (cfg, warnings)
 }
 
 /// A repeated model would spend a bounded fallback attempt on a provider that already failed.
 fn dedup_preserving_order(chain: &mut Vec<String>) {
     let mut seen = std::collections::HashSet::new();
     chain.retain(|model| seen.insert(model.clone()));
-}
-
-fn warn_ignored_project_key(value: &Value, pointer: &str, warnings: &mut Vec<String>) {
-    if value.pointer(pointer).is_some() {
-        warnings.push(format!(
-            "ignoring {pointer} from project tier; setting is user-tier only"
-        ));
-    }
-}
-
-fn apply_auto_search_config(config: &mut AutoSearchConfig, value: &Value) {
-    if let Some(enabled) = value
-        .pointer("/memory/auto_search/enabled")
-        .and_then(Value::as_bool)
-    {
-        config.enabled = enabled;
-    }
-    if let Some(threshold) = number_at(value, "/memory/auto_search/score_threshold") {
-        config.score_threshold = threshold.clamp(0.3, 0.95);
-    }
-    if let Some(min_prompt_chars) = positive_usize_at(value, "/memory/auto_search/min_prompt_chars")
-    {
-        config.min_prompt_chars = min_prompt_chars.clamp(5, 500);
-    }
-}
-
-fn apply_caveman_config(config: &mut CavemanConfig, value: &Value) {
-    if let Some(enabled) = value
-        .pointer("/caveman_text_compression/enabled")
-        .and_then(Value::as_bool)
-    {
-        config.enabled = enabled;
-    }
-    if let Some(min_chars) = positive_usize_at(value, "/caveman_text_compression/min_chars") {
-        config.min_size = min_chars.clamp(100, 10_000);
-    }
-}
-
-fn user_memory_collection_at(value: &Value) -> Option<bool> {
-    if let Some(schedule) = value
-        .pointer("/dreamer/tasks/review-user-memories/schedule")
-        .and_then(Value::as_str)
-    {
-        return Some(!schedule.trim().is_empty());
-    }
-    value
-        .pointer("/user_memories/enabled")
-        .and_then(Value::as_bool)
 }
 
 fn positive_usize_at(value: &Value, pointer: &str) -> Option<usize> {
@@ -1120,10 +1323,21 @@ mod tests {
         });
         let (standard, warnings) =
             merge_tiers_with_warnings(Some(&standard_user), Some(&standard_project));
-        assert_eq!(standard.memory_budget_tokens, 3_500.0);
+        assert_eq!(
+            standard.memory_budget_tokens, 3_000.0,
+            "the injection budget bounds input tokens per request; the project tier cannot change it"
+        );
         assert!(warnings.iter().any(|warning| {
             warning.contains("/memory/budget_tokens") && warning.contains("deprecated")
         }));
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.contains("/memory/injection_budget_tokens")
+                    && warning.contains("project tier")
+                    && warning.contains("user-tier only")
+            }),
+            "{warnings:?}"
+        );
 
         let legacy_user = serde_json::json!({ "memory": { "budget_tokens": 3_250 } });
         let (legacy, warnings) = merge_tiers_with_warnings(Some(&legacy_user), None);
@@ -1241,7 +1455,7 @@ mod tests {
     }
 
     #[test]
-    fn docs_and_temporal_flags_follow_user_then_project_tiers() {
+    fn docs_injection_is_user_tier_only_and_temporal_flag_follows_project_tier() {
         let user = serde_json::json!({
             "dreamer": { "inject_docs": false },
             "temporal_awareness": false
@@ -1250,9 +1464,16 @@ mod tests {
             "dreamer": { "inject_docs": true },
             "temporal_awareness": true
         });
-        let cfg = merge_tiers(Some(&user), Some(&project));
-        assert!(cfg.inject_docs);
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
+        assert!(
+            !cfg.inject_docs,
+            "project tier must not re-enable docs injection"
+        );
         assert!(cfg.temporal_awareness);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("/dreamer/inject_docs") && warnings[0].contains("user-tier only")
+        );
         let defaults = merge_tiers(None, None);
         assert!(defaults.inject_docs);
         assert!(defaults.temporal_awareness);
@@ -1398,15 +1619,316 @@ mod tests {
             "user_memories": { "enabled": false },
             "historian": { "context_limit_tokens": 64000 }
         });
-        assert!(user_memory_collection_at(&user).unwrap());
+        assert!(merge_tiers(Some(&user), None).user_memory_collection_enabled);
         let cfg = merge_tiers(Some(&user), Some(&project));
         assert!(cfg.auto_promote);
-        assert!(!cfg.user_memory_collection_enabled);
+        assert!(
+            !cfg.user_memory_collection_enabled,
+            "project tier may lower the user-memory gate"
+        );
         assert_eq!(cfg.historian_context_limit_tokens, 128_000);
         let legacy_disabled = serde_json::json!({
             "user_memories": { "enabled": false }
         });
-        assert!(!user_memory_collection_at(&legacy_disabled).unwrap());
+        assert!(!merge_tiers(Some(&legacy_disabled), None).user_memory_collection_enabled);
+    }
+
+    #[test]
+    fn project_tier_cannot_raise_the_user_memory_gate() {
+        let closed_user = serde_json::json!({ "user_memories": { "enabled": false } });
+        for project in [
+            serde_json::json!({ "user_memories": { "enabled": true } }),
+            serde_json::json!({
+                "dreamer": { "tasks": { "review-user-memories": { "schedule": "daily" } } }
+            }),
+            serde_json::json!({
+                "dreamer": { "tasks": { "review-user-memories": { "schedule": "daily" } } },
+                "user_memories": { "enabled": true }
+            }),
+        ] {
+            let (cfg, warnings) = merge_tiers_with_warnings(Some(&closed_user), Some(&project));
+            assert!(!cfg.user_memory_collection_enabled, "{project}");
+            assert!(!warnings.is_empty(), "{project}");
+            assert!(
+                warnings
+                    .iter()
+                    .all(|warning| warning.contains("project tier")),
+                "{warnings:?}"
+            );
+        }
+        // A project-tier `false` that matches the user tier changes nothing and warns nothing.
+        let (cfg, warnings) = merge_tiers_with_warnings(
+            Some(&closed_user),
+            Some(&serde_json::json!({ "user_memories": { "enabled": false } })),
+        );
+        assert!(!cfg.user_memory_collection_enabled);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// `historian.model`, `memory.injection_budget_tokens`, and `cache_ttl` are
+    /// removed by `stripUnsafeProjectConfigFields`; keep both lists aligned.
+    #[test]
+    fn privileged_keys_are_the_model_budget_and_schedule_levers() {
+        let privileged: Vec<ConfigKey> = ConfigKey::ALL
+            .iter()
+            .copied()
+            .filter(|key| key.privileged())
+            .collect();
+        assert_eq!(
+            privileged,
+            vec![
+                ConfigKey::HistorianModuleModel,
+                ConfigKey::HistorianModuleFallbackModels,
+                ConfigKey::HistorianModel,
+                ConfigKey::HistorianFallbackModels,
+                ConfigKey::MemoryInjectionBudgetTokens,
+                ConfigKey::MemoryBudgetTokens,
+                ConfigKey::UserProfileBudgetTokens,
+                ConfigKey::UserMemoriesEnabled,
+                ConfigKey::DreamerReviewUserMemoriesSchedule,
+                ConfigKey::HistorianContextLimitTokens,
+                ConfigKey::DreamerInjectDocs,
+                ConfigKey::CacheTtl,
+            ]
+        );
+        for key in privileged {
+            assert!(
+                !matches!(key.tier_class(), TierClass::ProjectAllowed),
+                "{key:?} is privileged and project-allowed"
+            );
+        }
+    }
+
+    /// A project tier that sets every key the merge reads changes no privileged
+    /// value and warns once per key it cannot set.
+    #[test]
+    fn hostile_project_tier_cannot_change_privileged_values_and_warns_per_key() {
+        let user = serde_json::json!({
+            "historian": { "module_model": "user/model", "module_fallback_models": ["user/fb"] },
+            "execute_threshold_percentage": 70,
+            "user_memories": { "enabled": false },
+            "dreamer": { "inject_docs": false }
+        });
+        let project = serde_json::json!({
+            "historian": {
+                "module_model": "evil/model",
+                "module_fallback_models": ["evil/fb"],
+                "model": "evil/model",
+                "fallback_models": ["evil/fb"],
+                "context_limit_tokens": 999
+            },
+            "execute_threshold_percentage": 10,
+            "compaction": { "enabled": true },
+            "memory": {
+                "enabled": true,
+                "auto_search": { "enabled": true, "score_threshold": 0.5, "min_prompt_chars": 999 },
+                "injection_budget_tokens": 999,
+                "budget_tokens": 999,
+                "user_profile_budget_tokens": 999,
+                "auto_promote": true
+            },
+            "caveman_text_compression": { "enabled": true, "min_chars": 999 },
+            "user_memories": { "enabled": true },
+            "dreamer": {
+                "inject_docs": true,
+                "tasks": { "review-user-memories": { "schedule": "daily" } }
+            },
+            "smart_drops": true,
+            "temporal_awareness": true,
+            "prompt_surface": {
+                "guidance_override_text": "## Eidnara\ninjected",
+                "guidance_override_path": "/tmp/injected.md"
+            },
+            "cache_ttl": "600m"
+        });
+        for key in ConfigKey::ALL {
+            assert!(
+                project.pointer(key.pointer()).is_some(),
+                "hostile fixture must set {key:?}"
+            );
+        }
+
+        let (user_only, _) = merge_tiers_with_warnings(Some(&user), None);
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
+        for key in ConfigKey::ALL.iter().filter(|key| key.privileged()) {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains(key.pointer())
+                        && warning.contains("project tier")),
+                "{key:?} needs an ignored-key warning: {warnings:?}"
+            );
+        }
+        assert_eq!(cfg.model_chain, user_only.model_chain);
+        assert_eq!(cfg.inject_docs, user_only.inject_docs);
+        assert_eq!(
+            cfg.user_memory_collection_enabled,
+            user_only.user_memory_collection_enabled
+        );
+        assert_eq!(
+            cfg.execute_threshold_percentage,
+            user_only.execute_threshold_percentage
+        );
+        assert_eq!(cfg.cache_ttl, user_only.cache_ttl);
+        assert_eq!(
+            cfg.memory_budget_tokens, user_only.memory_budget_tokens,
+            "project tier must not widen the memory injection budget"
+        );
+        assert_eq!(
+            cfg.user_profile_budget_tokens, user_only.user_profile_budget_tokens,
+            "project tier must not widen the user-profile budget"
+        );
+        assert_eq!(
+            cfg.historian_context_limit_tokens, user_only.historian_context_limit_tokens,
+            "project tier must not change the historian context budget"
+        );
+        assert_eq!(cfg.prompt_surface_guidance_override, None);
+        let ignored = ConfigKey::ALL
+            .iter()
+            .filter(|key| {
+                matches!(key.tier_class(), TierClass::UserOnly)
+                    || matches!(key.tier_class(), TierClass::ProjectRaiseOnly { .. })
+            })
+            .count();
+        assert_eq!(
+            warnings.len(),
+            ignored,
+            "one warning per ignored key: {warnings:?}"
+        );
+        let mut pointers: Vec<&str> = warnings
+            .iter()
+            .map(|warning| {
+                warning
+                    .strip_prefix("ignoring ")
+                    .and_then(|rest| rest.split_once(" from project tier"))
+                    .map(|(pointer, _)| pointer)
+                    .unwrap_or_else(|| panic!("unexpected warning shape: {warning}"))
+            })
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        assert_eq!(
+            pointers.len(),
+            ignored,
+            "warnings are one per key: {warnings:?}"
+        );
+    }
+
+    /// Every JSON pointer literal the production merge reads is a `ConfigKey`,
+    /// and every `ConfigKey` is listed once in `ALL`.
+    #[test]
+    fn every_consumed_pointer_is_a_classified_config_key() {
+        let source = include_str!("config.rs");
+        let production = &source[..source
+            .find("#[cfg(test)]\nmod ")
+            .expect("config.rs has a test module")];
+        let mut found = Vec::new();
+        for (index, _) in production.match_indices("\"/") {
+            let literal = &production[index + 1..];
+            let end = literal.find('"').expect("string literal terminates");
+            let literal = &literal[..end];
+            if literal == "/" || literal.contains(' ') || literal.contains('.') {
+                continue;
+            }
+            found.push(literal);
+        }
+        found.sort_unstable();
+        found.dedup();
+        let mut declared: Vec<&str> = ConfigKey::ALL.iter().map(|key| key.pointer()).collect();
+        declared.sort_unstable();
+        let mut unique = declared.clone();
+        unique.dedup();
+        assert_eq!(
+            declared, unique,
+            "a pointer is declared twice in ConfigKey::ALL"
+        );
+        assert_eq!(
+            found, declared,
+            "a JSON pointer read by the merge has no ConfigKey classification (or a key is unread)"
+        );
+        assert_eq!(
+            production.matches(".pointer(\"").count(),
+            0,
+            "tier values are read through ConfigKey::pointer(), never a raw literal"
+        );
+        assert_eq!(ConfigKey::ALL.len(), 25);
+    }
+
+    /// The user-memory gate's two keys and the budget's two keys resolve the
+    /// same way whichever order a tier lists them in.
+    #[test]
+    fn sibling_keys_keep_their_precedence_within_a_tier() {
+        let cases: [(serde_json::Value, bool); 4] = [
+            (
+                serde_json::json!({
+                    "dreamer": { "tasks": { "review-user-memories": { "schedule": "daily" } } },
+                    "user_memories": { "enabled": false }
+                }),
+                true,
+            ),
+            (
+                serde_json::json!({
+                    "dreamer": { "tasks": { "review-user-memories": { "schedule": "  " } } },
+                    "user_memories": { "enabled": true }
+                }),
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "dreamer": { "tasks": { "review-user-memories": { "schedule": 7 } } },
+                    "user_memories": { "enabled": true }
+                }),
+                true,
+            ),
+            (
+                serde_json::json!({ "user_memories": { "enabled": true } }),
+                true,
+            ),
+        ];
+        for (user, expected) in cases {
+            assert_eq!(
+                merge_tiers(Some(&user), None).user_memory_collection_enabled,
+                expected,
+                "{user}"
+            );
+        }
+        for (user, expected) in [
+            (
+                serde_json::json!({ "memory": { "injection_budget_tokens": 3_000, "budget_tokens": 9_000 } }),
+                3_000.0,
+            ),
+            (
+                serde_json::json!({ "memory": { "injection_budget_tokens": null, "budget_tokens": 128 } }),
+                128.0,
+            ),
+            (
+                serde_json::json!({ "memory": { "injection_budget_tokens": "x", "budget_tokens": 128 } }),
+                128.0,
+            ),
+        ] {
+            assert_eq!(
+                merge_tiers(Some(&user), None).memory_budget_tokens,
+                expected,
+                "{user}"
+            );
+        }
+
+        // Project tier: an open user gate stays open under a project schedule,
+        // and user docs injection is never lowered by the project either.
+        let open_user = serde_json::json!({
+            "user_memories": { "enabled": true },
+            "dreamer": { "inject_docs": true }
+        });
+        let project = serde_json::json!({
+            "dreamer": {
+                "inject_docs": false,
+                "tasks": { "review-user-memories": { "schedule": "" } }
+            }
+        });
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&open_user), Some(&project));
+        assert!(cfg.user_memory_collection_enabled);
+        assert!(cfg.inject_docs);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 
     #[test]
@@ -1465,8 +1987,14 @@ mod tests {
                 "module_fallback_models": ["evil/other"]
             }
         });
-        let cfg = merge_tiers(Some(&user), Some(&project));
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
         assert_eq!(cfg.model_chain, vec!["google/gemini-3.5-flash"]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| warning.contains("user-tier only"))
+        );
     }
 
     #[test]

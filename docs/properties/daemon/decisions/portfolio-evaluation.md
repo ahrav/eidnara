@@ -1,5 +1,55 @@
 # Part 4f portfolio evaluation
 
+## Current config disposition
+
+This section records config evidence at
+`74044960ee91641dec95c8552f15282844a18b13`. It is a bounded refresh, not a new
+independent evaluation of unrelated decision-unit or codec records. The original
+evaluation is preserved separately below and does not establish current code
+behavior, test counts, or CI selection.
+
+| Subject | Current disposition | Evidence |
+| --- | --- | --- |
+| Adjacent-only model-chain premise | Invalidated; uniqueness guarantee and unaudited regression check retained | Full deduplication at `crates/daemon/src/config.rs:950-953`; non-adjacent-repeat check at `crates/daemon/src/config.rs:2185-2194` |
+| Silent malformed-file premise | Invalidated; path-bearing diagnostic guarantee retained | Tier warning storage at `crates/daemon/src/config.rs:362-393`, collection at `crates/daemon/src/config.rs:262-282`, and existing check at `crates/daemon/src/config.rs:2133-2182` |
+| Clamp diagnostics and threshold floor | Active; user-only inputs isolate range behavior from tier warnings | Clamps at `crates/daemon/src/config.rs:750-752` and `crates/daemon/src/config.rs:827-869`; zero rejection at `crates/daemon/src/config.rs:955-961` |
+| Model-map differential | Active; scheduler map tests exist, but do not compare both walks | The golden deserializes maps and resolves them (`crates/daemon/src/scheduler.rs:923-932`, `crates/daemon/src/scheduler.rs:1011-1013`, `crates/daemon/src/scheduler.rs:1087-1096`); the daemon adapter remains scalar (`crates/daemon/src/transform.rs:5447-5454`) |
+| Chunk-budget totality | Active; proof corrected to the final integer clamp, not cast saturation | `crates/daemon/src/config.rs:28-29`, `crates/daemon/src/config.rs:39-46`, and existing boundary check at `crates/daemon/src/config.rs:1449-1455` |
+| Config-reader integration and CI | Existing coverage is inventoried as unaudited; the no-CI/no-integration premise is retired | Nondefault 500-token user-config check at `crates/daemon/tests/transform_canonical_memory.rs:448-539`; workspace nextest at `.github/workflows/ci.yml:413-417` |
+
+Counts are record and row censuses, not adequacy verdicts:
+
+- 27 records and 27 index rows remain: 25 active and two invalidated.
+- All records: 26 safety, one reachability; 26 `always`, one `reachable`.
+- Active records: 24 safety, one reachability; 24 `always`, one `reachable`.
+- Reachability labels are 16 default-production, seven explicit-config-only,
+  and four test-only overall; the active subset is 16, five, and four.
+- The fault-map rows contain 23 active `Yes` labels, two active `Partial`
+  labels, and two invalidated premises. The historical 23/4 headline was not
+  a reliable basis for subtraction; these counts come from the rows themselves.
+- The existing 26 evidence files cover 27 records because the trigger-budget
+  record explicitly shares the guarded-budget evidence. No new evidence file or
+  property is created to make those counts equal.
+
+The [current inventory](existing-checks.md) lists all 43 config tests and the
+budget-reader integration check with `unaudited` status. Confirmation of historical
+range and configurability obligations, and the intended cross-surface wildcard
+policy, remain human questions in the corresponding records. Runtime policy is
+unchanged.
+
+## Historical evaluation
+
+<details>
+<summary>Source-catalog evaluation and investigation, not a current verdict</summary>
+
+The material below is retained from the
+[pre-refresh evaluation](https://github.com/ahrav/eidnara/blob/74044960ee91641dec95c8552f15282844a18b13/docs/properties/daemon/decisions/portfolio-evaluation.md).
+Its line coordinates refer to discovery-time sources. In particular, statements
+that no properties are invalidated, no diagnostics channel exists, no test
+constructs `ByModel`, or no Rust config check runs in CI are superseded by the
+current disposition above. Historical requests for additional evidence files do
+not change the existing explicit sharing arrangement.
+
 Run by an independent evaluator with fresh context that had not seen the discovery
 reasoning, against `catalog.md`, `existing-checks.md`, and `fault-map.md`. Its
 charter was to expose systematic gaps rather than to agree. Its verdict was
@@ -111,8 +161,9 @@ shape rather than the wrong arithmetic.
 
 Test counts are unchanged and were not disputed: 192 in-crate tests reaching full
 scope-map 4f, 164 restricted to the brief's named files, zero in CI, zero
-integration tests in scope, `codec/sidecar.rs` at zero tests across 339 lines, and
-both harness goldens a single case each.
+integration tests in scope, `codec/sidecar.rs` at three direct tests (`codec/sidecar.rs:487-557`) that cover
+alignment pairing and not the block-identity stamp, and both harness goldens a
+single case each.
 
 ## Refinements applied
 
@@ -408,7 +459,7 @@ evaluation asked to have removed, so the assignment rule is stated once and appl
 to both: **4f owns the decision, the other sub-part owns the application.** Each
 record will need a cross-part citation into `transform.rs`; a citation is not shared
 ownership. The full entries are in
-[existing-checks.md](existing-checks.md#registered-claims-that-no-record-owns).
+[historical inventory](https://github.com/ahrav/eidnara/blob/74044960ee91641dec95c8552f15282844a18b13/docs/properties/daemon/decisions/existing-checks.md#registered-claims-that-no-record-owns).
 
 | # | Gap | Owner | Evidence |
 | --- | --- | --- | --- |
@@ -484,8 +535,9 @@ above is upstream of G4, of one record's slug, and of 8 of the register's 13
 across a boundary this catalog has otherwise respected. Three of the 27 records are
 now `Partial` on observability grounds, and two of those three need a channel that
 does not exist — a diagnostic return path in `config.rs`, and allocation accounting
-anywhere in the tree. And `codec/sidecar.rs` remains at zero tests across 339 lines
-while owning the block identity every downstream decision keys on, which the
+anywhere in the tree. And the block-identity stamp in `codec/sidecar.rs` remains without a direct test,
+since the file's three tests (`:487-557`) cover alignment pairing only, while it
+owns the block identity every downstream decision keys on, which the
 evaluation did not dispute and no refinement above touches.
 
 The largest fact about 4f is untouched by every correction and was not disputed:
@@ -601,8 +653,10 @@ Four other triggers, each firing independently:
   request path.** The route matrix's 2 request-supplied keys and 6 TypeScript-only
   keys are the exposure, and the matrix exists to be re-derived at that moment
   rather than trusted from this commit.
-- **Any test added to `codec/sidecar.rs`.** It is the part's quietest area at zero
-  tests across 339 lines, every exercise it gets is transitive through the two
-  one-case goldens, and `block_is_unchanged` (`:192`) decides whether native extras
-  replay verbatim — so a fingerprint that silently collides changes served bytes. The
-  day it has a direct test, several `Exercised:` lines across Group F change meaning.
+- **Any test of the stamp or fingerprint in `codec/sidecar.rs`.** The file's three
+  direct tests (`:487-557`) cover alignment pairing only, every exercise the stamp
+  gets is transitive through the two one-case goldens, and `block_is_unchanged`
+  (`:209`) decides whether native extras replay verbatim — so a fingerprint that silently collides changes served bytes. The
+   day it has a direct test, several `Exercised:` lines across Group F change meaning.
+
+</details>
