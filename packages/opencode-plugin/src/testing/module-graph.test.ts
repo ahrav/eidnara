@@ -9,6 +9,7 @@ import {
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
+    parseSource,
     reachableModules,
     withoutComments,
 } from "./module-graph";
@@ -134,8 +135,8 @@ const DATABASE_USES: Record<string, DatabaseUses> = {
     },
 };
 
-/** File names of the Rust-owned product stores, as a path a module could open; the scan blanks comments before matching. */
-const PRODUCT_STORE_FILE = /["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)["'`]/;
+/** File names of the Rust-owned product stores, as a path a module could open, with any non-word suffix such as `-wal` or `?mode=ro`; the scan blanks comments before matching. */
+const PRODUCT_STORE_FILE = /["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)(?!\w)/;
 
 type ReportedGraph = Omit<ModuleGraph, "text">;
 
@@ -229,6 +230,10 @@ describe("module graph over the landed tree", () => {
     test("retained modules name no Eidnara product-store file", () => {
         expect(PRODUCT_STORE_FILE.test('join(dir, "memory.sqlite")')).toBe(true);
         expect(PRODUCT_STORE_FILE.test("`${dir}/context.db`")).toBe(true);
+        expect(PRODUCT_STORE_FILE.test('"context.db?mode=ro"')).toBe(true);
+        expect(PRODUCT_STORE_FILE.test("'store.db-wal'")).toBe(true);
+        expect(PRODUCT_STORE_FILE.test("`memory.sqlite.bak`")).toBe(true);
+        expect(PRODUCT_STORE_FILE.test('"context.dbx"')).toBe(false);
         expect(PRODUCT_STORE_FILE.test("Eidnara's own context.db.")).toBe(false);
         expect(operationLiteralHits(scannedSources(), PRODUCT_STORE_FILE)).toEqual([]);
     }, 120_000);
@@ -485,6 +490,18 @@ describe("databaseUses", () => {
             "const leak = new DB(productPath);",
             "const marker = new Error('x');",
         ]);
+    });
+});
+
+describe("parseSource", () => {
+    test("rejects a file whose recovered tree could omit an audited construction", () => {
+        const malformed = ["const t = `oops;", "const db = new Database(productPath);", ""].join(
+            "\n",
+        );
+        expect(() => parseSource(malformed, "m.ts")).toThrow(/Unterminated template literal/);
+        expect(() => databaseUses(malformed)).toThrow(SyntaxError);
+        expect(() => parseSource("const a: number = 1;", "m.mjs")).toThrow(/TypeScript files/);
+        expect(() => parseSource("export const X = <div>{1}</div>;", "m.tsx")).not.toThrow();
     });
 });
 

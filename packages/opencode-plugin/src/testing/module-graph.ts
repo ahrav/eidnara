@@ -99,12 +99,50 @@ export function databaseBinders(graph: Pick<ModuleGraph, "imports">): string[] {
         .sort();
 }
 
+/** No library or module resolution: the program exists only to report syntactic diagnostics. */
+const PARSE_ONLY: ts.CompilerOptions = {
+    allowJs: true,
+    jsx: ts.JsxEmit.Preserve,
+    target: ts.ScriptTarget.Latest,
+    noLib: true,
+    noResolve: true,
+    types: [],
+};
+
+/**
+ * A syntax error makes the parser recover with a tree that can omit the very construction an
+ * audit looks for, so a file that does not parse cleanly is rejected instead of scanned.
+ */
+export function parseSource(source: string, fileName: string): ts.SourceFile {
+    const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
+    const host: ts.CompilerHost = {
+        getSourceFile: (name) => (name === fileName ? file : undefined),
+        getDefaultLibFileName: () => "lib.d.ts",
+        writeFile: () => {},
+        getCurrentDirectory: () => "",
+        getCanonicalFileName: (name) => name,
+        useCaseSensitiveFileNames: () => true,
+        getNewLine: () => "\n",
+        fileExists: (name) => name === fileName,
+        readFile: (name) => (name === fileName ? source : undefined),
+    };
+    const program = ts.createProgram([fileName], PARSE_ONLY, host);
+    const diagnostics = program.getSyntacticDiagnostics(file);
+    if (diagnostics.length > 0) {
+        const messages = diagnostics
+            .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, " "))
+            .join("; ");
+        throw new SyntaxError(`${fileName} does not parse: ${messages}`);
+    }
+    return file;
+}
+
 /**
  * Comments are blanked to spaces, never removed, so the scan reports the source line number
  * of a hit and a closed block comment cannot hide the code that follows it on the same line.
  */
 export function withoutComments(source: string, fileName = "module.ts"): string {
-    const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
+    const file = parseSource(source, fileName);
     const ranges = new Map<number, number>();
     const collect = (node: ts.Node): void => {
         for (const range of [
@@ -163,7 +201,7 @@ export function databaseUses(
     fileName = "module.ts",
     options: DatabaseUsesOptions = {},
 ): DatabaseUses {
-    const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
+    const file = parseSource(source, fileName);
     const lines = source.split("\n");
     const lineOf = (node: ts.Node) =>
         lines[file.getLineAndCharacterOfPosition(node.getStart(file)).line];
