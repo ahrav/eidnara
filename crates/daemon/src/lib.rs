@@ -28386,45 +28386,96 @@ mod tests {
         }
     }
 
-    /// Route names are `match` arms on string literals, so the registered set is read from this
-    /// file's source; a probe list alone would stay green after an unlisted spelling was added.
+    /// A probe list cannot detect an unlisted spelling, so the route set comes from the two
+    /// dispatchers' `match` arm patterns. Each arm must use string-literal patterns or `_`; the
+    /// parser fails on a constant or binding pattern instead of skipping the route it names.
+    /// commentlint: allow(JUDGE)
     fn dispatcher_route_literals() -> Vec<String> {
-        const SOURCE: &str = include_str!("lib.rs");
-        // The anchors are assembled at runtime so this test's own text never matches them.
-        let method_dispatch = format!("async fn {}(", "dispatch_value_with_inbound_bytes");
-        let facade_dispatch = format!("async fn {}(", "handle_facade_value");
-        let fallback = format!("_ => {}(&request)", "unrecognized_request_error");
-        let mut literals = Vec::new();
-        for (definition, arms_start) in [
-            (method_dispatch, format!("return match {} {{", "method")),
-            (facade_dispatch, format!("match {} {{", "name")),
-        ] {
-            assert_eq!(
-                SOURCE.matches(&definition).count(),
-                1,
-                "{definition} must be defined exactly once"
-            );
-            let body = &SOURCE[SOURCE.find(&definition).unwrap()..];
-            let arms = &body[body.find(&arms_start).unwrap()..];
-            let arms = &arms[..arms.find(&fallback).unwrap()];
-            let mut rest = arms;
-            while let Some(open) = rest.find('"') {
-                let literal = &rest[open + 1..];
-                let close = literal
-                    .find('"')
-                    .expect("unterminated literal in dispatch arms");
-                let candidate = &literal[..close];
-                // Only pattern literals name routes: a pattern is followed by `=>`, by `|` in
-                // an or-pattern, or by `if` in a guarded arm; a body literal such as the
-                // `echo` response key is followed by none of these.
-                let after = literal[close + 1..].trim_start();
-                if after.starts_with("=>") || after.starts_with('|') || after.starts_with("if ") {
-                    literals.push(candidate.to_string());
+        use quote::ToTokens;
+        use syn::visit::Visit;
+
+        const DISPATCHERS: [(&str, &str); 2] = [
+            ("dispatch_value_with_inbound_bytes", "method"),
+            ("handle_facade_value", "name"),
+        ];
+
+        fn pattern_literals(pat: &syn::Pat, literals: &mut Vec<String>) {
+            match pat {
+                syn::Pat::Lit(syn::PatLit {
+                    lit: syn::Lit::Str(route),
+                    ..
+                }) => literals.push(route.value()),
+                syn::Pat::Or(alternatives) => {
+                    for case in &alternatives.cases {
+                        pattern_literals(case, literals);
+                    }
                 }
-                rest = &rest[open + 1 + close + 1..];
+                syn::Pat::Wild(_) => {}
+                other => panic!(
+                    "dispatcher arm pattern must be a string literal or `_`, found `{}`",
+                    other.to_token_stream()
+                ),
             }
         }
-        literals
+
+        struct Dispatcher<'a> {
+            scrutinee: &'a str,
+            matches: usize,
+            literals: Vec<String>,
+        }
+
+        impl<'ast> Visit<'ast> for Dispatcher<'_> {
+            fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
+                if expr.expr.to_token_stream().to_string() == self.scrutinee {
+                    self.matches += 1;
+                    for arm in &expr.arms {
+                        pattern_literals(&arm.pat, &mut self.literals);
+                    }
+                }
+                syn::visit::visit_expr_match(self, expr);
+            }
+        }
+
+        struct Dispatchers {
+            functions: Vec<(&'static str, Option<Vec<String>>)>,
+        }
+
+        impl<'ast> Visit<'ast> for Dispatchers {
+            fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+                let name = function.sig.ident.to_string();
+                if let Some((_, scrutinee)) = DISPATCHERS.iter().find(|(f, _)| *f == name) {
+                    let mut dispatcher = Dispatcher {
+                        scrutinee,
+                        matches: 0,
+                        literals: Vec::new(),
+                    };
+                    dispatcher.visit_block(&function.block);
+                    assert_eq!(
+                        dispatcher.matches, 1,
+                        "{name} must match on `{scrutinee}` exactly once"
+                    );
+                    let slot = self
+                        .functions
+                        .iter_mut()
+                        .find(|(f, _)| *f == name)
+                        .expect("dispatcher listed");
+                    assert!(slot.1.is_none(), "{name} must be defined exactly once");
+                    slot.1 = Some(dispatcher.literals);
+                }
+                syn::visit::visit_impl_item_fn(self, function);
+            }
+        }
+
+        let file: syn::File = syn::parse_str(include_str!("lib.rs")).expect("lib.rs parses");
+        let mut dispatchers = Dispatchers {
+            functions: DISPATCHERS.iter().map(|(f, _)| (*f, None)).collect(),
+        };
+        dispatchers.visit_file(&file);
+        dispatchers
+            .functions
+            .into_iter()
+            .flat_map(|(name, literals)| literals.unwrap_or_else(|| panic!("{name} not found")))
+            .collect()
     }
 
     /// `model` covers the embedding-model listing routes (`models.list`) that the probe set

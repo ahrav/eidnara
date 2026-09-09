@@ -168,8 +168,9 @@ export function databaseUses(
                 recordEscape(node);
             }
             if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+                // An inline `type` specifier is erased at runtime and cannot alias the constructor.
                 for (const element of clause.namedBindings.elements) {
-                    if (element.propertyName) recordEscape(element);
+                    if (element.propertyName && !element.isTypeOnly) recordEscape(element);
                 }
             }
         }
