@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import {
     databaseBinders,
@@ -198,5 +199,29 @@ describe("reachableModules", () => {
 describe("databaseBinders", () => {
     test("names the modules importing a binding and skips the bindings themselves", () => {
         expect(databaseBinders(graph)).toEqual(["src/a/forbidden.ts", "src/b/forbidden.ts"]);
+    });
+});
+
+describe("operationLiteralHits", () => {
+    const dir = mkdtempSync(join(tmpdir(), "eidnara-literal-hits-"));
+    const file = join(dir, "probe.ts");
+    writeFileSync(
+        file,
+        ['const a = "claim.intent.stage";', 'const b = "claim.intent.ack";', ""].join("\n"),
+    );
+    afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+    test("reports every matching line with its one-based number", () => {
+        expect(operationLiteralHits([file])).toEqual([`${file}:1`, `${file}:2`]);
+    });
+
+    // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;
+    // a stale offset skips a real literal on the next line and the scan passes vacuously.
+    test("rejects a global pattern instead of under-counting", () => {
+        expect(() => operationLiteralHits([file], /claim\./g)).toThrow(TypeError);
+    });
+
+    test("rejects a sticky pattern instead of under-counting", () => {
+        expect(() => operationLiteralHits([file], /claim\./y)).toThrow(TypeError);
     });
 });
