@@ -16528,7 +16528,8 @@ fn ctx_memory_schema() -> Value {
             "observedFailure": { "type": ["string", "null"] },
             "rootCause": { "type": ["string", "null"] },
             "recovery": { "type": ["string", "null"] },
-            "nonApplicableWhen": { "type": ["string", "null"] }
+            "nonApplicableWhen": { "type": ["string", "null"] },
+            "expiresAt": { "type": ["number", "null"] }
         }
     });
     json!({
