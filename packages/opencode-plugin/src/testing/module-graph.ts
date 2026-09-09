@@ -118,24 +118,40 @@ export function operationLiteralHits(
 }
 
 export interface DatabaseUses {
-    /** `opens` contains source lines for `new` expressions whose constructor text contains `Database`. */
+    /** `opens` contains source lines for `new` expressions whose constructor text contains `Database`, or for every `new` expression under `allConstructions`. */
     opens: string[];
-    /** `escapes` contains source lines for `Database` usages that bypass direct constructor matching. */
+    /** `escapes` contains source lines for value-position identifiers containing `Database` and for binding-module imports that bypass direct constructor matching. */
     escapes: string[];
 }
 
+export interface DatabaseUsesOptions {
+    /** `allConstructions` reports every `new` expression, so an alias whose text does not match `/Database/` still appears in `opens`. */
+    allConstructions?: boolean;
+}
+
 /** An alias such as `const DB = Database` evades `new Database(` text matching; the syntax tree reports it as an escape. */
-export function databaseUses(source: string, fileName = "module.ts"): DatabaseUses {
+export function databaseUses(
+    source: string,
+    fileName = "module.ts",
+    options: DatabaseUsesOptions = {},
+): DatabaseUses {
     const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
     const lines = source.split("\n");
     const lineOf = (node: ts.Node) =>
         lines[file.getLineAndCharacterOfPosition(node.getStart(file)).line];
     const uses: DatabaseUses = { opens: [], escapes: [] };
+    const escape = (node: ts.Node) => {
+        const line = lineOf(node);
+        if (!uses.escapes.includes(line)) uses.escapes.push(line);
+    };
     const isBindingSpecifier = (node: ts.Expression | undefined) =>
         node !== undefined && ts.isStringLiteralLike(node) && DATABASE_BINDING.test(node.text);
 
     const visit = (node: ts.Node): void => {
-        if (ts.isNewExpression(node) && /Database/.test(node.expression.getText(file))) {
+        if (
+            ts.isNewExpression(node) &&
+            (options.allConstructions || /Database/.test(node.expression.getText(file)))
+        ) {
             uses.opens.push(lineOf(node));
         }
         if (
@@ -149,11 +165,11 @@ export function databaseUses(source: string, fileName = "module.ts"): DatabaseUs
                 clause.name ||
                 (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings))
             ) {
-                uses.escapes.push(lineOf(node));
+                escape(node);
             }
             if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
                 for (const element of clause.namedBindings.elements) {
-                    if (element.propertyName) uses.escapes.push(lineOf(element));
+                    if (element.propertyName) escape(element);
                 }
             }
         }
@@ -162,17 +178,17 @@ export function databaseUses(source: string, fileName = "module.ts"): DatabaseUs
             !node.exportClause &&
             isBindingSpecifier(node.moduleSpecifier)
         ) {
-            uses.escapes.push(lineOf(node));
+            escape(node);
         }
         if (ts.isCallExpression(node)) {
             const callee = node.expression;
             const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
             const isRequire = ts.isIdentifier(callee) && callee.text === "require";
             if ((isImport || isRequire) && isBindingSpecifier(node.arguments[0])) {
-                uses.escapes.push(lineOf(node));
+                escape(node);
             }
         }
-        if (ts.isIdentifier(node) && node.text === "Database") {
+        if (ts.isIdentifier(node) && /Database/.test(node.text)) {
             const parent = node.parent;
             const isTypeUse =
                 ts.isTypeReferenceNode(parent) ||
@@ -186,7 +202,7 @@ export function databaseUses(source: string, fileName = "module.ts"): DatabaseUs
                 (ts.isPropertySignature(parent) && parent.name === node) ||
                 (ts.isBindingElement(parent) && parent.propertyName === node);
             if (!ts.isImportSpecifier(parent) && !isTypeUse && !isOpen && !isPropertyKey) {
-                uses.escapes.push(lineOf(node));
+                escape(node);
             }
         }
         ts.forEachChild(node, visit);
