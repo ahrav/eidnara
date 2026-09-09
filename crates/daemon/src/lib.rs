@@ -28224,6 +28224,96 @@ mod tests {
         }
     }
 
+    /// Route names are `match` arms on string literals, so the registered set is read from this
+    /// file's source; a probe list alone would stay green after an unlisted spelling was added.
+    fn dispatcher_route_literals() -> Vec<String> {
+        const SOURCE: &str = include_str!("lib.rs");
+        // The anchors are assembled at runtime so this test's own text never matches them.
+        let method_dispatch = format!("async fn {}(", "dispatch_value_with_inbound_bytes");
+        let facade_dispatch = format!("async fn {}(", "handle_facade_value");
+        let fallback = format!("_ => {}(&request)", "unrecognized_request_error");
+        let mut literals = Vec::new();
+        for (definition, arms_start) in [
+            (method_dispatch, format!("return match {} {{", "method")),
+            (facade_dispatch, format!("match {} {{", "name")),
+        ] {
+            assert_eq!(
+                SOURCE.matches(&definition).count(),
+                1,
+                "{definition} must be defined exactly once"
+            );
+            let body = &SOURCE[SOURCE.find(&definition).unwrap()..];
+            let arms = &body[body.find(&arms_start).unwrap()..];
+            let arms = &arms[..arms.find(&fallback).unwrap()];
+            let mut rest = arms;
+            while let Some(open) = rest.find('"') {
+                let literal = &rest[open + 1..];
+                let close = literal
+                    .find('"')
+                    .expect("unterminated literal in dispatch arms");
+                let literal = &literal[..close];
+                if literal
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_')
+                {
+                    literals.push(literal.to_string());
+                }
+                rest = &rest[open + 1 + close + 1..];
+            }
+        }
+        literals
+    }
+
+    fn names_absent_subsystem(route: &str) -> bool {
+        route.split(['.', '_']).any(|segment| {
+            ["index", "embed", "git", "mural"]
+                .iter()
+                .any(|stem| segment.starts_with(stem))
+        })
+    }
+
+    #[test]
+    fn dispatchers_register_no_indexing_embedding_git_or_mural_route() {
+        for spelling in [
+            "index.messages",
+            "message_index.sync",
+            "embed.query",
+            "embedding.ingest",
+            "git_ingest",
+            "git.retrieve",
+            "mural.render",
+            "ctx_mural",
+        ] {
+            assert!(names_absent_subsystem(spelling), "{spelling}");
+        }
+        for spelling in [
+            "kernel.read",
+            "session.status",
+            "state_sync",
+            "ctx_memory",
+            "diagnostics",
+        ] {
+            assert!(!names_absent_subsystem(spelling), "{spelling}");
+        }
+        let literals = dispatcher_route_literals();
+        for control in [
+            "kernel.read",
+            "transform",
+            "ctx_memory",
+            "claim.intent.stage",
+        ] {
+            assert!(
+                literals.iter().any(|l| l == control),
+                "extractor missed {control}"
+            );
+        }
+        let offending: Vec<&String> = literals
+            .iter()
+            .filter(|l| names_absent_subsystem(l))
+            .collect();
+        assert!(offending.is_empty(), "{offending:?}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn management_todo_flush_and_recomp_contracts_are_replay_safe() {
         let producer = Arc::new(ProducerState::default());

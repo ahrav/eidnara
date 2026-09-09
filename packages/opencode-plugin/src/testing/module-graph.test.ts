@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import {
     databaseBinders,
+    databaseUses,
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
@@ -69,6 +70,8 @@ const AWAITING_CONSUMER = new Map<string, string>([
  */
 const HARNESS_DATABASE_WRITER = "features/context/compaction-marker.ts";
 const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"];
+/** The adapter defines `Database`, so `databaseBinders` cannot include it; the test audits the adapter's constructions directly. */
+const DATABASE_ADAPTER = "shared/sqlite.ts";
 
 /** File names of the Rust-owned product stores, as a path a module could open. */
 const PRODUCT_STORE_FILE =
@@ -145,9 +148,9 @@ describe("module graph over the landed tree", () => {
             [HARNESS_DATABASE_WRITER, ...HARNESS_DATABASE_READERS].sort(),
         );
         const opens = (module: string) => {
-            const source = readFileSync(join(SRC, module), "utf8");
-            expect(source).not.toMatch(/\bDatabase\s+as\b/);
-            return source.split("\n").filter((line) => /\bnew Database\(/.test(line));
+            const uses = databaseUses(readFileSync(join(SRC, module), "utf8"), module);
+            expect(uses.escapes).toEqual([]);
+            return uses.opens;
         };
         for (const reader of HARNESS_DATABASE_READERS) {
             expect(opens(reader)).toEqual([
@@ -158,6 +161,9 @@ describe("module graph over the landed tree", () => {
         expect(readFileSync(join(SRC, HARNESS_DATABASE_WRITER), "utf8")).toMatch(
             /const dbPath = getOpenCodeDbPath\(\);/,
         );
+        expect(databaseUses(readFileSync(join(SRC, DATABASE_ADAPTER), "utf8")).opens).toEqual([
+            '    const probe = new Database(":memory:");',
+        ]);
     }, 120_000);
 });
 const graph: ModuleGraph = {
@@ -199,6 +205,90 @@ describe("reachableModules", () => {
 describe("databaseBinders", () => {
     test("names the modules importing a binding and skips the bindings themselves", () => {
         expect(databaseBinders(graph)).toEqual(["src/a/forbidden.ts", "src/b/forbidden.ts"]);
+    });
+});
+
+describe("databaseUses", () => {
+    const allowed = [
+        'import { Database, runImmediate } from "../../shared/sqlite";',
+        "let cached: { path: string; db: Database } | null = null;",
+        "function open(dbPath: string): Database {",
+        "    const db = new Database(dbPath, { readonly: true });",
+        "    return db;",
+        "}",
+        "type Ctor = typeof Database;",
+        "const meta = { Database: 1 };",
+        "const name = meta.Database;",
+        "",
+    ].join("\n");
+
+    test("reports each open by its source line and no escape for imports, types, and member names", () => {
+        expect(databaseUses(allowed)).toEqual({
+            opens: ["    const db = new Database(dbPath, { readonly: true });"],
+            escapes: [],
+        });
+    });
+
+    test("reports a local alias of the constructor as an escape, and the aliased open as an open", () => {
+        const uses = databaseUses(
+            [
+                'import { Database } from "../../shared/sqlite";',
+                "const DB = Database;",
+                "const db = new DB(productPath);",
+                "const other = new Database(dbPath);",
+                "",
+            ].join("\n"),
+        );
+        expect(uses.escapes).toEqual(["const DB = Database;"]);
+        expect(uses.opens).toEqual(["const other = new Database(dbPath);"]);
+    });
+
+    test("reports a constructor passed as a value, extended, or re-exported as an escape", () => {
+        const uses = databaseUses(
+            [
+                'import { Database } from "../../shared/sqlite";',
+                "const db = Reflect.construct(Database, [productPath]);",
+                "class Store extends Database {}",
+                "const { Database: D } = { Database };",
+                "export { Database };",
+                "",
+            ].join("\n"),
+        );
+        expect(uses.escapes).toEqual([
+            "const db = Reflect.construct(Database, [productPath]);",
+            "class Store extends Database {}",
+            "const { Database: D } = { Database };",
+            "export { Database };",
+        ]);
+    });
+
+    test("reports aliased, namespace, default, star-exported, and dynamic binding imports as escapes", () => {
+        const uses = databaseUses(
+            [
+                'import { Database as DB } from "../../shared/sqlite";',
+                'import * as sqlite from "../../shared/sqlite";',
+                'import bun from "bun:sqlite";',
+                'export * from "../../shared/sqlite";',
+                'const lazy = await import("node:sqlite");',
+                'const legacy = require("better-sqlite3");',
+                'import { join } from "node:path";',
+                "",
+            ].join("\n"),
+        );
+        expect(uses.escapes).toEqual([
+            'import { Database as DB } from "../../shared/sqlite";',
+            'import * as sqlite from "../../shared/sqlite";',
+            'import bun from "bun:sqlite";',
+            'export * from "../../shared/sqlite";',
+            'const lazy = await import("node:sqlite");',
+            'const legacy = require("better-sqlite3");',
+        ]);
+    });
+
+    test("reports any constructor named like the binding as an open", () => {
+        expect(databaseUses("const probe = new DatabaseSync(':memory:');").opens).toEqual([
+            "const probe = new DatabaseSync(':memory:');",
+        ]);
     });
 });
 

@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import ts from "typescript";
 
 /** The Pi `build` script's externals; the graph stops at these package boundaries. */
 export const BUNDLE_EXTERNALS = [
@@ -114,4 +115,73 @@ export function operationLiteralHits(
         }
     }
     return hits;
+}
+
+export interface DatabaseUses {
+    /** `opens` contains source lines for `new` expressions whose constructor text contains `Database`. */
+    opens: string[];
+    /** `escapes` contains source lines for `Database` usages that bypass direct constructor matching. */
+    escapes: string[];
+}
+
+/** An alias such as `const DB = Database` evades `new Database(` text matching; the syntax tree reports it as an escape. */
+export function databaseUses(source: string, fileName = "module.ts"): DatabaseUses {
+    const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
+    const lines = source.split("\n");
+    const lineOf = (node: ts.Node) =>
+        lines[file.getLineAndCharacterOfPosition(node.getStart(file)).line];
+    const uses: DatabaseUses = { opens: [], escapes: [] };
+    const isBindingSpecifier = (node: ts.Expression | undefined) =>
+        node !== undefined && ts.isStringLiteralLike(node) && DATABASE_BINDING.test(node.text);
+
+    const visit = (node: ts.Node): void => {
+        if (ts.isNewExpression(node) && /Database/.test(node.expression.getText(file))) {
+            uses.opens.push(lineOf(node));
+        }
+        if (ts.isImportDeclaration(node) && isBindingSpecifier(node.moduleSpecifier)) {
+            const clause = node.importClause;
+            if (
+                clause?.name ||
+                (clause?.namedBindings && ts.isNamespaceImport(clause.namedBindings))
+            ) {
+                uses.escapes.push(lineOf(node));
+            }
+            if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+                for (const element of clause.namedBindings.elements) {
+                    if (element.propertyName) uses.escapes.push(lineOf(element));
+                }
+            }
+        }
+        if (
+            ts.isExportDeclaration(node) &&
+            !node.exportClause &&
+            isBindingSpecifier(node.moduleSpecifier)
+        ) {
+            uses.escapes.push(lineOf(node));
+        }
+        if (ts.isCallExpression(node)) {
+            const callee = node.expression;
+            const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
+            const isRequire = ts.isIdentifier(callee) && callee.text === "require";
+            if ((isImport || isRequire) && isBindingSpecifier(node.arguments[0])) {
+                uses.escapes.push(lineOf(node));
+            }
+        }
+        if (ts.isIdentifier(node) && node.text === "Database") {
+            const parent = node.parent;
+            const isTypeUse = ts.isTypeReferenceNode(parent) || ts.isTypeQueryNode(parent);
+            const isOpen = ts.isNewExpression(parent) && parent.expression === node;
+            const isPropertyKey =
+                (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+                (ts.isPropertyAssignment(parent) && parent.name === node) ||
+                (ts.isPropertySignature(parent) && parent.name === node) ||
+                (ts.isBindingElement(parent) && parent.propertyName === node);
+            if (!ts.isImportSpecifier(parent) && !isTypeUse && !isOpen && !isPropertyKey) {
+                uses.escapes.push(lineOf(node));
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(file);
+    return uses;
 }
