@@ -5,18 +5,33 @@ mod support;
 
 use daemon::kernel_route_fixtures::{admission, intent};
 use kernel::{
-    DecisionPayload, DecisionSpec, Envelope, EventKind, KernelError, KernelStore,
+    DecisionPayload, DecisionSpec, DomainSpec, Envelope, EventKind, KernelError, KernelStore,
     ObservationPayload, ObservationSpec, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass,
     TaintClass,
 };
 use serde_json::{Value, json};
 use support::kernel_daemon::{DOMAIN, KernelDaemon, SESSION, insert_decision, state_kind};
 
+/// The kernel domain the reader admits; the fixture's other rows stay in
+/// `DOMAIN` so a test can show that a positive-kind decision elsewhere is not
+/// injected.
+const MEMORY_DOMAIN: &str = "memory";
+
 fn decision_spec(object_id: &str, scope_id: &str, kind: &str, summary: &str) -> DecisionSpec {
+    decision_spec_in_domain(object_id, scope_id, MEMORY_DOMAIN, kind, summary)
+}
+
+fn decision_spec_in_domain(
+    object_id: &str,
+    scope_id: &str,
+    domain_id: &str,
+    kind: &str,
+    summary: &str,
+) -> DecisionSpec {
     DecisionSpec {
         decision_id: format!("{object_id}-decision"),
         object_id: object_id.to_string(),
-        domain_id: DOMAIN.to_string(),
+        domain_id: domain_id.to_string(),
         proposition_id: None,
         scope_id: Some(scope_id.to_string()),
         anchor_id: None,
@@ -68,6 +83,22 @@ fn verify(envelope: &mut Envelope<'_>, object_id: &str) -> Result<(), KernelErro
     Ok(())
 }
 
+/// `object_registry.domain_id` requires this domain; direct store writes bypass the route that creates it.
+fn ensure_memory_domain(envelope: &mut Envelope<'_>) -> Result<(), KernelError> {
+    if envelope.domain_exists(MEMORY_DOMAIN)? {
+        return Ok(());
+    }
+    envelope.insert_domain(DomainSpec {
+        domain_id: MEMORY_DOMAIN.to_string(),
+        object_id: format!("domain:{MEMORY_DOMAIN}"),
+        name: MEMORY_DOMAIN.to_string(),
+        source_kind: "repo".to_string(),
+        source_id: format!("domain:{MEMORY_DOMAIN}"),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+    })
+}
+
 fn commit_verified_memory(
     store: &KernelStore,
     key: &str,
@@ -78,6 +109,7 @@ fn commit_verified_memory(
 ) {
     store
         .commit(intent(key), |envelope| {
+            ensure_memory_domain(envelope)?;
             envelope.insert_decision(decision_spec(object_id, scope_id, kind, summary))?;
             verify(envelope, object_id)?;
             Ok(String::new())
@@ -170,6 +202,19 @@ async fn transform_composes_project_memory_from_canonical_rows_and_observes_abse
         })
         .unwrap();
     store
+        .commit(intent("other-domain"), |envelope| {
+            envelope.insert_decision(decision_spec_in_domain(
+                "note-arch",
+                &scope_id,
+                DOMAIN,
+                "ARCHITECTURE",
+                "Architecture from another domain.",
+            ))?;
+            verify(envelope, "note-arch")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    store
         .commit(intent("shape"), |envelope| {
             envelope.retire_decision("mem-retired")?;
             let mut replacement = decision_spec(
@@ -203,6 +248,7 @@ async fn transform_composes_project_memory_from_canonical_rows_and_observes_abse
         "Shelved design.",
         "Plain decision kind.",
         "Other project rule.",
+        "Architecture from another domain.",
     ] {
         assert!(!text.contains(absent), "{absent} leaked into {text}");
     }

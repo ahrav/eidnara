@@ -16,6 +16,8 @@ use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding,
 use crate::m0_compose::trim_memories_to_budget;
 use crate::memory_render::is_positive_memory_category;
 
+pub(crate) const MEMORY_DOMAIN_ID: &str = "memory";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalMemory {
     pub object_id: String,
@@ -128,6 +130,8 @@ impl CanonicalMemoryRead {
 /// Reads the project's injectable memory at the kernel tip, trimmed to
 /// `memory_budget_tokens`.
 ///
+/// The tip is captured before the lag sample, and the visible-row read is bound to it, so a commit published between them cannot admit rows the freshness verdict did not cover.
+///
 /// The store phase, the serving decision for a tip read on the `auto_inject`
 /// surface, and the visible-row read each withhold the composition with the
 /// `KernelOutcome` the `kernel.read` route would answer with.
@@ -141,6 +145,10 @@ pub(crate) fn read_project_memory(
         Ok(store) => store,
         Err(outcome) => return CanonicalMemoryRead::Withheld(outcome),
     };
+    let tip = match store.tip() {
+        Ok(tip) => tip,
+        Err(error) => return CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
+    };
     let lag = match store.outbox_lag(now_ms) {
         Ok(lag) => lag,
         Err(error) => return CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
@@ -149,7 +157,7 @@ pub(crate) fn read_project_memory(
     if !verdict.is_available() {
         return CanonicalMemoryRead::Withheld(verdict);
     }
-    match read_visible(&store, project, Surface::AutoInject, None, None) {
+    match read_visible(&store, project, Surface::AutoInject, Some(tip), None) {
         Ok(response) => {
             CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
         }
@@ -164,6 +172,8 @@ pub(crate) fn read_project_memory(
 /// the guard keeps a label-bearing row out of a block that has no label
 /// renderer. The injectable rows are then trimmed to `memory_budget_tokens` in
 /// serving order, so the snapshot holds only rows the block renders.
+///
+/// The kernel holds decisions of every domain, and a positive kind such as `ARCHITECTURE` is not reserved to memory writers, so rows outside the memory domain are dropped before the kind test.
 fn injectable_snapshot(
     response: ReadResponse,
     memory_budget_tokens: f64,
@@ -177,6 +187,7 @@ fn injectable_snapshot(
     } = response;
     let injectable: Vec<CanonicalMemory> = rows
         .iter()
+        .filter(|row| row.object.domain_id == MEMORY_DOMAIN_ID)
         .filter(|row| row.visibility == SurfaceVisibility::Visible)
         .filter_map(|row| decisions.get(&row.object.object_id))
         .filter(|decision| is_positive_memory_category(&decision.decision_kind))
@@ -208,11 +219,20 @@ mod tests {
         object_kind: &str,
         visibility: SurfaceVisibility,
     ) -> VisibleRow {
+        visible_row_in_domain(object_id, object_kind, MEMORY_DOMAIN_ID, visibility)
+    }
+
+    fn visible_row_in_domain(
+        object_id: &str,
+        object_kind: &str,
+        domain_id: &str,
+        visibility: SurfaceVisibility,
+    ) -> VisibleRow {
         VisibleRow {
             object: ObjectRow {
                 object_id: object_id.to_string(),
                 object_kind: object_kind.to_string(),
-                domain_id: "memory".to_string(),
+                domain_id: domain_id.to_string(),
                 source_kind: "assistant".to_string(),
                 source_id: "lineage".to_string(),
                 source_revision: 1,
@@ -291,6 +311,37 @@ mod tests {
                 category: "PROJECT_RULES".to_string(),
                 content: "Keep the public contract.".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn rows_outside_the_memory_domain_are_not_injectable() {
+        let snapshot = injectable_snapshot(
+            response(
+                vec![
+                    visible_row("rule", "decision", SurfaceVisibility::Visible),
+                    visible_row_in_domain(
+                        "note-arch",
+                        "decision",
+                        "notes",
+                        SurfaceVisibility::Visible,
+                    ),
+                ],
+                vec![
+                    decision("rule", "PROJECT_RULES", "Keep the public contract."),
+                    decision("note-arch", "ARCHITECTURE", "A note about architecture."),
+                ],
+            ),
+            UNBOUNDED,
+        );
+        assert_eq!(
+            snapshot
+                .rows()
+                .iter()
+                .map(|row| row.object_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rule"],
+            "a positive-kind decision from another domain must not be injected"
         );
     }
 

@@ -686,7 +686,7 @@ closure, and the same value is handed to a historian firing the pass triggers
 (`lib.rs:5118`), so a store phase change or lag change after that point cannot
 split one pass between a served block and a withheld record. The
 verdict-to-record mapping is total over `KernelOutcome`
-(`canonical_memory.rs:98-109`, `state.rs` `state_key`).
+(`canonical_memory.rs:100-111`, `state.rs` `state_key`).
 Required faults and enabling state: A `KernelOpenCoordinator` phase other than
 `Ready` (store starting or unavailable), an `outbox_lag` or `read_visible`
 error, or a registered consumer past either lag threshold

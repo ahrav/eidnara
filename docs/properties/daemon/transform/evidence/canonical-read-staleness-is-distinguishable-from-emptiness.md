@@ -16,21 +16,25 @@ Verified at HEAD.
 
 - `crates/daemon/src/canonical_memory.rs`: `CanonicalMemoryRead` has two
   variants, `Available(CanonicalMemorySnapshot)` and `Withheld(KernelOutcome)`
-  (`:88-94`). `composition()` (`:98-109`) maps `Available` to
+  (`:90-96`). `composition()` (`:100-111`) maps `Available` to
   `ProjectMemoryComposition::Canonical { known_as_of, truncated, revision }` and
   `Withheld` to `ProjectMemoryComposition::Withheld { state }` with
-  `state = verdict.state_key()`. `revision()` (`:112-117`) is `None` when
-  withheld. `rows()` (`:120-125`) returns the snapshot rows or an empty slice.
+  `state = verdict.state_key()`. `revision()` (`:114-119`) is `None` when
+  withheld. `rows()` (`:122-127`) returns the snapshot rows or an empty slice.
   Each is a single `match` with no default arm.
-- `crates/daemon/src/canonical_memory.rs:134-158` (`read_project_memory`): the
-  store phase (`KernelOpenCoordinator::kernel_store`), the `outbox_lag` read,
-  the serving decision `serving::project(serving::decide_for_tip_read(&lag),
-  Surface::AutoInject)`, and the `read_visible` call each return `Withheld`
-  carrying a `KernelOutcome`; only a served read constructs `Available`, and it
-  does so through `injectable_snapshot` (`:167-195`), which filters to visible
-  positive-category decisions, trims them to the memory budget, and hands the
-  trimmed rows to `CanonicalMemorySnapshot::new` (`:46`), which digests exactly
-  those rows once.
+- `crates/daemon/src/canonical_memory.rs:138-166` (`read_project_memory`): the
+  store phase (`KernelOpenCoordinator::kernel_store`), the `tip` read, the
+  `outbox_lag` read, the serving decision
+  `serving::project(serving::decide_for_tip_read(&lag), Surface::AutoInject)`,
+  and the `read_visible` call each return `Withheld` carrying a
+  `KernelOutcome`; only a served read constructs `Available`, and it does so
+  through `injectable_snapshot` (`:177-206`), which filters to visible
+  positive-category decisions in the memory domain, trims them to the memory
+  budget, and hands the trimmed rows to `CanonicalMemorySnapshot::new` (`:48`),
+  which digests exactly those rows once. The tip is read before the lag sample
+  and passed to `read_visible` as `as_of`, the same order `handle_kernel_read`
+  uses for a gated read, so the rows a served read pins are the rows the
+  freshness verdict covered.
 - `crates/daemon/src/kernel_routes/serving.rs:58-63` (`decide_for_tip_read`):
   zero registered consumers is served; otherwise `decide` applies the route's
   lag thresholds. So in a deployment with no outbox consumer, the withheld arm
@@ -127,8 +131,9 @@ acknowledges.
 
 ### Q: Is `Canonical { known_as_of: 0, .. }` reachable in production?
 
-- Sources examined: `read_visible` (`kernel_routes/read.rs`), which reads at
-  `store.tip()` when `as_of` is `None`; `KernelStore::tip`
+- Sources examined: `read_project_memory` (`canonical_memory.rs`), which reads
+  `store.tip()` before the lag sample and passes it to `read_visible` as
+  `as_of`; `KernelStore::tip`
   (`crates/kernel/src/envelope.rs:569-575`, `COALESCE(MAX(commit_seq), 0)`).
 - Findings: a kernel store with no commits reports `tip() == 0`, so a served
   read of an empty store records `Canonical { known_as_of: 0, truncated: false,
