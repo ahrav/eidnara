@@ -112,22 +112,27 @@ correction were applied to `fault-map.md` and change no record here.
   `tests/claim_mirror.rs`. The mirror's in-transaction snapshot-vector
   compare and its clear step lived in that module and went with it; nothing
   in `lib.rs` compared a snapshot vector. The claim-intent ledger and its
-  control row stay for the next ticket. The mirror's seed path was the only
-  writer that moved the control row from `resetting` back to `accepting`
-  without an identity check; with it gone, the only remaining `accepting`
-  writer is `authority_finish_prepare` through
-  `set_claim_intent_transition_tx`, which returns `Ok(())` without writing
-  unless its `context_store_uuid` is 32 lowercase hex
-  (`crates/memory-store/src/lib.rs:4973-4975`). Under the dashed production
-  shape that `intent-control-transition-write-is-silently-dropped` documents,
-  no authority cycle writes the row, so a rebuild grant
-  (`begin_claim_store_rebuild`, test-only caller) leaves the ledger in
-  `resetting` with no in-repository path back to `accepting`;
-  `claim_intent_stage_fence` reports every later stage as `Frozen`. Every
+  control row outlived the mirror by one ticket (see the next bullet). Every
   Group C record carries `Status: invalidated` and names
   `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
   transform catalog as the replacement; prose below that treats the mirror
   as live describes the source tree.
+- The claim-intent ledger is gone from `crates/memory-store` as well: the
+  `claim_intents` and `claim_intent_controls` tables and their index in
+  `baseline.sql`, `ClaimIntentRecord`, the `ClaimIntent*` error variants, the
+  `ClaimIntents` durable-write family and its registry entry,
+  `stage_claim_intent`, `inspect_claim_intent`, `list_claim_intents`,
+  `acknowledge_claim_intent`, `unresolved_claim_intent_count`,
+  `begin_claim_store_rebuild`, `claim_intent_stage_fence`,
+  `authority_for_route_tx`, `set_claim_intent_transition_tx`, and
+  `tests/claim_intent_ledger.rs`. The authority machine keeps its prepare,
+  finish, abort, and drain transitions unchanged apart from the control-row
+  write each one made for the memories domain; the notes-domain fence and the
+  `dreamer.run_task` memories gate are untouched. Every Group D record and
+  `core-intent-ack-transition-legality-gap` carry `Status: invalidated`; there
+  is no successor, because canonical memory writes go through the kernel's
+  own `(producer, operation_key, request_digest)` receipts, which the kernel
+  crate's tests hold (`crates/kernel/tests/kernel_envelope.rs`).
 - `crates/memory-store` opens its store through `storage::open_sqlite`
   against one baseline (`crates/memory-store/baseline.sql`); the `eidnara-host`
   managed layout names the file `memory.sqlite`, and the development
@@ -1367,6 +1372,12 @@ Open questions:
 
 ## Group D: the claim intent ledger
 
+Every record in this group is invalidated at HEAD: the claim-intent ledger, its
+tables, and its tests are gone from `crates/memory-store`. The group is kept as
+the record of the source tree; its `file:line` references are host-repository
+citations at `eb6da6109` (see Provenance) and name code that no longer exists
+here.
+
 Four records on the durable row that records a claim command staged *before* the host
 mutated `context.db`. An intent is keyed by `(producer, operation_key)` alone
 (`lib.rs:1230`), carries a request digest and a four-field binding that are verified
@@ -1384,7 +1395,17 @@ a ledger problem.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - no test asserts that a control row appears after an authority
 transition. `tests/claim_intent_ledger.rs:178-179` and `:169-228` deliberately assert
 the *authority-row* fence instead, and the comment at `:11-15` shows the fixture was
@@ -1428,7 +1449,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:133-166` covers restart survival
 (`:148-151`), an incarnation binding mismatch (`:153-161`), and a digest conflict
 (`:162-165`). `format_epoch`, `authority_project`, and `authority_generation`
@@ -1468,7 +1499,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:85-131` walks staged to
 context-committed to acknowledged, and `:169-228` and `:346-401` reach
 terminal-rejected. No test attempts an illegal transition out of a terminal state, and
@@ -1511,7 +1552,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:337-401` proves a staged replay is
 refused once the authority is draining, which is the fence, not the effect count.
 Nothing in this crate observes the context effect, because the effect lands in a
@@ -1904,7 +1955,17 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - nothing in `context-core` asserts transition legality, because
 `context-core` does not model it. `crates/memory-store/tests/claim_intent_ledger.rs` exercises
 acknowledgements, and Group D's `intent-terminal-state-is-entered-at-most-once` is where

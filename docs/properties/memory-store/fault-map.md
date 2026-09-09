@@ -18,7 +18,11 @@ mirror staleness on the memory-tool read path) describes the source tree; at
 HEAD those faults have no subject and no harness is owed for them. Staleness on
 the canonical read path is owned by
 `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
-transform catalog and its fault map.
+transform catalog and its fault map. The claim-intent ledger is gone as well,
+and the four Group D records and `core-intent-ack-transition-legality-gap` are
+invalidated; the intent rows below (control-row transitions, identity, terminal
+absorption, the staged-replay window, and the ack transition table) describe
+the source tree and are owed no harness.
 
 One framing point specific to this part. The dominant obstacle here is not a
 missing fault. It is that **no CI job executes any test in this scope**, so the
