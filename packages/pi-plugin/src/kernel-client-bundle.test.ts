@@ -1,13 +1,19 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import {
     bundleModuleGraph,
+    type DatabaseUses,
     databaseBinders,
+    databaseUses,
+    firstPartyInputs,
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
+    PRODUCT_STORE_FILE,
+    RETAINED_DATABASE_USES,
     reachableModules,
+    TEST_FILE,
 } from "@eidnara/opencode/testing/module-graph";
 
 /** The shared client Pi imports through the `@eidnara/opencode/*` alias. */
@@ -17,9 +23,10 @@ const CLIENT_ENTRY = resolve(
 );
 const PI_ENTRY = resolve(import.meta.dir, "kernel-client-pi.ts");
 const CLAIM_STORAGE_PATTERN = /storage-claim/;
+const OPENCODE_SRC = resolve(import.meta.dir, "../../opencode-plugin/src");
 /** Reads the harness's own `opencode.db` read-only; the shared plugin names its single writer. */
 const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"].map((reader) =>
-    resolve(import.meta.dir, "../../opencode-plugin/src", reader),
+    resolve(OPENCODE_SRC, reader),
 );
 /** A binding left external (`node:sqlite`, `bun:sqlite`, `better-sqlite3`) or a source module under a `sqlite` path segment. */
 const SQLITE_PATTERN =
@@ -101,18 +108,37 @@ describe("Pi kernel-client bundle reachability", () => {
         expect(graph.text).not.toMatch(OPERATION_LITERAL);
     });
 
-    it("the shipped entry points reach only the read-only harness-database reader and carry no claim.*/dreamer.* literal", () => {
+    it("the shipped entry points reach only the read-only harness-database reader and carry no claim.*/dreamer.* literal or product-store path", () => {
         const sources = new Set<string>();
         for (const graph of Object.values(buildEntryGraphs())) {
             for (const binder of databaseBinders(graph)) {
                 expect(HARNESS_DATABASE_READERS).toContain(resolve(PACKAGE_ROOT, binder));
             }
-            for (const input of graph.inputs) {
-                if (!input.includes("/node_modules/")) sources.add(resolve(PACKAGE_ROOT, input));
+            const inputs = firstPartyInputs(graph);
+            for (const input of [...inputs.code, ...inputs.data]) {
+                sources.add(resolve(PACKAGE_ROOT, input));
             }
         }
         expect(sources.size).toBeGreaterThan(0);
+        expect([...sources].filter((file) => TEST_FILE.test(file))).toEqual([]);
         expect(operationLiteralHits([...sources])).toEqual([]);
+        expect(operationLiteralHits([...sources], PRODUCT_STORE_FILE)).toEqual([]);
+        // Every reached source is read directly, so a computed binding load or a constructor
+        // alias in a module no import edge names as a binder still lands here. The reached
+        // OpenCode modules must show exactly the uses the shared map records for them.
+        const uses: Record<string, DatabaseUses> = {};
+        for (const file of [...sources].sort()) {
+            const found = databaseUses(readFileSync(file, "utf8"), file);
+            if (found.opens.length > 0 || found.escapes.length > 0) {
+                uses[relative(OPENCODE_SRC, file)] = found;
+            }
+        }
+        expect(uses).toEqual({
+            "hooks/context/read-session-db.ts":
+                RETAINED_DATABASE_USES["hooks/context/read-session-db.ts"],
+            "shared/sqlite.ts": RETAINED_DATABASE_USES["shared/sqlite.ts"],
+            "shared/token-estimator.ts": RETAINED_DATABASE_USES["shared/token-estimator.ts"],
+        });
     }, 120_000);
 
     it("the memory disposition command ships in the main entry through the shared kernel client", () => {

@@ -5257,14 +5257,17 @@ async fn a_disposition_preview_reports_visibility_per_surface_and_writes_nothing
                 "projected": visibilities("hidden", "hidden", "labeled"),
                 "visibility_changes": true,
             },
+            // A second operation on the same target is judged after the first,
+            // as the commit would judge it: its prior and its `current` are
+            // the first operation's result.
             {
                 "object_id": "store-decision-object-1",
                 "event": "quarantine",
                 "outcome": "quarantine",
-                "previous_disposition": "active",
+                "previous_disposition": "stale",
                 "disposition": "quarantined",
                 "denied": false,
-                "current": visibilities("visible", "visible", "visible"),
+                "current": visibilities("hidden", "hidden", "labeled"),
                 "projected": visibilities("hidden", "hidden", "hidden"),
                 "visibility_changes": true,
             },
@@ -5330,6 +5333,86 @@ async fn a_disposition_preview_reports_visibility_per_surface_and_writes_nothing
     reused["preview"] = json!(true);
     let reused = daemon.call(daemon.route, reused).await;
     assert_state(&reused, "invalid", Some("operation_key_reused"));
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// Operations in one request are judged in order against the same envelope, so
+/// a later operation on an object sees the earlier one's decision as its prior.
+/// A preview must carry that forward: `quarantine` then `mark_stale` on one
+/// active decision is a relaxation the commit denies without an approval, and
+/// the preview reports exactly the `outcome`, `previous_disposition`,
+/// `disposition`, and `denied` the commit then records for both operations.
+#[tokio::test]
+async fn a_disposition_preview_judges_later_operations_after_earlier_ones() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let operations = vec![
+        disposition("decision-object-1", "quarantine"),
+        disposition("decision-object-1", "mark_stale"),
+    ];
+
+    let previewed = daemon.preview("sequence", operations.clone()).await;
+    assert_state(&previewed, "available", None);
+    assert_eq!(
+        previewed["previews"],
+        json!([
+            {
+                "object_id": "decision-object-1",
+                "event": "quarantine",
+                "outcome": "quarantine",
+                "previous_disposition": "active",
+                "disposition": "quarantined",
+                "denied": false,
+                "current": visibilities("hidden", "hidden", "labeled"),
+                "projected": visibilities("hidden", "hidden", "hidden"),
+                "visibility_changes": true,
+            },
+            {
+                "object_id": "decision-object-1",
+                "event": "mark_stale",
+                "outcome": "deny",
+                "previous_disposition": "quarantined",
+                "disposition": "quarantined",
+                "denied": true,
+                "current": visibilities("hidden", "hidden", "hidden"),
+                "projected": visibilities("hidden", "hidden", "hidden"),
+                "visibility_changes": false,
+            },
+        ]),
+        "{previewed}"
+    );
+
+    let applied = daemon.commit("sequence", operations, vec![]).await;
+    assert_state(&applied, "available", None);
+    let judged: Vec<Value> = previewed["previews"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|preview| {
+            let mut result = preview.clone();
+            let result = result.as_object_mut().unwrap();
+            result.retain(|key, _| {
+                !matches!(key.as_str(), "current" | "projected" | "visibility_changes")
+            });
+            Value::Object(result.clone())
+        })
+        .collect();
+    assert_eq!(
+        json!(judged),
+        applied["dispositions"],
+        "the preview judged what the commit recorded: {applied}"
+    );
+    assert_eq!(
+        stored_disposition(&daemon, "decision-object-1"),
+        "quarantined"
+    );
     daemon.handler.shutdown().await.unwrap();
 }
 

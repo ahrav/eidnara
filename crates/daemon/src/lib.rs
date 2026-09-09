@@ -97,11 +97,11 @@ use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
 use classify::{
     CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_PROMPT_TEMPLATE_VERSION,
-    CLASSIFY_RECOVERY_TIMEOUT, CLASSIFY_SCHEMA_VERSION, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK,
-    CLASSIFY_TEMPERATURE, Classification, ClassifyPoolRow, DREAMER_ATTEMPT_BUDGET,
-    DREAMER_ATTEMPT_BUDGET_WINDOW, MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_OBJECTS,
-    MAX_CLASSIFY_PROMPT_BYTES, attempt_child_session_id, classify_request_timeout,
-    object_id_is_renderable, parse_classify_output, render_classify_prompt,
+    CLASSIFY_SCHEMA_VERSION, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK, CLASSIFY_TEMPERATURE,
+    Classification, ClassifyPoolRow, DREAMER_ATTEMPT_BUDGET, DREAMER_ATTEMPT_BUDGET_WINDOW,
+    MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_OBJECTS, MAX_CLASSIFY_PROMPT_BYTES,
+    attempt_child_session_id, classify_request_timeout, object_id_is_renderable,
+    parse_classify_output, render_classify_prompt,
 };
 use config::{ConfigCache, DaemonConfig, derive_historian_chunk_tokens};
 use healing::{SerializerProfile, tail_reclaim};
@@ -231,6 +231,63 @@ pub struct SessionBinding {
     /// The binding does not use a newer harness-resolved value because config can change while the route remains open.
     pub history_budget_tokens: f64,
     pub credential_fingerprints: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+pub(crate) struct RouteBindings {
+    by_route: HashMap<RouteHandle, (u64, SessionBinding)>,
+    next_bind_seq: u64,
+}
+
+impl RouteBindings {
+    /// Binds `channel`, returning the binding it replaced. A rebind counts as
+    /// the newest bind on its root.
+    fn insert(&mut self, channel: RouteHandle, binding: SessionBinding) -> Option<SessionBinding> {
+        let seq = self.next_bind_seq;
+        self.next_bind_seq += 1;
+        self.by_route
+            .insert(channel, (seq, binding))
+            .map(|(_, previous)| previous)
+    }
+
+    fn remove(&mut self, channel: &RouteHandle) -> Option<SessionBinding> {
+        self.by_route.remove(channel).map(|(_, binding)| binding)
+    }
+
+    fn get(&self, channel: &RouteHandle) -> Option<&SessionBinding> {
+        self.by_route.get(channel).map(|(_, binding)| binding)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &SessionBinding> {
+        self.by_route.values().map(|(_, binding)| binding)
+    }
+
+    fn clear(&mut self) {
+        self.by_route.clear();
+    }
+
+    /// The returned sequence orders bindings by insertion time.
+    fn latest_for_root(&self, route_root: &Path) -> Option<(u64, &SessionBinding)> {
+        self.by_route
+            .values()
+            .filter(|(_, binding)| binding.project_root == route_root)
+            .map(|(seq, binding)| (*seq, binding))
+            .max_by_key(|(seq, _)| *seq)
+    }
+
+    /// The returned sequence orders bindings by insertion time.
+    fn latest_per_root(&self) -> BTreeMap<&Path, (u64, &SessionBinding)> {
+        let mut latest: BTreeMap<&Path, (u64, &SessionBinding)> = BTreeMap::new();
+        for (seq, binding) in self.by_route.values() {
+            let entry = latest
+                .entry(binding.project_root.as_path())
+                .or_insert((*seq, binding));
+            if *seq > entry.0 {
+                *entry = (*seq, binding);
+            }
+        }
+        latest
+    }
 }
 
 fn apply_claude_code_config_controls(
@@ -2881,7 +2938,7 @@ pub struct Handler {
     #[cfg(test)]
     publication_fence_write_hook: ConnectFailureCommitHook,
     /// A full route handle maps to its session binding and route root; epoch-scoped lookups and removals prevent channel reuse from accessing another incarnation's state.
-    bindings: Arc<Mutex<HashMap<RouteHandle, SessionBinding>>>,
+    bindings: Arc<Mutex<RouteBindings>>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3507,7 +3564,7 @@ impl Handler {
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
-            bindings: Arc::new(Mutex::new(HashMap::new())),
+            bindings: Arc::new(Mutex::new(RouteBindings::default())),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -3839,7 +3896,7 @@ impl Handler {
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
-            bindings: Arc::new(Mutex::new(HashMap::new())),
+            bindings: Arc::new(Mutex::new(RouteBindings::default())),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -9494,58 +9551,23 @@ impl DreamerRuntime {
         let timeout_ms = task.timeout_ms;
         let task = CLASSIFY_TASK;
         let route_root = route.project_root.to_string_lossy().to_string();
-        let Some(project) = (match store.authority_project_for_route(&route_root, "memories") {
-            Ok(project) => project,
+        let authority = match memories_authority_for_route(&store, &route_root) {
+            Ok(MemoriesAuthority::Module(authority)) => authority,
+            Ok(MemoriesAuthority::NotModule { message }) => {
+                return PreparedOutcome::Error {
+                    code: "authority_not_module".to_string(),
+                    message,
+                };
+            }
             Err(error) => {
                 return PreparedOutcome::Error {
                     code: "authority_lookup_failed".to_string(),
                     message: error.to_string(),
                 };
             }
-        }) else {
-            return PreparedOutcome::Error {
-                code: "authority_not_module".to_string(),
-                message: "memories authority for this route is not MODULE".to_string(),
-            };
         };
-        let Some((context_store_uuid, authority_project)) =
-            (match store.module_authority_for_project(&project, "memories") {
-                Ok(authority) => authority,
-                Err(error) => {
-                    return PreparedOutcome::Error {
-                        code: "authority_lookup_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
-            })
-        else {
-            return PreparedOutcome::Error {
-                code: "authority_not_module".to_string(),
-                message: "memories authority for this route is not MODULE".to_string(),
-            };
-        };
-        let authority =
-            match store.authority_status(&context_store_uuid, &authority_project, "memories") {
-                Ok(Some(authority)) => authority,
-                Ok(None) => {
-                    return PreparedOutcome::Error {
-                        code: "authority_not_module".to_string(),
-                        message: "memories authority row is missing".to_string(),
-                    };
-                }
-                Err(error) => {
-                    return PreparedOutcome::Error {
-                        code: "authority_lookup_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
-            };
-        if authority.state != "MODULE" {
-            return PreparedOutcome::Error {
-                code: "authority_not_module".to_string(),
-                message: format!("memories authority is {}", authority.state),
-            };
-        }
+        let context_store_uuid = authority.context_store_uuid;
+        let authority_project = authority.project;
         if authority.generation != authority_generation {
             return PreparedOutcome::Error {
                 code: "authority_generation_mismatch".to_string(),
@@ -9596,6 +9618,10 @@ impl DreamerRuntime {
             "object_ids": expected_ids,
             "model_chain": model_chain,
             "timeout_ms": timeout_ms,
+            "await_timeout_ms": u64::try_from(CLASSIFY_AWAIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+            "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
+            // Canonical JSON refuses fractional floats; the display form is stable.
+            "temperature": CLASSIFY_TEMPERATURE.to_string(),
             "prompt_template_version": CLASSIFY_PROMPT_TEMPLATE_VERSION,
             "schema_version": CLASSIFY_SCHEMA_VERSION,
             "system_prompt_hash": system_prompt_hash,
@@ -9614,7 +9640,6 @@ impl DreamerRuntime {
             request_digest,
             ledger_session: ledger_session.to_string(),
             command_id: command_id.to_string(),
-            harness: route.harness.to_string(),
         };
         // The budget is judged from the durable attempt count before any receipt
         // is written: an exhausted project dispatches nothing new and leaves no
@@ -9640,8 +9665,6 @@ impl DreamerRuntime {
             Ok(DreamerBeginOutcome::Complete { result_json, .. }) => {
                 return replay_dream_task_response(&result_json);
             }
-            // An earlier daemon incarnation left the command open. What happens
-            // next depends on whether it got as far as dispatching a model.
             Ok(DreamerBeginOutcome::InProgress { generation }) => {
                 match self
                     .resume_dreamer_receipt(
@@ -9763,6 +9786,22 @@ impl DreamerRuntime {
             )) {
                 return stop;
             }
+            // The start future has not been polled. A deadline during the ledger
+            // write leaves the attempt unsent. commentlint: allow(JUDGE)
+            if Instant::now() >= deadline {
+                if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
+                    receipt_key,
+                    generation,
+                    attempt_index,
+                    DreamerTerminalKind::NotSent,
+                    now_ms(),
+                )) {
+                    return stop;
+                }
+                last_error =
+                    "classify time budget exhausted before starting a producer run".to_string();
+                break;
+            }
             attempts += 1;
             let _dreamer_run_guard = self.register_dreamer_run(&child_session);
             let started = match tokio::time::timeout(
@@ -9791,42 +9830,36 @@ impl DreamerRuntime {
             // The run handle is the dispatch marker a later incarnation resolves
             // against the runtime; a dispatched run the ledger cannot follow
             // settles as unknown rather than staying open with no handle.
-            if let Ok(handle) = &started
-                && let Err(stop) = ledger_stop(store.record_dreamer_run_handle(
+            if let Ok(handle) = &started {
+                let recorded = store.record_dreamer_run_handle(
                     receipt_key,
                     generation,
                     attempt_index,
                     &handle.run_id,
-                ))
-            {
-                let _ = producer.purge_session(&child_session).await;
-                return settle_dispatched_attempt_as_unknown(
-                    &store,
-                    receipt_key,
-                    generation,
-                    attempt_index,
-                    stop,
                 );
+                let handle_fenced = matches!(recorded, Ok(DreamerTransition::Fenced));
+                if let Err(stop) = ledger_stop(recorded) {
+                    if !handle_fenced {
+                        let _ = producer.purge_session(&child_session).await;
+                    }
+                    return settle_dispatched_attempt_as_unknown(
+                        &store,
+                        receipt_key,
+                        generation,
+                        attempt_index,
+                        stop,
+                    );
+                }
             }
             let attempt_output = match started {
-                Ok(handle) => match producer
-                    .await_output_with_timeout(
-                        &handle.run_id,
-                        classify_attempt_timeout(CLASSIFY_AWAIT_TIMEOUT, deadline),
-                    )
-                    .await
-                {
-                    Ok(result) => Ok(result),
-                    Err(HistorianProducerError::TimedOut) => {
-                        producer
-                            .redrain_output_with_timeout(
-                                &handle.run_id,
-                                classify_attempt_timeout(CLASSIFY_RECOVERY_TIMEOUT, deadline),
-                            )
-                            .await
-                    }
-                    Err(error) => Err(error),
-                },
+                Ok(handle) => {
+                    producer
+                        .await_output_with_timeout(
+                            &handle.run_id,
+                            classify_attempt_timeout(CLASSIFY_AWAIT_TIMEOUT, deadline),
+                        )
+                        .await
+                }
                 Err(error) => Err(error),
             };
             let attempt_terminal = match &attempt_output {
@@ -9840,13 +9873,15 @@ impl DreamerRuntime {
                 Err(_) if start_not_sent => DreamerTerminalKind::NotSent,
                 Err(_) => DreamerTerminalKind::Failed,
             };
-            if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
+            let finished = store.finish_dreamer_attempt(
                 receipt_key,
                 generation,
                 attempt_index,
                 attempt_terminal,
                 now_ms(),
-            )) {
+            );
+            let attempt_fenced = matches!(finished, Ok(DreamerTransition::Fenced));
+            if let Err(stop) = ledger_stop(finished) {
                 // A usable result in hand is a known outcome even though its attempt
                 // row cannot record one, so it is offered as the receipt's terminal
                 // response first. A fenced attempt write is not: another
@@ -9889,9 +9924,11 @@ impl DreamerRuntime {
                         return read_dream_task_response(&store, receipt_key);
                     }
                 }
-                // The model was dispatched but the ledger cannot follow it, so the
-                // request settles as unknown rather than staying open forever.
-                let _ = producer.purge_session(&child_session).await;
+                // A fenced run no longer owns the request, and the successor may have
+                // adopted this session's run through its recorded handle. commentlint: allow(JUDGE)
+                if !attempt_fenced {
+                    let _ = producer.purge_session(&child_session).await;
+                }
                 return settle_dispatched_attempt_as_unknown(
                     &store,
                     receipt_key,
@@ -10025,14 +10062,13 @@ impl DreamerRuntime {
     /// takes the receipt over and dispatches under the next generation. With
     /// one, the model may have run. An attempt that already ended (the
     /// predecessor crashed between the model's answer and the receipt's
-    /// completion) settles as `unknown`. An attempt still open is resolved by
-    /// its recorded run handle against the runtime, under the harness the
-    /// receipt was started with: a handle the runtime no longer knows settles
-    /// as `unknown`, terminal and never dispatched again; a marker with no
-    /// handle, or a runtime that cannot be asked, also fails closed; a handle
-    /// the runtime still holds is left alone for a later retry. This is the
-    /// deliberate opposite of the historian's reattach path, which refires a
-    /// missing run.
+    /// completion) settles as `unknown`. An open attempt is resolved using the commentlint: allow(JUDGE)
+    /// runtime identity recorded at dispatch, not the retry route. commentlint: allow(JUDGE)
+    /// A missing or ended runtime handle, or a marker with no handle, settles commentlint: allow(JUDGE)
+    /// as terminal `unknown` and is never dispatched again. A runtime whose commentlint: allow(JUDGE)
+    /// status cannot be queried answers `unknown` without a write; an active commentlint: allow(JUDGE)
+    /// run is left for a later retry. Unlike the historian's reattach path, commentlint: allow(JUDGE)
+    /// this resolver never refires a missing run. commentlint: allow(JUDGE)
     async fn resume_dreamer_receipt(
         &self,
         store: &MemoryStore,
@@ -10052,8 +10088,12 @@ impl DreamerRuntime {
             if over_budget {
                 return Err(dreamer_budget_exhausted());
             }
-            return ledger_stop(store.take_over_dreamer_receipt(key, generation, now_ms()))
-                .map(|()| generation + 1);
+            return ledger_stop(store.take_over_undispatched_dreamer_receipt(
+                key,
+                generation,
+                now_ms(),
+            ))
+            .map(|()| generation + 1);
         };
         let unknown = |message: String| PreparedOutcome::Error {
             code: "dreamer_outcome_unknown".to_string(),
@@ -10115,8 +10155,13 @@ impl DreamerRuntime {
             Ok(RunState::Missing { .. }) => Err(settle(format!(
                 "run {run_handle} from an earlier daemon is no longer known to the runtime; its outcome is unknown and it is not dispatched again"
             ))),
-            Ok(RunState::Active | RunState::Terminal) => Err(unknown(format!(
-                "run {run_handle} from an earlier daemon is still held by the runtime; its outcome is not recorded here"
+            // A terminal run has no recorded outcome and cannot become active,
+            // so the receipt settles instead of retrying the status probe.
+            Ok(RunState::Terminal) => Err(settle(format!(
+                "run {run_handle} from an earlier daemon ended on the runtime before its outcome was recorded; its outcome is unknown and it is not dispatched again"
+            ))),
+            Ok(RunState::Active) => Err(unknown(format!(
+                "run {run_handle} from an earlier daemon is still running on the runtime; its outcome is not recorded here"
             ))),
             Err(error) => Err(unknown(format!(
                 "run {run_handle} from an earlier daemon cannot be resolved: {error}"
@@ -13763,7 +13808,6 @@ fn classify_success_response(
             "temperature": CLASSIFY_TEMPERATURE,
             "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
             "await_timeout_ms": CLASSIFY_AWAIT_TIMEOUT.as_millis(),
-            "recovery_timeout_ms": CLASSIFY_RECOVERY_TIMEOUT.as_millis(),
         }
     })
 }
@@ -13780,9 +13824,7 @@ enum PoolFailure {
     /// does not hold, a non-memory decision, a pool past the byte bound. The
     /// receipt records it, so a retry replays the refusal without a read.
     Request(Value),
-    /// The kernel could not answer: not yet open, unavailable, or busy. The
-    /// receipt stays open with no attempt, so a retry takes it over and reads
-    /// again once the kernel can.
+    /// An open receipt with no attempt lets a retry take ownership and repeat the kernel read.
     Kernel(PreparedOutcome),
 }
 
@@ -14071,25 +14113,71 @@ fn classification_object_id(operation_key: &str, memory_object_id: &str) -> Stri
     format!("memory-classification:{:x}", hasher.finalize())
 }
 
+enum MemoriesAuthority {
+    Module(ModuleMemoriesAuthority),
+    NotModule { message: String },
+}
+
+/// The identity a run under `MODULE` memories authority writes against.
+struct ModuleMemoriesAuthority {
+    context_store_uuid: String,
+    project: String,
+    generation: u64,
+}
+
+/// Store failures propagate to callers instead of being treated as an
+/// unscheduled route.
+fn memories_authority_for_route(
+    store: &MemoryStore,
+    route_root: &str,
+) -> Result<MemoriesAuthority, MemoryStoreError> {
+    let Some(project) = store.authority_project_for_route(route_root, "memories")? else {
+        return Ok(MemoriesAuthority::NotModule {
+            message: "memories authority for this route is not MODULE".to_string(),
+        });
+    };
+    let Some((context_store_uuid, authority_project)) =
+        store.module_authority_for_project(&project, "memories")?
+    else {
+        return Ok(MemoriesAuthority::NotModule {
+            message: "memories authority for this route is not MODULE".to_string(),
+        });
+    };
+    let Some(authority) =
+        store.authority_status(&context_store_uuid, &authority_project, "memories")?
+    else {
+        return Ok(MemoriesAuthority::NotModule {
+            message: "memories authority row is missing".to_string(),
+        });
+    };
+    if authority.state != "MODULE" {
+        return Ok(MemoriesAuthority::NotModule {
+            message: format!("memories authority is {}", authority.state),
+        });
+    }
+    Ok(MemoriesAuthority::Module(ModuleMemoriesAuthority {
+        context_store_uuid: authority.context_store_uuid,
+        project: authority.project,
+        generation: authority.generation,
+    }))
+}
+
 /// The daemon state the Dreamer scheduler reads and drives: the open store,
 /// the live route bindings a run's harness and configuration come from, and
 /// the durable classify protocol.
 struct SchedulerBridge {
     store: Arc<MemoryStore>,
-    bindings: Arc<Mutex<HashMap<RouteHandle, SessionBinding>>>,
+    bindings: Arc<Mutex<RouteBindings>>,
     dreamer: Arc<DreamerRuntime>,
 }
 
 impl SchedulerBridge {
-    /// One live binding per route root, so every scheduled run of a project
-    /// dispatches under the same harness and credentials.
     fn binding_for_root(&self, route_root: &Path) -> Option<SessionBinding> {
         self.bindings
             .lock()
             .expect("bindings mutex")
-            .values()
-            .find(|binding| binding.project_root == route_root)
-            .cloned()
+            .latest_for_root(route_root)
+            .map(|(_, binding)| binding.clone())
     }
 }
 
@@ -14099,45 +14187,53 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
         &self.store
     }
 
-    /// The schedule is read from the configuration each route was bound
-    /// under, the same tier-merged value every other gate on that route uses;
-    /// the project tier cannot set it, so a project-tier schedule never
-    /// appears here. A project qualifies when its memories authority is
-    /// `MODULE`, the state every run writes under.
-    fn scheduled_projects(&self) -> Vec<dreamer_scheduler::ScheduledProject> {
+    /// A project qualifies only when its memories authority is `MODULE`.
+    fn scheduled_projects(&self) -> Result<Vec<dreamer_scheduler::ScheduledProject>, String> {
         let store = &self.store;
-        let mut roots: BTreeMap<PathBuf, String> = BTreeMap::new();
-        for binding in self.bindings.lock().expect("bindings mutex").values() {
-            if let Some(schedule) = &binding.config.dreamer_review_user_memories_schedule {
-                roots
-                    .entry(binding.project_root.clone())
-                    .or_insert_with(|| schedule.clone());
+        let scheduled_roots: Vec<(u64, PathBuf, String)> = self
+            .bindings
+            .lock()
+            .expect("bindings mutex")
+            .latest_per_root()
+            .into_iter()
+            .filter_map(|(root, (seq, binding))| {
+                let schedule = binding
+                    .config
+                    .dreamer_review_user_memories_schedule
+                    .as_ref()?;
+                Some((seq, root.to_path_buf(), schedule.clone()))
+            })
+            .collect();
+        let mut by_project: BTreeMap<String, (u64, dreamer_scheduler::ScheduledProject)> =
+            BTreeMap::new();
+        for (seq, route_root, schedule) in scheduled_roots {
+            let root = route_root.to_string_lossy().to_string();
+            let authority = match memories_authority_for_route(store, &root)
+                .map_err(|error| error.to_string())?
+            {
+                MemoriesAuthority::Module(authority) => authority,
+                MemoriesAuthority::NotModule { .. } => continue,
+            };
+            let candidate = dreamer_scheduler::ScheduledProject {
+                project: authority.project.clone(),
+                route_root,
+                authority_generation: authority.generation,
+                schedule,
+            };
+            match by_project.entry(authority.project) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((seq, candidate));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) if seq > slot.get().0 => {
+                    slot.insert((seq, candidate));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
-        roots
-            .into_iter()
-            .filter_map(|(route_root, schedule)| {
-                let root = route_root.to_string_lossy().to_string();
-                let project = store
-                    .authority_project_for_route(&root, "memories")
-                    .ok()
-                    .flatten()?;
-                let (context_store_uuid, authority_project) = store
-                    .module_authority_for_project(&project, "memories")
-                    .ok()
-                    .flatten()?;
-                let authority = store
-                    .authority_status(&context_store_uuid, &authority_project, "memories")
-                    .ok()
-                    .flatten()?;
-                (authority.state == "MODULE").then_some(dreamer_scheduler::ScheduledProject {
-                    project: authority_project,
-                    route_root,
-                    authority_generation: authority.generation,
-                    schedule,
-                })
-            })
-            .collect()
+        Ok(by_project
+            .into_values()
+            .map(|(_, project)| project)
+            .collect())
     }
 
     async fn run_task(
@@ -19068,6 +19164,7 @@ mod tests {
         binds: AtomicUsize,
         statuses: AtomicUsize,
         await_outputs: AtomicUsize,
+        redrains: AtomicUsize,
         block_output: std::sync::atomic::AtomicBool,
         notify: Notify,
         connect_errors: Mutex<VecDeque<HistorianProducerError>>,
@@ -19251,6 +19348,7 @@ mod tests {
             run_id: &str,
             timeout: Duration,
         ) -> Result<ProducerOutput, HistorianProducerError> {
+            self.state.redrains.fetch_add(1, Ordering::SeqCst);
             match tokio::time::timeout(timeout, self.await_output(run_id)).await {
                 Ok(result) => result,
                 Err(_) => Err(HistorianProducerError::TimedOut),
@@ -27949,7 +28047,9 @@ mod tests {
                     .unwrap();
                 let state = states[0].clone().expect("observation object");
                 let (_, admission) = kernel
-                    .preview(|envelope| envelope.subject_admission(&observation.object_id))
+                    .preview(Instant::now() + CLASSIFY_KERNEL_WRITE_TIMEOUT, |envelope| {
+                        envelope.subject_admission(&observation.object_id)
+                    })
                     .unwrap();
                 let (prior, _) = admission.expect("classification is admitted");
                 written.push(WrittenClassification {
@@ -28284,6 +28384,133 @@ mod tests {
         let retried = harness.classify(payload, "cross-incarnation").await;
         assert_eq!(error_code_of(&retried), "dreamer_outcome_unknown");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A pre-dispatch ledger failure leaves an in-progress receipt without an
+    /// attempt row; a retry adopts it under the next generation and runs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_recovers_a_receipt_stranded_before_any_dispatch() {
+        use memory_store::dreamer_ledger::DreamerReceiptState;
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: classify_manifest(&ids),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer).await;
+        harness
+            .store
+            .execute_tag_sql_for_test(
+                "CREATE TRIGGER dreamer_attempt_insert_fault
+                 BEFORE INSERT ON dreamer_attempts
+                 BEGIN SELECT RAISE(ABORT, 'injected attempt insert fault'); END;",
+            )
+            .unwrap();
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
+        let stranded = harness.classify(payload.clone(), "stranded").await;
+        assert_eq!(error_code_of(&stranded), "dreamer_ledger_failed");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            harness.receipt("stranded").state,
+            DreamerReceiptState::InProgress { generation: 1 }
+        );
+
+        harness
+            .store
+            .execute_tag_sql_for_test("DROP TRIGGER dreamer_attempt_insert_fault;")
+            .unwrap();
+        let recovered = response_of(harness.classify(payload.clone(), "stranded").await);
+        assert_eq!(recovered["ok"], json!(true));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        let receipt = harness.receipt("stranded");
+        assert!(matches!(
+            receipt.state,
+            DreamerReceiptState::Complete { generation: 2, .. }
+        ));
+        let operation_key = dreamer_operation_key("ses", "stranded");
+        let attempts = harness
+            .store
+            .list_dreamer_attempts(DreamerReceiptKey {
+                project: "git:identity",
+                producer: DREAMER_RECEIPT_PRODUCER,
+                operation_key: &operation_key,
+            })
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].generation, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced() {
+        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+        for fence_during_start in [true, false] {
+            let ids = [test_memory_id(1)];
+            let producer = Arc::new(ProducerState::default());
+            producer
+                .await_results
+                .lock()
+                .unwrap()
+                .push_back(Ok(ProducerOutput {
+                    text: classify_manifest(&ids),
+                    length_capped: false,
+                }));
+            let harness = DreamerHarness::start(&producer).await;
+            let operation_key = dreamer_operation_key("ses", "fenced-mid-run");
+            let hook_store = Arc::clone(&harness.store);
+            let hook_key = operation_key.clone();
+            let hook = if fence_during_start {
+                &producer.on_start
+            } else {
+                &producer.on_await_output
+            };
+            *hook.lock().unwrap() = Some(Box::new(move || {
+                let transition = hook_store
+                    .take_over_dreamer_receipt(
+                        DreamerReceiptKey {
+                            project: "git:identity",
+                            producer: DREAMER_RECEIPT_PRODUCER,
+                            operation_key: &hook_key,
+                        },
+                        1,
+                        now_ms(),
+                    )
+                    .unwrap();
+                assert_eq!(transition, DreamerTransition::Applied);
+            }));
+            let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
+            let outcome = harness.classify(payload, "fenced-mid-run").await;
+            assert_eq!(error_code_of(&outcome), "dreamer_ledger_fenced");
+            assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                producer.await_outputs.load(Ordering::SeqCst),
+                usize::from(!fence_during_start)
+            );
+            assert!(
+                producer.purges.lock().unwrap().is_empty(),
+                "a fenced run must not delete a child session the successor may own"
+            );
+            let receipt = harness.receipt("fenced-mid-run");
+            assert_eq!(
+                receipt.state,
+                DreamerReceiptState::InProgress { generation: 2 }
+            );
+            let attempts = harness
+                .store
+                .list_dreamer_attempts(DreamerReceiptKey {
+                    project: "git:identity",
+                    producer: DREAMER_RECEIPT_PRODUCER,
+                    operation_key: &operation_key,
+                })
+                .unwrap();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0].generation, 1);
+            assert_eq!(attempts[0].terminal_kind, None::<DreamerTerminalKind>);
+            assert_eq!(attempts[0].run_handle.is_none(), fence_during_start);
+        }
     }
 
     /// A start that the producer proves never queued a request ends the attempt
@@ -28627,11 +28854,10 @@ mod tests {
         ) {
             producer.block_output.store(true, Ordering::SeqCst);
             let request = self.classify(payload, command_id);
-            let interrupted = tokio::time::timeout(Duration::from_millis(200), request).await;
-            assert!(
-                interrupted.is_err(),
-                "the request must still be awaiting output"
-            );
+            tokio::select! {
+                outcome = request => panic!("the request ended before interruption: {outcome:?}"),
+                () = wait_for_count(&producer.await_outputs, 1) => {}
+            }
             producer.block_output.store(false, Ordering::SeqCst);
             assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
             assert_eq!(
@@ -28658,7 +28884,6 @@ mod tests {
         assert_eq!(attempts[0].terminal_kind, None);
         assert_eq!(attempts[0].harness, "pi");
         assert_eq!(attempts[0].project_root, harness.route_root);
-        assert_eq!(harness.receipt("restart").binding.harness, "pi");
 
         producer
             .status_results
@@ -28729,6 +28954,53 @@ mod tests {
             DreamerReceiptState::InProgress { generation: 1 }
         );
         assert_eq!(harness.attempts("held")[0].terminal_kind, None);
+    }
+
+    /// A run the runtime reports ended settles the receipt as unknown: the
+    /// answer was never recorded and the run cannot become active again, so a
+    /// later retry replays the settled outcome without asking the runtime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown() {
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
+        harness
+            .crash_after_dispatch(&producer, payload.clone(), "ended")
+            .await;
+        producer
+            .status_results
+            .lock()
+            .unwrap()
+            .push_back(RunState::Terminal);
+        let resumed = harness.classify(payload.clone(), "ended").await;
+        assert_eq!(error_code_of(&resumed), "dreamer_outcome_unknown");
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            1,
+            "no second dispatch"
+        );
+        assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.attempts("ended")[0].terminal_kind,
+            Some(DreamerTerminalKind::Unknown)
+        );
+        assert!(
+            matches!(
+                harness.receipt("ended").state,
+                DreamerReceiptState::Complete {
+                    generation: 1,
+                    terminal_kind: DreamerTerminalKind::Unknown,
+                    ..
+                }
+            ),
+            "{:?}",
+            harness.receipt("ended").state
+        );
+        let replayed = harness.classify(payload, "ended").await;
+        assert_eq!(error_code_of(&replayed), "dreamer_outcome_unknown");
+        assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
     /// The classify inputs a scheduled slot dispatches in these tests: one
@@ -28815,7 +29087,7 @@ mod tests {
         let harness = DreamerHarness::start(&producer).await;
         let bridge = harness.scheduler_bridge();
         assert!(
-            bridge.scheduled_projects().is_empty(),
+            bridge.scheduled_projects().unwrap().is_empty(),
             "disabled by default"
         );
 
@@ -28867,7 +29139,7 @@ mod tests {
         route_binding.config = from_project_tier;
         harness.handler.bind_route(test_route(7), route_binding);
         assert!(
-            bridge.scheduled_projects().is_empty(),
+            bridge.scheduled_projects().unwrap().is_empty(),
             "a project tier cannot put a task on the scheduler"
         );
 
@@ -28887,7 +29159,7 @@ mod tests {
         let mut route_binding = binding_with_harness(&harness.route_root, "pi", "ses");
         route_binding.config = from_user_tier;
         harness.handler.bind_route(test_route(7), route_binding);
-        let projects = bridge.scheduled_projects();
+        let projects = bridge.scheduled_projects().unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].project, "git:identity");
         assert_eq!(projects[0].schedule, "*/15 * * * *");
@@ -28919,7 +29191,111 @@ mod tests {
             .authority_begin_drain("context", "git:identity", "memories", "lease", i64::MAX, 1)
             .unwrap();
         assert_ne!(draining.state, "MODULE");
-        assert!(bridge.scheduled_projects().is_empty());
+        assert!(bridge.scheduled_projects().unwrap().is_empty());
+    }
+
+    /// A failed authority lookup must return an error rather than an empty
+    /// project list, because the scheduler drops the pending slot of any
+    /// project missing from the list.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_reports_a_store_failure_instead_of_no_projects() {
+        use dreamer_scheduler::SchedulerHost;
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        harness.schedule(Some("*/15 * * * *"));
+        let bridge = harness.scheduler_bridge();
+        assert_eq!(bridge.scheduled_projects().unwrap().len(), 1);
+
+        harness.store.fail_next_authority_route_read_for_test();
+        let failed = bridge.scheduled_projects();
+        assert!(
+            matches!(&failed, Err(reason) if reason.contains("injected authority route read failure")),
+            "{failed:?}"
+        );
+        // The fault was one read; the project is back on the next call.
+        assert_eq!(bridge.scheduled_projects().unwrap().len(), 1);
+    }
+
+    /// The most recently bound binding determines the root's schedule and
+    /// harness. A newer binding without a schedule unschedules the project.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_follows_the_most_recent_binding_on_a_root() {
+        use dreamer_scheduler::SchedulerHost;
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let bridge = harness.scheduler_bridge();
+        let root = harness.route_root.clone();
+        let bind = |channel: u16, harness_name: &str, schedule: Option<&str>| {
+            let mut route_binding = binding_with_harness(&root, harness_name, "ses");
+            route_binding.config.dreamer_review_user_memories_schedule =
+                schedule.map(str::to_string);
+            harness
+                .handler
+                .bind_route(test_route(channel), route_binding);
+        };
+
+        // Twelve bindings expose an implementation that selects by map
+        // iteration order instead of the most recently bound route.
+        for channel in 1..=12u16 {
+            bind(
+                channel,
+                &format!("h{channel}"),
+                Some(&format!("*/{channel} * * * *")),
+            );
+        }
+        let projects = bridge.scheduled_projects().unwrap();
+        assert_eq!(projects.len(), 1, "{projects:?}");
+        assert_eq!(projects[0].schedule, "*/12 * * * *", "the newest binding");
+        assert_eq!(
+            bridge.binding_for_root(Path::new(&root)).unwrap().harness,
+            "h12"
+        );
+
+        // Rebinding the oldest channel makes it the newest binding.
+        bind(1, "h1-again", Some("*/7 * * * *"));
+        assert_eq!(
+            bridge.scheduled_projects().unwrap()[0].schedule,
+            "*/7 * * * *"
+        );
+        assert_eq!(
+            bridge.binding_for_root(Path::new(&root)).unwrap().harness,
+            "h1-again"
+        );
+
+        // Older bindings on the root still have schedules; the newest has none.
+        bind(13, "h13", None);
+        assert!(bridge.scheduled_projects().unwrap().is_empty());
+        assert_eq!(
+            bridge.binding_for_root(Path::new(&root)).unwrap().harness,
+            "h13"
+        );
+    }
+
+    /// Several route roots can bind to one authority project; the scheduler
+    /// reports that project once, under its most recently bound root.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_reports_a_project_once_across_its_roots() {
+        use dreamer_scheduler::SchedulerHost;
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let bridge = harness.scheduler_bridge();
+        harness.schedule(Some("*/15 * * * *"));
+        let worktree = harness._dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        harness
+            .store
+            .bind_authority_route("context", "git:identity", worktree.to_str().unwrap())
+            .unwrap();
+        let mut route_binding = binding_with_harness(worktree.to_str().unwrap(), "pi", "ses-2");
+        route_binding.config.dreamer_review_user_memories_schedule =
+            Some("*/5 * * * *".to_string());
+        harness.handler.bind_route(test_route(8), route_binding);
+
+        let projects = bridge.scheduled_projects().unwrap();
+        assert_eq!(projects.len(), 1, "{projects:?}");
+        assert_eq!(projects[0].project, "git:identity");
+        assert_eq!(projects[0].route_root, worktree, "the newest root");
+        assert_eq!(projects[0].schedule, "*/5 * * * *");
     }
 
     /// A scheduled slot runs through the same durable protocol as the wire
@@ -28961,12 +29337,12 @@ mod tests {
         let mut scheduler = DreamerScheduler::new(clock.shared());
         assert!(scheduler.tick(bridge.as_ref()).await.is_empty());
         clock.advance(Duration::from_secs(15 * 60));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), scheduler.tick(bridge.as_ref()))
-                .await
-                .is_err(),
-            "the run must still be awaiting output"
-        );
+        tokio::select! {
+            events = scheduler.tick(bridge.as_ref()) => {
+                panic!("the scheduled run ended before interruption: {events:?}");
+            }
+            () = wait_for_count(&producer.await_outputs, 1) => {}
+        }
         producer.block_output.store(false, Ordering::SeqCst);
         drop(scheduler);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
@@ -28991,9 +29367,9 @@ mod tests {
             receipt.binding.ledger_session,
             dreamer_scheduler::SCHEDULER_LEDGER_SESSION
         );
-        assert_eq!(receipt.binding.harness, "pi");
         let attempts = scheduler_attempts(&harness.store, &command_id);
         assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].harness, "pi");
         assert_eq!(attempts[0].terminal_kind, None);
         assert_eq!(attempts[0].run_handle.as_deref(), Some("run-1"));
 
@@ -29159,25 +29535,33 @@ mod tests {
     }
 
     /// An await that runs out of time is a cancellation after dispatch: the
-    /// attempt ends `cancelled`, counts against the budget, and the exhausted
-    /// chain completes the receipt as a terminal failure.
+    /// attempt ends `cancelled` with no further read of the run and is counted
+    /// by `count_dreamer_attempts`.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable() {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        // Both the await and the recovery redrain run out of time.
-        for _ in 0..2 {
-            producer
-                .await_results
-                .lock()
-                .unwrap()
-                .push_back(Err(HistorianProducerError::TimedOut));
-        }
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Err(HistorianProducerError::TimedOut));
+        // An answer that arrives after the deadline must not be read: the request's time is spent.
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(classify_manifest(&ids));
         let harness = DreamerHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let outcome = harness.classify(payload.clone(), "cancelled").await;
         assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            producer.redrains.load(Ordering::SeqCst),
+            0,
+            "a timed-out await is not followed by a second read of the run"
+        );
         let attempts = harness.attempts("cancelled");
         assert_eq!(attempts.len(), 1);
         assert_eq!(
@@ -31233,60 +31617,355 @@ mod tests {
         }
     }
 
-    /// Route names are `match` arms on string literals, so the registered set is read from this
-    /// file's source; a probe list alone would stay green after an unlisted spelling was added.
-    fn dispatcher_route_literals() -> Vec<String> {
-        const SOURCE: &str = include_str!("lib.rs");
-        // The anchors are assembled at runtime so this test's own text never matches them.
-        let method_dispatch = format!("async fn {}(", "dispatch_value_with_inbound_bytes");
-        let facade_dispatch = format!("async fn {}(", "handle_facade_value");
-        let fallback = format!("_ => {}(&request)", "unrecognized_request_error");
+    /// A route can be spelled as a string, a byte string, or a C string; the audits compare all
+    /// three as text.
+    fn literal_text(lit: &syn::Lit) -> Option<String> {
+        match lit {
+            syn::Lit::Str(text) => Some(text.value()),
+            syn::Lit::ByteStr(bytes) => Some(String::from_utf8_lossy(&bytes.value()).into_owned()),
+            syn::Lit::CStr(text) => Some(text.value().to_string_lossy().into_owned()),
+            syn::Lit::Char(ch) => Some(ch.value().to_string()),
+            syn::Lit::Byte(byte) => Some(char::from(byte.value()).to_string()),
+            _ => None,
+        }
+    }
+
+    /// The literals a macro invocation carries. `concat!` also contributes the string it
+    /// evaluates to, since fragments such as `"mural"` and `".render"` name nothing alone, and
+    /// `stringify!` contributes its token text with and without spaces. A `concat!` whose
+    /// arguments are not all literals cannot be evaluated here, so it fails the audit rather
+    /// than yielding a spelling the compiler would never produce.
+    fn macro_literals(mac: &syn::Macro) -> Vec<String> {
+        use quote::ToTokens;
+
         let mut literals = Vec::new();
-        for (definition, arms_start) in [
-            (method_dispatch, format!("return match {} {{", "method")),
-            (facade_dispatch, format!("match {} {{", "name")),
-        ] {
-            assert_eq!(
-                SOURCE.matches(&definition).count(),
-                1,
-                "{definition} must be defined exactly once"
-            );
-            let body = &SOURCE[SOURCE.find(&definition).unwrap()..];
-            let arms = &body[body.find(&arms_start).unwrap()..];
-            let arms = &arms[..arms.find(&fallback).unwrap()];
-            let mut rest = arms;
-            while let Some(open) = rest.find('"') {
-                let literal = &rest[open + 1..];
-                let close = literal
-                    .find('"')
-                    .expect("unterminated literal in dispatch arms");
-                let candidate = &literal[..close];
-                // Only pattern literals name routes: a pattern is followed by `=>`, by `|` in
-                // an or-pattern, or by `if` in a guarded arm; a body literal such as the
-                // `echo` response key is followed by none of these.
-                let after = literal[close + 1..].trim_start();
-                if after.starts_with("=>") || after.starts_with('|') || after.starts_with("if ") {
-                    literals.push(candidate.to_string());
-                }
-                rest = &rest[open + 1 + close + 1..];
-            }
+        macro_string_literals(mac.tokens.clone(), &mut literals);
+        if mac.path.is_ident("stringify") {
+            let spaced = mac.tokens.to_string();
+            literals.push(spaced.replace(' ', ""));
+            literals.push(spaced);
+        }
+        if mac.path.is_ident("concat") {
+            let value = concat_value(mac.tokens.clone()).unwrap_or_else(|| {
+                panic!(
+                    "`{}` cannot be audited: concat! arguments must be literals",
+                    mac.to_token_stream()
+                )
+            });
+            literals.push(value);
         }
         literals
     }
 
+    /// `concat!` renders an integer by value (`0x10` is `16`) and a float by its digits, so
+    /// `concat!("mu", 1, "ral.render")` is `mu1ral.render`, never `mural.render`. Byte, byte
+    /// string, and C string literals are rejected here because `concat!` rejects them.
+    fn concat_value(tokens: proc_macro2::TokenStream) -> Option<String> {
+        let mut out = String::new();
+        let mut expect_argument = true;
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Punct(punct)
+                    if punct.as_char() == ',' && !expect_argument =>
+                {
+                    expect_argument = true;
+                }
+                proc_macro2::TokenTree::Literal(literal) if expect_argument => {
+                    match syn::parse_str::<syn::Lit>(&literal.to_string()).ok()? {
+                        syn::Lit::Str(text) => out.push_str(&text.value()),
+                        syn::Lit::Char(ch) => out.push(ch.value()),
+                        syn::Lit::Int(int) => out.push_str(int.base10_digits()),
+                        syn::Lit::Float(float) => out.push_str(float.base10_digits()),
+                        _ => return None,
+                    }
+                    expect_argument = false;
+                }
+                proc_macro2::TokenTree::Ident(ident)
+                    if expect_argument && (ident == "true" || ident == "false") =>
+                {
+                    out.push_str(&ident.to_string());
+                    expect_argument = false;
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// `syn` leaves macro bodies as tokens, so their string literals are collected by hand.
+    fn macro_string_literals(tokens: proc_macro2::TokenStream, into: &mut Vec<String>) {
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Group(group) => macro_string_literals(group.stream(), into),
+                proc_macro2::TokenTree::Literal(literal) => {
+                    if let Some(text) = syn::parse_str::<syn::Lit>(&literal.to_string())
+                        .ok()
+                        .as_ref()
+                        .and_then(literal_text)
+                    {
+                        into.push(text);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A probe list cannot detect an unlisted spelling, so the route set comes from the two
+    /// dispatchers' `match` arm patterns. Each arm must use string-literal patterns or `_`; the
+    /// parser fails on a constant or binding pattern instead of skipping the route it names.
+    /// The `_` arm must reject the request because delegating would route every unlisted
+    /// spelling. Every other string literal in a dispatcher, before the match or inside an arm
+    /// body, must be a request-envelope field or an echo response key; the discriminator may be
+    /// read only where the function binds it; and outside the match `request` may flow only
+    /// into an envelope `get`, the facade dispatcher, or the rejecting call. A route decision
+    /// therefore cannot move ahead of the match, nest inside an arm, or hide in a helper.
+    /// commentlint: allow(JUDGE)
+    fn dispatcher_route_literals() -> Vec<String> {
+        use quote::ToTokens;
+        use syn::visit::Visit;
+
+        /// Dispatcher, discriminator, and how often the body reads the discriminator outside the
+        /// match: once for the `if let` that binds `method`, never for `name`.
+        const DISPATCHERS: [(&str, &str, usize); 2] = [
+            ("dispatch_value_with_inbound_bytes", "method", 1),
+            ("handle_facade_value", "name", 0),
+        ];
+        /// Request-envelope fields the dispatchers read, and the `echo` arm's response keys.
+        const NON_ROUTE_LITERALS: [&str; 6] = ["method", "kind", "name", "arguments", "ok", "echo"];
+
+        fn pattern_literals(pat: &syn::Pat, literals: &mut Vec<String>) {
+            match pat {
+                syn::Pat::Lit(syn::PatLit {
+                    lit: syn::Lit::Str(route),
+                    ..
+                }) => literals.push(route.value()),
+                syn::Pat::Or(alternatives) => {
+                    for case in &alternatives.cases {
+                        pattern_literals(case, literals);
+                    }
+                }
+                syn::Pat::Wild(_) => {}
+                other => panic!(
+                    "dispatcher arm pattern must be a string literal or `_`, found `{}`",
+                    other.to_token_stream()
+                ),
+            }
+        }
+
+        struct Dispatcher<'a> {
+            scrutinee: &'a str,
+            rejecting_body: &'a str,
+            matches: usize,
+            inside_audited: usize,
+            literals: Vec<String>,
+            other_literals: Vec<String>,
+            outside_reads: usize,
+            request_reads: usize,
+            request_uses: usize,
+        }
+
+        fn is_request(expr: &syn::Expr) -> bool {
+            matches!(
+                expr.to_token_stream().to_string().as_str(),
+                "request" | "& request"
+            )
+        }
+
+        impl<'ast> Visit<'ast> for Dispatcher<'_> {
+            fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
+                let audited = expr.expr.to_token_stream().to_string() == self.scrutinee;
+                if audited {
+                    self.matches += 1;
+                    for arm in &expr.arms {
+                        if matches!(arm.pat, syn::Pat::Wild(_)) {
+                            assert!(
+                                arm.guard.is_none(),
+                                "the `_` arm of `match {}` must not be guarded",
+                                self.scrutinee
+                            );
+                            assert_eq!(
+                                arm.body.to_token_stream().to_string(),
+                                self.rejecting_body,
+                                "the `_` arm of `match {}` must reject the request",
+                                self.scrutinee
+                            );
+                        }
+                        pattern_literals(&arm.pat, &mut self.literals);
+                    }
+                    // Patterns are classified above; guards and bodies are walked so a literal
+                    // or a nested match inside an arm is recorded like any other non-pattern text.
+                    self.inside_audited += 1;
+                    self.visit_expr(&expr.expr);
+                    for arm in &expr.arms {
+                        if let Some((_, guard)) = &arm.guard {
+                            self.visit_expr(guard);
+                        }
+                        self.visit_expr(&arm.body);
+                    }
+                    self.inside_audited -= 1;
+                } else {
+                    syn::visit::visit_expr_match(self, expr);
+                }
+            }
+
+            fn visit_lit(&mut self, lit: &'ast syn::Lit) {
+                self.other_literals.extend(literal_text(lit));
+            }
+
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                self.other_literals.extend(macro_literals(mac));
+                syn::visit::visit_macro(self, mac);
+            }
+
+            fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+                if self.inside_audited == 0 {
+                    let text = path.to_token_stream().to_string();
+                    if text == self.scrutinee {
+                        self.outside_reads += 1;
+                    }
+                    if text == "request" {
+                        self.request_reads += 1;
+                    }
+                }
+                syn::visit::visit_expr_path(self, path);
+            }
+
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if self.inside_audited == 0 {
+                    let method = call.method.to_string();
+                    let envelope_get = is_request(&call.receiver)
+                        && method == "get"
+                        && call.args.len() == 1
+                        && matches!(
+                            &call.args[0],
+                            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(field), .. })
+                                if NON_ROUTE_LITERALS.contains(&field.value().as_str())
+                        );
+                    if envelope_get {
+                        self.request_uses += 1;
+                    } else if DISPATCHERS.iter().any(|(f, _, _)| *f == method) {
+                        self.request_uses += call.args.iter().filter(|a| is_request(a)).count();
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                if self.inside_audited == 0
+                    && call.func.to_token_stream().to_string() == "unrecognized_request_error"
+                {
+                    self.request_uses += call.args.iter().filter(|a| is_request(a)).count();
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+
+            fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
+        }
+
+        struct Dispatchers {
+            rejecting_body: String,
+            functions: Vec<(&'static str, Option<Vec<String>>)>,
+        }
+
+        impl<'ast> Visit<'ast> for Dispatchers {
+            fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+                let name = function.sig.ident.to_string();
+                if let Some((_, scrutinee, binding_reads)) =
+                    DISPATCHERS.iter().find(|(f, _, _)| *f == name)
+                {
+                    let mut dispatcher = Dispatcher {
+                        scrutinee,
+                        rejecting_body: &self.rejecting_body,
+                        matches: 0,
+                        inside_audited: 0,
+                        literals: Vec::new(),
+                        other_literals: Vec::new(),
+                        outside_reads: 0,
+                        request_reads: 0,
+                        request_uses: 0,
+                    };
+                    dispatcher.visit_block(&function.block);
+                    assert_eq!(
+                        dispatcher.matches, 1,
+                        "{name} must match on `{scrutinee}` exactly once"
+                    );
+                    let routing_elsewhere: Vec<&String> = dispatcher
+                        .other_literals
+                        .iter()
+                        .filter(|literal| !NON_ROUTE_LITERALS.contains(&literal.as_str()))
+                        .collect();
+                    assert!(
+                        routing_elsewhere.is_empty(),
+                        "{name} names {routing_elsewhere:?} outside the arm patterns of \
+                         `match {scrutinee}`; route decisions belong in those patterns"
+                    );
+                    assert_eq!(
+                        dispatcher.outside_reads, *binding_reads,
+                        "{name} reads `{scrutinee}` outside `match {scrutinee}`; \
+                         route decisions belong in the audited match"
+                    );
+                    assert_eq!(
+                        dispatcher.request_reads, dispatcher.request_uses,
+                        "{name} hands `request` to something other than an envelope `get`, the \
+                         facade dispatcher, or the rejecting call outside `match {scrutinee}`; \
+                         a helper there could route on the request unaudited"
+                    );
+                    let slot = self
+                        .functions
+                        .iter_mut()
+                        .find(|(f, _)| *f == name)
+                        .expect("dispatcher listed");
+                    assert!(slot.1.is_none(), "{name} must be defined exactly once");
+                    slot.1 = Some(dispatcher.literals);
+                }
+                syn::visit::visit_impl_item_fn(self, function);
+            }
+        }
+
+        let file: syn::File = syn::parse_str(include_str!("lib.rs")).expect("lib.rs parses");
+        let rejecting_body: syn::Expr =
+            syn::parse_str("unrecognized_request_error(&request)").expect("rejecting body parses");
+        let mut dispatchers = Dispatchers {
+            rejecting_body: rejecting_body.to_token_stream().to_string(),
+            functions: DISPATCHERS.iter().map(|(f, _, _)| (*f, None)).collect(),
+        };
+        dispatchers.visit_file(&file);
+        dispatchers
+            .functions
+            .into_iter()
+            .flat_map(|(name, literals)| literals.unwrap_or_else(|| panic!("{name} not found")))
+            .collect()
+    }
+
     /// `model` covers the embedding-model listing routes (`models.list`) that the probe set
     /// treats as part of the absent embedding subsystem.
+    const ABSENT_ROUTE_WORDS: &[&str] = &[
+        "index",
+        "indexes",
+        "indexing",
+        "indexer",
+        "embed",
+        "embeds",
+        "embedding",
+        "embeddings",
+        "model",
+        "models",
+        "git",
+        "mural",
+        "murals",
+    ];
+
     fn names_absent_subsystem(route: &str) -> bool {
-        route.split(['.', '_', '-', '/', ':']).any(|segment| {
-            ["index", "embed", "model", "git", "mural"]
-                .iter()
-                .any(|stem| segment.starts_with(stem))
-        })
+        test_support::names_absent_subsystem(route, ABSENT_ROUTE_WORDS)
     }
 
     #[test]
     fn dispatchers_register_no_indexing_embedding_git_or_mural_route() {
         for spelling in UNREACHABLE_ROUTE_SPELLINGS {
+            assert!(names_absent_subsystem(spelling), "{spelling}");
+        }
+        for spelling in ["Mural.render", "GIT_ingest", "Embed.Query", "models.List"] {
             assert!(names_absent_subsystem(spelling), "{spelling}");
         }
         for spelling in [
@@ -31315,6 +31994,1532 @@ mod tests {
             .filter(|l| names_absent_subsystem(l))
             .collect();
         assert!(offending.is_empty(), "{offending:?}");
+    }
+
+    /// Wire operations are dotted (`kernel.read`) or facade tool names (`ctx_memory`); a literal
+    /// with whitespace is prose, and an undotted identifier such as an error code is not a route.
+    fn is_operation_spelling(literal: &str) -> bool {
+        !literal.chars().any(char::is_whitespace)
+            && (literal.contains('.') || literal.starts_with("ctx_") || literal.starts_with("ctx-"))
+    }
+
+    /// `MuralRender` becomes `mural_render`, the snake_case form serde's `rename_all` produces
+    /// and the shape `names_absent_subsystem` splits.
+    fn camel_words(ident: &str) -> String {
+        let mut out = String::new();
+        for (index, ch) in ident.chars().enumerate() {
+            if ch.is_ascii_uppercase() && index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        }
+        out
+    }
+
+    /// The wire spelling serde derives from a variant identifier under a `rename_all` rule.
+    /// The rules are serde's: snake_case inserts `_` before every uppercase letter after the
+    /// first, so `MURALRender` becomes `m_u_r_a_l_render`.
+    fn serde_rename(rule: &str, ident: &str) -> String {
+        let snake = camel_words(ident);
+        match rule {
+            "snake_case" => snake,
+            "SCREAMING_SNAKE_CASE" => snake.to_ascii_uppercase(),
+            "kebab-case" => snake.replace('_', "-"),
+            "SCREAMING-KEBAB-CASE" => snake.replace('_', "-").to_ascii_uppercase(),
+            "lowercase" => ident.to_ascii_lowercase(),
+            "UPPERCASE" => ident.to_ascii_uppercase(),
+            "camelCase" => {
+                let mut chars = ident.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_ascii_lowercase().to_string() + chars.as_str())
+                    .unwrap_or_default()
+            }
+            "PascalCase" => ident.to_string(),
+            other => panic!("unknown serde rename_all rule {other:?}"),
+        }
+    }
+
+    /// The `rename_all` rule an item declares, from `#[serde(rename_all = "...")]`.
+    fn rename_all_rule(attrs: &[syn::Attribute]) -> Option<String> {
+        attrs.iter().find_map(|attr| {
+            if !attr.path().is_ident("serde") {
+                return None;
+            }
+            let mut rule = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename_all") {
+                    if meta.input.peek(syn::token::Paren) {
+                        // `rename_all(serialize = "...", deserialize = "...")`: only the
+                        // deserialize side names what the wire accepts.
+                        meta.parse_nested_meta(|side| {
+                            let value: syn::LitStr = side.value()?.parse()?;
+                            if side.path.is_ident("deserialize") {
+                                rule = Some(value.value());
+                            }
+                            Ok(())
+                        })?;
+                    } else {
+                        let value: syn::LitStr = meta.value()?.parse()?;
+                        rule = Some(value.value());
+                    }
+                } else if meta.input.peek(syn::Token![=]) {
+                    let _: syn::Expr = meta.value()?.parse()?;
+                } else if meta.input.peek(syn::token::Paren) {
+                    let _ = meta.parse_nested_meta(|_| Ok(()));
+                }
+                Ok(())
+            });
+            rule
+        })
+    }
+
+    /// Whether a variant carries `#[serde(skip)]` or `#[serde(skip_deserializing)]`, which keep
+    /// it off the inbound wire.
+    fn is_skipped(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("serde")
+                && attr
+                    .parse_nested_meta(|meta| {
+                        if meta.path.is_ident("skip") || meta.path.is_ident("skip_deserializing") {
+                            return Err(meta.error("skipped"));
+                        }
+                        if meta.input.peek(syn::Token![=]) {
+                            let _: syn::Expr = meta.value()?.parse()?;
+                        } else if meta.input.peek(syn::token::Paren) {
+                            let _ = meta.parse_nested_meta(|_| Ok(()));
+                        }
+                        Ok(())
+                    })
+                    .is_err()
+        })
+    }
+
+    /// Whether a variant carries a `rename` that applies to deserialization: `rename = "..."` or
+    /// `rename(deserialize = "...")`. A serialize-only rename leaves the deserialize spelling as
+    /// the identifier or the `rename_all` form.
+    fn has_serde_rename(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            if !attr.path().is_ident("serde") {
+                return false;
+            }
+            let mut renamed = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
+                    if meta.input.peek(syn::token::Paren) {
+                        meta.parse_nested_meta(|side| {
+                            let _: syn::LitStr = side.value()?.parse()?;
+                            if side.path.is_ident("deserialize") {
+                                renamed = true;
+                            }
+                            Ok(())
+                        })?;
+                    } else {
+                        let _: syn::Expr = meta.value()?.parse()?;
+                        renamed = true;
+                    }
+                } else if meta.input.peek(syn::Token![=]) {
+                    let _: syn::Expr = meta.value()?.parse()?;
+                } else if meta.input.peek(syn::token::Paren) {
+                    let _ = meta.parse_nested_meta(|_| Ok(()));
+                }
+                Ok(())
+            });
+            renamed
+        })
+    }
+
+    fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+        match item {
+            syn::Item::Const(i) => &i.attrs,
+            syn::Item::Enum(i) => &i.attrs,
+            syn::Item::Fn(i) => &i.attrs,
+            syn::Item::Impl(i) => &i.attrs,
+            syn::Item::Macro(i) => &i.attrs,
+            syn::Item::Mod(i) => &i.attrs,
+            syn::Item::Static(i) => &i.attrs,
+            syn::Item::Struct(i) => &i.attrs,
+            syn::Item::Trait(i) => &i.attrs,
+            syn::Item::Type(i) => &i.attrs,
+            syn::Item::Use(i) => &i.attrs,
+            _ => &[],
+        }
+    }
+
+    fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+        match item {
+            syn::ImplItem::Const(i) => &i.attrs,
+            syn::ImplItem::Fn(i) => &i.attrs,
+            syn::ImplItem::Type(i) => &i.attrs,
+            syn::ImplItem::Macro(i) => &i.attrs,
+            _ => &[],
+        }
+    }
+
+    fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+        match item {
+            syn::TraitItem::Const(i) => &i.attrs,
+            syn::TraitItem::Fn(i) => &i.attrs,
+            syn::TraitItem::Type(i) => &i.attrs,
+            syn::TraitItem::Macro(i) => &i.attrs,
+            _ => &[],
+        }
+    }
+
+    /// The attributes a production build applies: each plain attribute as written, plus the
+    /// payload of every `cfg_attr` whose predicate can hold outside a test build, flattened
+    /// recursively. A `cfg_attr` behind `test` contributes nothing.
+    fn production_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
+        let mut out = Vec::new();
+        for attr in attrs {
+            if !attr.path().is_ident("cfg_attr") {
+                out.push(attr.clone());
+                continue;
+            }
+            let parsed = attr.parse_args_with(|input: syn::parse::ParseStream| {
+                let predicate: syn::Meta = input.parse()?;
+                let mut payload = Vec::new();
+                while input.peek(syn::Token![,]) {
+                    input.parse::<syn::Token![,]>()?;
+                    if input.is_empty() {
+                        break;
+                    }
+                    payload.push(input.parse::<syn::Meta>()?);
+                }
+                Ok((predicate, payload))
+            });
+            let Ok((predicate, payload)) = parsed else {
+                continue;
+            };
+            if requires_test(&predicate) {
+                continue;
+            }
+            let inner: Vec<syn::Attribute> = payload
+                .into_iter()
+                .map(|meta| syn::Attribute {
+                    pound_token: Default::default(),
+                    style: syn::AttrStyle::Outer,
+                    bracket_token: Default::default(),
+                    meta,
+                })
+                .collect();
+            out.extend(production_attrs(&inner));
+        }
+        out
+    }
+
+    /// Whether a `cfg` predicate can only hold in a test build: `test` itself, or an `all(...)`
+    /// with such a predicate among its operands. `any(...)` and `not(...)` do not require it.
+    fn requires_test(meta: &syn::Meta) -> bool {
+        match meta {
+            syn::Meta::Path(path) => path.is_ident("test"),
+            syn::Meta::List(list) if list.path.is_ident("all") => list
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .is_ok_and(|operands| operands.iter().any(requires_test)),
+            _ => false,
+        }
+    }
+
+    fn is_test_only(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("test")
+                || (attr.path().is_ident("cfg")
+                    && attr
+                        .parse_args::<syn::Meta>()
+                        .is_ok_and(|meta| requires_test(&meta)))
+        })
+    }
+
+    fn rust_sources(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("crate source directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                rust_sources(&path, into);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                into.push(path);
+            }
+        }
+    }
+
+    /// Every root Cargo compiles into a shipped artifact: the auto-discovered `src/lib.rs`,
+    /// `src/main.rs`, `src/bin/*.rs`, and `src/bin/*/main.rs`, plus each explicit `[lib]` or
+    /// `[[bin]]` `path`. An explicit target outside `src/` would escape the orphan check, so it
+    /// fails here. Examples, tests, and benches are not shipped and are not roots.
+    fn crate_roots(manifest_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let src = manifest_dir.join("src");
+        let manifest =
+            std::fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("readable manifest");
+        let mut explicit_lib = false;
+        let mut autobins = true;
+        let mut autolib = true;
+        let mut explicit: Vec<std::path::PathBuf> = Vec::new();
+        let mut section = String::new();
+        for line in manifest.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                section = line.trim_matches(['[', ']']).to_string();
+                continue;
+            }
+            if section == "package" {
+                if line.starts_with("autobins") && line.ends_with("false") {
+                    autobins = false;
+                }
+                if line.starts_with("autolib") && line.ends_with("false") {
+                    autolib = false;
+                }
+                continue;
+            }
+            if !matches!(section.as_str(), "lib" | "bin") {
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("path") {
+                let value = value.trim_start().trim_start_matches('=').trim();
+                let target = manifest_dir.join(value.trim_matches('"'));
+                assert!(
+                    target.starts_with(&src),
+                    "Cargo target {} lies outside src/ and the audit cannot classify it",
+                    target.display()
+                );
+                if section == "lib" {
+                    explicit_lib = true;
+                }
+                explicit.push(target);
+            }
+        }
+        let mut roots = Vec::new();
+        // An explicit `[lib] path` is the sole library target; the conventional root then
+        // plays no part in the build. `autolib = false` and `autobins = false` turn the
+        // conventional discovery off entirely.
+        if autolib && !explicit_lib && src.join("lib.rs").is_file() {
+            roots.push(src.join("lib.rs"));
+        }
+        if autobins && src.join("main.rs").is_file() {
+            roots.push(src.join("main.rs"));
+        }
+        if autobins && let Ok(entries) = std::fs::read_dir(src.join("bin")) {
+            for entry in entries {
+                let path = entry.expect("directory entry").path();
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    roots.push(path);
+                } else if path.is_dir() && path.join("main.rs").is_file() {
+                    roots.push(path.join("main.rs"));
+                }
+            }
+        }
+        for target in explicit {
+            if !roots.contains(&target) {
+                roots.push(target);
+            }
+        }
+        assert!(!roots.is_empty(), "no crate roots found");
+        roots
+    }
+
+    /// The files that reach a production build: the crate roots and every out-of-line module
+    /// they declare, transitively, skipping a declaration behind `#[cfg(test)]`. A file the
+    /// compiler never sees is reported as `orphaned` so the scan cannot skip it silently.
+    struct ModuleTree {
+        production: Vec<(std::path::PathBuf, syn::File)>,
+        test_only: Vec<std::path::PathBuf>,
+    }
+
+    fn module_tree(roots: &[std::path::PathBuf]) -> ModuleTree {
+        /// The directory a file's out-of-line children live in: a crate root and a `mod.rs` own
+        /// their directory; any other file owns the directory named after it.
+        fn module_dir(declaring: &std::path::Path, is_root: bool) -> std::path::PathBuf {
+            let dir = declaring.parent().expect("module file has a directory");
+            let stem = declaring
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("module file has a name");
+            if is_root || stem == "mod" {
+                dir.to_path_buf()
+            } else {
+                dir.join(stem)
+            }
+        }
+
+        fn child_path(
+            declaring: &std::path::Path,
+            module_dir: &std::path::Path,
+            item: &syn::ItemMod,
+        ) -> Option<std::path::PathBuf> {
+            let explicit = item.attrs.iter().find_map(|attr| {
+                if !attr.path().is_ident("path") {
+                    return None;
+                }
+                let syn::Meta::NameValue(meta) = &attr.meta else {
+                    return None;
+                };
+                let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(path),
+                    ..
+                }) = &meta.value
+                else {
+                    return None;
+                };
+                // `#[path]` is relative to the declaring file's directory.
+                Some(
+                    declaring
+                        .parent()
+                        .expect("module file has a directory")
+                        .join(path.value()),
+                )
+            });
+            if let Some(path) = explicit {
+                return Some(path);
+            }
+            let name = item.ident.to_string();
+            let flat = module_dir.join(format!("{name}.rs"));
+            let nested = module_dir.join(&name).join("mod.rs");
+            if flat.is_file() {
+                Some(flat)
+            } else if nested.is_file() {
+                Some(nested)
+            } else {
+                None
+            }
+        }
+
+        /// Collects out-of-line modules in `items`, including declarations inside inline modules
+        /// and function bodies. Rust permits a function-local `mod x;` only with `#[path]`.
+        fn declared_children(
+            declaring: &std::path::Path,
+            module_dir: &std::path::Path,
+            items: &[syn::Item],
+            test_only: bool,
+            into: &mut Vec<(std::path::PathBuf, bool)>,
+        ) {
+            use quote::ToTokens;
+            use syn::visit::Visit;
+
+            struct Declared<'a> {
+                declaring: &'a std::path::Path,
+                module_dir: std::path::PathBuf,
+                test_only: bool,
+                into: &'a mut Vec<(std::path::PathBuf, bool)>,
+            }
+
+            impl<'ast> Visit<'ast> for Declared<'_> {
+                fn visit_item(&mut self, item: &'ast syn::Item) {
+                    let outer = self.test_only;
+                    self.test_only |= is_test_only(item_attrs(item));
+                    syn::visit::visit_item(self, item);
+                    self.test_only = outer;
+                }
+
+                fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+                    let outer = self.test_only;
+                    self.test_only |= is_test_only(impl_item_attrs(item));
+                    syn::visit::visit_impl_item(self, item);
+                    self.test_only = outer;
+                }
+
+                fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+                    let outer = self.test_only;
+                    self.test_only |= is_test_only(trait_item_attrs(item));
+                    syn::visit::visit_trait_item(self, item);
+                    self.test_only = outer;
+                }
+
+                fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+                    match &module.content {
+                        Some((_, inner)) => {
+                            let nested = self.module_dir.join(module.ident.to_string());
+                            let outer = std::mem::replace(&mut self.module_dir, nested);
+                            for item in inner {
+                                self.visit_item(item);
+                            }
+                            self.module_dir = outer;
+                        }
+                        None => {
+                            let child = child_path(self.declaring, &self.module_dir, module)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "{}: cannot resolve `{}`",
+                                        self.declaring.display(),
+                                        module.to_token_stream()
+                                    )
+                                });
+                            self.into.push((child, self.test_only));
+                        }
+                    }
+                }
+            }
+
+            let mut declared = Declared {
+                declaring,
+                module_dir: module_dir.to_path_buf(),
+                test_only,
+                into,
+            };
+            for item in items {
+                declared.visit_item(item);
+            }
+        }
+
+        /// Files reachable only through a test-gated declaration, classified without being
+        /// scanned, so a fixture module's own children are not reported as orphans.
+        fn walk_test_only(path: &std::path::PathBuf, tree: &mut ModuleTree) {
+            if tree.test_only.contains(path) {
+                return;
+            }
+            tree.test_only.push(path.clone());
+            let source = std::fs::read_to_string(path).expect("readable source");
+            let file: syn::File = syn::parse_str(&source)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let mut children = Vec::new();
+            declared_children(
+                path,
+                &module_dir(path, false),
+                &file.items,
+                true,
+                &mut children,
+            );
+            for (child, _) in children {
+                walk_test_only(&child, tree);
+            }
+        }
+
+        /// Files spliced in by `include!`, which Cargo compiles like any module. A literal path
+        /// is followed; a computed one (an `OUT_DIR` build output) cannot be scanned, so it
+        /// fails the audit.
+        fn included_files(
+            declaring: &std::path::Path,
+            file: &syn::File,
+        ) -> Vec<std::path::PathBuf> {
+            use quote::ToTokens;
+
+            struct Includes<'a> {
+                declaring: &'a std::path::Path,
+                found: Vec<std::path::PathBuf>,
+            }
+            impl<'ast> syn::visit::Visit<'ast> for Includes<'_> {
+                fn visit_item(&mut self, item: &'ast syn::Item) {
+                    if !is_test_only(item_attrs(item)) {
+                        syn::visit::visit_item(self, item);
+                    }
+                }
+                fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                    if mac.path.is_ident("include") {
+                        let literal = syn::parse2::<syn::LitStr>(mac.tokens.clone());
+                        let Ok(literal) = literal else {
+                            panic!(
+                                "{}: `{}` includes a source the audit cannot read",
+                                self.declaring.display(),
+                                mac.to_token_stream()
+                            );
+                        };
+                        let dir = self.declaring.parent().expect("file has a directory");
+                        self.found.push(dir.join(literal.value()));
+                    }
+                    syn::visit::visit_macro(self, mac);
+                }
+            }
+            let mut includes = Includes {
+                declaring,
+                found: Vec::new(),
+            };
+            syn::visit::Visit::visit_file(&mut includes, file);
+            includes.found
+        }
+
+        fn walk(path: &std::path::PathBuf, is_root: bool, tree: &mut ModuleTree) {
+            if tree.production.iter().any(|(seen, _)| seen == path) {
+                return;
+            }
+            let source = std::fs::read_to_string(path).expect("readable source");
+            let file: syn::File = syn::parse_str(&source)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let included = included_files(path, &file);
+            let mut children = Vec::new();
+            declared_children(
+                path,
+                &module_dir(path, is_root),
+                &file.items,
+                false,
+                &mut children,
+            );
+            tree.production.push((path.clone(), file));
+            for (child, test_only) in children {
+                if test_only {
+                    walk_test_only(&child, tree);
+                } else {
+                    walk(&child, false, tree);
+                }
+            }
+            for spliced in included {
+                walk(&spliced, false, tree);
+            }
+        }
+
+        let mut tree = ModuleTree {
+            production: Vec::new(),
+            test_only: Vec::new(),
+        };
+        for root in roots {
+            walk(root, true, &mut tree);
+        }
+        tree
+    }
+
+    /// Macros a comparison operand may invoke. `concat!` and `stringify!` are evaluated. The
+    /// others carry their string content as literal tokens the audit collects (`format!`'s
+    /// template, `matches!` patterns, `json!` keys and values); a runtime interpolation in them
+    /// is outside the literal-spelling contract in the same way a runtime string is anywhere
+    /// else. Any other macro (`env!`, `include_str!`, a crate-local macro) could yield a
+    /// spelling the audit never sees, and so could a macro nested inside one of these, so both
+    /// fail the test.
+    const VISIBLE_MACROS: [&str; 6] = ["concat", "stringify", "format", "matches", "json", "vec"];
+
+    fn nests_a_macro(tokens: proc_macro2::TokenStream) -> bool {
+        let mut previous_ident = false;
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Group(group) => {
+                    if nests_a_macro(group.stream()) {
+                        return true;
+                    }
+                    previous_ident = false;
+                }
+                proc_macro2::TokenTree::Ident(_) => previous_ident = true,
+                proc_macro2::TokenTree::Punct(punct) => {
+                    // A macro bang is a lone `!`; a joint `!` starts `!=`.
+                    if previous_ident
+                        && punct.as_char() == '!'
+                        && punct.spacing() == proc_macro2::Spacing::Alone
+                    {
+                        return true;
+                    }
+                    previous_ident = false;
+                }
+                proc_macro2::TokenTree::Literal(_) => previous_ident = false,
+            }
+        }
+        false
+    }
+
+    fn reject_unevaluable_macros(expr: &syn::Expr) {
+        use quote::ToTokens;
+
+        struct Macros(Vec<String>);
+        impl<'ast> syn::visit::Visit<'ast> for Macros {
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                let visible = VISIBLE_MACROS.iter().any(|name| mac.path.is_ident(name));
+                if !visible || nests_a_macro(mac.tokens.clone()) {
+                    self.0.push(mac.to_token_stream().to_string());
+                }
+                syn::visit::visit_macro(self, mac);
+            }
+        }
+        let mut macros = Macros(Vec::new());
+        syn::visit::Visit::visit_expr(&mut macros, expr);
+        assert!(
+            macros.0.is_empty(),
+            "a comparison operand invokes {:?}; only {VISIBLE_MACROS:?} with no nested macro \
+             can be audited there",
+            macros.0
+        );
+    }
+
+    /// Every string literal under one expression or pattern, including literals inside macros.
+    fn string_literals_in(node: impl FnOnce(&mut StringLiterals)) -> Vec<String> {
+        let mut collector = StringLiterals(Vec::new());
+        node(&mut collector);
+        collector.0
+    }
+
+    struct StringLiterals(Vec<String>);
+
+    impl<'ast> syn::visit::Visit<'ast> for StringLiterals {
+        fn visit_lit(&mut self, lit: &'ast syn::Lit) {
+            self.0.extend(literal_text(lit));
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            self.0.extend(macro_literals(mac));
+            syn::visit::visit_macro(self, mac);
+        }
+    }
+
+    /// The last segment of every path an expression names, so `routes::MURAL` and `MURAL`
+    /// both resolve against the constant table.
+    struct PathNames(Vec<String>);
+
+    impl<'ast> syn::visit::Visit<'ast> for PathNames {
+        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+            if let Some(segment) = path.path.segments.last() {
+                self.0.push(segment.ident.to_string());
+            }
+            syn::visit::visit_expr_path(self, path);
+        }
+    }
+
+    fn path_names(expr: &syn::Expr) -> Vec<String> {
+        let mut names = PathNames(Vec::new());
+        syn::visit::Visit::visit_expr(&mut names, expr);
+        names.0
+    }
+
+    /// The string values of `const`, `static`, and associated `const` items, keyed by name, so a
+    /// comparison against a named constant is classified by the text the constant holds. An
+    /// initializer that names another constant (`const ROUTE: &str = MURAL;`) is recorded as a
+    /// reference and resolved once every file has been read.
+    struct StringConsts {
+        values: std::collections::HashMap<String, Vec<String>>,
+        references: std::collections::HashMap<String, Vec<String>>,
+    }
+
+    impl StringConsts {
+        fn record(&mut self, name: &syn::Ident, expr: &syn::Expr) {
+            use syn::visit::Visit;
+
+            let values = string_literals_in(|c| c.visit_expr(expr));
+            if !values.is_empty() {
+                self.values
+                    .entry(name.to_string())
+                    .or_default()
+                    .extend(values);
+            }
+            let references = path_names(expr);
+            if !references.is_empty() {
+                self.references
+                    .entry(name.to_string())
+                    .or_default()
+                    .extend(references);
+            }
+        }
+
+        /// `resolved` propagates string values through constant aliases until no alias gains a
+        /// value.
+        fn resolved(mut self) -> std::collections::HashMap<String, Vec<String>> {
+            loop {
+                let mut grew = false;
+                for (name, references) in &self.references {
+                    let mut gained: Vec<String> = Vec::new();
+                    for reference in references {
+                        if reference == name {
+                            continue;
+                        }
+                        if let Some(held) = self.values.get(reference) {
+                            gained.extend(held.iter().cloned());
+                        }
+                    }
+                    let own = self.values.entry(name.clone()).or_default();
+                    for value in gained {
+                        if !own.contains(&value) {
+                            own.push(value);
+                            grew = true;
+                        }
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            self.values.retain(|_, values| !values.is_empty());
+            self.values
+        }
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for StringConsts {
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            if !is_test_only(item_attrs(item)) {
+                syn::visit::visit_item(self, item);
+            }
+        }
+
+        fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+            if !is_test_only(impl_item_attrs(item)) {
+                syn::visit::visit_impl_item(self, item);
+            }
+        }
+
+        fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+            if !is_test_only(trait_item_attrs(item)) {
+                syn::visit::visit_trait_item(self, item);
+            }
+        }
+
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            self.record(&item.ident, &item.expr);
+            syn::visit::visit_item_const(self, item);
+        }
+
+        fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
+            self.record(&item.ident, &item.expr);
+            syn::visit::visit_impl_item_const(self, item);
+        }
+
+        fn visit_trait_item_const(&mut self, item: &'ast syn::TraitItemConst) {
+            if let Some((_, default)) = &item.default {
+                self.record(&item.ident, default);
+            }
+            syn::visit::visit_trait_item_const(self, item);
+        }
+
+        fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+            self.record(&item.ident, &item.expr);
+            syn::visit::visit_item_static(self, item);
+        }
+    }
+
+    /// `regex_texts` expands supported regex syntax into bounded literal texts.
+    /// Negated character classes remain unexpanded.
+    fn regex_texts(pattern: &str) -> Vec<String> {
+        /// A leading `(?i)` or `(?ix)` group sets flags and matches nothing.
+        fn strip_flag_groups(pattern: &str) -> &str {
+            let mut rest = pattern;
+            while let Some(after_open) = rest.strip_prefix("(?")
+                && let Some(close) = after_open.find(')')
+                && after_open[..close]
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphabetic() || ch == '-')
+            {
+                rest = &after_open[close + 1..];
+            }
+            rest
+        }
+
+        fn reduce(pattern: &str) -> String {
+            let mut text = strip_flag_groups(pattern)
+                .trim_start_matches('^')
+                .trim_end_matches('$')
+                .to_string();
+            let mut out = String::new();
+            let mut chars = text.drain(..).peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\\' => {
+                        if let Some(escaped) = chars.next() {
+                            out.push('\u{0}');
+                            out.push(escaped);
+                        }
+                    }
+                    other => out.push(other),
+                }
+            }
+            out
+        }
+
+        /// `?:`, a flag prefix such as `?i:`, and a capture name such as `?P<name>` or
+        /// `?<name>` are group syntax that matches no text.
+        fn strip_group_prefix(inner: &str) -> &str {
+            let Some(after) = inner.strip_prefix('?') else {
+                return inner;
+            };
+            if let Some(named) = after.strip_prefix("P<").or_else(|| after.strip_prefix('<'))
+                && let Some(close) = named.find('>')
+            {
+                return &named[close + 1..];
+            }
+            match after.find(':') {
+                Some(colon)
+                    if after[..colon]
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphabetic() || ch == '-') =>
+                {
+                    &after[colon + 1..]
+                }
+                _ => inner,
+            }
+        }
+
+        /// Members are escaped so `-` and `]` remain literal.
+        fn class_members(inner: &[char]) -> Option<Vec<String>> {
+            if inner.first() == Some(&'^') {
+                return None;
+            }
+            let mut members = Vec::new();
+            let mut index = 0;
+            while index < inner.len() {
+                let mut member = inner[index];
+                if member == '\u{0}' {
+                    index += 1;
+                    member = *inner.get(index)?;
+                }
+                if inner.get(index + 1) == Some(&'-') && index + 2 < inner.len() {
+                    index += 2;
+                    let mut end = inner[index];
+                    if end == '\u{0}' {
+                        index += 1;
+                        end = *inner.get(index)?;
+                    }
+                    let (from, to) = (member as u32, end as u32);
+                    if to < from || to - from >= 16 {
+                        return None;
+                    }
+                    for point in from..=to {
+                        members.push(format!("\u{0}{}", char::from_u32(point)?));
+                    }
+                } else {
+                    members.push(format!("\u{0}{member}"));
+                }
+                index += 1;
+            }
+            (members.len() <= 16).then_some(members)
+        }
+
+        /// Expand the innermost parenthesized group, then the first enumerable class; a NUL
+        /// marks an escaped character so an escaped `|`, `(`, or `[` is never treated as syntax.
+        fn expand(text: &str, out: &mut Vec<String>) {
+            if out.len() >= 64 {
+                return;
+            }
+            let bytes: Vec<char> = text.chars().collect();
+            let mut open = None;
+            for (index, &ch) in bytes.iter().enumerate() {
+                let escaped = index > 0 && bytes[index - 1] == '\u{0}';
+                if escaped {
+                    continue;
+                }
+                match ch {
+                    '(' => open = Some(index),
+                    ')' => {
+                        if let Some(start) = open {
+                            let inner: String = bytes[start + 1..index].iter().collect();
+                            let inner = strip_group_prefix(&inner).to_string();
+                            let prefix: String = bytes[..start].iter().collect();
+                            let suffix: String = bytes[index + 1..].iter().collect();
+                            let alternatives: Vec<&str> = split_unescaped(&inner, '|');
+                            for alternative in alternatives {
+                                expand(&format!("{prefix}{alternative}{suffix}"), out);
+                            }
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut class_open = None;
+            for (index, &ch) in bytes.iter().enumerate() {
+                let escaped = index > 0 && bytes[index - 1] == '\u{0}';
+                if escaped {
+                    continue;
+                }
+                match ch {
+                    '[' if class_open.is_none() => class_open = Some(index),
+                    ']' => {
+                        if let Some(start) = class_open
+                            && let Some(members) = class_members(&bytes[start + 1..index])
+                        {
+                            let prefix: String = bytes[..start].iter().collect();
+                            let suffix: String = bytes[index + 1..].iter().collect();
+                            for member in members {
+                                expand(&format!("{prefix}{member}{suffix}"), out);
+                            }
+                            return;
+                        }
+                        class_open = None;
+                    }
+                    _ => {}
+                }
+            }
+            let alternatives = split_unescaped(text, '|');
+            if alternatives.len() > 1 {
+                for alternative in alternatives {
+                    out.push(alternative.replace('\u{0}', ""));
+                }
+            } else {
+                out.push(text.replace('\u{0}', ""));
+            }
+        }
+
+        fn split_unescaped(text: &str, separator: char) -> Vec<&str> {
+            let mut parts = Vec::new();
+            let mut start = 0;
+            let mut previous_escape = false;
+            for (index, ch) in text.char_indices() {
+                if ch == separator && !previous_escape {
+                    parts.push(&text[start..index]);
+                    start = index + ch.len_utf8();
+                }
+                previous_escape = ch == '\u{0}';
+            }
+            parts.push(&text[start..]);
+            parts
+        }
+
+        let mut texts = Vec::new();
+        expand(&reduce(pattern), &mut texts);
+        texts
+    }
+
+    /// Literals in an expression plus the values of any string constants it names.
+    fn compared_strings(
+        expr: &syn::Expr,
+        consts: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        use syn::visit::Visit;
+
+        let mut values = string_literals_in(|c| c.visit_expr(expr));
+        for name in path_names(expr) {
+            if let Some(held) = consts.get(&name) {
+                values.extend(held.iter().cloned());
+            }
+        }
+        values
+    }
+
+    /// The dispatcher audit fixes where routes are registered; this fixes what any handler or
+    /// helper could compare a request against. Every operation-shaped literal is classified; a
+    /// bare word is classified only where it is compared, matched, or searched for, and only by
+    /// the stems that are not ordinary words: `model` names a message role and `index` names a
+    /// position. Test code is skipped because the probe lists spell these names on purpose.
+    /// commentlint: allow(JUDGE)
+    #[test]
+    fn production_source_spells_no_indexing_embedding_git_or_mural_operation() {
+        use quote::ToTokens;
+        use syn::visit::Visit;
+
+        const BARE_WORDS: &[&str] = &[
+            "mural",
+            "murals",
+            "embed",
+            "embeds",
+            "embedding",
+            "embeddings",
+            "git",
+        ];
+        /// The daemon composes a request-supplied mural into the M0 block and keys that frozen
+        /// unit `m0-mural`; comparing a unit key against it is not a route decision.
+        const KNOWN_NON_ROUTES: [&str; 1] = ["m0-mural"];
+        /// Literal pattern arguments and receiver keys passed to these methods are comparison
+        /// operands.
+        const COMPARISON_METHODS: [&str; 33] = [
+            "eq",
+            "ne",
+            "contains",
+            "starts_with",
+            "ends_with",
+            "eq_ignore_ascii_case",
+            "strip_prefix",
+            "strip_suffix",
+            "trim_start_matches",
+            "trim_end_matches",
+            "trim_matches",
+            "split",
+            "splitn",
+            "rsplit",
+            "rsplitn",
+            "split_once",
+            "rsplit_once",
+            "split_terminator",
+            "find",
+            "rfind",
+            "match_indices",
+            "replace",
+            "is_match",
+            "captures",
+            "find_iter",
+            "captures_iter",
+            "replace_all",
+            "shortest_match",
+            "get",
+            "get_mut",
+            "get_key_value",
+            "contains_key",
+            "binary_search",
+        ];
+        /// Types whose `new` takes a pattern the code later matches input against; a `use ... as`
+        /// rename of one of them is collected across the tree.
+        const PATTERN_TYPES: [&str; 3] = ["Regex", "RegexSet", "RegexBuilder"];
+
+        struct ProductionLiterals {
+            literals: Vec<String>,
+            compared: Vec<String>,
+            /// `Deserialize` and every name a `use ... as` rename gives it in the file.
+            deserialize_names: Vec<String>,
+            /// The regex types and every name a `use ... as` rename gives them.
+            pattern_types: Vec<String>,
+            /// Every production `const` and `static` string value in the crate, by name.
+            consts: std::collections::HashMap<String, Vec<String>>,
+        }
+
+        /// Renames of `Deserialize` anywhere in a file, so `use serde::Deserialize as Decode;`
+        /// still marks `#[derive(Decode)]` enums as deserializable.
+        struct DeserializeAliases(Vec<String>);
+
+        impl<'ast> Visit<'ast> for DeserializeAliases {
+            fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+                if rename.ident == "Deserialize" {
+                    self.0.push(rename.rename.to_string());
+                }
+            }
+        }
+
+        struct PatternTypeAliases(Vec<String>);
+
+        impl<'ast> Visit<'ast> for PatternTypeAliases {
+            fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+                if PATTERN_TYPES.iter().any(|name| rename.ident == name) {
+                    self.0.push(rename.rename.to_string());
+                }
+            }
+        }
+
+        impl ProductionLiterals {
+            /// Literals in a pattern, plus the values of constants the pattern names.
+            fn compare_pattern(&mut self, pat: &syn::Pat) {
+                self.compared
+                    .extend(string_literals_in(|c| c.visit_pat(pat)));
+                // A pattern may name a constant (`MURAL => ...`), which matches its value.
+                struct PatternPaths(Vec<String>);
+                impl<'ast> Visit<'ast> for PatternPaths {
+                    fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
+                        self.0.push(pat.ident.to_string());
+                        syn::visit::visit_pat_ident(self, pat);
+                    }
+                    fn visit_path(&mut self, path: &'ast syn::Path) {
+                        if let Some(segment) = path.segments.last() {
+                            self.0.push(segment.ident.to_string());
+                        }
+                        syn::visit::visit_path(self, path);
+                    }
+                }
+                let mut paths = PatternPaths(Vec::new());
+                paths.visit_pat(pat);
+                for name in paths.0 {
+                    if let Some(held) = self.consts.get(&name) {
+                        self.compared.extend(held.iter().cloned());
+                    }
+                }
+            }
+
+            fn visit_attribute_owned(&mut self, attr: &syn::Attribute) {
+                let mut literals = Vec::new();
+                macro_string_literals(attr.meta.to_token_stream(), &mut literals);
+                if attr.path().is_ident("serde") {
+                    self.compared.extend(literals.iter().cloned());
+                }
+                self.literals.extend(literals);
+            }
+        }
+
+        impl<'ast> Visit<'ast> for ProductionLiterals {
+            fn visit_item(&mut self, item: &'ast syn::Item) {
+                if !is_test_only(item_attrs(item)) {
+                    syn::visit::visit_item(self, item);
+                }
+            }
+
+            fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+                if !is_test_only(impl_item_attrs(item)) {
+                    syn::visit::visit_impl_item(self, item);
+                }
+            }
+
+            fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+                if !is_test_only(trait_item_attrs(item)) {
+                    syn::visit::visit_trait_item(self, item);
+                }
+            }
+
+            fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+                if !is_test_only(&variant.attrs) {
+                    syn::visit::visit_variant(self, variant);
+                }
+            }
+
+            fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+                let attrs = match stmt {
+                    syn::Stmt::Local(local) => Some(&local.attrs),
+                    syn::Stmt::Expr(syn::Expr::Call(call), _) => Some(&call.attrs),
+                    syn::Stmt::Expr(syn::Expr::MethodCall(call), _) => Some(&call.attrs),
+                    syn::Stmt::Expr(syn::Expr::Macro(mac), _) => Some(&mac.attrs),
+                    _ => None,
+                };
+                if !attrs.is_some_and(|attrs| is_test_only(attrs)) {
+                    syn::visit::visit_stmt(self, stmt);
+                }
+            }
+
+            fn visit_lit(&mut self, lit: &'ast syn::Lit) {
+                self.literals.extend(literal_text(lit));
+            }
+
+            /// Macros outside `VISIBLE_MACROS` may hide literal comparisons:
+            /// `route!(op, "mural")` may expand to `op == "mural"`.
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                let literals = macro_literals(mac);
+                let visible = VISIBLE_MACROS.iter().any(|name| mac.path.is_ident(name));
+                if mac.path.is_ident("matches") || !visible {
+                    self.compared.extend(literals.iter().cloned());
+                }
+                if mac.path.is_ident("matches") {
+                    // `matches!(op, MURAL)` names a constant in its pattern.
+                    for tree in mac.tokens.clone() {
+                        if let proc_macro2::TokenTree::Ident(ident) = tree
+                            && let Some(held) = self.consts.get(&ident.to_string())
+                        {
+                            self.compared.extend(held.iter().cloned());
+                        }
+                    }
+                }
+                self.literals.extend(literals);
+                syn::visit::visit_macro(self, mac);
+            }
+
+            fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
+                if matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+                    for side in [&binary.left, &binary.right] {
+                        reject_unevaluable_macros(side);
+                        self.compared.extend(compared_strings(side, &self.consts));
+                    }
+                }
+                syn::visit::visit_expr_binary(self, binary);
+            }
+
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if COMPARISON_METHODS.contains(&call.method.to_string().as_str()) {
+                    reject_unevaluable_macros(&call.receiver);
+                    self.compared
+                        .extend(compared_strings(&call.receiver, &self.consts));
+                    for arg in &call.args {
+                        reject_unevaluable_macros(arg);
+                        self.compared.extend(compared_strings(arg, &self.consts));
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+
+            /// A regex built from a literal is a pattern the code matches input against; its
+            /// anchors, escapes, and one-character classes are removed so the text it accepts
+            /// is what gets classified.
+            fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+                let is_pattern_constructor = match &*call.func {
+                    syn::Expr::Path(path) => {
+                        let segments: Vec<String> = path
+                            .path
+                            .segments
+                            .iter()
+                            .map(|s| s.ident.to_string())
+                            .collect();
+                        segments.len() >= 2
+                            && segments[segments.len() - 1] == "new"
+                            && self.pattern_types.contains(&segments[segments.len() - 2])
+                    }
+                    _ => false,
+                };
+                let is_comparison_call = match &*call.func {
+                    syn::Expr::Path(path) => path.path.segments.last().is_some_and(|s| {
+                        COMPARISON_METHODS.contains(&s.ident.to_string().as_str())
+                    }),
+                    _ => false,
+                };
+                if is_comparison_call {
+                    for arg in &call.args {
+                        reject_unevaluable_macros(arg);
+                        self.compared.extend(compared_strings(arg, &self.consts));
+                    }
+                }
+                if is_pattern_constructor {
+                    for arg in &call.args {
+                        reject_unevaluable_macros(arg);
+                        for pattern in compared_strings(arg, &self.consts) {
+                            self.compared.extend(regex_texts(&pattern));
+                        }
+                    }
+                }
+                syn::visit::visit_expr_call(self, call);
+            }
+
+            /// `if let "mural" = op` and `let Some("mural") = op else { .. }` test a value the
+            /// same way an arm pattern does.
+            fn visit_expr_let(&mut self, expr: &'ast syn::ExprLet) {
+                self.compare_pattern(&expr.pat);
+                syn::visit::visit_expr_let(self, expr);
+            }
+
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                self.compare_pattern(&local.pat);
+                syn::visit::visit_local(self, local);
+            }
+
+            fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+                self.compare_pattern(&arm.pat);
+                syn::visit::visit_arm(self, arm);
+            }
+            /// A deserializable enum accepts, for each variant, exactly the wire spelling serde
+            /// derives: the identifier as written by default, the `rename_all` rule's output when
+            /// the enum declares one, or the variant's own `rename` literal, which the attribute
+            /// walk already collects. Nothing else is synthesized, so `GitHub` is not `git_hub`.
+            /// A derive or serde attribute from a production-active `cfg_attr` counts as a plain
+            /// attribute.
+            fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+                type Derives = syn::punctuated::Punctuated<syn::Path, syn::Token![,]>;
+                let attrs = production_attrs(&item.attrs);
+                let deserializable = attrs.iter().any(|attr| {
+                    attr.path().is_ident("derive")
+                        && attr
+                            .parse_args_with(Derives::parse_terminated)
+                            .is_ok_and(|paths| {
+                                paths.iter().any(|path| {
+                                    path.segments.last().is_some_and(|segment| {
+                                        self.deserialize_names
+                                            .iter()
+                                            .any(|name| segment.ident == name)
+                                    })
+                                })
+                            })
+                });
+                let untagged = attrs.iter().any(|attr| {
+                    attr.path().is_ident("serde")
+                        && attr
+                            .parse_nested_meta(|meta| {
+                                if meta.path.is_ident("untagged") {
+                                    return Err(meta.error("untagged"));
+                                }
+                                if meta.input.peek(syn::Token![=]) {
+                                    let _: syn::Expr = meta.value()?.parse()?;
+                                } else if meta.input.peek(syn::token::Paren) {
+                                    let _ = meta.parse_nested_meta(|_| Ok(()));
+                                }
+                                Ok(())
+                            })
+                            .is_err()
+                });
+                // An untagged enum is chosen by payload shape; its variant names never cross
+                // the wire.
+                if deserializable && !untagged {
+                    let rule = rename_all_rule(&attrs);
+                    for variant in &item.variants {
+                        let variant_attrs = production_attrs(&variant.attrs);
+                        if is_test_only(&variant.attrs)
+                            || has_serde_rename(&variant_attrs)
+                            || is_skipped(&variant_attrs)
+                        {
+                            continue;
+                        }
+                        let ident = variant.ident.to_string();
+                        match rule.as_deref() {
+                            Some(rule @ ("camelCase" | "PascalCase")) => {
+                                // These rules keep the identifier's word boundaries, so the
+                                // wire value is classified by the words serde would split
+                                // it into under snake_case as well as by its exact text.
+                                self.compared.push(serde_rename(rule, &ident));
+                                self.compared.push(camel_words(&ident));
+                            }
+                            Some(rule) => self.compared.push(serde_rename(rule, &ident)),
+                            None => self.compared.push(ident),
+                        }
+                    }
+                }
+                syn::visit::visit_item_enum(self, item);
+            }
+
+            /// `serde` rename and alias values define accepted wire spellings.
+            fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+                if attr.path().is_ident("doc") {
+                    return;
+                }
+                if attr.path().is_ident("cfg_attr") {
+                    for inner in production_attrs(std::slice::from_ref(attr)) {
+                        self.visit_attribute_owned(&inner);
+                    }
+                    return;
+                }
+                self.visit_attribute_owned(attr);
+            }
+        }
+
+        for spelling in [
+            "mural.render",
+            "models.list",
+            "message_index.sync",
+            "embedding.ingest",
+            "ctx_mural",
+            "ctx-mural",
+        ] {
+            assert!(
+                is_operation_spelling(spelling) && names_absent_subsystem(spelling),
+                "{spelling}"
+            );
+        }
+        assert!(nests_a_macro(
+            syn::parse_str::<syn::Macro>(r#"format!("{}", env!("X"))"#)
+                .expect("macro")
+                .tokens
+        ));
+        assert!(!nests_a_macro(
+            syn::parse_str::<syn::Macro>(r#"format!("{}", a != b)"#)
+                .expect("macro")
+                .tokens
+        ));
+        assert_eq!(regex_texts(r"^mural\.render$"), ["mural.render"]);
+        assert_eq!(regex_texts(r"^(?:git[.]ingest)$"), ["git.ingest"]);
+        assert_eq!(regex_texts(r"(a|b)\.db"), ["a.db", "b.db"]);
+        assert_eq!(
+            regex_texts(r"^(mural|kernel)\.(read|list)$"),
+            ["mural.read", "mural.list", "kernel.read", "kernel.list"]
+        );
+        assert_eq!(regex_texts(r"a\|b"), ["a|b"]);
+        assert_eq!(regex_texts(r"(?i)^mural[.]render$"), ["mural.render"]);
+        assert_eq!(regex_texts(r"^(?i:mural)\.render$"), ["mural.render"]);
+        assert_eq!(
+            regex_texts(r"^(?P<op>mural|kernel)\.read$"),
+            ["mural.read", "kernel.read"]
+        );
+        assert_eq!(
+            regex_texts(r"^[mM]ural[.]render$"),
+            ["mural.render", "Mural.render"]
+        );
+        assert_eq!(regex_texts(r"^[a-c]\.db$"), ["a.db", "b.db", "c.db"]);
+        assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
+        assert_eq!(regex_texts(r"^[a-zA-Z0-9_-]+$"), ["[a-zA-Z0-9_-]+"]);
+        assert_eq!(regex_texts(r"^\[x\]$"), ["[x]"]);
+        assert_eq!(
+            concat_value(quote::quote!("mu", 1, "ral.render")),
+            Some("mu1ral.render".into())
+        );
+        assert_eq!(
+            concat_value(quote::quote!("a", 0x10, true, 'c', 1.5)),
+            Some("a16truec1.5".into())
+        );
+        assert_eq!(concat_value(quote::quote!("a", b"b")), None);
+        assert_eq!(concat_value(quote::quote!("a", -1)), None);
+        assert_eq!(
+            concat_value(quote::quote!("mural", ".render",)),
+            Some("mural.render".into())
+        );
+        assert_eq!(camel_words("MuralRender"), "mural_render");
+        assert_eq!(serde_rename("snake_case", "MuralRender"), "mural_render");
+        assert_eq!(serde_rename("kebab-case", "MuralRender"), "mural-render");
+        assert_eq!(
+            serde_rename("SCREAMING_SNAKE_CASE", "GitIngest"),
+            "GIT_INGEST"
+        );
+        assert_eq!(serde_rename("camelCase", "GitIngest"), "gitIngest");
+        assert_eq!(serde_rename("lowercase", "GitHub"), "github");
+        assert!(!test_support::names_absent_subsystem("GitHub", BARE_WORDS));
+        assert!(test_support::names_absent_subsystem(
+            &serde_rename("snake_case", "MuralRender"),
+            BARE_WORDS
+        ));
+        assert_eq!(camel_words("GitIngest"), "git_ingest");
+        assert_eq!(camel_words("ReadOnly"), "read_only");
+        for word in [
+            "github",
+            "gitignore",
+            "digital",
+            "modeling",
+            "embedded_release",
+        ] {
+            assert!(!names_absent_subsystem(word), "{word}");
+        }
+        assert!(names_absent_subsystem("indexer.status"));
+        for bare in ["git_ingest", "ctx_mural", "embed_query", "GIT_INGEST"] {
+            assert!(
+                test_support::names_absent_subsystem(bare, BARE_WORDS),
+                "{bare}"
+            );
+        }
+        for bare in ["model", "item_index", "chunk_index", "no_models", "digital"] {
+            assert!(
+                !test_support::names_absent_subsystem(bare, BARE_WORDS),
+                "{bare}"
+            );
+        }
+        // A bare snake_case spelling such as `mural_artifact_store_failed` can also be an
+        // error-code shape; only a comparison context classifies a bare word.
+        for benign in [
+            "mural_artifact_store_failed",
+            "<memory-mural>\nThe project memory mural image follows.\n</memory-mural>",
+            "payload/model/gte-modernbert-base-f16",
+        ] {
+            assert!(
+                !(is_operation_spelling(benign) && names_absent_subsystem(benign)),
+                "{benign}"
+            );
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let roots = crate_roots(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+        let tree = module_tree(&roots);
+        let mut every_file = Vec::new();
+        rust_sources(&src, &mut every_file);
+        let orphaned: Vec<_> = every_file
+            .iter()
+            .filter(|file| {
+                !tree.production.iter().any(|(path, _)| path == *file)
+                    && !tree.test_only.contains(file)
+            })
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "no module declaration reaches {orphaned:?}; the scan cannot classify them"
+        );
+        assert_eq!(
+            tree.test_only
+                .iter()
+                .map(|path| path
+                    .strip_prefix(&src)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string())
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["differential_goldens.rs", "test_support.rs"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert!(
+            tree.production.len() > 30,
+            "found only {} production sources",
+            tree.production.len()
+        );
+        // Constants are collected across the whole tree before any file is scanned, so a
+        // comparison against `routes::PREFIX` resolves whichever module declares it. Names are
+        // keyed by their last segment; a collision adds values and can only widen the check.
+        let mut consts = StringConsts {
+            values: std::collections::HashMap::new(),
+            references: std::collections::HashMap::new(),
+        };
+        for (_, file) in &tree.production {
+            consts.visit_file(file);
+        }
+        let consts = consts.resolved();
+        // A `pub use serde::Deserialize as Decode` in one module is a derive name in every module
+        // that imports it, so aliases are collected across the tree like constants.
+        let mut aliases = DeserializeAliases(vec!["Deserialize".to_string()]);
+        let mut pattern_types =
+            PatternTypeAliases(PATTERN_TYPES.iter().map(|s| s.to_string()).collect());
+        for (_, file) in &tree.production {
+            aliases.visit_file(file);
+            pattern_types.visit_file(file);
+        }
+        let mut offending = Vec::new();
+        for (path, file) in tree.production {
+            let mut scan = ProductionLiterals {
+                literals: Vec::new(),
+                compared: Vec::new(),
+                deserialize_names: aliases.0.clone(),
+                pattern_types: pattern_types.0.clone(),
+                consts: consts.clone(),
+            };
+            scan.visit_file(&file);
+            let relative = path
+                .strip_prefix(&src)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for literal in scan.literals {
+                if is_operation_spelling(&literal) && names_absent_subsystem(&literal) {
+                    offending.push(format!("{relative}: {literal:?}"));
+                }
+            }
+            for literal in scan.compared {
+                if !literal.chars().any(char::is_whitespace)
+                    && !KNOWN_NON_ROUTES.contains(&literal.as_str())
+                    && test_support::names_absent_subsystem(&literal, BARE_WORDS)
+                {
+                    offending.push(format!("{relative}: compared against {literal:?}"));
+                }
+            }
+        }
+        assert!(offending.is_empty(), "{offending:#?}");
     }
 
     #[tokio::test(flavor = "current_thread")]

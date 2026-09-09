@@ -11,8 +11,8 @@ relative to `crates/daemon/src/`.
 ## Evidence trail
 
 The daemon defines `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` as `true` and
-`DEFAULT_MIN_COMMIT_CLUSTERS` as `3` (`lib.rs:640-641`). Its production trigger
-context uses those constants (`lib.rs:4983-5005`). The boundary's commit-cluster
+`DEFAULT_MIN_COMMIT_CLUSTERS` as `3` (`lib.rs:642-643`). Its production trigger
+context uses those constants (`lib.rs:4985-5007`). The boundary's commit-cluster
 arm requires the enable flag, sufficient clusters, and sufficient tokens
 (`boundary.rs:814-819`).
 
@@ -51,7 +51,7 @@ not the other, while keeping the other trigger conditions false.
 Existing checks remain `unaudited`: the default-constant assertion at
 `boundary.rs:2011-2015` pins the default, not configurability. Direct contexts in
 tests supply `min_commit_clusters: 2` with enabled and disabled flags
-(`lib.rs:16664-16674`, `lib.rs:16929-16940`); they do not load these controls
+(`lib.rs:16698-16715`, `lib.rs:16964-16982`); they do not load these controls
 from config.
 
 ## Investigation log
@@ -59,7 +59,7 @@ from config.
 ### Q: Does the classified reader consume the commit-cluster controls?
 
 - Sources examined: `config.rs:80-109`, `config.rs:588-618`,
-  `config.rs:710-755`, and `lib.rs:4983-5005`.
+  `config.rs:710-755`, and `lib.rs:4985-5007`.
 - Findings: the reader has no matching fields or keys; the context receives
   constants. Default-valued comparisons cannot distinguish these paths.
 - Missing evidence: a config-to-trigger check with a discriminating nondefault

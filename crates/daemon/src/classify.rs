@@ -36,8 +36,8 @@ pub const MAX_CLASSIFY_MODEL_CHAIN: usize = 8;
 pub const CLASSIFY_TEMPERATURE: f64 = 0.1;
 pub const CLASSIFY_MAX_OUTPUT_TOKENS: u32 = 32_000;
 pub const CLASSIFY_AWAIT_TIMEOUT: Duration = Duration::from_secs(600);
-pub const CLASSIFY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// The host clamps a request's `timeout_ms` to the await ceiling, so no caller can hold a producer past it.
+/// With the two bounds equal, an await that times out has spent the whole request budget. commentlint: allow(JUDGE)
 pub const CLASSIFY_MAX_REQUEST_TIMEOUT: Duration = CLASSIFY_AWAIT_TIMEOUT;
 /// Version of the prompt template `render_classify_prompt` produces; digested
 /// into every request and recorded on every attempt.
@@ -633,6 +633,12 @@ mod tests {
         );
         assert_ne!(
             base,
+            attempt_child_session_id("project", "ses", "command", 2, 0, "prov/model-a"),
+            "the receipt generation alone must separate sessions: a successor never \
+             shares a child session with the predecessor it fenced"
+        );
+        assert_ne!(
+            base,
             attempt_child_session_id("other", "ses", "command", 1, 0, "prov/model-a")
         );
         assert_ne!(
@@ -644,11 +650,6 @@ mod tests {
         assert_ne!(
             base,
             attempt_child_session_id("project", "ses", "other", 1, 0, "prov/model-a")
-        );
-        assert_ne!(
-            base,
-            attempt_child_session_id("project", "ses", "command", 2, 0, "prov/model-a"),
-            "a successor generation must never reuse a predecessor's session"
         );
         assert!(base.starts_with("eidnara-dreamer:classify:"));
     }
