@@ -244,7 +244,7 @@ different sentence from the one this section used to carry. Group C's four guard
 still hold, and they are still worth recording for the reason given there. What
 changes is that the fifth thing in that neighbourhood is a defect and is now
 recorded as one. Production passes `None` (`lib.rs:4998`) and the only `Some` sites
-are `lib.rs:16672` and `:16937`, both tests, so the reachability is latent rather
+are `lib.rs:16708` and `:16973`, both tests, so the reachability is latent rather
 than default-production, and the split record says so. The nearest *reachable*
 hazard remains a different one: a `cache_ttl` of `"0"` parses to 0 ms and forces
 execution every pass, which no documentation mentions.
@@ -535,7 +535,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - direct test contexts use `min_commit_clusters: 2` and
-enabled and disabled flags (`lib.rs:16662-16679`, `lib.rs:16928-16946`). They
+enabled and disabled flags (`lib.rs:16698-16715`, `lib.rs:16964-16982`). They
 do not load those controls from config. Existing checks remain `unaudited`.
 Guarantee: A configured `commit_cluster_trigger` reaches the module's trigger
 decision, or the module reports that it cannot honour the key.
@@ -867,7 +867,7 @@ Read every guard: `boundary.rs:339-341`, `:363-372`, `:926-931`. Executed
 argument, which is what makes `:342` safe against a NaN threshold. Also
 confirmed that `ctx.trigger_budget` is the one unvalidated float (`:756-761`,
 `:377-379`) and that production always passes `None` (`lib.rs:4998`), with
-`Some` only at `lib.rs:16672` and `:16937`. The evidence file's test-plan item 4
+`Some` only at `lib.rs:16708` and `:16973`. The evidence file's test-plan item 4
 already states that the `trigger_budget` case "fails today"
 ([evidence:184-187](evidence/dec-a-boundary-budget-derivation-is-total-over-non-finite-input.md)),
 which is what the split acts on.
@@ -886,7 +886,7 @@ Reachability: test-only
 Status: active
 Exercised: not yet - and the evidence for the sibling record already says the
 oracle fails. `boundary.rs`'s golden fixture suite never sets `trigger_budget` to
-a non-finite value; the two `Some` sites in the tree, `lib.rs:16672` and `:16937`,
+a non-finite value; the two `Some` sites in the tree, `lib.rs:16708` and `:16973`,
 pass finite numbers.
 Guarantee: `BoundaryContext::trigger_budget`, being caller-supplied and read
 without validation, does not carry a non-finite value into a boundary

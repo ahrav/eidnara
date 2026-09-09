@@ -118,9 +118,9 @@ Production never passes `Some`. `lib.rs:4998` inside `prepare_historian_fire`:
 trigger_budget: None,
 ```
 
-and `rg trigger_budget crates/daemon/src` finds `Some` only at `lib.rs:16672`
-(`Some(4_000.0)`) and `lib.rs:16937` (`Some(10_000.0)`), both inside the
-`#[cfg(test)]` module that begins at `lib.rs:16167-16168`. So the defect class exists in
+and `rg trigger_budget crates/daemon/src` finds `Some` only at `lib.rs:16708`
+(`Some(4_000.0)`) and `lib.rs:16973` (`Some(10_000.0)`), both inside the
+`#[cfg(test)]` module that begins at `lib.rs:16203-16204`. So the defect class exists in
 shape and is unreachable in fact.
 
 **Unsigned arithmetic.** Every subtraction on an unsigned type in `boundary.rs` is
@@ -196,7 +196,7 @@ beside them.
 
 - Sources examined: `boundary.rs:756-761` and `:380-382` (both `unwrap_or_else`
   sites); `boundary.rs:222-224` (the `trigger_budget` field declaration on
-  `BoundaryContext`); `lib.rs:4998` (production `None`); `lib.rs:16672` and `:16937`
+  `BoundaryContext`); `lib.rs:4998` (production `None`); `lib.rs:16708` and `:16973`
   (test-only `Some`).
 - Findings: every other float on `BoundaryContext` is validated at its point of use,
   so the omission is inconsistent rather than reasoned. The field exists so a caller

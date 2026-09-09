@@ -297,7 +297,7 @@ not adequacy verdicts; every check is `unaudited`.
 `apply_once_stage_timings_large_fixture` (`transform.rs:12375-12376`),
 `tag_baseline_warm_hydration_50k` (`transform.rs:22539-22540`), and
 `full_module_pass_timing_fixture` (`transform.rs:27392-27393`). `lib.rs` carries
-one, `historian_trigger_token_reuse_benchmark` (`lib.rs:16725-16726`), which
+one, `historian_trigger_token_reuse_benchmark` (`lib.rs:16761-16762`), which
 calls `boundary::check_compartment_trigger_retokenized_reference`.
 
 `should_panic`: none found in any 4f file. One test has a panic oracle written a
@@ -348,15 +348,15 @@ Three separable facts, each verified line by line:
    one test, `incremental_sidecar_carries_pins_across_three_generations`
    (`codec/opencode.rs:2062`), which calls it three times with `replace_from` of
    1, 2, and 2 (`codec/opencode.rs:2077`, `:2088`, `:2098`), all in range. Its
-   single production caller is `lib.rs:12750`, outside 4f.
+   single production caller is `lib.rs:12786`, outside 4f.
 3. `codec/opencode.rs:484` enforces nothing in release, and its only test is
    debug-gated. 4e's `enforce_unique_tool_use_ids` (`transform.rs:10439`) has a
    repair path with its own tests (`transform.rs:20554`, `transform.rs:20567`).
    The encode-side `assert_unique_tool_use_ids` has one arm, so in release it
    neither enforces nor repairs. Two production call sites depend on it:
-   `codec/opencode.rs:387` inside the encode path and `lib.rs:13157`. A third
-   caller of `assert_unique_tool_use_ids`, `lib.rs:21369`, is inside `lib.rs`'s
-   test module (`mod tests`, `lib.rs:16168`). The doc comment at
+   `codec/opencode.rs:387` inside the encode path and `lib.rs:13193`. A third
+   caller of `assert_unique_tool_use_ids`, `lib.rs:21405`, is inside `lib.rs`'s
+   test module (`mod tests`, `lib.rs:16204`). The doc comment at
    `codec/opencode.rs:298` states the debug-only contract. The only test carries
    `#[cfg(debug_assertions)]` at `codec/opencode.rs:2026`. CI's nextest job
    builds tests in the dev profile, so the test runs there; the guard's
@@ -556,7 +556,7 @@ Ranked by the gap between what the code decides and what any check proves.
 
 5. `assert_unique_tool_use_ids` enforces nothing in a release build and has no
    release-arm test. `assert_unique_tool_use_ids` (`codec/opencode.rs:480-487`)
-   has two production callers (`codec/opencode.rs:387`, `lib.rs:13157`), one
+   has two production callers (`codec/opencode.rs:387`, `lib.rs:13193`), one
    test gated `#[cfg(debug_assertions)]` (`codec/opencode.rs:2026`), and no
    `cfg(not(debug_assertions))` anywhere in 4f. Unlike 4e's belt it has no
    repair arm, so the encode-side duplicate-id contract is unenforced in the
@@ -568,10 +568,10 @@ Ranked by the gap between what the code decides and what any check proves.
    Rust-only goldens, and three `lib.rs` tests that call
    `check_compartment_trigger`:
    `historian_trigger_token_reuse_matches_retokenized_production_shape`
-   (`lib.rs:16622`),
+   (`lib.rs:16658`),
    `trigger_suppresses_fire_when_projected_drops_hit_relative_target`
-   (`lib.rs:16897`), and the ignored `historian_trigger_token_reuse_benchmark`
-   (`lib.rs:16726`). No whole-pass test in `transform.rs` asserts anything
+   (`lib.rs:16933`), and the ignored `historian_trigger_token_reuse_benchmark`
+   (`lib.rs:16762`). No whole-pass test in `transform.rs` asserts anything
    about where the protected-tail split lands.
 
 7. `selection.rs:1155` is a live production `unreachable!` whose safety rests
