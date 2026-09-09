@@ -118,7 +118,7 @@ export function operationLiteralHits(
 export interface DatabaseUses {
     /** `opens` contains source lines for `new` expressions whose constructor text contains `Database`, or for every `new` expression under `allConstructions`. */
     opens: string[];
-    /** `escapes` contains source lines for value-position identifiers containing `Database` and for binding-module imports that bypass direct constructor matching. */
+    /** `escapes` contains source lines for value-position identifiers containing `Database`, for binding-module imports that bypass direct constructor matching, and for dynamic loads whose specifier is not a string literal. */
     escapes: string[];
 }
 
@@ -192,7 +192,10 @@ export function databaseUses(
             const callee = node.expression;
             const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
             const isRequire = ts.isIdentifier(callee) && callee.text === "require";
-            if ((isImport || isRequire) && isBindingSpecifier(node.arguments[0])) {
+            // Non-string-literal specifiers cannot be checked against the binding pattern, so they escape.
+            const specifier = node.arguments[0];
+            const unresolved = specifier !== undefined && !ts.isStringLiteralLike(specifier);
+            if ((isImport || isRequire) && (unresolved || isBindingSpecifier(specifier))) {
                 recordEscape(node);
             }
         }

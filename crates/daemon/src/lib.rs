@@ -28700,15 +28700,49 @@ mod tests {
         }
     }
 
+    /// Every string literal under one expression or pattern, including literals inside macros.
+    fn string_literals_in(node: impl FnOnce(&mut StringLiterals)) -> Vec<String> {
+        let mut collector = StringLiterals(Vec::new());
+        node(&mut collector);
+        collector.0
+    }
+
+    struct StringLiterals(Vec<String>);
+
+    impl<'ast> syn::visit::Visit<'ast> for StringLiterals {
+        fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+            self.0.push(lit.value());
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            macro_string_literals(mac.tokens.clone(), &mut self.0);
+            syn::visit::visit_macro(self, mac);
+        }
+    }
+
     /// The dispatcher audit fixes where routes are registered; this fixes what any handler or
-    /// helper could compare a request against. Test code is skipped because the probe lists
-    /// spell these names on purpose.
+    /// helper could compare a request against. Every operation-shaped literal is classified; a
+    /// bare word is classified only where it is compared, matched, or searched for, and only by
+    /// the stems that are not ordinary words: `model` names a message role and `index` names a
+    /// position. Test code is skipped because the probe lists spell these names on purpose.
+    /// commentlint: allow(JUDGE)
     #[test]
     fn production_source_spells_no_indexing_embedding_git_or_mural_operation() {
         use syn::visit::Visit;
 
+        const BARE_STEMS: &[&str] = &["mural", "embed", "git"];
+        const COMPARISON_METHODS: [&str; 6] = [
+            "eq",
+            "ne",
+            "contains",
+            "starts_with",
+            "ends_with",
+            "eq_ignore_ascii_case",
+        ];
+
         struct ProductionLiterals {
             literals: Vec<String>,
+            compared: Vec<String>,
         }
 
         impl<'ast> Visit<'ast> for ProductionLiterals {
@@ -28756,8 +28790,41 @@ mod tests {
             }
 
             fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-                macro_string_literals(mac.tokens.clone(), &mut self.literals);
+                let mut literals = Vec::new();
+                macro_string_literals(mac.tokens.clone(), &mut literals);
+                if mac.path.is_ident("matches") {
+                    self.compared.extend(literals.iter().cloned());
+                }
+                self.literals.extend(literals);
                 syn::visit::visit_macro(self, mac);
+            }
+
+            fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
+                if matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+                    for side in [&binary.left, &binary.right] {
+                        self.compared
+                            .extend(string_literals_in(|c| c.visit_expr(side)));
+                    }
+                }
+                syn::visit::visit_expr_binary(self, binary);
+            }
+
+            fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+                if COMPARISON_METHODS.contains(&call.method.to_string().as_str()) {
+                    self.compared
+                        .extend(string_literals_in(|c| c.visit_expr(&call.receiver)));
+                    for arg in &call.args {
+                        self.compared
+                            .extend(string_literals_in(|c| c.visit_expr(arg)));
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, call);
+            }
+
+            fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+                self.compared
+                    .extend(string_literals_in(|c| c.visit_pat(&arm.pat)));
+                syn::visit::visit_arm(self, arm);
             }
 
             fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
@@ -28776,8 +28843,20 @@ mod tests {
                 "{spelling}"
             );
         }
-        // A bare snake_case spelling such as `git_ingest` can also be an error-code shape; only
-        // the dispatcher-arm audit classifies it as a route.
+        for bare in ["git_ingest", "ctx_mural", "embed_query", "GIT_INGEST"] {
+            assert!(
+                test_support::names_absent_subsystem(bare, BARE_STEMS),
+                "{bare}"
+            );
+        }
+        for bare in ["model", "item_index", "chunk_index", "no_models", "digital"] {
+            assert!(
+                !test_support::names_absent_subsystem(bare, BARE_STEMS),
+                "{bare}"
+            );
+        }
+        // A bare snake_case spelling such as `mural_artifact_store_failed` can also be an
+        // error-code shape; only a comparison context classifies a bare word.
         for benign in [
             "mural_artifact_store_failed",
             "<memory-mural>\nThe project memory mural image follows.\n</memory-mural>",
@@ -28800,14 +28879,24 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
             let mut scan = ProductionLiterals {
                 literals: Vec::new(),
+                compared: Vec::new(),
             };
             scan.visit_file(&file);
+            let relative = path
+                .strip_prefix(&src)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
             for literal in scan.literals {
                 if is_operation_spelling(&literal) && names_absent_subsystem(&literal) {
-                    offending.push(format!(
-                        "{}: {literal:?}",
-                        path.strip_prefix(&src).unwrap_or(&path).display()
-                    ));
+                    offending.push(format!("{relative}: {literal:?}"));
+                }
+            }
+            for literal in scan.compared {
+                if !literal.chars().any(char::is_whitespace)
+                    && test_support::names_absent_subsystem(&literal, BARE_STEMS)
+                {
+                    offending.push(format!("{relative}: compared against {literal:?}"));
                 }
             }
         }
