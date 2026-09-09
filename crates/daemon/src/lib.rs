@@ -9647,19 +9647,26 @@ impl Handler {
             let Ok(attempt_index) = u32::try_from(attempt) else {
                 return invalid_params_error("classify model_chain is too long to record");
             };
-            let mut producer = match self
-                .producer_factory
-                .connect(
-                    &binding.project_root,
-                    &binding.harness,
-                    &binding.credential_fingerprints,
-                )
-                .await
+            let connect = self.producer_factory.connect(
+                &binding.project_root,
+                &binding.harness,
+                &binding.credential_fingerprints,
+            );
+            let mut producer = match tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                connect,
+            )
+            .await
             {
-                Ok(producer) => producer,
-                Err(error) => {
+                Ok(Ok(producer)) => producer,
+                Ok(Err(error)) => {
                     last_error = error.to_string();
                     continue;
+                }
+                Err(_) => {
+                    last_error =
+                        "classify time budget exhausted during producer startup".to_string();
+                    break;
                 }
             };
             if Instant::now() >= deadline {
@@ -18407,6 +18414,8 @@ mod tests {
         /// `status` waits on `notify` while `block_status` is set, simulating a
         /// runtime that accepts the probe but never replies.
         block_status: std::sync::atomic::AtomicBool,
+        /// `connect` waits on `notify` while `block_connect` is set.
+        block_connect: std::sync::atomic::AtomicBool,
     }
 
     struct TestProducerFactory {
@@ -18427,6 +18436,9 @@ mod tests {
                 .lock()
                 .expect("harnesses mutex")
                 .push(harness.to_string());
+            while self.state.block_connect.load(Ordering::SeqCst) {
+                self.state.notify.notified().await;
+            }
             if let Some(err) = self
                 .state
                 .connect_errors
@@ -28258,6 +28270,37 @@ mod tests {
                 .all(|timeout| *timeout <= classify::CLASSIFY_MAX_REQUEST_TIMEOUT),
             "{awaited:?}"
         );
+    }
+
+    /// Connection setup has no attempt row and no producer-side await ceiling,
+    /// so a handshake that never completes would otherwise hold the request
+    /// for as long as the connector allows, outside `timeout_ms`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_bounds_producer_startup_by_the_request_deadline() {
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        producer.block_connect.store(true, Ordering::SeqCst);
+        let request = harness.classify(claim_native_payload(&claims, 1_000), "stalled-connect");
+        let outcome = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .expect("connect is cut off by the request deadline");
+        producer.block_connect.store(false, Ordering::SeqCst);
+        assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
+        assert!(
+            matches!(&outcome, PreparedOutcome::Error { message, .. } if message.contains("during producer startup")),
+            "{outcome:?}"
+        );
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 1);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(harness.attempts("stalled-connect").is_empty());
+        assert!(matches!(
+            harness.receipt("stalled-connect").state,
+            DreamerReceiptState::Complete {
+                terminal_kind: DreamerTerminalKind::Failed,
+                ..
+            }
+        ));
     }
 
     /// Once a project has spent its attempt budget, a new command is refused
