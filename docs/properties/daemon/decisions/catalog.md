@@ -311,32 +311,37 @@ bound" is the bound the Rust code actually applies, which is the column the
 sibling table did not carry. "Takes effect here?" means the parsed value reaches
 a decision inside `daemon`.
 
+The Rust config citations in this table are verified against the classified
+reader. Code columns name their source file explicitly; shorthand references
+in the documented-default column refer to the historical `CONFIGURATION.md`,
+which is absent at HEAD.
+
 | Key | Code default | Documented default | Enforced bound | Takes effect here? |
 | --- | --- | --- | --- | --- |
-| `execute_threshold_percentage` (scalar) | `65.0` (`config.rs:19`, `:122`) | `65`, range `20-90` (`CONFIGURATION.md:167` (source-catalog path, not present at HEAD)) | `clamp(1.0, 90.0)` (`config.rs:568-570`); project tier may only raise (`:515-518`) | Yes. **Divergent**: documented lower bound `20`, enforced `1` |
-| `execute_threshold_percentage` (object form) | not parsed | documented, example at `:791` | none | **No.** `number_at` (`config.rs:631-637`) returns `None` for an object; 4b's `sel-per-model-and-token-thresholds-inert-in-module` |
+| `execute_threshold_percentage` (scalar) | `65.0` (`config.rs:21`, `config.rs:115`) | `65`, range `20-90` (`CONFIGURATION.md:167` (source-catalog path, not present at HEAD)) | `clamp(1.0, 90.0)` (`config.rs:750-752`); project tier may only raise (`config.rs:682-686`, `config.rs:734-744`) | Yes. **Divergent**: documented lower bound `20`, enforced `1` |
+| `execute_threshold_percentage` (object form) | not parsed | documented, example at `:791` | none | **No.** `number_at` (`config.rs:963-968`) returns `None` for an object; 4b's `sel-per-model-and-token-thresholds-inert-in-module` |
 | `execute_threshold_tokens` | not parsed | documented (`:168`, `:319-338`), doc claims clamp to `90% x context_limit` | none | **No.** Same 4b record. The documented clamp has no implementing code |
-| `compaction.enabled` | `true` (`config.rs:123`) | `true` (`:172`) | none; user tier only, project warns (`config.rs:520`) | Yes, user tier (`:433-435`) |
-| `memory.enabled` | `true` (`config.rs:124`) | `true` (`:589`) | none | Yes, both tiers (`:436-438`, `:521-523`) |
-| `memory.injection_budget_tokens` | `4000.0` (`config.rs:22`, `:123`) | `4000`, range `500-20000` (`:591`) | `.max(1.0)` only (`config.rs:847-851`) | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`); project warns (`:729`). **Divergent**: neither documented bound exists |
-| `memory.budget_tokens` (deprecated) | falls back to the same field (`config.rs:443-445`) | absent from the documented table | `.max(1.0)` | Yes, user tier, with a deprecation warning (`:446-451`); project warns and ignores (`:538`) |
-| `memory.user_profile_budget_tokens` | `4000.0` (`config.rs:25`, `:131`) | **undocumented** | `.max(1.0)` (`config.rs:453`) | Yes, user tier only (`:452-454`); project warns (`:539`) |
-| `memory.auto_promote` | `true` (`config.rs:127`) | `true` (`:592`) | none | Yes, both tiers (`:455-461`, `:529-535`) |
-| `memory.auto_search.enabled` | `true` (`config.rs:60`) | `true` (`:682`) | none | Yes, both tiers (`:584-590`) |
-| `memory.auto_search.score_threshold` | `0.6` (`config.rs:39`) | `0.6`, prose range `0.3-0.95` (`:683`, `:706`) | `clamp(0.3, 0.95)`, silent (`config.rs:591`) | Yes. Bound matches the prose; the clamp is invisible to the caller |
-| `memory.auto_search.min_prompt_chars` | `20` (`config.rs:40`) | `20`, **no range documented** (`:684`, `:707`) | `clamp(5, 500)` (`config.rs:595`); a `0` is silently discarded by `positive_usize_at` (`:623-629`) | Yes. **Divergent**: an undocumented bound and an undocumented discard |
-| `caveman_text_compression.enabled` | `false` (`config.rs:75`) | `false` (`:724`) | none | Yes, both tiers (`:600-606`) |
-| `caveman_text_compression.min_chars` | `500` (`config.rs:42`, `:77`) | `500`, **no range documented** (`:725`) | `clamp(100, 10_000)` (`config.rs:607`); a `0` discarded | Yes. **Divergent**: undocumented bound |
-| `smart_drops` | `false` (`config.rs:135`) | `false` (`:752`) | none | Yes, both tiers (`:467-469`, `:541-543`) |
-| `dreamer.inject_docs` | `true` (`config.rs:125`) | `true` (`:501`) | none | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`, read at `:895`); project warns (`:729`) |
-| `temporal_awareness` | `true` (`config.rs:133`) | `true` (`:650`) | none | Yes, both tiers (`:476-478`, `:550-555`) |
-| `dreamer.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:121`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:875-879`); the schedule is `UserOnly`, the flag is `ProjectRaiseOnly` and a project may only close the gate (`:687-692`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
-| `historian.model`, `historian.fallback_models` | empty chain (`config.rs:114`) | documented with **no user-only marker** (`:448-449`) | `dedup_preserving_order` (`config.rs:753`, `:950`) | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`, read at `:788-813`); project warns (`:729`) |
-| `historian.module_model`, `historian.module_fallback_models` | absent | **undocumented** | none | Yes, user tier only, and it replaces the whole chain (`config.rs:390-409`) |
-| `historian.context_limit_tokens` | `128_000` (`config.rs:37`, `:129`) | **undocumented** | `> 0` via `positive_usize_at` (`config.rs:464-466`) | Yes; project tier warns (`:540`) |
-| `cache_ttl` (string or object) | `"5m"` (`config.rs:129`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:771-773`); `"never"` maps to `u64::MAX` (`:365-368`) | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`, read at `:924-941`); project warns (`:729`); the TypeScript strip removes it from project config (`project-security.ts:386-391`). **Divergent**: `"0"` parses to `0` ms and forces execution every pass, undocumented |
-| `prompt_surface.guidance_override_path` | `None` | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `:88`) | Yes (`config.rs:281-358`); project warns (`:561-565`) |
-| `prompt_surface.guidance_override_text` | `None` | **undocumented** | none | Yes (`config.rs:479-485`), but a configured path resets it to `None` first (`:299`); project warns (`:556-560`) |
+| `compaction.enabled` | `true` (`config.rs:116`) | `true` (`:172`) | none; user-only (`config.rs:663-672`) | Yes, user tier (`config.rs:812-816`); project warns (`config.rs:729-732`) |
+| `memory.enabled` | `true` (`config.rs:117`) | `true` (`:589`) | none | Yes, both tiers (`config.rs:817-821`, `config.rs:717-733`) |
+| `memory.injection_budget_tokens` | `4000.0` (`config.rs:23`, `config.rs:123`) | `4000`, range `500-20000` (`:591`) | `.max(1.0)` only (`config.rs:847-851`) | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`); project warns (`config.rs:729-732`). **Divergent**: neither documented bound exists |
+| `memory.budget_tokens` (deprecated) | falls back to the same field (`config.rs:852-864`) | absent from the documented table | `.max(1.0)` (`config.rs:856`) | Yes, user-only and privileged (`config.rs:627-693`), with a deprecation warning (`config.rs:858-863`); project warns and ignores (`config.rs:729-732`) |
+| `memory.user_profile_budget_tokens` | `4000.0` (`config.rs:25`, `config.rs:124`) | **undocumented** | `.max(1.0)` (`config.rs:865-869`) | Yes, user-only (`config.rs:666-672`); project warns (`config.rs:729-732`) |
+| `memory.auto_promote` | `true` (`config.rs:120`) | `true` (`:592`) | none | Yes, both tiers (`config.rs:870-874`, `config.rs:717-733`) |
+| `memory.auto_search.enabled` | `true` (`config.rs:58`) | `true` (`:682`) | none | Yes, both tiers (`config.rs:822-826`, `config.rs:717-733`) |
+| `memory.auto_search.score_threshold` | `0.6` (`config.rs:34`) | `0.6`, prose range `0.3-0.95` (`:683`, `:706`) | `clamp(0.3, 0.95)`, silent (`config.rs:827-831`) | Yes. Bound matches the prose; the clamp is invisible to the caller |
+| `memory.auto_search.min_prompt_chars` | `20` (`config.rs:35`) | `20`, **no range documented** (`:684`, `:707`) | `clamp(5, 500)` (`config.rs:832-836`); a `0` is silently discarded by `positive_usize_at` (`config.rs:955-961`) | Yes. **Divergent**: an undocumented bound and an undocumented discard |
+| `caveman_text_compression.enabled` | `false` (`config.rs:74`) | `false` (`:724`) | none | Yes, both tiers (`config.rs:837-841`, `config.rs:717-733`) |
+| `caveman_text_compression.min_chars` | `500` (`config.rs:37`, `config.rs:75`) | `500`, **no range documented** (`:725`) | `clamp(100, 10_000)` (`config.rs:842-846`); a `0` discarded (`config.rs:955-961`) | Yes. **Divergent**: undocumented bound |
+| `smart_drops` | `false` (`config.rs:128`) | `false` (`:752`) | none | Yes, both tiers (`config.rs:890-894`, `config.rs:717-733`) |
+| `dreamer.inject_docs` | `true` (`config.rs:125`) | `true` (`:501`) | none | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:895-899`); project warns (`config.rs:729-732`) |
+| `temporal_awareness` | `true` (`config.rs:126`) | `true` (`:650`) | none | Yes, both tiers (`config.rs:900-904`, `config.rs:717-733`) |
+| `dreamer.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:121`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:875-879`); the schedule is `UserOnly` (`config.rs:667-672`), the flag is `ProjectRaiseOnly` and a project may only close the gate (`config.rs:687-692`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
+| `historian.model`, `historian.fallback_models` | empty chain (`config.rs:114`) | documented with **no user-only marker** (`:448-449`) | `dedup_preserving_order` (`config.rs:750-753`, `config.rs:950-953`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:788-806`); project warns (`config.rs:729-732`) |
+| `historian.module_model`, `historian.module_fallback_models` | absent | **undocumented** | none | Yes, user-only (`config.rs:659-672`); a non-empty module model selects the module chain instead of the plugin chain (`config.rs:774-806`) |
+| `historian.context_limit_tokens` | `128_000` (`config.rs:32`, `config.rs:122`) | **undocumented** | `> 0` via `positive_usize_at` (`config.rs:955-961`), applied at `config.rs:885-889` | Yes, user-only (`config.rs:668-672`); project warns (`config.rs:729-732`) |
+| `cache_ttl` (string or object) | `"5m"` (`config.rs:129`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:771-773`); `"never"` maps to `u64::MAX` (`scheduler.rs:365-368`) | Yes, user-only and privileged (`config.rs:627-693`, read at `config.rs:924-945`); project warns (`config.rs:729-732`); the TypeScript strip removes it from project config (`project-security.ts:386-391`). **Divergent**: `"0"` parses to `0` ms and forces execution every pass, undocumented |
+| `prompt_surface.guidance_override_path` | `None` (`config.rs:127`) | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `CONFIGURATION.md:88`) | Yes, from the user tier after merging (`config.rs:278-279`, `config.rs:408-490`); project warns (`config.rs:729-732`) |
+| `prompt_surface.guidance_override_text` | `None` (`config.rs:127`) | **undocumented** | exactly one guidance marker (`config.rs:905-920`) | Yes, user-only (`config.rs:670-672`), but a configured path resets it to `None` first (`config.rs:424`); project warns (`config.rs:729-732`) |
 | `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none | **Not in Rust; honoured in TypeScript.** Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` (`lib.rs:605`) at `lib.rs:4962`. `plugin/src/config/schema/eidnara.ts` parses it and `pi-plugin/src/context-handler.ts` consumes it |
 | `commit_cluster_trigger.min_clusters` | not parsed | `3`, **minimum `1`** (`:232`, `:238`) | none | **Not in Rust; honoured in TypeScript.** Rust hardwires `DEFAULT_MIN_COMMIT_CLUSTERS` (`lib.rs:607`) at `lib.rs:4963`. Same TypeScript parse and consumer as the flag |
 | `protected_tags` | not parsed by `config.rs` | `20`, range `1-100` (`:165`) | none from config; the request field defaults to a hardwired `20` at `lib.rs:603` | **Not through config; yes through the request.** `transform.rs:682-684` declares it `#[serde(default = "default_protected_tags")]`, and `rust-mode-transform.ts:1355` and `:2031` send it. 4b's `sel-protected-tags-not-read-from-module-config` is correct about the config route and is not a claim that the value never arrives |
@@ -522,7 +527,7 @@ Reachability: explicit-config-only
 Status: active
 Exercised: partial - `config.rs:1311-1314` pins the default `4000` and
 `:1317-1350` pins precedence, the deprecated fallback, and project rejection.
-The fallback cases at `:1884-1902` accept `128`, but no check asserts the
+The fallback cases at `:1885-1903` accept `128`, but no check asserts the
 documented range for the standard user-tier key.
 Guarantee: A configured `memory.injection_budget_tokens` outside the documented
 range is rejected, clamped to the documented range, or reported.
@@ -623,9 +628,9 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - the hostile fixture at `config.rs:1702-1804` supplies all
+Exercised: partial - the hostile fixture at `config.rs:1703-1805` supplies all
 25 consumed keys and asserts selected effective values, but derives its expected
-ignored-key count from `tier_class`. The pointer inventory at `:1809-1844` checks
+ignored-key count from `tier_class`. The pointer inventory at `:1810-1845` checks
 registration, not policy. No single independent per-key oracle covers this whole
 contract.
 Guarantee: A project may override only `memory.enabled`,
@@ -656,7 +661,8 @@ each consumed key, including `user_memories.enabled: true` against a closed user
 gate and a lower project threshold. The production path reads project values
 from `.eidnara/eidnara.jsonc`; no injected fault is required.
 Confidence: high - [evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
-Verified at `eccca05ec111fdf39df3795f08b7ca31ee713d96`: the classifications at
+Verified against the working tree based on
+`735f58dcb1002505c7aeb8a96505a4d210c4782b`: the classifications at
 `config.rs:657-693` match the explicit policy, and `:710-755` applies the tiers
 through them. The build-time assertion at `:696-708` rejects privileged keys
 classified as project-allowed; it does not pin the exact permissions of every
@@ -666,8 +672,9 @@ Existing check: `config.rs:1297-1302` covers raising and clamping the threshold;
 `:1317-1350` covers injection-budget rejection and the user-tier legacy fallback;
 `:1458-1480` covers docs-injection rejection and a temporal-flag override;
 `:1637-1666` covers attempts to open a closed gate and the unchanged closed gate;
-`:1671-1697` pins privileged key names; `:1702-1804` and `:1809-1844` are the
-hostile fixture and pointer inventory described above. Status `unaudited` for
+`:1671-1698` pins all ten privileged key names, including the legacy budget
+alias; `:1703-1805` and `:1810-1845` are the hostile fixture and pointer
+inventory described above. Status `unaudited` for
 each check; their presence is not a full independent policy oracle.
 Impact: a policy regression can let repository configuration select a model,
 widen an input budget, change unattended-task controls, or replace trusted

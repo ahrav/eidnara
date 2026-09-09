@@ -6,7 +6,8 @@ The source-catalog contract describes a `500-20000` memory-injection budget,
 but the Rust parser applies a floor of `1` and no ceiling. This is a user-tier
 range property. A project-tier fixture exercises trust-policy rejection instead.
 
-Source snapshot: `c73ed613dc9c48f4ad789925034f6eb081fca260`, verified
+Source snapshot: working tree based on
+`735f58dcb1002505c7aeb8a96505a4d210c4782b`, verified
 2026-09-09. Rust paths below are relative to `crates/daemon/src/`.
 
 ## Evidence trail
@@ -73,7 +74,7 @@ checks authority, not the range.
 Existing checks, each `unaudited`: `config.rs:1311-1314` pins the default;
 `:1317-1350` checks standard/legacy precedence and project rejection;
 `:1353-1387` checks the other user-only budget leaves. The fallback cases at
-`:1884-1902` accept `128` but do not assert the standard-key range. No full
+`:1885-1903` accept `128` but do not assert the standard-key range. No full
 range-check exercise is claimed.
 
 ## Investigation log

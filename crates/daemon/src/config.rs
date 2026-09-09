@@ -631,6 +631,7 @@ impl ConfigKey {
             | Self::HistorianModel
             | Self::HistorianFallbackModels
             | Self::MemoryInjectionBudgetTokens
+            | Self::MemoryBudgetTokens
             | Self::DreamerReviewUserMemoriesSchedule
             | Self::UserMemoriesEnabled
             | Self::DreamerInjectDocs
@@ -643,7 +644,6 @@ impl ConfigKey {
             | Self::AutoSearchMinPromptChars
             | Self::CavemanEnabled
             | Self::CavemanMinChars
-            | Self::MemoryBudgetTokens
             | Self::UserProfileBudgetTokens
             | Self::MemoryAutoPromote
             | Self::HistorianContextLimitTokens
@@ -1682,6 +1682,7 @@ mod tests {
                 ConfigKey::HistorianModel,
                 ConfigKey::HistorianFallbackModels,
                 ConfigKey::MemoryInjectionBudgetTokens,
+                ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserMemoriesEnabled,
                 ConfigKey::DreamerReviewUserMemoriesSchedule,
                 ConfigKey::DreamerInjectDocs,
