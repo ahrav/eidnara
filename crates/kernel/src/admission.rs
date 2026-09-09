@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use super::cas::{ArtifactDestination, ArtifactEgressFacts};
 use super::envelope::{
-    DomainSpec, Envelope, OBJECT_ROW_COLUMNS, ObjectRow, ObjectState, PendingChange,
+    DomainSpec, Envelope, OBJECT_ROW_COLUMNS, ObjectRow, ObjectState, PendingChange, Preview,
     load_object_states, object_row_from,
 };
 use super::object_write;
@@ -125,12 +125,11 @@ string_enum!(Surface {
     ExplicitSearch => "explicit_search",
 });
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SurfaceVisibility {
-    Hidden,
-    Visible,
-    Labeled,
-}
+string_enum!(SurfaceVisibility {
+    Hidden => "hidden",
+    Visible => "visible",
+    Labeled => "labeled",
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionEvent {
@@ -920,24 +919,19 @@ impl Envelope<'_> {
         self.guarded(|envelope| envelope.record_admission_inner(request))
     }
 
-    /// Returns the evaluation that `record_admission` would persist for `request` without writing it.
-    /// The same event, prior, approval, and trigger checks run, so a refusal here is the refusal the commit would give.
-    pub fn preview_admission(&self, request: AdmissionRequest) -> Result<Evaluation, KernelError> {
-        refuse_succession_events(&request)?;
-        Ok(self.prepare_admission(request)?.evaluation)
-    }
-
-    /// `None` when the registry has no live object by that id or its scope cannot match `scope`.
-    pub fn served_row(
+    /// The serving rows for `ids`, the registry's live objects among them whose scope can match `scope`, keyed by object id.
+    /// Ids that `identity` rejects are omitted from the query and absent from the result.
+    pub fn served_rows_for(
         &self,
-        object_id: &str,
+        ids: &[&str],
         scope: Option<ScopeTermFilter<'_>>,
-    ) -> Result<Option<ServedRow>, KernelError> {
-        let ids = serde_json::to_string(&[identity(object_id)?])
-            .map_err(|_| KernelError::InvalidInput)?;
+    ) -> Result<HashMap<String, ServedRow>, KernelError> {
+        let ids: Vec<String> = ids.iter().filter_map(|id| identity(id).ok()).collect();
+        let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
         Ok(served_classes(self.tx, self.commit_seq, Some(&ids), scope)?
             .into_iter()
-            .next())
+            .map(|row| (row.object.object_id.clone(), row))
+            .collect())
     }
 
     /// Returns the prior decision and supporting approval id from the same cache
@@ -1616,18 +1610,7 @@ impl Envelope<'_> {
         materialized: Option<ObjectRow>,
     ) -> Result<AdmissionDecision, KernelError> {
         let latest_key = prepared.facts.key();
-        let latest = StoredAdmission {
-            decision: PriorDecision {
-                historical_maturity: prepared.evaluation.historical_maturity,
-                effective_maturity: prepared.evaluation.effective_maturity.get(),
-                disposition: prepared.evaluation.disposition,
-                outcome: prepared.evaluation.outcome,
-                source_class: prepared.source_class,
-                taint_class: prepared.taint_class,
-                sensitivity: prepared.evaluation.sensitivity,
-            },
-            approval_object_id: prepared.supporting_approval.clone(),
-        };
+        let latest = prepared.stored();
         let admission_decision_id = format!("{}:{:020}", self.commit_seq, self.admission_ordinal);
         self.admission_ordinal = self
             .admission_ordinal
@@ -1799,6 +1782,40 @@ impl Envelope<'_> {
             sensitivity: prepared.evaluation.sensitivity,
             outcome: prepared.evaluation.outcome,
         })
+    }
+}
+
+impl Preview<'_> {
+    /// Returns the evaluation `record_admission` would persist for `request` without writing it; the same prior, approval, and trigger checks decide both. commentlint: allow(JUDGE)
+    /// The decision becomes the prior for later admissions of the same key in this preview, matching a written decision inside a commit.
+    pub fn preview_admission(
+        &mut self,
+        request: AdmissionRequest,
+    ) -> Result<Evaluation, KernelError> {
+        refuse_succession_events(&request)?;
+        let prepared = self.envelope.prepare_admission(request)?;
+        self.envelope
+            .admission_latest
+            .insert(prepared.facts.key(), prepared.stored());
+        Ok(prepared.evaluation)
+    }
+}
+
+impl PreparedDecision {
+    /// The prior a later decision on the same key reads once this one is written.
+    fn stored(&self) -> StoredAdmission {
+        StoredAdmission {
+            decision: PriorDecision {
+                historical_maturity: self.evaluation.historical_maturity,
+                effective_maturity: self.evaluation.effective_maturity.get(),
+                disposition: self.evaluation.disposition,
+                outcome: self.evaluation.outcome,
+                source_class: self.source_class,
+                taint_class: self.taint_class,
+                sensitivity: self.evaluation.sensitivity,
+            },
+            approval_object_id: self.supporting_approval.clone(),
+        }
     }
 }
 
