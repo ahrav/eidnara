@@ -141,10 +141,6 @@ pub fn compute_dreamer_request_digest(inputs: &Value) -> Result<String, Contract
 }
 
 /// Reports whether `text` contains exactly `expected_len` lowercase ASCII hex bytes.
-///
-/// Every identity and digest field the kernel and the stores accept goes
-/// through this one check, so no two of them admit different lengths or
-/// character sets for the same value.
 pub fn is_lower_hex(text: &str, expected_len: usize) -> bool {
     text.len() == expected_len
         && text

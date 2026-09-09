@@ -483,13 +483,13 @@ fn the_request_digest_ignores_map_insertion_order_and_pins_the_protocol() {
         dreamer_request_digest(&ordered).unwrap(),
         dreamer_request_digest(&reordered_items).unwrap()
     );
-    // The protocol prefix is part of the digested bytes: the digest is not the
-    // hash of the canonical JSON alone.
     let canonical = context_core::canonical_json::canonical_json_encode(&ordered).unwrap();
-    let bare = {
+    let expected = {
         use sha2::Digest as _;
-        format!("{:x}", sha2::Sha256::digest(canonical.as_bytes()))
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"eidnara-dreamer-request-v1\n");
+        hasher.update(canonical.as_bytes());
+        format!("{:x}", hasher.finalize())
     };
-    assert_ne!(dreamer_request_digest(&ordered).unwrap(), bare);
-    assert_eq!(dreamer_request_digest(&ordered).unwrap().len(), 64);
+    assert_eq!(dreamer_request_digest(&ordered).unwrap(), expected);
 }

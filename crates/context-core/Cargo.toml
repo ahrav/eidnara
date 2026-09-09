@@ -10,13 +10,13 @@ description = "Cache-stability core: pass classifier, decay curve, redaction pol
 
 [dependencies]
 secret-scanner = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+serde = { workspace = true }
 
 [[bench]]
 name = "windowed"
