@@ -59,6 +59,9 @@ pub enum KernelError {
     InvalidInput,
     #[error("kernel admission classification or transition is invalid")]
     AdmissionPolicy,
+    /// A preview refuses a later admission that depends on authority an earlier admission in the same preview changed. A commit runs the authority cascade over that change before judging the later admission; the preview does not simulate the cascade, so it refuses rather than judge against authority the commit would already have revised. commentlint: allow(JUDGE)
+    #[error("kernel preview rests on an authority an earlier previewed admission changed")]
+    PreviewAuthorityChanged,
     #[error("kernel snapshot is newer than the committed tip")]
     FutureSnapshot,
     #[error("kernel object was not found")]
@@ -97,6 +100,7 @@ impl KernelError {
         Self::CorruptCanonicalRow,
         Self::InvalidInput,
         Self::AdmissionPolicy,
+        Self::PreviewAuthorityChanged,
         Self::FutureSnapshot,
         Self::NotFound,
         Self::InvalidCheckpoint,
@@ -1130,6 +1134,7 @@ mod tests {
                 | KernelError::CorruptCanonicalRow
                 | KernelError::InvalidInput
                 | KernelError::AdmissionPolicy
+                | KernelError::PreviewAuthorityChanged
                 | KernelError::FutureSnapshot
                 | KernelError::NotFound
                 | KernelError::InvalidCheckpoint
