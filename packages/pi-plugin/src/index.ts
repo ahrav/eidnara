@@ -37,6 +37,7 @@ import { resolveFallbackChain } from "@eidnara/opencode/shared/resolve-fallbacks
 import { handlePiCloneSessionStart } from "./clone-inheritance";
 import { type PiSidekickConfig, registerCtxAugCommand } from "./commands/ctx-aug";
 import { registerCtxFlushCommand } from "./commands/ctx-flush";
+import { registerCtxMemoryMarkCommand } from "./commands/ctx-memory-mark";
 import { registerCtxRecompCommand } from "./commands/ctx-recomp";
 import { registerCtxStatusCommand } from "./commands/ctx-status";
 import { registerCtxWrapupCommand } from "./commands/ctx-wrapup";
@@ -480,6 +481,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
 
     registerCtxWrapupCommand(pi, daemonSessionDeps);
     info("registered /ctx-wrapup");
+
+    registerCtxMemoryMarkCommand(pi, { kernelClient });
+    info("registered /ctx-memory-mark");
 
     const systemPromptRefreshSessions = new Set<string>();
 

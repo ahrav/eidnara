@@ -1,11 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import { getEidnaraBuiltinCommands } from "./commands";
 
-const EXPECTED_KEYS = ["ctx-status", "ctx-recomp", "ctx-wrapup", "ctx-flush", "ctx-aug"];
+const EXPECTED_KEYS = [
+    "ctx-status",
+    "ctx-recomp",
+    "ctx-wrapup",
+    "ctx-flush",
+    "ctx-aug",
+    "ctx-memory-mark",
+];
 const UNAVAILABLE = "Unavailable when compaction.enabled is false";
 
 describe("getEidnaraBuiltinCommands", () => {
-    it("exposes exactly the five built-in commands", () => {
+    it("exposes exactly the six built-in commands", () => {
         expect(Object.keys(getEidnaraBuiltinCommands()).sort()).toEqual([...EXPECTED_KEYS].sort());
         expect(Object.keys(getEidnaraBuiltinCommands(false)).sort()).toEqual(
             [...EXPECTED_KEYS].sort(),
@@ -24,7 +31,7 @@ describe("getEidnaraBuiltinCommands", () => {
             expect(commands[key]?.description).toContain(UNAVAILABLE);
             expect(commands[key]?.description).toContain(`/${key}`);
         }
-        for (const key of ["ctx-status", "ctx-aug"]) {
+        for (const key of ["ctx-status", "ctx-aug", "ctx-memory-mark"]) {
             expect(commands[key]?.description).not.toContain(UNAVAILABLE);
         }
     });

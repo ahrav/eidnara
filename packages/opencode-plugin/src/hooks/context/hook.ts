@@ -25,7 +25,7 @@ import {
     createToolExecuteAfterHook,
     getLiveNotificationParams,
 } from "./hook-handlers";
-import { closeKernelSession } from "./kernel-transport";
+import { closeKernelSession, kernelClientResolver } from "./kernel-transport";
 import {
     addBoundedSession,
     type LiveSessionState,
@@ -382,6 +382,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
 
     const commandHandler = createEidnaraCommandHandler({
         moduleClient,
+        kernelClient: kernelClientResolver(deps.config),
         compactionOff,
         resolveProjectRoot: projectRootForCommand,
         isSessionDeleted: (sessionId) => deletedSessions.has(sessionId),

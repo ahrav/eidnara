@@ -4,16 +4,21 @@
  * client they ship with. It keeps the semantics the client relies on:
  * `known_as_of` tokens, the three conflict reasons, replay by operation key,
  * supersession chains, admission classes derived from `source_kind` and
- * lowered by the asserted classes, the envelope limits, and per-surface
- * visibility: a `labeled` row serves only
- * on `explicit_search`, `sensitive` rows hide from the automatic surfaces, and
- * `secret` rows hide everywhere. Rows carry the project root they were written
- * under and serve only to that project. Scripted surface and commit states
- * override the row-backed replies.
+ * lowered by the asserted classes, the envelope limits, disposition events
+ * with the kernel's fixed table and approval-gated relaxation, previews of
+ * them, and per-surface visibility: a `labeled` row serves only on
+ * `explicit_search`, a non-active disposition serves labeled at most or not
+ * at all, `sensitive` rows hide from the automatic surfaces, and `secret` rows
+ * hide everywhere. Rows carry the project root they were written under and
+ * serve only to that project. Scripted surface and commit states override the
+ * row-backed replies.
  */
 
 import { HostCallError } from "../host-client";
 import {
+    DISPOSITION_EVENTS,
+    type DispositionEvent,
+    type DispositionResult,
     type KernelMemorySnapshot,
     type KernelTransport,
     type KernelTransportCall,
@@ -22,8 +27,19 @@ import {
     type MemoryState,
     parseReadResponse,
     type Surface,
+    type SurfaceVisibilities,
     sha256Hex,
+    type Visibility,
 } from "../kernel-client";
+
+export type FakeDisposition =
+    | "active"
+    | "stale"
+    | "disputed"
+    | "superseded"
+    | "rejected"
+    | "contradicted"
+    | "quarantined";
 
 export interface FakeObject {
     object_id: string;
@@ -37,6 +53,8 @@ export interface FakeObject {
     superseded_by: string | null;
     sensitivity: "normal" | "sensitive" | "secret";
     labeled: boolean;
+    /** The kernel's disposition ratchet; `active` unless a disposition event moved it. */
+    disposition: FakeDisposition;
     /**
      * The project root the row was written under. `null` marks a seeded row
      * that serves to every project, a shape no route commit can produce.
@@ -50,6 +68,65 @@ interface Receipt {
     request_digest: string;
     tokens: { object_id: string; known_as_of: number }[];
     merged: string[];
+    dispositions: DispositionResult[];
+}
+
+/** The kernel's fixed event table: the command outcome and the disposition each event asks for. */
+const EVENT_EFFECT: Record<DispositionEvent, { outcome: string; disposition: FakeDisposition }> = {
+    mark_stale: { outcome: "deny", disposition: "stale" },
+    mark_disputed: { outcome: "deny", disposition: "disputed" },
+    explicit_reject: { outcome: "reject", disposition: "rejected" },
+    contradict: { outcome: "deny", disposition: "contradicted" },
+    quarantine: { outcome: "quarantine", disposition: "quarantined" },
+};
+
+/** Moving to a lower rank is a relaxation and needs a valid approval. */
+const DISPOSITION_RANK: Record<FakeDisposition, number> = {
+    active: 0,
+    stale: 1,
+    disputed: 1,
+    superseded: 1,
+    rejected: 2,
+    contradicted: 3,
+    quarantined: 3,
+};
+
+type VisibilityRow = "automatic" | "explicit_labeled" | "review_only" | "audit_only";
+
+function visibilityRow(labeled: boolean, disposition: FakeDisposition): VisibilityRow {
+    switch (disposition) {
+        case "active":
+            return labeled ? "explicit_labeled" : "automatic";
+        case "stale":
+        case "disputed":
+        case "superseded":
+            return "explicit_labeled";
+        case "rejected":
+            return "review_only";
+        case "contradicted":
+        case "quarantined":
+            return "audit_only";
+    }
+}
+
+function surfaceVisibility(
+    row: VisibilityRow,
+    surface: Surface,
+    sensitivity: Sensitivity,
+): Visibility {
+    if (sensitivity === "secret") return "hidden";
+    if (sensitivity === "sensitive" && surface !== "explicit_search") return "hidden";
+    if (row === "automatic") return "visible";
+    if (row === "explicit_labeled" && surface === "explicit_search") return "labeled";
+    return "hidden";
+}
+
+function surfaceVisibilities(row: VisibilityRow, sensitivity: Sensitivity): SurfaceVisibilities {
+    return {
+        auto_inject: surfaceVisibility(row, "auto_inject", sensitivity),
+        auto_search: surfaceVisibility(row, "auto_search", sensitivity),
+        explicit_search: surfaceVisibility(row, "explicit_search", sensitivity),
+    };
 }
 
 type Operation = Record<string, unknown> & { op: string };
@@ -178,6 +255,8 @@ export class FakeKernel {
     readonly receipts = new Map<string, Receipt>();
     /** Every `decision_id` the store has held, live or retired; the daemon's `decisions` primary key refuses a second insert under any of them. commentlint: allow(JUDGE) */
     readonly decisionIds = new Set<string>();
+    /** Objects the kernel would honor as approval authority: a live `adr_accepted` decision admitted by an explicit user. Any other live object cited as an approval is valid to name but grants nothing, so a relaxation citing it is denied. commentlint: allow(JUDGE) */
+    readonly approvals = new Set<string>();
     /** Forces every read on a surface to answer with this state instead of rows. */
     readonly surfaceStates = new Map<Surface, MemoryState>();
     /** Forces the next commit to answer with this state. */
@@ -209,6 +288,7 @@ export class FakeKernel {
         summary: string;
         rationale?: string;
         labeled?: boolean;
+        disposition?: FakeDisposition;
         sensitivity?: FakeObject["sensitivity"];
         source_revision?: number;
         domain_id?: string;
@@ -229,6 +309,7 @@ export class FakeKernel {
             superseded_by: null,
             sensitivity: input.sensitivity ?? "normal",
             labeled: input.labeled ?? true,
+            disposition: input.disposition ?? "active",
             project_root: input.projectRoot ?? null,
             decision: {
                 decision_kind: input.decision_kind,
@@ -238,6 +319,19 @@ export class FakeKernel {
         this.objects.set(object.object_id, object);
         this.lastChange.set(object.object_id, seq);
         this.decisionIds.add(input.decision_id ?? input.object_id);
+        return object;
+    }
+
+    /** Seeds a live `adr_accepted` decision the fake honors as approval authority, as the route test's `seed_approval` does. */
+    seedApproval(objectId: string, projectRoot?: string): FakeObject {
+        const object = this.seedDecision({
+            object_id: objectId,
+            decision_kind: "adr_accepted",
+            summary: "Approved by the user.",
+            source_kind: "user",
+            ...(projectRoot === undefined ? {} : { projectRoot }),
+        });
+        this.approvals.add(objectId);
         return object;
     }
 
@@ -273,10 +367,16 @@ export class FakeKernel {
             .sort((left, right) => (left.object_id < right.object_id ? -1 : 1));
     }
 
+    private static visibilityOn(object: FakeObject, surface: Surface): Visibility {
+        return surfaceVisibility(
+            visibilityRow(object.labeled, object.disposition),
+            surface,
+            object.sensitivity,
+        );
+    }
+
     private static servesOn(object: FakeObject, surface: Surface): boolean {
-        if (object.sensitivity === "secret") return false;
-        if (surface === "explicit_search") return true;
-        return !object.labeled && object.sensitivity !== "sensitive";
+        return FakeKernel.visibilityOn(object, surface) !== "hidden";
     }
 
     /** Newest `created_commit_seq` first, then ascending `object_id` within one commit. */
@@ -325,11 +425,12 @@ export class FakeKernel {
             truncated = true;
         }
         const rows = visible.map((object) => {
-            const { labeled, project_root, decision, ...row } = object;
+            const { labeled, disposition: _disposition, project_root, decision, ...row } = object;
+            const visibility = FakeKernel.visibilityOn(object, surface as Surface);
             return {
                 object: row,
-                visibility: labeled ? "labeled" : "visible",
-                labeled,
+                visibility,
+                labeled: visibility === "labeled",
                 scope_id: fakeProjectScopeId(project_root ?? projectRoot ?? ""),
                 token: { object_id: object.object_id, known_as_of: asOf },
                 decision: decision ?? null,
@@ -373,12 +474,24 @@ export class FakeKernel {
         return null;
     }
 
-    /** Class resolution precedes the receipt lookup, so an over-declared class cannot replay a receipt. commentlint: allow(JUDGE) */
-    private commitReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
+    /**
+     * The checks a commit and a preview share, in the daemon's order: the
+     * scripted state, the envelope limits, class resolution, then the receipt
+     * lookup, so an over-declared class cannot replay a receipt.
+     */
+    private commitPreflight(body: Record<string, unknown>):
+        | { reply: unknown }
+        | {
+              operations: Operation[];
+              tokens: { object_id: string; known_as_of: number }[];
+              sourceKind: string;
+              intent: { operation_key: string; request_digest: string };
+              replayed: Receipt | null;
+          } {
         if (this.nextCommitState) {
             const state = this.nextCommitState;
             this.nextCommitState = null;
-            return { state };
+            return { reply: { state } };
         }
         const operations = (body.operations as Operation[] | undefined) ?? [];
         if (operations.length > MAX_COMMIT_OPERATIONS) {
@@ -391,20 +504,29 @@ export class FakeKernel {
             throw invalidParams(`kernel.commit carries at most ${MAX_COMMIT_TOKENS} tokens`);
         }
         const classes = resolveClasses(body);
-        if ("reply" in classes) return classes.reply;
-        const { sourceKind } = classes;
+        if ("reply" in classes) return classes;
         const intent = body.intent as { operation_key: string; request_digest: string };
-        const replayed = this.receipts.get(intent.operation_key);
+        const replayed = this.receipts.get(intent.operation_key) ?? null;
+        if (replayed && replayed.request_digest !== intent.request_digest) {
+            return { reply: invalid("operation_key_reused") };
+        }
+        return { operations, tokens, sourceKind: classes.sourceKind, intent, replayed };
+    }
+
+    private commitReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
+        const preflight = this.commitPreflight(body);
+        if ("reply" in preflight) return preflight.reply;
+        const { operations, tokens, sourceKind, intent, replayed } = preflight;
         if (replayed) {
-            if (replayed.request_digest !== intent.request_digest) {
-                return invalid("operation_key_reused");
-            }
             return {
                 state: { kind: "available" },
                 receipt: { commit_seq: replayed.commit_seq, replayed: true },
                 known_as_of: replayed.commit_seq,
                 tokens: replayed.tokens,
                 merged: replayed.merged,
+                ...(replayed.dispositions.length === 0
+                    ? {}
+                    : { dispositions: replayed.dispositions }),
             };
         }
         this.beforeCommit?.();
@@ -415,7 +537,10 @@ export class FakeKernel {
         const staged = new Map<string, FakeObject>();
         const stagedDecisionIds = new Set<string>();
         const touched = new Set<string>();
+        /** Objects whose row changed structurally; the token advances for these alone. */
+        const changed = new Set<string>();
         const merged = new Set<string>();
+        const dispositions: DispositionResult[] = [];
         const view = (objectId: string): FakeObject | undefined =>
             staged.get(objectId) ?? this.objects.get(objectId);
         const stage = (objectId: string): FakeObject => {
@@ -457,6 +582,7 @@ export class FakeKernel {
                 superseded_by: null,
                 sensitivity,
                 labeled: true,
+                disposition: "active",
                 project_root: projectRoot,
                 decision: {
                     decision_kind: spec.decision_kind as string,
@@ -464,12 +590,14 @@ export class FakeKernel {
                 },
             });
             touched.add(objectId);
+            changed.add(objectId);
         };
         const invalidate = (target: FakeObject, supersededBy: string | null): void => {
             const row = stage(target.object_id);
             row.invalidated_commit_seq = seq;
             row.superseded_by = supersededBy;
             touched.add(row.object_id);
+            changed.add(row.object_id);
         };
         for (const operation of operations) {
             if (operation.op === "insert_decision") {
@@ -519,6 +647,7 @@ export class FakeKernel {
                 if (survivor) {
                     merged.add(survivor.object_id);
                     touched.add(survivor.object_id);
+                    changed.add(survivor.object_id);
                 } else {
                     // A non-fold successor may raise its predecessor's label but not lower it.
                     insert(
@@ -534,6 +663,14 @@ export class FakeKernel {
                 const retired = liveTarget(operation.object_id as string);
                 if (!retired) return invalid("not_found");
                 invalidate(retired, null);
+            } else if (operation.op === "disposition") {
+                const judged = this.judgeDisposition(operation, projectRoot, view);
+                if ("reply" in judged) return judged.reply;
+                const row = stage(judged.result.object_id);
+                row.disposition = judged.result.disposition as FakeDisposition;
+                // An admission event is part of the receipt but does not advance the object's token. commentlint: allow(JUDGE)
+                touched.add(row.object_id);
+                dispositions.push(judged.result);
             } else {
                 return invalid("invalid_input");
             }
@@ -547,13 +684,14 @@ export class FakeKernel {
                 this.objects.set(objectId, row);
             }
         }
-        for (const objectId of touched) this.lastChange.set(objectId, seq);
+        for (const objectId of changed) this.lastChange.set(objectId, seq);
         for (const decisionId of stagedDecisionIds) this.decisionIds.add(decisionId);
         const receipt: Receipt = {
             commit_seq: seq,
             request_digest: intent.request_digest,
             tokens: [...touched].sort().map((object_id) => ({ object_id, known_as_of: seq })),
             merged: [...merged].sort(),
+            dispositions,
         };
         this.receipts.set(intent.operation_key, receipt);
         return {
@@ -562,7 +700,110 @@ export class FakeKernel {
             known_as_of: seq,
             tokens: receipt.tokens,
             merged: receipt.merged,
+            ...(dispositions.length === 0 ? {} : { dispositions }),
         };
+    }
+
+    /**
+     * The daemon's `disposition_request` and the kernel's ratchet: the target
+     * must be a live in-project decision, a cited approval a live in-project
+     * object, and a move toward a less restrictive disposition without one is
+     * recorded as denied with the disposition unchanged.
+     */
+    private judgeDisposition(
+        operation: Operation,
+        projectRoot: string | null,
+        view: (objectId: string) => FakeObject | undefined,
+    ): { result: DispositionResult } | { reply: unknown } {
+        const objectId = operation.object_id;
+        const event = operation.event;
+        if (
+            typeof objectId !== "string" ||
+            !(DISPOSITION_EVENTS as readonly unknown[]).includes(event)
+        ) {
+            throw invalidParams("kernel.commit disposition is malformed");
+        }
+        const target = view(objectId);
+        if (
+            !target ||
+            !FakeKernel.inProject(target, projectRoot) ||
+            target.invalidated_commit_seq !== null ||
+            target.object_kind !== "decision"
+        ) {
+            return { reply: invalid("not_found") };
+        }
+        const approval = operation.approval_object_id;
+        let approved = false;
+        if (approval !== undefined) {
+            if (typeof approval !== "string") {
+                throw invalidParams("kernel.commit disposition approval is malformed");
+            }
+            const object = view(approval);
+            if (
+                !object ||
+                !FakeKernel.inProject(object, projectRoot) ||
+                object.invalidated_commit_seq !== null
+            ) {
+                return { reply: invalid("not_found") };
+            }
+            approved = this.approvals.has(approval);
+        }
+        const effect = EVENT_EFFECT[event as DispositionEvent];
+        const relaxes = DISPOSITION_RANK[effect.disposition] < DISPOSITION_RANK[target.disposition];
+        const denied = relaxes && !approved;
+        return {
+            result: {
+                object_id: objectId,
+                event: event as DispositionEvent,
+                outcome: effect.outcome,
+                previous_disposition: target.disposition,
+                disposition: denied ? target.disposition : effect.disposition,
+                denied,
+            },
+        };
+    }
+
+    /** `kernel.commit` with `preview: true`: a recorded identity answers its receipt; otherwise every operation is judged at the tip, nothing is written, and no receipt is created. commentlint: allow(JUDGE) */
+    private previewReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
+        const tokens = (body.tokens as unknown[] | undefined) ?? [];
+        if (tokens.length > 0)
+            throw invalidParams("kernel.commit preview checks no tokens; send none");
+        const operations = (body.operations as Operation[] | undefined) ?? [];
+        if (operations.some((operation) => operation.op !== "disposition")) {
+            throw invalidParams("kernel.commit preview supports disposition operations only");
+        }
+        const preflight = this.commitPreflight(body);
+        if ("reply" in preflight) return preflight.reply;
+        if (preflight.replayed) {
+            return {
+                state: { kind: "available" },
+                known_as_of: this.tip,
+                receipt: { commit_seq: preflight.replayed.commit_seq, replayed: true },
+                previews: [],
+            };
+        }
+        const previews = [];
+        for (const operation of operations) {
+            const judged = this.judgeDisposition(operation, projectRoot, (id) =>
+                this.objects.get(id),
+            );
+            if ("reply" in judged) return judged.reply;
+            const target = this.objects.get(judged.result.object_id) as FakeObject;
+            const current = surfaceVisibilities(
+                visibilityRow(target.labeled, target.disposition),
+                target.sensitivity,
+            );
+            const projected = surfaceVisibilities(
+                visibilityRow(target.labeled, judged.result.disposition as FakeDisposition),
+                target.sensitivity,
+            );
+            const visibility_changes = SURFACES.some(
+                (surface) =>
+                    current[surface] !== "hidden" && current[surface] !== projected[surface],
+            );
+            previews.push({ ...judged.result, current, projected, visibility_changes });
+        }
+        return { state: { kind: "available" }, known_as_of: this.tip, previews };
     }
 
     reply(call: KernelTransportCall): unknown {
@@ -576,7 +817,9 @@ export class FakeKernel {
             case "kernel.read":
                 return this.readReply(body, projectRoot);
             case "kernel.commit":
-                return this.commitReply(body, projectRoot);
+                return body.preview === true
+                    ? this.previewReply(body, projectRoot)
+                    : this.commitReply(body, projectRoot);
             default:
                 return invalid("invalid_input");
         }
