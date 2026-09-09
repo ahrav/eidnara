@@ -29341,43 +29341,109 @@ mod tests {
         }
     }
 
-    /// The exact text a literal-shaped regex accepts: anchors, one-character classes, and
-    /// backslash escapes removed. A class or group with alternation stays as written.
-    fn regex_text(pattern: &str) -> String {
-        let mut text = pattern
-            .trim_start_matches('^')
-            .trim_end_matches('$')
-            .to_string();
-        let mut out = String::new();
-        let mut chars = text.drain(..).peekable();
-        while let Some(ch) = chars.next() {
-            match ch {
-                '\\' => {
-                    if let Some(escaped) = chars.next() {
-                        out.push(escaped);
-                    }
-                }
-                '[' => {
-                    let mut class = String::new();
-                    for inner in chars.by_ref() {
-                        if inner == ']' {
-                            break;
+    /// The exact texts a literal-shaped regex accepts: anchors, one-character classes, and
+    /// backslash escapes removed, and every innermost alternation group expanded into one text
+    /// per alternative (bounded, so a pathological pattern cannot explode). A class wider than
+    /// one character stays as written.
+    fn regex_texts(pattern: &str) -> Vec<String> {
+        fn reduce(pattern: &str) -> String {
+            let mut text = pattern
+                .trim_start_matches('^')
+                .trim_end_matches('$')
+                .to_string();
+            let mut out = String::new();
+            let mut chars = text.drain(..).peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\\' => {
+                        if let Some(escaped) = chars.next() {
+                            out.push('\u{0}');
+                            out.push(escaped);
                         }
-                        class.push(inner);
                     }
-                    if class.chars().count() == 1 {
-                        out.push_str(&class);
-                    } else {
-                        out.push('[');
-                        out.push_str(&class);
-                        out.push(']');
+                    '[' => {
+                        let mut class = String::new();
+                        for inner in chars.by_ref() {
+                            if inner == ']' {
+                                break;
+                            }
+                            class.push(inner);
+                        }
+                        if class.chars().count() == 1 {
+                            out.push('\u{0}');
+                            out.push_str(&class);
+                        } else {
+                            out.push('[');
+                            out.push_str(&class);
+                            out.push(']');
+                        }
                     }
+                    other => out.push(other),
                 }
-                '(' | ')' if !pattern.contains('|') => {}
-                other => out.push(other),
+            }
+            out
+        }
+
+        /// Expand the innermost parenthesized group that contains `|`; a NUL marks an escaped
+        /// character so an escaped `|` or `(` is never treated as syntax.
+        fn expand(text: &str, out: &mut Vec<String>) {
+            if out.len() >= 64 {
+                return;
+            }
+            let bytes: Vec<char> = text.chars().collect();
+            let mut open = None;
+            for (index, &ch) in bytes.iter().enumerate() {
+                let escaped = index > 0 && bytes[index - 1] == '\u{0}';
+                if escaped {
+                    continue;
+                }
+                match ch {
+                    '(' => open = Some(index),
+                    ')' => {
+                        if let Some(start) = open {
+                            let inner: String = bytes[start + 1..index].iter().collect();
+                            let inner = inner.strip_prefix("?:").unwrap_or(&inner).to_string();
+                            let prefix: String = bytes[..start].iter().collect();
+                            let suffix: String = bytes[index + 1..].iter().collect();
+                            let alternatives: Vec<&str> = split_unescaped(&inner, '|');
+                            for alternative in alternatives {
+                                expand(&format!("{prefix}{alternative}{suffix}"), out);
+                            }
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // No group left; a bare top-level alternation splits into its alternatives.
+            let alternatives = split_unescaped(text, '|');
+            if alternatives.len() > 1 {
+                for alternative in alternatives {
+                    out.push(alternative.replace('\u{0}', ""));
+                }
+            } else {
+                out.push(text.replace('\u{0}', ""));
             }
         }
-        out.replace("?:", "")
+
+        fn split_unescaped(text: &str, separator: char) -> Vec<&str> {
+            let mut parts = Vec::new();
+            let mut start = 0;
+            let mut previous_escape = false;
+            for (index, ch) in text.char_indices() {
+                if ch == separator && !previous_escape {
+                    parts.push(&text[start..index]);
+                    start = index + ch.len_utf8();
+                }
+                previous_escape = ch == '\u{0}';
+            }
+            parts.push(&text[start..]);
+            parts
+        }
+
+        let mut texts = Vec::new();
+        expand(&reduce(pattern), &mut texts);
+        texts
     }
 
     /// Literals in an expression plus the values of any string constants it names.
@@ -29616,11 +29682,23 @@ mod tests {
                     }
                     _ => false,
                 };
+                let is_comparison_call = match &*call.func {
+                    syn::Expr::Path(path) => path.path.segments.last().is_some_and(|s| {
+                        COMPARISON_METHODS.contains(&s.ident.to_string().as_str())
+                    }),
+                    _ => false,
+                };
+                if is_comparison_call {
+                    for arg in &call.args {
+                        reject_unevaluable_macros(arg);
+                        self.compared.extend(compared_strings(arg, &self.consts));
+                    }
+                }
                 if is_pattern_constructor {
                     for arg in &call.args {
                         reject_unevaluable_macros(arg);
                         for pattern in compared_strings(arg, &self.consts) {
-                            self.compared.push(regex_text(&pattern));
+                            self.compared.extend(regex_texts(&pattern));
                         }
                     }
                 }
@@ -29743,9 +29821,14 @@ mod tests {
                 .expect("macro")
                 .tokens
         ));
-        assert_eq!(regex_text(r"^mural\.render$"), "mural.render");
-        assert_eq!(regex_text(r"^(?:git[.]ingest)$"), "git.ingest");
-        assert_eq!(regex_text(r"(a|b)\.db"), "(a|b).db");
+        assert_eq!(regex_texts(r"^mural\.render$"), ["mural.render"]);
+        assert_eq!(regex_texts(r"^(?:git[.]ingest)$"), ["git.ingest"]);
+        assert_eq!(regex_texts(r"(a|b)\.db"), ["a.db", "b.db"]);
+        assert_eq!(
+            regex_texts(r"^(mural|kernel)\.(read|list)$"),
+            ["mural.read", "mural.list", "kernel.read", "kernel.list"]
+        );
+        assert_eq!(regex_texts(r"a\|b"), ["a|b"]);
         assert_eq!(camel_words("MuralRender"), "mural_render");
         assert_eq!(serde_rename("snake_case", "MuralRender"), "mural_render");
         assert_eq!(serde_rename("kebab-case", "MuralRender"), "mural-render");

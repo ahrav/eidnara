@@ -457,6 +457,7 @@ describe("databaseUses", () => {
                     "let late;",
                     "late = createRequire(import.meta.url);",
                     'const lateLoad = late("node:sqlite");',
+                    'const { DatabaseSync: Elem } = process["getBuiltinModule"]("node:sqlite");',
                     "",
                 ].join("\n"),
             ).escapes,
@@ -471,6 +472,7 @@ describe("databaseUses", () => {
             'const ran = run("bun:sqlite");',
             'const viaBuiltinAlias = builtin("node:sqlite");',
             'const lateLoad = late("node:sqlite");',
+            'const { DatabaseSync: Elem } = process["getBuiltinModule"]("node:sqlite");',
         ]);
     });
 
@@ -645,7 +647,7 @@ describe("operationLiteralHits", () => {
                     "m.ts",
                 ),
             ).map((entry) => entry.value),
-        ).toEqual(["claim.intent.stage", "(a|b).db", "context.db", "CONTEXT.DB"]);
+        ).toEqual(["claim.intent.stage", "a.db", "b.db", "context.db", "CONTEXT.DB"]);
         expect(
             literalStrings(parseSource("const ci = /^CONTEXT[.]DB$/i;", "m.ts")).map(
                 (entry) => entry.value,
@@ -655,7 +657,15 @@ describe("operationLiteralHits", () => {
             literalStrings(
                 parseSource("const alt = /^(?:claim[.]intent[.]stage|kernel[.]read)$/;", "m.ts"),
             ).map((entry) => entry.value),
-        ).toEqual(["(?:claim.intent.stage|kernel.read)", "claim.intent.stage", "kernel.read"]);
+        ).toEqual(["claim.intent.stage", "kernel.read"]);
+        expect(
+            literalStrings(
+                parseSource(
+                    "const nested = /^(?:claim|kernel)[.](intent|read)$/; const esc = /a\\|b/;",
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim.intent", "claim.read", "kernel.intent", "kernel.read", "a|b"]);
         expect(
             literalStrings(
                 parseSource(

@@ -299,22 +299,40 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
     };
     // A regex that matches one exact string is that string with its anchors and escapes removed;
     // the literal-shaped body is what a `/^claim\.intent\.stage$/.test(op)` dispatch compares.
-    const regexBody = (text: string): string => {
-        const body = text.slice(1, text.lastIndexOf("/"));
-        return (
-            body
-                .replace(/^\^/, "")
-                .replace(/\$$/, "")
-                .replace(
-                    /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g,
-                    (_, x, u, b) => String.fromCodePoint(Number.parseInt(x ?? u ?? b, 16)),
-                )
-                // `[.]` matches exactly one character; a wider class stays as written.
-                .replace(/\[([^\]\\^])\]/g, "$1")
-                // A group without alternation matches exactly its contents.
-                .replace(/\((?:\?:)?([^()|]*)\)/g, "$1")
-                .replace(/\\(.)/g, "$1")
-        );
+    // The texts a literal-shaped regex accepts: anchors and one-character classes reduced,
+    // escapes decoded, and every innermost alternation group expanded to one text per
+    // alternative (bounded). A wider class stays as written. Escaped characters are marked with
+    // a private-use character while groups are expanded so an escaped `|` or `(` is never read as syntax.
+    const regexTexts = (text: string): string[] => {
+        const reduced = text
+            .slice(1, text.lastIndexOf("/"))
+            .replace(/^\^/, "")
+            .replace(/\$$/, "")
+            .replace(
+                /\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})|\\u\{([0-9a-fA-F]+)\}/g,
+                (_, x, u, b) => `\uE000${String.fromCodePoint(Number.parseInt(x ?? u ?? b, 16))}`,
+            )
+            // A one-character class, possibly holding an already-decoded escape.
+            .replace(/\[(\uE000?[^\]\\^])\]/g, "\uE000$1")
+            .replace(/\\(.)/g, "\uE000$1");
+        const out: string[] = [];
+        const splitUnescaped = (value: string): string[] => value.split(/(?<!\uE000)\|/);
+        const expand = (value: string): void => {
+            if (out.length >= 64) return;
+            const group = /\((?:\?:)?([^()]*)\)/.exec(value);
+            if (group?.index !== undefined && !value.startsWith("\uE000", group.index - 1)) {
+                const prefix = value.slice(0, group.index);
+                const suffix = value.slice(group.index + group[0].length);
+                for (const alternative of splitUnescaped(group[1] ?? "")) {
+                    expand(prefix + alternative + suffix);
+                }
+                return;
+            }
+            const alternatives = splitUnescaped(value);
+            for (const alternative of alternatives) out.push(alternative.replaceAll("\uE000", ""));
+        };
+        expand(reduced);
+        return out;
     };
     const lineOf = (node: ts.Node) =>
         file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
@@ -323,20 +341,14 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             folded.push({ line: lineOf(node), value: node.text });
         }
         if (ts.isRegularExpressionLiteral(node)) {
-            const body = regexBody(node.text);
-            folded.push({ line: lineOf(node), value: body });
-            // `(?:a|b)` around the whole body, or a bare `a|b`, accepts each alternative.
-            const group = /^\((?:\?:)?([^()]*\|[^()]*)\)$/.exec(body);
-            const alternation = group?.[1] ?? (/^[^()]*\|[^()]*$/.test(body) ? body : undefined);
-            if (alternation !== undefined) {
-                for (const alternative of alternation.split("|")) {
-                    folded.push({ line: lineOf(node), value: alternative });
+            const caseInsensitive = /\/[a-z]*i[a-z]*$/.test(node.text);
+            for (const accepted of regexTexts(node.text)) {
+                folded.push({ line: lineOf(node), value: accepted });
+                // An `i` flag accepts every casing, including the case-sensitive store names.
+                const lower = accepted.toLowerCase();
+                if (caseInsensitive && lower !== accepted) {
+                    folded.push({ line: lineOf(node), value: lower });
                 }
-            }
-            // An `i` flag accepts every casing, including the case-sensitive store file names.
-            const lower = body.toLowerCase();
-            if (lower !== body && /\/[a-z]*i[a-z]*$/.test(node.text)) {
-                folded.push({ line: lineOf(node), value: lower });
             }
         }
         if (
@@ -491,6 +503,12 @@ export function databaseUses(
         }
         ts.forEachChild(node, collectFactories);
     };
+    // `process["getBuiltinModule"]` is the same member as `process.getBuiltinModule`.
+    const memberText = (expression: ts.Expression): string =>
+        ts.isElementAccessExpression(expression) &&
+        ts.isStringLiteralLike(expression.argumentExpression)
+            ? `${expression.expression.getText(file)}.${expression.argumentExpression.text}`
+            : expression.getText(file);
     const isLoaderMember = (text: string) =>
         text === "module.require" || /(^|\.)getBuiltinModule$/.test(text);
     const loaders = new Set<string>(["require"]);
@@ -502,7 +520,7 @@ export function databaseUses(
             if (factories.has(factory)) loaders.add(name.text);
         } else if (ts.isIdentifier(value) && loaders.has(value.text)) {
             loaders.add(name.text);
-        } else if (isLoaderMember(value.getText(file))) {
+        } else if (isLoaderMember(memberText(value))) {
             loaders.add(name.text);
         }
     };
@@ -571,7 +589,7 @@ export function databaseUses(
             const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
             const isRequire =
                 (ts.isIdentifier(callee) && loaders.has(callee.text)) ||
-                isLoaderMember(callee.getText(file));
+                isLoaderMember(memberText(callee));
             // Non-string-literal specifiers cannot be checked against the binding pattern, so they escape.
             const specifier = node.arguments[0];
             const unresolved = specifier !== undefined && !ts.isStringLiteralLike(specifier);
