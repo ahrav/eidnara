@@ -86,6 +86,13 @@ revision; see the refinement list at the end of this section.
   beside other staging coordinators say so under `Open questions`.
   `storage_versions_block` and module status's `storage_versions` object are
   gone as well.
+- The six `claim.*` facade commands, their handlers, and the `memory_tool`
+  claim adapters (`stage_claim_intent`, `inspect_claim_intents`,
+  `acknowledge_claim_intent`, `list_committed_claims`) are gone from
+  `crates/daemon`. The architectural note below on the claim intent ledger
+  describes the source tree; at HEAD no handler in this part can reach the
+  ledger because no daemon code calls it. The facade part's four claim records
+  carry `Status: invalidated`.
 
 ## Handler table
 

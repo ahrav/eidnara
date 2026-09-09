@@ -13,6 +13,15 @@ The one CI step that matters moved across `76cd6f41..HEAD`:
 `cargo test -p daemon --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
 `ci.yml:172` at `HEAD`. Both were verified directly and both are cited.
 
+Reconciliation at this repository's HEAD. The six `claim.*` facade commands and
+their handlers are gone from `crates/daemon`, and the four records raised on
+them are `Status: invalidated` in the catalog. Every fault row and construction
+note below that concerns `claim.intent.stage`, `claim.intent.inspect`,
+`claim.intent.ack`, `claim.effects.apply`, or the mirror routes describes the
+source tree; at HEAD those faults have no subject and no harness is owed for
+them. The route-identity construction ("two bindings and three calls") and the
+digest-conflict construction are withdrawn with their records.
+
 Five framing points specific to this part.
 
 **First, the dominant obstacle is not a missing fault.** No CI job executes any

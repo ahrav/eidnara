@@ -91,6 +91,20 @@ the part are the eight `drive-fault` cases.
 - The `drive-fault` Cargo feature and its eight tests are gone from
   `crates/daemon` (KTD14); prose below that treats them as live describes the
   source tree.
+- The six claim commands (`claim.intent.stage`, `claim.intent.inspect`,
+  `claim.intent.ack`, `claim.effects.apply`, `claim.mirror.replace`,
+  `claim.mirror.apply`), their handlers, `claim_route_root`,
+  `claim_mirror_error`, the `memory_tool` claim adapters, and the `ctx_memory`
+  facade's mirror reads are gone from `crates/daemon` at `0c09d2bf`'s
+  successor. `handle_facade_value` routes the five `ctx_*` names only; a claim
+  command name falls to `unrecognized_request_error` like any unknown tool
+  (`facade_envelope_not_supported`), which
+  `retired_claim_facade_names_are_unsupported` (`lib.rs`, `mod tests`)
+  asserts. `ctx_memory` `get`/`list` answer a tool error naming canonical
+  kernel state as where memory is served from; its mutation actions answer a
+  tool error naming the kernel commit path. The four records in Group C and
+  Group D whose subject was a claim handler carry `Status: invalidated`; prose
+  below that treats those handlers as live describes the source tree.
 
 ## Facade map
 
@@ -134,6 +148,9 @@ The precedence is `method`/`kind` first, unconditionally. A body carrying both a
 (`:25299-25323`) asserts with `{kind:"echo", name:"ctx_memory"}`.
 
 ### The facade envelope routes eleven names, not two
+
+At HEAD the envelope routes five names: the six claim commands below are gone
+(see Provenance). The rest of this section describes the source tree.
 
 `handle_facade_value` (`:10042-10060`) routes `ctx_memory`, `ctx_search`,
 `ctx_expand`, `ctx_reduce`, `ctx_note`, and six claim commands
@@ -505,10 +522,10 @@ so.
 | [facade-a-measured-length-must-equal-written-body-or-nothing-is-terminal](#facade-a-measured-length-must-equal-written-body-or-nothing-is-terminal) | safety | high |
 | [facade-a-facade-error-text-carries-absolute-route-paths-to-the-model](#facade-a-facade-error-text-carries-absolute-route-paths-to-the-model) | safety | high |
 | [facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes](#facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes) | safety | high |
-| [facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect](#facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect) | safety | high |
-| [facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed](#facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed) | safety | high |
-| [facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity](#facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity) | safety | high |
-| [facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault](#facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault) | safety | high |
+| [facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect](#facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect) | safety | invalidated |
+| [facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed](#facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed) | safety | invalidated |
+| [facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity](#facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity) | safety | invalidated |
+| [facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault](#facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault) | safety | invalidated |
 | [facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes](#facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes) | safety | high |
 | [facade-a-replayed-facade-mutation-occurs-in-a-campaign](#facade-a-replayed-facade-mutation-occurs-in-a-campaign) | reachability | high |
 | [note-b-reducer-reads-process-local-timezone-for-durable-schedule](#note-b-reducer-reads-process-local-timezone-for-durable-schedule) | safety | high |
@@ -737,7 +754,8 @@ Open questions:
 ## Group C: acknowledgements that write nothing
 
 Three records on handlers that answer `isError: false` without touching durable
-state. `ctx_reduce` says so in a comment (`:10585-10586`) and is the one of the
+state. The two on `claim.effects.apply` are invalidated at HEAD: the handler is
+gone from `crates/daemon` (see Provenance). `ctx_reduce` says so in a comment (`:10585-10586`) and is the one of the
 part's six success-shaped paths with a test. `claim.effects.apply` never calls
 `self.store()` at all, and the producer treats its `ackedEffectId` as authority to
 advance a durable checkpoint permanently. That second handler carries two
@@ -784,7 +802,14 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the handler this record was raised on is gone from
+`crates/daemon`; the six `claim.*` facade names are no longer routed, so the
+subject is unreachable by any request. The claim mirror and intent ledger the
+lane was built on are deleted from the memory store by the follow-on tickets. No
+successor record: the invariant belonged to the claim lane, and canonical memory
+carries no equivalent surface. The evidence file keeps the finding as it stood
+in the source tree; its `file:line` references resolve there only.
 Exercised: not yet - no test in `daemon` references
 `handle_claim_effects_apply`.
 Guarantee: An accepted `claim.effects.apply` either changes durable module-side state or returns a code the producer treats as non-advancing. (Narrowed this disposition, D11: the second obligation, that the producer's checkpoint therefore means what it claims, is now its own record, because it needs a harness that does not exist.)
@@ -828,7 +853,14 @@ are on the shipped path
 (`packages/plugin/src/hooks/eidnara/module-state-sync.ts:2322-2340` (source-catalog path, not present at HEAD)). The
 record is `default-production` for the same reason as the record it was split
 from; only its constructibility differs.
-Status: active
+Status: invalidated
+Invalidated: the handler this record was raised on is gone from
+`crates/daemon`; the six `claim.*` facade names are no longer routed, so the
+subject is unreachable by any request. The claim mirror and intent ledger the
+lane was built on are deleted from the memory store by the follow-on tickets. No
+successor record: the invariant belonged to the claim lane, and canonical memory
+carries no equivalent surface. The evidence file keeps the finding as it stood
+in the source tree; its `file:line` references resolve there only.
 Exercised: not yet - not constructible today. This is the part's one
 outright block. The module side has no test at all: `claim_effects` appears
 twice in `lib.rs`, at `:10051` and `:10184`, and zero times in either test
@@ -894,6 +926,10 @@ Open questions:
 
 ## Group D: claim identity and the mutation ledger
 
+The first two of this group's four records are invalidated at HEAD: the claim
+handlers they were raised on are gone from `crates/daemon` (see Provenance). The
+mutation-ledger records that follow them stay active.
+
 Four records on identity: whose authority a claim call runs under, whether a
 caller can classify why its claim was refused, and what the durable mutation
 ledger memoizes as an outcome. The first two are on the four claim handlers that
@@ -907,7 +943,14 @@ observed `Duplicate` arm all three pass on a campaign that never retries a
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the handler this record was raised on is gone from
+`crates/daemon`; the six `claim.*` facade names are no longer routed, so the
+subject is unreachable by any request. The claim mirror and intent ledger the
+lane was built on are deleted from the memory store by the follow-on tickets. No
+successor record: the invariant belonged to the claim lane, and canonical memory
+carries no equivalent surface. The evidence file keeps the finding as it stood
+in the source tree; its `file:line` references resolve there only.
 Exercised: not yet - no `daemon` test drives any claim-intent facade call.
 Guarantee: A claim-intent facade call affects or reveals only intents whose
 authority the calling route is bound to.
@@ -946,7 +989,14 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the handler this record was raised on is gone from
+`crates/daemon`; the six `claim.*` facade names are no longer routed, so the
+subject is unreachable by any request. The claim mirror and intent ledger the
+lane was built on are deleted from the memory store by the follow-on tickets. No
+successor record: the invariant belonged to the claim lane, and canonical memory
+carries no equivalent surface. The evidence file keeps the finding as it stood
+in the source tree; its `file:line` references resolve there only.
 Exercised: not yet - no `daemon` test drives a digest conflict.
 Guarantee: A caller can tell from the error code alone whether its
 `(producer, operation_key)` was reused for a different request body, as opposed

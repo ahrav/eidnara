@@ -23,6 +23,19 @@ record and are also real: the scope map cites `:167-168` and lens A cites
 `:171-172`, which are the `name:` and `run:` lines of the same step at the two
 commits. All four describe one step; only the file moved.
 
+Reconciliation at this repository's HEAD. The six claim commands, their
+handlers, `claim_route_root`, `claim_mirror_error`, the `memory_tool` claim
+adapters, and the `ctx_memory` mirror reads are gone from `crates/daemon`; the
+facade routes the five `ctx_*` names only. Every entry below that names a claim
+handler, `list_committed_claims`, `stage_claim_intent`,
+`inspect_claim_intents`, or `acknowledge_claim_intent` describes the source
+tree; at HEAD the check it describes has no subject. One check replaces them:
+`retired_claim_facade_names_are_unsupported` (`lib.rs`, `mod tests`, status
+`unaudited`) sends each of the six names and asserts
+`facade_envelope_not_supported`, then sends `ctx_memory` `get` and `list` and
+asserts a tool error naming canonical kernel state. `memory_tool.rs` keeps only
+the search adapter and its one test.
+
 Three corrections to references handed to this synthesis, made per METHOD.md rule
 1 and recorded rather than silently applied.
 
