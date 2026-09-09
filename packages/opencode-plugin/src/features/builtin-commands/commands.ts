@@ -1,3 +1,4 @@
+import { MEMORY_MARK_COMMAND, MEMORY_MARK_DESCRIPTION } from "../../shared/memory-mark-command";
 import type { BuiltinCommandConfig } from "./types";
 
 const COMPACTION_ENABLED_PATH = `compaction${".enabled"}`;
@@ -32,6 +33,10 @@ export function getEidnaraBuiltinCommands(compactionEnabled = true): BuiltinComm
         "ctx-aug": {
             template: "ctx-aug",
             description: "Augment your prompt with project memory context via sidekick agent",
+        },
+        [MEMORY_MARK_COMMAND]: {
+            template: MEMORY_MARK_COMMAND,
+            description: MEMORY_MARK_DESCRIPTION,
         },
     };
 }

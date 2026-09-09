@@ -12,12 +12,15 @@ import { cancelled, conflict, disabled, invalid, type MemoryState, unavailable }
 import { TokenCache, type TokenStore } from "./token";
 import {
     type CommitPayload,
+    type DispositionEvent,
     MAX_COMMIT_OPERATIONS,
     MAX_COMMIT_TOKENS,
     MAX_READ_OBJECT_IDS,
     type MutationToken,
     type Parsed,
+    type PreviewPayload,
     parseCommitResponse,
+    parsePreviewResponse,
     parseReadResponse,
     type ReadPayload,
     type ReadRow,
@@ -86,10 +89,19 @@ export interface DecisionSpecInput {
     sensitivity?: Sensitivity;
 }
 
+export interface DispositionOperation {
+    op: "disposition";
+    object_id: string;
+    event: DispositionEvent;
+    /** Names the approval that authorizes a move toward a less restrictive disposition; a tightening needs none. */
+    approval_object_id?: string;
+}
+
 export type CommitOperation =
     | { op: "insert_decision"; spec: DecisionSpecInput }
     | { op: "supersede_decision"; replaced_object_id: string; spec: DecisionSpecInput }
-    | { op: "retire_decision"; object_id: string };
+    | { op: "retire_decision"; object_id: string }
+    | DispositionOperation;
 
 export interface CallOptions {
     signal?: AbortSignal;
@@ -130,6 +142,11 @@ export interface CommitArgs extends CallOptions, IntentArgs {
 }
 
 export type MutationArgs = Omit<CommitArgs, "operations" | "tokens">;
+
+/** A preview carries the same intent as the commit it stands in for, so the daemon parses the identity it would later record; tokens are refused, so none are collected. commentlint: allow(JUDGE) */
+export interface PreviewArgs extends MutationArgs {
+    operations: DispositionOperation[];
+}
 
 export type AvailableState = Extract<MemoryState, { kind: "available" }>;
 export type NonAvailableState = Exclude<MemoryState, { kind: "available" }>;
@@ -174,6 +191,7 @@ export function kernelMemorySnapshotFrom(result: ReadResult): KernelMemorySnapsh
         : { state: result.state, rows: [], knownAsOf: null };
 }
 export type CommitResult = KernelResult<CommitPayload>;
+export type PreviewResult = KernelResult<PreviewPayload>;
 
 export interface KernelClientOptions {
     transport: KernelTransport;
@@ -525,6 +543,7 @@ export class KernelClient {
         args: CommitArgs,
         tokens: MutationToken[],
         deadline: Deadline,
+        preview = false,
     ): Record<string, unknown> {
         const producer = args.producer ?? this.producer;
         const sourceKind = args.sourceKind ?? "assistant";
@@ -552,6 +571,7 @@ export class KernelClient {
             tokens,
             operations: args.operations,
             source_kind: sourceKind,
+            ...(preview ? { preview: true } : {}),
             ...(args.assertedSourceClass === undefined
                 ? {}
                 : { asserted_source_class: args.assertedSourceClass }),
@@ -690,6 +710,44 @@ export class KernelClient {
         const retried = await this.commitOnce(args, deadline);
         if (isSnapshotDiverged(retried.state)) this.tokens.dropProject(this.projectRoot);
         return retried;
+    }
+
+    private async previewOnce(args: PreviewArgs, deadline: Deadline): Promise<PreviewResult> {
+        const { result } = await this.call(
+            "kernel.commit",
+            () => this.commitBody(args, [], deadline, true),
+            // A preview writes nothing, so an ambiguous transport outcome reissues once, as a read does. commentlint: allow(JUDGE)
+            { signal: args.signal, deadline, reissuable: true },
+            parsePreviewResponse,
+        );
+        return result;
+    }
+
+    /**
+     * Judges disposition operations at the tip without writing: the reply
+     * carries each surface's verdict before and after, and whether any surface
+     * serving the object would change. No receipt is created, so the same
+     * identity is still free for `commit`.
+     *
+     * Previews carry no tokens or `as_of`, so after a connection identity refusal the same body is sent once more against the new connection, as a diverged read re-reads the tip. commentlint: allow(JUDGE)
+     */
+    async previewDispositions(input: PreviewArgs): Promise<PreviewResult> {
+        const args: PreviewArgs = {
+            ...input,
+            operations: JSON.parse(JSON.stringify(input.operations)) as DispositionOperation[],
+        };
+        const producer = args.producer ?? this.producer;
+        if (![producer, args.actor].every(isSeparatorFree)) {
+            return { state: nonAvailable(invalid("invalid_input")) };
+        }
+        if (args.operations.length > MAX_COMMIT_OPERATIONS) {
+            return { state: nonAvailable(invalid("invalid_input")) };
+        }
+        const deadline = this.deadline(args);
+        if (!(deadline instanceof Deadline)) return { state: deadline };
+        const first = await this.previewOnce(args, deadline);
+        if (!isSnapshotDiverged(first.state)) return first;
+        return await this.previewOnce(args, deadline);
     }
 
     create(spec: DecisionSpecInput, args: MutationArgs): Promise<CommitResult> {

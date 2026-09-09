@@ -88,12 +88,54 @@ export interface ReadPayload {
     rows: ReadRow[];
 }
 
+/** The event kinds a host command may name; each is a disposition transition the kernel's fixed table resolves, never a maturity promotion. commentlint: allow(JUDGE) */
+export const DISPOSITION_EVENTS = [
+    "mark_stale",
+    "mark_disputed",
+    "explicit_reject",
+    "contradict",
+    "quarantine",
+] as const;
+export type DispositionEvent = (typeof DISPOSITION_EVENTS)[number];
+
+/** What one disposition operation did or would do. `outcome` is the kernel's command result and `disposition` the resulting state; `denied` marks a relaxation refused for want of a valid approval. commentlint: allow(JUDGE) */
+export interface DispositionResult {
+    object_id: string;
+    event: DispositionEvent;
+    outcome: string;
+    previous_disposition: string;
+    disposition: string;
+    denied: boolean;
+}
+
+export interface SurfaceVisibilities {
+    auto_inject: Visibility;
+    auto_search: Visibility;
+    explicit_search: Visibility;
+}
+
+/** `visibility_changes` is true when a surface that serves the object now would show a different verdict afterwards. */
+export interface DispositionPreview extends DispositionResult {
+    current: SurfaceVisibilities;
+    projected: SurfaceVisibilities;
+    visibility_changes: boolean;
+}
+
+export interface PreviewPayload {
+    known_as_of: number;
+    previews: DispositionPreview[];
+    /** Present when the intent's identity is already recorded: the commit would replay this receipt, so nothing was judged and `previews` is empty. commentlint: allow(JUDGE) */
+    receipt?: { commit_seq: number; replayed: true };
+}
+
 export interface CommitPayload {
     receipt: { commit_seq: number; replayed: boolean };
     known_as_of: number;
     tokens: MutationToken[];
     /** IDs of supersede survivors whose replacement spec was discarded because the survivor was already live; the daemon only re-pointed the predecessor, so the submitted content was not written. commentlint: allow(JUDGE) */
     merged: string[];
+    /** One entry per disposition operation, in request order. */
+    dispositions: DispositionResult[];
 }
 
 export interface ParsedResponse {
@@ -300,6 +342,98 @@ export function parseReadResponse(raw: unknown): Parsed<ReadPayload> {
     };
 }
 
+function parseDispositionResult(raw: unknown): DispositionResult | null {
+    if (!isRecord(raw)) return null;
+    if (typeof raw.object_id !== "string" || !oneOf(DISPOSITION_EVENTS, raw.event)) return null;
+    for (const key of ["outcome", "previous_disposition", "disposition"] as const) {
+        if (typeof raw[key] !== "string") return null;
+    }
+    if (typeof raw.denied !== "boolean") return null;
+    return {
+        object_id: raw.object_id,
+        event: raw.event,
+        outcome: raw.outcome as string,
+        previous_disposition: raw.previous_disposition as string,
+        disposition: raw.disposition as string,
+        denied: raw.denied,
+    };
+}
+
+function parseDispositionResults(raw: unknown): DispositionResult[] | null {
+    if (!Array.isArray(raw)) return null;
+    const results: DispositionResult[] = [];
+    for (const item of raw) {
+        const result = parseDispositionResult(item);
+        if (!result) return null;
+        results.push(result);
+    }
+    return results;
+}
+
+function parseSurfaceVisibilities(raw: unknown): SurfaceVisibilities | null {
+    if (!isRecord(raw)) return null;
+    const { auto_inject, auto_search, explicit_search } = raw;
+    if (
+        !oneOf(VISIBILITIES, auto_inject) ||
+        !oneOf(VISIBILITIES, auto_search) ||
+        !oneOf(VISIBILITIES, explicit_search)
+    ) {
+        return null;
+    }
+    return { auto_inject, auto_search, explicit_search };
+}
+
+const SURFACE_KEYS = ["auto_inject", "auto_search", "explicit_search"] as const;
+
+/** The daemon's rule: a surface serving the object now would show a different verdict; a hidden surface changing is not a visible change. */
+export function visibilityChanges(
+    current: SurfaceVisibilities,
+    projected: SurfaceVisibilities,
+): boolean {
+    return SURFACE_KEYS.some(
+        (surface) => current[surface] !== "hidden" && current[surface] !== projected[surface],
+    );
+}
+
+function parseDispositionPreview(raw: unknown): DispositionPreview | null {
+    const result = parseDispositionResult(raw);
+    if (!result || !isRecord(raw)) return null;
+    const current = parseSurfaceVisibilities(raw.current);
+    const projected = parseSurfaceVisibilities(raw.projected);
+    if (!current || !projected || typeof raw.visibility_changes !== "boolean") return null;
+    // The flag gates the confirmation prompt, so a reply whose flag disagrees with its own verdicts is refused rather than trusted. commentlint: allow(JUDGE)
+    if (raw.visibility_changes !== visibilityChanges(current, projected)) return null;
+    return { ...result, current, projected, visibility_changes: raw.visibility_changes };
+}
+
+export function parsePreviewResponse(raw: unknown): Parsed<PreviewPayload> {
+    const { state, payload } = parseKernelResponse(raw);
+    if (state.kind !== "available") return { state, payload: null };
+    if (!isNonNegativeInteger(payload.known_as_of) || !Array.isArray(payload.previews)) {
+        return failed();
+    }
+    const previews: DispositionPreview[] = [];
+    for (const item of payload.previews) {
+        const preview = parseDispositionPreview(item);
+        if (!preview) return failed();
+        previews.push(preview);
+    }
+    if (payload.receipt === undefined) {
+        return { state, payload: { known_as_of: payload.known_as_of, previews } };
+    }
+    const receipt = payload.receipt;
+    if (!isRecord(receipt) || !isNonNegativeInteger(receipt.commit_seq)) return failed();
+    if (receipt.replayed !== true || previews.length > 0) return failed();
+    return {
+        state,
+        payload: {
+            known_as_of: payload.known_as_of,
+            previews,
+            receipt: { commit_seq: receipt.commit_seq, replayed: true },
+        },
+    };
+}
+
 export function parseCommitResponse(raw: unknown): Parsed<CommitPayload> {
     const { state, payload } = parseKernelResponse(raw);
     if (state.kind !== "available") return { state, payload: null };
@@ -315,6 +449,10 @@ export function parseCommitResponse(raw: unknown): Parsed<CommitPayload> {
     // A daemon that predates the field omits it. commentlint: allow(JUDGE)
     const merged = payload.merged === undefined ? [] : parseStrings(payload.merged);
     if (!merged) return failed();
+    // The daemon omits the list when the envelope carried no disposition. commentlint: allow(JUDGE)
+    const dispositions =
+        payload.dispositions === undefined ? [] : parseDispositionResults(payload.dispositions);
+    if (!dispositions) return failed();
     return {
         state,
         payload: {
@@ -322,6 +460,7 @@ export function parseCommitResponse(raw: unknown): Parsed<CommitPayload> {
             known_as_of: receipt.commit_seq,
             tokens,
             merged,
+            dispositions,
         },
     };
 }
