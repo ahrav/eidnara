@@ -231,6 +231,63 @@ pub struct SessionBinding {
     pub credential_fingerprints: std::collections::BTreeMap<String, String>,
 }
 
+#[derive(Default)]
+pub(crate) struct RouteBindings {
+    by_route: HashMap<RouteHandle, (u64, SessionBinding)>,
+    next_bind_seq: u64,
+}
+
+impl RouteBindings {
+    /// Binds `channel`, returning the binding it replaced. A rebind counts as
+    /// the newest bind on its root.
+    fn insert(&mut self, channel: RouteHandle, binding: SessionBinding) -> Option<SessionBinding> {
+        let seq = self.next_bind_seq;
+        self.next_bind_seq += 1;
+        self.by_route
+            .insert(channel, (seq, binding))
+            .map(|(_, previous)| previous)
+    }
+
+    fn remove(&mut self, channel: &RouteHandle) -> Option<SessionBinding> {
+        self.by_route.remove(channel).map(|(_, binding)| binding)
+    }
+
+    fn get(&self, channel: &RouteHandle) -> Option<&SessionBinding> {
+        self.by_route.get(channel).map(|(_, binding)| binding)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &SessionBinding> {
+        self.by_route.values().map(|(_, binding)| binding)
+    }
+
+    fn clear(&mut self) {
+        self.by_route.clear();
+    }
+
+    /// The returned sequence orders bindings by insertion time.
+    fn latest_for_root(&self, route_root: &Path) -> Option<(u64, &SessionBinding)> {
+        self.by_route
+            .values()
+            .filter(|(_, binding)| binding.project_root == route_root)
+            .map(|(seq, binding)| (*seq, binding))
+            .max_by_key(|(seq, _)| *seq)
+    }
+
+    /// The returned sequence orders bindings by insertion time.
+    fn latest_per_root(&self) -> BTreeMap<&Path, (u64, &SessionBinding)> {
+        let mut latest: BTreeMap<&Path, (u64, &SessionBinding)> = BTreeMap::new();
+        for (seq, binding) in self.by_route.values() {
+            let entry = latest
+                .entry(binding.project_root.as_path())
+                .or_insert((*seq, binding));
+            if *seq > entry.0 {
+                *entry = (*seq, binding);
+            }
+        }
+        latest
+    }
+}
+
 fn apply_claude_code_config_controls(
     request: &mut TransformRequest,
     config: &DaemonConfig,
@@ -2879,7 +2936,7 @@ pub struct Handler {
     #[cfg(test)]
     publication_fence_write_hook: ConnectFailureCommitHook,
     /// A full route handle maps to its session binding and route root; epoch-scoped lookups and removals prevent channel reuse from accessing another incarnation's state.
-    bindings: Arc<Mutex<HashMap<RouteHandle, SessionBinding>>>,
+    bindings: Arc<Mutex<RouteBindings>>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3494,7 +3551,7 @@ impl Handler {
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
-            bindings: Arc::new(Mutex::new(HashMap::new())),
+            bindings: Arc::new(Mutex::new(RouteBindings::default())),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -3822,7 +3879,7 @@ impl Handler {
             connect_failure_commit_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
-            bindings: Arc::new(Mutex::new(HashMap::new())),
+            bindings: Arc::new(Mutex::new(RouteBindings::default())),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -9478,58 +9535,23 @@ impl DreamerRuntime {
         let timeout_ms = task.timeout_ms;
         let task = CLASSIFY_TASK;
         let route_root = route.project_root.to_string_lossy().to_string();
-        let Some(project) = (match store.authority_project_for_route(&route_root, "memories") {
-            Ok(project) => project,
+        let authority = match memories_authority_for_route(&store, &route_root) {
+            Ok(MemoriesAuthority::Module(authority)) => authority,
+            Ok(MemoriesAuthority::NotModule { message }) => {
+                return PreparedOutcome::Error {
+                    code: "authority_not_module".to_string(),
+                    message,
+                };
+            }
             Err(error) => {
                 return PreparedOutcome::Error {
                     code: "authority_lookup_failed".to_string(),
                     message: error.to_string(),
                 };
             }
-        }) else {
-            return PreparedOutcome::Error {
-                code: "authority_not_module".to_string(),
-                message: "memories authority for this route is not MODULE".to_string(),
-            };
         };
-        let Some((context_store_uuid, authority_project)) =
-            (match store.module_authority_for_project(&project, "memories") {
-                Ok(authority) => authority,
-                Err(error) => {
-                    return PreparedOutcome::Error {
-                        code: "authority_lookup_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
-            })
-        else {
-            return PreparedOutcome::Error {
-                code: "authority_not_module".to_string(),
-                message: "memories authority for this route is not MODULE".to_string(),
-            };
-        };
-        let authority =
-            match store.authority_status(&context_store_uuid, &authority_project, "memories") {
-                Ok(Some(authority)) => authority,
-                Ok(None) => {
-                    return PreparedOutcome::Error {
-                        code: "authority_not_module".to_string(),
-                        message: "memories authority row is missing".to_string(),
-                    };
-                }
-                Err(error) => {
-                    return PreparedOutcome::Error {
-                        code: "authority_lookup_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
-            };
-        if authority.state != "MODULE" {
-            return PreparedOutcome::Error {
-                code: "authority_not_module".to_string(),
-                message: format!("memories authority is {}", authority.state),
-            };
-        }
+        let context_store_uuid = authority.context_store_uuid;
+        let authority_project = authority.project;
         if authority.generation != authority_generation {
             return PreparedOutcome::Error {
                 code: "authority_generation_mismatch".to_string(),
@@ -13653,25 +13675,71 @@ fn classify_success_response(
     })
 }
 
+enum MemoriesAuthority {
+    Module(ModuleMemoriesAuthority),
+    NotModule { message: String },
+}
+
+/// The identity a run under `MODULE` memories authority writes against.
+struct ModuleMemoriesAuthority {
+    context_store_uuid: String,
+    project: String,
+    generation: u64,
+}
+
+/// Store failures propagate to callers instead of being treated as an
+/// unscheduled route.
+fn memories_authority_for_route(
+    store: &MemoryStore,
+    route_root: &str,
+) -> Result<MemoriesAuthority, MemoryStoreError> {
+    let Some(project) = store.authority_project_for_route(route_root, "memories")? else {
+        return Ok(MemoriesAuthority::NotModule {
+            message: "memories authority for this route is not MODULE".to_string(),
+        });
+    };
+    let Some((context_store_uuid, authority_project)) =
+        store.module_authority_for_project(&project, "memories")?
+    else {
+        return Ok(MemoriesAuthority::NotModule {
+            message: "memories authority for this route is not MODULE".to_string(),
+        });
+    };
+    let Some(authority) =
+        store.authority_status(&context_store_uuid, &authority_project, "memories")?
+    else {
+        return Ok(MemoriesAuthority::NotModule {
+            message: "memories authority row is missing".to_string(),
+        });
+    };
+    if authority.state != "MODULE" {
+        return Ok(MemoriesAuthority::NotModule {
+            message: format!("memories authority is {}", authority.state),
+        });
+    }
+    Ok(MemoriesAuthority::Module(ModuleMemoriesAuthority {
+        context_store_uuid: authority.context_store_uuid,
+        project: authority.project,
+        generation: authority.generation,
+    }))
+}
+
 /// The daemon state the Dreamer scheduler reads and drives: the open store,
 /// the live route bindings a run's harness and configuration come from, and
 /// the durable classify protocol.
 struct SchedulerBridge {
     store: Arc<MemoryStore>,
-    bindings: Arc<Mutex<HashMap<RouteHandle, SessionBinding>>>,
+    bindings: Arc<Mutex<RouteBindings>>,
     dreamer: Arc<DreamerRuntime>,
 }
 
 impl SchedulerBridge {
-    /// One live binding per route root, so every scheduled run of a project
-    /// dispatches under the same harness and credentials.
     fn binding_for_root(&self, route_root: &Path) -> Option<SessionBinding> {
         self.bindings
             .lock()
             .expect("bindings mutex")
-            .values()
-            .find(|binding| binding.project_root == route_root)
-            .cloned()
+            .latest_for_root(route_root)
+            .map(|(_, binding)| binding.clone())
     }
 }
 
@@ -13681,45 +13749,53 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
         &self.store
     }
 
-    /// The schedule is read from the configuration each route was bound
-    /// under, the same tier-merged value every other gate on that route uses;
-    /// the project tier cannot set it, so a project-tier schedule never
-    /// appears here. A project qualifies when its memories authority is
-    /// `MODULE`, the state every run writes under.
-    fn scheduled_projects(&self) -> Vec<dreamer_scheduler::ScheduledProject> {
+    /// A project qualifies only when its memories authority is `MODULE`.
+    fn scheduled_projects(&self) -> Result<Vec<dreamer_scheduler::ScheduledProject>, String> {
         let store = &self.store;
-        let mut roots: BTreeMap<PathBuf, String> = BTreeMap::new();
-        for binding in self.bindings.lock().expect("bindings mutex").values() {
-            if let Some(schedule) = &binding.config.dreamer_review_user_memories_schedule {
-                roots
-                    .entry(binding.project_root.clone())
-                    .or_insert_with(|| schedule.clone());
+        let scheduled_roots: Vec<(u64, PathBuf, String)> = self
+            .bindings
+            .lock()
+            .expect("bindings mutex")
+            .latest_per_root()
+            .into_iter()
+            .filter_map(|(root, (seq, binding))| {
+                let schedule = binding
+                    .config
+                    .dreamer_review_user_memories_schedule
+                    .as_ref()?;
+                Some((seq, root.to_path_buf(), schedule.clone()))
+            })
+            .collect();
+        let mut by_project: BTreeMap<String, (u64, dreamer_scheduler::ScheduledProject)> =
+            BTreeMap::new();
+        for (seq, route_root, schedule) in scheduled_roots {
+            let root = route_root.to_string_lossy().to_string();
+            let authority = match memories_authority_for_route(store, &root)
+                .map_err(|error| error.to_string())?
+            {
+                MemoriesAuthority::Module(authority) => authority,
+                MemoriesAuthority::NotModule { .. } => continue,
+            };
+            let candidate = dreamer_scheduler::ScheduledProject {
+                project: authority.project.clone(),
+                route_root,
+                authority_generation: authority.generation,
+                schedule,
+            };
+            match by_project.entry(authority.project) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((seq, candidate));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) if seq > slot.get().0 => {
+                    slot.insert((seq, candidate));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
-        roots
-            .into_iter()
-            .filter_map(|(route_root, schedule)| {
-                let root = route_root.to_string_lossy().to_string();
-                let project = store
-                    .authority_project_for_route(&root, "memories")
-                    .ok()
-                    .flatten()?;
-                let (context_store_uuid, authority_project) = store
-                    .module_authority_for_project(&project, "memories")
-                    .ok()
-                    .flatten()?;
-                let authority = store
-                    .authority_status(&context_store_uuid, &authority_project, "memories")
-                    .ok()
-                    .flatten()?;
-                (authority.state == "MODULE").then_some(dreamer_scheduler::ScheduledProject {
-                    project: authority_project,
-                    route_root,
-                    authority_generation: authority.generation,
-                    schedule,
-                })
-            })
-            .collect()
+        Ok(by_project
+            .into_values()
+            .map(|(_, project)| project)
+            .collect())
     }
 
     async fn run_task(
@@ -28183,7 +28259,7 @@ mod tests {
         let harness = DreamerHarness::start(&producer);
         let bridge = harness.scheduler_bridge();
         assert!(
-            bridge.scheduled_projects().is_empty(),
+            bridge.scheduled_projects().unwrap().is_empty(),
             "disabled by default"
         );
 
@@ -28235,7 +28311,7 @@ mod tests {
         route_binding.config = from_project_tier;
         harness.handler.bind_route(test_route(7), route_binding);
         assert!(
-            bridge.scheduled_projects().is_empty(),
+            bridge.scheduled_projects().unwrap().is_empty(),
             "a project tier cannot put a task on the scheduler"
         );
 
@@ -28255,7 +28331,7 @@ mod tests {
         let mut route_binding = binding_with_harness(&harness.route_root, "pi", "ses");
         route_binding.config = from_user_tier;
         harness.handler.bind_route(test_route(7), route_binding);
-        let projects = bridge.scheduled_projects();
+        let projects = bridge.scheduled_projects().unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].project, "git:identity");
         assert_eq!(projects[0].schedule, "*/15 * * * *");
@@ -28287,7 +28363,111 @@ mod tests {
             .authority_begin_drain("context", "git:identity", "memories", "lease", i64::MAX, 1)
             .unwrap();
         assert_ne!(draining.state, "MODULE");
-        assert!(bridge.scheduled_projects().is_empty());
+        assert!(bridge.scheduled_projects().unwrap().is_empty());
+    }
+
+    /// A failed authority lookup must return an error rather than an empty
+    /// project list, because the scheduler drops the pending slot of any
+    /// project missing from the list.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_reports_a_store_failure_instead_of_no_projects() {
+        use dreamer_scheduler::SchedulerHost;
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        harness.schedule(Some("*/15 * * * *"));
+        let bridge = harness.scheduler_bridge();
+        assert_eq!(bridge.scheduled_projects().unwrap().len(), 1);
+
+        harness.store.fail_next_authority_route_read_for_test();
+        let failed = bridge.scheduled_projects();
+        assert!(
+            matches!(&failed, Err(reason) if reason.contains("injected authority route read failure")),
+            "{failed:?}"
+        );
+        // The fault was one read; the project is back on the next call.
+        assert_eq!(bridge.scheduled_projects().unwrap().len(), 1);
+    }
+
+    /// The most recently bound binding determines the root's schedule and
+    /// harness. A newer binding without a schedule unschedules the project.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_follows_the_most_recent_binding_on_a_root() {
+        use dreamer_scheduler::SchedulerHost;
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        let bridge = harness.scheduler_bridge();
+        let root = harness.route_root.clone();
+        let bind = |channel: u16, harness_name: &str, schedule: Option<&str>| {
+            let mut route_binding = binding_with_harness(&root, harness_name, "ses");
+            route_binding.config.dreamer_review_user_memories_schedule =
+                schedule.map(str::to_string);
+            harness
+                .handler
+                .bind_route(test_route(channel), route_binding);
+        };
+
+        // Twelve bindings expose an implementation that selects by map
+        // iteration order instead of the most recently bound route.
+        for channel in 1..=12u16 {
+            bind(
+                channel,
+                &format!("h{channel}"),
+                Some(&format!("*/{channel} * * * *")),
+            );
+        }
+        let projects = bridge.scheduled_projects().unwrap();
+        assert_eq!(projects.len(), 1, "{projects:?}");
+        assert_eq!(projects[0].schedule, "*/12 * * * *", "the newest binding");
+        assert_eq!(
+            bridge.binding_for_root(Path::new(&root)).unwrap().harness,
+            "h12"
+        );
+
+        // Rebinding the oldest channel makes it the newest binding.
+        bind(1, "h1-again", Some("*/7 * * * *"));
+        assert_eq!(
+            bridge.scheduled_projects().unwrap()[0].schedule,
+            "*/7 * * * *"
+        );
+        assert_eq!(
+            bridge.binding_for_root(Path::new(&root)).unwrap().harness,
+            "h1-again"
+        );
+
+        // Older bindings on the root still have schedules; the newest has none.
+        bind(13, "h13", None);
+        assert!(bridge.scheduled_projects().unwrap().is_empty());
+        assert_eq!(
+            bridge.binding_for_root(Path::new(&root)).unwrap().harness,
+            "h13"
+        );
+    }
+
+    /// Several route roots can bind to one authority project; the scheduler
+    /// reports that project once, under its most recently bound root.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_reports_a_project_once_across_its_roots() {
+        use dreamer_scheduler::SchedulerHost;
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        let bridge = harness.scheduler_bridge();
+        harness.schedule(Some("*/15 * * * *"));
+        let worktree = harness._dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        harness
+            .store
+            .bind_authority_route("context", "git:identity", worktree.to_str().unwrap())
+            .unwrap();
+        let mut route_binding = binding_with_harness(worktree.to_str().unwrap(), "pi", "ses-2");
+        route_binding.config.dreamer_review_user_memories_schedule =
+            Some("*/5 * * * *".to_string());
+        harness.handler.bind_route(test_route(8), route_binding);
+
+        let projects = bridge.scheduled_projects().unwrap();
+        assert_eq!(projects.len(), 1, "{projects:?}");
+        assert_eq!(projects[0].project, "git:identity");
+        assert_eq!(projects[0].route_root, worktree, "the newest root");
+        assert_eq!(projects[0].schedule, "*/5 * * * *");
     }
 
     /// A scheduled slot runs through the same durable protocol as the wire

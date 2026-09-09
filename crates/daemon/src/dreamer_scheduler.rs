@@ -83,7 +83,11 @@ pub(crate) enum TaskRunOutcome {
 #[async_trait]
 pub(crate) trait SchedulerHost: Send + Sync {
     fn store(&self) -> &MemoryStore;
-    fn scheduled_projects(&self) -> Vec<ScheduledProject>;
+    /// Returns at most one scheduled project per authority project; the host
+    /// chooses which bound route root represents a project reachable through
+    /// several. `Err` is a store failure, not an empty list: the scheduler
+    /// leaves the due table unchanged so a later tick retries the same slots.
+    fn scheduled_projects(&self) -> Result<Vec<ScheduledProject>, String>;
     /// Runs `task` for `project` under `command_id` through the durable
     /// receipt protocol.
     async fn run_task(
@@ -94,7 +98,7 @@ pub(crate) trait SchedulerHost: Send + Sync {
     ) -> TaskRunOutcome;
 }
 
-/// What one tick did for one project, in the order the work was done.
+/// Events emitted by a tick, ordered by execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TickEvent {
     /// The task was leased and run for the slot due at `due_at_ms`. When a
@@ -112,6 +116,9 @@ pub(crate) enum TickEvent {
         due_at_ms: i64,
         reason: String,
     },
+    /// The host could not report its projects, so nothing ran and no due
+    /// instant moved; the next tick sees the same slots.
+    Deferred { reason: String },
 }
 
 /// The command id of one scheduled slot: the task and the instant it was due,
@@ -141,20 +148,45 @@ impl DreamerScheduler {
     }
 
     /// Runs ticks until `cancel`, sleeping until the earliest due instant or
-    /// the idle poll, whichever comes first.
+    /// the idle poll, whichever comes first. A deferred tick leaves its slots
+    /// due, so the loop waits the idle poll before retrying the host instead
+    /// of re-ticking at once against a failing store.
     pub(crate) async fn run(mut self, host: Arc<dyn SchedulerHost>, cancel: CancellationToken) {
         loop {
             if cancel.is_cancelled() {
                 return;
             }
-            self.tick(host.as_ref()).await;
-            let wait = self
-                .earliest_due()
-                .map(|due| {
-                    Duration::from_millis(due.saturating_sub(self.clock.now_ms()).max(0) as u64)
-                })
-                .unwrap_or(IDLE_POLL)
-                .min(IDLE_POLL);
+            let mut deferred = false;
+            for event in self.tick(host.as_ref()).await {
+                match event {
+                    TickEvent::Ran { .. } => {}
+                    TickEvent::Skipped {
+                        project,
+                        due_at_ms,
+                        reason,
+                    } => {
+                        eprintln!(
+                            "daemon: dreamer scheduler skipped {project} slot {due_at_ms}: {reason}"
+                        );
+                    }
+                    TickEvent::Deferred { reason } => {
+                        deferred = true;
+                        eprintln!(
+                            "daemon: dreamer scheduler could not read its projects: {reason}"
+                        );
+                    }
+                }
+            }
+            let wait = if deferred {
+                IDLE_POLL
+            } else {
+                self.earliest_due()
+                    .map(|due| {
+                        Duration::from_millis(due.saturating_sub(self.clock.now_ms()).max(0) as u64)
+                    })
+                    .unwrap_or(IDLE_POLL)
+                    .min(IDLE_POLL)
+            };
             tokio::select! {
                 () = cancel.cancelled() => return,
                 () = self.clock.sleep(wait) => {}
@@ -181,11 +213,15 @@ impl DreamerScheduler {
     /// before it run in order of their due instant, then project name, so a
     /// backlog drains oldest first; a project's next instant is recomputed
     /// from that instant after it runs, so slots missed while the daemon was
-    /// down are not back-filled. Lease operations read the clock again as
-    /// they happen, so a long run does not shorten the lease of the next.
+    /// down are not back-filled. Lease operations read the clock immediately
+    /// before each lease, so a long-running project does not shorten a later
+    /// project's lease.
     pub(crate) async fn tick(&mut self, host: &dyn SchedulerHost) -> Vec<TickEvent> {
         let now_ms = self.clock.now_ms();
-        let projects = host.scheduled_projects();
+        let projects = match host.scheduled_projects() {
+            Ok(projects) => projects,
+            Err(reason) => return vec![TickEvent::Deferred { reason }],
+        };
         let due = self.due_projects(&projects, now_ms);
         let mut events = Vec::new();
         for (due_at_ms, project) in due {
@@ -352,6 +388,8 @@ fn next_due(schedule: &str, now_ms: i64) -> i64 {
 pub(crate) struct ManualClock {
     now_ms: std::sync::atomic::AtomicI64,
     park: bool,
+    /// Every duration `sleep` was asked for, in order.
+    sleeps: std::sync::Mutex<Vec<Duration>>,
 }
 
 #[cfg(test)]
@@ -360,6 +398,7 @@ impl ManualClock {
         Arc::new(Self {
             now_ms: std::sync::atomic::AtomicI64::new(now_ms),
             park: false,
+            sleeps: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -367,12 +406,17 @@ impl ManualClock {
         Arc::new(Self {
             now_ms: std::sync::atomic::AtomicI64::new(now_ms),
             park: true,
+            sleeps: std::sync::Mutex::new(Vec::new()),
         })
     }
 
     pub(crate) fn advance(&self, by: Duration) {
         self.now_ms
             .fetch_add(by.as_millis() as i64, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn sleeps(&self) -> Vec<Duration> {
+        self.sleeps.lock().unwrap().clone()
     }
 
     pub(crate) fn shared(self: &Arc<Self>) -> Arc<dyn SchedulerClock> {
@@ -388,7 +432,8 @@ impl SchedulerClock for ManualClock {
         self.now_ms.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    async fn sleep(&self, _duration: Duration) {
+    async fn sleep(&self, duration: Duration) {
+        self.sleeps.lock().unwrap().push(duration);
         if self.park {
             std::future::pending::<()>().await;
         }
@@ -415,6 +460,8 @@ mod tests {
         runnable: bool,
         /// Advanced by this much during every run.
         run_takes: Option<(Arc<ManualClock>, Duration)>,
+        /// The next `scheduled_projects` fails with this instead of answering.
+        fail_projects_once: Mutex<Option<String>>,
     }
 
     #[async_trait]
@@ -423,8 +470,11 @@ mod tests {
             &self.store
         }
 
-        fn scheduled_projects(&self) -> Vec<ScheduledProject> {
-            self.projects.lock().unwrap().clone()
+        fn scheduled_projects(&self) -> Result<Vec<ScheduledProject>, String> {
+            if let Some(reason) = self.fail_projects_once.lock().unwrap().take() {
+                return Err(reason);
+            }
+            Ok(self.projects.lock().unwrap().clone())
         }
 
         async fn run_task(
@@ -499,6 +549,7 @@ mod tests {
             runs: Mutex::new(Vec::new()),
             runnable: true,
             run_takes: None,
+            fail_projects_once: Mutex::new(None),
         }
     }
 
@@ -515,7 +566,7 @@ mod tests {
                 TickEvent::Ran {
                     project, due_at_ms, ..
                 } => Some((project.as_str(), *due_at_ms)),
-                TickEvent::Skipped { .. } => None,
+                TickEvent::Skipped { .. } | TickEvent::Deferred { .. } => None,
             })
             .collect()
     }
@@ -702,6 +753,44 @@ mod tests {
         *host.projects.lock().unwrap() = vec![scheduled];
         assert!(scheduler.tick(&host).await.is_empty());
         assert_eq!(host.runs.lock().unwrap().len(), 1);
+    }
+
+    /// A host that cannot report its projects is not a host with none: the
+    /// tick is deferred, the due table keeps the pending slot, and the next
+    /// tick runs the pending slot instead of rescheduling from now.
+    #[tokio::test]
+    async fn a_failed_project_lookup_defers_the_tick_and_keeps_the_pending_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![project(&store, "git:a", "*/15 * * * *")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = DreamerScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        let due = T0 + 15 * MINUTE_MS;
+
+        clock.advance(15 * MINUTE);
+        *host.fail_projects_once.lock().unwrap() = Some("store unavailable".to_string());
+        let events = scheduler.tick(&host).await;
+        assert_eq!(
+            events,
+            vec![TickEvent::Deferred {
+                reason: "store unavailable".to_string()
+            }]
+        );
+        assert!(host.runs.lock().unwrap().is_empty(), "nothing ran");
+        assert_eq!(
+            scheduler.earliest_due(),
+            Some(due),
+            "the pending slot is still due"
+        );
+
+        // The store answers again: the slot that was due runs, not a later one.
+        clock.advance(MINUTE);
+        assert_eq!(ran(&scheduler.tick(&host).await), vec![("git:a", due)]);
+        assert_eq!(
+            host.runs.lock().unwrap().as_slice(),
+            &[("git:a".to_string(), command(due))]
+        );
     }
 
     /// A restarted scheduler outranks its predecessor from the ledger, not
@@ -899,5 +988,34 @@ mod tests {
             .expect("run returns once cancelled")
             .unwrap();
         assert!(host.runs.lock().unwrap().is_empty(), "no tick after cancel");
+    }
+
+    /// A deferred tick leaves a slot due, which would otherwise make the loop
+    /// re-tick at once; a failing store is retried at the idle poll instead.
+    #[tokio::test]
+    async fn run_waits_the_idle_poll_after_a_deferred_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = Arc::new(scripted(
+            &store,
+            vec![project(&store, "git:a", "*/15 * * * *")],
+        ));
+        let clock = ManualClock::parked_at(T0 + 1_000);
+        let mut scheduler = DreamerScheduler::new(clock.shared());
+        assert!(scheduler.tick(host.as_ref()).await.is_empty());
+        clock.advance(15 * MINUTE);
+        *host.fail_projects_once.lock().unwrap() = Some("store unavailable".to_string());
+
+        let cancel = CancellationToken::new();
+        let dyn_host: Arc<dyn SchedulerHost> = Arc::clone(&host) as Arc<dyn SchedulerHost>;
+        let running = tokio::spawn(scheduler.run(dyn_host, cancel.clone()));
+        tokio::task::yield_now().await;
+        assert_eq!(clock.sleeps(), vec![IDLE_POLL], "not an immediate re-tick");
+        assert!(host.runs.lock().unwrap().is_empty());
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("run returns once cancelled")
+            .unwrap();
     }
 }

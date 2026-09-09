@@ -5403,6 +5403,10 @@ pub struct MemoryStore {
     authority_seed_transaction_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     historian_side_channel_fail_once: Mutex<BTreeSet<String>>,
+    /// Makes the next `authority_project_for_route` fail as a backend error,
+    /// so a caller's store-failure branch can be exercised on a healthy store.
+    #[cfg(any(test, feature = "test-support"))]
+    authority_route_read_fail_once: std::sync::atomic::AtomicBool,
 }
 
 fn valid_drop_seed_block_id(block_id: &str) -> bool {
@@ -5790,6 +5794,8 @@ impl MemoryStore {
             authority_seed_transaction_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            authority_route_read_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
         Ok(store)
@@ -6223,6 +6229,15 @@ impl MemoryStore {
         domain: &str,
     ) -> Result<Option<String>, MemoryStoreError> {
         validate_authority_domain(domain)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .authority_route_read_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected authority route read failure".to_string(),
+            )));
+        }
         self.inner
             .with_conn(|conn| {
                 conn.query_row(
@@ -6252,6 +6267,14 @@ impl MemoryStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(kind.to_string());
+    }
+
+    /// The next `authority_project_for_route` returns a backend error instead
+    /// of reading the ledger; every call after it reads normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_authority_route_read_for_test(&self) {
+        self.authority_route_read_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Reject a facade write that crosses the route's active authority identity.
