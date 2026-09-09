@@ -250,6 +250,22 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
+    it("strips cache_ttl from project config in both shapes", () => {
+        for (const cacheTtl of ["0", { default: "0", "anthropic/*": "1s" }]) {
+            const raw: Record<string, unknown> = {
+                cache_ttl: cacheTtl,
+                sidekick: { model: "x" },
+            };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw).toEqual({ sidekick: { model: "x" } });
+            expect(warnings).toEqual([
+                expect.stringContaining("Ignoring cache_ttl from project config"),
+            ]);
+        }
+    });
+
     it("strips mural.model from project config but keeps the feature switch", () => {
         const raw: Record<string, unknown> = {
             mural: { enabled: true, model: "repo-controlled-model" },

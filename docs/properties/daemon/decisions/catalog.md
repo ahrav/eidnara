@@ -318,7 +318,7 @@ a decision inside `daemon`.
 | `execute_threshold_tokens` | not parsed | documented (`:168`, `:319-338`), doc claims clamp to `90% x context_limit` | none | **No.** Same 4b record. The documented clamp has no implementing code |
 | `compaction.enabled` | `true` (`config.rs:123`) | `true` (`:172`) | none; user tier only, project warns (`config.rs:520`) | Yes, user tier (`:433-435`) |
 | `memory.enabled` | `true` (`config.rs:124`) | `true` (`:589`) | none | Yes, both tiers (`:436-438`, `:521-523`) |
-| `memory.injection_budget_tokens` | `4000.0` (`config.rs:22`, `:130`) | `4000`, range `500-20000` (`:591`) | `.max(1.0)` only (`config.rs:442`, `:527`) | Yes, both tiers. **Divergent**: neither documented bound exists |
+| `memory.injection_budget_tokens` | `4000.0` (`config.rs:22`, `:123`) | `4000`, range `500-20000` (`:591`) | `.max(1.0)` only (`config.rs:847-851`) | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`); project warns (`:729`). **Divergent**: neither documented bound exists |
 | `memory.budget_tokens` (deprecated) | falls back to the same field (`config.rs:443-445`) | absent from the documented table | `.max(1.0)` | Yes, user tier, with a deprecation warning (`:446-451`); project warns and ignores (`:538`) |
 | `memory.user_profile_budget_tokens` | `4000.0` (`config.rs:25`, `:131`) | **undocumented** | `.max(1.0)` (`config.rs:453`) | Yes, user tier only (`:452-454`); project warns (`:539`) |
 | `memory.auto_promote` | `true` (`config.rs:127`) | `true` (`:592`) | none | Yes, both tiers (`:455-461`, `:529-535`) |
@@ -328,13 +328,13 @@ a decision inside `daemon`.
 | `caveman_text_compression.enabled` | `false` (`config.rs:75`) | `false` (`:724`) | none | Yes, both tiers (`:600-606`) |
 | `caveman_text_compression.min_chars` | `500` (`config.rs:42`, `:77`) | `500`, **no range documented** (`:725`) | `clamp(100, 10_000)` (`config.rs:607`); a `0` discarded | Yes. **Divergent**: undocumented bound |
 | `smart_drops` | `false` (`config.rs:135`) | `false` (`:752`) | none | Yes, both tiers (`:467-469`, `:541-543`) |
-| `dreamer.inject_docs` | `true` (`config.rs:132`) | `true` (`:501`) | none | Yes, both tiers (`:470-475`, `:544-549`) |
+| `dreamer.inject_docs` | `true` (`config.rs:125`) | `true` (`:501`) | none | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`, read at `:895`); project warns (`:729`) |
 | `temporal_awareness` | `true` (`config.rs:133`) | `true` (`:650`) | none | Yes, both tiers (`:476-478`, `:550-555`) |
-| `dreamer.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:128`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:611-621`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
-| `historian.model`, `historian.fallback_models` | empty chain (`config.rs:121`) | documented with **no user-only marker** (`:448-449`) | `model_chain.dedup()` (`config.rs:571`), adjacent-only | Yes, user tier only (`:411-424`). **Divergent**: a project-tier value is dropped with no warning; `warn_ignored_project_key` is never called for it |
+| `dreamer.tasks.review-user-memories.schedule`, legacy `user_memories.enabled` | privacy gate defaults `false` (`config.rs:121`) | task default schedule `0 3 * * *`, i.e. on (`:527`) | none; a non-empty trimmed string reads as consent (`config.rs:875-879`); the schedule is `UserOnly`, the flag is `ProjectRaiseOnly` and a project may only close the gate (`:687-692`) | Yes as a presence test. **Divergent**: module default is closed, documented default is scheduled |
+| `historian.model`, `historian.fallback_models` | empty chain (`config.rs:114`) | documented with **no user-only marker** (`:448-449`) | `dedup_preserving_order` (`config.rs:753`, `:950`) | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`, read at `:788-813`); project warns (`:729`) |
 | `historian.module_model`, `historian.module_fallback_models` | absent | **undocumented** | none | Yes, user tier only, and it replaces the whole chain (`config.rs:390-409`) |
 | `historian.context_limit_tokens` | `128_000` (`config.rs:37`, `:129`) | **undocumented** | `> 0` via `positive_usize_at` (`config.rs:464-466`) | Yes; project tier warns (`:540`) |
-| `cache_ttl` (string or object) | `"5m"` (`config.rs:136`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:810-812`); `"never"` maps to `u64::MAX` (`:387-389`) | Yes, user tier only (`config.rs:486-511`). **Divergent**: project-tier value dropped with no warning, and `"0"` parses to `0` ms and forces execution every pass, undocumented |
+| `cache_ttl` (string or object) | `"5m"` (`config.rs:129`) | `"5m"` (`:163`), **no user-only marker** | parse is total; invalid falls back to `DEFAULT_CACHE_TTL_MS` (`scheduler.rs:771-773`); `"never"` maps to `u64::MAX` (`:365-368`) | Yes, user tier only: `UserOnly` and `privileged()` (`config.rs:627-693`, read at `:924-941`); project warns (`:729`); the TypeScript strip removes it from project config (`project-security.ts:386-391`). **Divergent**: `"0"` parses to `0` ms and forces execution every pass, undocumented |
 | `prompt_surface.guidance_override_path` | `None` | documented, user-only (`:75`, `:80-88`) | must be a readable section with exactly one marker (documented at `:88`) | Yes (`config.rs:281-358`); project warns (`:561-565`) |
 | `prompt_surface.guidance_override_text` | `None` | **undocumented** | none | Yes (`config.rs:479-485`), but a configured path resets it to `None` first (`:299`); project warns (`:556-560`) |
 | `commit_cluster_trigger.enabled` | not parsed | `true` (`:237`) | none | **Not in Rust; honoured in TypeScript.** Rust hardwires `DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED` (`lib.rs:605`) at `lib.rs:4962`. `plugin/src/config/schema/eidnara.ts` parses it and `pi-plugin/src/context-handler.ts` consumes it |
@@ -633,21 +633,36 @@ effective config only through its `TierClass`; the merge iterates the closed
 merge runs on every resolution.
 Fault/timing angle: none.
 Required faults and enabling state: a project `.eidnara/eidnara.jsonc` setting
-any privileged key (`historian.module_model`, `dreamer.inject_docs`,
+any privileged key (`historian.module_model`, `memory.injection_budget_tokens`,
+`cache_ttl`, `dreamer.inject_docs`,
 `dreamer.tasks.review-user-memories.schedule`, or `user_memories.enabled: true`
 against a closed user gate).
 Confidence: high - [evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
 The evidence file records the pre-table state this record was discovered in.
-The table now replaces the header's prose allow-list: `dreamer.inject_docs` and
-the review-user-memories schedule are `UserOnly`; `user_memories.enabled` is
+The table now replaces the header's prose allow-list: `dreamer.inject_docs`,
+the review-user-memories schedule, `memory.injection_budget_tokens`, and
+`cache_ttl` are `UserOnly` and `privileged()`; `user_memories.enabled` is
 `ProjectRaiseOnly` (a project may close the gate, never open it); a
 `const` assertion fails the build if a key marked `privileged()` is classified
 `ProjectAllowed`. `smart_drops` and `temporal_awareness` remain
-`ProjectAllowed` by classification rather than by omission.
+`ProjectAllowed` by classification rather than by omission. The memory budget
+the evidence file names as the permissive-direction risk is closed: the daemon
+reads the project file itself, so the TypeScript strip of
+`memory.injection_budget_tokens` (`project-security.ts:401-406`) did not reach
+this path. `cache_ttl` is privileged because the scheduler fires the historian
+once the TTL has elapsed since the last response (`scheduler.rs:473-478`), and
+the TypeScript leg now strips it too (`project-security.ts:386-391`) so the wire
+value the daemon prefers (`lib.rs:8026-8036`) cannot carry a project TTL.
 Existing check: the two tests named above, plus
+`privileged_keys_are_the_model_budget_and_schedule_levers` (pins the privileged
+list by name),
+`memory_injection_budget_uses_standard_key_and_deprecated_user_fallback`
+(project value ignored with a warning),
 `docs_injection_is_user_tier_only_and_temporal_flag_follows_project_tier`,
-`project_tier_cannot_raise_the_user_memory_gate`, and
-`module_model_is_user_tier_only` (now asserts the warnings).
+`project_tier_cannot_raise_the_user_memory_gate`,
+`module_model_is_user_tier_only` (now asserts the warnings), and
+`project-security.test.ts` `strips cache_ttl from project config in both
+shapes`.
 ### dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller
 
 Type: safety
