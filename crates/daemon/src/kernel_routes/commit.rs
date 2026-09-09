@@ -322,7 +322,7 @@ struct CommitPlan {
     deadline: Duration,
 }
 
-enum CommitFailure {
+pub(crate) enum CommitFailure {
     Kernel(KernelError),
     Token(TokenConflict),
     OperationKeyReused,
@@ -486,7 +486,7 @@ fn caller_domain(domain_id: &str) -> Result<&str, KernelError> {
 /// the first time an operation needs it; the checks and the inserts share the
 /// envelope's transaction, so two commits for a new project cannot both
 /// insert either row.
-fn ensure_scope(
+pub(crate) fn ensure_scope(
     envelope: &mut Envelope<'_>,
     project: &ProjectBinding,
     ready: &mut bool,
@@ -515,7 +515,7 @@ fn ensure_scope(
 const DOMAIN_SOURCE_KIND: &str = "kernel_route";
 
 /// The shared transaction prevents concurrent commits from inserting the same domain twice.
-fn ensure_domain(
+pub(crate) fn ensure_domain(
     envelope: &mut Envelope<'_>,
     domain_id: &str,
     ready: &mut HashSet<String>,
@@ -544,7 +544,7 @@ fn ensure_domain(
 /// a row the same route may mutate. Returning `NotFound` for an out-of-scope
 /// object, the same answer a missing object gets, prevents cross-project
 /// object-id enumeration.
-fn scoped_object_state(
+pub(crate) fn scoped_object_state(
     envelope: &Envelope<'_>,
     filter: &mut ScopeFilter,
     object_id: &str,

@@ -15,9 +15,12 @@ write on the failure path) no longer exists.
 
 Verified at HEAD. References are to `crates/daemon/src/lib.rs` unless stated.
 
-- `handle_dreamer_run_task` validates the request shape (`ClassifyRequest::parse`)
-  and hands `DreamerRuntime::run_dreamer_task` the parsed task plus the route
-  facts (`DreamerRoute`); that shared protocol passes the memories authority
+- `handle_dreamer_run_task` validates the request shape (`ClassifyRequest::parse`:
+  kernel object ids in the bound project, a model chain, and a timeout; a
+  host-rendered prompt or claim-lane items are refused) and hands
+  `DreamerRuntime::run_dreamer_task` the parsed task plus the route facts
+  (`DreamerRoute`, including the kernel project); that shared protocol passes
+  the memories authority
   `MODULE` gate, takes the in-process duplicate guard, then judges the
   per-project attempt budget from `count_dreamer_attempts` before any receipt
   is written: an exhausted project with no receipt for the command answers
@@ -25,7 +28,7 @@ Verified at HEAD. References are to `crates/daemon/src/lib.rs` unless stated.
   holds proceeds to `begin_dreamer_receipt`, so it replays, refuses a changed
   request, or settles under the same rules as below, and only a takeover
   (which would dispatch) is refused over budget.
-- `begin_dreamer_receipt` is the first write (`:9571`); it records the binding
+- `begin_dreamer_receipt` is the first write (`:9638`); it records the binding
   including the harness the request arrived on (`dreamer_ledger.rs`,
   `DreamerReceiptBinding.harness`, column `harness` in
   `crates/memory-store/baseline.sql:349`). Each attempt row records the
@@ -34,39 +37,57 @@ Verified at HEAD. References are to `crates/daemon/src/lib.rs` unless stated.
   is the run identity the runtime keys on. `Complete`
   replays; `DigestConflict` and `BindingMismatch` answer
   `dreamer_request_conflict` with no producer constructed; `InProgress`
-  goes to `resume_dreamer_receipt` (`:9886`).
+  goes to `resume_dreamer_receipt` (`:10035`).
+- Only once a dispatch is owed does `render_pool` (`:13786`) read the named
+  memories' canonical rows at the kernel tip and render the prompt
+  (`classify.rs`, `render_classify_prompt`, bodies escaped); an id the bound
+  project does not serve completes the receipt `failed` with an
+  `invalid_params` reply (`:9690-9706`), so a retry replays the refusal.
+  Replays and resumes never read the kernel.
 - `resume_dreamer_receipt` reads `list_dreamer_attempts` and picks the newest
   attempt at the open generation whose terminal is not `not_sent`. No such
   attempt: `take_over_dreamer_receipt` moves the fence to `g + 1` (Applied) or
   the request is `dreamer_ledger_fenced`. An ended attempt: complete the
-  receipt `unknown` through `complete_receipt_as_unknown` (`:13810`), leaving
+  receipt `unknown` through `complete_receipt_as_unknown` (`:14343`), leaving
   the attempt's own terminal in place. An open attempt with a handle: connect
   under the attempt's recorded `project_root` and `harness`, bind the recorded
   child session, and call `status`; `Missing` settles `unknown`,
   `Active` or `Terminal` answers `dreamer_outcome_unknown` with no write, a
   connect or status error answers the same. An open attempt with no handle:
   settle `unknown`. Settling an open attempt goes through
-  `settle_dispatched_attempt_as_unknown` (`:13790`), which writes the attempt
+  `settle_dispatched_attempt_as_unknown` (`:14323`), which writes the attempt
   terminal best-effort and then completes the receipt through the same helper,
   matching `Applied`, `Fenced`, and `Err` separately.
-- In the chain loop, `begin_dreamer_attempt` precedes `start` (`:9660`), and
-  `record_dreamer_run_handle` follows a successful `start` (`:9706`); a handle
+- In the chain loop, `begin_dreamer_attempt` precedes `start` (`:9748`), and
+  `record_dreamer_run_handle` follows a successful `start` (`:9794`); a handle
   write that is `Fenced` or fails purges the session and settles `unknown`.
   `finish_dreamer_attempt` records the attempt terminal; when it does not land,
   a usable result is still offered to `complete_dreamer_receipt` first, and
   otherwise the request settles `unknown`.
-- The exhausted-chain write (`:9837`) and the success write (`:9852`) match
+- Model output is accepted only by `parse_classify_output` (`classify.rs`):
+  one envelope, exact coverage, closed domains for importance, scope, and
+  shareable, no unknown attributes; a rejection names the rule and never the
+  text. Accepted classifications are written to the kernel by
+  `record_classifications` (`:13850`) before the receipt completes: one
+  `memory_classification` observation per memory in the memory domain, in the
+  project's scope, depending on the memory, admitted under
+  `(ModelInference, DreamerInference)` from the code path, committed under
+  `("dreamer.classify", <receipt operation key>, <receipt digest>)` so a repeat
+  under the same receipt replays the kernel's receipt. A kernel write failure
+  completes the receipt `failed` as `dreamer_kernel_write_failed` (`:9966`).
+- The exhausted-chain write (`:9947`) and the success write (`:10001`) match
   `Applied`, `Fenced`, and `Err`; only `Applied` answers with the receipt's
-  recorded response, read back through `read_dream_task_response`.
+  recorded response, read back through `read_dream_task_response`. The reply
+  carries the commit sequence and the count written, never the model's text.
 - `attempt_child_session_id` (`crates/daemon/src/classify.rs`) hashes the
   receipt generation with the request identity, attempt index, and model, so a
   successor generation cannot derive a predecessor's session.
 - Bounds: `timeout_ms` is clamped to `CLASSIFY_MAX_REQUEST_TIMEOUT`
-  (`classify.rs:23`, equal to the await ceiling) by `classify_request_timeout`
-  at `:9491`; the chain is
+  (`classify.rs:28`, equal to the await ceiling) by `classify_request_timeout`
+  at `:9558`; the chain is
   capped at `MAX_CLASSIFY_MODEL_CHAIN` at parse time; the budget is
   `DREAMER_ATTEMPT_BUDGET` per `DREAMER_ATTEMPT_BUDGET_WINDOW`
-  (`classify.rs:30-31`). `count_dreamer_attempts` excludes `not_sent` rows and
+  (`classify.rs:40-41`). `count_dreamer_attempts` excludes `not_sent` rows and
   counts open, `cancelled`, and length-capped attempts alike.
 - Ledger fences: every transition is a row-predicate `UPDATE` on key, generation,
   and `in_progress` state (`dreamer_ledger.rs:565`, `guarded_transition`), so a

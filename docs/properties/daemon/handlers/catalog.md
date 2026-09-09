@@ -553,11 +553,11 @@ this condition.
 Fault/timing angle: `begin_dreamer_receipt` runs before any producer is
 constructed (`lib.rs`, `DreamerRuntime::run_dreamer_task`), so a `Complete`
 receipt replays and an `in_progress` one goes to `resume_dreamer_receipt`
-(`lib.rs:9886`)
+(`lib.rs:10035`)
 before any connect. The attempt row precedes the model call and the run handle
-is recorded right after `start` returns (`lib.rs:9706`); a handle write that does
+is recorded right after `start` returns (`lib.rs:9794`); a handle write that does
 not land settles the attempt and receipt `unknown` through
-`settle_dispatched_attempt_as_unknown` (`lib.rs:13790`), as does an attempt
+`settle_dispatched_attempt_as_unknown` (`lib.rs:14323`), as does an attempt
 terminal that cannot be recorded. On resume, the newest attempt at the open
 generation that is not `not_sent` is the dispatch marker: an ended one settles
 `unknown` through `complete_receipt_as_unknown`, keeping its own terminal; an
@@ -604,11 +604,11 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - the scheduler runs on every daemon once
-the store opens (`lib.rs:3593`), but it has a project to run only when the user
+the store opens (`lib.rs:3606`), but it has a project to run only when the user
 tier sets `/dreamer/tasks/review-user-memories/schedule`, a `UserOnly` key
 (`config.rs:663-678`) that the project tier cannot set, and the route's
-memories authority is `MODULE` (`lib.rs:13689`). No task has Rust-owned
-classify inputs yet (`DreamerRuntime::classify_inputs`, `lib.rs:3044`), so on
+memories authority is `MODULE` (`lib.rs:14030`). No task has Rust-owned
+classify inputs yet (`DreamerRuntime::classify_inputs`, `lib.rs:3053`), so on
 this HEAD a due slot ends `dreamer_task_not_runnable` without a dispatch.
 Status: active
 Exercised: yes - `dreamer_scheduler::tests` in

@@ -54,7 +54,7 @@ impl ProjectBinding {
     /// keeps one route family's idempotency receipt from answering another's
     /// request. A blank key is refused here because the prefix would otherwise
     /// hide it from the kernel's emptiness check.
-    fn operation_key(&self, family: &str, operation_key: &str) -> Option<String> {
+    pub(crate) fn operation_key(&self, family: &str, operation_key: &str) -> Option<String> {
         if operation_key.trim().is_empty() {
             return None;
         }
