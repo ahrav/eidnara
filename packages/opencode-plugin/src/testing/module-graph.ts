@@ -362,7 +362,8 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             out.push(value.replaceAll("\uE000", ""));
         };
         const expand = (value: string): void => {
-            const group = /\((?:\?:)?([^()]*)\)/.exec(value);
+            // A quantified group (`(ab)?`, `(a|b){2}`) belongs to the quantifier rule below.
+            const group = /\((?:\?:)?([^()]*)\)(?![*+?{])/.exec(value);
             if (group?.index !== undefined && !value.startsWith("\uE000", group.index - 1)) {
                 const prefix = value.slice(0, group.index);
                 const suffix = value.slice(group.index + group[0].length);
@@ -375,14 +376,18 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             // whole text's quantifiers must multiply to at most 64 variants, so expanding them
             // can never trip the cap on a pattern that is not literal-shaped.
             const quantifierPattern =
-                /(\uE000.|\[(?:\uE000.|[^\]\uE000])*\]|[^\uE000\]?*+{}()|])(\?|\{(\d+)(?:,(\d+))?\})/g;
+                /(\((?:\?:)?[^()]*\)|\uE000.|\[(?:\uE000.|[^\]\uE000])*\]|[^\uE000\]?*+{}()|])(\?|\{(\d+)(?:,(\d+))?\})/g;
             const variantsOf = (match: RegExpExecArray): number | undefined => {
                 const [, atom, quantifier, low, high] = match;
                 if (match.index > 0 && value.startsWith("\uE000", match.index - 1))
                     return undefined;
                 const from = quantifier === "?" ? 0 : Number(low);
                 const to = quantifier === "?" ? 1 : Number(high ?? low);
-                const choices = atom.startsWith("[") ? classMembers(atom.slice(1, -1))?.length : 1;
+                const choices = atom.startsWith("[")
+                    ? classMembers(atom.slice(1, -1))?.length
+                    : atom.startsWith("(")
+                      ? splitUnescaped(atom.replace(/^\((?:\?:)?/, "").slice(0, -1)).length
+                      : 1;
                 if (choices === undefined || to < from || to > 16) return undefined;
                 let variants = 0;
                 for (let count = from; count <= to; count++) variants += choices ** count;
@@ -714,6 +719,14 @@ export function databaseUses(
     let namesBinding = options.allConstructions === true;
     const findBinding = (node: ts.Node): void => {
         if (namesBinding) return;
+        // A type-only import or export is erased at runtime and binds nothing.
+        if (
+            (ts.isImportDeclaration(node) && node.importClause?.isTypeOnly) ||
+            (ts.isExportDeclaration(node) && node.isTypeOnly) ||
+            (ts.isImportEqualsDeclaration(node) && node.isTypeOnly)
+        ) {
+            return;
+        }
         if (ts.isStringLiteralLike(node) && resolvesToBinding(fileName, node.text)) {
             namesBinding = true;
             return;

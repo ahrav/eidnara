@@ -29815,6 +29815,15 @@ mod tests {
                 match ch {
                     '(' => open = Some(index),
                     ')' => {
+                        // A quantified group (`(ab)?`, `(a|b){2}`) belongs to the quantifier
+                        // step below.
+                        let quantified = bytes
+                            .get(index + 1)
+                            .is_some_and(|next| matches!(next, '*' | '+' | '?' | '{'));
+                        if quantified {
+                            open = None;
+                            continue;
+                        }
                         if let Some(start) = open {
                             let inner: String = bytes[start + 1..index].iter().collect();
                             let inner = strip_group_prefix(&inner).to_string();
@@ -29913,7 +29922,19 @@ mod tests {
                         }
                         close + 1
                     }
-                    ']' | '?' | '*' | '+' | '{' | '}' | '(' | ')' | '|' => {
+                    '(' => {
+                        // Only an innermost group is an atom; a nested one is expanded first.
+                        let mut close = index + 1;
+                        while close < bytes.len() && !matches!(bytes[close], ')' | '(') {
+                            close += if bytes[close] == '\u{0}' { 2 } else { 1 };
+                        }
+                        if bytes.get(close) != Some(&')') {
+                            index += 1;
+                            continue;
+                        }
+                        close + 1
+                    }
+                    ']' | '?' | '*' | '+' | '{' | '}' | ')' | '|' => {
                         index += 1;
                         continue;
                     }
@@ -29943,10 +29964,14 @@ mod tests {
                     && from <= to
                     && to <= 16
                 {
-                    let choices = if bytes[start] == '[' {
-                        class_members(&bytes[start + 1..atom_end - 1]).map(|members| members.len())
-                    } else {
-                        Some(1)
+                    let choices = match bytes[start] {
+                        '[' => class_members(&bytes[start + 1..atom_end - 1])
+                            .map(|members| members.len()),
+                        '(' => {
+                            let inner: String = bytes[start + 1..atom_end - 1].iter().collect();
+                            Some(split_unescaped(strip_group_prefix(&inner), '|').len())
+                        }
+                        _ => Some(1),
                     };
                     if let Some(choices) = choices {
                         let variants = (from..=to).map(|count| choices.pow(count)).sum();
@@ -30436,6 +30461,8 @@ mod tests {
         );
         assert_eq!(regex_texts(r"^a{2,3}$"), ["aa", "aaa"]);
         assert_eq!(regex_texts(r"^\?{2}$"), ["??"]);
+        assert_eq!(regex_texts(r"^(a|b){2}$"), ["aa", "ab", "ba", "bb"]);
+        assert_eq!(regex_texts(r"^(ab)?x$"), ["x", "abx"]);
         assert_eq!(regex_texts(r"^[ab]+$"), ["[ab]+"]);
         assert_eq!(regex_texts(r"^[^.]+\.db$"), ["[^.]+.db"]);
         assert_eq!(regex_texts(r"^[a-zA-Z0-9_-]+$"), ["[a-zA-Z0-9_-]+"]);

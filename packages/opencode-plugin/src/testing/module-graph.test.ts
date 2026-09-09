@@ -410,6 +410,9 @@ describe("databaseUses", () => {
         expect(
             databaseUses(
                 [
+                    'import type { Database } from "bun:sqlite";',
+                    'export type { Database as Db } from "../../shared/sqlite";',
+                    'import type Native = require("node:sqlite");',
                     'const names = new Intl.DisplayNames(["en"], { type: "language" });',
                     "const again = new handle.constructor(productPath);",
                     "const Ctor = handle.constructor;",
@@ -857,6 +860,11 @@ describe("operationLiteralHits", () => {
             "aa",
             "aaa",
         ]);
+        expect(
+            literalStrings(
+                parseSource("const g = /^(a|b){2}$/; const o = /^(ab)?x$/;", "m.ts"),
+            ).map((entry) => entry.value),
+        ).toEqual(["aa", "ab", "ba", "bb", "x", "abx"]);
         const ten = "(a|b)".repeat(10);
         expect(literalStrings(parseSource(`const r = /^${ten}$/;`, "m.ts")).length).toBe(1024);
         expect(() => literalStrings(parseSource(`const r = /^${ten}(a|b)$/;`, "m.ts"))).toThrow(
