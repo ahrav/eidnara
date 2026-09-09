@@ -709,8 +709,16 @@ Fault/timing angle: The read is taken once per pass in `lib.rs:7994`, through
 `Handler::project_memory_read` (`lib.rs:4834`), before the `run_transform`
 closure, and the same value is handed to a historian firing the pass triggers
 (`lib.rs:5104`), so a store phase change or lag change after that point cannot
-split one pass between a served block and a withheld record, or between the
-transform's record and the historian's. The
+split one pass between a served block and a withheld record on either surface.
+Equality between `ModuleMeta.project_memory` and
+`HistorianDiagnostics.project_memory` in one response is not claimed:
+`meta.project_memory` is the served m0's record, rewritten only on a HARD,
+while the historian records the current pass's read, and the HARD trigger
+compares only the rendered-row digest (`canonical_memory.rs:50-66`,
+`m1_compose.rs:80-82`). A non-HARD pass whose read advanced `known_as_of` or
+changed `truncated` over the same rendered rows, or moved from one withheld
+state to another, therefore carries a `meta.project_memory` frozen by an
+earlier pass beside a historian record taken this pass. The
 verdict-to-record mapping is total over `KernelOutcome`
 (`canonical_memory.rs:101-112`, `state.rs` `state_key`).
 Required faults and enabling state: A `KernelOpenCoordinator` phase other than
