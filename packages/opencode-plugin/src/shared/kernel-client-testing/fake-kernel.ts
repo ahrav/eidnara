@@ -763,7 +763,7 @@ export class FakeKernel {
         };
     }
 
-    /** `kernel.commit` with `preview: true`: a recorded identity answers its receipt; otherwise every operation is judged at the tip, nothing is written, and no receipt is created. commentlint: allow(JUDGE) */
+    /** `kernel.commit` with `preview: true`: a recorded identity answers its receipt; otherwise operations are judged in order on an overlay of the tip, nothing is written, and no receipt is created. commentlint: allow(JUDGE) */
     private previewReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
         const tokens = (body.tokens as unknown[] | undefined) ?? [];
         if (tokens.length > 0)
@@ -783,12 +783,12 @@ export class FakeKernel {
             };
         }
         const previews = [];
+        const staged = new Map<string, FakeObject>();
+        const view = (id: string): FakeObject | undefined => staged.get(id) ?? this.objects.get(id);
         for (const operation of operations) {
-            const judged = this.judgeDisposition(operation, projectRoot, (id) =>
-                this.objects.get(id),
-            );
+            const judged = this.judgeDisposition(operation, projectRoot, view);
             if ("reply" in judged) return judged.reply;
-            const target = this.objects.get(judged.result.object_id) as FakeObject;
+            const target = view(judged.result.object_id) as FakeObject;
             const current = surfaceVisibilities(
                 visibilityRow(target.labeled, target.disposition),
                 target.sensitivity,
@@ -801,6 +801,10 @@ export class FakeKernel {
                 (surface) =>
                     current[surface] !== "hidden" && current[surface] !== projected[surface],
             );
+            staged.set(target.object_id, {
+                ...target,
+                disposition: judged.result.disposition as FakeDisposition,
+            });
             previews.push({ ...judged.result, current, projected, visibility_changes });
         }
         return { state: { kind: "available" }, known_as_of: this.tip, previews };

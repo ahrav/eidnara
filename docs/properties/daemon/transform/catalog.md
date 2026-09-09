@@ -670,16 +670,16 @@ and show a memory-disabled pass records no composition at all
 gated-off read, compares the firing's `project_memory` record for the
 withheld, empty, and gated-off reads, and checks the served prompt carries
 its row;
-`historian_prompt_composes_project_memory_from_canonical_rows` (`lib.rs:28216`)
+`historian_prompt_composes_project_memory_from_canonical_rows` (`lib.rs:28370`)
 fires the historian over a real kernel store and checks the captured prompt
 carries the verified row and none of the quarantined, retired, superseded, or
 other-project rows; and
 `a_withheld_historian_memory_read_is_recorded_and_differs_from_an_empty_block`
-(`lib.rs:28340`) fires once with the kernel store still opening and once with
+(`lib.rs:28494`) fires once with the kernel store still opening and once with
 an open, empty store and shows both prompts lack the block while the two
 `historian.project_memory` records differ; and
 `historian_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-(`lib.rs:28372`) shows the field is absent from the wire, not `null`, both for
+(`lib.rs:28526`) shows the field is absent from the wire, not `null`, both for
 a pass that did not fire and for a firing under a memory-disabled binding. All
 run in CI under `cargo test --workspace`.
 Guarantee: A HARD pass whose canonical memory read was not served (stale,
@@ -709,8 +709,16 @@ Fault/timing angle: The read is taken once per pass in `lib.rs:7994`, through
 `Handler::project_memory_read` (`lib.rs:4834`), before the `run_transform`
 closure, and the same value is handed to a historian firing the pass triggers
 (`lib.rs:5104`), so a store phase change or lag change after that point cannot
-split one pass between a served block and a withheld record, or between the
-transform's record and the historian's. The
+split one pass between a served block and a withheld record on either surface.
+Equality between `ModuleMeta.project_memory` and
+`HistorianDiagnostics.project_memory` in one response is not claimed:
+`meta.project_memory` is the served m0's record, rewritten only on a HARD,
+while the historian records the current pass's read, and the HARD trigger
+compares only the rendered-row digest (`canonical_memory.rs:50-66`,
+`m1_compose.rs:80-82`). A non-HARD pass whose read advanced `known_as_of` or
+changed `truncated` over the same rendered rows, or moved from one withheld
+state to another, therefore carries a `meta.project_memory` frozen by an
+earlier pass beside a historian record taken this pass. The
 verdict-to-record mapping is total over `KernelOutcome`
 (`canonical_memory.rs:101-112`, `state.rs` `state_key`).
 Required faults and enabling state: A `KernelOpenCoordinator` phase other than
@@ -728,7 +736,7 @@ and `None` composition), and the durable enum whose two variants have different
 serde tags.
 Existing check: `transform.rs:13282`, `canonical_memory.rs` tests,
 `tests/transform_canonical_memory.rs`, `historian_chunk.rs:1369`, and
-`lib.rs:28216`, `lib.rs:28340`, `lib.rs:28372` as described.
+`lib.rs:28370`, `lib.rs:28494`, `lib.rs:28526` as described.
 Impact: If a withheld read were recorded as `Canonical` with zero rows, an
 operator reading a session with no memory block could not tell "this project
 has no injectable memory" from "the store was starting when m0 froze", which is

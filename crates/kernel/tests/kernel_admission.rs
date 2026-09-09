@@ -7154,9 +7154,7 @@ fn an_object_admitted_by_a_trigger_serves_no_lower_than_that_trigger_reads_today
     );
 }
 
-/// A preview envelope answers the readers a commit closure sees, judges an
-/// admission the way `record_admission` would, and replays the receipt a
-/// recorded intent holds, while the store stays exactly as it was.
+/// A preview envelope answers the readers a commit closure sees, judges an admission the way `record_admission` would, and uses each judged decision as the next admission's prior. commentlint: allow(JUDGE)
 #[test]
 fn preview_judges_like_a_commit_and_writes_nothing() {
     let directory = tempfile::tempdir().unwrap();
@@ -7188,24 +7186,24 @@ fn preview_judges_like_a_commit_and_writes_nothing() {
     let commits_before = inspect(directory.path(), "SELECT COUNT(*) FROM commit_log");
 
     let (seen_tip, ()) = store
-        .preview(|envelope| {
+        .preview(far_deadline(), |preview| {
             // A token minted at the tip is valid for the next commit, so the preview accepts it too.
             assert_eq!(
-                envelope.check_token("object", tip)?,
+                preview.check_token("object", tip)?,
                 kernel::TokenCheck::Unchanged
             );
             let stale =
-                envelope.preview_admission(subject_request("object", EventKind::MarkStale))?;
+                preview.preview_admission(subject_request("object", EventKind::MarkStale))?;
             assert_eq!(stale.disposition, kernel::Disposition::Stale);
             assert_eq!(stale.visibility, kernel::VisibilityRow::ExplicitLabeled);
             // Succession events are refused before evaluation, as `record_admission` refuses them.
             assert_eq!(
-                envelope.preview_admission(subject_request("object", EventKind::Correct)),
+                preview.preview_admission(subject_request("object", EventKind::Correct)),
                 Err(KernelError::AdmissionPolicy)
             );
-            let served = envelope
-                .served_row("object", None)?
-                .expect("admitted object is served");
+            let served = preview.served_rows_for(&["object", "never-an-object"], None)?;
+            assert_eq!(served.len(), 1);
+            let served = &served["object"];
             assert_eq!(
                 served.visibility(Surface::AutoInject),
                 kernel::SurfaceVisibility::Visible
@@ -7214,16 +7212,30 @@ fn preview_judges_like_a_commit_and_writes_nothing() {
                 served.visibility_with(stale.visibility, stale.sensitivity, Surface::AutoInject),
                 kernel::SurfaceVisibility::Hidden
             );
+            // Each previewed admission uses the preceding previewed decision as its prior, matching commit behavior: quarantine after stale is judged from stale, and relaxing back is denied without an approval. commentlint: allow(JUDGE)
             assert_eq!(
-                envelope
+                preview
+                    .subject_admission("object")?
+                    .map(|(prior, _)| prior.disposition),
+                Some(kernel::Disposition::Stale)
+            );
+            let quarantined =
+                preview.preview_admission(subject_request("object", EventKind::Quarantine))?;
+            assert_eq!(quarantined.disposition, kernel::Disposition::Quarantined);
+            let relaxed =
+                preview.preview_admission(subject_request("object", EventKind::MarkStale))?;
+            assert_eq!(relaxed.outcome, kernel::Outcome::Deny);
+            assert_eq!(relaxed.disposition, kernel::Disposition::Quarantined);
+            assert_eq!(
+                preview
                     .stored_receipt(intent("admit"))?
                     .map(|receipt| receipt.commit_seq),
                 Some(admitted.commit_seq)
             );
-            assert_eq!(envelope.stored_receipt(intent("never-committed"))?, None);
+            assert_eq!(preview.stored_receipt(intent("never-committed"))?, None);
             let mut reused = intent("admit");
             reused.request_digest = "b".repeat(64);
-            assert_eq!(envelope.stored_receipt(reused), Err(KernelError::Conflict));
+            assert_eq!(preview.stored_receipt(reused), Err(KernelError::Conflict));
             Ok(())
         })
         .unwrap();
@@ -7237,4 +7249,45 @@ fn preview_judges_like_a_commit_and_writes_nothing() {
         inspect(directory.path(), "SELECT COUNT(*) FROM commit_log"),
         commits_before
     );
+    // The stored prior is untouched by the previewed sequence.
+    let (_, ()) = store
+        .preview(far_deadline(), |preview| {
+            assert_eq!(
+                preview
+                    .subject_admission("object")?
+                    .map(|(prior, _)| prior.disposition),
+                Some(kernel::Disposition::Active)
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn far_deadline() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(30)
+}
+
+/// A held reader pool returns `Deadline` at the preview deadline.
+#[test]
+fn preview_stops_waiting_for_a_reader_at_its_deadline() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let started = std::time::Instant::now();
+    let (outcome, elapsed) = std::thread::scope(|threads| {
+        threads
+            .spawn(|| store.hold_readers_for_test(&held, std::time::Duration::from_millis(1_500)));
+        held.wait();
+        let outcome = store.preview(
+            std::time::Instant::now() + std::time::Duration::from_millis(200),
+            |_| Ok(()),
+        );
+        (outcome, started.elapsed())
+    });
+    assert_eq!(outcome, Err(KernelError::Deadline));
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_400),
+        "the preview returned when the holder released the pool rather than at its own deadline, took {elapsed:?}"
+    );
+    let (_, ()) = store.preview(far_deadline(), |_| Ok(())).unwrap();
 }
