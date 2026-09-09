@@ -9556,14 +9556,10 @@ impl Handler {
         // is written: an exhausted project dispatches nothing new and leaves no
         // open receipt behind, while a command the ledger already holds still
         // replays, refuses, or settles under the same rules as below.
-        let budget_window_start = now_ms().saturating_sub(
-            i64::try_from(DREAMER_ATTEMPT_BUDGET_WINDOW.as_millis()).unwrap_or(i64::MAX),
-        );
-        let over_budget =
-            match store.count_dreamer_attempts(&authority_project, budget_window_start) {
-                Ok(spent) => spent >= DREAMER_ATTEMPT_BUDGET,
-                Err(error) => return dreamer_ledger_failed(error),
-            };
+        let over_budget = match dreamer_attempt_budget_exhausted(&store, &authority_project) {
+            Ok(over_budget) => over_budget,
+            Err(error) => return dreamer_ledger_failed(error),
+        };
         if over_budget {
             match store.lookup_dreamer_receipt(receipt_key) {
                 Ok(Some(_)) => {}
@@ -9578,7 +9574,14 @@ impl Handler {
             }
             Ok(DreamerBeginOutcome::InProgress { generation }) => {
                 match self
-                    .resume_dreamer_receipt(&store, receipt_key, generation, &binding, over_budget)
+                    .resume_dreamer_receipt(
+                        &store,
+                        receipt_key,
+                        generation,
+                        &binding,
+                        over_budget,
+                        deadline,
+                    )
                     .await
                 {
                     Ok(generation) => generation,
@@ -9619,6 +9622,19 @@ impl Handler {
                 last_error =
                     "classify time budget exhausted before starting a producer run".to_string();
                 break;
+            }
+            // The pre-dispatch check permits at most one attempt beyond the budget.
+            if attempt > 0 {
+                match dreamer_attempt_budget_exhausted(&store, &authority_project) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        last_error = format!(
+                            "dreamer attempt budget exhausted after {attempts} attempt(s); the remaining models in the chain are not dispatched"
+                        );
+                        break;
+                    }
+                    Err(error) => return dreamer_ledger_failed(error),
+                }
             }
             let child_session = attempt_child_session_id(
                 &authority_project,
@@ -9891,6 +9907,10 @@ impl Handler {
     /// status cannot be queried answers `unknown` without a write; an active commentlint: allow(JUDGE)
     /// run is left for a later retry. Unlike the historian's reattach path, commentlint: allow(JUDGE)
     /// this resolver never refires a missing run. commentlint: allow(JUDGE)
+    ///
+    /// The connect, bind, and `status` probe together run under the request's
+    /// remaining `deadline`; a probe that does not finish in time answers
+    /// `unknown` without a write, like a runtime whose status cannot be read.
     async fn resume_dreamer_receipt(
         &self,
         store: &MemoryStore,
@@ -9898,6 +9918,7 @@ impl Handler {
         generation: u64,
         binding: &SessionBinding,
         over_budget: bool,
+        deadline: Instant,
     ) -> Result<u64, PreparedOutcome> {
         let attempts = store
             .list_dreamer_attempts(key)
@@ -9952,41 +9973,47 @@ impl Handler {
         // The runtime keys a run by `(project_root, harness, session)`, so the
         // probe uses the identity the attempt was dispatched under, not the
         // route the retry arrived on.
-        let mut producer = match self
-            .producer_factory
-            .connect(
-                Path::new(&marker.project_root),
-                &marker.harness,
-                &binding.credential_fingerprints,
-            )
-            .await
+        let probe = async {
+            let mut producer = self
+                .producer_factory
+                .connect(
+                    Path::new(&marker.project_root),
+                    &marker.harness,
+                    &binding.credential_fingerprints,
+                )
+                .await?;
+            producer.bind_session(&marker.child_session).await?;
+            producer.status(run_handle).await
+        };
+        let state = match tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            probe,
+        )
+        .await
         {
-            Ok(producer) => producer,
-            Err(error) => {
+            Ok(Ok(state)) => state,
+            Ok(Err(error)) => {
                 return Err(unknown(format!(
                     "run {run_handle} from an earlier daemon cannot be resolved: {error}"
                 )));
             }
+            Err(_) => {
+                return Err(unknown(format!(
+                    "run {run_handle} from an earlier daemon could not be resolved within the request deadline; its outcome is not recorded here"
+                )));
+            }
         };
-        if let Err(error) = producer.bind_session(&marker.child_session).await {
-            return Err(unknown(format!(
-                "run {run_handle} from an earlier daemon cannot be resolved: {error}"
-            )));
-        }
-        match producer.status(run_handle).await {
-            Ok(RunState::Missing { .. }) => Err(settle(format!(
+        match state {
+            RunState::Missing { .. } => Err(settle(format!(
                 "run {run_handle} from an earlier daemon is no longer known to the runtime; its outcome is unknown and it is not dispatched again"
             ))),
             // A terminal run has no recorded outcome and cannot become active,
             // so the receipt settles instead of retrying the status probe.
-            Ok(RunState::Terminal) => Err(settle(format!(
+            RunState::Terminal => Err(settle(format!(
                 "run {run_handle} from an earlier daemon ended on the runtime before its outcome was recorded; its outcome is unknown and it is not dispatched again"
             ))),
-            Ok(RunState::Active) => Err(unknown(format!(
+            RunState::Active => Err(unknown(format!(
                 "run {run_handle} from an earlier daemon is still running on the runtime; its outcome is not recorded here"
-            ))),
-            Err(error) => Err(unknown(format!(
-                "run {run_handle} from an earlier daemon cannot be resolved: {error}"
             ))),
         }
     }
@@ -13633,6 +13660,18 @@ fn dreamer_operation_key(ledger_session: &str, command_id: &str) -> String {
         bytes.extend_from_slice(part.as_bytes());
     }
     sha256_hex(&bytes)
+}
+
+/// Whether `project` has dispatched at least `DREAMER_ATTEMPT_BUDGET` attempts
+/// within `DREAMER_ATTEMPT_BUDGET_WINDOW`, judged from the durable attempt rows.
+fn dreamer_attempt_budget_exhausted(
+    store: &MemoryStore,
+    project: &str,
+) -> Result<bool, MemoryStoreError> {
+    let window_start = now_ms().saturating_sub(
+        i64::try_from(DREAMER_ATTEMPT_BUDGET_WINDOW.as_millis()).unwrap_or(i64::MAX),
+    );
+    Ok(store.count_dreamer_attempts(project, window_start)? >= DREAMER_ATTEMPT_BUDGET)
 }
 
 fn dreamer_budget_exhausted() -> PreparedOutcome {
@@ -18365,6 +18404,9 @@ mod tests {
         status_results: Mutex<VecDeque<RunState>>,
         /// Every run id `status` was asked about, in order.
         status_runs: Mutex<Vec<String>>,
+        /// `status` waits on `notify` while `block_status` is set, simulating a
+        /// runtime that accepts the probe but never replies.
+        block_status: std::sync::atomic::AtomicBool,
     }
 
     struct TestProducerFactory {
@@ -18547,6 +18589,9 @@ mod tests {
                 .lock()
                 .expect("status runs mutex")
                 .push(format!("{session}:{run_id}"));
+            while self.state.block_status.load(Ordering::SeqCst) {
+                self.state.notify.notified().await;
+            }
             Ok(self
                 .state
                 .status_results
@@ -27975,6 +28020,35 @@ mod tests {
         assert_eq!(harness.attempts("held")[0].terminal_kind, None);
     }
 
+    /// A runtime that accepts the `status` probe and never replies would
+    /// otherwise hold the retry for the producer's own request timeout;
+    /// `timeout_ms` does not bound the producer's request timeout.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_bounds_the_recovery_probe_by_the_request_deadline() {
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        // The digest covers `timeout_ms`, so both legs carry the same 1 s budget.
+        let payload = claim_native_payload(&claims, 1_000);
+        harness
+            .crash_after_dispatch(&producer, payload.clone(), "stalled-probe")
+            .await;
+        producer.block_status.store(true, Ordering::SeqCst);
+        let retry = harness.classify(payload, "stalled-probe");
+        let resumed = tokio::time::timeout(Duration::from_secs(10), retry)
+            .await
+            .expect("the probe is cut off by the request deadline, not the producer's own timeout");
+        producer.block_status.store(false, Ordering::SeqCst);
+        assert_eq!(error_code_of(&resumed), "dreamer_outcome_unknown");
+        assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1, "no dispatch");
+        assert_eq!(
+            harness.receipt("stalled-probe").state,
+            DreamerReceiptState::InProgress { generation: 1 }
+        );
+        assert_eq!(harness.attempts("stalled-probe")[0].terminal_kind, None);
+    }
+
     /// A run the runtime reports ended settles the receipt as unknown: the
     /// answer was never recorded and the run cannot become active again, so a
     /// later retry replays the settled outcome without asking the runtime.
@@ -28251,6 +28325,95 @@ mod tests {
         assert_eq!(error_code_of(&conflict), "dreamer_request_conflict");
         assert_eq!(producer.connects.load(Ordering::SeqCst), connects);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// One admitted request cannot spend its whole chain past the budget: the
+    /// count is read again before each later model, so a request admitted at
+    /// `budget - 1` dispatches once, then fails closed through its receipt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain() {
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(claim_manifest(&claims));
+        let harness = DreamerHarness::start(&producer);
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        assert_eq!(
+            response_of(harness.classify(payload.clone(), "spender").await)["ok"],
+            json!(true)
+        );
+        let spender_key = dreamer_operation_key("ses", "spender");
+        harness
+            .store
+            .execute_tag_sql_for_test(&format!(
+                "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < {})
+                 INSERT INTO dreamer_attempts (project, producer, operation_key, generation, attempt_index, model,
+                     prompt_template_version, system_prompt_hash, schema_version, child_session, project_root, harness,
+                     dispatched_at_ms, terminal_kind, terminal_at_ms)
+                 SELECT project, producer, operation_key, generation, n, model, prompt_template_version,
+                     system_prompt_hash, schema_version, child_session || n, project_root, harness, dispatched_at_ms,
+                     'failed', dispatched_at_ms
+                 FROM dreamer_attempts, seq WHERE operation_key = '{spender_key}'",
+                DREAMER_ATTEMPT_BUDGET - 2
+            ))
+            .unwrap();
+        assert_eq!(
+            harness
+                .store
+                .count_dreamer_attempts("git:identity", 0)
+                .unwrap(),
+            DREAMER_ATTEMPT_BUDGET - 1
+        );
+
+        // Every model in the chain would fail; only the first may be paid for.
+        {
+            let mut results = producer.await_results.lock().unwrap();
+            for _ in 0..3 {
+                results.push_back(Err(HistorianProducerError::Protocol("refused".to_string())));
+            }
+        }
+        let mut chain = payload;
+        chain["model_chain"] = json!(["test/first", "test/second", "test/third"]);
+        let outcome = harness.classify(chain.clone(), "last-admitted").await;
+        assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
+        assert!(
+            matches!(&outcome, PreparedOutcome::Error { message, .. } if message.contains("budget exhausted after 1 attempt")),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            2,
+            "the chain stops after the attempt the budget admitted"
+        );
+        assert_eq!(
+            harness
+                .attempts("last-admitted")
+                .iter()
+                .map(|attempt| (attempt.attempt_index, attempt.terminal_kind))
+                .collect::<Vec<_>>(),
+            vec![(0, Some(DreamerTerminalKind::Failed))]
+        );
+        assert!(matches!(
+            harness.receipt("last-admitted").state,
+            DreamerReceiptState::Complete {
+                terminal_kind: DreamerTerminalKind::Failed,
+                ..
+            }
+        ));
+        assert_eq!(
+            harness
+                .store
+                .count_dreamer_attempts("git:identity", 0)
+                .unwrap(),
+            DREAMER_ATTEMPT_BUDGET
+        );
+        // The recorded failure replays; the window passing does not reopen it.
+        let replayed = harness.classify(chain, "last-admitted").await;
+        assert_eq!(error_code_of(&replayed), "dreamer_run_failed");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
     }
 
     /// An open attempt whose run handle was never recorded (a crash between

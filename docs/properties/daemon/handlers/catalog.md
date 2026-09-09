@@ -486,59 +486,56 @@ Status: active
 Exercised: yes - `dreamer_run_task_*` tests in `crates/daemon/src/lib.rs`
 (`mod tests`), all over a real store with the scripted producer.
 References in this record are verified against the merged working tree.
-`dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure` (`:27751`)
+`dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure` (`:27846`)
 exhausts the chain and replays the failure without a second start.
 `dreamer_run_task_replays_from_the_receipt_and_refuses_a_changed_request` covers
-success replay and the digest conflict with no producer call (`:27184`).
-`dreamer_run_task_fails_closed_when_the_failure_record_cannot_be_written`
-(`:27621`) installs a `RAISE(ABORT)` trigger on `dreamer_receipts`
+success replay and the digest conflict with no producer call (`:27279`).
+`dreamer_run_task_fails_closed_when_the_failure_record_cannot_be_written` (`:27716`) installs a `RAISE(ABORT)` trigger on `dreamer_receipts`
 `UPDATE OF state`,
 asserts `dreamer_ledger_failed` with the receipt still `in_progress`, then shows
 the retry settles the receipt as `unknown` with no producer start and a later
 replay still answers `dreamer_outcome_unknown`.
-`dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails`
-(`:27677`) faults the attempt row and shows a usable result still completes the
+`dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails` (`:27772`) faults the attempt row and shows a usable result still completes the
 receipt.
-`dreamer_run_task_settles_a_missing_run_after_restart_as_unknown_without_redispatch`
-(`:27842`) drops the request mid-await, rebinds the route under another harness,
+`dreamer_run_task_settles_a_missing_run_after_restart_as_unknown_without_redispatch` (`:27937`) drops the request mid-await, rebinds the route under another harness,
 then resumes with the runtime reporting the run `missing`: the probe binds the
 recorded child session under the recorded harness and root, the attempt and
 receipt settle `unknown`, and no second start happens.
-`dreamer_run_task_leaves_a_run_the_runtime_still_holds_open` (`:27910`) resumes
+`dreamer_run_task_leaves_a_run_the_runtime_still_holds_open` (`:28005`) resumes
 with the run still `active` and shows nothing is written or dispatched.
-`dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown` (`:27932`)
+`dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown` (`:28056`)
 resumes with the run reported `terminal` and shows the attempt and receipt settle
 `unknown` at once, with no second start and no second status probe on replay.
-`dreamer_run_task_recovers_a_receipt_stranded_before_any_dispatch` (`:27429`)
+`dreamer_run_task_recovers_a_receipt_stranded_before_any_dispatch` (`:27524`)
 faults attempt insertion, leaving no attempt row, then shows a retry dispatches
 once at generation 2.
-`dreamer_run_task_takes_over_an_undispatched_receipt_and_dispatches_once`
-(`:27979`) reopens a receipt with a `NotSent` attempt and shows the successor
+`dreamer_run_task_takes_over_an_undispatched_receipt_and_dispatches_once` (`:28103`) reopens a receipt with a `NotSent` attempt and shows the successor
 dispatches exactly once under a session the predecessor could not have derived,
 and that the predecessor's writes are fenced.
-`dreamer_run_task_settles_an_open_attempt_without_a_handle_as_unknown` (`:28210`)
+`dreamer_run_task_settles_an_open_attempt_without_a_handle_as_unknown` (`:28423`)
 nulls the recorded handle and shows the retry settles unknown without asking the
 runtime.
-`dreamer_run_task_does_not_replay_a_success_whose_completion_never_landed`
-(`:28246`) faults the receipt completion after a usable answer and shows the
+`dreamer_run_task_does_not_replay_a_success_whose_completion_never_landed` (`:28459`) faults the receipt completion after a usable answer and shows the
 retry settles unknown, keeps the attempt's own terminal, and never replays the
 success.
-`dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable`
-(`:28068`) scripts a timed-out await with a late answer queued behind it and
+`dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable` (`:28192`) scripts a timed-out await with a late answer queued behind it and
 shows the attempt ends `cancelled` with no second read of the run, and counts.
-`dreamer_run_task_clamps_the_request_timeout_to_the_host_ceiling` (`:28117`),
+`dreamer_run_task_clamps_the_request_timeout_to_the_host_ceiling` (`:28241`),
 `a_request_timeout_is_clamped_to_the_host_ceiling`
 (`crates/daemon/src/classify.rs:428`),
-`dreamer_run_task_enforces_the_model_chain_cap_before_dispatch`
-(`lib.rs:28299`), and
-`dreamer_run_task_refuses_a_project_whose_attempt_budget_is_exhausted`
-(`lib.rs:28142`) cover the three bounds; the budget test also shows a changed
+`dreamer_run_task_enforces_the_model_chain_cap_before_dispatch` (`lib.rs:28512`), and
+`dreamer_run_task_refuses_a_project_whose_attempt_budget_is_exhausted` (`lib.rs:28266`) cover the three bounds; the budget test also shows a changed
 request at exhaustion is a conflict, not a replay, and
-`dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted`
-(`lib.rs:28340`) shows an exhausted budget still settles an open receipt while
+`dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted` (`lib.rs:28553`) shows an exhausted budget still settles an open receipt while
 refusing a takeover.
+`dreamer_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain` (`lib.rs:28334`) admits a three-model chain at `budget - 1` and shows it
+dispatches once, records the failure through its receipt, and leaves the count
+at exactly the budget.
+`dreamer_run_task_bounds_the_recovery_probe_by_the_request_deadline` (`lib.rs:28027`) stalls the scripted producer's `status` and shows the retry
+answers `dreamer_outcome_unknown` within its own `timeout_ms` with nothing
+written.
 `dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced`
-(`lib.rs:27485-27551`) moves the receipt to generation 2 through `on_start` and
+(`lib.rs:27580-27646`) moves the receipt to generation 2 through `on_start` and
 `on_await_output` hooks. Both windows assert `dreamer_ledger_fenced`, no purge,
 the generation-2 receipt still open, and the generation-1 attempt still open.
 `an_undispatched_receipt_can_be_taken_over_only_without_a_possible_dispatch`
@@ -554,7 +551,10 @@ every other answer after a possible dispatch is `dreamer_ledger_failed`,
 `dreamer_ledger_fenced`, or an unrecorded `dreamer_outcome_unknown`, and a retry
 over the receipt any of those leaves behind starts no producer. A receipt whose
 generation never reached a model is the one shape a retry may take over; each
-successor attempt dispatches at most once under the new generation.
+successor attempt dispatches at most once under the new generation. Every
+producer call a request makes, including the recovery probe, runs under the
+request's `timeout_ms` deadline, and no request dispatches a model once the
+project's attempt count has reached `DREAMER_ATTEMPT_BUDGET`.
 Check: `always` - for every `dreamer.run_task` response that consumed a model
 attempt, the response is `ok: true`, `dreamer_run_failed`, or a replayed
 `dreamer_outcome_unknown` only if `lookup_dreamer_receipt` for `(project,
@@ -572,37 +572,42 @@ the in-flight duplicate guard at the top of `handle_dreamer_run_task` answers
 this condition.
 Fault/timing angle: `begin_dreamer_receipt` runs before any producer is
 constructed (`crates/daemon/src/lib.rs:9574-9613`), so a `Complete` receipt
-replays and an `in_progress` one goes to `resume_dreamer_receipt` (`lib.rs:9894`)
+replays and an `in_progress` one goes to `resume_dreamer_receipt` (`lib.rs:9914`)
 before any connect. The request digest includes the await timeout, output-token
 limit, and temperature, but no recovery timeout (`lib.rs:9526-9539`).
 The attempt row precedes the model call and the run handle
-is recorded right after `start` returns (`lib.rs:9717`); a handle write that does
+is recorded right after `start` returns (`lib.rs:9733`); a handle write that does
 not land settles the attempt and receipt `unknown` through
-`settle_dispatched_attempt_as_unknown` (`lib.rs:13683`), unless the generation
+`settle_dispatched_attempt_as_unknown` (`lib.rs:13722`), unless the generation
 fence rejects settlement. A fenced run-handle write skips purge
-(`lib.rs:9723-9734`), matching the fenced await-terminal write
-(`lib.rs:9766-9799`); a store error still permits cleanup. If the attempt
+(`lib.rs:9739-9750`), matching the fenced await-terminal write
+(`lib.rs:9782-9815`); a store error still permits cleanup. If the attempt
 terminal cannot be recorded, a usable answer is offered to receipt completion
-before unknown settlement (`lib.rs:9771-9786`). The request deadline is clamped
+before unknown settlement (`lib.rs:9787-9802`). The request deadline is clamped
 to the await ceiling (`crates/daemon/src/classify.rs:23`), so an await that times
 out has spent the whole request budget: the attempt ends `cancelled` and nothing
 more is read from the run. On resume, the newest attempt at the open
 generation that is not `not_sent` is the dispatch marker: an ended one settles
-`unknown` through `complete_receipt_as_unknown` (`lib.rs:13703`), keeping its own
+`unknown` through `complete_receipt_as_unknown` (`lib.rs:13742`), keeping its own
 terminal; an open one with a handle is resolved with `status` on a producer
 connected under the attempt's recorded `project_root` and `harness` and bound to
-its recorded child session, the identity the runtime keys runs by, and `Missing` or
+its recorded child session, the identity the runtime keys runs by, with the
+connect, bind, and probe together under the request deadline's remaining
+duration, and `Missing` or
 `Terminal` settles `unknown` (a terminal run cannot become active again and its
-answer was never recorded) while `Active` writes nothing; an open one with no
-handle settles `unknown` (`lib.rs:9933-9991`). Only the absence of a marker
-reaches `take_over_undispatched_dreamer_receipt` (`lib.rs:9913`), whose single
+answer was never recorded) while `Active`, a probe error, or a probe the
+deadline cuts off writes nothing; an open one with no
+handle settles `unknown` (`lib.rs:9954-10018`). Only the absence of a marker
+reaches `take_over_undispatched_dreamer_receipt` (`lib.rs:9934`), whose single
 guarded statement checks the current generation for
 `terminal_kind IS NULL OR terminal_kind != 'not_sent'` and moves the fence only
 when no such row exists (`crates/memory-store/src/dreamer_ledger.rs:410-431`).
 No-row and `NotSent` generations may advance; a possible dispatch blocks
 takeover even if its row lands after the list read. Later predecessor writes
 are fenced (`dreamer_ledger.rs:438-572`); over budget the takeover is refused,
-while every settling arm still runs. The successor's child sessions include the
+while every settling arm still runs. The budget is read again before every model
+after the first (`lib.rs:9627-9638`), so one admitted chain overshoots it by at
+most one attempt. The successor's child sessions include the
 generation (`crates/daemon/src/classify.rs:206-227`), so they cannot attach to
 or purge a predecessor's run. The exhausted-chain, success, and settle writes
 each match `Applied`, `Fenced`, and `Err` as separate arms.
@@ -619,13 +624,16 @@ rows; for cleanup fencing a generation change inside `on_start` or
 `on_await_output`. The budget bound needs the durable
 attempt count at `DREAMER_ATTEMPT_BUDGET` within `DREAMER_ATTEMPT_BUDGET_WINDOW`
 (`crates/daemon/src/classify.rs:30-31`), which the test fills through
-`execute_tag_sql_for_test`.
+`execute_tag_sql_for_test`; the mid-chain stop needs the count at one below
+the budget and a chain whose first model fails. The probe bound needs the
+scripted producer's `status` blocked under a `timeout_ms` both request legs
+share, since the digest covers `timeout_ms`.
 Confidence: high - [evidence](evidence/dreamer-dispatched-attempt-always-settles-through-the-receipt.md).
 The default route dispatches `dreamer.run_task` without a feature or configuration
 gate (`crates/daemon/src/lib.rs:12692`). The exhausted-chain, success, and unknown
 receipt completions distinguish all three transition results; the known-result
 fallback accepts only `Applied` and otherwise tries unknown settlement
-(`lib.rs:9771-9799`, `:9846-9876`, `:13714-13723`).
+(`lib.rs:9787-9815`, `:9862-9892`, `:13753-13762`).
 The resume path has one arm per marker shape and every arm that writes is
 driven by a test (the no-write answer for a failed `status` call shares its
 shape with the tested `Active` case); the ledger's row predicates are the fence
