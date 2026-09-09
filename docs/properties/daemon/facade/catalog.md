@@ -805,11 +805,15 @@ Reachability: default-production
 Status: invalidated
 Invalidated: the handler this record was raised on is gone from
 `crates/daemon`; the six `claim.*` facade names are no longer routed, so the
-subject is unreachable by any request. The claim mirror and intent ledger the
-lane was built on are deleted from the memory store by the follow-on tickets. No
-successor record: the invariant belonged to the claim lane, and canonical memory
-carries no equivalent surface. The evidence file keeps the finding as it stood
-in the source tree; its `file:line` references resolve there only.
+subject is unreachable by any request. The store side of the lane is still
+present: `crates/memory-store/src/claim_mirror.rs` and the claim-intent ledger
+(`MemoryStore::stage_claim_intent`, `MemoryStore::acknowledge_claim_intent`)
+remain in `crates/memory-store`, and no daemon code calls them. This record is
+invalidated because its subject was the daemon handler, not the store; the
+store-side cleanup and any coverage owed on it are separate work. No successor
+record: the invariant belonged to the claim lane, and canonical memory carries
+no equivalent surface. The evidence file keeps the finding as it stood in the
+source tree; its `file:line` references resolve there only.
 Exercised: not yet - no test in `daemon` references
 `handle_claim_effects_apply`.
 Guarantee: An accepted `claim.effects.apply` either changes durable module-side state or returns a code the producer treats as non-advancing. (Narrowed this disposition, D11: the second obligation, that the producer's checkpoint therefore means what it claims, is now its own record, because it needs a harness that does not exist.)
@@ -856,11 +860,15 @@ from; only its constructibility differs.
 Status: invalidated
 Invalidated: the handler this record was raised on is gone from
 `crates/daemon`; the six `claim.*` facade names are no longer routed, so the
-subject is unreachable by any request. The claim mirror and intent ledger the
-lane was built on are deleted from the memory store by the follow-on tickets. No
-successor record: the invariant belonged to the claim lane, and canonical memory
-carries no equivalent surface. The evidence file keeps the finding as it stood
-in the source tree; its `file:line` references resolve there only.
+subject is unreachable by any request. The store side of the lane is still
+present: `crates/memory-store/src/claim_mirror.rs` and the claim-intent ledger
+(`MemoryStore::stage_claim_intent`, `MemoryStore::acknowledge_claim_intent`)
+remain in `crates/memory-store`, and no daemon code calls them. This record is
+invalidated because its subject was the daemon handler, not the store; the
+store-side cleanup and any coverage owed on it are separate work. No successor
+record: the invariant belonged to the claim lane, and canonical memory carries
+no equivalent surface. The evidence file keeps the finding as it stood in the
+source tree; its `file:line` references resolve there only.
 Exercised: not yet - not constructible today. This is the part's one
 outright block. The module side has no test at all: `claim_effects` appears
 twice in `lib.rs`, at `:10051` and `:10184`, and zero times in either test
@@ -946,11 +954,15 @@ Reachability: default-production
 Status: invalidated
 Invalidated: the handler this record was raised on is gone from
 `crates/daemon`; the six `claim.*` facade names are no longer routed, so the
-subject is unreachable by any request. The claim mirror and intent ledger the
-lane was built on are deleted from the memory store by the follow-on tickets. No
-successor record: the invariant belonged to the claim lane, and canonical memory
-carries no equivalent surface. The evidence file keeps the finding as it stood
-in the source tree; its `file:line` references resolve there only.
+subject is unreachable by any request. The store side of the lane is still
+present: `crates/memory-store/src/claim_mirror.rs` and the claim-intent ledger
+(`MemoryStore::stage_claim_intent`, `MemoryStore::acknowledge_claim_intent`)
+remain in `crates/memory-store`, and no daemon code calls them. This record is
+invalidated because its subject was the daemon handler, not the store; the
+store-side cleanup and any coverage owed on it are separate work. No successor
+record: the invariant belonged to the claim lane, and canonical memory carries
+no equivalent surface. The evidence file keeps the finding as it stood in the
+source tree; its `file:line` references resolve there only.
 Exercised: not yet - no `daemon` test drives any claim-intent facade call.
 Guarantee: A claim-intent facade call affects or reveals only intents whose
 authority the calling route is bound to.
@@ -992,11 +1004,15 @@ Reachability: default-production
 Status: invalidated
 Invalidated: the handler this record was raised on is gone from
 `crates/daemon`; the six `claim.*` facade names are no longer routed, so the
-subject is unreachable by any request. The claim mirror and intent ledger the
-lane was built on are deleted from the memory store by the follow-on tickets. No
-successor record: the invariant belonged to the claim lane, and canonical memory
-carries no equivalent surface. The evidence file keeps the finding as it stood
-in the source tree; its `file:line` references resolve there only.
+subject is unreachable by any request. The store side of the lane is still
+present: `crates/memory-store/src/claim_mirror.rs` and the claim-intent ledger
+(`MemoryStore::stage_claim_intent`, `MemoryStore::acknowledge_claim_intent`)
+remain in `crates/memory-store`, and no daemon code calls them. This record is
+invalidated because its subject was the daemon handler, not the store; the
+store-side cleanup and any coverage owed on it are separate work. No successor
+record: the invariant belonged to the claim lane, and canonical memory carries
+no equivalent surface. The evidence file keeps the finding as it stood in the
+source tree; its `file:line` references resolve there only.
 Exercised: not yet - no `daemon` test drives a digest conflict.
 Guarantee: A caller can tell from the error code alone whether its
 `(producer, operation_key)` was reused for a different request body, as opposed

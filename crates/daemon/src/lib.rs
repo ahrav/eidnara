@@ -16482,7 +16482,7 @@ pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
 }
 
 fn ctx_memory_description() -> String {
-    "Read and maintain durable project-memory claims. Use public claim IDs and exact revision-bound mutation tokens; never use local row IDs. Create standalone facts, revise changed claims, archive or restore lifecycle state, and merge duplicate claims through the host commit path.".to_string()
+    "Read and maintain durable project memories. Memories are addressed by object id (mem_<32hex>) taken from tool results; never use local row IDs. Create standalone facts, revise changed memories, archive or restore lifecycle state, and merge duplicates through the host commit path; revise and merge supersede their targets with one new object and return its id, and no token is passed.".to_string()
 }
 
 fn ctx_search_description() -> String {
@@ -16498,23 +16498,7 @@ fn ctx_note_description() -> String {
 }
 
 fn ctx_memory_schema() -> Value {
-    let mutation_token = json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-            "tokenVersion", "publicClaimId", "revision", "contentDigest",
-            "lifecycleSeq", "applicabilityHeadsDigest", "policyHeadsDigest"
-        ],
-        "properties": {
-            "tokenVersion": { "type": "integer", "minimum": 1 },
-            "publicClaimId": { "type": "string", "pattern": "^mcm_[0-9a-f]{32}$" },
-            "revision": { "type": "integer", "minimum": 1 },
-            "contentDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "lifecycleSeq": { "type": "integer", "minimum": 1 },
-            "applicabilityHeadsDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "policyHeadsDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-        }
-    });
+    let object_id = json!({ "type": "string", "pattern": "^mem_[0-9a-f]{32}$" });
     let positive_categories = json!([
         "PROJECT_RULES",
         "ARCHITECTURE",
@@ -16561,17 +16545,11 @@ fn ctx_memory_schema() -> Value {
             },
             "content": { "type": "string", "maxLength": 65536 },
             "antiMemory": anti_memory,
-            "publicClaimId": { "type": "string", "pattern": "^mcm_[0-9a-f]{32}$" },
-            "publicClaimIds": {
+            "objectId": object_id,
+            "objectIds": {
                 "type": "array",
                 "maxItems": 20,
-                "items": { "type": "string", "pattern": "^mcm_[0-9a-f]{32}$" }
-            },
-            "mutationToken": mutation_token,
-            "mutationTokens": {
-                "type": "array",
-                "maxItems": 100,
-                "items": mutation_token
+                "items": object_id
             },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
             "reason": { "type": "string", "maxLength": 4096 },
@@ -26536,10 +26514,8 @@ mod tests {
                     "antiMemory",
                     "category",
                     "content",
-                    "publicClaimId",
-                    "publicClaimIds",
-                    "mutationToken",
-                    "mutationTokens",
+                    "objectId",
+                    "objectIds",
                     "limit",
                     "reason",
                     "memory_project",
@@ -27441,6 +27417,9 @@ mod tests {
             "claim_snapshot",
             "CommittedClaim",
             "mirror_row",
+            "publicClaimId",
+            "mutationToken",
+            "mcm_",
         ];
         let mut offending = Vec::new();
         for path in files {
