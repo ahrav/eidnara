@@ -131,12 +131,12 @@ and the fired `HistorianDiagnostics`:
 (`historian_chunk.rs:1369`) assembles withheld, empty, served, and gated-off
 reads at the assembler seam;
 `a_withheld_historian_memory_read_is_recorded_and_differs_from_an_empty_block`
-(`lib.rs:28340`) fires the historian through the handler with the kernel store
+(`lib.rs:28494`) fires the historian through the handler with the kernel store
 still opening (`Withheld { state: "unavailable:store_starting" }`) and again
 with an open, empty store (`Canonical { .. }`), and asserts the two records
 differ while neither captured prompt carries the block; and
 `historian_prompt_composes_project_memory_from_canonical_rows`
-(`lib.rs:28216`) commits verified, quarantined, retired, superseded, and
+(`lib.rs:28370`) commits verified, quarantined, retired, superseded, and
 other-project decisions to a real kernel store and checks the captured prompt
 carries only the verified row, with the diagnostics pinning `known_as_of` to
 the store tip.
