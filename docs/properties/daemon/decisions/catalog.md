@@ -618,35 +618,36 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - `config.rs:930-970` and `:981-997` assert that
-`auto_search`, `caveman`, `inject_docs`, and `temporal_awareness` follow
-user-then-project tiers, so the behaviour is pinned as intended. No test
-asserts the header's allow-list as a closed set.
+Exercised: yes - `config.rs` test
+`hostile_project_tier_cannot_change_privileged_values_and_warns_per_key` sets
+every `ConfigKey` from the project tier and asserts the privileged values equal
+the user tier and that exactly one warning is emitted per ignored key;
+`every_consumed_pointer_is_a_classified_config_key` asserts every JSON pointer
+literal the production merge reads is a `ConfigKey`.
 Guarantee: The set of leaves a project-tier config can change equals the set
-the trust policy documents.
-Check: `always` - for every leaf in `DaemonConfig`, a project-tier value
-changes it only if the documented policy permits it. `always` because the tier
+`ConfigKey::tier_class` classifies as `ProjectAllowed`, plus the tightening
+direction of the two `ProjectRaiseOnly` keys.
+Check: `always` - for every `ConfigKey`, a project-tier value changes the
+effective config only through its `TierClass`; the merge iterates the closed
+`ConfigKey::ALL` table and has no other read path. `always` because the tier
 merge runs on every resolution.
 Fault/timing angle: none.
-Required faults and enabling state: a project `.eidnara/eidnara.jsonc`
-setting `smart_drops: true`, which the code accepts at `config.rs:541-543`.
+Required faults and enabling state: a project `.eidnara/eidnara.jsonc` setting
+any privileged key (`historian.module_model`, `dreamer.inject_docs`,
+`dreamer.tasks.review-user-memories.schedule`, or `user_memories.enabled: true`
+against a closed user gate).
 Confidence: high - [evidence](evidence/dec-a-project-tier-can-write-leaves-outside-the-documented-allow-list.md).
-Compared `config.rs:6-7`'s enumeration against the project block at `:514-566`,
-leaf by leaf. Four leaves are outside the enumeration; two of them move in the
-permissive direction.
-Existing check: `config.rs:913-928` and `:1096-1117` prove specific keys are
-user-tier-only, and `warn_ignored_project_key` (`:575-581`) is called five
-times. Neither establishes that the remaining project-writable set is the
-documented one. Status `unaudited`.
-Impact: a repository can enable `smart_drops`, which `CONFIGURATION.md:767` (source-catalog path, not present at HEAD)
-describes as intentionally off while cache stability is validated, and can
-raise the memory injection budget without bound. Both change the bytes the
-module serves to the provider.
-Open questions:
-- Is `smart_drops` intended to be project-overridable? The header omits it
-  while the code applies it on both tiers, so one of the two is wrong. (needs
-  human input)
-
+The evidence file records the pre-table state this record was discovered in.
+The table now replaces the header's prose allow-list: `dreamer.inject_docs` and
+the review-user-memories schedule are `UserOnly`; `user_memories.enabled` is
+`ProjectRaiseOnly` (a project may close the gate, never open it); a
+`const` assertion fails the build if a key marked `privileged()` is classified
+`ProjectAllowed`. `smart_drops` and `temporal_awareness` remain
+`ProjectAllowed` by classification rather than by omission.
+Existing check: the two tests named above, plus
+`docs_injection_is_user_tier_only_and_temporal_flag_follows_project_tier`,
+`project_tier_cannot_raise_the_user_memory_gate`, and
+`module_model_is_user_tier_only` (now asserts the warnings).
 ### dec-a-config-value-clamps-and-zero-rejection-are-invisible-to-the-caller
 
 Type: safety
