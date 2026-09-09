@@ -150,7 +150,7 @@ coordinator records.
 ## What this part is about
 
 This part is a request surface. Its primary input is a request body and its
-primary "fault" is sending the same request twice, which is why eleven of the 25
+primary "fault" is sending the same request twice, which is why eleven of the 26
 records need no injected fault of any kind. One broadly good result frames the
 rest: validation precedes the first durable write in every handler in scope, and
 no path was found where a durable write precedes input validation. What the
@@ -302,15 +302,18 @@ to two; **F15** deflates the success-without-writing headline, which is why the
 prose above states the open questions instead of pre-empting them; and **F16**
 edits `fault-map.md` only.
 
-Final distributions after the disposition: **20 `always`, 2
-`always-or-unreached`, 3 `sometimes`, 0 `reachable`, 0 `unreachable`**;
-**19 safety, 3 liveness, 3 reachability**; **22 `default-production`, 3
-`explicit-config-only`, 0 `test-only`**. `always(!X)` is counted as `always`,
-following the convention Parts 4a and 4b used.
+Final distributions after the disposition and the later successor record
+`dreamer-dispatched-attempt-always-settles-through-the-receipt`, which
+replaces the invalidated `h4c-dreamer-failure-path-ledger-write-is-unchecked`
+and keeps that record's row: **21 `always`, 2 `always-or-unreached`, 3
+`sometimes`, 0 `reachable`, 0 `unreachable`**; **20 safety, 3 liveness, 3
+reachability**; **23 `default-production`, 3 `explicit-config-only`, 0
+`test-only`**. `always(!X)` is counted as `always`, following the convention
+Parts 4a and 4b used.
 
 One process caveat, inherited and restated. METHOD.md step 7 requires records to
-equal index rows to equal evidence files. Records and index rows both equal 25.
-**Evidence files remain at 24.** Both halves of the F7 split link
+equal index rows to equal evidence files. Records and index rows both equal 26.
+**Evidence files number 25.** Both halves of the F7 split link
 `evidence/stagelc-seed-and-import-reapers-only-run-on-fresh-traffic.md` and both
 halves of the F13 split link
 `evidence/stagelc-a-restart-is-observed-with-staged-state-present.md`, so every
@@ -328,7 +331,7 @@ lines.
 | [h4c-authority-prepare-route-bind-is-a-second-transaction](#h4c-authority-prepare-route-bind-is-a-second-transaction) | safety | high |
 | [h4c-transform-writes-two-side-effects-before-its-fenced-commit](#h4c-transform-writes-two-side-effects-before-its-fenced-commit) | safety | high |
 | [h4c-guidance-date-returns-success-without-persisting](#h4c-guidance-date-returns-success-without-persisting) | safety | high |
-| [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked) | safety | invalidated |
+| [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked) | safety | high |
 | [dreamer-dispatched-attempt-always-settles-through-the-receipt](#dreamer-dispatched-attempt-always-settles-through-the-receipt) | safety | high |
 | [h4c-side-channel-drain-result-is-discarded-by-the-caller](#h4c-side-channel-drain-result-is-discarded-by-the-caller) | safety | high |
 | [h4c-session-delete-has-no-caller-supplied-operation-identity](#h4c-session-delete-has-no-caller-supplied-operation-identity) | safety | high |
