@@ -44,7 +44,6 @@ fn binding(prompt: &str) -> DreamerReceiptBinding {
         request_digest: dreamer_request_digest(&request(prompt)).unwrap(),
         ledger_session: "ses-1".to_string(),
         command_id: "cmd-1".to_string(),
-        harness: "pi".to_string(),
     }
 }
 

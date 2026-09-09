@@ -33,9 +33,7 @@ pub struct DreamerReceiptKey<'a> {
 
 /// What a receipt binds its request to: the store incarnation and authority
 /// generation the request ran under, the digest over its effect-defining
-/// inputs, the client identity that issued it, and the harness the model runs
-/// are started under, which a later incarnation needs to ask the runtime about
-/// a recorded run handle.
+/// inputs, and the client identity that issued it. commentlint: allow(JUDGE)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamerReceiptBinding {
     pub database_incarnation_id: String,
@@ -43,7 +41,6 @@ pub struct DreamerReceiptBinding {
     pub request_digest: String,
     pub ledger_session: String,
     pub command_id: String,
-    pub harness: String,
 }
 
 /// How an attempt or a whole request ended.
@@ -175,7 +172,7 @@ pub struct DreamerAttempt {
 
 const RECEIPT_COLUMNS: &str = "database_incarnation_id, authority_generation, request_digest,
      ledger_session, command_id, state, generation, terminal_kind, result_json,
-     created_at_ms, updated_at_ms, harness";
+     created_at_ms, updated_at_ms";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DreamerReceipt> {
     let state: String = row.get(5)?;
@@ -204,7 +201,6 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DreamerReceipt>
             request_digest: row.get(2)?,
             ledger_session: row.get(3)?,
             command_id: row.get(4)?,
-            harness: row.get(11)?,
         },
         state,
         created_at_ms: row.get(9)?,
@@ -301,7 +297,6 @@ impl MemoryStore {
         write.identity("operation_key", key.operation_key)?;
         write.identity("ledger_session", &binding.ledger_session)?;
         write.identity("command_id", &binding.command_id)?;
-        write.identity("harness", &binding.harness)?;
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             let existing = tx
@@ -355,9 +350,8 @@ impl MemoryStore {
                 "INSERT INTO dreamer_receipts (
                      project, producer, operation_key, database_incarnation_id,
                      authority_generation, request_encoding_version, request_digest,
-                     ledger_session, command_id, harness, state, generation,
-                     created_at_ms, updated_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'in_progress', 1, ?11, ?11)",
+                     ledger_session, command_id, state, generation, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'in_progress', 1, ?10, ?10)",
                 params![
                     key.project,
                     key.producer,
@@ -368,7 +362,6 @@ impl MemoryStore {
                     binding.request_digest,
                     binding.ledger_session,
                     binding.command_id,
-                    binding.harness,
                     now_ms,
                 ],
             )?;

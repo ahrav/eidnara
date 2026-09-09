@@ -23,37 +23,42 @@ Verified at HEAD. References are to `crates/daemon/src/lib.rs` unless stated.
   holds proceeds to `begin_dreamer_receipt`, so it replays, refuses a changed
   request, or settles under the same rules as below, and only a takeover
   (which would dispatch) is refused over budget.
-- `begin_dreamer_receipt` is the first write (`:9571`); it records the binding
-  including the harness the request arrived on (`dreamer_ledger.rs`,
-  `DreamerReceiptBinding.harness`, column `harness` in
-  `crates/memory-store/baseline.sql:349`). Each attempt row records the
-  `project_root` and `harness` it was dispatched under
-  (`DreamerAttemptSpec`, `baseline.sql:374-375`), which with `child_session`
-  is the run identity the runtime keys on. `Complete`
+- `begin_dreamer_receipt` is the first write (`:9570`). Each attempt row records
+  the `project_root` and `harness` it was dispatched under
+  (`DreamerAttemptSpec`, `crates/memory-store/baseline.sql:373-374`), which with
+  `child_session` is the run identity the runtime keys on; the receipt row
+  carries no harness of its own, since the retry may arrive from another
+  harness and the probe must use the one the run was started under. `Complete`
   replays; `DigestConflict` and `BindingMismatch` answer
   `dreamer_request_conflict` with no producer constructed; `InProgress`
-  goes to `resume_dreamer_receipt` (`:9880`).
+  goes to `resume_dreamer_receipt` (`:9868`).
 - `resume_dreamer_receipt` reads `list_dreamer_attempts` and picks the newest
   attempt at the open generation whose terminal is not `not_sent`. No such
   attempt: `take_over_dreamer_receipt` moves the fence to `g + 1` (Applied) or
   the request is `dreamer_ledger_fenced`. An ended attempt: complete the
-  receipt `unknown` through `complete_receipt_as_unknown` (`:13681`), leaving
+  receipt `unknown` through `complete_receipt_as_unknown` (`:13673`), leaving
   the attempt's own terminal in place. An open attempt with a handle: connect
   under the attempt's recorded `project_root` and `harness`, bind the recorded
-  child session, and call `status`; `Missing` settles `unknown`,
-  `Active` or `Terminal` answers `dreamer_outcome_unknown` with no write, a
-  connect or status error answers the same. An open attempt with no handle:
+  child session, and call `status`; `Missing` and `Terminal` settle `unknown`
+  (a terminal run is final for the runtime and its answer was never recorded,
+  so a later retry could only repeat the probe), `Active` answers
+  `dreamer_outcome_unknown` with no write, and a connect or status error answers
+  the same. An open attempt with no handle:
   settle `unknown`. Settling an open attempt goes through
-  `settle_dispatched_attempt_as_unknown` (`:13661`), which writes the attempt
+  `settle_dispatched_attempt_as_unknown` (`:13653`), which writes the attempt
   terminal best-effort and then completes the receipt through the same helper,
   matching `Applied`, `Fenced`, and `Err` separately.
-- In the chain loop, `begin_dreamer_attempt` precedes `start` (`:9654`), and
-  `record_dreamer_run_handle` follows a successful `start` (`:9700`); a handle
+- In the chain loop, `begin_dreamer_attempt` precedes `start` (`:9653`), and
+  `record_dreamer_run_handle` follows a successful `start` (`:9699`); a handle
   write that is `Fenced` or fails purges the session and settles `unknown`.
+  The await runs under `classify_attempt_timeout(CLASSIFY_AWAIT_TIMEOUT,
+  deadline)`; because the request deadline is clamped to that same ceiling, an
+  await that times out has spent the whole request budget, the attempt ends
+  `cancelled`, and nothing more is read from the run.
   `finish_dreamer_attempt` records the attempt terminal; when it does not land,
   a usable result is still offered to `complete_dreamer_receipt` first, and
   otherwise the request settles `unknown`.
-- The exhausted-chain write (`:9831`) and the success write (`:9846`) match
+- The exhausted-chain write (`:9820`) and the success write (`:9835`) match
   `Applied`, `Fenced`, and `Err`; only `Applied` answers with the receipt's
   recorded response, read back through `read_dream_task_response`.
 - `attempt_child_session_id` (`crates/daemon/src/classify.rs`) hashes the
@@ -67,7 +72,7 @@ Verified at HEAD. References are to `crates/daemon/src/lib.rs` unless stated.
   (`classify.rs:30-31`). `count_dreamer_attempts` excludes `not_sent` rows and
   counts open, `cancelled`, and length-capped attempts alike.
 - Ledger fences: every transition is a row-predicate `UPDATE` on key, generation,
-  and `in_progress` state (`dreamer_ledger.rs:565`, `guarded_transition`), so a
+  and `in_progress` state (`dreamer_ledger.rs:568`, `guarded_transition`), so a
   predecessor generation's write after takeover is `Fenced`, not applied
   (`crates/memory-store/tests/dreamer_ledger.rs`,
   `a_higher_generation_takes_over_and_the_predecessor_is_fenced_on_every_transition`).
@@ -98,8 +103,9 @@ never started again.
   requests for different commands can exceed the budget by their number; the
   bound is a guard against runaway spend, not an exact quota.
 - The property depends on the runtime reporting a restarted host's old run ids
-  as `missing` (`docs/host-wire-protocol.md`), and on the scripted producer's
-  `status` being answerable in tests.
+  as `missing` (`docs/host-wire-protocol.md`), on a terminal run status never
+  returning to active within one runtime incarnation, and on the scripted
+  producer's `status` being answerable in tests.
 
 ## What a test must construct
 
@@ -108,14 +114,18 @@ never started again.
    and a further retry replaying `unknown` with one start still.
 2. The same with `status` `Active`: assert one start, receipt still
    `in_progress`, attempt still open.
-3. A receipt forced `in_progress` with no attempt rows: assert the retry
+3. The same with `status` `Terminal`: assert one start, attempt and receipt
+   terminal `unknown`, and a further retry replaying `unknown` with no second
+   `status` call.
+4. A receipt forced `in_progress` with no attempt rows: assert the retry
    dispatches once at generation 2 under a generation-derived session and the
    predecessor's `finish_dreamer_attempt` is `Fenced`.
-4. A blocked await under a short `timeout_ms`: assert the attempt ends
-   `cancelled`, counts toward the budget, and the receipt completes `failed`.
-5. A `timeout_ms` above the ceiling: assert every await the producer saw is at
+5. A timed-out await with a late answer queued behind it: assert the attempt
+   ends `cancelled`, no second read of the run happens, the attempt counts
+   toward the budget, and the receipt completes `failed`.
+6. A `timeout_ms` above the ceiling: assert every await the producer saw is at
    most `CLASSIFY_MAX_REQUEST_TIMEOUT`.
-6. The durable attempt count filled to the budget: assert a new command answers
+7. The durable attempt count filled to the budget: assert a new command answers
    `dreamer_budget_exhausted` with no receipt and no start, and a completed
    command still replays.
 
@@ -134,6 +144,30 @@ The tests named in the catalog record construct exactly these.
   because its work is idempotent summarization; a classify run is a paid call
   the specification says must never be repeated on an unknown outcome.
 - Conclusion: resolved with answer; the asymmetry is deliberate.
+
+### Q: Why does a `Terminal` status settle rather than wait for a later retry?
+
+- Sources examined: the Broca supervisor's run status transitions and terminal
+  retention (`crates/host-runtime/src/broca/supervisor.rs`,
+  `crates/host-runtime/src/broca/config.rs`, `TERMINAL_RETENTION`).
+- Findings: a run reported terminal stays terminal until the runtime forgets it
+  after the retention window, when `status` answers `missing`. Leaving the
+  receipt open would repeat the connect, bind, and status probe on every retry
+  for that window and then settle `unknown` anyway. The spec accepts a
+  fail-closed `unknown` for a restart mid-run, so the receipt settles at the
+  first probe that proves the run can never become active.
+- Conclusion: resolved with answer; `Terminal` shares the `Missing` arm's write.
+
+### Q: Why is there no second read of the run after a timed-out await?
+
+- Sources examined: `classify_request_timeout`, `classify_attempt_timeout`, and
+  the await call in the chain loop.
+- Findings: the request deadline is clamped to `CLASSIFY_AWAIT_TIMEOUT`, and the
+  await runs under `min(CLASSIFY_AWAIT_TIMEOUT, deadline - now)`, which is the
+  remaining request budget. An await that times out has therefore reached the
+  deadline, and any further read would run under a zero window. The attempt
+  ends `cancelled` and the session is purged.
+- Conclusion: resolved with answer; the deadline is the single bound.
 
 ### Q: Does the budget check race with a concurrent request?
 

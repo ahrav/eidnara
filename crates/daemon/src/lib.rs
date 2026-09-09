@@ -95,10 +95,10 @@ use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
 use classify::{
-    CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_RECOVERY_TIMEOUT,
-    CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK, CLASSIFY_TEMPERATURE, DREAMER_ATTEMPT_BUDGET,
-    DREAMER_ATTEMPT_BUDGET_WINDOW, MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_PROMPT_BYTES,
-    attempt_child_session_id, classify_request_timeout, validate_classify_manifest,
+    CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK,
+    CLASSIFY_TEMPERATURE, DREAMER_ATTEMPT_BUDGET, DREAMER_ATTEMPT_BUDGET_WINDOW,
+    MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_PROMPT_BYTES, attempt_child_session_id,
+    classify_request_timeout, validate_classify_manifest,
 };
 use config::{ConfigCache, DaemonConfig, derive_historian_chunk_tokens};
 use healing::{SerializerProfile, tail_reclaim};
@@ -9547,7 +9547,6 @@ impl Handler {
             request_digest,
             ledger_session: ledger_session.clone(),
             command_id: command_id.to_string(),
-            harness: binding.harness.clone(),
         };
         // The budget is judged from the durable attempt count before any receipt
         // is written: an exhausted project dispatches nothing new and leaves no
@@ -9714,24 +9713,14 @@ impl Handler {
                 );
             }
             let attempt_output = match started {
-                Ok(handle) => match producer
-                    .await_output_with_timeout(
-                        &handle.run_id,
-                        classify_attempt_timeout(CLASSIFY_AWAIT_TIMEOUT, deadline),
-                    )
-                    .await
-                {
-                    Ok(result) => Ok(result),
-                    Err(HistorianProducerError::TimedOut) => {
-                        producer
-                            .redrain_output_with_timeout(
-                                &handle.run_id,
-                                classify_attempt_timeout(CLASSIFY_RECOVERY_TIMEOUT, deadline),
-                            )
-                            .await
-                    }
-                    Err(error) => Err(error),
-                },
+                Ok(handle) => {
+                    producer
+                        .await_output_with_timeout(
+                            &handle.run_id,
+                            classify_attempt_timeout(CLASSIFY_AWAIT_TIMEOUT, deadline),
+                        )
+                        .await
+                }
                 Err(error) => Err(error),
             };
             let attempt_terminal = match &attempt_output {
@@ -9869,14 +9858,13 @@ impl Handler {
     /// takes the receipt over and dispatches under the next generation. With
     /// one, the model may have run. An attempt that already ended (the
     /// predecessor crashed between the model's answer and the receipt's
-    /// completion) settles as `unknown`. An attempt still open is resolved by
-    /// its recorded run handle against the runtime, under the harness the
-    /// receipt was started with: a handle the runtime no longer knows settles
-    /// as `unknown`, terminal and never dispatched again; a marker with no
-    /// handle, or a runtime that cannot be asked, also fails closed; a handle
-    /// the runtime still holds is left alone for a later retry. This is the
-    /// deliberate opposite of the historian's reattach path, which refires a
-    /// missing run.
+    /// completion) settles as `unknown`. An open attempt is resolved using the commentlint: allow(JUDGE)
+    /// runtime identity recorded at dispatch, not the retry route. commentlint: allow(JUDGE)
+    /// A missing or ended runtime handle, or a marker with no handle, settles commentlint: allow(JUDGE)
+    /// as terminal `unknown` and is never dispatched again. A runtime whose commentlint: allow(JUDGE)
+    /// status cannot be queried answers `unknown` without a write; an active commentlint: allow(JUDGE)
+    /// run is left for a later retry. Unlike the historian's reattach path, commentlint: allow(JUDGE)
+    /// this resolver never refires a missing run. commentlint: allow(JUDGE)
     async fn resume_dreamer_receipt(
         &self,
         store: &MemoryStore,
@@ -9959,8 +9947,13 @@ impl Handler {
             Ok(RunState::Missing { .. }) => Err(settle(format!(
                 "run {run_handle} from an earlier daemon is no longer known to the runtime; its outcome is unknown and it is not dispatched again"
             ))),
-            Ok(RunState::Active | RunState::Terminal) => Err(unknown(format!(
-                "run {run_handle} from an earlier daemon is still held by the runtime; its outcome is not recorded here"
+            // A terminal run has no recorded outcome and cannot become active,
+            // so the receipt settles instead of retrying the status probe.
+            Ok(RunState::Terminal) => Err(settle(format!(
+                "run {run_handle} from an earlier daemon ended on the runtime before its outcome was recorded; its outcome is unknown and it is not dispatched again"
+            ))),
+            Ok(RunState::Active) => Err(unknown(format!(
+                "run {run_handle} from an earlier daemon is still running on the runtime; its outcome is not recorded here"
             ))),
             Err(error) => Err(unknown(format!(
                 "run {run_handle} from an earlier daemon cannot be resolved: {error}"
@@ -13589,7 +13582,6 @@ fn classify_success_response(
             "temperature": CLASSIFY_TEMPERATURE,
             "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
             "await_timeout_ms": CLASSIFY_AWAIT_TIMEOUT.as_millis(),
-            "recovery_timeout_ms": CLASSIFY_RECOVERY_TIMEOUT.as_millis(),
         }
     })
 }
@@ -18322,6 +18314,7 @@ mod tests {
         binds: AtomicUsize,
         statuses: AtomicUsize,
         await_outputs: AtomicUsize,
+        redrains: AtomicUsize,
         block_output: std::sync::atomic::AtomicBool,
         notify: Notify,
         connect_errors: Mutex<VecDeque<HistorianProducerError>>,
@@ -18500,6 +18493,7 @@ mod tests {
             run_id: &str,
             timeout: Duration,
         ) -> Result<ProducerOutput, HistorianProducerError> {
+            self.state.redrains.fetch_add(1, Ordering::SeqCst);
             match tokio::time::timeout(timeout, self.await_output(run_id)).await {
                 Ok(result) => result,
                 Err(_) => Err(HistorianProducerError::TimedOut),
@@ -27698,7 +27692,6 @@ mod tests {
         assert_eq!(attempts[0].terminal_kind, None);
         assert_eq!(attempts[0].harness, "pi");
         assert_eq!(attempts[0].project_root, harness.route_root);
-        assert_eq!(harness.receipt("restart").binding.harness, "pi");
 
         producer
             .status_results
@@ -27769,6 +27762,53 @@ mod tests {
             DreamerReceiptState::InProgress { generation: 1 }
         );
         assert_eq!(harness.attempts("held")[0].terminal_kind, None);
+    }
+
+    /// A run the runtime reports ended settles the receipt as unknown: the
+    /// answer was never recorded and the run cannot become active again, so a
+    /// later retry replays the settled outcome without asking the runtime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown() {
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        harness
+            .crash_after_dispatch(&producer, payload.clone(), "ended")
+            .await;
+        producer
+            .status_results
+            .lock()
+            .unwrap()
+            .push_back(RunState::Terminal);
+        let resumed = harness.classify(payload.clone(), "ended").await;
+        assert_eq!(error_code_of(&resumed), "dreamer_outcome_unknown");
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            1,
+            "no second dispatch"
+        );
+        assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            harness.attempts("ended")[0].terminal_kind,
+            Some(DreamerTerminalKind::Unknown)
+        );
+        assert!(
+            matches!(
+                harness.receipt("ended").state,
+                DreamerReceiptState::Complete {
+                    generation: 1,
+                    terminal_kind: DreamerTerminalKind::Unknown,
+                    ..
+                }
+            ),
+            "{:?}",
+            harness.receipt("ended").state
+        );
+        let replayed = harness.classify(payload, "ended").await;
+        assert_eq!(error_code_of(&replayed), "dreamer_outcome_unknown");
+        assert_eq!(producer.statuses.load(Ordering::SeqCst), 1);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
     /// A receipt left `IN_PROGRESS` before any model was dispatched is taken over
@@ -27861,25 +27901,33 @@ mod tests {
     }
 
     /// An await that runs out of time is a cancellation after dispatch: the
-    /// attempt ends `cancelled`, counts against the budget, and the exhausted
-    /// chain completes the receipt as a terminal failure.
+    /// attempt ends `cancelled` with no further read of the run and is counted
+    /// by `count_dreamer_attempts`.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable() {
         let claims = [test_claim_id(1)];
         let producer = Arc::new(ProducerState::default());
-        // Both the await and the recovery redrain run out of time.
-        for _ in 0..2 {
-            producer
-                .await_results
-                .lock()
-                .unwrap()
-                .push_back(Err(HistorianProducerError::TimedOut));
-        }
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Err(HistorianProducerError::TimedOut));
+        // An answer that arrives after the deadline must not be read: the request's time is spent.
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(claim_manifest(&claims));
         let harness = DreamerHarness::start(&producer);
         let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
         let outcome = harness.classify(payload.clone(), "cancelled").await;
         assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            producer.redrains.load(Ordering::SeqCst),
+            0,
+            "a timed-out await is not followed by a second read of the run"
+        );
         let attempts = harness.attempts("cancelled");
         assert_eq!(attempts.len(), 1);
         assert_eq!(

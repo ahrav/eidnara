@@ -503,6 +503,9 @@ recorded child session under the recorded harness and root, the attempt and
 receipt settle `unknown`, and no second start happens.
 `dreamer_run_task_leaves_a_run_the_runtime_still_holds_open` resumes with the
 run still `active` and shows nothing is written or dispatched.
+`dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown` resumes
+with the run reported `terminal` and shows the attempt and receipt settle
+`unknown` at once, with no second start and no second status probe on replay.
 `dreamer_run_task_takes_over_an_undispatched_receipt_and_dispatches_once` opens
 a receipt with no attempt row and shows the successor generation dispatches
 exactly once under a session the predecessor could not have derived, and that
@@ -514,7 +517,8 @@ runtime.
 faults the receipt completion after a usable answer and shows the retry settles
 unknown, keeps the attempt's own terminal, and never replays the success.
 `dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable` scripts
-a timed-out await and redrain and shows the attempt ends `cancelled` and counts.
+a timed-out await with a late answer queued behind it and shows the attempt
+ends `cancelled` with no second read of the run, and counts.
 `dreamer_run_task_clamps_the_request_timeout_to_the_host_ceiling`,
 `a_request_timeout_is_clamped_to_the_host_ceiling` (`classify.rs`),
 `dreamer_run_task_enforces_the_model_chain_cap_before_dispatch`, and
@@ -523,9 +527,9 @@ three bounds; the budget test also shows a changed request at exhaustion is a
 conflict, not a replay, and
 `dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted`
 shows an exhausted budget still settles an open receipt while refusing a
-takeover. Not driven by a test: a resume whose `status` answers
-`Terminal` or fails, and a settlement fenced by a later generation; both share
-the arms the tested cases drive.
+takeover. Not driven by a test: a resume whose `status` call fails, and a
+settlement fenced by a later generation; both share the arms the tested cases
+drive.
 Guarantee: Every `dreamer.run_task` request that may have reached a model is
 answered only through its receipt: a terminal answer (`ok: true`,
 `dreamer_run_failed`, or `dreamer_outcome_unknown` read back from a `complete`
@@ -551,22 +555,26 @@ the in-flight duplicate guard at the top of `handle_dreamer_run_task` answers
 this condition.
 Fault/timing angle: `begin_dreamer_receipt` runs before any producer is
 constructed (`lib.rs`, `handle_dreamer_run_task`), so a `Complete` receipt
-replays and an `in_progress` one goes to `resume_dreamer_receipt` (`lib.rs:9880`)
+replays and an `in_progress` one goes to `resume_dreamer_receipt` (`lib.rs:9868`)
 before any connect. The attempt row precedes the model call and the run handle
-is recorded right after `start` returns (`lib.rs:9700`); a handle write that does
+is recorded right after `start` returns (`lib.rs:9699`); a handle write that does
 not land settles the attempt and receipt `unknown` through
-`settle_dispatched_attempt_as_unknown` (`lib.rs:13661`), as does an attempt
-terminal that cannot be recorded. On resume, the newest attempt at the open
+`settle_dispatched_attempt_as_unknown` (`lib.rs:13653`), as does an attempt
+terminal that cannot be recorded. The request deadline is clamped to the await
+ceiling (`classify.rs:23`), so an await that times out has spent the whole
+request budget: the attempt ends `cancelled` and nothing more is read from the
+run. On resume, the newest attempt at the open
 generation that is not `not_sent` is the dispatch marker: an ended one settles
 `unknown` through `complete_receipt_as_unknown`, keeping its own terminal; an
 open one with a handle is resolved with `status` on a producer connected under
 the attempt's recorded `project_root` and `harness` and bound to its recorded
-child session, the identity the runtime keys runs by, and `Missing` settles
-`unknown` while `Active` or `Terminal` writes nothing; an open one with no
+child session, the identity the runtime keys runs by, and `Missing` or
+`Terminal` settles `unknown` (a terminal run cannot become active again and its
+answer was never recorded) while `Active` writes nothing; an open one with no
 handle settles `unknown`. Only
 the absence of a marker reaches `take_over_dreamer_receipt`, whose row predicate
 moves the fence to `g + 1` so every later write by the predecessor is `Fenced`
-(`dreamer_ledger.rs:386`, `:575`); over budget the takeover is refused, since
+(`dreamer_ledger.rs:379`, `:568`); over budget the takeover is refused, since
 it would dispatch, while every settling arm still runs. The successor's child sessions include the
 generation (`classify.rs`, `attempt_child_session_id`), so they cannot attach to
 or purge a predecessor's run. The exhausted-chain, success, and settle writes
@@ -578,16 +586,16 @@ trigger raising `ABORT`); for the attempt window the same trigger on
 `dreamer_attempts` `UPDATE OF terminal_kind`; for the restart windows a request
 dropped between `start` and `complete_dreamer_receipt` (the tests drop the
 request future while `await_output` is blocked) with the scripted producer
-answering `status` as `Missing` or `Active`; for takeover a receipt left
-`in_progress` with no attempt row. The budget bound needs the durable attempt
-count at `DREAMER_ATTEMPT_BUDGET` within `DREAMER_ATTEMPT_BUDGET_WINDOW`
+answering `status` as `Missing`, `Terminal`, or `Active`; for takeover a receipt
+left `in_progress` with no attempt row. The budget bound needs the durable
+attempt count at `DREAMER_ATTEMPT_BUDGET` within `DREAMER_ATTEMPT_BUDGET_WINDOW`
 (`classify.rs:30-31`), which the test fills through `execute_tag_sql_for_test`.
 Confidence: high - [evidence](evidence/dreamer-dispatched-attempt-always-settles-through-the-receipt.md).
 Every receipt write in the route is matched on all three transition results;
 the resume path has one arm per marker shape and every arm that writes is
-driven by a test (the two no-write answers for a held run share one arm with
-the tested `Active` case); the ledger's row predicates are the fence and are
-tested in `crates/memory-store/tests/dreamer_ledger.rs`.
+driven by a test (the no-write answer for a failed `status` call shares its
+shape with the tested `Active` case); the ledger's row predicates are the fence
+and are tested in `crates/memory-store/tests/dreamer_ledger.rs`.
 Existing check: the tests named under Exercised.
 Impact: A second billable model call for one logical command, or a false
 success after a daemon restart. This is the only handler in this part whose
