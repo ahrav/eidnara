@@ -28386,6 +28386,21 @@ mod tests {
         }
     }
 
+    /// `syn` leaves macro bodies as tokens, so their string literals are collected by hand.
+    fn macro_string_literals(tokens: proc_macro2::TokenStream, into: &mut Vec<String>) {
+        for tree in tokens {
+            match tree {
+                proc_macro2::TokenTree::Group(group) => macro_string_literals(group.stream(), into),
+                proc_macro2::TokenTree::Literal(literal) => {
+                    if let Ok(text) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
+                        into.push(text.value());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// A probe list cannot detect an unlisted spelling, so the route set comes from the two
     /// dispatchers' `match` arm patterns. Each arm must use string-literal patterns or `_`; the
     /// parser fails on a constant or binding pattern instead of skipping the route it names.
@@ -28425,23 +28440,6 @@ mod tests {
                     "dispatcher arm pattern must be a string literal or `_`, found `{}`",
                     other.to_token_stream()
                 ),
-            }
-        }
-
-        /// `syn` leaves macro bodies as tokens, so their string literals are collected by hand.
-        fn macro_string_literals(tokens: proc_macro2::TokenStream, into: &mut Vec<String>) {
-            for tree in tokens {
-                match tree {
-                    proc_macro2::TokenTree::Group(group) => {
-                        macro_string_literals(group.stream(), into)
-                    }
-                    proc_macro2::TokenTree::Literal(literal) => {
-                        if let Ok(text) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
-                            into.push(text.value());
-                        }
-                    }
-                    _ => {}
-                }
             }
         }
 
@@ -28672,6 +28670,148 @@ mod tests {
             .filter(|l| names_absent_subsystem(l))
             .collect();
         assert!(offending.is_empty(), "{offending:?}");
+    }
+
+    /// Wire operations are dotted (`kernel.read`) or facade tool names (`ctx_memory`); a literal
+    /// with whitespace is prose, and an undotted identifier such as an error code is not a route.
+    fn is_operation_spelling(literal: &str) -> bool {
+        !literal.chars().any(char::is_whitespace)
+            && (literal.contains('.') || literal.starts_with("ctx_") || literal.starts_with("ctx-"))
+    }
+
+    fn is_test_only(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("test")
+                || (attr.path().is_ident("cfg")
+                    && attr
+                        .parse_args::<syn::Ident>()
+                        .is_ok_and(|ident| ident == "test"))
+        })
+    }
+
+    fn rust_sources(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("crate source directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                rust_sources(&path, into);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                into.push(path);
+            }
+        }
+    }
+
+    /// The dispatcher audit fixes where routes are registered; this fixes what any handler or
+    /// helper could compare a request against. Test code is skipped because the probe lists
+    /// spell these names on purpose.
+    #[test]
+    fn production_source_spells_no_indexing_embedding_git_or_mural_operation() {
+        use syn::visit::Visit;
+
+        struct ProductionLiterals {
+            literals: Vec<String>,
+        }
+
+        impl<'ast> Visit<'ast> for ProductionLiterals {
+            fn visit_item(&mut self, item: &'ast syn::Item) {
+                let attrs = match item {
+                    syn::Item::Const(i) => &i.attrs,
+                    syn::Item::Enum(i) => &i.attrs,
+                    syn::Item::Fn(i) => &i.attrs,
+                    syn::Item::Impl(i) => &i.attrs,
+                    syn::Item::Macro(i) => &i.attrs,
+                    syn::Item::Mod(i) => &i.attrs,
+                    syn::Item::Static(i) => &i.attrs,
+                    syn::Item::Struct(i) => &i.attrs,
+                    syn::Item::Trait(i) => &i.attrs,
+                    syn::Item::Type(i) => &i.attrs,
+                    syn::Item::Use(i) => &i.attrs,
+                    _ => &Vec::new(),
+                };
+                if !is_test_only(attrs) {
+                    syn::visit::visit_item(self, item);
+                }
+            }
+
+            fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+                if !is_test_only(&function.attrs) {
+                    syn::visit::visit_impl_item_fn(self, function);
+                }
+            }
+
+            fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+                let attrs = match stmt {
+                    syn::Stmt::Local(local) => Some(&local.attrs),
+                    syn::Stmt::Expr(syn::Expr::Call(call), _) => Some(&call.attrs),
+                    syn::Stmt::Expr(syn::Expr::MethodCall(call), _) => Some(&call.attrs),
+                    syn::Stmt::Expr(syn::Expr::Macro(mac), _) => Some(&mac.attrs),
+                    _ => None,
+                };
+                if !attrs.is_some_and(|attrs| is_test_only(attrs)) {
+                    syn::visit::visit_stmt(self, stmt);
+                }
+            }
+
+            fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+                self.literals.push(lit.value());
+            }
+
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                macro_string_literals(mac.tokens.clone(), &mut self.literals);
+                syn::visit::visit_macro(self, mac);
+            }
+
+            fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
+        }
+
+        for spelling in [
+            "mural.render",
+            "models.list",
+            "message_index.sync",
+            "embedding.ingest",
+            "ctx_mural",
+            "ctx-mural",
+        ] {
+            assert!(
+                is_operation_spelling(spelling) && names_absent_subsystem(spelling),
+                "{spelling}"
+            );
+        }
+        // A bare snake_case spelling such as `git_ingest` can also be an error-code shape; only
+        // the dispatcher-arm audit classifies it as a route.
+        for benign in [
+            "mural_artifact_store_failed",
+            "<memory-mural>\nThe project memory mural image follows.\n</memory-mural>",
+            "payload/model/gte-modernbert-base-f16",
+        ] {
+            assert!(
+                !(is_operation_spelling(benign) && names_absent_subsystem(benign)),
+                "{benign}"
+            );
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = Vec::new();
+        rust_sources(&src, &mut sources);
+        assert!(sources.len() > 30, "found only {} sources", sources.len());
+        let mut offending = Vec::new();
+        for path in sources {
+            let source = std::fs::read_to_string(&path).expect("readable source");
+            let file: syn::File = syn::parse_str(&source)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            let mut scan = ProductionLiterals {
+                literals: Vec::new(),
+            };
+            scan.visit_file(&file);
+            for literal in scan.literals {
+                if is_operation_spelling(&literal) && names_absent_subsystem(&literal) {
+                    offending.push(format!(
+                        "{}: {literal:?}",
+                        path.strip_prefix(&src).unwrap_or(&path).display()
+                    ));
+                }
+            }
+        }
+        assert!(offending.is_empty(), "{offending:#?}");
     }
 
     #[tokio::test(flavor = "current_thread")]

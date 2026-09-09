@@ -152,9 +152,13 @@ describe("module graph over the landed tree", () => {
 
     test("the compaction marker is the only retained module that writes a database", () => {
         const binders = new Set<string>();
-        for (const graph of Object.values(moduleGraphReport())) {
+        for (const [root, graph] of Object.entries(moduleGraphReport())) {
+            const testRoot = TESTS.includes(root);
             for (const binder of databaseBinders(graph)) {
-                if (!/\.test\.tsx?$/.test(binder)) binders.add(binder);
+                // A test root may bind a database itself; every module it reaches, and every
+                // module a production root reaches, is audited whatever its file name.
+                if (testRoot && resolve(SRC, binder) === root) continue;
+                binders.add(binder);
             }
         }
         expect([...binders].sort()).toEqual(
