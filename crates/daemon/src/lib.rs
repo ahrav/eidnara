@@ -29891,12 +29891,17 @@ mod tests {
                             continue;
                         };
                         let shorthand = match escaped {
-                            'w' if !in_class => Some(word.as_str()),
-                            'W' if !in_class => Some(non_word.as_str()),
-                            'S' | 'D' if !in_class => Some(WILDCARD_ALPHABET),
+                            'w' => Some(word.as_str()),
+                            'W' => Some(non_word.as_str()),
+                            'S' | 'D' => Some(WILDCARD_ALPHABET),
                             _ => None,
                         };
                         match shorthand {
+                            // Inside a class the members join the others; outside they form
+                            // a class of their own.
+                            Some(members) if !members.is_empty() && in_class => {
+                                out.push_str(members);
+                            }
                             Some(members) if !members.is_empty() => {
                                 out.push('[');
                                 out.push_str(members);
@@ -30717,6 +30722,7 @@ mod tests {
         assert!(regex_texts(r"^mu.al[.]render$").contains(&"mural.render".to_string()));
         assert!(regex_texts(r"^mu\wal\.render$").contains(&"mural.render".to_string()));
         assert_eq!(regex_texts(r"^\d+$"), ["d+"]);
+        assert!(regex_texts(r"^[\w]ural[.]render$").contains(&"mural.render".to_string()));
         assert!(
             std::panic::catch_unwind(|| regex_texts(r"^[^x][^x][^x][^x][^x][.]render$")).is_err(),
             "a quantifier-free pattern past the class budget must fail the audit"

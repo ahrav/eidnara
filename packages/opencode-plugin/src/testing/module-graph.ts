@@ -250,8 +250,10 @@ export function operationLiteralHits(
 export function literalStrings(file: ts.SourceFile): { line: number; value: string }[] {
     const folded: { line: number; value: string }[] = [];
     // Bindings whose initializers fold to strings, keyed by name without regard to scope, so a
-    // shadowed name keeps every value it is ever given.
+    // shadowed name keeps every value it is ever given. Array bindings whose elements all fold
+    // are kept separately for `parts.join(...)`.
     const bindings = new Map<string, string[]>();
+    const arrayBindings = new Map<string, ts.ArrayLiteralExpression>();
     // Every string an expression can evaluate to under the bindings, or `undefined` when a leaf
     // is not foldable. A product past 1024 values fails the scan rather than dropping any.
     const product = (parts: (string[] | undefined)[]): string[] | undefined => {
@@ -300,17 +302,24 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             const lower = /Lower/.test(inner.expression.name.text);
             return receiver.map((value) => (lower ? value.toLowerCase() : value.toUpperCase()));
         }
-        // `["claim", "intent"].join(".")` with every element and the separator foldable.
+        // `["claim", "intent"].join(".")`, or `parts.join(".")` on a constant array binding,
+        // with every element and the separator foldable.
         if (
             ts.isCallExpression(inner) &&
             ts.isPropertyAccessExpression(inner.expression) &&
             inner.expression.name.text === "join" &&
-            ts.isArrayLiteralExpression(inner.expression.expression) &&
             inner.arguments.length <= 1
         ) {
+            const receiver = inner.expression.expression;
+            const array = ts.isArrayLiteralExpression(receiver)
+                ? receiver
+                : ts.isIdentifier(receiver)
+                  ? arrayBindings.get(receiver.text)
+                  : undefined;
+            if (array === undefined) return undefined;
             const separator = inner.arguments[0] ? leafTexts(inner.arguments[0]) : [","];
             const parts: (string[] | undefined)[] = [];
-            for (const [index, element] of inner.expression.expression.elements.entries()) {
+            for (const [index, element] of array.elements.entries()) {
                 if (index > 0) parts.push(separator);
                 parts.push(leafTexts(element));
             }
@@ -337,6 +346,10 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
             .replace(/^\^/, "")
             .replace(/\$$/, "")
             .replace(/\\.|\[(?:\\.|[^\]])*\]|\./g, (token) => {
+                if (token.startsWith("[")) {
+                    // Inside a class, `\w` contributes its alphabet members alongside the others.
+                    return token.replace(/\\[wWSD]/g, (inner) => shorthand[inner] ?? inner);
+                }
                 const members = shorthand[token];
                 return members === undefined || members === "" ? token : `[${members}]`;
             });
@@ -541,6 +554,9 @@ export function literalStrings(file: ts.SourceFile): { line: number; value: stri
     const collectBindings = (node: ts.Node): void => {
         if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
             bind(node.name, node.initializer);
+            if (ts.isArrayLiteralExpression(node.initializer)) {
+                arrayBindings.set(node.name.text, node.initializer);
+            }
         }
         if (
             ts.isBinaryExpression(node) &&

@@ -907,6 +907,19 @@ describe("operationLiteralHits", () => {
         expect(wild).toContain("claim.read");
         expect(wild).toContain("d+");
         expect(
+            literalStrings(parseSource("const bracketed = /^[\\w]laim[.]intent$/;", "m.ts")).map(
+                (entry) => entry.value,
+            ),
+        ).toContain("claim.intent");
+        expect(
+            literalStrings(
+                parseSource(
+                    'const parts = ["claim", "intent", "stage"]; const op = parts.join("."); const mixed = ["a", b]; const no = mixed.join("");',
+                    "m.ts",
+                ),
+            ).map((entry) => entry.value),
+        ).toEqual(["claim", "intent", "stage", "claim.intent.stage", ".", "a"]);
+        expect(
             literalStrings(
                 parseSource(
                     'const dyn = new RegExp("^STORE[.]DB$", runtimeFlags); let late; late = "claim"; const op = late + ".intent.stage";',
