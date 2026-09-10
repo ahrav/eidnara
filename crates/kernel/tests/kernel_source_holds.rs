@@ -1060,6 +1060,29 @@ fn purge_expiry_missing_bytes_and_release_invalidate_the_hold_without_moving_the
             Ok(after_purge.clone())
         );
     }
+    let original = fs::read(&gone_path).unwrap();
+    let mut overwritten = original.clone();
+    overwritten[0] ^= 1;
+    for damaged in [&original[..original.len() - 1], overwritten.as_slice()] {
+        fs::write(&gone_path, damaged).unwrap();
+        assert_eq!(
+            status(&fixture, &after_purge, after_purge.captured_at),
+            Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes))
+        );
+        fs::write(&gone_path, &original).unwrap();
+        assert_eq!(
+            status(&fixture, &after_purge, after_purge.captured_at),
+            Ok(after_purge.clone())
+        );
+    }
+    fs::set_permissions(&gone_path, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&gone_path).is_err() {
+        assert_eq!(
+            status(&fixture, &after_purge, after_purge.captured_at),
+            Err(SourceHoldError::Kernel(KernelError::Io))
+        );
+    }
+    fs::set_permissions(&gone_path, fs::Permissions::from_mode(0o600)).unwrap();
     fs::remove_file(&gone_path).unwrap();
     assert_eq!(
         status(&fixture, &after_purge, after_purge.captured_at),
