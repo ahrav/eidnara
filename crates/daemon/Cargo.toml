@@ -24,7 +24,11 @@ cache-stability = { workspace = true }
 context-core = { workspace = true }
 memory-store = { workspace = true }
 kernel = { workspace = true }
+retrieval = { workspace = true }
 storage = { workspace = true }
+# The search projection's fenced write closures speak the storage crate's
+# rusqlite result type; already a transitive dependency through storage.
+rusqlite = { workspace = true }
 lease = { workspace = true }
 # Lock-free snapshot swap for the kernel health projection; already a transitive
 # dependency through gix, so it adds no new supply-chain root.
@@ -93,6 +97,5 @@ memory-store = { workspace = true, features = ["test-support"] }
 kernel = { workspace = true, features = ["test-support"] }
 host-runtime = { workspace = true, features = ["test-support"] }
 daemon = { path = ".", features = ["test-support"] }
-rusqlite = { workspace = true }
 tempfile = { workspace = true }
 filetime = "0.2"
