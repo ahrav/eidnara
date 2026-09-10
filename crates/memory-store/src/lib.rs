@@ -3798,12 +3798,24 @@ pub use task_lease::{
 
 /// The outcome of leasing one scheduled Dreamer task; the claim's `note_id` is
 /// the task id and its `source_revision` the due instant the task was leased for.
-pub type DreamerTaskAcquireOutcome = LeaseAcquireOutcome<()>;
+pub type DreamerTaskAcquireOutcome = LeaseAcquireOutcome<DreamerLeasedTask>;
+
+/// Which task a Dreamer claim leases, relative to the task the acquisition
+/// asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DreamerLeasedTask {
+    Requested,
+    /// The caller's slot still held a live claim on `claim.note_id`; that
+    /// claim is returned, rebound to this acquisition and renewed. `task_id`
+    /// stays free until this claim is completed or abandoned.
+    Held,
+}
 
 impl MemoryStore {
     /// Leases `task_id` for the run due at `due_at_ms`. A task another live
-    /// claim holds is `NoWork`; the caller's own expired or rebound slot is
-    /// recovered by the shared protocol.
+    /// claim holds is `NoWork`. A live claim already on the caller's own slot
+    /// is recovered instead, and the outcome's `DreamerLeasedTask` says
+    /// whether that claim is on `task_id` or on a task the slot still held.
     #[allow(clippy::too_many_arguments)]
     pub fn acquire_dreamer_task(
         &self,
@@ -3816,6 +3828,15 @@ impl MemoryStore {
         due_at_ms: i64,
         now_ms: i64,
     ) -> Result<DreamerTaskAcquireOutcome, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .dreamer_task_acquire_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected dreamer task acquire failure".to_string(),
+            )));
+        }
         self.acquire_task_lease(
             &DREAMER_TASK,
             project,
@@ -3840,13 +3861,19 @@ impl MemoryStore {
                 Ok(task_lease::LeaseSelected::Claim {
                     note_id: task_id,
                     phase: "run".to_string(),
-                    task: (),
+                    task: DreamerLeasedTask::Requested,
                     source_revision: due_at_ms,
                     state_version: 0,
                     policy_version: 0,
                 })
             },
-            |_, _| Ok(Some(())),
+            |_, leased_task_id| {
+                Ok(Some(if leased_task_id == task_id {
+                    DreamerLeasedTask::Requested
+                } else {
+                    DreamerLeasedTask::Held
+                }))
+            },
         )
     }
 
@@ -3863,6 +3890,15 @@ impl MemoryStore {
         response_json: &str,
         now_ms: i64,
     ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .dreamer_task_complete_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected dreamer task complete failure".to_string(),
+            )));
+        }
         self.complete_task_lease(
             &DREAMER_TASK,
             project,
@@ -4995,6 +5031,18 @@ pub struct MemoryStore {
     authority_seed_transaction_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     historian_side_channel_fail_once: Mutex<BTreeSet<String>>,
+    /// Makes the next `authority_project_for_route` fail as a backend error,
+    /// so a caller's store-failure branch can be exercised on a healthy store.
+    #[cfg(any(test, feature = "test-support"))]
+    authority_route_read_fail_once: std::sync::atomic::AtomicBool,
+    /// Makes the next `acquire_dreamer_task` fail as a backend error before it
+    /// touches the ledger.
+    #[cfg(any(test, feature = "test-support"))]
+    dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool,
+    /// Makes the next `complete_dreamer_task` fail as a backend error before
+    /// it touches the ledger.
+    #[cfg(any(test, feature = "test-support"))]
+    dreamer_task_complete_fail_once: std::sync::atomic::AtomicBool,
 }
 
 fn valid_drop_seed_block_id(block_id: &str) -> bool {
@@ -5382,6 +5430,12 @@ impl MemoryStore {
             authority_seed_transaction_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            authority_route_read_fail_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            dreamer_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
         Ok(store)
@@ -5814,6 +5868,15 @@ impl MemoryStore {
         domain: &str,
     ) -> Result<Option<String>, MemoryStoreError> {
         validate_authority_domain(domain)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .authority_route_read_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected authority route read failure".to_string(),
+            )));
+        }
         self.inner
             .with_conn(|conn| {
                 conn.query_row(
@@ -5843,6 +5906,28 @@ impl MemoryStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(kind.to_string());
+    }
+
+    /// The next `authority_project_for_route` returns a backend error instead
+    /// of reading the ledger; every call after it reads normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_authority_route_read_for_test(&self) {
+        self.authority_route_read_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next `acquire_dreamer_task` fails as a backend error; later calls run normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_dreamer_task_acquire_for_test(&self) {
+        self.dreamer_task_acquire_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next `complete_dreamer_task` fails as a backend error; later calls run normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_dreamer_task_complete_for_test(&self) {
+        self.dreamer_task_complete_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Reject a facade write that crosses the route's active authority identity.
@@ -22111,6 +22196,83 @@ mod tests {
         assert!(matches!(
             other("other-4", expired_at + 7),
             LeaseAcquireOutcome::Claim {
+                replayed: false,
+                ..
+            }
+        ));
+    }
+
+    /// Slot recovery runs before the selector: a slot still holding a live
+    /// claim on another task hands that claim back, marked `Held`, and the
+    /// requested task stays free.
+    #[test]
+    fn dreamer_task_slot_recovery_names_the_task_it_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = note_eval_store(dir.path());
+        activate_domain(&store, "memories");
+        let acquire = |acquisition_id: &str, slot: i64, task_id: i64, now_ms: i64| {
+            store
+                .acquire_dreamer_task(
+                    EVAL_PROJECT,
+                    acquisition_id,
+                    "sched",
+                    slot,
+                    1,
+                    task_id,
+                    now_ms,
+                    now_ms,
+                )
+                .unwrap()
+        };
+        let first = match acquire("acq-1", 0, 1, 100) {
+            LeaseAcquireOutcome::Claim {
+                claim,
+                task: DreamerLeasedTask::Requested,
+                replayed: false,
+            } => claim,
+            other => panic!("{other:?}"),
+        };
+        let recovered = match acquire("acq-2", 0, 2, 200) {
+            LeaseAcquireOutcome::Claim {
+                claim,
+                task: DreamerLeasedTask::Held,
+                replayed: true,
+            } => claim,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(recovered.claim_id, first.claim_id);
+        assert_eq!(recovered.note_id, 1, "the task the slot still held");
+        assert_eq!(recovered.acquisition_id, "acq-2");
+        assert_eq!(recovered.expires_at, 200 + DREAMER_TASK_LEASE_MS, "renewed");
+        // A replay of `acq-2` is still marked `Held`.
+        assert!(matches!(
+            acquire("acq-2", 0, 2, 201),
+            LeaseAcquireOutcome::Claim {
+                task: DreamerLeasedTask::Held,
+                replayed: true,
+                ..
+            }
+        ));
+        // Task 2 was never leased: another slot takes it.
+        assert!(matches!(
+            acquire("acq-3", 1, 2, 202),
+            LeaseAcquireOutcome::Claim {
+                task: DreamerLeasedTask::Requested,
+                replayed: false,
+                ..
+            }
+        ));
+        // Once the held claim is released, the slot leases what it asks for.
+        assert_eq!(
+            store
+                .abandon_dreamer_task(EVAL_PROJECT, &recovered.claim_id, "sched", 0, 203)
+                .unwrap(),
+            NoteEvalAbandonOutcome::Abandoned
+        );
+        assert!(matches!(
+            acquire("acq-4", 0, 3, 204),
+            LeaseAcquireOutcome::Claim {
+                task: DreamerLeasedTask::Requested,
                 replayed: false,
                 ..
             }

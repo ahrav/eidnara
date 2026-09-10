@@ -44,7 +44,6 @@ fn binding(prompt: &str) -> DreamerReceiptBinding {
         request_digest: dreamer_request_digest(&request(prompt)).unwrap(),
         ledger_session: "ses-1".to_string(),
         command_id: "cmd-1".to_string(),
-        harness: "pi".to_string(),
     }
 }
 
@@ -234,6 +233,117 @@ fn an_attempt_that_was_never_sent_is_recorded_but_not_counted_as_a_dispatch() {
         DreamerTransition::Applied
     );
     assert_eq!(store.count_dreamer_attempts(PROJECT, 0).unwrap(), 1);
+}
+
+#[test]
+fn a_flagged_command_id_is_refused_only_when_no_receipt_exists_for_it() {
+    use context_core::redaction::RedactionErrorKind;
+    use memory_store::MemoryStoreError;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let mut flagged = binding("prompt");
+    flagged.command_id = ["password=", "dreamer-fixture"].concat();
+
+    assert!(matches!(
+        store.begin_dreamer_receipt(key(), &flagged, 1),
+        Err(MemoryStoreError::Redaction(
+            RedactionErrorKind::SecretDetected
+        ))
+    ));
+    assert_eq!(store.lookup_dreamer_receipt(key()).unwrap(), None);
+
+    // A retained receipt whose stored id a later detector flags still replays.
+    store
+        .execute_tag_sql_for_test(&format!(
+            "INSERT INTO dreamer_receipts (
+                 project, producer, operation_key, database_incarnation_id,
+                 authority_generation, request_encoding_version, request_digest,
+                 ledger_session, command_id, state, generation, terminal_kind,
+                 result_json, created_at_ms, updated_at_ms
+             ) VALUES (
+                 '{PROJECT}', '{PRODUCER}', '{OPERATION_KEY}', '{INCARNATION}',
+                 3, 1, '{}', 'ses-1', '{}', 'complete', 1, 'complete', '{{}}', 2, 3
+             )",
+            flagged.request_digest, flagged.command_id
+        ))
+        .unwrap();
+    assert_eq!(
+        store.begin_dreamer_receipt(key(), &flagged, 4).unwrap(),
+        DreamerBeginOutcome::Complete {
+            generation: 1,
+            terminal_kind: DreamerTerminalKind::Complete,
+            result_json: "{}".to_string(),
+        }
+    );
+}
+
+#[test]
+fn an_undispatched_receipt_can_be_taken_over_only_without_a_possible_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    store
+        .begin_dreamer_receipt(key(), &binding("prompt"), 1)
+        .unwrap();
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 1, 2)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    assert_eq!(
+        store.lookup_dreamer_receipt(key()).unwrap().unwrap().state,
+        DreamerReceiptState::InProgress { generation: 2 }
+    );
+    // Only the current generation can create an attempt.
+    assert_eq!(
+        store
+            .begin_dreamer_attempt(key(), 1, &attempt(0, "prov/model-a"), 3)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    assert_eq!(
+        store
+            .begin_dreamer_attempt(key(), 2, &attempt(0, "prov/model-a"), 4)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 2, 5)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
+    store
+        .finish_dreamer_attempt(key(), 2, 0, DreamerTerminalKind::NotSent, 6)
+        .unwrap();
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 2, 7)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    assert_eq!(
+        store.lookup_dreamer_receipt(key()).unwrap().unwrap().state,
+        DreamerReceiptState::InProgress { generation: 3 }
+    );
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 3, 8)
+            .unwrap(),
+        DreamerTransition::Applied
+    );
+    store
+        .begin_dreamer_attempt(key(), 4, &attempt(0, "prov/model-a"), 9)
+        .unwrap();
+    store
+        .finish_dreamer_attempt(key(), 4, 0, DreamerTerminalKind::Failed, 10)
+        .unwrap();
+    assert_eq!(
+        store
+            .take_over_undispatched_dreamer_receipt(key(), 4, 11)
+            .unwrap(),
+        DreamerTransition::Fenced
+    );
 }
 
 #[test]
@@ -483,13 +593,13 @@ fn the_request_digest_ignores_map_insertion_order_and_pins_the_protocol() {
         dreamer_request_digest(&ordered).unwrap(),
         dreamer_request_digest(&reordered_items).unwrap()
     );
-    // The protocol prefix is part of the digested bytes: the digest is not the
-    // hash of the canonical JSON alone.
     let canonical = context_core::canonical_json::canonical_json_encode(&ordered).unwrap();
-    let bare = {
+    let expected = {
         use sha2::Digest as _;
-        format!("{:x}", sha2::Sha256::digest(canonical.as_bytes()))
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"eidnara-dreamer-request-v1\n");
+        hasher.update(canonical.as_bytes());
+        format!("{:x}", hasher.finalize())
     };
-    assert_ne!(dreamer_request_digest(&ordered).unwrap(), bare);
-    assert_eq!(dreamer_request_digest(&ordered).unwrap().len(), 64);
+    assert_eq!(dreamer_request_digest(&ordered).unwrap(), expected);
 }

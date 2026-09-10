@@ -100,9 +100,12 @@ the part are the eight `drive-fault` cases.
   command name falls to `unrecognized_request_error` like any unknown tool
   (`facade_envelope_not_supported`), which
   `retired_claim_facade_names_are_unsupported` (`lib.rs`, `mod tests`)
-  asserts. `ctx_memory` `get`/`list` answer a tool error naming canonical
-  kernel state as where memory is served from; its mutation actions answer a
-  tool error naming the kernel commit path. The four records in Group C and
+  asserts. `ctx_memory` advertises and delegates the five actions the host
+  memory tool serves: `get` answers a tool error naming canonical kernel state
+  as where memory is served from, and `create`, `revise`, `archive`, and
+  `merge` answer a tool error naming the kernel commit path. `list` and
+  `restore` are no longer advertised and answer the unknown-action error like
+  any other unserved name. The four records in Group C and
   Group D whose subject was a claim handler carry `Status: invalidated`; prose
   below that treats those handlers as live describes the source tree.
 
@@ -287,7 +290,7 @@ next state plus a `surfaced` boolean.
 | due | `get_due_compiled_smart_note_checks` `:711-731` | pending, compiled, has artifact, on-policy, unquarantined, `check_next_due_at <= now` | `(check_next_due_at, id)` `:728` |
 | compile | `get_smart_notes_needing_compilation` `:735-755` | pending, due, and (`uncompiled` or `failing` or no artifact or off-policy) | `(created_at, id)` `:752` |
 | liveness | `get_stale_compiled_smart_notes` `:759-783` | pending, compiled, on-policy, false for at least 7 days, last liveness at least 24h ago | `(check_false_since_at, id)` `:780` |
-| fallback | `get_fallback_smart_notes` `:788-806` | pending and `check_status == "fallback"` — **no time predicate at all** | `(last_checked_at.is_some(), last_checked_at, id)` `:797-803` |
+| fallback | `get_fallback_smart_notes` `:788-806` | pending and `check_status == "fallback"` - **no time predicate at all** | `(last_checked_at.is_some(), last_checked_at, id)` `:797-803` |
 
 `eligible` (`:704-707`) additionally drops a note whose `compile_status` is
 already `"compiled"` when the caller set `retina_handoff`. Backoff coverage is
@@ -434,7 +437,7 @@ are both capped and reaped (`NOTE_EVAL_LEDGER_CAP` at
 `crates/memory-store/src/task_lease.rs:356-360`). A dismissed note is
 the retirement counterpart: `dismiss_note` UPDATEs and never DELETEs and appends
 rather than replaces the resolution, so the content stays readable through
-`filter: "dismissed"`, and nothing returns it to `pending` — readable but never
+`filter: "dismissed"`, and nothing returns it to `pending` - readable but never
 restorable.
 
 ### Coverage
@@ -522,10 +525,10 @@ so.
 | [facade-a-measured-length-must-equal-written-body-or-nothing-is-terminal](#facade-a-measured-length-must-equal-written-body-or-nothing-is-terminal) | safety | high |
 | [facade-a-facade-error-text-carries-absolute-route-paths-to-the-model](#facade-a-facade-error-text-carries-absolute-route-paths-to-the-model) | safety | high |
 | [facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes](#facade-a-ctx-reduce-acknowledges-a-queue-it-never-writes) | safety | high |
-| [facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect](#facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect) | safety | invalidated |
-| [facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed](#facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed) | safety | invalidated |
-| [facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity](#facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity) | safety | invalidated |
-| [facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault](#facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault) | safety | invalidated |
+| [facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect](#facade-a-claim-effects-apply-acks-a-durable-checkpoint-with-no-module-effect) | safety | high |
+| [facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed](#facade-a-claim-effects-ack-and-producer-checkpoint-advance-are-never-composed) | safety | high |
+| [facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity](#facade-a-claim-intent-inspect-and-ack-discard-the-bound-route-identity) | safety | high |
+| [facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault](#facade-a-claim-intent-digest-conflict-is-indistinguishable-from-a-store-fault) | safety | high |
 | [facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes](#facade-a-mutation-ledger-memoizes-error-bearing-responses-as-command-outcomes) | safety | high |
 | [facade-a-replayed-facade-mutation-occurs-in-a-campaign](#facade-a-replayed-facade-mutation-occurs-in-a-campaign) | reachability | high |
 | [note-b-reducer-reads-process-local-timezone-for-durable-schedule](#note-b-reducer-reads-process-local-timezone-for-durable-schedule) | safety | high |
@@ -593,7 +596,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet - corrected this disposition (D13). An earlier version said `lib.rs:25632-25641` asserts the open acceptance is intentional and scored the runtime consequence `partial` on that basis. That assertion is about the advertised manifest's `additionalProperties` value, not about runtime behaviour, so nothing exercises what happens to an unknown key at runtime.
-Guarantee: An argument key that **resembles no key any `ctx_*` handler reads** — a compatibility key — never changes the handler's behaviour and never produces a caller-visible diagnostic.
+Guarantee: An argument key that **resembles no key any `ctx_*` handler reads** - a compatibility key - never changes the handler's behaviour and never produces a caller-visible diagnostic.
 Check: `always` - for every `ctx_*` call, assert that adding an argument key outside the handler's read set **and at edit distance greater than one from every key in that read set, ignoring case and separators**, produces an identical response to the call without it. Compare at the level that is stable rather than byte for byte on two sequential mutating calls: either drive the two calls against two independently cloned stores seeded to the same state, or compare the argument maps `facade_arguments` returns. A `command_id` must be absent from both calls or differ between them. `always` rather than `unreachable` because the acceptance is a state of the returned value, not a forbidden code point. Two corrections are folded in here. The edit-distance exclusion is D4: without it this check and `facade-a-misspelled-surface-condition-silently-writes-a-plain-note` contradict on a `ctx_note` write carrying `surfaceCondition`, one passing only if the response is unchanged and the other only if it is changed. The comparison level is D3: the store mints identifiers into the response text (`format!("Saved session note #{}.", note.id)` at `:11704`, insert at `:11690-11702`), so two sequential writes differ by construction, and a shared `command_id` makes the second response structurally one field larger because `facade_command_outcome`'s `Duplicate` arm inserts `"replayed": true` (`:15303`).
 Fault/timing angle: none.
 Required faults and enabling state: none. Any facade call with a spare key, plus two cloned stores if the tool under test mutates.
@@ -615,7 +618,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet - no test writes a note with a near-miss condition key.
-Guarantee: A `ctx_note` write carrying a key within one edit, one case change, or one separator change of `surface_condition` — a typo rather than a compatibility key — either records the condition, or refuses, or answers with a diagnostic naming the unread key. It never reports plain-note success silently.
+Guarantee: A `ctx_note` write carrying a key within one edit, one case change, or one separator change of `surface_condition` - a typo rather than a compatibility key - either records the condition, or refuses, or answers with a diagnostic naming the unread key. It never reports plain-note success silently.
 Check: `always` - assert that for every `ctx_note` write whose arguments contain any key differing from `surface_condition` only by case, separator, or a single edit, the response is not a plain `isError: false` "Saved session note #N." **and that the response names the unread key**. `always` because it must hold on every write evaluated. The diagnostic clause is a correction applied this disposition (D4): stating which diagnostic this record expects, against the sibling record's expectation of none for a compatibility key, is what keeps the two disjoint on the same input.
 Fault/timing angle: none, but the enabling state matters: with no live evaluator, the correctly spelled key refuses, so the misspelling converts a refusal into a success.
 Required faults and enabling state: a `ctx_note` write carrying `surfaceCondition` (or similar) and non-empty `content`, with `has_live_note_evaluator(project, now)` false.
@@ -805,11 +808,15 @@ Reachability: default-production
 Status: invalidated
 Invalidated: the handler this record was raised on is gone from
 `crates/daemon`; the six `claim.*` facade names are no longer routed, so the
-subject is unreachable by any request. The claim mirror and intent ledger the
-lane was built on are deleted from the memory store by the follow-on tickets. No
-successor record: the invariant belonged to the claim lane, and canonical memory
-carries no equivalent surface. The evidence file keeps the finding as it stood
-in the source tree; its `file:line` references resolve there only.
+subject is unreachable by any request. The store side of the lane is still
+present: `crates/memory-store/src/claim_mirror.rs` and the claim-intent ledger
+(`MemoryStore::stage_claim_intent`, `MemoryStore::acknowledge_claim_intent`)
+remain in `crates/memory-store`, and no daemon code calls them. This record is
+invalidated because its subject was the daemon handler, not the store; the
+store-side cleanup and any coverage owed on it are separate work. No successor
+record: the invariant belonged to the claim lane, and canonical memory carries
+no equivalent surface. The evidence file keeps the finding as it stood in the
+source tree; its `file:line` references resolve there only.
 Exercised: not yet - no test in `daemon` references
 `handle_claim_effects_apply`.
 Guarantee: An accepted `claim.effects.apply` either changes durable module-side state or returns a code the producer treats as non-advancing. (Narrowed this disposition, D11: the second obligation, that the producer's checkpoint therefore means what it claims, is now its own record, because it needs a harness that does not exist.)
@@ -856,11 +863,15 @@ from; only its constructibility differs.
 Status: invalidated
 Invalidated: the handler this record was raised on is gone from
 `crates/daemon`; the six `claim.*` facade names are no longer routed, so the
-subject is unreachable by any request. The claim mirror and intent ledger the
-lane was built on are deleted from the memory store by the follow-on tickets. No
-successor record: the invariant belonged to the claim lane, and canonical memory
-carries no equivalent surface. The evidence file keeps the finding as it stood
-in the source tree; its `file:line` references resolve there only.
+subject is unreachable by any request. The store side of the lane is still
+present: `crates/memory-store/src/claim_mirror.rs` and the claim-intent ledger
+(`MemoryStore::stage_claim_intent`, `MemoryStore::acknowledge_claim_intent`)
+remain in `crates/memory-store`, and no daemon code calls them. This record is
+invalidated because its subject was the daemon handler, not the store; the
+store-side cleanup and any coverage owed on it are separate work. No successor
+record: the invariant belonged to the claim lane, and canonical memory carries
+no equivalent surface. The evidence file keeps the finding as it stood in the
+source tree; its `file:line` references resolve there only.
 Exercised: not yet - not constructible today. This is the part's one
 outright block. The module side has no test at all: `claim_effects` appears
 twice in `lib.rs`, at `:10051` and `:10184`, and zero times in either test
@@ -890,7 +901,7 @@ that bounds the exposure is a timing-free predicate: the checkpoint advance
 rejects a regression and a beyond-tail value
 (`storage-claim-operations.ts:2218-2243`), so the failure mode is skipped effects
 rather than fabricated ones.
-Required faults and enabling state: **a harness that does not exist** — a
+Required faults and enabling state: **a harness that does not exist** - a
 cross-language process pair in which the real Rust module answers the real
 TypeScript producer. No amount of in-crate work reaches it, which is exactly why
 this obligation is a separate record: folding it into the module-local one made
@@ -946,11 +957,15 @@ Reachability: default-production
 Status: invalidated
 Invalidated: the handler this record was raised on is gone from
 `crates/daemon`; the six `claim.*` facade names are no longer routed, so the
-subject is unreachable by any request. The claim mirror and intent ledger the
-lane was built on are deleted from the memory store by the follow-on tickets. No
-successor record: the invariant belonged to the claim lane, and canonical memory
-carries no equivalent surface. The evidence file keeps the finding as it stood
-in the source tree; its `file:line` references resolve there only.
+subject is unreachable by any request. The store side of the lane is still
+present: `crates/memory-store/src/claim_mirror.rs` and the claim-intent ledger
+(`MemoryStore::stage_claim_intent`, `MemoryStore::acknowledge_claim_intent`)
+remain in `crates/memory-store`, and no daemon code calls them. This record is
+invalidated because its subject was the daemon handler, not the store; the
+store-side cleanup and any coverage owed on it are separate work. No successor
+record: the invariant belonged to the claim lane, and canonical memory carries
+no equivalent surface. The evidence file keeps the finding as it stood in the
+source tree; its `file:line` references resolve there only.
 Exercised: not yet - no `daemon` test drives any claim-intent facade call.
 Guarantee: A claim-intent facade call affects or reveals only intents whose
 authority the calling route is bound to.
@@ -992,11 +1007,15 @@ Reachability: default-production
 Status: invalidated
 Invalidated: the handler this record was raised on is gone from
 `crates/daemon`; the six `claim.*` facade names are no longer routed, so the
-subject is unreachable by any request. The claim mirror and intent ledger the
-lane was built on are deleted from the memory store by the follow-on tickets. No
-successor record: the invariant belonged to the claim lane, and canonical memory
-carries no equivalent surface. The evidence file keeps the finding as it stood
-in the source tree; its `file:line` references resolve there only.
+subject is unreachable by any request. The store side of the lane is still
+present: `crates/memory-store/src/claim_mirror.rs` and the claim-intent ledger
+(`MemoryStore::stage_claim_intent`, `MemoryStore::acknowledge_claim_intent`)
+remain in `crates/memory-store`, and no daemon code calls them. This record is
+invalidated because its subject was the daemon handler, not the store; the
+store-side cleanup and any coverage owed on it are separate work. No successor
+record: the invariant belonged to the claim lane, and canonical memory carries
+no equivalent surface. The evidence file keeps the finding as it stood in the
+source tree; its `file:line` references resolve there only.
 Exercised: not yet - no `daemon` test drives a digest conflict.
 Guarantee: A caller can tell from the error code alone whether its
 `(producer, operation_key)` was reused for a different request body, as opposed
@@ -1648,8 +1667,8 @@ these records has an executing check.
   two are deliberately disjoint rather than overlapping: the compatibility-key
   record excludes keys within one edit of a read key, and the typo record demands
   a diagnostic naming exactly those. Hypothesis: neither dominates the other, and
-  a single implementation change — walking the key set and classifying each key as
-  read, compatible, or near-miss — would satisfy both at once, which is why they
+  a single implementation change - walking the key set and classifying each key as
+  read, compatible, or near-miss - would satisfy both at once, which is why they
   are grouped. All three argument records share one harness constraint recorded in
   D3: never compare two sequential mutating calls byte for byte, because the store
   mints ids into the text (`:11704`) and a shared `command_id` adds a `replayed`

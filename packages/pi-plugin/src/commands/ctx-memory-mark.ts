@@ -47,11 +47,20 @@ export function registerCtxMemoryMarkCommand(
                 return;
             }
             const projectRoot = resolveProjectRootDirectory(ctx.cwd);
+            // Pi invalidates a command's `ctx` when its session is replaced or reloaded, so reading it throws once the invoking session is gone; a commit after that would reopen the closed session's daemon route. commentlint: allow(JUDGE)
+            const isCancelled = (): boolean => {
+                try {
+                    return resolveSessionId(ctx) !== sessionId;
+                } catch {
+                    return true;
+                }
+            };
             const outcome = await runMemoryMarkCommand({
                 client: deps.kernelClient({ sessionId, projectRoot }),
                 sessionId,
                 actor: PI_MEMORY_MARK_ACTOR,
                 args: parsed.args,
+                isCancelled,
                 // Without a dialog the runner asks for the confirm flag instead.
                 ...(ctx.hasUI
                     ? {
@@ -63,6 +72,8 @@ export function registerCtxMemoryMarkCommand(
                       }
                     : {}),
             });
+            // The session that asked is gone, so there is no transcript to answer into.
+            if (isCancelled()) return;
             sendCtxStatusMessage(
                 pi,
                 {

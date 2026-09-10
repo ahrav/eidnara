@@ -277,4 +277,76 @@ describe("runMemoryMarkCommand", () => {
             "invalid:not_found",
         );
     });
+
+    test("a verdict for another object or event never decides the one the user named", async () => {
+        // A well-typed reply whose verdict names a different object would otherwise skip the prompt and commit the requested operation blind. commentlint: allow(JUDGE)
+        const available = { kind: "available" } as const;
+        const verdict = (object_id: string, event: MemoryMarkArgs["event"]) => ({
+            object_id,
+            event,
+            outcome: "deny",
+            previous_disposition: "active",
+            disposition: "stale",
+            denied: false,
+        });
+        const quiet = {
+            auto_inject: "hidden",
+            auto_search: "hidden",
+            explicit_search: "labeled",
+        } as const;
+        const preview = (object_id: string, event: MemoryMarkArgs["event"]) => ({
+            ...verdict(object_id, event),
+            current: quiet,
+            projected: quiet,
+            visibility_changes: false,
+        });
+        let commits = 0;
+        const stub = (previews: unknown[], dispositions: unknown[]) =>
+            ({
+                previewDispositions: async () => ({ state: available, known_as_of: 1, previews }),
+                commit: async () => {
+                    commits += 1;
+                    return {
+                        state: available,
+                        receipt: { commit_seq: 2, replayed: false },
+                        known_as_of: 2,
+                        tokens: [],
+                        merged: [],
+                        dispositions,
+                    };
+                },
+            }) as unknown as KernelClient;
+        const base = {
+            sessionId: SESSION,
+            actor: "user:test",
+            args: args("mark_stale", "mem_a"),
+            confirm: UNEXPECTED_CONFIRMATION,
+        };
+        const refused = {
+            kind: "refused",
+            step: "preview",
+            state: { kind: "invalid", reason: "internal" },
+        } as const;
+        for (const previews of [
+            [],
+            [preview("mem_b", "mark_stale")],
+            [preview("mem_a", "quarantine")],
+            [preview("mem_a", "mark_stale"), preview("mem_b", "mark_stale")],
+        ]) {
+            const outcome = await runMemoryMarkCommand({ ...base, client: stub(previews, []) });
+            expect(outcome).toEqual(refused);
+        }
+        expect(commits).toBe(0);
+
+        const unknown = await runMemoryMarkCommand({
+            ...base,
+            client: stub([preview("mem_a", "mark_stale")], [verdict("mem_b", "mark_stale")]),
+        });
+        expect(unknown).toEqual({
+            kind: "refused",
+            step: "commit",
+            state: { kind: "unavailable", reason: "outcome_unknown" },
+        });
+        expect(commits).toBe(1);
+    });
 });

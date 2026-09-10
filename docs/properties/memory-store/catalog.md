@@ -141,7 +141,9 @@ correction were applied to `fault-map.md` and change no record here.
   claim-result decoder, the public-claim-id validator, revision locators,
   mutation tokens, the heads digests, and the snapshot vector were deleted
   with no consumer left. In Group F, `core-canonical-encoding-crossruntime-parity`
-  stays active over the moved module;
+  stays active over the moved module, restated as the Rust encoder's byte
+  stability and the Dreamer request digest because no TypeScript encoder under
+  the fixture exists in this repository;
   `core-result-decode-acceptance-boundary`,
   `core-applicability-heads-order-independence`, and
   `core-revision-locator-roundtrip-inverse` carry `Status: invalidated`.
@@ -288,28 +290,28 @@ bill for the crate.
 | [migration-and-its-version-record-commit-together](#migration-and-its-version-record-commit-together) | safety | high |
 | [recorded-schema-version-cannot-disagree-with-the-actual-schema](#recorded-schema-version-cannot-disagree-with-the-actual-schema) | safety | medium |
 | [post-migration-open-repair-is-resumable-and-effect-idempotent](#post-migration-open-repair-is-resumable-and-effect-idempotent) | safety | high |
-| [mirror-receipt-replay-applies-effects-once](#mirror-receipt-replay-applies-effects-once) | safety | invalidated |
-| [mirror-receipt-conflict-rejects-divergent-replay](#mirror-receipt-conflict-rejects-divergent-replay) | safety | invalidated |
-| [mirror-project-effect-chain-detects-omission](#mirror-project-effect-chain-detects-omission) | safety | invalidated |
-| [mirror-generation-advances-exactly-one-per-touched-project](#mirror-generation-advances-exactly-one-per-touched-project) | safety | invalidated |
-| [mirror-read-fence-relies-on-generation-advance](#mirror-read-fence-relies-on-generation-advance) | safety | invalidated |
-| [mirror-reset-cycle-requires-a-rebuild-grant](#mirror-reset-cycle-requires-a-rebuild-grant) | reachability | invalidated |
-| [mirror-clear-without-a-grant-is-never-entered](#mirror-clear-without-a-grant-is-never-entered) | reachability | invalidated |
-| [mirror-accepting-gate-is-skipped-when-control-is-absent](#mirror-accepting-gate-is-skipped-when-control-is-absent) | safety | invalidated |
-| [mirror-staleness-undetectable-on-memory-tool-read-path](#mirror-staleness-undetectable-on-memory-tool-read-path) | safety | invalidated |
-| [intent-control-transition-write-is-silently-dropped](#intent-control-transition-write-is-silently-dropped) | safety | invalidated |
-| [intent-identity-is-producer-and-operation-key](#intent-identity-is-producer-and-operation-key) | safety | invalidated |
-| [intent-terminal-state-is-entered-at-most-once](#intent-terminal-state-is-entered-at-most-once) | safety | invalidated |
-| [intent-staged-replay-produces-one-context-effect](#intent-staged-replay-produces-one-context-effect) | safety | invalidated |
+| [mirror-receipt-replay-applies-effects-once](#mirror-receipt-replay-applies-effects-once) | safety | high |
+| [mirror-receipt-conflict-rejects-divergent-replay](#mirror-receipt-conflict-rejects-divergent-replay) | safety | high |
+| [mirror-project-effect-chain-detects-omission](#mirror-project-effect-chain-detects-omission) | safety | high |
+| [mirror-generation-advances-exactly-one-per-touched-project](#mirror-generation-advances-exactly-one-per-touched-project) | safety | high |
+| [mirror-read-fence-relies-on-generation-advance](#mirror-read-fence-relies-on-generation-advance) | safety | medium |
+| [mirror-reset-cycle-requires-a-rebuild-grant](#mirror-reset-cycle-requires-a-rebuild-grant) | reachability | high |
+| [mirror-clear-without-a-grant-is-never-entered](#mirror-clear-without-a-grant-is-never-entered) | reachability | high |
+| [mirror-accepting-gate-is-skipped-when-control-is-absent](#mirror-accepting-gate-is-skipped-when-control-is-absent) | safety | high |
+| [mirror-staleness-undetectable-on-memory-tool-read-path](#mirror-staleness-undetectable-on-memory-tool-read-path) | safety | high |
+| [intent-control-transition-write-is-silently-dropped](#intent-control-transition-write-is-silently-dropped) | safety | high |
+| [intent-identity-is-producer-and-operation-key](#intent-identity-is-producer-and-operation-key) | safety | high |
+| [intent-terminal-state-is-entered-at-most-once](#intent-terminal-state-is-entered-at-most-once) | safety | high |
+| [intent-staged-replay-produces-one-context-effect](#intent-staged-replay-produces-one-context-effect) | safety | medium |
 | [core-decay-newest-compartment-tier-floor](#core-decay-newest-compartment-tier-floor) | safety | high |
 | [core-decay-tier-ladder-monotone-and-archive-agreement](#core-decay-tier-ladder-monotone-and-archive-agreement) | safety | high |
 | [core-decay-budget-pressure-range-totality](#core-decay-budget-pressure-range-totality) | safety | high |
 | [core-decay-archive-termination-bound](#core-decay-archive-termination-bound) | safety | high |
 | [core-canonical-encoding-crossruntime-parity](#core-canonical-encoding-crossruntime-parity) | safety | high |
-| [core-result-decode-acceptance-boundary](#core-result-decode-acceptance-boundary) | safety | invalidated |
-| [core-applicability-heads-order-independence](#core-applicability-heads-order-independence) | safety | invalidated |
-| [core-revision-locator-roundtrip-inverse](#core-revision-locator-roundtrip-inverse) | safety | invalidated |
-| [core-intent-ack-transition-legality-gap](#core-intent-ack-transition-legality-gap) | safety | invalidated |
+| [core-result-decode-acceptance-boundary](#core-result-decode-acceptance-boundary) | safety | high |
+| [core-applicability-heads-order-independence](#core-applicability-heads-order-independence) | safety | high |
+| [core-revision-locator-roundtrip-inverse](#core-revision-locator-roundtrip-inverse) | safety | high |
+| [core-intent-ack-transition-legality-gap](#core-intent-ack-transition-legality-gap) | safety | medium |
 | [core-pass-classifier-destructive-clear-guard](#core-pass-classifier-destructive-clear-guard) | safety | high |
 | [tokenizer-cross-process-determinism](#tokenizer-cross-process-determinism) | safety | high |
 | [tokenizer-golden-oracle-provenance](#tokenizer-golden-oracle-provenance) | safety | high |
@@ -866,7 +868,9 @@ Every record in this group is invalidated at HEAD: the claim mirror module, its
 tables, and its tests are gone from `crates/memory-store` (see Provenance), and
 the replacement for what the mirror's consumers relied on is
 `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
-transform catalog. The group is kept as the record of the source tree.
+transform catalog. The group is kept as the record of the source tree; its
+`file:line` references are host-repository citations at `eb6da6109` (see
+Provenance) and name files that no longer exist here.
 
 Nine records on a projection of an authority that lives outside this store. The
 mirror is not a cache and not a second source of truth: every mutation is push-only
@@ -892,8 +896,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:177-250` applies one receipt and
 replays the identical bytes, asserting `applied_effect_count` then `replayed`. It
 does not cover a replay interleaved with an intervening receipt, a replay after
@@ -945,8 +950,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test reuses a receipt ID with different bytes.
 `tests/claim_mirror.rs:223-232` replays identical bytes only; `:592-624` covers a
 different guard (equal revision, different content, fresh receipt).
@@ -992,8 +998,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:304-320` skips one effect and asserts
 `CheckpointMismatch`. Only the single-project, single-gap case; no multi-project
 interleave where another project occupies the intervening global effect IDs, which
@@ -1043,8 +1050,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:290-303` asserts one wrong generation is
 refused, and `:528-591` asserts untouched rows are restamped. Neither covers the
 untouched-project arm, where a receipt must present `stored + 0` for a project it
@@ -1136,8 +1144,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: yes - `tests/claim_mirror.rs:377-458` and `:482-517` drive the whole
 cycle, and `tests/claim_intent_ledger.rs:288-335` drives the grant. Every one of
 these calls `begin_claim_store_rebuild` directly from test code.
@@ -1200,8 +1209,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:461-479`
 (`u10_scenario_7_equivalent_restart_seed_is_idempotent`) seeds the same snapshot
 twice with no grant and asserts both succeed (`:470-471`), then mutates one
@@ -1266,8 +1276,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test applies a receipt while the control row says
 `draining`, and no test asserts that an absent control row permits an apply. The
 absent-row case is the production default
@@ -1324,8 +1335,9 @@ readers this record was raised on no longer exist, so its subject is
 unreachable. Canonical memory is read from the kernel, and the property its
 consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
 in the daemon transform catalog. The record body and its evidence file keep
-the deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test reads through `list_committed_claims` with a mirror
 deliberately behind the authority, because nothing in the store can express "behind
 the authority".
@@ -1375,8 +1387,10 @@ Open questions:
 ## Group D: the claim intent ledger
 
 Every record in this group is invalidated at HEAD: the claim-intent ledger, its
-tables, and its tests are gone from `crates/memory-store` (see Provenance). The
-group is kept as the record of the source tree.
+tables, and its tests are gone from `crates/memory-store`. The group is kept as
+the record of the source tree; its `file:line` references are host-repository
+citations at `eb6da6109` (see Provenance) and name code that no longer exists
+here.
 
 Four records on the durable row that records a claim command staged *before* the host
 mutated `context.db`. An intent is keyed by `(producer, operation_key)` alone
@@ -1403,8 +1417,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - no test asserts that a control row appears after an authority
 transition. `tests/claim_intent_ledger.rs:178-179` and `:169-228` deliberately assert
 the *authority-row* fence instead, and the comment at `:11-15` shows the fixture was
@@ -1456,8 +1471,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:133-166` covers restart survival
 (`:148-151`), an incarnation binding mismatch (`:153-161`), and a digest conflict
 (`:162-165`). `format_epoch`, `authority_project`, and `authority_generation`
@@ -1505,8 +1521,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:85-131` walks staged to
 context-committed to acknowledged, and `:169-228` and `:346-401` reach
 terminal-rejected. No test attempts an illegal transition out of a terminal state, and
@@ -1557,8 +1574,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:337-401` proves a staged replay is
 refused once the authority is draining, which is the fence, not the effect count.
 Nothing in this crate observes the context effect, because the effect lands in a
@@ -1773,8 +1791,10 @@ Open questions:
 ## Group F: core operation semantics and encoding
 
 At HEAD `claim_operation.rs` is gone (see Provenance): the encoder record below
-is live over `canonical_json.rs`, the intent-ack and three encoding-law records
-are invalidated, and the pass-classifier record is unchanged.
+is live over `canonical_json.rs` and states the Rust encoder's byte stability
+and the Dreamer request digest, because no TypeScript encoder exists in this
+repository; the intent-ack and three encoding-law records are invalidated, and
+the pass-classifier record is unchanged.
 
 Six records on `crates/context-core/src/claim_operation.rs` (878 lines) and
 `crates/context-core/src/lib.rs` (338). This module is an encoding and identity contract,
@@ -1791,55 +1811,85 @@ cheapest complete check in the whole part.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - the fixture pins 5 canonicalization cases and 2 rejection cases
-(`claim_operation.rs:718-747`), including one astral key-order case that genuinely
-discriminates code-point from UTF-16 ordering.
-Guarantee: the Rust and TypeScript canonical encoders accept exactly the same values and
-emit byte-identical output, so a digest computed on either side fences correctly against
-the other.
-Check: `always` - for every value in the shared canonical vocabulary,
-`canonical_json_encode(v)` in Rust equals `canonicalJsonEncode(v)` in TypeScript byte
-for byte, and the accepted sets coincide: both accept a value or both reject it.
-Restrict the comparison to values Rust can represent, since Rust `&str` cannot hold a
-lone surrogate that TypeScript can. `always` because every staged command digests
-through this path.
-Fault/timing angle: none. This is a cross-runtime equivalence, not a race.
+Exercised: partial - `crates/context-core/src/canonical_json.rs:185`
+`canonical_bytes_match_fixture` pins 5 canonicalization cases, including one
+astral key-order case that discriminates code-point from UTF-16 ordering; `:235`
+`non_canonical_numbers_are_rejected` pins 5 rejections (`1.5`, `2^53 - 1 + 2`,
+`2^53`, `-2^53`, `2^64 - 1`); `:250` `integer_above_i64_max_is_not_canonical`
+covers the u64 path; `:201`
+`dreamer_request_digest_is_sha256_over_protocol_and_canonical_bytes` recomputes
+the digest formula over the 5 cases, pins `1e3`, `1.0`, `-0.0`, and `-0` to
+their integer forms, and asserts key-order independence and array-order
+sensitivity on one object; `:164` `digest_protocols_are_the_recorded_literals`
+pins the protocol strings. `crates/memory-store/tests/dreamer_ledger.rs:455`
+repeats the key-order and protocol checks through the store's wrapper. No
+generator drives the discriminating regions, and no cross-runtime comparison
+runs: the TypeScript encoder this record was raised against is not in this
+repository.
+Guarantee: the canonical encoder is a deterministic function of the JSON value:
+equal values encode to byte-identical output regardless of object key insertion
+order, integral floats encode as the integer they equal, every number outside
+the safe-integer vocabulary is rejected, and the Dreamer request digest is the
+documented formula over those bytes, so one digest identifies exactly one
+semantic request.
+Check: `always` - for every `serde_json::Value` `v`: `canonical_json_encode(v)`
+succeeds if and only if every number in `v` is finite, integral, and within
+`±(2^53 - 1)`; when it succeeds, the output equals
+`canonical_json_encode(permute_keys(v))` byte for byte, equals the pinned bytes
+for every fixture case, and `compute_dreamer_request_digest(v)` equals the
+lowercase-hex SHA-256 over `"eidnara-dreamer-request-v1\n"` followed by those
+bytes. `always` because every Dreamer command digests through this path before
+its receipt is written.
+Fault/timing angle: none. This is a pure-function law, not a race.
 Required faults and enabling state: a generator that emits values spanning the
 discriminating regions: object keys straddling the BMP/astral boundary
 (`U+E000`..`U+FFFF` versus `U+10000`+), keys differing only past a shared prefix,
-integers at exactly `±(2^53 - 1)` and `±2^53`, `-0`, floats with zero fraction such as
-`1e3`, control characters `U+0000`..`U+001F`, `U+2028`, `U+2029`, and
-unpaired-surrogate-free astral text.
-Confidence: high - [evidence](evidence/core-canonical-encoding-crossruntime-parity.md). I read the
-TypeScript twin and confirmed it uses an explicit `compareCodePoints` (TS `:53-63`) at
-TS `:120`, not the default sort, so the agreement with Rust's `BTreeMap` ordering
-(`claim_operation.rs:124`) is deliberate. I decoded the `astral-key-order` fixture keys
-as `U+0041`, `U+FFFD`, `U+1F600` and confirmed the pinned canonical output is in
-code-point order, which UTF-16 order would reverse for the last two.
-Existing check: at HEAD the encoder lives in
-`crates/context-core/src/canonical_json.rs`, and the checks are
-`canonical_bytes_match_fixture`, `non_canonical_numbers_are_rejected`, and
-`dreamer_request_digest_is_sha256_over_protocol_and_canonical_bytes` there,
-fixture-driven from `testdata/canonical-json-contract-v1.json`. The source tree's
-checks were `claim_operation.rs:718`
-`canonical_bytes_and_request_digests_match_fixture` and `:737`
-`non_canonical_numbers_are_rejected`. Status `unaudited`.
-Impact: a divergence means the two runtimes compute different request digests for the
-same semantic command, so the intent ledger's replay detection and the mutation-token
-fence both misfire: a replay looks like a new command, or two different commands collide
-on one identity.
+integers at exactly `±(2^53 - 1)` and `±2^53`, `-0`, floats with zero fraction
+such as `1e3`, control characters `U+0000`..`U+001F`, `U+2028`, `U+2029`, and
+unpaired-surrogate-free astral text; and, for every generated object, a
+permutation of its key insertion order.
+Confidence: high - [evidence](evidence/core-canonical-encoding-crossruntime-parity.md).
+Verified by reading `crates/context-core/src/canonical_json.rs:42-53`, the number
+vocabulary: an `i64` path range-checked to `±MAX_SAFE_INTEGER` at `:44-46` and an
+`f64` path at `:48-52` rejecting non-finite, fractional, and out-of-range values;
+`:55-68`, which escapes only `"`, `\`, and code points below `0x20`, the last as
+lowercase `\u00xx` at `:62`; `:93`, where `BTreeMap<&String, &Value>` orders keys
+by UTF-8 bytes, which is code-point order for well-formed UTF-8; and `:128-135`,
+which hashes `<protocol>`, `\n`, then the canonical bytes. I decoded the
+`astral-key-order` fixture keys as `U+0041`, `U+FFFD`, `U+1F600` and confirmed the
+pinned canonical output is in code-point order, which UTF-16 order would reverse
+for the last two. The TypeScript twin this record was raised against
+(`packages/plugin/src/features/eidnara/memory/claim-operation-contract.ts`
+(source-catalog path, not present at HEAD)) is not in this repository, and
+`packages/e2e-tests/src/incident-pool/history.ts:29` `canonicalJson` is an
+unrelated harness helper with JavaScript `<` key order and `JSON.stringify`
+escaping under no shared fixture, so this record is a Rust byte-stability and
+digest-formula check until an encoder under the same fixture exists here.
+Existing check: `crates/context-core/src/canonical_json.rs:164`, `:185`, `:201`,
+`:235`, and `:250`, fixture-driven from
+`crates/context-core/testdata/canonical-json-contract-v1.json`, and
+`crates/memory-store/tests/dreamer_ledger.rs:455`. The source tree's checks were
+`claim_operation.rs:718` `canonical_bytes_and_request_digests_match_fixture` and
+`:737` `non_canonical_numbers_are_rejected`. Status `unaudited`.
+Impact: a nondeterministic or drifting encoding gives one Dreamer command two
+digests, so `begin_dreamer_receipt`
+(`crates/memory-store/src/dreamer_ledger.rs:318`) reports `DigestConflict` on a
+legitimate retry and `run_dreamer_task` returns `dreamer_request_conflict`
+(`crates/daemon/src/lib.rs:9646`) instead of replaying the recorded outcome; a
+collision gives two different requests one receipt, so a retry replays the wrong
+result. The durable-write redaction scan at `crates/memory-store/src/lib.rs:3206`
+encodes through the same path, so an encoder change alters the bytes the secret
+scanner sees.
 Open questions:
 
 - Is the `U+FFFD` key in the `astral-key-order` fixture deliberate, or is it a mangled
   `U+E000` or lone surrogate from an earlier generator run? It discriminates correctly
   either way, but the intent matters for future edits. (unresolved, needs the fixture
   generator's history)
-- Only two `invalidCanonical` cases exist (`1.5` and `9007199254740993`). Is the
-  rejection surface intended to be that narrow? (needs human input)
-- The TypeScript twin this record compares against is not in this repository;
-  at HEAD the fixture pins the Rust encoder's bytes only, so the check is a
-  Rust byte-stability check until a TypeScript encoder under the same fixture
-  exists here. (needs human input)
+- No TypeScript encoder under `canonical-json-contract-v1.json` exists in this
+  repository. If one is added, this record regains its cross-runtime clause:
+  both encoders accept the same values and emit the same bytes for every
+  fixture case. Until then the fixture pins Rust bytes only. (needs human input)
 
 ### core-result-decode-acceptance-boundary
 
@@ -1850,8 +1900,9 @@ Invalidated: the function this record was raised on was deleted with
 `crates/context-core/src/claim_operation.rs`; it had no consumer once the
 claim mirror, the claim-intent ledger, and the claim-lane classify request were
 gone. No successor record. The record body and its evidence file keep the
-deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `claim_operation.rs:847-877` covers 2 valid and 5 invalid fixture
 envelopes. Neither valid case has a non-canonical payload, and no case pairs an
 `applied` outcome with a non-null `staleReason`.
@@ -1900,8 +1951,9 @@ Invalidated: the function this record was raised on was deleted with
 `crates/context-core/src/claim_operation.rs`; it had no consumer once the
 claim mirror, the claim-intent ledger, and the claim-lane classify request were
 gone. No successor record. The record body and its evidence file keep the
-deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - 2 fixture cases (`claim_operation.rs:803-822`): the empty list and
 one two-element list. No case permutes the same list, so the invariance is asserted
 nowhere.
@@ -1945,8 +1997,9 @@ Invalidated: the function this record was raised on was deleted with
 `crates/context-core/src/claim_operation.rs`; it had no consumer once the
 claim mirror, the claim-intent ledger, and the claim-lane classify request were
 gone. No successor record. The record body and its evidence file keep the
-deleted code as quoted from the source tree; those `file:line` references
-resolve there only.
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - the fixture (`claim_operation.rs:760-786`) asserts
 `format(parse(s)) == s` for each valid case and rejection for 8 invalid strings, but
 never asserts `parse(format(l)) == Some(l)` for a generated locator.
@@ -1990,8 +2043,9 @@ transitions this record was raised on no longer exist, so its subject is
 unreachable. No successor record: canonical memory writes are keyed and
 replayed by the kernel's own commit receipts, which the kernel crate's tests
 hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
-evidence file keep the deleted code as quoted from the source tree; those
-`file:line` references resolve there only.
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - nothing in `context-core` asserts transition legality, because
 `context-core` does not model it. `crates/memory-store/tests/claim_intent_ledger.rs` exercises
 acknowledgements, and Group D's `intent-terminal-state-is-entered-at-most-once` is where

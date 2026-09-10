@@ -33,9 +33,7 @@ pub struct DreamerReceiptKey<'a> {
 
 /// What a receipt binds its request to: the store incarnation and authority
 /// generation the request ran under, the digest over its effect-defining
-/// inputs, the client identity that issued it, and the harness the model runs
-/// are started under, which a later incarnation needs to ask the runtime about
-/// a recorded run handle.
+/// inputs, and the client identity that issued it. commentlint: allow(JUDGE)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamerReceiptBinding {
     pub database_incarnation_id: String,
@@ -43,7 +41,6 @@ pub struct DreamerReceiptBinding {
     pub request_digest: String,
     pub ledger_session: String,
     pub command_id: String,
-    pub harness: String,
 }
 
 /// How an attempt or a whole request ended.
@@ -175,7 +172,7 @@ pub struct DreamerAttempt {
 
 const RECEIPT_COLUMNS: &str = "database_incarnation_id, authority_generation, request_digest,
      ledger_session, command_id, state, generation, terminal_kind, result_json,
-     created_at_ms, updated_at_ms, harness";
+     created_at_ms, updated_at_ms";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DreamerReceipt> {
     let state: String = row.get(5)?;
@@ -204,7 +201,6 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DreamerReceipt>
             request_digest: row.get(2)?,
             ledger_session: row.get(3)?,
             command_id: row.get(4)?,
-            harness: row.get(11)?,
         },
         state,
         created_at_ms: row.get(9)?,
@@ -299,9 +295,11 @@ impl MemoryStore {
         write.existing_identity("project", key.project)?;
         write.identity("producer", key.producer)?;
         write.identity("operation_key", key.operation_key)?;
-        write.identity("ledger_session", &binding.ledger_session)?;
-        write.identity("command_id", &binding.command_id)?;
-        write.identity("harness", &binding.harness)?;
+        // A flagged `ledger_session` or `command_id` blocks only insertion; an
+        // exact retry can still read the existing durable receipt.
+        write.existing_identity("ledger_session", &binding.ledger_session)?;
+        write.existing_identity("command_id", &binding.command_id)?;
+        let identities_flagged = write.recorded_detections(&["ledger_session", "command_id"]);
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             let existing = tx
@@ -351,13 +349,19 @@ impl MemoryStore {
                 };
                 return Ok(WriteDisposition::Replay(outcome));
             }
+            if identities_flagged {
+                coordinated
+                    .prepared
+                    .borrow()
+                    .reject_recorded_identities(&["ledger_session", "command_id"])
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            }
             tx.execute(
                 "INSERT INTO dreamer_receipts (
                      project, producer, operation_key, database_incarnation_id,
                      authority_generation, request_encoding_version, request_digest,
-                     ledger_session, command_id, harness, state, generation,
-                     created_at_ms, updated_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'in_progress', 1, ?11, ?11)",
+                     ledger_session, command_id, state, generation, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'in_progress', 1, ?10, ?10)",
                 params![
                     key.project,
                     key.producer,
@@ -368,7 +372,6 @@ impl MemoryStore {
                     binding.request_digest,
                     binding.ledger_session,
                     binding.command_id,
-                    binding.harness,
                     now_ms,
                 ],
             )?;
@@ -397,6 +400,33 @@ impl MemoryStore {
             "UPDATE dreamer_receipts SET generation = ?4, updated_at_ms = ?5
               WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
                 AND state = 'in_progress' AND generation = ?6",
+            params![successor, now_ms, predecessor],
+        )
+    }
+
+    /// Adopts a generation with no attempt that may have reached a model.
+    /// Attempt rows precede dispatch; only `not_sent` rows prove no dispatch.
+    /// The attempt check and fence move share one statement, so no attempt can land between them.
+    pub fn take_over_undispatched_dreamer_receipt(
+        &self,
+        key: DreamerReceiptKey<'_>,
+        predecessor_generation: u64,
+        now_ms: i64,
+    ) -> Result<DreamerTransition, MemoryStoreError> {
+        let predecessor = generation_param(predecessor_generation)?;
+        let successor = generation_param(predecessor_generation.saturating_add(1))?;
+        self.guarded_transition(
+            key,
+            |_| Ok(()),
+            "UPDATE dreamer_receipts SET generation = ?4, updated_at_ms = ?5
+              WHERE project = ?1 AND producer = ?2 AND operation_key = ?3
+                AND state = 'in_progress' AND generation = ?6
+                AND NOT EXISTS (
+                    SELECT 1 FROM dreamer_attempts a
+                      WHERE a.project = ?1 AND a.producer = ?2 AND a.operation_key = ?3
+                        AND a.generation = ?6
+                        AND (a.terminal_kind IS NULL OR a.terminal_kind != 'not_sent')
+                )",
             params![successor, now_ms, predecessor],
         )
     }

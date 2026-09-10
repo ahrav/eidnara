@@ -404,6 +404,7 @@ mod tests {
         assert!(memory_properties.contains_key("objectId"));
         assert!(memory_properties.contains_key("objectIds"));
         assert!(!memory_schema.to_string().contains("Claim"));
+        assert!(!memory_properties.contains_key("mutationToken"));
 
         for guidance in [
             GUIDANCE_FULL_PRIMARY,

@@ -107,7 +107,8 @@ impl KernelStore {
     /// in insertion order. Dependencies are written with the observation and
     /// never change, so no snapshot sequence applies. An unknown observation
     /// has no dependencies and yields an empty vector.
-    pub fn observation_dependency_targets(
+    #[cfg(feature = "test-support")]
+    pub fn observation_dependency_targets_for_test(
         &self,
         observation_id: &str,
         dependency_kind: &str,

@@ -35,6 +35,13 @@ all three commits. The one CI step that matters moved:
 `cargo test -p daemon --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
 `:172` at `HEAD`, and records cite whichever the lens agent used.
 
+Numeric `lib.rs` anchors in the tables and the h4c and stagelc records are the
+lens agents' at `e447c927`; the daemon has grown since, so they do not hold at
+this branch's HEAD and are read at `e447c927`. The `handle_dreamer_run_task`
+row and the two Dreamer records below cite `lib.rs` by symbol, because those
+paths were rewritten after the lens read; their `dreamer_scheduler.rs` and
+`memory-store` anchors are verified at this branch's HEAD.
+
 Reachability provenance. Twenty-two records are `default-production` and three
 are `explicit-config-only`. The shared `default-production` evidence is one pair
 of facts: the production entry is `CompositeComponent::handle` (`:11963`), which
@@ -115,7 +122,7 @@ recognisable, or says what stands in for one.
 | `handle_transform_unpaged_value` (`:8007-8615`) | Project mural artifact (`:8210`), historian side channels (`:8252`), pass traces (`:8262`, `:8332`, `:8560`), then the fenced cache-state commit inside `apply_once` | **3 or more, in separate transactions** | None at the handler. The cache-state commit is fenced by `row_version`/`revert_epoch` inside `apply_once` | `TransformResponse` with `committed` (`:8522`) |
 | `handle_state_sync_value` (`:8642-9125`) → `apply_state_sync_wire` (`:9127-9333`) | Full shadow state, via `apply_authority_state_sync` (`:9241-9285`), plus an in-memory capability flag (`:9288-9291`) | 1 durable, plus 1 in-memory effect | `shadow_generation` + `expected_shadow_seq` fence (`:9244-9245`); paged path adds `seed_id` + digest (`:8735-8748`) | `{ok, shadow_generation, shadow_seq, row_version, ...skipped/seeded counts}` (`:9292-9306`) |
 | `handle_transform_page_value` (`:9335-9578`) | Nothing durable itself; assembles pages then delegates to the unpaged path | 0 direct | `transform_page_id` + `transform_page_digest` (consts `:636-641`) | Page ack, or the delegated transform response |
-| `handle_dreamer_run_task` (`:9605-10040`) | Dream task ledger row (`:9989` failure path, `:10016` success path) | 1, after an external model call | `command_id`, 1..=256 bytes (`:9626-9631`), plus an `authority_generation` fence (`:9690-9698`); replay read at `:9819` before any producer run | Replayed ledger response (`:9820`, `:10029`) or an error (`:9995`, `:10035`) |
+| `handle_dreamer_run_task` → `DreamerRuntime::run_dreamer_task` (symbol anchors, verified at this branch's HEAD; the function was rewritten after the lens read) | Dreamer receipt and attempt rows in the Dreamer ledger (`begin_dreamer_receipt` before any producer, `begin_dreamer_attempt` before each start, `complete_dreamer_receipt` on every settled arm), plus one `memory_classification` observation per memory through `DreamerRuntime::record_classifications` | 1 receipt write before the model call, 1 attempt write per model, 1 kernel commit after an accepted result, then 1 receipt completion; the kernel commit precedes the completion | `command_id`, 1..=256 bytes (`handle_dreamer_run_task`), under the session's ledger session and the route's authority project, plus an `authority_generation` fence and a `leased_project` check (`run_dreamer_task`); the receipt binding digests `object_ids`, model chain, timeout, and template, schema, and prompt versions; the kernel commit key adds the route and authority-project digests (`classify_kernel_operation_key`) | Replayed receipt response (`replay_dream_task_response`, `read_dream_task_response`), `dreamer_request_conflict`, `dreamer_outcome_unknown`, or the request failure the receipt recorded |
 
 Read-only handlers in scope, listed for completeness and carrying no records:
 `handle_authority_status_value` (`:7134-7167`), `handle_mirror_pull_value`
@@ -157,7 +164,7 @@ coordinator records.
 ## What this part is about
 
 This part is a request surface. Its primary input is a request body and its
-primary "fault" is sending the same request twice, which is why eleven of the 25
+primary "fault" is sending the same request twice, which is why eleven of the 26
 records need no injected fault of any kind. One broadly good result frames the
 rest: validation precedes the first durable write in every handler in scope, and
 no path was found where a durable write precedes input validation. What the
@@ -309,15 +316,18 @@ to two; **F15** deflates the success-without-writing headline, which is why the
 prose above states the open questions instead of pre-empting them; and **F16**
 edits `fault-map.md` only.
 
-Final distributions after the disposition: **20 `always`, 2
-`always-or-unreached`, 3 `sometimes`, 0 `reachable`, 0 `unreachable`**;
-**19 safety, 3 liveness, 3 reachability**; **22 `default-production`, 3
-`explicit-config-only`, 0 `test-only`**. `always(!X)` is counted as `always`,
-following the convention Parts 4a and 4b used.
+Final distributions after the disposition and the later successor record
+`dreamer-dispatched-attempt-always-settles-through-the-receipt`, which
+replaces the invalidated `h4c-dreamer-failure-path-ledger-write-is-unchecked`
+and keeps that record's row: **21 `always`, 2 `always-or-unreached`, 3
+`sometimes`, 0 `reachable`, 0 `unreachable`**; **20 safety, 3 liveness, 3
+reachability**; **23 `default-production`, 3 `explicit-config-only`, 0
+`test-only`**. `always(!X)` is counted as `always`, following the convention
+Parts 4a and 4b used.
 
 One process caveat, inherited and restated. METHOD.md step 7 requires records to
-equal index rows to equal evidence files. Records and index rows both equal 25.
-**Evidence files remain at 24.** Both halves of the F7 split link
+equal index rows to equal evidence files. Records and index rows both equal 26.
+**Evidence files number 25.** Both halves of the F7 split link
 `evidence/stagelc-seed-and-import-reapers-only-run-on-fresh-traffic.md` and both
 halves of the F13 split link
 `evidence/stagelc-a-restart-is-observed-with-staged-state-present.md`, so every
@@ -335,7 +345,7 @@ lines.
 | [h4c-authority-prepare-route-bind-is-a-second-transaction](#h4c-authority-prepare-route-bind-is-a-second-transaction) | safety | high |
 | [h4c-transform-writes-two-side-effects-before-its-fenced-commit](#h4c-transform-writes-two-side-effects-before-its-fenced-commit) | safety | high |
 | [h4c-guidance-date-returns-success-without-persisting](#h4c-guidance-date-returns-success-without-persisting) | safety | high |
-| [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked) | safety | invalidated |
+| [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked) | safety | high |
 | [dreamer-dispatched-attempt-always-settles-through-the-receipt](#dreamer-dispatched-attempt-always-settles-through-the-receipt) | safety | high |
 | [scheduled-dreamer-slot-runs-once-through-lease-and-receipt](#scheduled-dreamer-slot-runs-once-through-lease-and-receipt) | safety | high |
 | [h4c-side-channel-drain-result-is-discarded-by-the-caller](#h4c-side-channel-drain-result-is-discarded-by-the-caller) | safety | high |
@@ -492,48 +502,109 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `dreamer_run_task_*` tests in `crates/daemon/src/lib.rs`
-(`mod tests`), all over a real store with the scripted producer.
-`dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure` exhausts the
-chain and replays the failure without a second start.
+(`mod tests`) construct the cases below over a real store with the scripted
+producer. The three ported receipt tests use the async object-id harness.
+Symbol anchors use the merged source. The main thread reports these checks.
+At `c35a4ad5`:
+
+- `cargo test -p daemon --lib --all-features --locked dreamer`: 50 passed.
+- Fifty further runs of the same compiled libtest binary with the `dreamer`
+  filter at default concurrency: all 50 tests passed in each of the 50 runs,
+  with no retries.
+
+On the working tree merging `origin/main` (`2ba7dbf4`) into `3e34242e`:
+
+- `cargo nextest run --workspace --all-targets --all-features --locked`:
+  3,589 passed, 64 skipped. Nextest was 0.9.140; the recommended version is
+  0.9.143.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`:
+  passed.
+- `cargo fmt --all -- --check`: passed.
+
+The 50-by-50 repetition check was not rerun after `c35a4ad5`. An incremental
+read-only review of the latest merge found no actionable findings.
+These execution and review results do not change the checks' `unaudited`
+adequacy status.
+
+`dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure`
+exhausts the chain and replays the failure without a second start.
 `dreamer_run_task_replays_from_the_receipt_and_refuses_a_changed_request` covers
 success replay and the digest conflict with no producer call.
 `dreamer_run_task_fails_closed_when_the_failure_record_cannot_be_written`
-installs a `RAISE(ABORT)` trigger on `dreamer_receipts` `UPDATE OF state`,
+installs a `RAISE(ABORT)` trigger on `dreamer_receipts`
+`UPDATE OF state`,
 asserts `dreamer_ledger_failed` with the receipt still `in_progress`, then shows
 the retry settles the receipt as `unknown` with no producer start and a later
 replay still answers `dreamer_outcome_unknown`.
 `dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails`
-faults the attempt row and shows a usable result still completes the receipt.
+faults the attempt row and shows a usable result still completes the
+receipt.
 `dreamer_run_task_settles_a_missing_run_after_restart_as_unknown_without_redispatch`
-drops the request mid-await, rebinds the route under another harness, then
-resumes with the runtime reporting the run `missing`: the probe binds the
+drops the request mid-await, rebinds the route under another harness,
+then resumes with the runtime reporting the run `missing`: the probe binds the
 recorded child session under the recorded harness and root, the attempt and
 receipt settle `unknown`, and no second start happens.
-`dreamer_run_task_leaves_a_run_the_runtime_still_holds_open` resumes with the
-run still `active` and shows nothing is written or dispatched.
-`dreamer_run_task_takes_over_an_undispatched_receipt_and_dispatches_once` opens
-a receipt with no attempt row and shows the successor generation dispatches
-exactly once under a session the predecessor could not have derived, and that
-the predecessor's writes are fenced.
-`dreamer_run_task_settles_an_open_attempt_without_a_handle_as_unknown` nulls
-the recorded handle and shows the retry settles unknown without asking the
+`dreamer_run_task_leaves_a_run_the_runtime_still_holds_open` resumes
+with the run still `active` and shows nothing is written or dispatched.
+`dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown`
+resumes with the run reported `terminal` and shows the attempt and receipt settle
+`unknown` at once, with no second start and no second status probe on replay.
+`dreamer_run_task_recovers_a_receipt_stranded_before_any_dispatch`
+faults attempt insertion, leaving no attempt row, then shows a retry dispatches
+once at generation 2.
+`dreamer_run_task_takes_over_an_undispatched_receipt_and_dispatches_once`
+reopens a receipt with a `NotSent` attempt and shows the successor
+dispatches exactly once under a session the predecessor could not have derived,
+and that the predecessor's writes are fenced.
+`dreamer_run_task_settles_an_open_attempt_without_a_handle_as_unknown`
+nulls the recorded handle and shows the retry settles unknown without asking the
 runtime.
 `dreamer_run_task_does_not_replay_a_success_whose_completion_never_landed`
-faults the receipt completion after a usable answer and shows the retry settles
-unknown, keeps the attempt's own terminal, and never replays the success.
-`dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable` scripts
-a timed-out await and redrain and shows the attempt ends `cancelled` and counts.
+faults the receipt completion after a usable answer and shows the
+retry settles unknown, keeps the attempt's own terminal, and never replays the
+success.
+`dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable`
+scripts a timed-out await with a late answer queued behind it and
+shows the attempt ends `cancelled` with no second read of the run, and counts.
 `dreamer_run_task_clamps_the_request_timeout_to_the_host_ceiling`,
-`a_request_timeout_is_clamped_to_the_host_ceiling` (`classify.rs`),
+`a_request_timeout_is_clamped_to_the_host_ceiling`
+(`crates/daemon/src/classify.rs`, `mod tests`),
 `dreamer_run_task_enforces_the_model_chain_cap_before_dispatch`, and
-`dreamer_run_task_refuses_a_project_whose_attempt_budget_is_exhausted` cover the
-three bounds; the budget test also shows a changed request at exhaustion is a
-conflict, not a replay, and
+`dreamer_run_task_refuses_a_project_whose_attempt_budget_is_exhausted`
+cover the three bounds; the budget test also shows a changed
+request at exhaustion is a conflict, not a replay, and
 `dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted`
 shows an exhausted budget still settles an open receipt while refusing a
-takeover. Not driven by a test: a resume whose `status` answers
-`Terminal` or fails, and a settlement fenced by a later generation; both share
-the arms the tested cases drive.
+takeover.
+`dreamer_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain`
+admits a three-model chain at `budget - 1` and shows it dispatches once, records
+the failure through its receipt, and leaves the count at exactly the budget.
+`dreamer_run_task_bounds_the_recovery_probe_by_the_request_deadline` stalls the
+scripted producer's `status` and shows the retry answers
+`dreamer_outcome_unknown` within its own `timeout_ms` with nothing written.
+`dreamer_run_task_bounds_producer_startup_by_the_request_deadline` stalls the
+factory's `connect` and shows a fresh command fails through its receipt within
+`timeout_ms` with no attempt row and no start.
+`dreamer_run_task_leaves_the_receipt_open_while_the_kernel_is_starting` reads
+the pool against a kernel still `Starting`, shows `kernel_unavailable` with the
+receipt `in_progress` and no attempt, then opens the kernel and shows the same
+command dispatches once and writes its classifications.
+`dreamer_run_task_refuses_a_pool_over_the_kernel_read_budget_as_too_large`
+shows a read the kernel truncated at its payload budget is refused
+`payload_too_large`, not as an object the project lacks, with no connect.
+`dreamer_run_task_retires_the_prior_classification_of_a_reclassified_memory`
+runs two commands over one memory and shows one live classification per memory
+carrying the second run's values, the first run's rows invalidated at the
+second commit, and a replay of the second run writing nothing.
+`dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced`
+moves the receipt to generation 2 through `on_start` and
+`on_await_output` hooks. Both windows assert `dreamer_ledger_fenced`, no purge,
+the generation-2 receipt still open, and the generation-1 attempt still open.
+`an_undispatched_receipt_can_be_taken_over_only_without_a_possible_dispatch`
+(`crates/memory-store/tests/dreamer_ledger.rs`) allows no-row and
+`NotSent` takeover, ignores older-generation rows, and blocks an open or failed
+current-generation attempt. Not driven by a test: a resume whose `status` call
+fails; it shares the no-write response shape of the tested `Active` case.
 Guarantee: Every `dreamer.run_task` request that may have reached a model is
 answered only through its receipt: a terminal answer (`ok: true`,
 `dreamer_run_failed`, or `dreamer_outcome_unknown` read back from a `complete`
@@ -541,18 +612,31 @@ receipt) is returned only after `complete_dreamer_receipt` reports `Applied`;
 every other answer after a possible dispatch is `dreamer_ledger_failed`,
 `dreamer_ledger_fenced`, or an unrecorded `dreamer_outcome_unknown`, and a retry
 over the receipt any of those leaves behind starts no producer. A receipt whose
-generation never reached a model is the one shape a retry may take over, and the
-successor dispatches under a new generation at most once.
+generation never reached a model is the one shape a retry may take over; each
+successor attempt dispatches at most once under the new generation. Every
+producer call that can start or resolve a model run (connect, `start`, the
+await, and the recovery probe) runs under the request's `timeout_ms` deadline;
+`purge_session` after a terminal outcome runs under the producer's own request
+timeout instead, so cleanup still happens once the deadline has passed. A
+request dispatches a model only after reading the project's attempt count
+below `DREAMER_ATTEMPT_BUDGET`, once before its receipt is written and again
+before each later model; the read and the attempt write are not one atomic
+step, so requests admitted concurrently can each add one attempt past the
+budget. The budget is a bounded guard, not an exact quota. An accepted result
+is committed to canonical kernel state before the receipt completes, and only
+while the run's project still holds `MODULE` authority at the run's generation.
 Check: `always` - for every `dreamer.run_task` response that consumed a model
-attempt, the response is `ok: true`, `dreamer_run_failed`, or a replayed
+attempt, the response is `ok: true`, `dreamer_run_failed`,
+`dreamer_kernel_write_failed`, or a replayed
 `dreamer_outcome_unknown` only if `lookup_dreamer_receipt` for `(project,
 "dreamer.run_task", operation_key)` returns `Complete` (the converse does not
 hold: a run-handle write that fails after dispatch settles the receipt
 `unknown` and still answers `dreamer_ledger_failed`); and for every retry over
 an `in_progress` receipt at generation `g`, the producer factory's `start` count
-does not change unless `list_dreamer_attempts` holds no row at `g` other than
-`not_sent` rows, in which case the receipt moves to `g + 1` and exactly one
-attempt row is written under it before the answer. `always` because
+does not change unless the atomic takeover predicate finds no row at `g` other
+than `not_sent` rows and moves the receipt to `g + 1`; only the successor may
+then insert attempts for its model chain. The preceding `list_dreamer_attempts`
+read alone does not authorize dispatch. `always` because
 the receipt is the retry contract for every outcome that spent a billable call;
 the in-flight duplicate guard at the top of `run_dreamer_task` answers
 `dreamer_run_failed` with no receipt and no attempt, by design, and is outside
@@ -560,44 +644,111 @@ this condition.
 Fault/timing angle: `begin_dreamer_receipt` runs before any producer is
 constructed (`lib.rs`, `DreamerRuntime::run_dreamer_task`), so a `Complete`
 receipt replays and an `in_progress` one goes to `resume_dreamer_receipt`
-(`lib.rs:10035`)
-before any connect. The attempt row precedes the model call and the run handle
-is recorded right after `start` returns (`lib.rs:9794`); a handle write that does
-not land settles the attempt and receipt `unknown` through
-`settle_dispatched_attempt_as_unknown` (`lib.rs:14323`), as does an attempt
-terminal that cannot be recorded. On resume, the newest attempt at the open
+before any connect. The digest includes the kernel scope of the bound root,
+sorted `object_ids`, model chain, requested timeout, await ceiling, output-token
+limit, temperature, template and schema versions, and system-prompt hash, but
+not memory bodies or a recovery timeout; the receipt is keyed by authority
+project, and several roots can hold one project, so a completed receipt does not
+answer a request from another root's scope. `ClassifyRequest::parse` rejects caller-rendered `prompt_body` and
+claim-lane `items`. A fresh or taken-over generation calls `render_pool` for
+canonical memories in the bound kernel project; a memory the serving view
+classes above normal is refused as `sensitive_remote` before any connect, since
+the prompt goes to a model provider. Request failures complete the
+receipt; `kernel_unavailable` leaves it open without an attempt so a retry can
+take over and read again. A replay or recovery of a possible dispatch skips
+that read.
+In the chain loop, `connect` runs under the deadline's remaining duration and a
+cut-off handshake ends the chain with no attempt row. The attempt row precedes
+the model call and the run handle is recorded right after `start` returns; a
+handle write that does not land tries to settle the attempt and receipt
+`unknown` through `settle_dispatched_attempt_as_unknown`, unless the generation
+fence rejects settlement. A fenced run-handle write skips purge
+and so does a fenced attempt-terminal write; a store error still permits
+cleanup. If the attempt terminal cannot be recorded because of a store error,
+a usable answer is parsed and committed through `record_classifications`
+before being offered to receipt completion. A fence excludes that fallback's
+kernel write. The request deadline is clamped to the await ceiling
+(`crates/daemon/src/classify.rs`, `classify_request_timeout`), so an await that
+times out has spent the whole request budget: the attempt ends `cancelled` and
+nothing more is read from the run. On resume, the newest attempt at the open
 generation that is not `not_sent` is the dispatch marker: an ended one settles
-`unknown` through `complete_receipt_as_unknown`, keeping its own terminal; an
-open one with a handle is resolved with `status` on a producer connected under
-the attempt's recorded `project_root` and `harness` and bound to its recorded
-child session, the identity the runtime keys runs by, and `Missing` settles
-`unknown` while `Active` or `Terminal` writes nothing; an open one with no
-handle settles `unknown`. Only
-the absence of a marker reaches `take_over_dreamer_receipt`, whose row predicate
-moves the fence to `g + 1` so every later write by the predecessor is `Fenced`
-(`dreamer_ledger.rs:386`, `:575`); over budget the takeover is refused, since
-it would dispatch, while every settling arm still runs. The successor's child sessions include the
-generation (`classify.rs`, `attempt_child_session_id`), so they cannot attach to
-or purge a predecessor's run. The exhausted-chain, success, and settle writes
+`unknown` through `complete_receipt_as_unknown`, keeping its own
+terminal; an open one with a handle is resolved with `status` on a producer
+connected under the attempt's recorded `project_root` and `harness` and bound to
+its recorded child session, the identity the runtime keys runs by, with the
+connect, bind, and probe together under the request deadline's remaining
+duration, and `Missing` or
+`Terminal` settles `unknown` (a terminal run cannot become active again and its
+answer was never recorded) while `Active`, a probe error, or a probe the
+deadline cuts off writes nothing; an open one with no
+handle settles `unknown`. Only the absence of a marker reaches
+`take_over_undispatched_dreamer_receipt`, whose single guarded statement checks
+the current generation for
+`terminal_kind IS NULL OR terminal_kind != 'not_sent'` and moves the fence only
+when no such row exists (`crates/memory-store/src/dreamer_ledger.rs`).
+No-row and `NotSent` generations may advance; a possible dispatch blocks
+takeover even if its row lands after the list read. Later predecessor writes
+are fenced (`crates/memory-store/src/dreamer_ledger.rs`); over budget the
+takeover is refused, while every settling arm still runs. The budget is read
+again before every model after the first (`dreamer_attempt_budget_exhausted`),
+so one admitted chain overshoots it by at most one attempt. The successor's
+child sessions include the generation (`crates/daemon/src/classify.rs`,
+`attempt_child_session_id`), so they cannot attach to or purge a predecessor's
+run. The exhausted-chain, success, and settle writes
 each match `Applied`, `Fenced`, and `Err` as separate arms.
+Accepted classifications become project-scoped `memory_classification`
+observations with `(ModelInference, DreamerInference)` admission, keyed under
+`dreamer.classify` by the route digest, the authority project's digest, the
+receipt's operation key, and the receipt digest, so two projects that hold one
+root in turn and reuse a session and command id are two kernel receipts. The model's
+`shareable` is recorded true only for a memory the serving view classes normal and
+serves at `ExplicitSearch` at commit time. The same kernel commit retires this project's prior live
+classifications for each memory, meaning rows in its scope, in the memory domain,
+from `dreamer.classify`, selected by that writer identity in the kernel query
+(`DependentObservationQuery`); another project's or producer's row citing the
+memory through `classifies` is never returned, so it is neither retired nor a
+failure nor work the writer does while holding the kernel lock. Authority is read
+again immediately before the write (`classify_write_refusal`): a project that no
+longer holds `MODULE` at the run's generation writes nothing and the receipt
+completes `failed` with the authority code, `authority_unverified` when that read
+itself fails, so the scheduler consumes the slot instead of retaining it. That commit
+precedes receipt completion: a crash between them leaves canonical effects but
+an unknown receipt outcome on recovery, not a second dispatch. Normal kernel
+write failure is recorded as `dreamer_kernel_write_failed`; a receipt read-back
+error, missing terminal receipt, or malformed JSON fails closed rather than
+returning success.
 Required faults and enabling state: A classify run whose authority gate passes
 and whose model chain is exhausted, plus a store fault on
 `complete_dreamer_receipt` (a `BEFORE UPDATE OF state ON dreamer_receipts`
 trigger raising `ABORT`); for the attempt window the same trigger on
 `dreamer_attempts` `UPDATE OF terminal_kind`; for the restart windows a request
 dropped between `start` and `complete_dreamer_receipt` (the tests drop the
-request future while `await_output` is blocked) with the scripted producer
-answering `status` as `Missing` or `Active`; for takeover a receipt left
-`in_progress` with no attempt row. The budget bound needs the durable attempt
-count at `DREAMER_ATTEMPT_BUDGET` within `DREAMER_ATTEMPT_BUDGET_WINDOW`
-(`classify.rs:30-31`), which the test fills through `execute_tag_sql_for_test`.
+request future while `await_output` is blocked). `DreamerHarness::crash_after_dispatch`
+uses `tokio::select!` with `wait_for_count(&producer.await_outputs, 1)` to
+observe entry into the output wait before dropping the request, rather than
+inferring that state from 200 ms elapsed. The scripted producer answers
+`status` as `Missing`, `Terminal`, or `Active`; for takeover a receipt
+left `in_progress` with no current-generation attempt other than `NotSent`
+rows; for cleanup fencing a generation change inside `on_start` or
+`on_await_output`. The budget bound needs the durable
+attempt count at `DREAMER_ATTEMPT_BUDGET` within `DREAMER_ATTEMPT_BUDGET_WINDOW`
+(`crates/daemon/src/classify.rs`), which the test fills through
+`execute_tag_sql_for_test`; the mid-chain stop needs the count at one below
+the budget and a chain whose first model fails. The probe bound needs the
+scripted producer's `status` blocked under a `timeout_ms` both request legs
+share, since the digest covers `timeout_ms`.
 Confidence: high - [evidence](evidence/dreamer-dispatched-attempt-always-settles-through-the-receipt.md).
-Every receipt write in the route is matched on all three transition results;
-the resume path has one arm per marker shape and every arm that writes is
-driven by a test (the two no-write answers for a held run share one arm with
-the tested `Active` case); the ledger's row predicates are the fence and are
-tested in `crates/memory-store/tests/dreamer_ledger.rs`.
-Existing check: the tests named under Exercised.
+The default route dispatches `dreamer.run_task` without a feature or configuration
+gate (`crates/daemon/src/lib.rs`, `dispatch_value_with_inbound_bytes`). The
+exhausted-chain, success, and unknown receipt completions distinguish all three
+transition results; the known-result
+fallback accepts only `Applied` and otherwise tries unknown settlement
+(`run_dreamer_task`, `complete_receipt_as_unknown`).
+The resume path has one arm per marker shape and every arm that writes is
+driven by a test (the no-write answer for a failed `status` call shares its
+shape with the tested `Active` case); the ledger's row predicates are the fence
+and are tested in `crates/memory-store/tests/dreamer_ledger.rs`.
+Existing check: the tests named under Exercised; status `unaudited`.
 Impact: A second billable model call for one logical command, or a false
 success after a daemon restart. This is the only handler in this part whose
 repeat cost is an external paid side effect rather than a local write.
@@ -611,73 +762,171 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - the scheduler runs on every daemon once
-the store opens (`lib.rs:3606`), but it has a project to run only when the user
+the store opens (`crates/daemon/src/lib.rs`, `Handler::begin_store_open`), but it
+has a project to run only when the user
 tier sets `/dreamer/tasks/review-user-memories/schedule`, a `UserOnly` key
-(`config.rs:663-678`) that the project tier cannot set, and the route's
-memories authority is `MODULE` (`lib.rs:14030`). No task has Rust-owned
-classify inputs yet (`DreamerRuntime::classify_inputs`, `lib.rs:3053`), so on
-this HEAD a due slot ends `dreamer_task_not_runnable` without a dispatch.
+(`crates/daemon/src/config.rs`, `tier_class`) that the project tier cannot set,
+and the route's memories authority is `MODULE`
+(`crates/daemon/src/lib.rs`, `SchedulerBridge::scheduled_projects`).
+`DreamerRuntime::new` installs no task input builder, and `install_task_inputs`
+is test-only. Production `classify_inputs` therefore returns `None`: a due
+slot records `dreamer_task_not_runnable` on its lease without a receipt or
+dispatch. Scheduled model execution is exercised through the test input seam.
 Status: active
-Exercised: yes - `dreamer_scheduler::tests` in
+Exercised: yes - the working tree merging `bc007c9a` into `c35a4ad5` passed the
+nextest run recorded below. `dreamer_scheduler::tests` in
 `crates/daemon/src/dreamer_scheduler.rs` drive `tick` with a manual clock over
-a real store: due-ness, oldest-first backlog with no back-fill, per-acquisition
-lease instants, schedule change and removal, recovery of a predecessor's live
-claim under its own slot with the successor's generation taken from the ledger,
-expired-versus-live predecessor leases, a not-runnable slot ending `applied`,
-and cancellation of a parked loop.
+a real store: due-ness, oldest-first backlog with no back-fill, a run that
+outlasts its period leaving the crossed slot unfilled, per-acquisition
+lease instants, schedule change and removal, a deferred tick that keeps the
+pending slot when the host cannot report its projects, a retained slot when the
+ledger cannot answer the lease, the run, or the completion, a backward clock
+step during a run, recovery of a
+predecessor's live claim under its own slot with the successor's generation
+taken from the ledger, expired-versus-live predecessor leases, a not-runnable
+slot ending `applied`, cancellation of a parked loop and of a tick parked in a
+run with a second project still due, and the idle-poll wait
+after a deferred tick or a retained slot.
 `dreamer_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt`
 (`lib.rs`, `mod tests`) runs a slot through `SchedulerBridge` with scripted
-inputs, reads the receipt from inside the producer's `start`, drops the tick
-mid-await, and shows a restarted scheduler recovers the interrupted slot
-through the receipt with no second start.
+object-id inputs, reads the receipt from inside the producer's `start`, and
+uses `tokio::select!` with `wait_for_count(&producer.await_outputs, 1)` to
+observe the output wait before dropping the tick. It shows a restarted
+scheduler recovers the interrupted slot through the receipt with no second start.
 `dreamer_scheduler_sees_only_user_scheduled_module_projects` binds a route under
 the loader's output for a hostile project tier and for a user tier.
+`dreamer_scheduler_bridge_reports_a_store_failure_instead_of_no_projects`,
+`dreamer_scheduler_bridge_follows_the_most_recent_binding_on_a_root`, and
+`dreamer_scheduler_bridge_reports_a_project_once_across_its_roots` cover the
+bridge's store-failure, binding-selection, and per-project collapse contracts,
+including a newest root without a schedule unscheduling a project whose older
+roots still carry one.
+`dreamer_scheduler_bridge_reports_a_store_failure_inside_the_run_as_unavailable`
+fails the protocol's authority gate and shows `StoreUnavailable` with no
+dispatch and no receipt, then the same command running once the store answers.
+`dreamer_scheduler_bridge_refuses_a_root_that_moved_to_another_project` rebinds
+the leased project's root to a second `MODULE` project at the same generation
+and shows the run is refused with no dispatch and no receipt under either.
+`a_failed_lease_acquisition_retains_the_slot_for_the_next_tick`,
+`a_failed_lease_completion_retains_the_slot_and_the_retry_records_it`, and
+`run_waits_the_idle_poll_after_a_deferred_tick_or_a_retained_slot` cover a
+lease or completion the ledger could not answer for: the slot stays due, the
+next tick re-leases the same claim and asks for the same command id, and the
+loop waits the idle poll first.
+`a_backward_clock_step_during_a_run_does_not_rewind_the_schedule` steps the
+clock back an hour during a run and shows the next instant is the slot after
+the one that ran, with nothing running until the clock reaches it.
+The passing nextest, clippy, and formatting checks are recorded under
+[the receipt record](#dreamer-dispatched-attempt-always-settles-through-the-receipt).
+The 50-by-50 repetition evidence there applies only to `c35a4ad5`.
 Guarantee: For every project and due instant, the scheduler dispatches at most
 one model run, and only through `DreamerRuntime::run_dreamer_task` under the
 command id `slot_command_id(task, due_at_ms)`, after `acquire_dreamer_task`
-returned a claim for the task; a restarted scheduler that is handed a
+returned a claim for the task, or records `NotRunnable` on the lease without a
+dispatch; a restarted scheduler that is handed a
 predecessor's live claim runs that claim's slot, so the interrupted receipt is
-resumed rather than a second one opened; a project without a user-tier schedule
-or without `MODULE` memories authority is never leased.
-Check: `always` - for every `TickEvent::Ran { project, due_at_ms }`, the
-ledger holds exactly one `dreamer_task` claim whose `note_id` is the task id
-and whose `source_revision` is `due_at_ms`, and the receipt for
+resolved rather than a second one opened when its digest and authority binding
+still match; the authority gate refuses a route resolving to another project
+before writing a receipt; only projects admitted by the newest root's user-tier
+schedule and `MODULE` authority checks are considered for leasing; project
+lookup errors defer the tick, while generation-lookup or lease-acquisition store
+errors retain the affected slot instead of advancing it.
+Check: `always` - at each `TickEvent::Ran { project, due_at_ms }`, correlate the
+returned `dreamer_task` claim's `note_id` and `source_revision` with the task
+and due instant. A `NotRunnable` outcome or project-mismatch refusal adds no
+receipt or attempt. For a runnable task, all attempts use the receipt for
 `(project, "dreamer.run_task", operation_key(SCHEDULER_LEDGER_SESSION,
-slot_command_id(task, due_at_ms)))` has at most one attempt row that is not
-`not_sent`. `always` because every run is a billable side effect keyed by the
-slot; the lease is what serialises schedulers and the receipt is what
-serialises retries, and the property holds only when both keys agree.
+slot_command_id(task, due_at_ms)))`; each `(generation, attempt_index)` starts
+at most once, and recovering a receipt with a possible dispatch adds no start.
+The original model chain may contain several attempts; an at-most-one-attempt
+check would reject valid fallback. Check attempted starts separately from
+acknowledged handles. If project lookup fails, the tick is deferred and its due
+table is unchanged. If generation lookup or lease acquisition returns a store
+error, assert `Retained`, no task run, and no advance of that project's due
+instant; a later fault-free tick with unchanged scheduling retries the same
+slot. A newest root with no schedule excludes the project even if older roots
+have schedules. `always` applies because slot identity and recovery safety
+must hold for every run, including a rebound predecessor claim.
 Fault/timing angle: The scheduler leases before it runs (`run_slot`,
-`dreamer_scheduler.rs:248`) and derives the command id from the claim's
-`source_revision`, not the slot that came due (`:297`), so a claim rebound from
+`dreamer_scheduler.rs:313`) and derives the command id from the claim's
+`source_revision`, not the slot that came due (`:367`), so a claim rebound from
 a predecessor names the predecessor's slot. Lease and completion instants are
 read from the clock as each happens, so a long run does not shorten the next
-project's lease. A daemon that dies between `acquire` and `complete` leaves a
-live claim; the successor's registration generation comes from
-`next_dreamer_scheduler_generation` (`memory-store:3939`), above every
+project's lease. The next instant is recomputed from the clock after the run
+returns, floored at the slot that ran (`:256`), so a run that outlasts
+its period skips the slot it crossed instead of re-ticking at once on an instant
+already in the past, and a wall clock that steps back during a run cannot rewind
+the schedule below the slot that ran. A daemon that dies between `acquire` and
+`complete` leaves a live claim; the successor's registration generation comes from
+`next_dreamer_scheduler_generation` (`memory-store:3975`), above every
 generation the instance recorded, so the shared protocol rebinds the claim to
 the successor rather than refusing it. A lease that expired first is collected
 and the successor leases a fresh claim for its own slot; the predecessor's
 receipt then waits for a request with its command id, which no scheduler
-issues, and stays `in_progress`.
+issues, and stays `in_progress`. A store failure inside
+`SchedulerBridge::scheduled_projects` is an `Err`, not an empty list
+(`memories_authority_for_route`, `crates/daemon/src/lib.rs`, shared with the
+wire route); `tick` returns `TickEvent::Deferred` (`:248`) without reconciling
+the due table, and `run` waits the idle poll before retrying (`:163`). A store
+failure from the generation lookup or from `acquire_dreamer_task` is
+`TickEvent::Retained` (`run_slot`, `:325`): `tick` does not advance that
+project (`:254`), so the slot stays due, and `run` waits the idle poll as after
+a deferred tick. A `StoreUnavailable` reply from the host (`:377`; the
+bridge maps `authority_lookup_failed`, `dreamer_ledger_failed`, and
+`kernel_unavailable` to it in `SchedulerBridge::run_task`, the codes that leave
+no receipt or an open one with no attempt) and a store failure from `complete_dreamer_task`
+(`:402`) retain the slot the same way, with the claim left live under the
+slot's acquisition id; the next tick re-leases that claim and asks for the same
+command id, which the receipt replays or resumes without a second dispatch.
+Every acquisition decision and every other host reply consumes the slot.
+Bindings freeze configuration at bind, so `RouteBindings::insert`
+(`crates/daemon/src/lib.rs`) stamps each bind with a sequence and the bridge
+collapses roots to the most recently bound binding per root and the most
+recently bound root per project before it reads the schedule, so a newest
+binding without a schedule unschedules the project; `binding_for_root` reads
+the newest binding on that root again at dispatch, so the run dispatches under
+the binding the user presents at that moment on the root whose schedule put
+the project on the scheduler. `run` awaits each tick under `select!` with the
+cancellation token (`:172`): shutdown drops a tick mid-run instead of
+waiting out the run, and the projects still due behind it are not leased; the
+abandoned run is the receipt protocol's to recover. The route is resolved again
+inside `run_dreamer_task`; `SchedulerBridge::run_task` passes
+`DreamerRunRequest::leased_project = Some(&project.project)`, the project the
+lease is on, and a route that now resolves to another project is refused as
+`authority_project_mismatch` (`crates/daemon/src/lib.rs`,
+`DreamerRuntime::run_dreamer_task`) before any receipt is written, because an
+equal generation on the other project would otherwise pass the generation
+check. Receipt recovery still uses the attempt's recorded identity.
 Required faults and enabling state: A user-tier schedule on a bound route with
 `MODULE` memories authority; for recovery, a tick dropped between `acquire`
 and `complete` while the producer is awaiting output, and a successor started
-within `DREAMER_TASK_LEASE_MS` (20 min) of the interrupted slot.
+before the predecessor's lease expires, `DREAMER_TASK_LEASE_MS` (20 min) after
+acquisition; for the
+deferred tick, a store read failure during `scheduled_projects` while a slot
+is due; for the retained slot, a store failure during `acquire_dreamer_task`,
+inside the durable protocol, or during `complete_dreamer_task` while a slot is
+due; for the refused run, a root rebound to a second `MODULE`
+project between `scheduled_projects` and `run_task`.
 Confidence: high - [evidence](evidence/scheduled-dreamer-slot-runs-once-through-lease-and-receipt.md).
 The lease and receipt keys are derived from one value in one function; the
 recovery tests observe the ledger and the producer, not the scheduler's own
 events.
-Existing check: the tests named under Exercised.
-Impact: A second billable model call for one slot after a restart, or an
-unattended run a project tier switched on.
+Existing check: the tests named under Exercised; status `unaudited`. Passing
+execution and the incremental read-only review do not establish test adequacy.
+Impact: A second billable model call for one slot after a restart, an
+unattended run a project tier switched on or an older root kept on after the
+user removed the schedule, a run receipted under a project the lease does not
+name, or a slot silently lost to a transient store error.
 Open questions:
 
 - A predecessor slot whose lease expired before the successor's first slot
   leaves its receipt `in_progress` with no scheduler ever retrying that
-  command id; the run's own attempt row still holds the dispatch, so nothing
-  is double-billed, but the receipt is never settled. Whether the successor
+  command id. The attempt row protects the old receipt from redispatch, but
+  does not prevent a run under a later slot's identity. Whether the successor
   should sweep such receipts is a design decision. (needs human input)
+- A runnable scheduler rebuilds inputs before receipt lookup. Changed inputs
+  or authority can prevent recovery of the old receipt; tests use stable
+  scripted inputs and do not establish recovery across such changes.
 
 ### h4c-side-channel-drain-result-is-discarded-by-the-caller
 
@@ -1535,8 +1784,11 @@ omission rather than a design choice.
 Grouped by shared mechanism rather than by the section headings above, because
 several of the sharpest relationships cross groups. Every dominance statement
 below is a **hypothesis** about which oracle subsumes which, offered to guide
-ordering, not a verified claim; none of them has been tested, because none of
-these records has an executing check.
+ordering, not a verified claim; none of them has been tested. The Dreamer record
+is the exception to the "no executing check" state the rest of this map assumes:
+the tests named under its Exercised field drive its guarantee under injected
+store faults. Every other record keeps the status its own Exercised and Existing
+check fields state.
 
 - **An earlier transaction commits and a later step fails.**
   [h4c-recomp-reset-precedes-its-ledger-row](#h4c-recomp-reset-precedes-its-ledger-row),
@@ -1560,12 +1812,15 @@ these records has an executing check.
   Three records whose shared consequence is that the caller's view and the store's
   state can differ with nothing reporting it. They do not dominate one another,
   because each breaks a different signal: guidance withholds a persistence field,
-  the dreamer discards a write result on the one path a retry depends on, and the
+  the dreamer once discarded a write result on the one path a retry depends on
+  (resolved at HEAD, where every receipt write is matched and the receipt is the
+  retry contract; the record stays in this group for its mechanism), and the
   transform discards three counters the store computed. They are grouped because
   the guidance no-row arm and the side-channel drain both already have a driving
-  test, so two of the three are half-built, and because METHOD.md's
-  effect-accounting rule is the common lens: attempted and acknowledged must be
-  tracked separately, and in all three the module has the numbers and drops them.
+  test, and the dreamer's receipt writes are driven under injected faults, and
+  because METHOD.md's effect-accounting rule is the common lens: attempted and
+  acknowledged must be tracked separately, and in all three the module has the
+  numbers; two of them still drop them.
 - **Identity, or its absence, on a repeat delivery.**
   [h4c-session-delete-has-no-caller-supplied-operation-identity](#h4c-session-delete-has-no-caller-supplied-operation-identity),
   [h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write](#h4c-todo-state-set-cannot-distinguish-a-repeat-from-a-first-write).

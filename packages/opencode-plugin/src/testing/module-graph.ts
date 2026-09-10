@@ -5,7 +5,6 @@
  */
 
 import { readFileSync } from "node:fs";
-import ts from "typescript";
 
 /** The Pi `build` script's externals; the graph stops at these package boundaries. */
 export const BUNDLE_EXTERNALS = [
@@ -18,7 +17,8 @@ export const BUNDLE_EXTERNALS = [
 export const DATABASE_BINDING =
     /(?:^|\/)(?:node:sqlite|bun:sqlite|better-sqlite3)(?:$|\/)|(?:^|\/)shared\/sqlite(?:\.ts)?$/;
 
-export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[A-Za-z_][A-Za-z0-9_.]*["'`]/;
+/** The suffix is unconstrained so a spelling with a hyphen or an interpolation still matches; case is ignored so a handler cannot compare a normalized operation against an upper-cased name. */
+export const OPERATION_LITERAL = /["'`](?:claim|dreamer)\.[^"'`]*["'`]/i;
 
 export interface ModuleGraph {
     /** Every source module in the bundle, as the bundler names it relative to the working directory. */
@@ -74,26 +74,27 @@ export async function bundleModuleGraph(entry: string): Promise<ModuleGraph> {
 }
 
 /**
- * `RegExp.prototype.test` advances `lastIndex` for `g` and `y` patterns, so later inputs
- * can be skipped. A skipped match would make a boundary proof pass vacuously.
+ * Module and external-specifier paths matching `pattern`.
+ *
+ * `g` and `y` patterns are rejected: `RegExp.prototype.test` advances `lastIndex` on them, so
+ * consecutive matches are checked from a stale offset and the result under-counts. The function
+ * throws rather than under-counting, which would report a reachable module as unreachable.
  */
-function assertStatelessPattern(caller: string, pattern: RegExp): void {
+export function reachableModules(graph: ModuleGraph, pattern: RegExp): string[] {
     if (pattern.global || pattern.sticky) {
         throw new TypeError(
-            `${caller}: pattern must not use the g or y flag (got /${pattern.source}/${pattern.flags})`,
+            `reachableModules: pattern must not use the g or y flag (got /${pattern.source}/${pattern.flags})`,
         );
     }
-}
-
-/** Module and external-specifier paths matching `pattern`. */
-export function reachableModules(graph: ModuleGraph, pattern: RegExp): string[] {
-    assertStatelessPattern("reachableModules", pattern);
     return [...graph.inputs, ...graph.externals].filter((path) => pattern.test(path));
 }
 
 export function databaseBinders(graph: Pick<ModuleGraph, "imports">): string[] {
     return Object.entries(graph.imports)
-        .filter(([, imports]) => imports.some((edge) => DATABASE_BINDING.test(edge)))
+        .filter(
+            ([path, imports]) =>
+                !DATABASE_BINDING.test(path) && imports.some((edge) => DATABASE_BINDING.test(edge)),
+        )
         .map(([path]) => path)
         .sort();
 }
@@ -103,7 +104,6 @@ export function operationLiteralHits(
     files: string[],
     pattern: RegExp = OPERATION_LITERAL,
 ): string[] {
-    assertStatelessPattern("operationLiteralHits", pattern);
     const hits: string[] = [];
     for (const file of files) {
         const lines = readFileSync(file, "utf8").split("\n");
@@ -112,97 +112,4 @@ export function operationLiteralHits(
         }
     }
     return hits;
-}
-
-export interface DatabaseUses {
-    /** `opens` contains source lines for `new` expressions whose constructor text contains `Database`, or for every `new` expression under `allConstructions`. */
-    opens: string[];
-    /** `escapes` contains source lines for value-position identifiers containing `Database` and for binding-module imports that bypass direct constructor matching. */
-    escapes: string[];
-}
-
-export interface DatabaseUsesOptions {
-    /** `allConstructions` reports every `new` expression, so an alias whose text does not match `/Database/` still appears in `opens`. */
-    allConstructions?: boolean;
-}
-
-/** An alias such as `const DB = Database` evades `new Database(` text matching; the syntax tree reports it as an escape. */
-export function databaseUses(
-    source: string,
-    fileName = "module.ts",
-    options: DatabaseUsesOptions = {},
-): DatabaseUses {
-    const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
-    const lines = source.split("\n");
-    const lineOf = (node: ts.Node) =>
-        lines[file.getLineAndCharacterOfPosition(node.getStart(file)).line];
-    const uses: DatabaseUses = { opens: [], escapes: [] };
-    const escapedLines = new Set<number>();
-    const recordEscape = (node: ts.Node) => {
-        const index = file.getLineAndCharacterOfPosition(node.getStart(file)).line;
-        if (escapedLines.has(index)) return;
-        escapedLines.add(index);
-        uses.escapes.push(lines[index]);
-    };
-    const isBindingSpecifier = (node: ts.Expression | undefined) =>
-        node !== undefined && ts.isStringLiteralLike(node) && DATABASE_BINDING.test(node.text);
-
-    const visit = (node: ts.Node): void => {
-        if (
-            ts.isNewExpression(node) &&
-            (options.allConstructions || /Database/.test(node.expression.getText(file)))
-        ) {
-            uses.opens.push(lineOf(node));
-        }
-        if (
-            ts.isImportDeclaration(node) &&
-            isBindingSpecifier(node.moduleSpecifier) &&
-            node.importClause &&
-            !node.importClause.isTypeOnly
-        ) {
-            const clause = node.importClause;
-            if (
-                clause.name ||
-                (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings))
-            ) {
-                recordEscape(node);
-            }
-            if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-                for (const element of clause.namedBindings.elements) {
-                    if (element.propertyName) recordEscape(element);
-                }
-            }
-        }
-        if (ts.isExportDeclaration(node) && isBindingSpecifier(node.moduleSpecifier)) {
-            recordEscape(node);
-        }
-        if (ts.isCallExpression(node)) {
-            const callee = node.expression;
-            const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
-            const isRequire = ts.isIdentifier(callee) && callee.text === "require";
-            if ((isImport || isRequire) && isBindingSpecifier(node.arguments[0])) {
-                recordEscape(node);
-            }
-        }
-        if (ts.isIdentifier(node) && /Database/.test(node.text)) {
-            const parent = node.parent;
-            const isTypeUse =
-                ts.isTypeReferenceNode(parent) ||
-                ts.isTypeQueryNode(parent) ||
-                ts.isQualifiedName(parent) ||
-                (ts.isTypeAliasDeclaration(parent) && parent.name === node);
-            const isOpen = ts.isNewExpression(parent) && parent.expression === node;
-            const isPropertyKey =
-                (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
-                (ts.isPropertyAssignment(parent) && parent.name === node) ||
-                (ts.isPropertySignature(parent) && parent.name === node) ||
-                (ts.isBindingElement(parent) && parent.propertyName === node);
-            if (!ts.isImportSpecifier(parent) && !isTypeUse && !isOpen && !isPropertyKey) {
-                recordEscape(node);
-            }
-        }
-        ts.forEachChild(node, visit);
-    };
-    visit(file);
-    return uses;
 }

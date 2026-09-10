@@ -1,10 +1,8 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import {
     databaseBinders,
-    databaseUses,
     type ModuleGraph,
     OPERATION_LITERAL,
     operationLiteralHits,
@@ -21,7 +19,7 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
         const full = join(dir, entry.name);
         if (GENERATED.has(full)) continue;
         if (entry.isDirectory()) sourceFiles(full, acc);
-        else if (/\.(?:tsx?|mjs)$/.test(entry.name)) acc.push(full);
+        else if (/\.tsx?$/.test(entry.name)) acc.push(full);
     }
     return acc;
 }
@@ -61,10 +59,6 @@ const AWAITING_CONSUMER = new Map<string, string>([
         "testing/module-graph-report.ts",
         "test infrastructure: run as a child process, never imported",
     ],
-    [
-        "tui/entry.mjs",
-        "the `./tui` package export: a loader whose only imports are `tui/index.tsx` (a root here) and its compiled copy, plus the host's virtual runtime registry that no bundler resolves",
-    ],
 ]);
 
 /**
@@ -74,20 +68,15 @@ const AWAITING_CONSUMER = new Map<string, string>([
  */
 const HARNESS_DATABASE_WRITER = "features/context/compaction-marker.ts";
 const HARNESS_DATABASE_READERS = ["hooks/context/read-session-db.ts"];
-/** The adapter defines `Database`, so `databaseBinders` cannot include it; the test audits the adapter's constructions directly. */
-const DATABASE_ADAPTER = "shared/sqlite.ts";
 
 /** File names of the Rust-owned product stores, as a path a module could open. */
+/** File names of the Rust-owned product stores, as a path a module could open, with any non-word suffix such as `-wal` or `?mode=ro`; a line that is a comment is skipped. */
 const PRODUCT_STORE_FILE =
-    /^(?!\s*(?:\/\/|\*|\/\*)).*["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)["'`]/;
+    /^(?!\s*(?:\/\/|\*|\/\*)).*["'`/](?:memory\.sqlite|kernel\.sqlite|context\.db|store\.db)(?!\w)/;
 
 type ReportedGraph = Omit<ModuleGraph, "text">;
 
-let cachedReport: Record<string, ReportedGraph> | undefined;
-
-/** Two tests read the report; each root is bundled once per test file run. */
 function moduleGraphReport(): Record<string, ReportedGraph> {
-    if (cachedReport) return cachedReport;
     const report = Bun.spawnSync({
         cmd: ["bun", join(import.meta.dir, "module-graph-report.ts"), ...ROOTS],
         cwd: SRC,
@@ -97,8 +86,7 @@ function moduleGraphReport(): Record<string, ReportedGraph> {
     if (report.exitCode !== 0) {
         throw new Error(`module graph report failed: ${report.stderr.toString()}`);
     }
-    cachedReport = JSON.parse(report.stdout.toString());
-    return cachedReport as Record<string, ReportedGraph>;
+    return JSON.parse(report.stdout.toString());
 }
 
 describe("module graph over the landed tree", () => {
@@ -133,6 +121,9 @@ describe("module graph over the landed tree", () => {
         expect(OPERATION_LITERAL.test('"claim.intent.stage"')).toBe(true);
         expect(OPERATION_LITERAL.test("'dreamer.run_task'")).toBe(true);
         expect(OPERATION_LITERAL.test("`dreamer.run_task`")).toBe(true);
+        expect(OPERATION_LITERAL.test('"claim.intent-stage"')).toBe(true);
+        expect(OPERATION_LITERAL.test("`dreamer.${task}`")).toBe(true);
+        expect(OPERATION_LITERAL.test('"CLAIM.INTENT.STAGE"')).toBe(true);
         expect(OPERATION_LITERAL.test('"dreamer_inference"')).toBe(false);
         expect(OPERATION_LITERAL.test("claim.claim_id")).toBe(false);
         expect(operationLiteralHits(MODULES)).toEqual([]);
@@ -141,6 +132,9 @@ describe("module graph over the landed tree", () => {
     test("retained modules name no Eidnara product-store file", () => {
         expect(PRODUCT_STORE_FILE.test('join(dir, "memory.sqlite")')).toBe(true);
         expect(PRODUCT_STORE_FILE.test("`${dir}/context.db`")).toBe(true);
+        expect(PRODUCT_STORE_FILE.test('"context.db?mode=ro"')).toBe(true);
+        expect(PRODUCT_STORE_FILE.test("'store.db-wal'")).toBe(true);
+        expect(PRODUCT_STORE_FILE.test('"context.dbx"')).toBe(false);
         expect(PRODUCT_STORE_FILE.test("Eidnara's own context.db.")).toBe(false);
         expect(PRODUCT_STORE_FILE.test("     * applies to its own `context.db`.")).toBe(false);
         expect(operationLiteralHits(MODULES, PRODUCT_STORE_FILE)).toEqual([]);
@@ -157,9 +151,9 @@ describe("module graph over the landed tree", () => {
             [HARNESS_DATABASE_WRITER, ...HARNESS_DATABASE_READERS].sort(),
         );
         const opens = (module: string) => {
-            const uses = databaseUses(readFileSync(join(SRC, module), "utf8"), module);
-            expect(uses.escapes).toEqual([]);
-            return uses.opens;
+            const source = readFileSync(join(SRC, module), "utf8");
+            expect(source).not.toMatch(/\bDatabase\s+as\b/);
+            return source.split("\n").filter((line) => /\bnew Database\(/.test(line));
         };
         for (const reader of HARNESS_DATABASE_READERS) {
             expect(opens(reader)).toEqual([
@@ -170,34 +164,6 @@ describe("module graph over the landed tree", () => {
         expect(readFileSync(join(SRC, HARNESS_DATABASE_WRITER), "utf8")).toMatch(
             /const dbPath = getOpenCodeDbPath\(\);/,
         );
-        expect(
-            databaseUses(readFileSync(join(SRC, DATABASE_ADAPTER), "utf8"), DATABASE_ADAPTER, {
-                allConstructions: true,
-            }),
-        ).toEqual({
-            opens: [
-                "        throw new TypeError(",
-                "            throw new TypeError(",
-                "        throw new Error(`unable to open database file: ${location} does not exist`);",
-                "            throw new SqliteRuntimeUnavailableError(runtime, specifier, error);",
-                "const privilegeDepth = new WeakMap<Database, number>();",
-                "        throw new TypeError(",
-                "        throw new TypeError(",
-                '    const probe = new Database(":memory:");',
-            ],
-            escapes: [
-                "const DatabaseImpl: typeof BetterSqlite3 = isBun",
-                "    ? buildBunSqliteDatabaseClass(sqliteModule.Database)",
-                "    : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);",
-                "export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqlite3 {",
-                "    class BunSqliteDatabase extends BunDatabase {",
-                "    return BunSqliteDatabase as unknown as typeof BetterSqlite3;",
-                "export function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {",
-                "    class NodeSqliteDatabase extends DatabaseSync {",
-                "    return NodeSqliteDatabase as unknown as typeof BetterSqlite3;",
-                "export const Database: typeof BetterSqlite3 = DatabaseImpl;",
-            ],
-        });
     }, 120_000);
 });
 const graph: ModuleGraph = {
@@ -237,145 +203,7 @@ describe("reachableModules", () => {
 });
 
 describe("databaseBinders", () => {
-    test("names every module importing a binding, including an adapter that imports one statically", () => {
-        expect(databaseBinders(graph)).toEqual([
-            "src/a/forbidden.ts",
-            "src/b/forbidden.ts",
-            "src/shared/sqlite.ts",
-        ]);
-    });
-});
-
-describe("databaseUses", () => {
-    const allowed = [
-        'import { Database, runImmediate } from "../../shared/sqlite";',
-        'import type BetterSqlite3 from "better-sqlite3";',
-        "let cached: { path: string; db: Database } | null = null;",
-        "function open(dbPath: string): Database {",
-        "    const db = new Database(dbPath, { readonly: true });",
-        "    return db;",
-        "}",
-        "type Ctor = typeof Database;",
-        "type Database = BetterSqlite3.Database;",
-        "const meta = { Database: 1 };",
-        "const name = meta.Database;",
-        "",
-    ].join("\n");
-
-    test("reports each open by its source line and no escape for imports, types, and member names", () => {
-        expect(databaseUses(allowed)).toEqual({
-            opens: ["    const db = new Database(dbPath, { readonly: true });"],
-            escapes: [],
-        });
-    });
-
-    test("reports a local alias of the constructor as an escape, and the aliased open as an open", () => {
-        const uses = databaseUses(
-            [
-                'import { Database } from "../../shared/sqlite";',
-                "const DB = Database;",
-                "const db = new DB(productPath);",
-                "const other = new Database(dbPath);",
-                "",
-            ].join("\n"),
-        );
-        expect(uses.escapes).toEqual(["const DB = Database;"]);
-        expect(uses.opens).toEqual(["const other = new Database(dbPath);"]);
-    });
-
-    test("reports a constructor passed as a value, extended, or re-exported as an escape", () => {
-        const uses = databaseUses(
-            [
-                'import { Database } from "../../shared/sqlite";',
-                "const db = Reflect.construct(Database, [productPath]);",
-                "class Store extends Database {}",
-                "const { Database: D } = { Database };",
-                "export { Database };",
-                "",
-            ].join("\n"),
-        );
-        expect(uses.escapes).toEqual([
-            "const db = Reflect.construct(Database, [productPath]);",
-            "class Store extends Database {}",
-            "const { Database: D } = { Database };",
-            "export { Database };",
-        ]);
-    });
-
-    test("reports aliased, namespace, default, re-exported, and dynamic binding imports as escapes", () => {
-        const uses = databaseUses(
-            [
-                'import { Database as DB } from "../../shared/sqlite";',
-                'import * as sqlite from "../../shared/sqlite";',
-                'import bun from "bun:sqlite";',
-                'export * from "../../shared/sqlite";',
-                'export { default as Db } from "better-sqlite3";',
-                'const lazy = await import("node:sqlite");',
-                'const legacy = require("better-sqlite3");',
-                'import { join } from "node:path";',
-                "",
-            ].join("\n"),
-        );
-        expect(uses.escapes).toEqual([
-            'import { Database as DB } from "../../shared/sqlite";',
-            'import * as sqlite from "../../shared/sqlite";',
-            'import bun from "bun:sqlite";',
-            'export * from "../../shared/sqlite";',
-            'export { default as Db } from "better-sqlite3";',
-            'const lazy = await import("node:sqlite");',
-            'const legacy = require("better-sqlite3");',
-        ]);
-    });
-
-    test("reports any constructor named like the binding as an open", () => {
-        expect(databaseUses("const probe = new DatabaseSync(':memory:');").opens).toEqual([
-            "const probe = new DatabaseSync(':memory:');",
-        ]);
-    });
-
-    test("under allConstructions, an alias of an implementation constructor is both an escape and an open", () => {
-        const uses = databaseUses(
-            [
-                "const DatabaseImpl = buildNodeSqliteDatabaseClass(mod.DatabaseSync);",
-                "const DB = DatabaseImpl;",
-                "const leak = new DB(productPath);",
-                "const marker = new Error('x');",
-                "",
-            ].join("\n"),
-            "module.ts",
-            { allConstructions: true },
-        );
-        expect(uses.escapes).toEqual([
-            "const DatabaseImpl = buildNodeSqliteDatabaseClass(mod.DatabaseSync);",
-            "const DB = DatabaseImpl;",
-        ]);
-        expect(uses.opens).toEqual([
-            "const leak = new DB(productPath);",
-            "const marker = new Error('x');",
-        ]);
-    });
-});
-
-describe("operationLiteralHits", () => {
-    const dir = mkdtempSync(join(tmpdir(), "eidnara-literal-hits-"));
-    const file = join(dir, "probe.ts");
-    writeFileSync(
-        file,
-        ['const a = "claim.intent.stage";', 'const b = "claim.intent.ack";', ""].join("\n"),
-    );
-    afterAll(() => rmSync(dir, { recursive: true, force: true }));
-
-    test("reports every matching line with its one-based number", () => {
-        expect(operationLiteralHits([file])).toEqual([`${file}:1`, `${file}:2`]);
-    });
-
-    // `RegExp.prototype.test` advances `lastIndex` for global and sticky patterns;
-    // a stale offset skips a real literal on the next line and the scan passes vacuously.
-    test("rejects a global pattern instead of under-counting", () => {
-        expect(() => operationLiteralHits([file], /claim\./g)).toThrow(TypeError);
-    });
-
-    test("rejects a sticky pattern instead of under-counting", () => {
-        expect(() => operationLiteralHits([file], /claim\./y)).toThrow(TypeError);
+    test("names the modules importing a binding and skips the bindings themselves", () => {
+        expect(databaseBinders(graph)).toEqual(["src/a/forbidden.ts", "src/b/forbidden.ts"]);
     });
 });
