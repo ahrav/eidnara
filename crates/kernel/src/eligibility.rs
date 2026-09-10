@@ -1,4 +1,4 @@
-//! One judgement for every consumer of `kernel.eligibility.batch` verdicts: the precedence and the scope decision live here so the daemon route and later adapters cannot drift from each other, while consumers keep decoding, authorization, wire literals, and caching. The artifact egress route keeps its own refusal vocabulary and is not routed through this module. commentlint: allow(JUDGE)
+//! One judgement for every consumer of `kernel.eligibility.batch` verdicts: the precedence and the scope decision live here so the daemon route and later adapters cannot drift from each other, while consumers keep decoding, authorization, wire literals, and caching. The artifact egress route keeps its own refusal vocabulary and is not routed through this module.
 
 use std::collections::HashMap;
 
@@ -13,13 +13,13 @@ use crate::scope::{
 };
 use crate::{KernelError, KernelStore, SurfaceVisibility};
 
-/// One batch holds a reader for one registry read plus one verdict per candidate, so the count bounds how long a single call occupies the pool. commentlint: allow(JUDGE)
+/// One batch holds a reader for one registry read plus one verdict per candidate, so the count bounds how long a single call occupies the pool.
 pub const MAX_ELIGIBILITY_CANDIDATES: usize = 1024;
 
-/// Bounds the identity a consumer keys a cache entry by, whether or not the object exists; `applicability::MAX_OBJECT_ID_BYTES` bounds a different surface. commentlint: allow(JUDGE)
+/// Bounds the identity a consumer keys a cache entry by, whether or not the object exists; `applicability::MAX_OBJECT_ID_BYTES` bounds a different surface.
 pub const MAX_ELIGIBILITY_OBJECT_ID_BYTES: usize = 512;
 
-/// Verdict order is fixed: an object that is gone or replaced is reported as such before its revision, scope, or sensitivity is considered. commentlint: allow(JUDGE)
+/// Verdict order is fixed: an object that is gone or replaced is reported as such before its revision, scope, or sensitivity is considered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EligibilityVerdict {
     Ok,
@@ -39,14 +39,14 @@ pub struct EligibilityCandidate {
     pub artifact_digest: Option<String>,
 }
 
-/// The exact `project` term value a stored scope must carry for its rows to serve. commentlint: allow(JUDGE)
+/// The exact `project` term value a stored scope must carry for its rows to serve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectScope {
     context: ScopeMatchContext,
 }
 
 impl ProjectScope {
-    /// `project_digest` is the lowercase SHA-256 hex a route stamps as the project term; anything else is refused so a malformed binding cannot silently judge every row `WrongScope`. commentlint: allow(JUDGE)
+    /// `project_digest` is the lowercase SHA-256 hex a route stamps as the project term; anything else is refused so a malformed binding cannot silently judge every row `WrongScope`.
     pub fn new(project_digest: &str) -> Result<Self, KernelError> {
         if !is_artifact_digest(project_digest) {
             return Err(KernelError::InvalidInput);
@@ -56,7 +56,7 @@ impl ProjectScope {
         })
     }
 
-    /// A row with no scope has no project and never serves, and neither does a scope with no `project` term: it constrains nothing, so it would match every project. `Uncertain` (a redacted term, a dimension with no value, a malformed scope) and a scope with no stored row both fail to match. commentlint: allow(JUDGE)
+    /// A row with no scope has no project and never serves, and neither does a scope with no `project` term: it constrains nothing, so it would match every project. `Uncertain` (a redacted term, a dimension with no value, a malformed scope) and a scope with no stored row both fail to match.
     pub fn names_project(&self, terms: Option<&[ScopeTermSpec]>) -> bool {
         terms.is_some_and(|terms| {
             CanonicalScope::from_term_specs(terms).is_ok_and(|scope| {
@@ -69,9 +69,9 @@ impl ProjectScope {
 
 #[derive(Debug)]
 pub struct EligibilityBatch {
-    /// The snapshot every verdict was judged at. A `None` classification generation means a classification merge overlapped the read; such a batch is not a reusable grant and must not be cached. commentlint: allow(JUDGE)
+    /// The snapshot every verdict was judged at. A `None` classification generation means a classification merge overlapped the read; such a batch is not a reusable grant and must not be cached.
     pub snapshot: EgressSnapshot,
-    /// `verdicts[i]` judges `candidates[i]` of the call that produced the batch; the two are positionally aligned and equal in length. commentlint: allow(JUDGE)
+    /// `verdicts[i]` judges `candidates[i]` of the call that produced the batch; the two are positionally aligned and equal in length.
     pub verdicts: Vec<EligibilityVerdict>,
 }
 
@@ -99,7 +99,7 @@ impl ScopeVerdicts<'_> {
     }
 }
 
-/// The sensitivity judged is the one the serving view folds onto the object from its admission history, since that is the class a read handed the caller; the registry class stands in when no admission decision serves the object. A secret object is refused for every destination and a non-normal object for a remote one, whether or not the candidate cites an artifact. An object no read serves, hidden by admission or never admitted, is refused as `Hidden`. commentlint: allow(JUDGE)
+/// The sensitivity judged is the one the serving view folds onto the object from its admission history, since that is the class a read handed the caller; the registry class stands in when no admission decision serves the object. A secret object is refused for every destination and a non-normal object for a remote one, whether or not the candidate cites an artifact. An object no read serves, hidden by admission or never admitted, is refused as `Hidden`.
 fn judge(
     candidate: &EligibilityCandidate,
     facts: &EgressCandidate,
@@ -143,7 +143,7 @@ fn judge(
     EligibilityVerdict::Ok
 }
 
-/// Runs before any reader is acquired; `egress_candidates_tx` repeats the digest check because it also serves callers that skip this gate. commentlint: allow(JUDGE)
+/// Runs before any reader is acquired; `egress_candidates_tx` repeats the digest check because it also serves callers that skip this gate.
 fn check_bounds(candidates: &[EligibilityCandidate]) -> Result<(), KernelError> {
     if candidates.len() > MAX_ELIGIBILITY_CANDIDATES {
         return Err(KernelError::InvalidInput);
@@ -166,7 +166,7 @@ fn check_bounds(candidates: &[EligibilityCandidate]) -> Result<(), KernelError> 
 }
 
 impl KernelStore {
-    /// Registry state, served class, artifact facts, and the scope terms each verdict depends on all come from one read snapshot at one tip; bounds are checked before any reader is taken, so an over-bound batch costs no query. commentlint: allow(JUDGE)
+    /// Registry state, served class, artifact facts, and the scope terms each verdict depends on all come from one read snapshot at one tip; bounds are checked before any reader is taken, so an over-bound batch costs no query.
     pub fn judge_eligibility(
         &self,
         project: &ProjectScope,

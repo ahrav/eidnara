@@ -1,4 +1,4 @@
-//! `kernel.eligibility.batch`: the kernel judges one verdict per candidate; the daemon caches each verdict by store lease epoch, tip, and classification generation. commentlint: allow(JUDGE)
+//! `kernel.eligibility.batch`: the kernel judges one verdict per candidate; the daemon caches each verdict by store lease epoch, tip, and classification generation.
 
 use std::collections::{HashMap, VecDeque};
 
