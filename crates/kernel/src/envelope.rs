@@ -1373,7 +1373,7 @@ struct RedactedIntent {
 
 impl RedactedIntent {
     fn new(intent: CommitIntent) -> Result<Self, KernelError> {
-        if !context_core::claim_operation::is_lower_hex(&intent.request_digest, 64)
+        if !context_core::canonical_json::is_lower_hex(&intent.request_digest, 64)
             || intent.producer.trim().is_empty()
             || intent.operation_key.trim().is_empty()
         {

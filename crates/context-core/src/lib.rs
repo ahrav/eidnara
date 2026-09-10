@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-pub mod claim_operation;
+pub mod canonical_json;
 pub mod decay;
 pub mod redaction;
 

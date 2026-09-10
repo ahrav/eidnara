@@ -133,6 +133,20 @@ correction were applied to `fault-map.md` and change no record here.
   is no successor, because canonical memory writes go through the kernel's
   own `(producer, operation_key, request_digest)` receipts, which the kernel
   crate's tests hold (`crates/kernel/tests/kernel_envelope.rs`).
+- `crates/context-core/src/claim_operation.rs` is gone. The canonical-JSON
+  encoder, `ContractError::NotCanonical`, `is_lower_hex`, and the Dreamer
+  request digest moved unchanged to `crates/context-core/src/canonical_json.rs`,
+  with the canonicalization and rejection cases of the golden fixture as
+  `testdata/canonical-json-contract-v1.json`; the intent wire types, the
+  claim-result decoder, the public-claim-id validator, revision locators,
+  mutation tokens, the heads digests, and the snapshot vector were deleted
+  with no consumer left. In Group F, `core-canonical-encoding-crossruntime-parity`
+  stays active over the moved module, restated as the Rust encoder's byte
+  stability and the Dreamer request digest because no TypeScript encoder under
+  the fixture exists in this repository;
+  `core-result-decode-acceptance-boundary`,
+  `core-applicability-heads-order-independence`, and
+  `core-revision-locator-roundtrip-inverse` carry `Status: invalidated`.
 - `crates/memory-store` opens its store through `storage::open_sqlite`
   against one baseline (`crates/memory-store/baseline.sql`); the `eidnara-host`
   managed layout names the file `memory.sqlite`, and the development
@@ -1776,6 +1790,12 @@ Open questions:
 
 ## Group F: core operation semantics and encoding
 
+At HEAD `claim_operation.rs` is gone (see Provenance): the encoder record below
+is live over `canonical_json.rs` and states the Rust encoder's byte stability
+and the Dreamer request digest, because no TypeScript encoder exists in this
+repository; the intent-ack and three encoding-law records are invalidated, and
+the pass-classifier record is unchanged.
+
 Six records on `crates/context-core/src/claim_operation.rs` (878 lines) and
 `crates/context-core/src/lib.rs` (338). This module is an encoding and identity contract,
 not a state machine: it defines closed enums and no transition function, and every
@@ -1791,52 +1811,98 @@ cheapest complete check in the whole part.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - the fixture pins 5 canonicalization cases and 2 rejection cases
-(`claim_operation.rs:718-747`), including one astral key-order case that genuinely
-discriminates code-point from UTF-16 ordering.
-Guarantee: the Rust and TypeScript canonical encoders accept exactly the same values and
-emit byte-identical output, so a digest computed on either side fences correctly against
-the other.
-Check: `always` - for every value in the shared canonical vocabulary,
-`canonical_json_encode(v)` in Rust equals `canonicalJsonEncode(v)` in TypeScript byte
-for byte, and the accepted sets coincide: both accept a value or both reject it.
-Restrict the comparison to values Rust can represent, since Rust `&str` cannot hold a
-lone surrogate that TypeScript can. `always` because every staged command digests
-through this path.
-Fault/timing angle: none. This is a cross-runtime equivalence, not a race.
+Exercised: partial - `crates/context-core/src/canonical_json.rs:185`
+`canonical_bytes_match_fixture` pins 5 canonicalization cases, including one
+astral key-order case that discriminates code-point from UTF-16 ordering; `:235`
+`non_canonical_numbers_are_rejected` pins 5 rejections (`1.5`, `2^53 - 1 + 2`,
+`2^53`, `-2^53`, `2^64 - 1`); `:250` `integer_above_i64_max_is_not_canonical`
+covers the u64 path; `:201`
+`dreamer_request_digest_is_sha256_over_protocol_and_canonical_bytes` recomputes
+the digest formula over the 5 cases, pins `1e3`, `1.0`, `-0.0`, and `-0` to
+their integer forms, and asserts key-order independence and array-order
+sensitivity on one object; `:164` `digest_protocols_are_the_recorded_literals`
+pins the protocol strings. `crates/memory-store/tests/dreamer_ledger.rs:455`
+repeats the key-order and protocol checks through the store's wrapper. No
+generator drives the discriminating regions, and no cross-runtime comparison
+runs: the TypeScript encoder this record was raised against is not in this
+repository.
+Guarantee: the canonical encoder is a deterministic function of the JSON value:
+equal values encode to byte-identical output regardless of object key insertion
+order, integral floats encode as the integer they equal, every number outside
+the safe-integer vocabulary is rejected, and the Dreamer request digest is the
+documented formula over those bytes, so one digest identifies exactly one
+semantic request.
+Check: `always` - for every `serde_json::Value` `v`: `canonical_json_encode(v)`
+succeeds if and only if every number in `v` is finite, integral, and within
+`±(2^53 - 1)`; when it succeeds, the output equals
+`canonical_json_encode(permute_keys(v))` byte for byte, equals the pinned bytes
+for every fixture case, and `compute_dreamer_request_digest(v)` equals the
+lowercase-hex SHA-256 over `"eidnara-dreamer-request-v1\n"` followed by those
+bytes. `always` because every Dreamer command digests through this path before
+its receipt is written.
+Fault/timing angle: none. This is a pure-function law, not a race.
 Required faults and enabling state: a generator that emits values spanning the
 discriminating regions: object keys straddling the BMP/astral boundary
 (`U+E000`..`U+FFFF` versus `U+10000`+), keys differing only past a shared prefix,
-integers at exactly `±(2^53 - 1)` and `±2^53`, `-0`, floats with zero fraction such as
-`1e3`, control characters `U+0000`..`U+001F`, `U+2028`, `U+2029`, and
-unpaired-surrogate-free astral text.
-Confidence: high - [evidence](evidence/core-canonical-encoding-crossruntime-parity.md). I read the
-TypeScript twin and confirmed it uses an explicit `compareCodePoints` (TS `:53-63`) at
-TS `:120`, not the default sort, so the agreement with Rust's `BTreeMap` ordering
-(`claim_operation.rs:124`) is deliberate. I decoded the `astral-key-order` fixture keys
-as `U+0041`, `U+FFFD`, `U+1F600` and confirmed the pinned canonical output is in
-code-point order, which UTF-16 order would reverse for the last two.
-Existing check: `crates/context-core/src/claim_operation.rs:718`
-`canonical_bytes_and_request_digests_match_fixture` and `:737`
-`non_canonical_numbers_are_rejected`, both fixture-driven. Status `unaudited`.
-Impact: a divergence means the two runtimes compute different request digests for the
-same semantic command, so the intent ledger's replay detection and the mutation-token
-fence both misfire: a replay looks like a new command, or two different commands collide
-on one identity.
+integers at exactly `±(2^53 - 1)` and `±2^53`, `-0`, floats with zero fraction
+such as `1e3`, control characters `U+0000`..`U+001F`, `U+2028`, `U+2029`, and
+unpaired-surrogate-free astral text; and, for every generated object, a
+permutation of its key insertion order.
+Confidence: high - [evidence](evidence/core-canonical-encoding-crossruntime-parity.md).
+Verified by reading `crates/context-core/src/canonical_json.rs:42-53`, the number
+vocabulary: an `i64` path range-checked to `±MAX_SAFE_INTEGER` at `:44-46` and an
+`f64` path at `:48-52` rejecting non-finite, fractional, and out-of-range values;
+`:55-68`, which escapes only `"`, `\`, and code points below `0x20`, the last as
+lowercase `\u00xx` at `:62`; `:93`, where `BTreeMap<&String, &Value>` orders keys
+by UTF-8 bytes, which is code-point order for well-formed UTF-8; and `:128-135`,
+which hashes `<protocol>`, `\n`, then the canonical bytes. I decoded the
+`astral-key-order` fixture keys as `U+0041`, `U+FFFD`, `U+1F600` and confirmed the
+pinned canonical output is in code-point order, which UTF-16 order would reverse
+for the last two. The TypeScript twin this record was raised against
+(`packages/plugin/src/features/eidnara/memory/claim-operation-contract.ts`
+(source-catalog path, not present at HEAD)) is not in this repository, and
+`packages/e2e-tests/src/incident-pool/history.ts:29` `canonicalJson` is an
+unrelated harness helper with JavaScript `<` key order and `JSON.stringify`
+escaping under no shared fixture, so this record is a Rust byte-stability and
+digest-formula check until an encoder under the same fixture exists here.
+Existing check: `crates/context-core/src/canonical_json.rs:164`, `:185`, `:201`,
+`:235`, and `:250`, fixture-driven from
+`crates/context-core/testdata/canonical-json-contract-v1.json`, and
+`crates/memory-store/tests/dreamer_ledger.rs:455`. The source tree's checks were
+`claim_operation.rs:718` `canonical_bytes_and_request_digests_match_fixture` and
+`:737` `non_canonical_numbers_are_rejected`. Status `unaudited`.
+Impact: a nondeterministic or drifting encoding gives one Dreamer command two
+digests, so `begin_dreamer_receipt`
+(`crates/memory-store/src/dreamer_ledger.rs:318`) reports `DigestConflict` on a
+legitimate retry and `run_dreamer_task` returns `dreamer_request_conflict`
+(`crates/daemon/src/lib.rs:9646`) instead of replaying the recorded outcome; a
+collision gives two different requests one receipt, so a retry replays the wrong
+result. The durable-write redaction scan at `crates/memory-store/src/lib.rs:3206`
+encodes through the same path, so an encoder change alters the bytes the secret
+scanner sees.
 Open questions:
 
 - Is the `U+FFFD` key in the `astral-key-order` fixture deliberate, or is it a mangled
   `U+E000` or lone surrogate from an earlier generator run? It discriminates correctly
   either way, but the intent matters for future edits. (unresolved, needs the fixture
   generator's history)
-- Only two `invalidCanonical` cases exist (`1.5` and `9007199254740993`). Is the
-  rejection surface intended to be that narrow? (needs human input)
+- No TypeScript encoder under `canonical-json-contract-v1.json` exists in this
+  repository. If one is added, this record regains its cross-runtime clause:
+  both encoders accept the same values and emit the same bytes for every
+  fixture case. Until then the fixture pins Rust bytes only. (needs human input)
 
 ### core-result-decode-acceptance-boundary
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the function this record was raised on was deleted with
+`crates/context-core/src/claim_operation.rs`; it had no consumer once the
+claim mirror, the claim-intent ledger, and the claim-lane classify request were
+gone. No successor record. The record body and its evidence file keep the
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `claim_operation.rs:847-877` covers 2 valid and 5 invalid fixture
 envelopes. Neither valid case has a non-canonical payload, and no case pairs an
 `applied` outcome with a non-null `staleReason`.
@@ -1880,7 +1946,14 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the function this record was raised on was deleted with
+`crates/context-core/src/claim_operation.rs`; it had no consumer once the
+claim mirror, the claim-intent ledger, and the claim-lane classify request were
+gone. No successor record. The record body and its evidence file keep the
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - 2 fixture cases (`claim_operation.rs:803-822`): the empty list and
 one two-element list. No case permutes the same list, so the invariance is asserted
 nowhere.
@@ -1919,7 +1992,14 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the function this record was raised on was deleted with
+`crates/context-core/src/claim_operation.rs`; it had no consumer once the
+claim mirror, the claim-intent ledger, and the claim-lane classify request were
+gone. No successor record. The record body and its evidence file keep the
+deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - the fixture (`claim_operation.rs:760-786`) asserts
 `format(parse(s)) == s` for each valid case and rejection for 8 invalid strings, but
 never asserts `parse(format(l)) == Some(l)` for a generated locator.

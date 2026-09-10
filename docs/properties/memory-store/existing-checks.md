@@ -17,7 +17,15 @@ claim-intent ledger followed: `tests/claim_intent_ledger.rs`, the intent case
 `list_claim_intents_saturates_an_oversized_limit`, and the `claim_intents`
 objects in `tests/baseline.rs` are gone; every entry below that names a ledger
 function or one of those tests describes the source tree. The authority
-state-machine tests are unchanged and still pass.
+state-machine tests are unchanged and still pass. `crates/context-core/src/claim_operation.rs`
+followed: the encoder and its fixture-driven checks moved to
+`src/canonical_json.rs` (`canonical_bytes_match_fixture`,
+`non_canonical_numbers_are_rejected`, `integer_above_i64_max_is_not_canonical`,
+plus `dreamer_request_digest_is_sha256_over_protocol_and_canonical_bytes`,
+`digest_protocols_are_the_recorded_literals`, and
+`lower_hex_check_is_exact_in_length_and_alphabet`); the public-claim-id,
+revision-locator, mutation-token, heads-digest, snapshot-vector, and
+stored-result checks were deleted with their subjects.
 
 `crates/memory-store/src/lib.rs` is 20,650 lines, of which production is lines 1 to
 13,930. Line 13,930 closes `capped_trace_error`, 13,931 is blank, and everything

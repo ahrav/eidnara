@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use context_core::claim_operation::is_lower_hex;
+use context_core::canonical_json::is_lower_hex;
 use host_runtime::RouteHandle;
 use kernel::{
     ArtifactDestination, ArtifactEligibility, EgressCandidate, EgressSnapshot, KernelError,

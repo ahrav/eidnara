@@ -17,7 +17,7 @@ pub mod dreamer_ledger;
 pub(crate) mod task_lease;
 
 use cache_stability::{DurabilityClass, FrozenUnit};
-use context_core::claim_operation::canonical_json_encode;
+use context_core::canonical_json::canonical_json_encode;
 use context_core::redaction::{
     DETECTOR_ID, Detection, Redaction, detector_revision, detector_semantic_digest,
     protected_json_key_label, qualified_secret_key_label, redact_durable_text,

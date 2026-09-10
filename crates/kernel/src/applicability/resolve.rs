@@ -6,7 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use context_core::claim_operation::is_lower_hex;
+use context_core::canonical_json::is_lower_hex;
 use gix::ObjectId;
 use sha2::{Digest, Sha256};
 

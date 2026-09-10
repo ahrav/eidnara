@@ -593,11 +593,13 @@ fn the_request_digest_ignores_map_insertion_order_and_pins_the_protocol() {
         dreamer_request_digest(&ordered).unwrap(),
         dreamer_request_digest(&reordered_items).unwrap()
     );
-    // The protocol prefix keeps a Dreamer digest distinct from a claim digest
-    // over the same bytes.
-    assert_ne!(
-        dreamer_request_digest(&ordered).unwrap(),
-        context_core::claim_operation::compute_claim_operation_request_digest(&ordered).unwrap()
-    );
-    assert_eq!(dreamer_request_digest(&ordered).unwrap().len(), 64);
+    let canonical = context_core::canonical_json::canonical_json_encode(&ordered).unwrap();
+    let expected = {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"eidnara-dreamer-request-v1\n");
+        hasher.update(canonical.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+    assert_eq!(dreamer_request_digest(&ordered).unwrap(), expected);
 }

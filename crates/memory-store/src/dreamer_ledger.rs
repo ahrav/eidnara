@@ -12,14 +12,14 @@
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
-use context_core::claim_operation::is_lower_hex;
+use context_core::canonical_json::is_lower_hex;
 
 use crate::{
     DurableWriteFamily, JsonScanPolicy, MemoryStore, MemoryStoreError, PreparedWrite,
     WriteDisposition, active_scan_owner_key,
 };
 
-pub use context_core::claim_operation::{
+pub use context_core::canonical_json::{
     DREAMER_REQUEST_ENCODING_VERSION, compute_dreamer_request_digest,
 };
 

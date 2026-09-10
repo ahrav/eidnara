@@ -1,4 +1,4 @@
-use context_core::claim_operation::is_lower_hex;
+use context_core::canonical_json::is_lower_hex;
 use lease::{FileLeaseStore, HeldFileLease, LeaseError, LeaseKey, protect_file};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use std::fmt;

@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use context_core::claim_operation::is_lower_hex;
+use context_core::canonical_json::is_lower_hex;
 use host_runtime::RouteHandle;
 use kernel::{
     ArtifactHandle, ArtifactIngestRequest, KernelStore, MAX_PAYLOAD_BYTES, ProviderEgress,
