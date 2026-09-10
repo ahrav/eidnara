@@ -182,6 +182,11 @@ jobs:
             exit 1
           fi
 
+      - name: Comment markers
+        # `.githooks/pre-commit` runs this script on staged lines; CI runs it on
+        # every tracked file.
+        run: scripts/forbid-comment-markers.sh
+
       - name: Retired memory-plane identifiers
         # The retired second memory plane (its mirror, its intent ledger, its
         # operation contract, its fallback reads, and its two-lane selection) is
