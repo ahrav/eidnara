@@ -23,9 +23,9 @@ pub struct CommitReadRequest {
 /// Identifies the history that a captured request's commit sequences refer to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommitReadIncarnation {
-    database: u128,
-    lease_epoch: u64,
-    /// Restoring an older backup retains `database` but allows commit sequences to be reused.
+    open_nonce: i64,
+    /// A restore keeps `open_nonce` but can let later commits reuse sequences a captured request
+    /// already names.
     restore_generation: u64,
 }
 
@@ -200,32 +200,19 @@ impl KernelStore {
             .map_err(map_sqlite)?;
         Ok(CommitReadTarget {
             through_commit: tip(&tx).map_err(map_sqlite)?,
-            incarnation: self.incarnation(&tx)?,
+            incarnation: self.incarnation(),
         })
     }
 
     /// Must run under a reader guard because a restore holds every guard while advancing
     /// `restore_generation` and swapping the database.
-    fn incarnation(&self, tx: &Transaction<'_>) -> Result<CommitReadIncarnation, KernelError> {
-        let database: String = tx
-            .query_row_cached(
-                "SELECT database_incarnation_id FROM kernel_format_marker",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(map_sqlite)?;
-        if database.len() != 32 {
-            return Err(KernelError::CorruptCanonicalRow);
-        }
-        let database =
-            u128::from_str_radix(&database, 16).map_err(|_| KernelError::CorruptCanonicalRow)?;
-        Ok(CommitReadIncarnation {
-            database,
-            lease_epoch: self.lease_epoch(),
+    fn incarnation(&self) -> CommitReadIncarnation {
+        CommitReadIncarnation {
+            open_nonce: self.open_nonce,
             restore_generation: self
                 .restore_generation
                 .load(std::sync::atomic::Ordering::SeqCst),
-        })
+        }
     }
 
     /// Reads whole commits in `(after_commit, through_commit]` for a registered consumer until a
@@ -246,12 +233,12 @@ impl KernelStore {
             return Err(CommitReadError::InvalidRequest);
         }
         let mut reader = self.lock_reader()?;
+        if request.incarnation != self.incarnation() {
+            return Err(CommitReadError::IncarnationMismatch);
+        }
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
-        if request.incarnation != self.incarnation(&tx)? {
-            return Err(CommitReadError::IncarnationMismatch);
-        }
         let checkpoint: i64 = tx
             .query_row_cached(
                 "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",

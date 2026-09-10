@@ -158,6 +158,9 @@ pub struct KernelStore {
     /// commit-log row, so a reader keyed on the tip alone can still tell that
     /// its egress facts are stale.
     pub(super) classification_generation: AtomicU64,
+    /// Distinguishes handles whose lease epochs and database identities coincide, so a captured
+    /// `CommitReadRequest` identifies one handle.
+    pub(super) open_nonce: i64,
     /// Advances when a restore installs a different database under this handle, so a
     /// `CommitReadRequest` captured against the displaced history is refused.
     pub(super) restore_generation: AtomicU64,
@@ -345,6 +348,9 @@ impl KernelStore {
         }
         let lease_epoch = lease.epoch();
         raise_writer_fence(&mut writer, lease_epoch)?;
+        let open_nonce: i64 = writer
+            .query_row("SELECT random()", [], |row| row.get(0))
+            .map_err(|_| KernelError::Io)?;
         // A store written by the parent build retains a digest of pre-redaction
         // candidate input, so it is rewritten before the store is handed out.
         super::envelope::strip_legacy_candidate_verifiers(&mut writer, lease_epoch)?;
@@ -380,6 +386,7 @@ impl KernelStore {
             shard_directories: Mutex::new(std::collections::BTreeMap::new()),
             lease_epoch,
             classification_generation: AtomicU64::new(0),
+            open_nonce,
             restore_generation: AtomicU64::new(0),
             #[cfg(feature = "test-support")]
             materialized_outbox_rows: AtomicUsize::new(0),

@@ -975,4 +975,42 @@ fn a_restore_under_the_same_handle_is_a_new_incarnation() {
         .unwrap();
     assert_eq!(restored, expected);
     assert_ne!(restored, first);
+
+    // Both roots now hold the same database identity. Each reopened root acquires
+    // a root-local lease epoch and starts a fresh restore generation.
+    let Fixture {
+        root: root_a,
+        store: store_a,
+        ..
+    } = fixture;
+    let Fixture {
+        root: root_b,
+        store: store_b,
+        ..
+    } = other;
+    drop((store_a, store_b));
+    let reopen = |root: tempfile::TempDir| {
+        let store = KernelStore::open(root.path()).unwrap();
+        Fixture {
+            root,
+            store,
+            ledger: Ledger::default(),
+        }
+    };
+    let mut a = reopen(root_a);
+    let mut b = reopen(root_b);
+    a.insert_domains("a-diverges", &[30]);
+    b.insert_domains("b-diverges", &[31]);
+    let tip = a.tip();
+    assert_eq!(tip, b.tip());
+    let from_a = a.request(0, tip);
+    let from_b = b.request(0, tip);
+    assert_ne!(
+        a.store.read_complete_commits(&from_a, wide()).unwrap(),
+        b.store.read_complete_commits(&from_b, wide()).unwrap()
+    );
+    assert_eq!(
+        a.store.read_complete_commits(&from_b, wide()).unwrap_err(),
+        CommitReadError::IncarnationMismatch
+    );
 }
