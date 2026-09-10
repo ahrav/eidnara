@@ -48,5 +48,6 @@ evidence.
 | `authority-transition`, `lkg`, `retrieval`, `dreamer`, `embeddings`, `git-ingestion` | `part-5a-storage`, `part-5c-transform-ts`, discovery | U5 |
 | `cli`, `historian-ts` | `part-5d-cli`, `part-5b-historian-ts` | U7 |
 | `search-projection` | the RP2.1 specification ([#347](https://github.com/ahrav/eidnara/issues/347)) and its companion catalogs for embedding, export and recovery, and projection coverage, authored against Eidnara `913234433` | RP2.1 P1 |
+| `hot-path-optimization` | the hot-path latency specification ([#350](https://github.com/ahrav/eidnara/issues/350)): a parent preservation supplement (K, E, S, H, R records) and its `latency-audit/` area (A, B, C, P, T, G, W records), authored against Eidnara `913234433` with line anchors re-verified at commit time | HP1 M0 |
 
 Part directories do not exist before their assigned waves.
