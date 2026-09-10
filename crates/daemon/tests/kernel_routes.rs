@@ -5552,3 +5552,91 @@ async fn a_disposition_preview_reports_denials_and_refusals_like_the_commit() {
     assert_eq!(admission_row_count(&daemon), admission_rows);
     daemon.handler.shutdown().await.unwrap();
 }
+
+/// Quarantining an approval and relaxing a decision that rests on it in one
+/// request: the commit judges the relaxation after the quarantine and denies
+/// it, while a preview would read the approval's authority from the ledger the
+/// quarantine never reached. The preview refuses the request as malformed
+/// instead; each operation previews on its own.
+#[tokio::test]
+async fn a_disposition_preview_refuses_an_operation_whose_authority_an_earlier_one_changes() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    assert_state(
+        &daemon
+            .commit("create", vec![insert_decision(1)], vec![])
+            .await,
+        "available",
+        None,
+    );
+    let scope_id = daemon.project_scope_id().await;
+    assert_state(
+        &daemon
+            .commit(
+                "quarantine",
+                vec![disposition("decision-object-1", "quarantine")],
+                vec![],
+            )
+            .await,
+        "available",
+        None,
+    );
+    seed_approval(&daemon, "approval-1", Some(&scope_id));
+    let operations = vec![
+        disposition("approval-1", "quarantine"),
+        disposition_with_approval("decision-object-1", "mark_stale", "approval-1"),
+    ];
+
+    let mut request = commit_request(
+        &daemon.project,
+        SESSION,
+        "coupled",
+        operations.clone(),
+        vec![],
+    );
+    request["preview"] = json!(true);
+    let refused = daemon
+        .handler
+        .dispatch_value_for_test(daemon.route, request)
+        .await;
+    match &refused {
+        PreparedOutcome::Error { code, message } => {
+            assert_eq!(code, "invalid_params", "{refused:?}");
+            assert!(message.contains("separate requests"), "{refused:?}");
+        }
+        other => panic!("a coupled preview is malformed: {other:?}"),
+    }
+
+    // Each operation previews alone; the relaxation is granted while the
+    // approval still holds.
+    let alone = daemon
+        .preview("approval-alone", vec![operations[0].clone()])
+        .await;
+    assert_state(&alone, "available", None);
+    assert_eq!(
+        alone["previews"][0]["disposition"], "quarantined",
+        "{alone}"
+    );
+    let alone = daemon
+        .preview("relax-alone", vec![operations[1].clone()])
+        .await;
+    assert_state(&alone, "available", None);
+    assert_eq!(alone["previews"][0]["denied"], false, "{alone}");
+    assert_eq!(alone["previews"][0]["disposition"], "stale", "{alone}");
+
+    let applied = daemon.commit("coupled", operations, vec![]).await;
+    assert_state(&applied, "available", None);
+    assert_eq!(
+        applied["dispositions"][1],
+        json!({
+            "object_id": "decision-object-1",
+            "event": "mark_stale",
+            "outcome": "deny",
+            "previous_disposition": "quarantined",
+            "disposition": "quarantined",
+            "denied": true,
+        }),
+        "the commit denies the relaxation the preview declined to judge: {applied}"
+    );
+    daemon.handler.shutdown().await.unwrap();
+}

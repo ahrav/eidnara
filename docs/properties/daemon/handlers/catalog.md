@@ -157,7 +157,7 @@ coordinator records.
 ## What this part is about
 
 This part is a request surface. Its primary input is a request body and its
-primary "fault" is sending the same request twice, which is why eleven of the 25
+primary "fault" is sending the same request twice, which is why eleven of the 26
 records need no injected fault of any kind. One broadly good result frames the
 rest: validation precedes the first durable write in every handler in scope, and
 no path was found where a durable write precedes input validation. What the
@@ -309,15 +309,18 @@ to two; **F15** deflates the success-without-writing headline, which is why the
 prose above states the open questions instead of pre-empting them; and **F16**
 edits `fault-map.md` only.
 
-Final distributions after the disposition: **20 `always`, 2
-`always-or-unreached`, 3 `sometimes`, 0 `reachable`, 0 `unreachable`**;
-**19 safety, 3 liveness, 3 reachability**; **22 `default-production`, 3
-`explicit-config-only`, 0 `test-only`**. `always(!X)` is counted as `always`,
-following the convention Parts 4a and 4b used.
+Final distributions after the disposition and the later successor record
+`dreamer-dispatched-attempt-always-settles-through-the-receipt`, which
+replaces the invalidated `h4c-dreamer-failure-path-ledger-write-is-unchecked`
+and keeps that record's row: **21 `always`, 2 `always-or-unreached`, 3
+`sometimes`, 0 `reachable`, 0 `unreachable`**; **20 safety, 3 liveness, 3
+reachability**; **23 `default-production`, 3 `explicit-config-only`, 0
+`test-only`**. `always(!X)` is counted as `always`, following the convention
+Parts 4a and 4b used.
 
 One process caveat, inherited and restated. METHOD.md step 7 requires records to
-equal index rows to equal evidence files. Records and index rows both equal 25.
-**Evidence files remain at 24.** Both halves of the F7 split link
+equal index rows to equal evidence files. Records and index rows both equal 26.
+**Evidence files number 25.** Both halves of the F7 split link
 `evidence/stagelc-seed-and-import-reapers-only-run-on-fresh-traffic.md` and both
 halves of the F13 split link
 `evidence/stagelc-a-restart-is-observed-with-staged-state-present.md`, so every
@@ -335,7 +338,7 @@ lines.
 | [h4c-authority-prepare-route-bind-is-a-second-transaction](#h4c-authority-prepare-route-bind-is-a-second-transaction) | safety | high |
 | [h4c-transform-writes-two-side-effects-before-its-fenced-commit](#h4c-transform-writes-two-side-effects-before-its-fenced-commit) | safety | high |
 | [h4c-guidance-date-returns-success-without-persisting](#h4c-guidance-date-returns-success-without-persisting) | safety | high |
-| [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked) | safety | invalidated |
+| [h4c-dreamer-failure-path-ledger-write-is-unchecked](#h4c-dreamer-failure-path-ledger-write-is-unchecked) | safety | high |
 | [dreamer-dispatched-attempt-always-settles-through-the-receipt](#dreamer-dispatched-attempt-always-settles-through-the-receipt) | safety | high |
 | [scheduled-dreamer-slot-runs-once-through-lease-and-receipt](#scheduled-dreamer-slot-runs-once-through-lease-and-receipt) | safety | high |
 | [h4c-side-channel-drain-result-is-discarded-by-the-caller](#h4c-side-channel-drain-result-is-discarded-by-the-caller) | safety | high |
@@ -502,16 +505,16 @@ At `c35a4ad5`:
   filter at default concurrency: all 50 tests passed in each of the 50 runs,
   with no retries.
 
-On the working tree merging `bc007c9a` into `c35a4ad5`:
+On the working tree merging `origin/main` (`2ba7dbf4`) into `3e34242e`:
 
-- `cargo nextest run --profile ci -p daemon -p kernel -p memory-store --all-targets --all-features --locked`:
-  2,327 passed, 5 skipped. Nextest was 0.9.140; the recommended version is
+- `cargo nextest run --workspace --all-targets --all-features --locked`:
+  3,589 passed, 64 skipped. Nextest was 0.9.140; the recommended version is
   0.9.143.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`:
   passed.
 - `cargo fmt --all -- --check`: passed.
 
-The 50-by-50 repetition check was not rerun after `bc007c9a`. An incremental
+The 50-by-50 repetition check was not rerun after `c35a4ad5`. An incremental
 read-only review of the latest merge found no actionable findings.
 These execution and review results do not change the checks' `unaudited`
 adequacy status.
@@ -566,6 +569,15 @@ request at exhaustion is a conflict, not a replay, and
 `dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted`
 shows an exhausted budget still settles an open receipt while refusing a
 takeover.
+`dreamer_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain`
+admits a three-model chain at `budget - 1` and shows it dispatches once, records
+the failure through its receipt, and leaves the count at exactly the budget.
+`dreamer_run_task_bounds_the_recovery_probe_by_the_request_deadline` stalls the
+scripted producer's `status` and shows the retry answers
+`dreamer_outcome_unknown` within its own `timeout_ms` with nothing written.
+`dreamer_run_task_bounds_producer_startup_by_the_request_deadline` stalls the
+factory's `connect` and shows a fresh command fails through its receipt within
+`timeout_ms` with no attempt row and no start.
 `dreamer_run_task_leaves_the_receipt_open_while_the_kernel_is_starting` reads
 the pool against a kernel still `Starting`, shows `kernel_unavailable` with the
 receipt `in_progress` and no attempt, then opens the kernel and shows the same
@@ -586,10 +598,26 @@ the generation-2 receipt still open, and the generation-1 attempt still open.
 `NotSent` takeover, ignores older-generation rows, and blocks an open or failed
 current-generation attempt. Not driven by a test: a resume whose `status` call
 fails; it shares the no-write response shape of the tested `Active` case.
-Guarantee: A `dreamer.run_task` request reports a recorded terminal result only
-from a complete receipt, and recovery of a receipt with a possible dispatch
-never starts another producer; only an atomically verified undispatched
-generation may be taken over for a new attempt chain.
+Guarantee: Every `dreamer.run_task` request that may have reached a model is
+answered only through its receipt: a terminal answer (`ok: true`,
+`dreamer_run_failed`, or `dreamer_outcome_unknown` read back from a `complete`
+receipt) is returned only after `complete_dreamer_receipt` reports `Applied`;
+every other answer after a possible dispatch is `dreamer_ledger_failed`,
+`dreamer_ledger_fenced`, or an unrecorded `dreamer_outcome_unknown`, and a retry
+over the receipt any of those leaves behind starts no producer. A receipt whose
+generation never reached a model is the one shape a retry may take over; each
+successor attempt dispatches at most once under the new generation. Every
+producer call that can start or resolve a model run (connect, `start`, the
+await, and the recovery probe) runs under the request's `timeout_ms` deadline;
+`purge_session` after a terminal outcome runs under the producer's own request
+timeout instead, so cleanup still happens once the deadline has passed. A
+request dispatches a model only after reading the project's attempt count
+below `DREAMER_ATTEMPT_BUDGET`, once before its receipt is written and again
+before each later model; the read and the attempt write are not one atomic
+step, so requests admitted concurrently can each add one attempt past the
+budget. The budget is a bounded guard, not an exact quota. An accepted result
+is committed to canonical kernel state before the receipt completes, and only
+while the run's project still holds `MODULE` authority at the run's generation.
 Check: `always` - for every `dreamer.run_task` response that consumed a model
 attempt, the response is `ok: true`, `dreamer_run_failed`,
 `dreamer_kernel_write_failed`, or a replayed
@@ -620,10 +648,11 @@ the prompt goes to a model provider. Request failures complete the
 receipt; `kernel_unavailable` leaves it open without an attempt so a retry can
 take over and read again. A replay or recovery of a possible dispatch skips
 that read.
-The attempt row precedes the model call and the run handle
-is recorded right after `start` returns; a handle write that does
-not land tries to settle the attempt and receipt `unknown` through
-`settle_dispatched_attempt_as_unknown`, unless the generation
+In the chain loop, `connect` runs under the deadline's remaining duration and a
+cut-off handshake ends the chain with no attempt row. The attempt row precedes
+the model call and the run handle is recorded right after `start` returns; a
+handle write that does not land tries to settle the attempt and receipt
+`unknown` through `settle_dispatched_attempt_as_unknown`, unless the generation
 fence rejects settlement. A fenced run-handle write skips purge
 and so does a fenced attempt-terminal write; a store error still permits
 cleanup. If the attempt terminal cannot be recorded because of a store error,
@@ -637,20 +666,26 @@ generation that is not `not_sent` is the dispatch marker: an ended one settles
 `unknown` through `complete_receipt_as_unknown`, keeping its own
 terminal; an open one with a handle is resolved with `status` on a producer
 connected under the attempt's recorded `project_root` and `harness` and bound to
-its recorded child session, the identity the runtime keys runs by, and `Missing` or
+its recorded child session, the identity the runtime keys runs by, with the
+connect, bind, and probe together under the request deadline's remaining
+duration, and `Missing` or
 `Terminal` settles `unknown` (a terminal run cannot become active again and its
-answer was never recorded) while `Active` writes nothing; an open one with no
-handle settles `unknown`. A failed connect, bind, or status probe writes nothing.
-Only the absence of a marker reaches `take_over_undispatched_dreamer_receipt`,
-whose single guarded statement checks the current generation for
+answer was never recorded) while `Active`, a probe error, or a probe the
+deadline cuts off writes nothing; an open one with no
+handle settles `unknown`. Only the absence of a marker reaches
+`take_over_undispatched_dreamer_receipt`, whose single guarded statement checks
+the current generation for
 `terminal_kind IS NULL OR terminal_kind != 'not_sent'` and moves the fence only
 when no such row exists (`crates/memory-store/src/dreamer_ledger.rs`).
 No-row and `NotSent` generations may advance; a possible dispatch blocks
 takeover even if its row lands after the list read. Later predecessor writes
-are fenced; over budget the takeover is refused,
-while every settling arm still runs. The successor's child sessions include the
-generation (`crates/daemon/src/classify.rs`, `attempt_child_session_id`), so
-they use different identities from the predecessor's runs. The exhausted-chain, success, and settle writes
+are fenced (`crates/memory-store/src/dreamer_ledger.rs`); over budget the
+takeover is refused, while every settling arm still runs. The budget is read
+again before every model after the first (`dreamer_attempt_budget_exhausted`),
+so one admitted chain overshoots it by at most one attempt. The successor's
+child sessions include the generation (`crates/daemon/src/classify.rs`,
+`attempt_child_session_id`), so they cannot attach to or purge a predecessor's
+run. The exhausted-chain, success, and settle writes
 each match `Applied`, `Fenced`, and `Err` as separate arms.
 Accepted classifications become project-scoped `memory_classification`
 observations with `(ModelInference, DreamerInference)` admission, keyed under
@@ -686,7 +721,10 @@ rows; for cleanup fencing a generation change inside `on_start` or
 `on_await_output`. The budget bound needs the durable
 attempt count at `DREAMER_ATTEMPT_BUDGET` within `DREAMER_ATTEMPT_BUDGET_WINDOW`
 (`crates/daemon/src/classify.rs`), which the test fills through
-`execute_tag_sql_for_test`.
+`execute_tag_sql_for_test`; the mid-chain stop needs the count at one below
+the budget and a chain whose first model fails. The probe bound needs the
+scripted producer's `status` blocked under a `timeout_ms` both request legs
+share, since the digest covers `timeout_ms`.
 Confidence: high - [evidence](evidence/dreamer-dispatched-attempt-always-settles-through-the-receipt.md).
 The default route dispatches `dreamer.run_task` without a feature or configuration
 gate (`crates/daemon/src/lib.rs`, `dispatch_value_with_inbound_bytes`). The

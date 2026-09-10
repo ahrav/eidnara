@@ -70,12 +70,16 @@ default-production reachability, subject to the route's authority checks.
   `complete_receipt_as_unknown`, preserving the attempt's terminal. An open
   marker without a handle also settles `unknown`. With a handle, recovery
   connects under the recorded root and harness, binds the recorded child
-  session, and asks `status`. `Missing` and `Terminal` settle `unknown`;
-  `Active`, connection errors, bind errors, and status errors answer
-  `dreamer_outcome_unknown` without writing. Open-attempt settlement uses
-  `settle_dispatched_attempt_as_unknown`: attempt finish is best-effort, but
-  receipt completion checks `Applied`, `Fenced`, and `Err` separately.
-- In `run_dreamer_task`, `begin_dreamer_attempt` precedes the start call and
+  session, and asks `status`, all three under one `tokio::time::timeout` set
+  to the request deadline's remaining duration. `Missing` and `Terminal` settle
+  `unknown`; `Active`, connection errors, bind errors, status errors, and a
+  probe the deadline cuts off answer `dreamer_outcome_unknown` without writing.
+  Open-attempt settlement uses `settle_dispatched_attempt_as_unknown`: attempt
+  finish is best-effort, but receipt completion checks `Applied`, `Fenced`,
+  and `Err` separately.
+- In the chain loop, `connect` runs under the deadline's remaining duration
+  and a cut-off handshake ends the chain with no attempt row.
+  `begin_dreamer_attempt` precedes the start call and
   `record_dreamer_run_handle` follows a successful start. A fenced handle
   write skips purge; a store error still attempts purge. Both try unknown
   settlement, which cannot overwrite a successor's receipt. The attempt
@@ -129,8 +133,13 @@ default-production reachability, subject to the route's authority checks.
   generation with the project, ledger session, command, attempt index, and
   model to separate successor sessions. That module defines the 600-second
   request/await ceiling, the eight-model chain cap, and the budget of 200
-  attempts per project per 24 hours. `count_dreamer_attempts` in
-  `crates/memory-store/src/dreamer_ledger.rs` excludes only `NotSent` rows.
+  attempts per project per 24 hours. The budget is read through
+  `dreamer_attempt_budget_exhausted` once before the receipt is written and
+  again before every model after the first, so one admitted chain overshoots
+  the budget by at most the attempt it was admitted for.
+  `count_dreamer_attempts` in `crates/memory-store/src/dreamer_ledger.rs`
+  excludes only `NotSent` rows and counts open, `cancelled`, and length-capped
+  attempts alike.
 - Takeover, attempt insertion, handle recording, attempt finish, and receipt
   completion predicate writes on receipt key, generation, and `in_progress`
   state in `crates/memory-store/src/dreamer_ledger.rs`. Predecessor writes
@@ -177,9 +186,21 @@ the producer is never started again.
   canonical classifications committed but the receipt open. Recovery settles
   `unknown` without another dispatch or kernel write; `unknown` does not mean
   that no canonical effect occurred.
-- The budget is checked before the chain, not reserved per attempt. Concurrent
-  requests and fallback attempts in an admitted chain can exceed it; it is a
-  spend guard, not an exact quota.
+- The budget check and the attempt write are two reads apart, so concurrent
+  requests for different commands can each exceed the budget by one attempt;
+  the re-read before every later model keeps a single chain from adding its
+  length to that slack. The bound is a guard against runaway spend, not an
+  exact quota.
+- The recovery probe shares the request deadline. A runtime that accepts the
+  `status` call and never answers is cut off at the deadline and the retry
+  answers `dreamer_outcome_unknown` with no write; the receipt stays open for a
+  later retry with more budget.
+- `purge_session` is not under the request deadline. It runs after a terminal
+  outcome under the producer's own request timeout
+  (`crates/daemon/src/historian_producer.rs`, `DEFAULT_REQUEST_TIMEOUT`),
+  because cleanup that ran under an already-spent deadline would never delete
+  the child session. A request can therefore outlive `timeout_ms` by at most
+  that cleanup budget, plus the bounded kernel commit of an accepted result.
 - The property depends on the runtime reporting a restarted host's old run ids
   as `missing` (`docs/host-wire-protocol.md`, Section 7.2, `run.status`), on a
   terminal run status never returning to active within one runtime incarnation,
@@ -260,6 +281,20 @@ the producer is never started again.
    check and before the write: assert `authority_not_module`, one start, an
    unchanged kernel tip, no classification, and a `failed` receipt
    (`dreamer_run_task_writes_nothing_when_authority_drains_during_the_model_call`).
+18. The durable attempt count at `budget - 1` and a three-model chain whose
+    every model fails: assert one start, one `failed` attempt row, the receipt
+    `complete` as `failed` with a budget message, the count at exactly the
+    budget, and a retry replaying the failure with no new start
+    (`dreamer_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain`).
+19. A dispatched attempt whose retry finds the runtime accepting `status` and
+    never answering, under a `timeout_ms` both legs share: assert the retry
+    returns `dreamer_outcome_unknown` within the deadline, one `status` call,
+    no start, and the receipt and attempt still open
+    (`dreamer_run_task_bounds_the_recovery_probe_by_the_request_deadline`).
+20. A fresh command whose factory `connect` never completes: assert it fails
+    within `timeout_ms` as `dreamer_run_failed`, one connect, no start, no
+    attempt row, and the receipt `complete` as `failed`
+    (`dreamer_run_task_bounds_producer_startup_by_the_request_deadline`).
 
 The stranded-receipt, fenced-cleanup, and terminal-status tests use the async
 object-id harness:
@@ -321,9 +356,30 @@ established here by the single guarded statement, not by a race test.
 
 ### Q: Does the budget check race with a concurrent request?
 
-- Sources examined: `count_dreamer_attempts` and the check's placement before
-  `begin_dreamer_receipt`.
-- Findings: two requests can both read `spent = budget - 1` and both dispatch.
-  Each admitted chain can also try several models without checking the budget
-  again. The bound is a host guard against runaway spend, not an exact quota.
-- Conclusion: resolved with answer; recorded as a known slack.
+- Sources examined: `dreamer_attempt_budget_exhausted`, its call before
+  `begin_dreamer_receipt`, and its call at the top of the chain loop.
+- Findings: two requests can both read `spent = budget - 1` and both dispatch,
+  so the bound can be exceeded by the number of concurrent requests. Within one
+  request the count is re-read before each model after the first, so a chain
+  admitted at `budget - 1` dispatches once and then fails closed through its
+  receipt; without that re-read a single eight-model chain could add seven
+  attempts past the budget with no concurrency at all. The bound is a host guard
+  against runaway spend, not an exact quota.
+- Conclusion: resolved with answer; recorded as a known slack of one attempt
+  per concurrent request.
+
+### Q: Why does the recovery probe run under the request deadline?
+
+- Sources examined: `resume_dreamer_receipt`'s connect, bind, and `status`
+  calls; `HistorianProducer::status` and `DEFAULT_REQUEST_TIMEOUT`
+  (`crates/daemon/src/historian_producer.rs`).
+- Findings: the producer's `status` call runs under its own 30 s request
+  timeout, and the connect and bind before it have no timeout of their own. A
+  retry with a small `timeout_ms` against a runtime that accepted the probe and
+  stalled would occupy the request for the producer's timeout rather than the
+  caller's, contradicting the whole-request bound. The three calls now run
+  under one `tokio::time::timeout` set to the deadline's remaining duration; a
+  cut-off probe answers `dreamer_outcome_unknown` with no write, the same shape
+  as a runtime whose status cannot be read.
+- Conclusion: resolved with answer; the deadline bounds recovery as well as
+  dispatch.
