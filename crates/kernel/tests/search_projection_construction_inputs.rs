@@ -519,19 +519,74 @@ fn coverage_rows<'a>(matrix: &'a Value, field: &str, universe: &[&'a str]) -> Ve
 fn section<'a>(text: &'a str, heading: &str) -> &'a str {
     let start = text
         .find(heading)
-        .unwrap_or_else(|| panic!("witness-matrix.md lacks {heading}"));
+        .unwrap_or_else(|| panic!("document lacks {heading}"));
     let body = &text[start + heading.len()..];
     let end = body.find("\n## ").unwrap_or(body.len());
     &body[..end]
 }
 
+/// Data rows of every table in `body`. A header row is the row immediately
+/// followed by the `| --- |` separator, so no header text is hard-coded.
 fn table_rows(body: &str) -> Vec<String> {
-    body.lines()
-        .filter(|line| line.starts_with("| ") && !line.starts_with("| ---"))
-        .filter(|line| !line.starts_with("| Marker |") && !line.starts_with("| Criterion |"))
-        .filter(|line| !line.starts_with("| Seam |"))
-        .map(str::to_owned)
+    let lines: Vec<&str> = body.lines().collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("| ") && !line.starts_with("| ---"))
+        .filter(|(index, _)| {
+            !lines
+                .get(index + 1)
+                .is_some_and(|next| next.starts_with("| ---"))
+        })
+        .map(|(_, line)| (*line).to_owned())
         .collect()
+}
+
+/// `path=value` citations in cell prose. A citation names a
+/// construction-contracts.json record by dotted key path; `value` is the JSON
+/// literal the record must hold, or the bare word when it is not a literal.
+fn contract_citations(text: &str) -> Vec<(String, Value)> {
+    text.split_whitespace()
+        .filter_map(|word| {
+            let word = word.trim_end_matches(['.', ',', ';', ':', ')']);
+            let (path, value) = word.split_once('=')?;
+            let is_path = !path.is_empty()
+                && path.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'
+                        || byte == b'.'
+                });
+            is_path.then(|| {
+                let value =
+                    serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_owned()));
+                (path.to_owned(), value)
+            })
+        })
+        .collect()
+}
+
+/// Seam identifiers in a prose column: `T4` names one seam and `T1-T9` names
+/// the inclusive range, so "All T1-T9" expands to every seam.
+fn seam_tokens(text: &str) -> BTreeSet<&'static str> {
+    let index = |token: &str| SEAMS.iter().position(|seam| *seam == token);
+    let mut seams = BTreeSet::new();
+    for word in text.split_whitespace() {
+        let word = word.trim_matches(['.', ',', ';', ':', '(', ')']);
+        match word.split_once('-') {
+            Some((low, high)) => {
+                if let (Some(low), Some(high)) = (index(low), index(high)) {
+                    seams.extend(&SEAMS[low..=high]);
+                }
+            }
+            None => {
+                if let Some(position) = index(word) {
+                    seams.insert(SEAMS[position]);
+                }
+            }
+        }
+    }
+    seams
 }
 
 #[test]
@@ -575,9 +630,90 @@ fn markdown_matrix_restates_the_fixture_exactly() {
 }
 
 #[test]
+fn cell_prose_cites_only_contract_records_that_exist() {
+    let matrix = fixture("witness-matrix.json");
+    let contracts = fixture("construction-contracts.json");
+    let mut citations = 0;
+    for cell in cells(&matrix) {
+        let name = marker(cell);
+        for field in [
+            "independent_oracle",
+            "negative_control",
+            "integration_observation",
+        ] {
+            for (path, value) in contract_citations(cell[field].as_str().expect(field)) {
+                let record = path
+                    .split('.')
+                    .try_fold(&contracts, |node, key| node.get(key))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{name} {field} cites {path}, which construction-contracts.json lacks"
+                        )
+                    });
+                assert_eq!(record, &value, "{name} {field} misstates {path}");
+                citations += 1;
+            }
+        }
+    }
+    assert!(citations >= 1, "no cell cites a contract record");
+}
+
+#[test]
+fn traceability_map_restates_matrix_coverage_per_property() {
+    let matrix = fixture("witness-matrix.json");
+    let text = read(&repo_root().join("docs/properties/search-projection/spec-traceability.md"));
+    let mut expected: BTreeMap<&str, (BTreeSet<&str>, BTreeSet<&str>)> = BTreeMap::new();
+    for cell in cells(&matrix) {
+        let entry = expected
+            .entry(cell["property"].as_str().expect("property"))
+            .or_default();
+        entry.0.extend(str_list(&cell["acceptance_criteria"]));
+        entry.1.extend(str_list(&cell["seams"]));
+    }
+
+    let mut listed = BTreeSet::new();
+    for row in table_rows(section(&text, "## Property-to-specification map")) {
+        let columns: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+        let [property, obligation, seam] = columns.as_slice() else {
+            panic!("property row has {} columns: {row}", columns.len());
+        };
+        let slug = property
+            .strip_prefix('[')
+            .and_then(|link| link.split_once(']'))
+            .map(|(slug, _)| slug)
+            .unwrap_or_else(|| panic!("property column is not a catalog link: {property}"));
+        let (criteria, seams) = expected
+            .get(slug)
+            .unwrap_or_else(|| panic!("{slug} has no witness-matrix cell"));
+        let cited: BTreeSet<&str> = obligation
+            .split(|c: char| c == ';' || c == '/' || c.is_whitespace())
+            .filter(|token| ACCEPTANCE_CRITERIA.contains(token))
+            .collect();
+        assert_eq!(
+            &cited, criteria,
+            "{slug} acceptance criteria differ from its matrix cells"
+        );
+        assert_eq!(
+            seam_tokens(seam),
+            seams.iter().copied().collect(),
+            "{slug} seams differ from its matrix cells"
+        );
+        assert!(listed.insert(slug.to_owned()), "{slug} is listed twice");
+    }
+    assert_eq!(
+        listed,
+        expected.keys().map(|slug| (*slug).to_owned()).collect(),
+        "the traceability map lists a different property set than the matrix"
+    );
+}
+
+#[test]
 fn contracts_freeze_the_five_classes() {
     let contracts = fixture("construction-contracts.json");
-    assert_eq!(contracts["identity_contract_version"], "search-projection-identity-v1");
+    assert_eq!(
+        contracts["identity_contract_version"],
+        "search-projection-identity-v1"
+    );
     let classes = contracts["classes"].as_object().expect("classes");
     assert_eq!(
         classes.keys().map(String::as_str).collect::<BTreeSet<_>>(),

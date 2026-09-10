@@ -6,7 +6,8 @@ and AC1-AC12 name its constraint, testing-seam, and acceptance sections. They
 are document locators, not API names or tickets. The approved issue is published;
 this companion was authored uncommitted; ticket P1
 ([#352](https://github.com/ahrav/eidnara/issues/352)) carries it into the
-repository without change.
+repository. Its property map restates the acceptance criteria and seams of the
+[required witness matrix](witness-matrix.md), which is authoritative for both.
 
 ## Source requirements and decisions
 
@@ -74,6 +75,9 @@ granularity only; it does not change source behavior or external ownership.
 Each property has one canonical catalog owner. Testing groups can share fixtures,
 but they do not redefine another property's oracle. AC11 binds every required
 scenario in the three maps, in addition to the specific criteria listed below.
+The acceptance criteria and the seams in each row are the union over that
+property's cells in the [witness matrix](witness-matrix.md); the kernel test
+`search_projection_construction_inputs` checks the two agree.
 All records remain proposed, active, `test-only`, and unexercised.
 
 | Canonical property | Specification obligation | Testing seam |
@@ -91,22 +95,22 @@ All records remain proposed, active, `test-only`, and unexercised.
 | [projection-commit-checkpoint-pending-atomic](projection-coverage/catalog.md#projection-commit-checkpoint-pending-atomic) | C3; U2; AC2 | T5 reopened rows/checkpoint/pending prefix. |
 | [projection-replay-does-not-resurrect](projection-coverage/catalog.md#projection-replay-does-not-resurrect) | C3; U2; AC2/AC3 | T4 duplicate/overlap/old-prefix replay. |
 | [projection-occurrence-payload-separation](projection-coverage/catalog.md#projection-occurrence-payload-separation) | C4; KTD4; U2; AC3 | T1 independent tuples/bytes and collision. |
-| [projection-source-inventory-complete](projection-coverage/catalog.md#projection-source-inventory-complete) | C4; R1/R3; U4; AC3 | T4 all-class inventory, T7 source adapters. |
-| [projection-raw-tools-exact-and-lexical](projection-coverage/catalog.md#projection-raw-tools-exact-and-lexical) | C4; R2; U4; AC3 | T1 captured byte buffers, T7 default job absence. |
+| [projection-source-inventory-complete](projection-coverage/catalog.md#projection-source-inventory-complete) | C4; R1/R3; U4; AC3/AC11 | T4 all-class inventory, per-class revision and removal ledger, and nonempty declared completeness. |
+| [projection-raw-tools-exact-and-lexical](projection-coverage/catalog.md#projection-raw-tools-exact-and-lexical) | C4; R2; U4; AC3 | T1 captured multibyte/CRLF/overlapping-span and multipart error byte buffers. |
 | [projection-n13-hooks-stay-gated](projection-coverage/catalog.md#projection-n13-hooks-stay-gated) | C7; U4; AC9/AC12 | T7 frozen hook/gate activation matrix. |
-| [projection-canonical-eligibility-authority](projection-coverage/catalog.md#projection-canonical-eligibility-authority) | C1; prerequisite; AC6/AC9 | T7 pinned adapter comparison and stale grant. |
+| [projection-canonical-eligibility-authority](projection-coverage/catalog.md#projection-canonical-eligibility-authority) | C1; prerequisite; AC6 | T7 pinned adapter comparison and stale grant. |
 | [projection-lexical-dense-coverage-distinct](projection-coverage/catalog.md#projection-lexical-dense-coverage-distinct) | C4/C5; U4; AC3 | T4 independent per-class sets and validity facts. |
-| [projection-bounded-admission-preserves-progress](projection-coverage/catalog.md#projection-bounded-admission-preserves-progress) | C3/C6; U2; AC2/AC12 | T6 whole-commit/pending-cap refusal and unchanged prefix. |
-| [projection-remediation-invalidates-derived-bytes](projection-coverage/catalog.md#projection-remediation-invalidates-derived-bytes) | C4/C5; Open Question 2; AC10 | T3 held result/current bytes and T4 operation ledger. |
+| [projection-bounded-admission-preserves-progress](projection-coverage/catalog.md#projection-bounded-admission-preserves-progress) | C3/C6; U2; AC2/AC5/AC7 | T6 whole-commit/pending-cap refusal and unchanged prefix. |
+| [projection-remediation-invalidates-derived-bytes](projection-coverage/catalog.md#projection-remediation-invalidates-derived-bytes) | C4/C5; Open Question 2; AC10 | T3 held result/current bytes with the recorded applicability decision and name-only control. |
 | [projection-acceptance-situations-witnessed](projection-coverage/catalog.md#projection-acceptance-situations-witnessed) | Verification Strategy; AC11 | All T1-T9; frozen nonempty marker/scenario matrix. |
 | [embedding-count-authority-is-untruncated](embedding/catalog.md#embedding-count-authority-is-untruncated) | C5; KTD3; U3; AC4 | T1 independent complete token sequences/artifacts. |
 | [embedding-input-is-rejected-before-inference](embedding/catalog.md#embedding-input-is-rejected-before-inference) | C5; U3; AC4 | T2 real preflight plus post-certification attempt counter. |
 | [embedding-pending-drives-one-job-table](embedding/catalog.md#embedding-pending-drives-one-job-table) | C5; KTD1/KTD3; U3; AC5 | T8 durable pending/admission/worker trace. |
-| [embedding-completion-is-identity-fenced](embedding/catalog.md#embedding-completion-is-identity-fenced) | C5; U3; AC5/AC10 | T3 each identity dimension, current input, tombstone. |
-| [embedding-complete-requires-durable-vector](embedding/catalog.md#embedding-complete-requires-durable-vector) | C5; U3; AC5 | T5 persistence/completion crash and reopened vector. |
+| [embedding-completion-is-identity-fenced](embedding/catalog.md#embedding-completion-is-identity-fenced) | C5; U3; AC5/AC6 | T3 each identity dimension, current input, tombstone. |
+| [embedding-complete-requires-durable-vector](embedding/catalog.md#embedding-complete-requires-durable-vector) | C5; U3; AC2/AC5 | T5 persistence/completion crash and reopened vector. |
 | [embedding-restart-retries-durable-pending](embedding/catalog.md#embedding-restart-retries-durable-pending) | C5/C7; U3/U5; AC7 | T9 stable pending and fresh JobTable after actual crash. |
 | [embedding-backfill-preserves-query-admission](embedding/catalog.md#embedding-backfill-preserves-query-admission) | C6; shared RP2.7 prerequisite; U3; AC8 | T8 offered-query ledger under bounded saturated backfill. |
-| [embedding-identity-gc-preserves-live-work](embedding/catalog.md#embedding-identity-gc-preserves-live-work) | C5; U3; AC5 | T3 live-reference/obsolete-state matrix and no-op control. |
+| [embedding-identity-gc-preserves-live-work](embedding/catalog.md#embedding-identity-gc-preserves-live-work) | C5; U3; AC3/AC5 | T3 live-reference/obsolete-state matrix and no-op control. |
 | [embedding-supervisor-shares-budget-and-joins](embedding/catalog.md#embedding-supervisor-shares-budget-and-joins) | C6; R3; shared RP2.7 prerequisite; AC8 | T8 original deadline/flag and physical owner/permit/charge census. |
 
 ## Ownership and completeness checks

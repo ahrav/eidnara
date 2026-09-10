@@ -127,7 +127,7 @@
       "scenario_ids": [
         "name_only_remediation_after_s"
       ],
-      "independent_oracle": "Independent reconstruction of mapped input bytes before and after the remediation under CC7; the fixture records mapping_consumes_domain_name=false.",
+      "independent_oracle": "Independent reconstruction of mapped input bytes before and after the remediation under CC7; construction-contracts.json records remediation_applicability.mapping_consumes_field=false for domains.name.",
       "negative_control": "A mapping that invents a byte dependency on domains.name, or a page whose bytes change without a source revision change, must fail.",
       "integration_observation": "Real operator_remediation commit after S while an export attempt is active and before T is fixed.",
       "constructing_tickets": [

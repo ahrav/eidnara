@@ -78,7 +78,9 @@ through the final combined confirmation. One creation command returned
 The statements above describe the specification task at the time it ran.
 Ticket P1 ([#352](https://github.com/ahrav/eidnara/issues/352)) carries this
 directory into the repository unchanged apart from the status wording in
-[README](README.md) and [specification traceability](spec-traceability.md), and
+[README](README.md) and [specification traceability](spec-traceability.md),
+whose property map also takes its acceptance criteria and seams from the
+[witness matrix](witness-matrix.md), and
 adds [construction contracts](construction-contracts.md), the
-[witness matrix](witness-matrix.md), and [prerequisite receipts](prerequisite-receipts.md).
+witness matrix, and [prerequisite receipts](prerequisite-receipts.md).
 This note does not alter the verifier's verdict or its evidence limits.
