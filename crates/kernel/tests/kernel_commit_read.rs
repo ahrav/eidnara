@@ -7,7 +7,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use kernel::{
     CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest, CompleteCommit, DomainSpec,
-    KernelError, KernelStore, PageEnd, Sensitivity, materialized_outbox_rows_for_test,
+    KernelError, KernelStore, PageEnd, Sensitivity,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -522,7 +522,6 @@ fn missing_rows_and_malformed_ordinals_fail_and_leave_progress_untouched() {
             .unwrap_err(),
         CommitReadError::MalformedOrdinals { commit_seq: many }
     );
-    // A fourth row on a three-event commit is a surplus, not an ordinal fault.
     fixture
         .mutate()
         .execute(
@@ -530,6 +529,52 @@ fn missing_rows_and_malformed_ordinals_fail_and_leave_progress_untouched() {
             [many],
         )
         .unwrap();
+    // Ordinals {-1,0,2} satisfy `MAX(ordinal)+1 == COUNT(*)`, and neither table
+    // bounds `ordinal` below, so the reader must reject the low end itself.
+    fixture
+        .mutate()
+        .execute(
+            "UPDATE outbox SET ordinal=-1 WHERE commit_seq=?1 AND ordinal=1",
+            [many],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&fixture.request(0, tip), wide())
+            .unwrap_err(),
+        CommitReadError::MalformedOrdinals { commit_seq: many }
+    );
+    fixture
+        .mutate()
+        .execute(
+            "UPDATE outbox SET ordinal=1 WHERE commit_seq=?1 AND ordinal=-1",
+            [many],
+        )
+        .unwrap();
+    // The highest representable ordinal is a typed refusal, not an overflow.
+    fixture
+        .mutate()
+        .execute(
+            "UPDATE outbox SET ordinal=?2 WHERE commit_seq=?1 AND ordinal=2",
+            rusqlite::params![many, i64::MAX],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&fixture.request(0, tip), wide())
+            .unwrap_err(),
+        CommitReadError::MalformedOrdinals { commit_seq: many }
+    );
+    fixture
+        .mutate()
+        .execute(
+            "UPDATE outbox SET ordinal=2 WHERE commit_seq=?1 AND ordinal=?2",
+            rusqlite::params![many, i64::MAX],
+        )
+        .unwrap();
+    // A fourth row on a three-event commit is a surplus, not an ordinal fault.
     fixture
         .mutate()
         .execute(
@@ -616,6 +661,26 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
         .sum();
     assert!(many_bytes > 0);
 
+    // The counter is scoped per store, so another store's reads cannot move it.
+    let other = seeded();
+    let before_other = fixture.store.materialized_outbox_rows_for_test();
+    let other_page = other
+        .store
+        .read_complete_commits(&other.request(0, other.tip()), wide())
+        .unwrap();
+    assert!(
+        other_page
+            .commits
+            .iter()
+            .any(|commit| !commit.rows.is_empty())
+    );
+    assert_eq!(
+        fixture.store.materialized_outbox_rows_for_test(),
+        before_other,
+        "another store's read moved this store's counter"
+    );
+    drop(other);
+
     // Exact fit: a three-row commit under a three-row, exact-byte bound reads whole.
     let exact = bounds(1, 3, many_bytes);
     let page = fixture
@@ -629,7 +694,7 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
     // One row or one byte less and the same commit is oversized as the first
     // commit of the page: no payload is selected and progress stays at `after`.
     for tight in [bounds(1, 2, many_bytes), bounds(1, 3, many_bytes - 1)] {
-        let materialized = materialized_outbox_rows_for_test();
+        let materialized = fixture.store.materialized_outbox_rows_for_test();
         let page = fixture
             .store
             .read_complete_commits(&fixture.request(many - 1, tip), tight)
@@ -645,7 +710,7 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
             }
         );
         assert_eq!(
-            materialized_outbox_rows_for_test(),
+            fixture.store.materialized_outbox_rows_for_test(),
             materialized,
             "a refused commit selected payload rows"
         );
@@ -654,7 +719,7 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
     // Reached mid-page, the same commit ends the page as deferred; the read
     // from that point is what reports it oversized. Neither read selects it.
     let tight = bounds(64, 2, 1 << 20);
-    let materialized = materialized_outbox_rows_for_test();
+    let materialized = fixture.store.materialized_outbox_rows_for_test();
     let first = fixture
         .store
         .read_complete_commits(&fixture.request(0, tip), tight)
@@ -663,14 +728,20 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
     assert_eq!(first.end, PageEnd::Deferred { next_commit: many });
     assert_eq!(first.through, many - 1);
     let selected: usize = first.commits.iter().map(|commit| commit.rows.len()).sum();
-    assert_eq!(materialized_outbox_rows_for_test(), materialized + selected);
+    assert_eq!(
+        fixture.store.materialized_outbox_rows_for_test(),
+        materialized + selected
+    );
     let blocked = fixture
         .store
         .read_complete_commits(&fixture.request(first.through, tip), tight)
         .unwrap();
     assert!(blocked.commits.is_empty());
     assert!(matches!(blocked.end, PageEnd::Oversized { commit_seq, .. } if commit_seq == many));
-    assert_eq!(materialized_outbox_rows_for_test(), materialized + selected);
+    assert_eq!(
+        fixture.store.materialized_outbox_rows_for_test(),
+        materialized + selected
+    );
 
     // A commit that fits alone but not beside the previous one is deferred
     // whole to the next page; the ledger predicts every page boundary.

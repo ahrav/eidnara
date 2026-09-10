@@ -59,8 +59,6 @@ pub use cas::{
     BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason, MAX_PAYLOAD_BYTES,
     ProviderEgress,
 };
-#[cfg(feature = "test-support")]
-pub use commit_read::materialized_outbox_rows_for_test;
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadRequest, CompleteCommit, PageEnd,
 };
