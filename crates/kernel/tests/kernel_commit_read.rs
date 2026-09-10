@@ -4,10 +4,12 @@
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::os::unix::fs::PermissionsExt;
+use std::time::{Duration, Instant};
 
 use kernel::{
-    CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest, CompleteCommit, DomainSpec,
-    KernelError, KernelStore, PageEnd, Sensitivity, materialized_outbox_rows_for_test,
+    BackupRequest, CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest,
+    CompleteCommit, DomainSpec, KernelError, KernelStore, PageEnd, Sensitivity,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -60,8 +62,9 @@ struct Ledger {
 }
 
 struct Fixture {
-    root: tempfile::TempDir,
+    // Fields drop in declaration order, so `store` drops before `root`.
     store: KernelStore,
+    root: tempfile::TempDir,
     ledger: Ledger,
 }
 
@@ -70,8 +73,8 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let store = KernelStore::open(root.path()).unwrap();
         Self {
-            root,
             store,
+            root,
             ledger: Ledger::default(),
         }
     }
@@ -79,7 +82,7 @@ impl Fixture {
     fn request(&self, after: i64, through: i64) -> CommitReadRequest {
         CommitReadRequest {
             consumer_id: CONSUMER.to_string(),
-            lease_epoch: self.store.lease_epoch(),
+            incarnation: self.store.capture_commit_read_target().unwrap().incarnation,
             after_commit: after,
             through_commit: through,
         }
@@ -504,6 +507,26 @@ fn missing_rows_and_malformed_ordinals_fail_and_leave_progress_untouched() {
         .read_complete_commits(&fixture.request(0, many - 1), wide())
         .unwrap();
     assert!(!page.commits.is_empty());
+    // A page that is already full by commit count ends before the damaged
+    // commit is inspected: the healthy commit is delivered and deferred, and the
+    // refusal arrives on the page the damaged commit would open.
+    let full = fixture
+        .store
+        .read_complete_commits(&fixture.request(many - 2, tip), bounds(1, 1024, 1 << 20))
+        .unwrap();
+    assert_eq!(
+        observed(&full.commits),
+        vec![(many - 1, fixture.ledger.commits[&(many - 1)].clone())]
+    );
+    assert_eq!(full.through, many - 1);
+    assert_eq!(full.end, PageEnd::Deferred { next_commit: many });
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&fixture.request(many - 1, tip), bounds(1, 1024, 1 << 20))
+            .unwrap_err(),
+        CommitReadError::MissingHistory { commit_seq: many }
+    );
 
     // Restore the row under a wrong ordinal: counts agree, ordinals do not.
     fixture
@@ -522,7 +545,6 @@ fn missing_rows_and_malformed_ordinals_fail_and_leave_progress_untouched() {
             .unwrap_err(),
         CommitReadError::MalformedOrdinals { commit_seq: many }
     );
-    // A fourth row on a three-event commit is a surplus, not an ordinal fault.
     fixture
         .mutate()
         .execute(
@@ -530,6 +552,52 @@ fn missing_rows_and_malformed_ordinals_fail_and_leave_progress_untouched() {
             [many],
         )
         .unwrap();
+    // Ordinals {-1,0,2} satisfy `MAX(ordinal)+1 == COUNT(*)`, and neither table
+    // bounds `ordinal` below, so the reader must reject the low end itself.
+    fixture
+        .mutate()
+        .execute(
+            "UPDATE outbox SET ordinal=-1 WHERE commit_seq=?1 AND ordinal=1",
+            [many],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&fixture.request(0, tip), wide())
+            .unwrap_err(),
+        CommitReadError::MalformedOrdinals { commit_seq: many }
+    );
+    fixture
+        .mutate()
+        .execute(
+            "UPDATE outbox SET ordinal=1 WHERE commit_seq=?1 AND ordinal=-1",
+            [many],
+        )
+        .unwrap();
+    // The highest representable ordinal is a typed refusal, not an overflow.
+    fixture
+        .mutate()
+        .execute(
+            "UPDATE outbox SET ordinal=?2 WHERE commit_seq=?1 AND ordinal=2",
+            rusqlite::params![many, i64::MAX],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&fixture.request(0, tip), wide())
+            .unwrap_err(),
+        CommitReadError::MalformedOrdinals { commit_seq: many }
+    );
+    fixture
+        .mutate()
+        .execute(
+            "UPDATE outbox SET ordinal=2 WHERE commit_seq=?1 AND ordinal=?2",
+            rusqlite::params![many, i64::MAX],
+        )
+        .unwrap();
+    // A fourth row on a three-event commit is a surplus, not an ordinal fault.
     fixture
         .mutate()
         .execute(
@@ -616,6 +684,26 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
         .sum();
     assert!(many_bytes > 0);
 
+    // The counter is scoped per store, so another store's reads cannot move it.
+    let other = seeded();
+    let before_other = fixture.store.materialized_outbox_rows_for_test();
+    let other_page = other
+        .store
+        .read_complete_commits(&other.request(0, other.tip()), wide())
+        .unwrap();
+    assert!(
+        other_page
+            .commits
+            .iter()
+            .any(|commit| !commit.rows.is_empty())
+    );
+    assert_eq!(
+        fixture.store.materialized_outbox_rows_for_test(),
+        before_other,
+        "another store's read moved this store's counter"
+    );
+    drop(other);
+
     // Exact fit: a three-row commit under a three-row, exact-byte bound reads whole.
     let exact = bounds(1, 3, many_bytes);
     let page = fixture
@@ -629,7 +717,7 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
     // One row or one byte less and the same commit is oversized as the first
     // commit of the page: no payload is selected and progress stays at `after`.
     for tight in [bounds(1, 2, many_bytes), bounds(1, 3, many_bytes - 1)] {
-        let materialized = materialized_outbox_rows_for_test();
+        let materialized = fixture.store.materialized_outbox_rows_for_test();
         let page = fixture
             .store
             .read_complete_commits(&fixture.request(many - 1, tip), tight)
@@ -645,7 +733,7 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
             }
         );
         assert_eq!(
-            materialized_outbox_rows_for_test(),
+            fixture.store.materialized_outbox_rows_for_test(),
             materialized,
             "a refused commit selected payload rows"
         );
@@ -654,7 +742,7 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
     // Reached mid-page, the same commit ends the page as deferred; the read
     // from that point is what reports it oversized. Neither read selects it.
     let tight = bounds(64, 2, 1 << 20);
-    let materialized = materialized_outbox_rows_for_test();
+    let materialized = fixture.store.materialized_outbox_rows_for_test();
     let first = fixture
         .store
         .read_complete_commits(&fixture.request(0, tip), tight)
@@ -663,14 +751,20 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
     assert_eq!(first.end, PageEnd::Deferred { next_commit: many });
     assert_eq!(first.through, many - 1);
     let selected: usize = first.commits.iter().map(|commit| commit.rows.len()).sum();
-    assert_eq!(materialized_outbox_rows_for_test(), materialized + selected);
+    assert_eq!(
+        fixture.store.materialized_outbox_rows_for_test(),
+        materialized + selected
+    );
     let blocked = fixture
         .store
         .read_complete_commits(&fixture.request(first.through, tip), tight)
         .unwrap();
     assert!(blocked.commits.is_empty());
     assert!(matches!(blocked.end, PageEnd::Oversized { commit_seq, .. } if commit_seq == many));
-    assert_eq!(materialized_outbox_rows_for_test(), materialized + selected);
+    assert_eq!(
+        fixture.store.materialized_outbox_rows_for_test(),
+        materialized + selected
+    );
 
     // A commit that fits alone but not beside the previous one is deferred
     // whole to the next page; the ledger predicts every page boundary.
@@ -699,10 +793,19 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
 #[test]
 fn retries_keep_the_captured_target_and_the_wrong_reader_fails_closed() {
     let mut fixture = seeded();
-    let target = fixture.tip();
+    let capture = fixture.store.capture_commit_read_target().unwrap();
+    let target = capture.through_commit;
+    assert_eq!(target, fixture.tip());
+    let request = CommitReadRequest {
+        consumer_id: CONSUMER.to_string(),
+        incarnation: capture.incarnation,
+        after_commit: 0,
+        through_commit: target,
+    };
+    assert_eq!(request, fixture.request(0, target));
     let first = fixture
         .store
-        .read_complete_commits(&fixture.request(0, target), wide())
+        .read_complete_commits(&request, wide())
         .unwrap();
     assert_eq!(first.through, target);
 
@@ -739,15 +842,6 @@ fn retries_keep_the_captured_target_and_the_wrong_reader_fails_closed() {
             .unwrap_err(),
         CommitReadError::UnknownConsumer
     );
-    let mut wrong_incarnation = fixture.request(0, target);
-    wrong_incarnation.lease_epoch += 1;
-    assert_eq!(
-        fixture
-            .store
-            .read_complete_commits(&wrong_incarnation, wide())
-            .unwrap_err(),
-        CommitReadError::IncarnationMismatch
-    );
     let tip = fixture.tip();
     assert_eq!(
         fixture
@@ -775,7 +869,7 @@ fn retries_keep_the_captured_target_and_the_wrong_reader_fails_closed() {
         reopened.read_complete_commits(&stale, wide()).unwrap_err(),
         CommitReadError::IncarnationMismatch
     );
-    stale.lease_epoch = reopened.lease_epoch();
+    stale.incarnation = reopened.capture_commit_read_target().unwrap().incarnation;
     let again = reopened.read_complete_commits(&stale, wide()).unwrap();
     assert_eq!(again, first);
 }
@@ -825,4 +919,99 @@ fn acknowledgement_and_pruning_bound_what_a_consumer_may_still_read() {
     );
     assert!(pending.last().unwrap().commit_boundary);
     assert_eq!(fixture.published_rows(), 0);
+}
+
+#[test]
+fn a_restore_under_the_same_handle_is_a_new_incarnation() {
+    let fixture = seeded();
+    let target = *fixture.ledger.commits.keys().nth(2).unwrap();
+    let captured = fixture.request(0, target);
+    let first = fixture
+        .store
+        .read_complete_commits(&captured, wide())
+        .unwrap();
+    assert_eq!(first.through, target);
+
+    let mut other = Fixture::open();
+    other.register(CONSUMER);
+    other.insert_domains("other-one", &[20]);
+    other.insert_domains("other-many", &[21, 22]);
+    assert!(other.tip() >= target);
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&other.request(0, target), wide())
+            .unwrap_err(),
+        CommitReadError::IncarnationMismatch
+    );
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = other
+        .store
+        .backup(BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.store.restore(&backup.destination_path).unwrap(),
+        other.tip()
+    );
+
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&captured, wide())
+            .unwrap_err(),
+        CommitReadError::IncarnationMismatch
+    );
+    let restored = fixture
+        .store
+        .read_complete_commits(&fixture.request(0, target), wide())
+        .unwrap();
+    let expected = other
+        .store
+        .read_complete_commits(&other.request(0, target), wide())
+        .unwrap();
+    assert_eq!(restored, expected);
+    assert_ne!(restored, first);
+
+    // Both roots now hold the same database identity. Each reopened root acquires
+    // a root-local lease epoch and starts a fresh restore generation.
+    let Fixture {
+        root: root_a,
+        store: store_a,
+        ..
+    } = fixture;
+    let Fixture {
+        root: root_b,
+        store: store_b,
+        ..
+    } = other;
+    drop((store_a, store_b));
+    let reopen = |root: tempfile::TempDir| {
+        let store = KernelStore::open(root.path()).unwrap();
+        Fixture {
+            store,
+            root,
+            ledger: Ledger::default(),
+        }
+    };
+    let mut a = reopen(root_a);
+    let mut b = reopen(root_b);
+    a.insert_domains("a-diverges", &[30]);
+    b.insert_domains("b-diverges", &[31]);
+    let tip = a.tip();
+    assert_eq!(tip, b.tip());
+    let from_a = a.request(0, tip);
+    let from_b = b.request(0, tip);
+    assert_ne!(
+        a.store.read_complete_commits(&from_a, wide()).unwrap(),
+        b.store.read_complete_commits(&from_b, wide()).unwrap()
+    );
+    assert_eq!(
+        a.store.read_complete_commits(&from_b, wide()).unwrap_err(),
+        CommitReadError::IncarnationMismatch
+    );
 }

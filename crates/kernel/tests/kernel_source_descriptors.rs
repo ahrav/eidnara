@@ -268,7 +268,7 @@ impl Fixture {
             .read_complete_commits(
                 &kernel::CommitReadRequest {
                     consumer_id: CONSUMER.to_string(),
-                    lease_epoch: self.store.lease_epoch(),
+                    incarnation: self.store.capture_commit_read_target().unwrap().incarnation,
                     after_commit: seq - 1,
                     through_commit: seq,
                 },

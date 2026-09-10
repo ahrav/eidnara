@@ -221,8 +221,8 @@ pub enum ArtifactErrorKind {
     ExactBytesRewritten,
     /// An exact ingest received bytes that are not valid UTF-8 text.
     UnsupportedShape,
-    /// The digest names a stored object whose bytes differ from the payload. Nothing is replaced;
-    /// the offered bytes are refused.
+    /// A stored object hashes to the payload's digest but holds different bytes. Nothing is
+    /// replaced; the offered bytes are refused.
     DigestCollision,
 }
 
