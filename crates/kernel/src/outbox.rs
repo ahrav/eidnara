@@ -454,23 +454,7 @@ impl KernelStore {
             )
             .map_err(map_sqlite)?;
         let entries = statement
-            .query_map([limit], |row| {
-                let sensitivity: String = row.get(8)?;
-                Ok(OutboxEntry {
-                    outbox_position: row.get(0)?,
-                    commit_seq: row.get(1)?,
-                    ordinal: row.get(2)?,
-                    object_id: row.get(3)?,
-                    object_kind: row.get(4)?,
-                    source_kind: row.get(5)?,
-                    source_id: row.get(6)?,
-                    source_revision: row.get(7)?,
-                    sensitivity: Sensitivity::from_stored(&sensitivity),
-                    payload: row.get(9)?,
-                    created_at: row.get(10)?,
-                    commit_boundary: row.get(11)?,
-                })
-            })
+            .query_map([limit], outbox_entry)
             .map_err(map_sqlite)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(map_sqlite)?;
@@ -600,6 +584,25 @@ impl KernelStore {
         tx.commit().map_err(map_sqlite)?;
         Ok(OutboxPruneResult { horizon, deleted })
     }
+}
+
+/// Maps the twelve-column outbox projection every reader selects: the eleven stored columns in schema order, then the caller's commit-boundary expression. commentlint: allow(JUDGE)
+pub(super) fn outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
+    let sensitivity: String = row.get(8)?;
+    Ok(OutboxEntry {
+        outbox_position: row.get(0)?,
+        commit_seq: row.get(1)?,
+        ordinal: row.get(2)?,
+        object_id: row.get(3)?,
+        object_kind: row.get(4)?,
+        source_kind: row.get(5)?,
+        source_id: row.get(6)?,
+        source_revision: row.get(7)?,
+        sensitivity: Sensitivity::from_stored(&sensitivity),
+        payload: row.get(9)?,
+        created_at: row.get(10)?,
+        commit_boundary: row.get(11)?,
+    })
 }
 
 fn consumer_identity(consumer_id: &str) -> Result<String, KernelError> {
