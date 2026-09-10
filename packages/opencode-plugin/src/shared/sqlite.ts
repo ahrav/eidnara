@@ -38,11 +38,11 @@ type SqliteModule = {
 };
 
 /**
- * bun:sqlite opens with zero flags (SQLITE_MISUSE) when the options object carries none of its own keys; node:sqlite ignores unknown keys. commentlint: allow(JUDGE)
+ * bun:sqlite opens with zero flags (SQLITE_MISUSE) when the options object carries none of its own keys; node:sqlite ignores unknown keys.
  * Rejecting every key other than `readonly` and `fileMustExist` prevents a call from
  * succeeding on one runtime but failing or behaving differently on the other.
  *
- * A Buffer location deserializes a database in better-sqlite3 but represents path bytes in node:sqlite, so only string paths are accepted. commentlint: allow(JUDGE)
+ * A Buffer location deserializes a database in better-sqlite3 but represents path bytes in node:sqlite, so only string paths are accepted.
  */
 function normalizeOpenRequest(
     filename: unknown,
@@ -170,7 +170,7 @@ export function buildBunSqliteDatabaseClass(BunDatabase: any): typeof BetterSqli
             super(location, readonly ? { readonly: true } : { readwrite: true, create: true });
         }
 
-        // The callback throws before `super.transaction` commits, so the native wrapper rolls back. commentlint: allow(JUDGE)
+        // The callback throws before `super.transaction` commits, so the native wrapper rolls back.
         // The `any` parameters match better-sqlite3's generic `transaction(fn)` signature.
         transaction<F extends (...args: any[]) => any>(fn: F): F {
             rejectAsyncCallback(fn, "transaction");

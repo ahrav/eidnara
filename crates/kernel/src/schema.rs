@@ -218,7 +218,7 @@ pub fn apply_kernel_connection_profile(
     }
     // Switching journal_mode can need the write lock, so the busy handler is
     // installed first; the default handler gives up immediately.
-    // SQLite removes the busy handler for a nonpositive timeout instead of installing one, so such a value is refused rather than passed through. commentlint: allow(JUDGE)
+    // SQLite removes the busy handler for a nonpositive timeout instead of installing one, so such a value is refused rather than passed through.
     if busy_timeout_ms <= 0 {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -297,7 +297,7 @@ fn apply_schema<F: FnOnce() -> rusqlite::Result<()>>(
     // `BEGIN IMMEDIATE` acquires the write lock before later statements run.
     // A DEFERRED bootstrap holds a shared read lock and fails `SQLITE_BUSY` on
     // upgrade instead of waiting out `busy_timeout`.
-    // `read_valid_marker` rejects a negative `created_at`, so refusing it here keeps every committed marker reopenable. commentlint: allow(JUDGE)
+    // `read_valid_marker` rejects a negative `created_at`, so refusing it here keeps every committed marker reopenable.
     if !is_well_formed_incarnation_id(incarnation) || created_at < 0 {
         return Err(rusqlite::Error::InvalidQuery);
     }

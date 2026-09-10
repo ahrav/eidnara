@@ -245,7 +245,7 @@ impl KernelStore {
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|_| KernelError::InvalidBackup)?;
-            // SQLite resolves a pathname, so the file it opened is compared with the file created through the verified descriptor before a page is copied; a destination swapped in between would otherwise receive the whole copy. commentlint: allow(JUDGE)
+            // SQLite resolves a pathname, so the file it opened is compared with the file created through the verified descriptor before a page is copied; a destination swapped in between would otherwise receive the whole copy.
             assert_same_file(
                 &destination,
                 std::ffi::OsStr::new(&temp_name),
@@ -418,11 +418,11 @@ impl KernelStore {
 
     /// Verifies and installs a backup, returning its captured commit sequence.
     ///
-    /// A backup that does not carry every purge this store has committed is refused as `InvalidRestore` before the live family is displaced: a purge is irreversible, and installing a history without its tombstone would let the purged bytes be ingested again. A backup whose live evidence references an artifact this store does not hold, or holds only as bytes that fail verification, is refused the same way, since it would publish references every read would then fail against. commentlint: allow(JUDGE)
+    /// A backup that does not carry every purge this store has committed is refused as `InvalidRestore` before the live family is displaced: a purge is irreversible, and installing a history without its tombstone would let the purged bytes be ingested again. A backup whose live evidence references an artifact this store does not hold, or holds only as bytes that fail verification, is refused the same way, since it would publish references every read would then fail against.
     /// The checks run under the writer guard that purges and purge unlinks also hold, so neither can change the answer between the check and the displacement.
     ///
-    /// Verification reads and hashes every artifact the backup's live evidence references while the writer and every reader guard are held, so no read or write proceeds until it finishes. The window is proportional to the total bytes of those artifacts, bounded above by the store's artifact capacity; a restore of a store near capacity is a maintenance operation, not one to run behind a request. commentlint: allow(JUDGE)
-    /// After installing the backup, `restore` runs interrupted-work recovery before returning, so it unlinks the bytes of any purge the backup recorded as committed and pending unlink. commentlint: allow(JUDGE)
+    /// Verification reads and hashes every artifact the backup's live evidence references while the writer and every reader guard are held, so no read or write proceeds until it finishes. The window is proportional to the total bytes of those artifacts, bounded above by the store's artifact capacity; a restore of a store near capacity is a maintenance operation, not one to run behind a request.
+    /// After installing the backup, `restore` runs interrupted-work recovery before returning, so it unlinks the bytes of any purge the backup recorded as committed and pending unlink.
     /// Recovery errors, including a purge unlink that could not complete, are reported as `Io` after the backup is installed; the pending unlink stays recorded for maintenance to retry.
     pub fn restore(&self, backup_path: impl AsRef<Path>) -> Result<i64, KernelError> {
         self.restore_inner(backup_path.as_ref(), None, None)
@@ -490,8 +490,8 @@ impl KernelStore {
         hook: Option<&mut dyn FnMut(RestorePhase)>,
     ) -> Result<i64, KernelError> {
         let source_seq = self.install_backup(backup_path, fault, hook)?;
-        // The installed history carries its own interrupted work, such as a purge that committed without unlinking its bytes; the connection guards are released here, so recovery can take them. commentlint: allow(JUDGE)
-        // A purge the restored history owes whose bytes are still readable is a failure of this restore, not a deferred chore, because the caller was promised those bytes are gone before the call returns. commentlint: allow(JUDGE)
+        // The installed history carries its own interrupted work, such as a purge that committed without unlinking its bytes; the connection guards are released here, so recovery can take them.
+        // A purge the restored history owes whose bytes are still readable is a failure of this restore, not a deferred chore, because the caller was promised those bytes are gone before the call returns.
         if self.recover_interrupted_work()? > 0 {
             return Err(KernelError::Io);
         }
@@ -620,7 +620,7 @@ impl KernelStore {
                 return Err(error);
             }
         };
-        // A restored database can change an artifact's classification while keeping the displaced commit-log tip, so a verdict cached on `(tip, generation)` before this point must not survive it. commentlint: allow(JUDGE)
+        // A restored database can change an artifact's classification while keeping the displaced commit-log tip, so a verdict cached on `(tip, generation)` before this point must not survive it.
         // `_change` is declared after the connection guards so it drops first, restoring an even generation before readers can acquire a swapped connection.
         let _change = self.begin_classification_change();
         let temporary_writer = temporary.remove(0);
@@ -1398,7 +1398,7 @@ fn read_valid_restore_marker(
     {
         return Err(KernelError::Inconclusive);
     }
-    // `Path::is_dir` follows a symlink, so the directory is opened `NOFOLLOW` and every rollback step below runs relative to that descriptor; a `.restore-*` entry swapped for a link cannot redirect the rollback. commentlint: allow(JUDGE)
+    // `Path::is_dir` follows a symlink, so the directory is opened `NOFOLLOW` and every rollback step below runs relative to that descriptor; a `.restore-*` entry swapped for a link cannot redirect the rollback.
     let recovery = RecoveryDir::open(root, recovery_directory)?;
     Ok((marker, recovery))
 }

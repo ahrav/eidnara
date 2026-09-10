@@ -12,7 +12,7 @@ function compactionOwnerSuffix(snapshot: SidebarSnapshot): string {
         : "native compaction";
 }
 
-/** Prefers `native_context_usage_percentage`, measured against the unreserved model window; `contextLimit` subtracts the output reservation. commentlint: allow(JUDGE) */
+/** Prefers `native_context_usage_percentage`, measured against the unreserved model window; `contextLimit` subtracts the output reservation. */
 export function nativeCompactionContextLabel(snapshot: SidebarSnapshot): string {
     const owner = compactionOwnerSuffix(snapshot);
     const native = snapshot.native_context_usage_percentage;
@@ -24,7 +24,7 @@ export function nativeCompactionContextLabel(snapshot: SidebarSnapshot): string 
     return `Context: ${percentage.toFixed(1)}% · ${owner}`;
 }
 
-/** Recovers the unreserved window from `inputTokens / percentage`, falling back to the reserved `contextLimit`. commentlint: allow(JUDGE) */
+/** Recovers the unreserved window from `inputTokens / percentage`, falling back to the reserved `contextLimit`. */
 export function nativeContextLimit(snapshot: SidebarSnapshot): number {
     const native = snapshot.native_context_usage_percentage;
     if (

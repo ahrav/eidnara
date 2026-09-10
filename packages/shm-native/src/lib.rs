@@ -1209,7 +1209,7 @@ pub fn commit_reservation(
     })
 }
 
-/// Prefix on errors raised after a handle's native token was detached; the JavaScript wrapper treats such an error as consuming the handle. commentlint: allow(JUDGE)
+/// Prefix on errors raised after a handle's native token was detached; the JavaScript wrapper treats such an error as consuming the handle.
 const HANDLE_CONSUMED_PREFIX: &str = "native handle consumed: ";
 
 fn consumed_error(message: &str) -> Error {

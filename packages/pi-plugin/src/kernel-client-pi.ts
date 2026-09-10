@@ -15,16 +15,16 @@ interface IsolatedTokenState {
     tokens: TokenCache;
     /** Orders project roots from least to most recently resolved and bounds the cache's per-project token buckets. */
     rootOrder: Set<string>;
-    /** The connection file each root's tokens were minted against: a token's `known_as_of` is a position in one daemon's event sequence, so a root re-resolved under a different connection file drops that root's tokens instead of presenting them to the new daemon. commentlint: allow(JUDGE) */
+    /** The connection file each root's tokens were minted against: a token's `known_as_of` is a position in one daemon's event sequence, so a root re-resolved under a different connection file drops that root's tokens instead of presenting them to the new daemon. */
     connectionFileByRoot: Map<string, string>;
 }
 
 const isolatedTokenCaches = new Map<string, IsolatedTokenState>();
 
-/** Cap on project roots whose token buckets one forked session retains; `/cd` past the cap evicts the least-recently-resolved root's tokens, mirroring the shared cache's bound. commentlint: allow(JUDGE) */
+/** Cap on project roots whose token buckets one forked session retains; `/cd` past the cap evicts the least-recently-resolved root's tokens, mirroring the shared cache's bound. */
 export const MAX_ISOLATED_TOKEN_CACHE_PROJECTS = 4;
 
-/** Every kernel operation resolves a client for its project root first; resolution order therefore tracks token-cache access order. commentlint: allow(JUDGE) */
+/** Every kernel operation resolves a client for its project root first; resolution order therefore tracks token-cache access order. */
 function touchIsolatedRoot(
     state: IsolatedTokenState,
     projectRoot: string,

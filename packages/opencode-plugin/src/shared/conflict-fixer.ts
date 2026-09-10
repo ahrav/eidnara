@@ -24,19 +24,19 @@ type JsonObject = Record<string, unknown>;
 
 interface JsonConfigDocument {
     path: string;
-    /** The physical file behind `path` after every symlink, in the path and in its ancestors, is resolved; aliases of one file compose here. commentlint: allow(JUDGE) */
+    /** The physical file behind `path` after every symlink, in the path and in its ancestors, is resolved; aliases of one file compose here. */
     target: string;
     config: JsonObject;
     text: string;
-    /** `false` when the editor refuses the document; the layer still counts toward precedence. commentlint: allow(JUDGE) */
+    /** `false` when the editor refuses the document; the layer still counts toward precedence. */
     editable: boolean;
 }
 
 /**
- * `config` is parsed the way the detector parses it, so a layer the editor refuses still reports the value the host uses. commentlint: allow(JUDGE)
- * The resolved target serves both read and write, preventing a retargeted link from receiving the previous target's edited snapshot. commentlint: allow(JUDGE)
- * A FIFO or device is refused before the read so a blocking open cannot hang the fixer. commentlint: allow(JUDGE)
- * A fatal decoder rejects malformed UTF-8 rather than rewriting the file with U+FFFD. commentlint: allow(JUDGE)
+ * `config` is parsed the way the detector parses it, so a layer the editor refuses still reports the value the host uses.
+ * The resolved target serves both read and write, preventing a retargeted link from receiving the previous target's edited snapshot.
+ * A FIFO or device is refused before the read so a blocking open cannot hang the fixer.
+ * A fatal decoder rejects malformed UTF-8 rather than rewriting the file with U+FFFD.
  */
 function readConfig(filePath: string): JsonConfigDocument | null {
     try {
@@ -56,7 +56,7 @@ function readConfig(filePath: string): JsonConfigDocument | null {
     }
 }
 
-/** A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. commentlint: allow(JUDGE) */
+/** A truncated `opencode.json` stops OpenCode from starting, so a partial write must never land on the destination path. */
 function writeConfig(target: string, text: string): void {
     writeFileAtomicSync(target, text);
 }
@@ -112,7 +112,7 @@ export interface FixConflictsOptions {
 
 /**
  * Returns applied edits; uneditable layers can leave conflicts unresolved.
- * Callers re-run `detectConflicts` to report what is left. commentlint: allow(JUDGE)
+ * Callers re-run `detectConflicts` to report what is left.
  */
 export function fixConflicts(
     directory: string,

@@ -42,7 +42,6 @@ function linkRealTokenizer(dir: string): void {
 /**
  * The driver has no `node_modules` ancestor, so `require("ai-tokenizer")` fails and `preloadTokenizer` searches on disk.
  * `cwd` is an otherwise empty directory under `dir`, so tests can plant a package there and observe whether the search reaches it.
- * commentlint: allow(JUDGE)
  */
 function runPreloadRace(text: string, options: DriverOptions = {}): RaceReport {
     const dir = mkdtempSync(join(tmpdir(), "eidnara-token-estimator-race-"));

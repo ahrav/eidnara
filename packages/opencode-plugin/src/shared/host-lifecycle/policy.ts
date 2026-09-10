@@ -134,7 +134,7 @@ function nativeChildRan(error: unknown): boolean {
     return error instanceof NativeLaunchError && error.childMayHaveActed;
 }
 
-/** `lifecycle_busy` and `harness_unavailable` return before the binary spawns or stops anything. commentlint: allow(JUDGE) */
+/** `lifecycle_busy` and `harness_unavailable` return before the binary spawns or stops anything. */
 const DAEMON_AS_FOUND_REASONS: ReadonlySet<DaemonReason> = new Set([
     "already_running",
     "already_stopped",
@@ -142,7 +142,7 @@ const DAEMON_AS_FOUND_REASONS: ReadonlySet<DaemonReason> = new Set([
     "harness_unavailable",
 ]);
 
-/** A restart that reports both effects uncommitted also left the daemon as found, whatever its reason. commentlint: allow(JUDGE) */
+/** A restart that reports both effects uncommitted also left the daemon as found, whatever its reason. */
 function daemonAsFound(native: DaemonResultV1): boolean {
     if (DAEMON_AS_FOUND_REASONS.has(native.reason)) return true;
     const effects = native.effects;
@@ -300,8 +300,8 @@ function unprovenCompatibility(result: DaemonResultV1): DaemonResultV1 {
 }
 
 /**
- * JSON round-trip evaluates `toJSON` and getters once before deriving both the coalescing key and launch payload. commentlint: allow(JUDGE)
- * An envelope with no JSON form is passed through unchanged so the launcher reports its typed usage error, and is marked so it never shares a start. commentlint: allow(JUDGE)
+ * JSON round-trip evaluates `toJSON` and getters once before deriving both the coalescing key and launch payload.
+ * An envelope with no JSON form is passed through unchanged so the launcher reports its typed usage error, and is marked so it never shares a start.
  */
 function normalizedEnvelope(envelope: NativeStartupEnvelope | undefined): {
     envelope: NativeStartupEnvelope | undefined;
@@ -319,8 +319,8 @@ function normalizedEnvelope(envelope: NativeStartupEnvelope | undefined): {
 }
 
 /**
- * Native `start` answers `harness_unavailable` for a changed harness or credential set on a running daemon, so demands with different envelopes are different requests and must not share one result. commentlint: allow(JUDGE)
- * Keys are normalized so wire-identical envelopes coalesce however their callers built the object. commentlint: allow(JUDGE)
+ * Native `start` answers `harness_unavailable` for a changed harness or credential set on a running daemon, so demands with different envelopes are different requests and must not share one result.
+ * Keys are normalized so wire-identical envelopes coalesce however their callers built the object.
  */
 function envelopeIdentity(envelope: NativeStartupEnvelope | undefined): string {
     return envelope === undefined ? "" : stableStringify(envelope);
@@ -373,7 +373,7 @@ export class HostLifecyclePolicy {
         string,
         { generation: number; snapshot: Promise<CompatibilitySnapshot> }
     >();
-    /** Advances after each native mutation unless the daemon is provably as the command found it; see `invokeMutation`. commentlint: allow(JUDGE) */
+    /** Advances after each native mutation unless the daemon is provably as the command found it; see `invokeMutation`. */
     private lifecycleGeneration = 0;
     private platformGateResult: PlatformGate | undefined;
 
@@ -467,12 +467,12 @@ export class HostLifecyclePolicy {
         // would launch a second native start that only collides with the
         // first on the transaction lock.
         const rootKey = rootResolution.ok ? rootResolution.root : "\u0000no-root";
-        // One serialized snapshot is both the coalescing key and the native start's input, so a stateful `toJSON` cannot make coalesced demands launch with different envelopes. commentlint: allow(JUDGE)
+        // One serialized snapshot is both the coalescing key and the native start's input, so a stateful `toJSON` cannot make coalesced demands launch with different envelopes.
         const { envelope: startupEnvelope, serializable } = normalizedEnvelope(
             request.startupEnvelope ?? this.defaultStartupEnvelope,
         );
         const key = `${rootKey}\u0000${envelopeIdentity(startupEnvelope)}`;
-        // Serialization ran caller-supplied code that can exhaust the caller deadline or aggregate budget, or abort the signal; none may then spawn. commentlint: allow(JUDGE)
+        // Serialization ran caller-supplied code that can exhaust the caller deadline or aggregate budget, or abort the signal; none may then spawn.
         if (request.signal?.aborted) throw new WaiterDetachedError("aborted");
         if (callerDeadlineAt !== undefined && monotonicNow() >= callerDeadlineAt) {
             throw new WaiterDetachedError("deadline");
@@ -482,7 +482,7 @@ export class HostLifecyclePolicy {
         if (rootResolution.ok && monotonicNow() >= aggregateDeadlineAt) {
             return { result: timeoutResult("start", rootResolution.root, true), storage: null };
         }
-        // An envelope with no JSON form has no trustworthy identity, so its start is never shared. commentlint: allow(JUDGE)
+        // An envelope with no JSON form has no trustworthy identity, so its start is never shared.
         let shared = serializable ? this.inflightStarts.get(key) : undefined;
         if (!shared) {
             shared = this.start(startupEnvelope);
@@ -499,7 +499,7 @@ export class HostLifecyclePolicy {
         }
         let result: DaemonResultV1;
         if (rootResolution.ok) {
-            // The shared start ran on its own full aggregate; this demand waits only for its remaining aggregate time. commentlint: allow(JUDGE)
+            // The shared start ran on its own full aggregate; this demand waits only for its remaining aggregate time.
             try {
                 result = await this.raceWithinPolicy(
                     shared,
@@ -509,7 +509,7 @@ export class HostLifecyclePolicy {
                 );
             } catch (error) {
                 if (error instanceof WaiterDetachedError) throw error;
-                // The child may still be running for other waiters, so its effects are unknown to this demand. commentlint: allow(JUDGE)
+                // The child may still be running for other waiters, so its effects are unknown to this demand.
                 return {
                     result: timeoutResult("start", rootResolution.root, false),
                     storage: null,
@@ -605,7 +605,7 @@ export class HostLifecyclePolicy {
      * would never leave the map and every later demand for the root would join
      * a probe that can no longer answer.
      *
-     * A probe outlived by a native mutation is rejected and never joined: the daemon it authenticated may no longer be the one serving. commentlint: allow(JUDGE)
+     * A probe outlived by a native mutation is rejected and never joined: the daemon it authenticated may no longer be the one serving.
      */
     private sharedCompatibility(
         probe: (budgetMs: number, signal?: AbortSignal) => Promise<CompatibilitySnapshot>,
@@ -638,7 +638,7 @@ export class HostLifecyclePolicy {
         return snapshot;
     }
 
-    /** `platformReaders` is `readonly`, so the gate runs its readers once per policy; every later caller reads the memo. commentlint: allow(JUDGE) */
+    /** `platformReaders` is `readonly`, so the gate runs its readers once per policy; every later caller reads the memo. */
     private platformGate(): PlatformGate {
         this.platformGateResult ??= checkPlatform(this.platformReaders);
         return this.platformGateResult;
@@ -701,7 +701,7 @@ export class HostLifecyclePolicy {
                 signal.addEventListener("abort", onAbort, { once: true });
             }
             if (deadlineAt !== undefined) {
-                // A timer of 0 fires in a later macrotask, so an already-settled `shared` would resolve this waiter through the microtask queue first and hand it a result it had no time left to wait for; a probe's synchronous prefix ran before this call, so its cost lands here too. commentlint: allow(JUDGE)
+                // A timer of 0 fires in a later macrotask, so an already-settled `shared` would resolve this waiter through the microtask queue first and hand it a result it had no time left to wait for; a probe's synchronous prefix ran before this call, so its cost lands here too.
                 const delayMs = deadlineAt - monotonicNow();
                 if (delayMs <= 0) {
                     detach("deadline");
@@ -724,7 +724,7 @@ export class HostLifecyclePolicy {
                 },
                 (error: unknown) => {
                     if (settled) return;
-                    // A late rejection is the deadline's outcome, not the probe's; classifying it as a probe failure would let it stand in for a detachment. commentlint: allow(JUDGE)
+                    // A late rejection is the deadline's outcome, not the probe's; classifying it as a probe failure would let it stand in for a detachment.
                     if (deadlineAt !== undefined && monotonicNow() >= deadlineAt) {
                         detach("deadline");
                         return;
@@ -815,7 +815,7 @@ export class HostLifecyclePolicy {
         return result;
     }
 
-    /** `daemonMayHaveChanged` is false only when no child ran or the child answered that it acted on nothing. commentlint: allow(JUDGE) */
+    /** `daemonMayHaveChanged` is false only when no child ran or the child answered that it acted on nothing. */
     private async invokeMutation(
         command: "start" | "stop" | "restart",
         preflight: { root: string; deadlineMs: number },
@@ -872,7 +872,7 @@ export class HostLifecyclePolicy {
                 const fallback = this.payloadDirFallback();
                 if (fallback !== null) {
                     const retryBudget = remaining();
-                    // A found payload contradicts the first launch's answer, and with no budget left to retry the command timed out; nothing new committed. commentlint: allow(JUDGE)
+                    // A found payload contradicts the first launch's answer, and with no budget left to retry the command timed out; nothing new committed.
                     if (retryBudget <= 0) {
                         return {
                             result: timeoutResult(command, preflight.root, true),
@@ -929,7 +929,7 @@ export class HostLifecyclePolicy {
             // A readiness failure must not erase an observation that already
             // succeeded. Letting it reach the outer `catch` would answer
             // `internal_error` for a daemon this call verifiably observed, so a
-            // rejected probe degrades to `relabeled`. `raceDetached` enforces `remaining` when the probe ignores its argument. commentlint: allow(JUDGE)
+            // rejected probe degrades to `relabeled`. `raceDetached` enforces `remaining` when the probe ignores its argument.
             let observed: ObservationalHealth;
             try {
                 observed = await this.raceDetached(

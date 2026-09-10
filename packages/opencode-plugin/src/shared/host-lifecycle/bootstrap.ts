@@ -494,7 +494,7 @@ function invalid(detail: string): BootstrapError {
 
 /**
  * Sparse files can report large logical sizes without occupying blocks.
- * A debug `eidnara-host` with full debuginfo measures about 380 MiB. commentlint: allow(JUDGE)
+ * A debug `eidnara-host` with full debuginfo measures about 380 MiB.
  */
 const MAX_LAUNCHER_BYTES = 1 << 30;
 

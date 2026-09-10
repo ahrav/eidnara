@@ -730,7 +730,6 @@ function redactedReasoningData(part: Record<string, unknown>): string | null {
 /**
  * Invariant: `estimateNonToolPart` and `partContentFingerprint` must both classify through this
  * function. A second classifier lets the fingerprint miss content the tokenizer counts.
- * commentlint: allow(JUDGE)
  */
 function classifyNonToolPart(
     part: Record<string, unknown>,

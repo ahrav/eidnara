@@ -742,7 +742,7 @@ fn collect_ring_open(attempt: &mut Attempt, pair: (u32, u32)) -> Result<(), Stri
     // Unanswered measured requests invalidate the attempt.
     // Publishing only completed requests would bias latency toward successful requests.
     // Delete
-    // A missed slot is a request withheld at the in-flight cap (ring.rs `MissedSlot`); publishing the point would omit exactly the requests carrying the most queueing delay. commentlint: allow(JUDGE)
+    // A missed slot is a request withheld at the in-flight cap (ring.rs `MissedSlot`); publishing the point would omit exactly the requests carrying the most queueing delay.
     let transport_failures = result.outcomes.peer_closed
         + result.outcomes.write_failure
         + result.outcomes.unresolved_at_drain
@@ -769,7 +769,7 @@ fn collect_ring_open(attempt: &mut Attempt, pair: (u32, u32)) -> Result<(), Stri
     ] {
         attempt.add_histogram(file, hist)?;
     }
-    // `sched_to_completion` includes tokio's ~1ms `sleep_until` quantization at the offered rates, so only its raw histogram is kept. commentlint: allow(JUDGE)
+    // `sched_to_completion` includes tokio's ~1ms `sleep_until` quantization at the offered rates, so only its raw histogram is kept.
     let results = serde_json::json!({
         "offered_rate_per_sec": rate,
         "issue_p50_ns": result.issue_to_completion.value_at_quantile(0.50),

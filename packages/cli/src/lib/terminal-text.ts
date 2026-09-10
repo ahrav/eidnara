@@ -1,7 +1,7 @@
 /**
  * C0 and C1 controls can move the cursor, erase lines, or forge terminal output. The ranges
  * match zero-width and bidi marks, line and paragraph separators, bidi overrides and isolates,
- * and the BOM. commentlint: allow(JUDGE)
+ * and the BOM.
  */
 export const TERMINAL_CONTROL_CHARS =
     // biome-ignore lint/suspicious/noControlCharactersInRegex: the security boundary intentionally matches C0/C1 ranges

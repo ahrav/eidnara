@@ -150,8 +150,8 @@ fn close_fallback_ceiling() -> libc::c_int {
     soft.clamp(FLOOR, CLAMP) as libc::c_int
 }
 
-/// The fallback sweep stops at `ceiling`, so an inherited descriptor above it would otherwise survive into the daemon. commentlint: allow(JUDGE)
-/// `read_dir` allocates and is not async-signal-safe, so only the parent may call this; the child walks the returned slice. commentlint: allow(JUDGE)
+/// The fallback sweep stops at `ceiling`, so an inherited descriptor above it would otherwise survive into the daemon.
+/// `read_dir` allocates and is not async-signal-safe, so only the parent may call this; the child walks the returned slice.
 #[cfg(target_os = "linux")]
 fn descriptors_above(ceiling: libc::c_int) -> Vec<libc::c_int> {
     let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
@@ -174,7 +174,7 @@ fn descriptors_above(_ceiling: libc::c_int) -> Vec<libc::c_int> {
 
 /// # Safety
 ///
-/// Reading `errno` through its thread-local pointer is async-signal-safe and touches no shared state. commentlint: allow(JUDGE)
+/// Reading `errno` through its thread-local pointer is async-signal-safe and touches no shared state.
 unsafe fn errno() -> libc::c_int {
     #[cfg(target_os = "linux")]
     // SAFETY: `__errno_location` returns a valid pointer to the calling thread's `errno`.
@@ -192,8 +192,8 @@ unsafe fn errno() -> libc::c_int {
 ///
 /// # Safety
 ///
-/// The forked child calls this function after `fork`; `status_w` is the open status-pipe write end. commentlint: allow(JUDGE)
-/// Uses only `write` and `_exit`, both async-signal-safe, on a stack buffer. commentlint: allow(JUDGE)
+/// The forked child calls this function after `fork`; `status_w` is the open status-pipe write end.
+/// Uses only `write` and `_exit`, both async-signal-safe, on a stack buffer.
 unsafe fn child_fail(status_w: libc::c_int, exit_code: libc::c_int) -> ! {
     // SAFETY: The child reads its thread-local `errno` immediately after the failing call.
     let code = unsafe { errno() };
@@ -233,12 +233,12 @@ fn await_child_status(status_r: OwnedFd) -> Result<(), SpawnError> {
 }
 
 /// Production callers must supply a retained launcher descriptor.
-/// A successful return proves only that the child reached `exec`; callers must wait for publication evidence before treating the daemon as ready. commentlint: allow(JUDGE)
+/// A successful return proves only that the child reached `exec`; callers must wait for publication evidence before treating the daemon as ready.
 ///
 /// # Errors
 ///
 /// Child setup and `exec` failures carry the child's `errno` in `child_error`; launcher-side failures leave it `None`.
-/// The launcher's fork child. The parent never reaps it on the success path, so the PID stays bound to this child for the parent's lifetime. commentlint: allow(JUDGE)
+/// The launcher's fork child. The parent never reaps it on the success path, so the PID stays bound to this child for the parent's lifetime.
 pub struct SpawnedChild {
     pid: libc::pid_t,
 }
@@ -330,8 +330,8 @@ pub fn spawn_detached(
     let argv0 = CString::new("eidnara-host").expect("static argv");
     let argv1 = CString::new("serve").expect("static argv");
     let argv: [*const libc::c_char; 3] = [argv0.as_ptr(), argv1.as_ptr(), std::ptr::null()];
-    // glibc's `fexecve` falls back to `snprintf` plus `execve` when `execveat` is unavailable or seccomp-blocked, and `snprintf` is not async-signal-safe. commentlint: allow(JUDGE)
-    // The kernel resolves this path before closing `FD_CLOEXEC` descriptors, so fd 3 keeps the flag and does not leak into the daemon. commentlint: allow(JUDGE)
+    // glibc's `fexecve` falls back to `snprintf` plus `execve` when `execveat` is unavailable or seccomp-blocked, and `snprintf` is not async-signal-safe.
+    // The kernel resolves this path before closing `FD_CLOEXEC` descriptors, so fd 3 keeps the flag and does not leak into the daemon.
     #[cfg(target_os = "linux")]
     let exe_path = CString::new("/proc/self/fd/3").expect("static exe path");
     #[cfg(target_os = "macos")]
@@ -364,7 +364,7 @@ pub fn spawn_detached(
     #[cfg(not(target_os = "linux"))]
     let max_signal = libc::SIGUSR2;
 
-    // An ignored `SIGCHLD` survives `exec` from the launcher's parent and makes the kernel reap the fork child the moment it exits, which frees its PID while `SpawnedChild::terminate` may still signal it. The default disposition keeps the child waitable until this process reaps it. commentlint: allow(JUDGE)
+    // An ignored `SIGCHLD` survives `exec` from the launcher's parent and makes the kernel reap the fork child the moment it exits, which frees its PID while `SpawnedChild::terminate` may still signal it. The default disposition keeps the child waitable until this process reaps it.
     // SAFETY: `SIG_DFL` is valid for `SIGCHLD` and does not access Rust memory.
     unsafe {
         libc::signal(libc::SIGCHLD, libc::SIG_DFL);
@@ -385,8 +385,8 @@ pub fn spawn_detached(
         return Err(SpawnError::new("fork failed"));
     }
     if pid == 0 {
-        // SAFETY: `fork` leaves the child with one thread and copies of the parent's descriptors. commentlint: allow(JUDGE)
-        // Every call is async-signal-safe libc on values resolved before `fork`: no allocation, no Rust I/O, no formatting, no unwinding. commentlint: allow(JUDGE)
+        // SAFETY: `fork` leaves the child with one thread and copies of the parent's descriptors.
+        // Every call is async-signal-safe libc on values resolved before `fork`: no allocation, no Rust I/O, no formatting, no unwinding.
         // Every failure diverges through `child_fail`, which writes `errno` and calls `_exit`; the final `child_fail` runs only if `execve` returns.
         // `status_w_raw` is at least fd 4, so no `dup2` below overwrites it, and the close sweep skips it.
         unsafe {

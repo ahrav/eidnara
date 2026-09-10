@@ -279,7 +279,7 @@ describe("runMemoryMarkCommand", () => {
     });
 
     test("a verdict for another object or event never decides the one the user named", async () => {
-        // A well-typed reply whose verdict names a different object would otherwise skip the prompt and commit the requested operation blind. commentlint: allow(JUDGE)
+        // A well-typed reply whose verdict names a different object would otherwise skip the prompt and commit the requested operation blind.
         const available = { kind: "available" } as const;
         const verdict = (object_id: string, event: MemoryMarkArgs["event"]) => ({
             object_id,

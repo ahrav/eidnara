@@ -558,10 +558,10 @@ function gitRootDirectory(canonical: string): string | null {
     }
 }
 
-/** Answers the git worktree root containing `directory`, or the directory's canonical path when no `.git` is found, matching the daemon's canonical project root. commentlint: allow(JUDGE) */
+/** Answers the git worktree root containing `directory`, or the directory's canonical path when no `.git` is found, matching the daemon's canonical project root. */
 export function resolveProjectRootDirectory(directory: string): string {
     const resolved = path.resolve(directory);
-    // Git discovers the repository from the physical path, so a symlinked subtree beneath another checkout belongs to the link target's repository, not the outer one; walking the raw spelling first would find the outer `.git`. The daemon's `ProjectBinding` compares roots after the same `canonical_root` symlink resolution, so a raw spelling would also derive a distinct import identity inside one daemon scope. commentlint: allow(JUDGE)
+    // Git discovers the repository from the physical path, so a symlinked subtree beneath another checkout belongs to the link target's repository, not the outer one; walking the raw spelling first would find the outer `.git`. The daemon's `ProjectBinding` compares roots after the same `canonical_root` symlink resolution, so a raw spelling would also derive a distinct import identity inside one daemon scope.
     let canonical: string;
     try {
         canonical = realpathSync.native(resolved);

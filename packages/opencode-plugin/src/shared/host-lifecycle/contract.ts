@@ -67,7 +67,7 @@ export function reasonPrecedence(reason: DaemonReason): number | null {
     return FAILING_REASONS.get(reason)?.precedence ?? null;
 }
 
-// `shutdown_timeout` carries the state the stop phase last observed; the binary reports `running` when the shutdown request's commit is uncertain. commentlint: allow(JUDGE)
+// `shutdown_timeout` carries the state the stop phase last observed; the binary reports `running` when the shutdown request's commit is uncertain.
 const FIXED_REASON_STATES: Partial<Record<DaemonReason, readonly [DaemonState, ...DaemonState[]]>> =
     {
         healthy: ["running"],
@@ -90,7 +90,7 @@ export function statesForReason(
     return FIXED_REASON_STATES[reason];
 }
 
-/** Where a reason admits several states, the first is the one that asserts no daemon observation. commentlint: allow(JUDGE) */
+/** Where a reason admits several states, the first is the one that asserts no daemon observation. */
 export function fixedStateForReason(reason: DaemonReason): DaemonState | undefined {
     return FIXED_REASON_STATES[reason]?.[0];
 }
@@ -114,7 +114,7 @@ function remediationFitsReason(reason: DaemonReason, remediation: string | null)
 }
 
 /**
- * `no_data_dir` denotes an unresolved data root. The binary's `envelope_failure_result` pairs the other two with the probed state, which is `unavailable` when the probe finds no data root. commentlint: allow(JUDGE)
+ * `no_data_dir` denotes an unresolved data root. The binary's `envelope_failure_result` pairs the other two with the probed state, which is `unavailable` when the probe finds no data root.
  */
 const UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
     "no_data_dir",
@@ -228,7 +228,7 @@ function nullableString(value: unknown, what: string): string | null {
     return value;
 }
 
-// Authentication-frame literals from `docs/host-wire-protocol.md`. commentlint: allow(JUDGE)
+// Authentication-frame literals from `docs/host-wire-protocol.md`.
 const MAX_AUTH_MESSAGE_LEN = 4096;
 const DAEMON_ID_LEN = 16;
 const NONCE_LEN = 32;

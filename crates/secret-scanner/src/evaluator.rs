@@ -1655,7 +1655,7 @@ mod tests {
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
     }
 
-    /// The semantic digest does not cover these tables, so a change here must also bump `REVISION.semantic_digest_version`; update the pinned digest in the same change. commentlint: allow(JUDGE)
+    /// The semantic digest does not cover these tables, so a change here must also bump `REVISION.semantic_digest_version`; update the pinned digest in the same change.
     #[test]
     fn evaluator_constants_are_pinned() {
         let mut encoded = Vec::new();

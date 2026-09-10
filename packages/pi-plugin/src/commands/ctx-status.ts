@@ -88,7 +88,7 @@ export function registerCtxStatusCommand(pi: ExtensionAPI, deps: RegisterCtxStat
                 if (daemonStatus) {
                     const value = daemonStatus as Record<string, unknown>;
                     lines.push("", formatRustStatusText(value));
-                    // A daemon limit that differs from `usableSoft` would put two denominators on one status, so the derivation renders only when the daemon limit is absent or agrees. commentlint: allow(JUDGE)
+                    // A daemon limit that differs from `usableSoft` would put two denominators on one status, so the derivation renders only when the daemon limit is absent or agrees.
                     const daemonLimit = statusContextLimitTokens(value);
                     if (
                         windowGeometry &&

@@ -1338,13 +1338,13 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("array.toml", "values", ApplicabilityState::Current),
         ("array.toml", "enabled", ApplicabilityState::Stale),
         // A string element of an array nested inside two inline tables is
-        // content, not a key. commentlint: allow(JUDGE)
+        // content, not a key.
         ("deep-array.toml", "child", ApplicabilityState::Current),
         ("deep-array.toml", "options", ApplicabilityState::Current),
         ("deep-array.toml", "flag", ApplicabilityState::Current),
         ("deep-array.toml", "phantom", ApplicabilityState::Stale),
         // `[server]` alone also parses as a YAML flow sequence; the table
-        // header reading defines the key. commentlint: allow(JUDGE)
+        // header reading defines the key.
         ("header-only.toml", "server", ApplicabilityState::Current),
         ("header-only.toml", "absent", ApplicabilityState::Stale),
         ("header-comment.toml", "server", ApplicabilityState::Current),
@@ -1355,7 +1355,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("escaped-key.toml", "leaf", ApplicabilityState::Current),
         // A `[` line inside a multi-line array is an element, not a table
         // header; an inline table inside it still defines its keys, and the
-        // table header after the array closes is read again. commentlint: allow(JUDGE)
+        // table header after the array closes is read again.
         (
             "multiline-array.toml",
             "values",
@@ -3131,7 +3131,7 @@ fn a_real_uncommitted_edit_still_trips_the_dirty_gate() {
     );
 }
 
-/// An assume-valid index entry suppresses Git's worktree check; modified bytes still make dependent objects DirtyTreeUncertain. commentlint: allow(JUDGE)
+/// An assume-valid index entry suppresses Git's worktree check; modified bytes still make dependent objects DirtyTreeUncertain.
 #[test]
 fn an_edited_assume_valid_file_still_trips_the_dirty_gate() {
     use gix::index::entry::Flags;

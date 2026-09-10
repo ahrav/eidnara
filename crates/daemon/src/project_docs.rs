@@ -45,7 +45,7 @@ fn escape_xml_content(s: &str) -> String {
 /// Returns `None` unless the path opens, without following a symlink, as a
 /// regular file whose bytes fit `MAX_PROJECT_DOC_BYTES` and decode as UTF-8.
 /// The descriptor is validated and the cap enforced on bytes read, so a swap
-/// or growth after the open cannot change what is read. commentlint: allow(JUDGE)
+/// or growth after the open cannot change what is read.
 fn read_safe_canonical(path: &Path) -> Option<String> {
     let bytes = crate::config::read_bounded_bytes(path, MAX_PROJECT_DOC_BYTES).ok()?;
     let raw = String::from_utf8(bytes).ok()?;

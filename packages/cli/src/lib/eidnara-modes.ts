@@ -9,7 +9,7 @@ export interface EidnaraModes {
 }
 
 /**
- * Reads the shared user config only: setup edits global host settings, so a project-tier opt-out must not switch a native manager back on for every other project. commentlint: allow(JUDGE)
+ * Reads the shared user config only: setup edits global host settings, so a project-tier opt-out must not switch a native manager back on for every other project.
  * A missing or unreadable config, or no user tier at all (`undefined`), resolves to the schema defaults (everything enabled).
  */
 export function readEidnaraModes(configPath: string | undefined): EidnaraModes {

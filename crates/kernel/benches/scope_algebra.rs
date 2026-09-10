@@ -732,8 +732,8 @@ criterion_group! {
 }
 
 fn main() {
-    // `cargo test --all-targets` omits `--bench`, so the binary returns before fixture setup writes thousands of gix commits and worktree files. commentlint: allow(JUDGE)
-    // `cargo bench -- --test` keeps `--bench`, so Criterion runs every group once. commentlint: allow(JUDGE)
+    // `cargo test --all-targets` omits `--bench`, so the binary returns before fixture setup writes thousands of gix commits and worktree files.
+    // `cargo bench -- --test` keeps `--bench`, so Criterion runs every group once.
     if !std::env::args().any(|arg| arg == "--bench") {
         eprintln!("scope_algebra: fixture setup runs only under `cargo bench`");
         return;

@@ -33,7 +33,7 @@ pub struct DreamerReceiptKey<'a> {
 
 /// What a receipt binds its request to: the store incarnation and authority
 /// generation the request ran under, the digest over its effect-defining
-/// inputs, and the client identity that issued it. commentlint: allow(JUDGE)
+/// inputs, and the client identity that issued it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DreamerReceiptBinding {
     pub database_incarnation_id: String,
@@ -688,7 +688,7 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Counts attempts except those ending `NotSent`. commentlint: allow(JUDGE)
+    /// Counts attempts except those ending `NotSent`.
     pub fn count_dreamer_attempts(
         &self,
         project: &str,

@@ -173,7 +173,7 @@ impl DaemonConfig {
         };
         // A bare key walks the same dash-stripped ladder as a qualified one,
         // without the provider-qualified and wildcard rungs, so the same model
-        // resolves the same TTL whether or not its provider prefix is present. commentlint: allow(JUDGE)
+        // resolves the same TTL whether or not its provider prefix is present.
         let (provider, mut model_id) = match model_key.split_once('/') {
             Some((provider, model_id)) => {
                 if provider.is_empty() || model_id.is_empty() {
@@ -264,7 +264,7 @@ impl ConfigCache {
     }
 
     /// Tier read failures are reported on every load so a long-running daemon keeps
-    /// surfacing a config file it cannot use. commentlint: allow(JUDGE)
+    /// surfacing a config file it cannot use.
     fn effective_with_warnings(
         &mut self,
         user_path: Option<&Path>,
@@ -296,7 +296,7 @@ fn user_config_path() -> Option<PathBuf> {
     )
 }
 
-/// A CWD-relative fallback would let the untrusted project tree supply user-tier-only keys, so empty and relative values yield no user tier. commentlint: allow(JUDGE)
+/// A CWD-relative fallback would let the untrusted project tree supply user-tier-only keys, so empty and relative values yield no user tier.
 fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     let absolute = |value: Option<&str>| {
         value
@@ -315,10 +315,10 @@ fn user_config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> O
 }
 
 /// Largest config tier file read. A project controls its own `.eidnara`
-/// directory, so the read is bounded before the daemon allocates for it. commentlint: allow(JUDGE)
+/// directory, so the read is bounded before the daemon allocates for it.
 const MAX_CONFIG_TIER_BYTES: u64 = 1 << 20;
 
-/// Largest guidance override file read; the same order as a config tier. commentlint: allow(JUDGE)
+/// Largest guidance override file read; the same order as a config tier.
 const MAX_GUIDANCE_OVERRIDE_BYTES: u64 = 1 << 20;
 
 /// Reads at most `MAX_CONFIG_TIER_BYTES` from `path`; a longer file is an
@@ -330,14 +330,14 @@ fn read_bounded_config(path: &Path) -> io::Result<String> {
 
 /// Reads at most `limit` bytes from `path`; a longer file is `InvalidData`.
 /// The bound is enforced on bytes read, not on a size sampled beforehand, so a
-/// file growing under the read cannot exceed it. commentlint: allow(JUDGE)
+/// file growing under the read cannot exceed it.
 pub(crate) fn read_bounded_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
 
     // A FIFO or device at a project-controlled path would block the open or
     // the read while the config mutex is held; `NONBLOCK` keeps the open from
     // waiting on a writer and the descriptor's own type settles what was
-    // reached before any byte is read. commentlint: allow(JUDGE)
+    // reached before any byte is read.
     let file: fs::File = rustix::fs::open(
         path,
         rustix::fs::OFlags::RDONLY
@@ -1267,7 +1267,7 @@ mod tests {
             ),
             // An empty or relative XDG_CONFIG_HOME would resolve the trusted
             // user tier against the process working directory, so it is
-            // treated as unset. commentlint: allow(JUDGE)
+            // treated as unset.
             (
                 Some(""),
                 Some("/home/u"),
@@ -1279,7 +1279,7 @@ mod tests {
                 Some(PathBuf::from("/home/u/.config/eidnara/eidnara.jsonc")),
             ),
             // Without a usable home there is no user tier at all rather than
-            // a CWD-relative one. commentlint: allow(JUDGE)
+            // a CWD-relative one.
             (None, None, None),
             (Some(""), Some(""), None),
             (None, Some("rel/home"), None),

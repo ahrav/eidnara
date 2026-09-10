@@ -85,7 +85,7 @@ impl LlmExecutionBackend for OpenCodeBackend {
         ))
     }
 
-    /// The probe re-verifies the whole closure and resolves the executable exactly as `run_opencode` does before launch, so a rejected send and a failed run report the same subreason. commentlint: allow(JUDGE)
+    /// The probe re-verifies the whole closure and resolves the executable exactly as `run_opencode` does before launch, so a rejected send and a failed run report the same subreason.
     fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
         if harness != Harness::OpenCode {
             return None;
@@ -122,7 +122,7 @@ fn inline_config(request: &BackendRequest) -> String {
         },
     });
     let serialized = serde_json::to_string(&config).expect("inline config serializes");
-    // Neutralize OpenCode's `{env:..}`/`{file:..}` config substitution tokens in caller text. commentlint: allow(JUDGE)
+    // Neutralize OpenCode's `{env:..}`/`{file:..}` config substitution tokens in caller text.
     // `\u007b` decodes back to a literal `{`; structural `{` from serde is followed by `"` or `}`, never by these tokens.
     serialized
         .replace("{env:", "\\u007benv:")
@@ -164,12 +164,12 @@ async fn run_opencode(
     // Resolution opens and stats the node, so it runs on the blocking pool rather than on a runtime worker.
     let closure = Arc::clone(&runtime.closure);
     let executable = runtime.executable_node.clone();
-    // The whole closure is re-verified immediately before launch and the executable resolved from that fresh handle; see `ValidatedHarnessClosure::revalidate`. commentlint: allow(JUDGE)
+    // The whole closure is re-verified immediately before launch and the executable resolved from that fresh handle; see `ValidatedHarnessClosure::revalidate`.
     let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
         let fresh = closure.revalidate().ok()?;
         fresh.resolve_node_descriptor(&executable).ok()
     }));
-    // An abandoned resolution only reads the closure store, so it leaves no residue. commentlint: allow(JUDGE)
+    // An abandoned resolution only reads the closure store, so it leaves no residue.
     let executable_node = match subprocess::race_setup(&cancel, setup_deadline, &mut resolve).await
     {
         Ok(Ok(Some(node))) => node,
@@ -191,7 +191,7 @@ async fn run_opencode(
         Ok(Err(err)) => return subprocess::spawn_failure(Harness::OpenCode, &err),
         Err(abort) => {
             // The in-flight creation gets a grace period to return its directory for cleanup.
-            // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort. commentlint: allow(JUDGE)
+            // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort.
             let cleanup = match tokio::time::timeout(limits.termination_grace, &mut create).await {
                 Ok(Ok(dir)) => subprocess::bounded_cleanup(dir, limits.termination_grace).await,
                 Ok(Err(_)) => Ok(()),
@@ -203,7 +203,7 @@ async fn run_opencode(
             );
         }
     };
-    // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one `run_timeout`. commentlint: allow(JUDGE)
+    // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one `run_timeout`.
     let remaining = setup_deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
         return subprocess::merge_cleanup(
@@ -295,7 +295,7 @@ fn parse_opencode_transcript(
             return Err(format!("missing event type at line {line_no}"));
         };
         match event_type {
-            // A step opened after the terminal means the run continued past the answer it published; the earlier text cannot be trusted as the complete result. commentlint: allow(JUDGE)
+            // A step opened after the terminal means the run continued past the answer it published; the earlier text cannot be trusted as the complete result.
             "step_start" => {
                 if terminal.is_some() {
                     return Err(format!(
@@ -332,13 +332,13 @@ fn parse_opencode_transcript(
                     .and_then(|part| part.get("reason"))
                     .and_then(serde_json::Value::as_str);
                 let finish_reason = match reason {
-                    // A tool-calling step is tool activity, equivalent to the `tool_use` event rejected above; accepting it would also publish the pre-tool text beside the final answer. commentlint: allow(JUDGE)
+                    // A tool-calling step is tool activity, equivalent to the `tool_use` event rejected above; accepting it would also publish the pre-tool text beside the final answer.
                     Some("tool-calls") => {
                         return Err(format!(
                             "tool-calls finish in a tool-less run at line {line_no}"
                         ));
                     }
-                    // A finish without a reason is structurally malformed; skipping it would keep that step's text for a later success to publish. commentlint: allow(JUDGE)
+                    // A finish without a reason is structurally malformed; skipping it would keep that step's text for a later success to publish.
                     None => {
                         return Err(format!("step_finish without part.reason at line {line_no}"));
                     }

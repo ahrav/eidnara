@@ -2317,7 +2317,7 @@ impl Drop for ByteCharge {
                 *used = used.saturating_sub(self.bytes);
             }
             // Read `parked` only after releasing `used`; the waiter sets it before its
-            // final `charge` under the same lock, which rules out a lost wake. commentlint: allow(JUDGE)
+            // final `charge` under the same lock, which rules out a lost wake.
             if owner.parked.load(Ordering::SeqCst)
                 && let Some(wake) = lock_unpoisoned(&owner.wake)
                     .as_ref()
@@ -2734,7 +2734,7 @@ async fn start_ring_bridge(
     })
 }
 
-/// Each in-flight frame owns its completion channel, so awaiting the window head is safe even when the bridge's control lane completes a later frame first. commentlint: allow(JUDGE)
+/// Each in-flight frame owns its completion channel, so awaiting the window head is safe even when the bridge's control lane completes a later frame first.
 const WRITER_WINDOW: usize = 32;
 /// Data channel depth: `CLIENT_DATA_QUEUE_FRAMES` less the frames the writer may hold in flight.
 const WRITER_QUEUE_FRAMES: usize = CLIENT_DATA_QUEUE_FRAMES - WRITER_WINDOW;
@@ -2864,7 +2864,7 @@ async fn writer_loop(
             tokio::select! {
                 biased;
                 () = inner.cancel.cancelled() => break,
-                // `Inner` holds `control_tx` and `data_tx`, so a closed channel is unreachable while `inner` is held. commentlint: allow(JUDGE)
+                // `Inner` holds `control_tx` and `data_tx`, so a closed channel is unreachable while `inner` is held.
                 // Break on channel closure so every wait remains inside the cancellation `select!`.
                 frame = control_rx.recv() => match frame {
                     Some(frame) => Some(frame),

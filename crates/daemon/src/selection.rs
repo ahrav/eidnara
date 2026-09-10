@@ -536,7 +536,7 @@ fn safe_prefix(s: &str, max_len: usize) -> &str {
 fn region_hint(value: &str) -> String {
     // A value this function already hinted ends with the sentinel and fits
     // the hint length plus the sentinel; a longer value that happens to end
-    // the same way is content and is hinted like any other. commentlint: allow(JUDGE)
+    // the same way is content and is hinted like any other.
     if value.ends_with(TRUNCATION_SENTINEL)
         && utf16_len(value) <= EDIT_REGION_HINT_LEN + utf16_len(TRUNCATION_SENTINEL)
     {

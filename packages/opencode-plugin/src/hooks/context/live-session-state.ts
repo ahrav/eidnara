@@ -2,7 +2,7 @@ import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import type { ContextUsageEntry } from "./event-handler";
 import type { AgentBySession, LiveModelBySession, VariantBySession } from "./hook-handlers";
 
-/** Sessions whose live usage stays resident. Each entry is the session's newest-response record; `session.deleted` clears it, and an evicted session is re-read from OpenCode's database on the next poll. Matches the sticky sidebar cache's session cap. commentlint: allow(JUDGE) */
+/** Sessions whose live usage stays resident. Each entry is the session's newest-response record; `session.deleted` clears it, and an evicted session is re-read from OpenCode's database on the next poll. Matches the sticky sidebar cache's session cap. */
 export const MAX_LIVE_USAGE_SESSIONS = 100;
 
 export interface SessionMetadataReadState {
@@ -19,7 +19,7 @@ export interface LiveSessionState {
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
-    /** `contextUsageBySession` holds each session's input-token usage from its latest assistant response; the sidebar reads it when the daemon supplies no usage. commentlint: allow(JUDGE) */
+    /** `contextUsageBySession` holds each session's input-token usage from its latest assistant response; the sidebar reads it when the daemon supplies no usage. */
     contextUsageBySession: BoundedSessionMap<ContextUsageEntry>;
     historyRefreshSessions: Set<string>;
     deferredHistoryRefreshSessions: Set<string>;
@@ -28,7 +28,7 @@ export interface LiveSessionState {
     deferredMaterializationSessions: Set<string>;
     /** `sessionDirectoryBySession` caches `session.directory` values to avoid later SDK calls. */
     sessionDirectoryBySession: Map<string, string>;
-    /** `retryAfterMs` prevents one hook turn from spending both bounded metadata reads. commentlint: allow(JUDGE) */
+    /** `retryAfterMs` prevents one hook turn from spending both bounded metadata reads. */
     sessionMetadataReadStateBySession: Map<string, SessionMetadataReadState>;
     /**
      * `internalChildSessions` holds the ids of hidden `eidnara-` child sessions;

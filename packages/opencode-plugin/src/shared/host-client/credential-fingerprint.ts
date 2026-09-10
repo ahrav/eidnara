@@ -49,7 +49,7 @@ export function credentialFingerprints(
         let complete = true;
         for (const name of names) {
             const value = source[name];
-            // An unqualified value drops only this provider's row, matching the host's per-provider `provider_row` in `crates/host-runtime/src/broca/subprocess.rs`. commentlint: allow(JUDGE)
+            // An unqualified value drops only this provider's row, matching the host's per-provider `provider_row` in `crates/host-runtime/src/broca/subprocess.rs`.
             if (
                 value === undefined ||
                 value.length === 0 ||

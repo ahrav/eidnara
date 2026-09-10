@@ -99,7 +99,7 @@ pub(super) fn describe_findings(
 /// cluster. Keyed labels win provider labels, which win generic labels.
 ///
 /// Merged output has no overlaps, so merging again is a no-op and callers may
-/// pass raw or already-merged replacements. commentlint: allow(JUDGE)
+/// pass raw or already-merged replacements.
 pub(super) fn render(
     input: &str,
     replacements: Vec<Replacement>,
@@ -133,7 +133,7 @@ pub(super) fn merge(mut replacements: Vec<Replacement>) -> Vec<Replacement> {
 /// `merged` must hold the output of [`merge`]: sorted by start and overlap-free.
 ///
 /// Re-merges only the `merged` suffix with `end > earliest`, because earlier clusters cannot
-/// overlap `incoming`. commentlint: allow(JUDGE)
+/// overlap `incoming`.
 pub(super) fn merge_into(merged: &mut Vec<Replacement>, mut incoming: Vec<Replacement>) {
     let Some(earliest) = incoming.iter().map(|replacement| replacement.start).min() else {
         return;
@@ -393,7 +393,7 @@ mod tests {
     /// `memory-store` persists `Detection::secret_type` as `scan_detections.label_id`,
     /// whose `CHECK` admits 1..=64 bytes of `[a-z0-9_]`. A provider label outside that
     /// shape reaches `memory-store` and aborts its durable write when that secret type is
-    /// detected. commentlint: allow(JUDGE)
+    /// detected.
     #[test]
     fn every_provider_label_fits_the_persisted_label_shape() {
         let mut providers = 0;

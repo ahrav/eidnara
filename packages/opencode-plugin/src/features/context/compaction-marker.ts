@@ -76,9 +76,9 @@ export function generatePartId(timestampMs: number, counter = 0n, identity = "")
 }
 
 /**
- * Ownership lives in the part payload because `/fork` assigns new primary keys to copied rows. commentlint: allow(JUDGE)
+ * Ownership lives in the part payload because `/fork` assigns new primary keys to copied rows.
  * A captured native row (`crates/daemon/testdata/codec/opencode-golden.json`) carries only
- * `type` and `auto`, so the extra key is the only durable signature. commentlint: allow(JUDGE)
+ * `type` and `auto`, so the extra key is the only durable signature.
  */
 const EIDNARA_COMPACTION_PART_DATA = JSON.stringify({
     type: "compaction",
@@ -829,7 +829,7 @@ function dataReferencesTailStart(data: unknown): string | null {
  * boundary). Native compaction rows are never matched: ownership keys on
  * Eidnara-specific signatures (the `eidnara` provider identity on summary
  * messages, the exact plugin marker summary text for legacy lineages, and the
- * `eidnara` key on the compaction part payload) plus session identity. commentlint: allow(JUDGE)
+ * `eidnara` key on the compaction part payload) plus session identity.
  *
  * The transaction atomically removes each compaction part with its summary lineage.
  * Deleting only the compaction part would leave its summary message in model history.

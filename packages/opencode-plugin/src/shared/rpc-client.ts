@@ -37,8 +37,8 @@ export class EidnaraRpcClient {
     }
 
     /**
-     * A request is sent at most once per resolved server. A 401 re-resolves to use a rotated port-file token. commentlint: allow(JUDGE)
-     * On fetch failure, the client clears its cached record and does not retry because the handler may have run. commentlint: allow(JUDGE)
+     * A request is sent at most once per resolved server. A 401 re-resolves to use a rotated port-file token.
+     * On fetch failure, the client clears its cached record and does not retry because the handler may have run.
      */
     async call<T = Record<string, unknown>>(
         method: string,
@@ -49,7 +49,7 @@ export class EidnaraRpcClient {
         for (let attempt = 0; attempt < MAX_RERESOLVE_ATTEMPTS; attempt++) {
             const server = await this.resolveServer();
             if (!server) {
-                // `resolveServer` owns the wait for a server to appear. The loop re-resolves only when a resolved server rejects a call. commentlint: allow(JUDGE)
+                // `resolveServer` owns the wait for a server to appear. The loop re-resolves only when a resolved server rejects a call.
                 throw lastError ?? new Error("Eidnara RPC server not available");
             }
 
@@ -128,7 +128,7 @@ export class EidnaraRpcClient {
 
     private async resolveServer(maxAttempts = MAX_RETRIES): Promise<RpcPortFileRecord | null> {
         if (this.server) {
-            // A cached record passes the same gate as a freshly read one; the cache skips only the directory scan. A server replaced inside the same process keeps the pid alive but stops answering `/health` on the old port. commentlint: allow(JUDGE)
+            // A cached record passes the same gate as a freshly read one; the cache skips only the directory scan. A server replaced inside the same process keeps the pid alive but stops answering `/health` on the old port.
             if (isDiscoveryCandidate(this.server) && (await this.healthCheck(this.server))) {
                 return this.server;
             }

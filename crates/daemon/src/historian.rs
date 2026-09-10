@@ -50,7 +50,7 @@ fn to_stored_compartment(
         p3: c.p3.clone(),
         p4: c.p4.clone(),
         // The validator captures any `\d+`; the documented range is 1 through
-        // 100, so the value is clamped before it narrows to `i32`. commentlint: allow(JUDGE)
+        // 100, so the value is clamped before it narrows to `i32`.
         importance: c
             .importance
             .map(|i| i32::try_from(i.clamp(1, 100)).unwrap_or(100))

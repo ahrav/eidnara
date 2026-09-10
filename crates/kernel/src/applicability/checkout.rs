@@ -357,7 +357,7 @@ impl DirtyEntry {
     /// `skip_worktree`, so treating them as dirty would gate every object
     /// declaring such a path forever.
     ///
-    /// A flagged path whose bytes or mode no longer match the index has a `_modified` status, so this method returns true. commentlint: allow(JUDGE)
+    /// A flagged path whose bytes or mode no longer match the index has a `_modified` status, so this method returns true.
     pub fn is_uncommitted_change(&self) -> bool {
         !matches!(self.status, "skip_worktree" | "assume_valid")
     }
@@ -386,7 +386,7 @@ pub struct CheckoutSnapshot {
     dirty_entries: Vec<DirtyEntry>,
     /// The index the dirty scan compared against. A check that revalidates a
     /// path against "the index" has to mean this one: a stage after the
-    /// snapshot would otherwise agree with the edit it staged. commentlint: allow(JUDGE)
+    /// snapshot would otherwise agree with the edit it staged.
     index: gix::worktree::Index,
     shallow: bool,
     commit_graph: OnceCell<Option<gix::commitgraph::Graph>>,
@@ -399,7 +399,7 @@ impl CheckoutSnapshot {
     }
 
     /// The submodule at `gitlink`, opened the way the nested scan opened it,
-    /// with the index it currently holds. `None` when it cannot be opened. commentlint: allow(JUDGE)
+    /// with the index it currently holds. `None` when it cannot be opened.
     pub(super) fn nested_index(&self, gitlink: &str) -> Option<PinnedRepository> {
         let workdir = self.repo.workdir()?;
         let (dir, name) = open_parent_beneath(workdir, Path::new(gitlink)).opened()?;
@@ -583,7 +583,7 @@ impl std::fmt::Debug for CheckoutSnapshot {
 }
 
 /// `Options::isolated()` skips installation, user, and system configuration
-/// but still reads `.git/config`; see [`strip_command_config`]. commentlint: allow(JUDGE)
+/// but still reads `.git/config`; see [`strip_command_config`].
 fn open_isolated(path: &Path) -> Result<gix::Repository, SnapshotError> {
     let mut repo = gix::open_opts(path, gix::open::Options::isolated())
         .map_err(|error| SnapshotError::Open(error.to_string()))?;
@@ -591,11 +591,11 @@ fn open_isolated(path: &Path) -> Result<gix::Repository, SnapshotError> {
     Ok(repo)
 }
 
-/// gix trusts `.git/config` when the current user owns the Git directory. commentlint: allow(JUDGE)
+/// gix trusts `.git/config` when the current user owns the Git directory.
 /// The status walk runs a `filter.<name>.clean` or `filter.<name>.process`
-/// command selected by `.gitattributes` while comparing a modified file. commentlint: allow(JUDGE)
-/// The diff and merge keys name commands the same way. commentlint: allow(JUDGE)
-/// The edit is in-memory only: the on-disk config is never rewritten. commentlint: allow(JUDGE)
+/// command selected by `.gitattributes` while comparing a modified file.
+/// The diff and merge keys name commands the same way.
+/// The edit is in-memory only: the on-disk config is never rewritten.
 fn strip_command_config(repo: &mut gix::Repository) -> Result<(), SnapshotError> {
     let mut config = repo.config_snapshot_mut();
     let filter_ids: Vec<_> = config
@@ -715,7 +715,7 @@ fn scan_dirty_entries(
     use gix::status::Item;
 
     // Read before the walk and verified after it, so the index the flagged
-    // entries and later checks compare against is the one the walk saw. commentlint: allow(JUDGE)
+    // entries and later checks compare against is the one the walk saw.
     let index = repo
         .index_or_empty()
         .map_err(|error| SnapshotError::Scan(error.to_string()))?;
@@ -784,7 +784,7 @@ fn scan_dirty_entries(
         // blob id separates two absent-file states whose staged content
         // differs.
         let worktree = worktree_hash(repo, rela_path, ctx)?;
-        // Git skips index comparisons for SKIP_WORKTREE and ASSUME_VALID. commentlint: allow(JUDGE)
+        // Git skips index comparisons for SKIP_WORKTREE and ASSUME_VALID.
         let unmaterialized = worktree.missing && bookkeeping == "skip_worktree";
         let status = if unmaterialized
             || worktree.matches_index_entry(entry, capabilities)
@@ -978,10 +978,10 @@ struct WorktreeHash {
     /// be inspected.
     mode: &'static str,
     /// Git object id for the path (blob id of the bytes or link target, HEAD
-    /// of a clean gitlink), or `None` when unavailable. commentlint: allow(JUDGE)
+    /// of a clean gitlink), or `None` when unavailable.
     object_id: Option<gix::ObjectId>,
     /// The path definitely does not exist. False for every other `absent`
-    /// outcome, where a refused or unreadable ancestor hides what is there. commentlint: allow(JUDGE)
+    /// outcome, where a refused or unreadable ancestor hides what is there.
     missing: bool,
 }
 
@@ -1021,7 +1021,7 @@ impl WorktreeHash {
 /// one `mode` records, under the repository's filesystem capabilities: with
 /// `core.fileMode=false` git ignores the executable bit, and with
 /// `core.symlinks=false` an indexed symlink is checked out as a regular file
-/// holding the link target. commentlint: allow(JUDGE)
+/// holding the link target.
 pub(super) fn tracked_mode_matches(
     mode: gix::index::entry::Mode,
     observed: &str,
@@ -1039,7 +1039,7 @@ pub(super) fn tracked_mode_matches(
 }
 
 /// Largest file run through the worktree-to-git conversion; beyond it a raw
-/// mismatch stands as modified. commentlint: allow(JUDGE)
+/// mismatch stands as modified.
 const MAX_NORMALIZED_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Blob id of `src` after git's built-in worktree-to-git conversions (`eol`,
@@ -1047,7 +1047,7 @@ const MAX_NORMALIZED_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 /// conversion applies or the result is not usable. A `text eol=crlf` attribute
 /// keeps CRLF bytes in the worktree over an LF blob, so raw bytes alone would
 /// report a clean file as modified. External drivers are stripped at open, so
-/// `Process` cannot occur and is treated as no result. commentlint: allow(JUDGE)
+/// `Process` cannot occur and is treated as no result.
 pub(super) fn normalized_blob_id_in(
     repo: &gix::Repository,
     index: &gix::index::State,
@@ -1190,7 +1190,7 @@ fn worktree_hash(
         Err(error) => return Err(SnapshotError::Scan(error.to_string())),
     };
     // A file that grows under the read gets no blob id, which reads as not
-    // matching the index: the conservative direction. commentlint: allow(JUDGE)
+    // matching the index: the conservative direction.
     let expected_len = u64::try_from(stat.st_size).unwrap_or(0);
     let mut blob = gix::hash::hasher(repo.object_hash());
     blob.update(&gix::objs::encode::loose_header(
@@ -1259,7 +1259,7 @@ fn conflict_content_hash(
 }
 
 /// Entries hashed between budget polls; the per-entry work is a few hundred
-/// bytes of digest input, so a coarse stride keeps the poll off the hot path. commentlint: allow(JUDGE)
+/// bytes of digest input, so a coarse stride keeps the poll off the hot path.
 const FINGERPRINT_POLL_STRIDE: usize = 1024;
 
 fn fingerprint_entries(
@@ -1330,7 +1330,7 @@ fn submodule_hash_at(
 
 /// A submodule repository named through a pinned `/proc/self/fd` directory,
 /// with the index it held when opened. The descriptor is part of the value
-/// because every path the repository resolves runs through it. commentlint: allow(JUDGE)
+/// because every path the repository resolves runs through it.
 pub(super) struct PinnedRepository {
     _pin: OwnedFd,
     pub(super) repo: gix::Repository,
@@ -1338,7 +1338,7 @@ pub(super) struct PinnedRepository {
 }
 
 /// Opens the repository at the gitlink `name` beneath `dir` through the pinned
-/// descriptor, as [`submodule_hash_at`] does, without scanning it. commentlint: allow(JUDGE)
+/// descriptor, as [`submodule_hash_at`] does, without scanning it.
 #[cfg(target_os = "linux")]
 fn submodule_repo_at(dir: &OwnedFd, name: &OsStr) -> Option<PinnedRepository> {
     use std::os::fd::AsRawFd;
@@ -1429,7 +1429,7 @@ fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<GitlinkHash, Snapsho
     }
     // A gitlink whose nested worktree carries uncommitted edits does not
     // match the superproject index even when HEAD equals the recorded id;
-    // git reports it as modified content. commentlint: allow(JUDGE)
+    // git reports it as modified content.
     let clean = entries.iter().all(|entry| !entry.is_uncommitted_change());
     Ok(GitlinkHash {
         content: format!(
@@ -1442,10 +1442,10 @@ fn submodule_hash(path: &Path, ctx: &ScanCtx<'_>) -> Result<GitlinkHash, Snapsho
 }
 
 /// Folds `path`'s bytes into `hash` chunk by chunk, so a large file bounds
-/// neither the working set nor the digest. commentlint: allow(JUDGE)
+/// neither the working set nor the digest.
 /// A missing path keys as absent; a symlink, FIFO, or directory at `path` is
 /// refused, since opening a FIFO can block indefinitely and a link's target is
-/// state this digest cannot see. commentlint: allow(JUDGE)
+/// state this digest cannot see.
 fn fold_file(
     hash: &mut Sha256,
     path: &Path,
@@ -1455,7 +1455,7 @@ fn fold_file(
     // leave a window for the path to be swapped before the read.
     let mut file = match open_regular_no_follow_at(rfs::CWD, path.as_os_str()) {
         Ok(Some(file)) => file,
-        // A refused non-regular path is not absent: the graph readers follow it. commentlint: allow(JUDGE)
+        // A refused non-regular path is not absent: the graph readers follow it.
         Ok(None) => match rfs::statat(rfs::CWD, path, AtFlags::SYMLINK_NOFOLLOW) {
             Err(rustix::io::Errno::NOENT) => {
                 hash.update(b"absent\0");

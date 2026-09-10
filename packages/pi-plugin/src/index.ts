@@ -636,7 +636,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
     }
 
-    // Clears one session's prompt state and closes its routes on both daemon transports; a closed route reopens on the session's next call, so no durable state is lost. commentlint: allow(JUDGE)
+    // Clears one session's prompt state and closes its routes on both daemon transports; a closed route reopens on the session's next call, so no durable state is lost.
     // The kernel transport is shared per connection file, and a session that `/cd`s across projects with distinct connection files holds routes on each, so every project config this process has resolved is released.
     function releaseSessionResources(sessionId: string): void {
         clearPiSystemPromptSession(sessionId);
@@ -655,13 +655,13 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             const sessionId = sessionIdFromContext(ctx);
             if (sessionId) {
                 releaseSessionResources(sessionId);
-                // A reload re-creates the extension for the same live session, and no `fork` start event follows to isolate it again, so its fork tokens must survive. Every other reason ends this runtime's use of the session. commentlint: allow(JUDGE)
+                // A reload re-creates the extension for the same live session, and no `fork` start event follows to isolate it again, so its fork tokens must survive. Every other reason ends this runtime's use of the session.
                 if (event.reason !== "reload") forgetPiSessionKernelTokens(sessionId);
             }
         } catch {
             // best-effort cleanup
         }
-        // `session_shutdown` ends this runtime: the next runtime builds its own client from its own configuration, so the transport this one dialed is torn down here or its socket, poller, and ring mappings stay cached for the process lifetime. commentlint: allow(JUDGE)
+        // `session_shutdown` ends this runtime: the next runtime builds its own client from its own configuration, so the transport this one dialed is torn down here or its socket, poller, and ring mappings stay cached for the process lifetime.
         moduleClient.disconnect();
         // `session_shutdown` with reason `reload` fires before `/reload` re-imports the extension.
         clearPiEidnaraActive();

@@ -482,8 +482,8 @@ impl Runtime {
 
 /// The publication daemon version is unauthenticated: the daemon wrote it, but no handshake proved it.
 ///
-/// `status` reads the unauthenticated version fail-closed, so a forged value can withhold `ok` but never grant it. commentlint: allow(JUDGE)
-/// Start, stop, and selection commit authenticate first and use the handshake's version. commentlint: allow(JUDGE)
+/// `status` reads the unauthenticated version fail-closed, so a forged value can withhold `ok` but never grant it.
+/// Start, stop, and selection commit authenticate first and use the handshake's version.
 fn publication_daemon_ver(observed: &LifecycleProbe) -> Option<String> {
     observed
         .publication
@@ -686,7 +686,7 @@ fn start_phase(
             && let Ok(observed) = probe()
             && observed.state == LifecycleState::Running
         {
-            // A predecessor launcher's orphaned child can win the instance lock, with any generation or harness envelope; `started` is claimed only for the incarnation this command spawned, identified by its unreaped child's PID in the lifecycle record. commentlint: allow(JUDGE)
+            // A predecessor launcher's orphaned child can win the instance lock, with any generation or harness envelope; `started` is claimed only for the incarnation this command spawned, identified by its unreaped child's PID in the lifecycle record.
             let own_incarnation = observed
                 .record
                 .as_ref()
@@ -714,7 +714,7 @@ fn start_phase(
                     generation_check: Some(("pass", "healthy")),
                 };
             }
-            // The named publication path must still resolve to the namespace observed before the spawn; a replaced managed subtree would make `started` name a daemon clients cannot reach, so the daemon is stopped and the drift reported. commentlint: allow(JUDGE)
+            // The named publication path must still resolve to the namespace observed before the spawn; a replaced managed subtree would make `started` name a daemon clients cannot reach, so the daemon is stopped and the drift reported.
             if anchor.verify().is_err() {
                 // The publication path now resolves into a replacement tree, so a path-based shutdown could reach a different daemon; the owned child is terminated through its PID instead.
                 child.terminate(phase_cap(STOP_TEARDOWN));
@@ -759,7 +759,7 @@ fn start_phase(
             };
         }
         if Instant::now() >= deadline {
-            // A child still initializing past the cap could publish after this result is emitted, so `startup_timeout` terminates it first and reports the state observed afterward. commentlint: allow(JUDGE)
+            // A child still initializing past the cap could publish after this result is emitted, so `startup_timeout` terminates it first and reports the state observed afterward.
             child.terminate(phase_cap(STOP_TEARDOWN));
             // A child that exits before publishing leaves a coherent `stopped` observation.
             // Reporting a pre-publication child exit as `wedged` would falsely claim fence incoherence.
@@ -1030,7 +1030,7 @@ const PAYLOAD_MANIFEST_SCHEMA: &str = "eidnara.payload-manifest/v1";
 
 /// Checks whether the running generation was staged from payload manifest digest `expected`.
 ///
-/// `already_running` with `proof:"current"` vouches for the running native code; a named payload returns `native_payload_invalid` when its manifest differs. commentlint: allow(JUDGE)
+/// `already_running` with `proof:"current"` vouches for the running native code; a named payload returns `native_payload_invalid` when its manifest differs.
 /// The running generation is the lifecycle record's digest, which `serve` writes from its startup envelope; a legacy record without a digest cannot prove the match and fails closed.
 fn running_generation_matches(
     observed: &LifecycleProbe,
@@ -1108,7 +1108,7 @@ fn payload_sources(
     if let Some(expected) = expected_manifest_digest {
         return trusted_payload_sources(dir, expected);
     }
-    // A release build stages only manifest-bound payloads: an unqualified tree can carry any `payload/bin/eidnara-host`, and the launcher-present branch of `generation_launcher` would exec it without a trusted identity. commentlint: allow(JUDGE)
+    // A release build stages only manifest-bound payloads: an unqualified tree can carry any `payload/bin/eidnara-host`, and the launcher-present branch of `generation_launcher` would exec it without a trusted identity.
     if !cfg!(debug_assertions) {
         eprintln!(
             "eidnara-host: --payload-dir requires --payload-manifest-digest in a release build"
@@ -1162,7 +1162,7 @@ fn trusted_payload_sources(
         "linux-x64-gnu" => "@eidnara/host-linux-x64-gnu",
         _ => return Err(invalid),
     };
-    // The enforced floor is the contract row `supported_target` reads; the manifest's copies are release-tooling output already bound by `release_contract_sha256` and carry no separate authority. commentlint: allow(JUDGE)
+    // The enforced floor is the contract row `supported_target` reads; the manifest's copies are release-tooling output already bound by `release_contract_sha256` and carry no separate authority.
     let _ = (&manifest.platform_floor, &manifest.synapse);
     if manifest.schema != PAYLOAD_MANIFEST_SCHEMA
         || manifest.release.id != "eidnara-host-release"
@@ -1493,7 +1493,7 @@ fn stop_phase(
         }
     }
     // After acknowledgement or an unresolved in-flight request, probe determines whether the host committed it.
-    // The request is already sent, so the teardown window is the full cap regardless of how much of `outer` the caller's earlier phases used: cutting it short would report `shutdown_timeout` for a stop that then completes, and a `restart` would skip its staged successor. commentlint: allow(JUDGE)
+    // The request is already sent, so the teardown window is the full cap regardless of how much of `outer` the caller's earlier phases used: cutting it short would report `shutdown_timeout` for a stop that then completes, and a `restart` would skip its staged successor.
     let deadline = Instant::now() + phase_cap(STOP_TEARDOWN);
     loop {
         match probe() {
@@ -1505,7 +1505,7 @@ fn stop_phase(
             Err(_) => {}
         }
         if Instant::now() >= deadline {
-            // An unacknowledged request can still commit when the host writes its queued response, so one `Running` observation cannot clear it; the stop stays reported as committed and the observed state is carried so callers do not assume the daemon kept serving. commentlint: allow(JUDGE)
+            // An unacknowledged request can still commit when the host writes its queued response, so one `Running` observation cannot clear it; the stop stays reported as committed and the observed state is carried so callers do not assume the daemon kept serving.
             let state = match probe().map(|observed| observed.state) {
                 Ok(LifecycleState::Running) if commit_uncertain => "running",
                 _ => "stopping",
@@ -1644,7 +1644,7 @@ fn cmd_restart(
         }
         LifecycleState::Stopped | LifecycleState::Running => {}
     }
-    // The successor generation is staged, promoted, validated, and its launcher opened before the irreversible stop, so a payload that fails or is replaced under the command leaves the incumbent serving; the retained launcher descriptor is immutable from here on. commentlint: allow(JUDGE)
+    // The successor generation is staged, promoted, validated, and its launcher opened before the irreversible stop, so a payload that fails or is replaced under the command leaves the incumbent serving; the retained launcher descriptor is immutable from here on.
     let running_generation = observed
         .record
         .as_ref()
@@ -1677,7 +1677,7 @@ fn cmd_restart(
                         .with_effects(effects(false, false));
                 }
             },
-            // The incumbent can exit between the settle probe and this attempt; a stopped observation continues on the stopped path so the command restores service instead of reporting a daemon that is gone. commentlint: allow(JUDGE)
+            // The incumbent can exit between the settle probe and this attempt; a stopped observation continues on the stopped path so the command restores service instead of reporting a daemon that is gone.
             None => match probe() {
                 Ok(fresh) if fresh.state == LifecycleState::Stopped => {
                     observed = fresh;
@@ -1784,7 +1784,7 @@ fn harness_remediation(subreason: &str) -> Option<&'static str> {
     }
 }
 
-/// A harness or credential the launcher described incorrectly is `harness_unavailable`, the contract's reason for a supplied harness that cannot serve, with the remediation its subreason carries; a read the command could not complete is `internal_error`. commentlint: allow(JUDGE)
+/// A harness or credential the launcher described incorrectly is `harness_unavailable`, the contract's reason for a supplied harness that cannot serve, with the remediation its subreason carries; a read the command could not complete is `internal_error`.
 fn envelope_failure_result(
     command: &'static str,
     error: &serve::LauncherEnvelopeError,

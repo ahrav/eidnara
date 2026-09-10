@@ -339,8 +339,8 @@ impl Supervisor {
     /// The spawned run task, not admission, waits for a backend permit.
     /// The stored fingerprint uses the exact request bytes in `body`.
     /// The stored fingerprint makes byte-identical retries idempotent.
-    /// Resolves a `send` whose outcome is already fixed by the session's existing state — a byte-identical resend of a live run, a conflicting live run, a deletion tombstone, or a closed index — without admitting anything. commentlint: allow(JUDGE)
-    /// These outcomes cannot create a new admission, so a caller must reach them even when the harness has become unavailable or the route's credential fingerprint is stale; availability and credential gates apply only to a genuinely new run. commentlint: allow(JUDGE)
+    /// Resolves a `send` whose outcome is already fixed by the session's existing state — a byte-identical resend of a live run, a conflicting live run, a deletion tombstone, or a closed index — without admitting anything.
+    /// These outcomes cannot create a new admission, so a caller must reach them even when the harness has become unavailable or the route's credential fingerprint is stale; availability and credential gates apply only to a genuinely new run.
     pub fn existing_session_outcome(
         &self,
         key: &SessionKey,

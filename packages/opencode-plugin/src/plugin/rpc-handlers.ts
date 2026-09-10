@@ -51,7 +51,7 @@ import {
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 import type { PluginContext } from "./types";
 
-/** Sessions whose work-metrics carry stays resident. Matches the sticky sidebar cache's session cap, since both hold one entry per polled session. commentlint: allow(JUDGE) */
+/** Sessions whose work-metrics carry stays resident. Matches the sticky sidebar cache's session cap, since both hold one entry per polled session. */
 const WORK_METRICS_CARRY_MAX_SESSIONS = 100;
 // Each poll processes only assistant rows newer than its watermark because the long-lived RPC server retains each session's carry across polls.
 // Losing a carry is safe: a restart, an LRU eviction, and `session.deleted` all make the next poll re-read that session's assistant rows from the start.
@@ -59,14 +59,14 @@ const workMetricsCarryBySession = new BoundedSessionMap<WorkMetricsCarry>(
     WORK_METRICS_CARRY_MAX_SESSIONS,
 );
 const RUST_STATUS_CACHE_TTL_MS = 2_000;
-/** Live entries per poll cache. Each open sidebar pane polls one `(session, directory)` pair, so the cap covers concurrent panes while bounding growth across sessions and projects. commentlint: allow(JUDGE) */
+/** Live entries per poll cache. Each open sidebar pane polls one `(session, directory)` pair, so the cap covers concurrent panes while bounding growth across sessions and projects. */
 const POLL_CACHE_MAX_ENTRIES = 32;
 
 export function clearWorkMetricsCarry(sessionId: string): void {
     workMetricsCarryBySession.delete(sessionId);
 }
 
-/** A row at or below the watermark is already folded in, and the incremental read never revisits it. OpenCode message ids are time-ordered, so id order tracks the `(time_created, id)` fold order. commentlint: allow(JUDGE) */
+/** A row at or below the watermark is already folded in, and the incremental read never revisits it. OpenCode message ids are time-ordered, so id order tracks the `(time_created, id)` fold order. */
 export function clearWorkMetricsCarryIfFolded(sessionId: string, messageId: string): void {
     const carry = workMetricsCarryBySession.peek(sessionId);
     if (carry && carry.lastId !== "" && messageId <= carry.lastId) {
@@ -82,7 +82,7 @@ function pollCacheKey(sessionId: string, directory: string): string {
     return `${sessionId}\u001f${directory}`;
 }
 
-/** Every `get` and `set` sweeps expired entries, and a full cache evicts its oldest entry before inserting, so a long-lived RPC server polling many sessions never accumulates dead snapshots. commentlint: allow(JUDGE) */
+/** Every `get` and `set` sweeps expired entries, and a full cache evicts its oldest entry before inserting, so a long-lived RPC server polling many sessions never accumulates dead snapshots. */
 export class BoundedTtlCache<V> {
     private readonly entries = new Map<string, { value: V; cachedAt: number }>();
 
@@ -190,7 +190,7 @@ const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
 );
-// The memory snapshot shares the status cache's TTL so one sidebar poll costs at most one daemon read per surface. commentlint: allow(JUDGE)
+// The memory snapshot shares the status cache's TTL so one sidebar poll costs at most one daemon read per surface.
 const memorySnapshotCache = new CoalescedTtlCache<KernelMemorySnapshot>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
@@ -199,7 +199,7 @@ const memorySnapshotCache = new CoalescedTtlCache<KernelMemorySnapshot>(
 /**
  * Forgets a session's cached and in-flight daemon status and memory snapshot under every root. After
  * a deletion a late answer cannot resurrect the session; after a turn the next poll reads state the
- * turn's transform and tool calls changed. commentlint: allow(JUDGE)
+ * turn's transform and tool calls changed.
  */
 export function clearSessionPollCaches(sessionId: string): void {
     const prefix = pollCacheKey(sessionId, "");
@@ -229,7 +229,7 @@ function resolveSidebarWorkMetrics(sessionId: string): {
     }
 }
 
-/** Resolves to `undefined` only when no module client exists; transport failures and daemon error responses throw, so callers cannot mistake an unreachable daemon for a session with no state. commentlint: allow(JUDGE) */
+/** Resolves to `undefined` only when no module client exists; transport failures and daemon error responses throw, so callers cannot mistake an unreachable daemon for a session with no state. */
 async function loadRustSessionStatus(
     client: RustModeModuleClient | undefined,
     sessionId: string,
@@ -301,7 +301,7 @@ function modelKeyOf(model: ActiveModel | undefined): string | undefined {
     return model ? `${model.providerID}/${model.modelID}` : undefined;
 }
 
-/** The live usage entry for `sessionId`, only when it was measured against `modelKey`; after a model switch the previous model's tokens and response timing must not be read against the new model. commentlint: allow(JUDGE) */
+/** The live usage entry for `sessionId`, only when it was measured against `modelKey`; after a model switch the previous model's tokens and response timing must not be read against the new model. */
 function liveUsageEntryFor(
     liveSessionState: LiveSessionState | undefined,
     sessionId: string,
@@ -309,7 +309,7 @@ function liveUsageEntryFor(
     if (!liveSessionState) return undefined;
     let entry = liveSessionState.contextUsageBySession.get(sessionId);
     if (!entry) {
-        // A restart or the idle sweep empties the map while the session's last response is still in OpenCode's database. Recovering it here keeps later polls off the database until the next response overwrites it. commentlint: allow(JUDGE)
+        // A restart or the idle sweep empties the map while the session's last response is still in OpenCode's database. Recovering it here keeps later polls off the database until the next response overwrites it.
         const persisted = findLastAssistantUsageFromOpenCodeDb(sessionId);
         if (persisted) {
             const contextLimit = resolveContextLimit(persisted.providerID, persisted.modelID);
@@ -403,7 +403,7 @@ export function buildSidebarSnapshot(
         const moduleUsage = moduleStatus?.usage;
         const moduleInputTokens = moduleUsage?.current_total_input_tokens;
         const moduleContextLimit = moduleUsage?.context_limit_tokens;
-        // The live entry is the newest measured sample; the daemon's is the copy a transform forwarded earlier, so it fills in only when no live or persisted sample exists. A compacted session with no later response is zero, not the daemon's pre-compaction copy. commentlint: allow(JUDGE)
+        // The live entry is the newest measured sample; the daemon's is the copy a transform forwarded earlier, so it fills in only when no live or persisted sample exists. A compacted session with no later response is zero, not the daemon's pre-compaction copy.
         const usageEntry = liveUsageEntryFor(liveSessionState, sessionId);
         const liveUsage = usageForModel(usageEntry, modelKey)?.usage;
         const compactedWithoutResponse =
@@ -432,7 +432,7 @@ export function buildSidebarSnapshot(
             typeof moduleStatus?.pending_drop_count === "number"
                 ? moduleStatus.pending_drop_count
                 : 0;
-        // `wrapup_active` is the daemon's only in-flight signal, so `historianRunning` and `compartmentInProgress` share it. commentlint: allow(JUDGE)
+        // `wrapup_active` is the daemon's only in-flight signal, so `historianRunning` and `compartmentInProgress` share it.
         const wrapupActive = moduleStatus?.wrapup_active === true;
 
         // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
@@ -451,7 +451,7 @@ export function buildSidebarSnapshot(
             typeof moduleContextLimit === "number" && moduleContextLimit > 0
                 ? moduleContextLimit
                 : 0;
-        // Each sample divides by the limit it was measured against: the live entry by the model's window, the daemon's copy by the limit sent with it; either falls back to the other when its own is unknown. commentlint: allow(JUDGE)
+        // Each sample divides by the limit it was measured against: the live entry by the model's window, the daemon's copy by the limit sent with it; either falls back to the other when its own is unknown.
         const contextLimit =
             liveInputTokens > 0
                 ? modelContextLimit > 0
@@ -765,7 +765,7 @@ export function registerRpcHandlers(
             ? args.nativeCompaction.auto || args.nativeCompaction.prune
             : undefined,
     };
-    // The same maps the hooks share, so a metadata read here pins the route root and records child classification for them too. commentlint: allow(JUDGE)
+    // The same maps the hooks share, so a metadata read here pins the route root and records child classification for them too.
     const sessionDirectoryDeps: Omit<SessionDirectoryDeps, "directory"> = {
         client: args.client ?? undefined,
         sessionDirectoryBySession: liveSessionState.sessionDirectoryBySession,
@@ -773,7 +773,7 @@ export function registerRpcHandlers(
         subagentSessions: liveSessionState.subagentSessions,
         internalChildSessions: liveSessionState.internalChildSessions,
     };
-    // Daemon state is keyed by (session, project_root), so a poll reads the root the hooks write under; the caller's directory is the fallback when the host reports none. commentlint: allow(JUDGE)
+    // Daemon state is keyed by (session, project_root), so a poll reads the root the hooks write under; the caller's directory is the fallback when the host reports none.
     const routeRootFor = (sessionId: string, requested: unknown): Promise<string> =>
         resolveSessionDirectory(
             {
@@ -806,7 +806,7 @@ export function registerRpcHandlers(
         });
     };
 
-    // An unreachable daemon fails the poll rather than yielding zero counts, because `applyStickySnapshotCache` treats zero counts as lost state and blanks the sidebar. commentlint: allow(JUDGE)
+    // An unreachable daemon fails the poll rather than yielding zero counts, because `applyStickySnapshotCache` treats zero counts as lost state and blanks the sidebar.
     const loadPollInputs = async (
         sessionId: string,
         dir: string,

@@ -64,7 +64,7 @@ export const MEMORY_DOMAIN_ID = "memory";
 
 /**
  * `kernel.read` rejects a longer `object_ids` filter with `invalid_params`.
- * A filtered read scopes visible rows to named objects before the daemon applies its row cap, so a targeted lookup reaches rows a capped unfiltered read drops. commentlint: allow(JUDGE)
+ * A filtered read scopes visible rows to named objects before the daemon applies its row cap, so a targeted lookup reaches rows a capped unfiltered read drops.
  */
 export const MAX_READ_OBJECT_IDS = 64;
 
@@ -74,7 +74,7 @@ export const MAX_COMMIT_OPERATIONS = 256;
 /** `kernel.commit` rejects an envelope carrying more tokens with `invalid_params` before any kernel work. Mirrors the daemon route's `MAX_TOKENS`. */
 export const MAX_COMMIT_TOKENS = 1024;
 
-/** A decision row in the memory domain; `decision_kind` carries the memory category, not the domain. commentlint: allow(JUDGE) */
+/** A decision row in the memory domain; `decision_kind` carries the memory category, not the domain. */
 export function isMemoryDecisionRow(row: ReadRow): row is ReadRow & { decision: ReadDecision } {
     return row.decision !== undefined && row.object.domain_id === MEMORY_DOMAIN_ID;
 }
@@ -83,12 +83,12 @@ export interface ReadPayload {
     known_as_of: number;
     tip: number;
     gated: boolean;
-    /** Whether the daemon dropped rows to fit its per-read row and byte bounds; dropped rows are the oldest, and objects they name still mutate through commit-side token checks. commentlint: allow(JUDGE) */
+    /** Whether the daemon dropped rows to fit its per-read row and byte bounds; dropped rows are the oldest, and objects they name still mutate through commit-side token checks. */
     truncated: boolean;
     rows: ReadRow[];
 }
 
-/** The event kinds a host command may name; each is a disposition transition the kernel's fixed table resolves, never a maturity promotion. commentlint: allow(JUDGE) */
+/** The event kinds a host command may name; each is a disposition transition the kernel's fixed table resolves, never a maturity promotion. */
 export const DISPOSITION_EVENTS = [
     "mark_stale",
     "mark_disputed",
@@ -98,7 +98,7 @@ export const DISPOSITION_EVENTS = [
 ] as const;
 export type DispositionEvent = (typeof DISPOSITION_EVENTS)[number];
 
-/** What one disposition operation did or would do. `outcome` is the kernel's command result and `disposition` the resulting state; `denied` marks a relaxation refused for want of a valid approval. commentlint: allow(JUDGE) */
+/** What one disposition operation did or would do. `outcome` is the kernel's command result and `disposition` the resulting state; `denied` marks a relaxation refused for want of a valid approval. */
 export interface DispositionResult {
     object_id: string;
     event: DispositionEvent;
@@ -124,7 +124,7 @@ export interface DispositionPreview extends DispositionResult {
 export interface PreviewPayload {
     known_as_of: number;
     previews: DispositionPreview[];
-    /** Present when the intent's identity is already recorded: the commit would replay this receipt, so nothing was judged and `previews` is empty. commentlint: allow(JUDGE) */
+    /** Present when the intent's identity is already recorded: the commit would replay this receipt, so nothing was judged and `previews` is empty. */
     receipt?: { commit_seq: number; replayed: true };
 }
 
@@ -132,7 +132,7 @@ export interface CommitPayload {
     receipt: { commit_seq: number; replayed: boolean };
     known_as_of: number;
     tokens: MutationToken[];
-    /** IDs of supersede survivors whose replacement spec was discarded because the survivor was already live; the daemon only re-pointed the predecessor, so the submitted content was not written. commentlint: allow(JUDGE) */
+    /** IDs of supersede survivors whose replacement spec was discarded because the survivor was already live; the daemon only re-pointed the predecessor, so the submitted content was not written. */
     merged: string[];
     /** One entry per disposition operation, in request order. */
     dispositions: DispositionResult[];
@@ -240,7 +240,7 @@ function parseObjectRow(raw: unknown): ObjectRow | null {
     }
     if (!isNonNegativeInteger(raw.source_revision)) return null;
     if (!isNonNegativeInteger(raw.created_commit_seq)) return null;
-    // The registry's CHECK constraint keeps an invalidation strictly after creation. commentlint: allow(JUDGE)
+    // The registry's CHECK constraint keeps an invalidation strictly after creation.
     if (
         raw.invalidated_commit_seq !== null &&
         (!isNonNegativeInteger(raw.invalidated_commit_seq) ||
@@ -319,7 +319,7 @@ export function parseReadResponse(raw: unknown): Parsed<ReadPayload> {
         return failed();
     }
     if (typeof payload.gated !== "boolean" || !Array.isArray(payload.rows)) return failed();
-    // A daemon that predates the flag omits it. commentlint: allow(JUDGE)
+    // A daemon that predates the flag omits it.
     if (payload.truncated !== undefined && typeof payload.truncated !== "boolean") {
         return failed();
     }
@@ -401,7 +401,7 @@ function parseDispositionPreview(raw: unknown): DispositionPreview | null {
     const current = parseSurfaceVisibilities(raw.current);
     const projected = parseSurfaceVisibilities(raw.projected);
     if (!current || !projected || typeof raw.visibility_changes !== "boolean") return null;
-    // The flag gates the confirmation prompt, so a reply whose flag disagrees with its own verdicts is refused rather than trusted. commentlint: allow(JUDGE)
+    // The flag gates the confirmation prompt, so a reply whose flag disagrees with its own verdicts is refused rather than trusted.
     if (raw.visibility_changes !== visibilityChanges(current, projected)) return null;
     return { ...result, current, projected, visibility_changes: raw.visibility_changes };
 }
@@ -440,16 +440,16 @@ export function parseCommitResponse(raw: unknown): Parsed<CommitPayload> {
     const receipt = payload.receipt;
     if (!isRecord(receipt) || !isNonNegativeInteger(receipt.commit_seq)) return failed();
     if (typeof receipt.replayed !== "boolean") return failed();
-    // `known_as_of` and every token position are `receipt.commit_seq` on the daemon side; a payload that disagrees would cache a mutation boundary that masks an intervening change or forces a spurious conflict. commentlint: allow(JUDGE)
+    // `known_as_of` and every token position are `receipt.commit_seq` on the daemon side; a payload that disagrees would cache a mutation boundary that masks an intervening change or forces a spurious conflict.
     if (payload.known_as_of !== receipt.commit_seq) return failed();
     const tokens = parseTokens(payload.tokens);
     if (!tokens || tokens.some((token) => token.known_as_of !== receipt.commit_seq)) {
         return failed();
     }
-    // A daemon that predates the field omits it. commentlint: allow(JUDGE)
+    // A daemon that predates the field omits it.
     const merged = payload.merged === undefined ? [] : parseStrings(payload.merged);
     if (!merged) return failed();
-    // The daemon omits the list when the envelope carried no disposition. commentlint: allow(JUDGE)
+    // The daemon omits the list when the envelope carried no disposition.
     const dispositions =
         payload.dispositions === undefined ? [] : parseDispositionResults(payload.dispositions);
     if (!dispositions) return failed();

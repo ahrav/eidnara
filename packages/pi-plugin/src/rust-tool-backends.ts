@@ -4,13 +4,13 @@ import type {
     RustToolBackends,
 } from "@eidnara/opencode/plugin/rust-tool-backends";
 
-/** Pi's daemon tool backends take the project root per invocation because a Pi process has no live-session map: `/cd` and multi-root sessions move the root between calls, and the daemon keys routes and lineage by `(session, root)`, where OpenCode pins the root by session instead. commentlint: allow(JUDGE) */
+/** Pi's daemon tool backends take the project root per invocation because a Pi process has no live-session map: `/cd` and multi-root sessions move the root between calls, and the daemon keys routes and lineage by `(session, root)`, where OpenCode pins the root by session instead. */
 export interface PiRustReduceRequest {
     sessionId: string;
     projectRoot: string;
     drop: string;
     commandId: string;
-    /** When supplied, the harness abort signal; the transport settles a cancelled call without waiting out its request budget. commentlint: allow(JUDGE) */
+    /** When supplied, the harness abort signal; the transport settles a cancelled call without waiting out its request budget. */
     signal?: AbortSignal;
 }
 
@@ -91,6 +91,6 @@ export function createPiRustToolBackends(moduleClient: RustModeModuleClient): Pi
                 },
                 ...(signal ? { signal } : {}),
             }),
-        // `noteEvaluationAvailable` stays absent: the daemon accepts a conditioned write only while a `note.evaluation.register` heartbeat is live for the project, and no shipped host registers one, so the tool must surface the daemon's refusal instead of compiling the condition. commentlint: allow(JUDGE)
+        // `noteEvaluationAvailable` stays absent: the daemon accepts a conditioned write only while a `note.evaluation.register` heartbeat is live for the project, and no shipped host registers one, so the tool must surface the daemon's refusal instead of compiling the condition.
     };
 }

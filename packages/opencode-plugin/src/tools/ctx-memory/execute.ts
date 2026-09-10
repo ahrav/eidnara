@@ -45,7 +45,7 @@ export const CTX_MEMORY_SOURCE_ID = "ctx_memory";
 export const CTX_MEMORY_ACTOR = "agent:opencode";
 
 function uniqueIds(ids: readonly string[] | undefined): string[] {
-    // The wrappers fall back to unvalidated raw arguments when schema parsing fails, so the check rejects non-string entries before `.trim()` throws a TypeError. commentlint: allow(JUDGE)
+    // The wrappers fall back to unvalidated raw arguments when schema parsing fails, so the check rejects non-string entries before `.trim()` throws a TypeError.
     if (ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))) {
         throw new MemoryInputError("'objectIds' must be an array of strings");
     }
@@ -107,7 +107,7 @@ function serializedBytes(view: Record<string, unknown>): number {
     return Buffer.byteLength(JSON.stringify(view), "utf8");
 }
 
-/** A raw per-field cap does not bound the serialized view: JSON escaping multiplies a field's bytes (a control character costs six), and an anti-memory repeats its summary across `content` and every parsed field. The cap therefore halves until the serialized view fits the response budget; `null` means no cap fits, which only an oversized unbounded field such as the object id or category can cause. commentlint: allow(JUDGE) */
+/** A raw per-field cap does not bound the serialized view: JSON escaping multiplies a field's bytes (a control character costs six), and an anti-memory repeats its summary across `content` and every parsed field. The cap therefore halves until the serialized view fits the response budget; `null` means no cap fits, which only an oversized unbounded field such as the object id or category can cause. */
 function boundedMemoryViewWithinBudget(row: ReadRow): Record<string, unknown> | null {
     for (let fieldBytes = MAX_RENDER_FIELD_BYTES; fieldBytes >= 1; fieldBytes >>= 1) {
         const view = boundedMemoryView(row, fieldBytes);
@@ -116,7 +116,7 @@ function boundedMemoryViewWithinBudget(row: ReadRow): Record<string, unknown> | 
     return null;
 }
 
-/** Retains the leading rows whose serialized views fit `CTX_MEMORY_RESPONSE_BUDGET_BYTES` and elides the rest. A first row that alone exceeds the budget is field-bounded and re-measured against the same budget, so the rendered response never exceeds it; the row is elided only when no field cap fits. commentlint: allow(JUDGE) */
+/** Retains the leading rows whose serialized views fit `CTX_MEMORY_RESPONSE_BUDGET_BYTES` and elides the rest. A first row that alone exceeds the budget is field-bounded and re-measured against the same budget, so the rendered response never exceeds it; the row is elided only when no field cap fits. */
 function packMemoryViews(
     rows: readonly ReadRow[],
     viewOf: (row: ReadRow) => Record<string, unknown>,
@@ -240,7 +240,7 @@ function rowCategory(row: ReadRow): string {
     return row.decision?.decision_kind ?? row.object.object_kind;
 }
 
-/** One survivor cannot replace facts from different categories, so every merge predecessor must carry the same `decision_kind`. commentlint: allow(JUDGE) */
+/** One survivor cannot replace facts from different categories, so every merge predecessor must carry the same `decision_kind`. */
 function requireMergeableCategory(predecessors: readonly ReadRow[]): string {
     const categories = [...new Set(predecessors.map(rowCategory))].sort();
     if (categories.length > 1) {
@@ -251,7 +251,7 @@ function requireMergeableCategory(predecessors: readonly ReadRow[]): string {
     return categories[0] as string;
 }
 
-/** An anti-memory records a rejected strategy; a successor on the other arm would flip the negation, so the successor's anti-memory arm must match the predecessors'. The caller supplies the action-specific error for each direction. commentlint: allow(JUDGE) */
+/** An anti-memory records a rejected strategy; a successor on the other arm would flip the negation, so the successor's anti-memory arm must match the predecessors'. The caller supplies the action-specific error for each direction. */
 function requireMatchingAntiArm(
     successorCategory: string,
     predecessorCategory: string,
@@ -263,7 +263,7 @@ function requireMatchingAntiArm(
     }
 }
 
-/** The kernel admits only the envelope's first supersede of a survivor and folds later targets in without re-admission, and an omitted sensitivity defaults to `normal`; the successor therefore asserts the strictest sensitivity any predecessor holds so a sensitive predecessor's content never reaches automatic surfaces. commentlint: allow(JUDGE) */
+/** The kernel admits only the envelope's first supersede of a survivor and folds later targets in without re-admission, and an omitted sensitivity defaults to `normal`; the successor therefore asserts the strictest sensitivity any predecessor holds so a sensitive predecessor's content never reaches automatic surfaces. */
 function strictestSensitivity(predecessors: readonly ReadRow[]): Sensitivity {
     // `SENSITIVITIES` is ordered least to most strict.
     const rank = predecessors.reduce(
@@ -277,7 +277,7 @@ function strictestSensitivity(predecessors: readonly ReadRow[]): Sensitivity {
  * Every mutation target must be a memory this project can read: the daemon
  * resolves ids store-wide and checks only the tokens it is handed, so the
  * project-scoped read is the authorization boundary. Rows follow `targets`
- * order because `revisionArgs` inherits from the caller's first target. commentlint: allow(JUDGE)
+ * order because `revisionArgs` inherits from the caller's first target.
  */
 function requireVisible(rows: readonly ReadRow[], targets: readonly string[]): ReadRow[] {
     const byId = new Map(rows.map((row) => [row.object.object_id, row]));
@@ -303,7 +303,7 @@ function requireTarget(args: CtxMemoryArgs): string {
     return objectId;
 }
 
-/** `objectId` names the written object (the survivor for revise/merge) apart from the retired predecessors that `objects` also lists; `archive` writes none. commentlint: allow(JUDGE) */
+/** `objectId` names the written object (the survivor for revise/merge) apart from the retired predecessors that `objects` also lists; `archive` writes none. */
 function renderCommit(
     action: CtxMemoryAction,
     result: CommitResult,
@@ -333,7 +333,7 @@ export interface ExecuteCtxMemoryArgs {
     signal?: AbortSignal;
 }
 
-/** `objectIds` scopes the read to the named objects, so a preflight or replay probe reaches a target beyond the daemon's row cap. commentlint: allow(JUDGE) */
+/** `objectIds` scopes the read to the named objects, so a preflight or replay probe reaches a target beyond the daemon's row cap. */
 async function readMemoryRows(
     client: KernelClient,
     signal?: AbortSignal,
@@ -357,7 +357,7 @@ async function readMemoryRows(
     };
 }
 
-/** The revise and merge preflight reads its targets through chunked filtered reads: the id filter bypasses the daemon's row cap but not its byte budget, and a byte-truncated preflight would misclassify the dropped live targets as missing. After chunking, `truncated` is true only for an id whose single-row read stayed truncated, so `requireVisible` rejects only targets the daemon provably does not serve. commentlint: allow(JUDGE) */
+/** The revise and merge preflight reads its targets through chunked filtered reads: the id filter bypasses the daemon's row cap but not its byte budget, and a byte-truncated preflight would misclassify the dropped live targets as missing. After chunking, `truncated` is true only for an id whose single-row read stayed truncated, so `requireVisible` rejects only targets the daemon provably does not serve. */
 async function readMemoryRowsChunked(
     client: KernelClient,
     objectIds: readonly string[],
@@ -382,7 +382,7 @@ async function readMemoryRowsChunked(
     };
 }
 
-/** An anti-memory predecessor's summary is parsed back into an `antiMemory` payload — never inherited as `content` — because `assertCtxMemoryWriteShape` requires the payload arm for the anti-memory category. `null` counts as omitted for every inherited field, matching the shape assertion's admission of null optional strings on the schema-fallback path; a strict `undefined` test would let `reason: null` reach `decisionSpec` as an explicit empty rationale and erase the stored one. commentlint: allow(JUDGE) */
+/** An anti-memory predecessor's summary is parsed back into an `antiMemory` payload — never inherited as `content` — because `assertCtxMemoryWriteShape` requires the payload arm for the anti-memory category. `null` counts as omitted for every inherited field, matching the shape assertion's admission of null optional strings on the schema-fallback path; a strict `undefined` test would let `reason: null` reach `decisionSpec` as an explicit empty rationale and erase the stored one. */
 function revisionArgs(args: CtxMemoryArgs, predecessors: readonly ReadRow[]): CtxMemoryArgs {
     const decision = predecessors[0]?.decision;
     const merged: CtxMemoryArgs = {
@@ -409,18 +409,18 @@ function nextSourceRevision(predecessors: readonly ReadRow[]): number {
     return predecessors.reduce((max, row) => Math.max(max, row.object.source_revision), 0) + 1;
 }
 
-/** A `retire_decision` operation carries no payload, so the caller's reason rides in the commit intent's `cause` after the tool-call id. `cause` is audit text only — the operation key derives from the session and tool-call identity — so a redelivered call keeps its key regardless of the reason text. commentlint: allow(JUDGE) */
+/** A `retire_decision` operation carries no payload, so the caller's reason rides in the commit intent's `cause` after the tool-call id. `cause` is audit text only — the operation key derives from the session and tool-call identity — so a redelivered call keeps its key regardless of the reason text. */
 function archiveCause(identity: CtxMemoryWriteIdentity, reason: string | undefined): string {
     const trimmed = reason?.trim();
     return trimmed ? `${identity.toolCallId} reason: ${trimmed}` : identity.toolCallId;
 }
 
-/** The stable write identity the operation key derives from: the session scopes the harness-local tool-call id, so two sessions reusing one tool-call id key distinct operations. commentlint: allow(JUDGE) */
+/** The stable write identity the operation key derives from: the session scopes the harness-local tool-call id, so two sessions reusing one tool-call id key distinct operations. */
 function operationIdOf(identity: CtxMemoryWriteIdentity): string {
     return `${identity.sessionId}${OPERATION_KEY_SEPARATOR}${identity.toolCallId}`;
 }
 
-/** A caller-supplied anti-memory without an explicit expiry gets the default horizon: kernel writes have no lifecycle expiry, so the horizon rides in the rendered payload and the read sites filter on it. The expiry is day-aligned because the rendered payload feeds the commit's request digest: a redelivered tool call must produce byte-identical operations to replay instead of hitting `operation_key_reused`. commentlint: allow(JUDGE) */
+/** A caller-supplied anti-memory without an explicit expiry gets the default horizon: kernel writes have no lifecycle expiry, so the horizon rides in the rendered payload and the read sites filter on it. The expiry is day-aligned because the rendered payload feeds the commit's request digest: a redelivered tool call must produce byte-identical operations to replay instead of hitting `operation_key_reused`. */
 function withAntiMemoryExpiry(args: CtxMemoryArgs): CtxMemoryArgs {
     if (!args.antiMemory || args.antiMemory.expiresAt != null) return args;
     const expiresAt = Math.ceil((Date.now() + ANTI_MEMORY_DEFAULT_TTL_MS) / DAY_MS) * DAY_MS;
@@ -429,7 +429,7 @@ function withAntiMemoryExpiry(args: CtxMemoryArgs): CtxMemoryArgs {
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
-/** A stored row cannot reveal whether its expiry was generated or explicit, so the replay probes substitute it only when it could have been generated: every generated expiry is UTC-day-aligned, and time moves forward, so an earlier delivery's generated expiry never exceeds the retry's regenerated one. An explicit expiry outside that envelope keeps its digest conflict instead of being erased by the substitution. commentlint: allow(JUDGE) */
+/** A stored row cannot reveal whether its expiry was generated or explicit, so the replay probes substitute it only when it could have been generated: every generated expiry is UTC-day-aligned, and time moves forward, so an earlier delivery's generated expiry never exceeds the retry's regenerated one. An explicit expiry outside that envelope keeps its digest conflict instead of being erased by the substitution. */
 function plausiblyGeneratedExpiry(
     stored: number | null | undefined,
     retryGenerated: number | null | undefined,
@@ -442,7 +442,7 @@ function plausiblyGeneratedExpiry(
     );
 }
 
-/** The create replay probe answers "already applied" only when the stored row equals the spec this request derives on its own: the derived category and rationale (empty when omitted) must equal the stored decision kind and rationale, a caller-supplied summary must equal the stored one byte for byte, and an anti-memory must re-render to the stored payload under the stored expiry — the one field a generated expiry legitimately drifts on — so any other changed content surfaces the daemon's `operation_key_reused` rejection. The row must also carry the create spec's lineage, `ctx_memory` at revision 1: a revise or merge under the same identity derives the same object id but writes revision 2 or later, and the stored operation for such a row was a supersede, not the insert this request would issue. commentlint: allow(JUDGE) */
+/** The create replay probe answers "already applied" only when the stored row equals the spec this request derives on its own: the derived category and rationale (empty when omitted) must equal the stored decision kind and rationale, a caller-supplied summary must equal the stored one byte for byte, and an anti-memory must re-render to the stored payload under the stored expiry — the one field a generated expiry legitimately drifts on — so any other changed content surfaces the daemon's `operation_key_reused` rejection. The row must also carry the create spec's lineage, `ctx_memory` at revision 1: a revise or merge under the same identity derives the same object id but writes revision 2 or later, and the stored operation for such a row was a supersede, not the insert this request would issue. */
 function replayMatchesRow(args: CtxMemoryArgs, row: ReadRow): boolean {
     const decision = row.decision;
     if (!decision) return false;
@@ -470,7 +470,7 @@ function replayMatchesRow(args: CtxMemoryArgs, row: ReadRow): boolean {
     return decision.payload.summary === args.content.trim();
 }
 
-/** The revise and merge replay probe compares only the fields this request states: an omitted category, content, or reason inherits from the retired predecessors, which no read serves, so it is consistent with whatever the successor holds, and the daemon's digest probe on the row-rebuilt spec is what proves the identity committed that successor. An explicit field must equal the stored one so a request that names different content keeps the daemon's `operation_key_reused` rejection. A generated anti-memory expiry is the one field a redelivery legitimately drifts on — it is day-aligned at delivery time — so the comparison re-renders under the stored expiry when the stored value could have been generated, mirroring the create probe. commentlint: allow(JUDGE) */
+/** The revise and merge replay probe compares only the fields this request states: an omitted category, content, or reason inherits from the retired predecessors, which no read serves, so it is consistent with whatever the successor holds, and the daemon's digest probe on the row-rebuilt spec is what proves the identity committed that successor. An explicit field must equal the stored one so a request that names different content keeps the daemon's `operation_key_reused` rejection. A generated anti-memory expiry is the one field a redelivery legitimately drifts on — it is day-aligned at delivery time — so the comparison re-renders under the stored expiry when the stored value could have been generated, mirroring the create probe. */
 function replayMatchesSuccessor(
     args: CtxMemoryArgs,
     row: ReadRow,
@@ -502,7 +502,7 @@ function replayMatchesSuccessor(
     return decision.payload.summary === args.content.trim();
 }
 
-/** The row a redelivered revise or merge already wrote: the successor id derives from the write identity, and a committed request retired every one of its targets, so recovery requires all named targets gone. A redelivery naming a still-visible target differs from what committed and keeps the ordinary visibility error. commentlint: allow(JUDGE) */
+/** The row a redelivered revise or merge already wrote: the successor id derives from the write identity, and a committed request retired every one of its targets, so recovery requires all named targets gone. A redelivery naming a still-visible target differs from what committed and keeps the ordinary visibility error. */
 function redeliveredSuccessor(
     args: CtxMemoryArgs,
     identity: CtxMemoryWriteIdentity,
@@ -517,7 +517,7 @@ function redeliveredSuccessor(
     return successor;
 }
 
-/** Rebuilds the committed successor spec byte-for-byte from the row that commit wrote: the daemon stores every spec field verbatim, and the request digest canonicalizes key order, so a probe carrying this spec hashes identically to the original envelope. Target absence alone proves only that the named objects are not currently visible — the digest comparison is what proves they were the committed request's predecessors. commentlint: allow(JUDGE) */
+/** Rebuilds the committed successor spec byte-for-byte from the row that commit wrote: the daemon stores every spec field verbatim, and the request digest canonicalizes key order, so a probe carrying this spec hashes identically to the original envelope. Target absence alone proves only that the named objects are not currently visible — the digest comparison is what proves they were the committed request's predecessors. */
 function successorSpec(identity: CtxMemoryWriteIdentity, successor: ReadRow): DecisionSpecInput {
     const decision = successor.decision as ReadDecision;
     return {
@@ -535,7 +535,7 @@ function successorSpec(identity: CtxMemoryWriteIdentity, successor: ReadRow): De
     };
 }
 
-/** Renders a create replay from the row the first delivery wrote. Only `create` uses this: a redelivered generated-expiry create hashes to a different digest, so the daemon answers `operation_key_reused` and no replayed receipt exists to render from; a create touches exactly the object it inserted, so the row alone names the complete affected set. Revise and merge render their replayed probe receipt instead, whose tokens also list the retired predecessors. `knownAsOf` is the row's creating commit because a daemon replay reports the stored receipt's commit sequence as `known_as_of`, not the tip the probe read. commentlint: allow(JUDGE) */
+/** Renders a create replay from the row the first delivery wrote. Only `create` uses this: a redelivered generated-expiry create hashes to a different digest, so the daemon answers `operation_key_reused` and no replayed receipt exists to render from; a create touches exactly the object it inserted, so the row alone names the complete affected set. Revise and merge render their replayed probe receipt instead, whose tokens also list the retired predecessors. `knownAsOf` is the row's creating commit because a daemon replay reports the stored receipt's commit sequence as `known_as_of`, not the tip the probe read. */
 function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow): string {
     return JSON.stringify({
         action,
@@ -549,10 +549,10 @@ function renderReplayedOutcome(action: CtxMemoryAction, row: ReadRow): string {
 
 export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<string> {
     const { client, action, identity, actor, sourceKind, signal } = input;
-    // Every action reads at least one optional string field with `.trim()`, and the wrappers pass raw arguments through when schema parsing fails, so the type check runs once here rather than per action; archive has no shape assertion of its own to carry it. commentlint: allow(JUDGE)
+    // Every action reads at least one optional string field with `.trim()`, and the wrappers pass raw arguments through when schema parsing fails, so the type check runs once here rather than per action; archive has no shape assertion of its own to carry it.
     assertCtxMemoryFieldTypes(input.args);
     const args = withAntiMemoryExpiry(input.args);
-    // A generated expiry drifts across UTC day boundaries, so a redelivered call renders a different expiry line under the same operation key; the replay probes compare such requests under the stored expiry instead. commentlint: allow(JUDGE)
+    // A generated expiry drifts across UTC day boundaries, so a redelivered call renders a different expiry line under the same operation key; the replay probes compare such requests under the stored expiry instead.
     const generatedExpiry =
         args.antiMemory !== undefined && input.args.antiMemory?.expiresAt == null;
     const operationId = operationIdOf(identity);
@@ -575,19 +575,19 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         }
         const read = await readMemoryRows(client, signal, wanted);
         if (!read.ok) return renderCtxMemoryStateText(read.state, []);
-        // An expired anti-memory reads as missing, the same served-row rule list, search, and status apply, so `get` cannot resurface a rejected strategy past its horizon. commentlint: allow(JUDGE)
+        // An expired anti-memory reads as missing, the same served-row rule list, search, and status apply, so `get` cannot resurface a rejected strategy past its horizon.
         const nowMs = Date.now();
         const returnedIds = new Set(read.rows.map((row) => row.object.object_id));
         const found = read.rows.filter(
             (row) => wanted.includes(row.object.object_id) && isServedMemoryDecisionRow(row, nowMs),
         );
         const foundIds = new Set(found.map((row) => row.object.object_id));
-        // Each named id serializes complete when it fits; ids past the response byte budget are elided by name so the caller can re-request them in smaller batches. commentlint: allow(JUDGE)
+        // Each named id serializes complete when it fits; ids past the response byte budget are elided by name so the caller can re-request them in smaller batches.
         const packed = packMemoryViews(found, memoryView);
         const elidedObjectIds = packed.elidedRows.map((row) => row.object.object_id);
-        // Ids the read did not serve echo back as the caller wrote them. They are caller input the packer never measures and the daemon caps their count but not their length, so the echo shares the response budget with the packed views: each id is field-bounded, and ids past the remaining budget are counted instead of named. commentlint: allow(JUDGE)
+        // Ids the read did not serve echo back as the caller wrote them. They are caller input the packer never measures and the daemon caps their count but not their length, so the echo shares the response budget with the packed views: each id is field-bounded, and ids past the remaining budget are counted instead of named.
         const notServed = wanted.filter((id) => !foundIds.has(id));
-        // A truncated read cannot prove an absent id is missing — it can live beyond the daemon's row cap — so such ids report as unresolved. An id the daemon did return and the served-row filter hid is known missing even on a truncated read. commentlint: allow(JUDGE)
+        // A truncated read cannot prove an absent id is missing — it can live beyond the daemon's row cap — so such ids report as unresolved. An id the daemon did return and the served-row filter hid is known missing even on a truncated read.
         const hidden = notServed.filter((id) => returnedIds.has(id));
         const absent = notServed.filter((id) => !returnedIds.has(id));
         let remainingBytes =
@@ -620,7 +620,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         });
     }
     if (action === "create") {
-        // The executor is the last check before the kernel commits: the generic client accepts any decision kind, so taxonomy membership and positive/anti-memory exclusivity are enforced here regardless of which harness wrapper called. commentlint: allow(JUDGE)
+        // The executor is the last check before the kernel commits: the generic client accepts any decision kind, so taxonomy membership and positive/anti-memory exclusivity are enforced here regardless of which harness wrapper called.
         assertCtxMemoryWriteShape({ ...args, action: "create" });
         const category = args.category?.trim() ?? "";
         const spec = decisionSpec(args, category, identity, {
@@ -629,7 +629,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         });
         const createMutation = sourceKind === undefined ? mutation : { ...mutation, sourceKind };
         const result = await client.create(spec, createMutation);
-        // A redelivery of a generated-expiry create answers `operation_key_reused` because its digest drifted. The object id derives from the same identity, so a visible object under it proves the first delivery committed; answer the replay the daemon would have given. commentlint: allow(JUDGE)
+        // A redelivery of a generated-expiry create answers `operation_key_reused` because its digest drifted. The object id derives from the same identity, so a visible object under it proves the first delivery committed; answer the replay the daemon would have given.
         if (
             generatedExpiry &&
             !isAvailable(result) &&
@@ -658,7 +658,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
             ...(signal ? { signal } : {}),
         };
         if (!read.rows.some((row) => row.object.object_id === target)) {
-            // A committed archive retired its target, so a redelivery's targeted read serves nothing and the visibility check alone would misreport the replay as "memory not found". The daemon answers a matching `(operation_key, request_digest)` from its receipt ledger before token validation, so resubmitting the identical retire operation replays the original commit; the operation bytes match `client.archive`'s, keeping the digest identical. The probe's token pins `known_as_of` to snapshot 0, which predates every commit, so a first-delivery envelope trips the token conflict before mutating anything and falls through to the visibility error. commentlint: allow(JUDGE)
+            // A committed archive retired its target, so a redelivery's targeted read serves nothing and the visibility check alone would misreport the replay as "memory not found". The daemon answers a matching `(operation_key, request_digest)` from its receipt ledger before token validation, so resubmitting the identical retire operation replays the original commit; the operation bytes match `client.archive`'s, keeping the digest identical. The probe's token pins `known_as_of` to snapshot 0, which predates every commit, so a first-delivery envelope trips the token conflict before mutating anything and falls through to the visibility error.
             const probe = await client.commit({
                 ...archiveMutation,
                 tokens: [{ object_id: target, known_as_of: 0 }],
@@ -676,19 +676,19 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
 
     if (action === "revise") {
         const target = requireTarget(args);
-        // The successor id rides in the filter so redelivery recovery sees the row this identity already wrote. commentlint: allow(JUDGE)
+        // The successor id rides in the filter so redelivery recovery sees the row this identity already wrote.
         const read = await readMemoryRowsChunked(
             client,
             [...new Set([target, derivedId("mem", identity, 0)])],
             signal,
         );
         if (!read.ok) return renderCtxMemoryStateText(read.state, [target]);
-        // A truncated read cannot prove the target retired, so recovery only runs on a complete snapshot. commentlint: allow(JUDGE)
+        // A truncated read cannot prove the target retired, so recovery only runs on a complete snapshot.
         const replayed = read.truncated
             ? null
             : redeliveredSuccessor(args, identity, read.rows, [target], generatedExpiry);
         if (replayed) {
-            // Absence plus a matching successor only suggests a redelivery; the daemon's receipt ledger proves it. The probe resubmits the committed operation bytes rebuilt from the successor row: a digest match replays before token validation, while an identity reused with a different target hashes differently, answers `operation_key_reused`, and falls through to the ordinary visibility error. commentlint: allow(JUDGE)
+            // Absence plus a matching successor only suggests a redelivery; the daemon's receipt ledger proves it. The probe resubmits the committed operation bytes rebuilt from the successor row: a digest match replays before token validation, while an identity reused with a different target hashes differently, answers `operation_key_reused`, and falls through to the ordinary visibility error.
             const probe = await client.commit({
                 ...mutation,
                 tokens: [{ object_id: target, known_as_of: 0 }],
@@ -731,7 +731,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         );
     }
 
-    // The raw list's length is bounded before any per-element work so an oversized input (the schema-fallback path passes raw arguments through) is rejected without a scan, and blank entries count toward the cap because they were given. A duplicate id in the merge list is a caller-side bug; the duplicate check precedes arity validation so duplicate input cannot pass as a smaller merge after deduplication, and the error names the offending ids so the caller can fix its list. commentlint: allow(JUDGE)
+    // The raw list's length is bounded before any per-element work so an oversized input (the schema-fallback path passes raw arguments through) is rejected without a scan, and blank entries count toward the cap because they were given. A duplicate id in the merge list is a caller-side bug; the duplicate check precedes arity validation so duplicate input cannot pass as a smaller merge after deduplication, and the error names the offending ids so the caller can fix its list.
     if (Array.isArray(args.objectIds) && args.objectIds.length > MERGE_MAX_TARGETS) {
         throw new MemoryInputError(
             `merge accepts at most ${MERGE_MAX_TARGETS} objectIds; ${args.objectIds.length} were given. Merge in smaller batches.`,
@@ -763,7 +763,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
             "merge requires content (with category) or antiMemory for the survivor; the targets' payloads are not combined automatically",
         );
     }
-    // The successor id rides in the filter so redelivery recovery sees the row this identity already wrote. commentlint: allow(JUDGE)
+    // The successor id rides in the filter so redelivery recovery sees the row this identity already wrote.
     const read = await readMemoryRowsChunked(
         client,
         [...new Set([...targets, derivedId("mem", identity, 0)])],
@@ -774,7 +774,7 @@ export async function executeCtxMemory(input: ExecuteCtxMemoryArgs): Promise<str
         ? null
         : redeliveredSuccessor(args, identity, read.rows, targets, generatedExpiry);
     if (replayed) {
-        // The same digest proof as revise, with one supersede operation per target in list order: a reordered or substituted target list hashes differently and keeps the ordinary visibility error. commentlint: allow(JUDGE)
+        // The same digest proof as revise, with one supersede operation per target in list order: a reordered or substituted target list hashes differently and keeps the ordinary visibility error.
         const spec = successorSpec(identity, replayed);
         const probe = await client.commit({
             ...mutation,

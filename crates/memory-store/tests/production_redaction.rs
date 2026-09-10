@@ -527,7 +527,7 @@ fn concurrent_facade_duplicate_persists_one_active_scan_batch() {
     assert_eq!(scan_audit_counts(temp.path()).batches, 1);
 }
 
-/// `every_durable_write_family_is_declared_once_with_a_distinct_owner_kind` owns declaration completeness. commentlint: allow(JUDGE)
+/// `every_durable_write_family_is_declared_once_with_a_distinct_owner_kind` owns declaration completeness.
 #[test]
 fn durable_write_registry_references_real_bindings_and_checked_tests() {
     let store_source = include_str!("../src/lib.rs");
@@ -1256,7 +1256,7 @@ fn transaction_produced_facade_text_is_redacted_and_bounded() {
 }
 
 /// The `notes_facade_authority_*` triggers abort a facade write whenever the caller's
-/// route resolves to a `notes` authority in any state other than `MODULE`. commentlint: allow(JUDGE)
+/// route resolves to a `notes` authority in any state other than `MODULE`.
 #[test]
 fn facade_note_mutations_abort_unless_the_notes_authority_is_module() {
     const STORE_UUID: &str = "0123456789abcdef0123456789abcdef";

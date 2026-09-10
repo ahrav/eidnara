@@ -44,7 +44,7 @@ const HTTP_TOKEN = "[A-Za-z0-9!#$%&*+.^_|~-]+";
 const AUTH_SCHEME_NAMES =
     "(?:AWS4-HMAC-SHA256|AWS|Bearer|Basic|Digest|Token|ApiKey|Api-Key|Negotiate|NTLM|Hawk|OAuth|SharedKeyLite|SharedKey|Signature|HMAC-SHA256|HMAC|SCRAM-SHA-256|SCRAM-SHA-1|DPoP|GNAP|HOBA|Mutual|PrivateToken|Concealed|vapid|GoogleLogin|SSWS)";
 const AUTH_SCHEME_PATTERN = new RegExp(`^${AUTH_SCHEME_NAMES}$`, "i");
-/** One `name=value` parameter of a `Digest`-style header, with the whitespace RFC 7235 allows around `=`; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. commentlint: allow(JUDGE) */
+/** One `name=value` parameter of a `Digest`-style header, with the whitespace RFC 7235 allows around `=`; a quoted value reads escape pairs as one character so `username="a\"b"` does not end at the escaped quote. */
 const AUTH_PARAM = String.raw`${HTTP_TOKEN}\s*=\s*(?:"${DOUBLE_QUOTED_BODY}"|[^\s,"]+)`;
 /** A PEM header with no footer stops the body scan here instead of reading to the end of the input. */
 const PEM_BODY_MAX = 16_384;
@@ -195,7 +195,7 @@ function vocabularyReach(joined: string, reverse: boolean): boolean[] {
     return reach;
 }
 
-/** A separator-free name (`apikey`, `OPENAIAPIKEY`) is a credential when vocabulary words cover the whole name and the cover holds a label word plus a label segment other than `key`; `keyvalue` reduces to the bare key and `monkey` has no cover. commentlint: allow(JUDGE) */
+/** A separator-free name (`apikey`, `OPENAIAPIKEY`) is a credential when vocabulary words cover the whole name and the cover holds a label word plus a label segment other than `key`; `keyvalue` reduces to the bare key and `monkey` has no cover. */
 function undelimitedNamesACredential(joined: string): boolean {
     const fromStart = vocabularyReach(joined, false);
     const toEnd = vocabularyReach(joined, true);
@@ -216,7 +216,7 @@ function undelimitedNamesACredential(joined: string): boolean {
     return namesALabel && namesAQualifiedSegment;
 }
 
-/** `isSecretKey` mirrors `secret_shaped_json_key` in `crates/context-core/src/redaction.rs`, whose vocabulary lists `SECRET_QUALIFIERS` and `LABEL_AFFIXES` copy: a label-word segment marks the key unless a public marker is present or the label reduces to the bare `key`, which names a map entry (`target_key`, `key_id`) rather than a credential. commentlint: allow(JUDGE) */
+/** `isSecretKey` mirrors `secret_shaped_json_key` in `crates/context-core/src/redaction.rs`, whose vocabulary lists `SECRET_QUALIFIERS` and `LABEL_AFFIXES` copy: a label-word segment marks the key unless a public marker is present or the label reduces to the bare `key`, which names a map entry (`target_key`, `key_id`) rather than a credential. */
 export function isSecretKey(key: string): boolean {
     const segments = keySegments(key);
     if (segments.length === 0) return false;
@@ -227,7 +227,7 @@ export function isSecretKey(key: string): boolean {
     return undelimitedNamesACredential(segments.join(""));
 }
 
-/** `isSecretKey` without the bare-`key` carve-out: `key=` in a log line has no map to be an entry of, while `author` and `monkey` hold no label segment and stay visible. commentlint: allow(JUDGE) */
+/** `isSecretKey` without the bare-`key` carve-out: `key=` in a log line has no map to be an entry of, while `author` and `monkey` hold no label segment and stay visible. */
 function textKeyNamesASecret(key: string): boolean {
     const segments = keySegments(key);
     if (segments.some((segment) => NON_SECRET_KEY_MARKERS.has(segment))) return false;
@@ -273,7 +273,7 @@ const IDENTIFIER_CHAR = "[A-Za-z0-9_]";
 const PATH_END = String.raw`(?=$|[\\/\s"'\`,;:)\]])`;
 /** A home-directory segment: everything up to a separator, without trailing punctuation. */
 const HOME_SEGMENT = String.raw`[^/\\\s"'\`]*[^/\\\s"'\`.,;:)\]]`;
-/** A home-directory name that may hold spaces (`John Doe`), read only when a separator follows its last word; the words exclude the characters Windows forbids in a name so a run cannot cross into a second path. commentlint: allow(JUDGE) */
+/** A home-directory name that may hold spaces (`John Doe`), read only when a separator follows its last word; the words exclude the characters Windows forbids in a name so a run cannot cross into a second path. */
 const SPACED_HOME_SEGMENT = String.raw`[^\\/:*?"<>|\s]+(?: [^\\/:*?"<>|\s]+)*(?=[\\/])`;
 const HOME_NAME = `(?:${SPACED_HOME_SEGMENT}|${HOME_SEGMENT})`;
 
@@ -552,7 +552,7 @@ const QUOTED_KEY_PATTERN = new RegExp(
  * key characters from where the run starts, so a key of any length is read once; the lookahead
  * admits only a run holding a vocabulary word. The optional `>` matches a provider marker
  * standing where the key was, such as `<HUGGINGFACE_TOKEN_REDACTED>=v` after the token pattern
- * absorbed a trailing `key` run. commentlint: allow(JUDGE)
+ * absorbed a trailing `key` run.
  */
 const ASSIGNMENT_KEY_PATTERN = new RegExp(
     `(?<!${ASSIGNMENT_KEY_RUN})(?=${ASSIGNMENT_KEY_RUN}*(?:${SECRET_WORD_ALTERNATION}))(${ASSIGNMENT_KEY_RUN}+>?)(\\s*=\\s*|:[ \\t]+)`,

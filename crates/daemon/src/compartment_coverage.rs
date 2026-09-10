@@ -142,7 +142,7 @@ impl std::fmt::Display for CoverageError {
 ///
 /// # Errors
 ///
-/// Returns `CoverageError` when a range is negative or descending, or a later range starts at or before the preceding range's end. commentlint: allow(JUDGE)
+/// Returns `CoverageError` when a range is negative or descending, or a later range starts at or before the preceding range's end.
 pub fn resolve_coverage(
     compartments: &[StoredCompartment],
 ) -> Result<Option<CompartmentCoverage>, CoverageError> {

@@ -77,7 +77,7 @@ function managedDirChain(dir: string): string[] | null {
 
 /**
  * Reject directories owned by another user because their owner can replace
- * entries with symlinks. commentlint: allow(JUDGE)
+ * entries with symlinks.
  */
 function assertPrivateDir(dir: string): void {
     const stat = fs.lstatSync(dir);
@@ -112,7 +112,7 @@ function ensureLogDir(dir: string): boolean {
  * `O_NOFOLLOW` makes a symlink at the log path fail the open instead of
  * redirecting the append; the requested create mode grants access only to the owner.
  * `O_NONBLOCK` turns a FIFO with no reader into `ENXIO` instead of a hang, and
- * the descriptor is rejected unless it names a regular file. commentlint: allow(JUDGE)
+ * the descriptor is rejected unless it names a regular file.
  */
 function appendPrivate(logFile: string, data: string, managed: boolean): void {
     const { O_WRONLY, O_APPEND, O_CREAT, O_NOFOLLOW, O_NONBLOCK } = fs.constants;

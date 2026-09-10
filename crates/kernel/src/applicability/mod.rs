@@ -381,7 +381,6 @@ fn demote_if_blocked(object: &mut ObjectApplicability, state: Option<&BlockState
 
 /// The one Current-to-Uncertain transition. Demotion marks the clearing append
 /// as owed, so every site that demotes reports the same outstanding work.
-/// commentlint: allow(JUDGE)
 fn demote_current(object: &mut ObjectApplicability, reason: &str) {
     object.state = ApplicabilityState::Uncertain;
     object.evidence = format!("durable applicability block not cleared: {reason}");

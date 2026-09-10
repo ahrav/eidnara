@@ -7154,7 +7154,7 @@ fn an_object_admitted_by_a_trigger_serves_no_lower_than_that_trigger_reads_today
     );
 }
 
-/// A preview envelope answers the readers a commit closure sees, judges an admission the way `record_admission` would, and uses each judged decision as the next admission's prior. commentlint: allow(JUDGE)
+/// A preview envelope answers the readers a commit closure sees, judges an admission the way `record_admission` would, and uses each judged decision as the next admission's prior.
 #[test]
 fn preview_judges_like_a_commit_and_writes_nothing() {
     let directory = tempfile::tempdir().unwrap();
@@ -7212,7 +7212,7 @@ fn preview_judges_like_a_commit_and_writes_nothing() {
                 served.visibility_with(stale.visibility, stale.sensitivity, Surface::AutoInject),
                 kernel::SurfaceVisibility::Hidden
             );
-            // Each previewed admission uses the preceding previewed decision as its prior, matching commit behavior: quarantine after stale is judged from stale, and relaxing back is denied without an approval. commentlint: allow(JUDGE)
+            // Each previewed admission uses the preceding previewed decision as its prior, matching commit behavior: quarantine after stale is judged from stale, and relaxing back is denied without an approval.
             assert_eq!(
                 preview
                     .subject_admission("object")?
@@ -7346,7 +7346,7 @@ fn preview_refuses_an_operation_whose_authority_an_earlier_one_changed() {
         })
         .unwrap();
 
-    // Alone, the relaxation rests on an approval the ledger still holds valid. commentlint: allow(JUDGE)
+    // Alone, the relaxation rests on an approval the ledger still holds valid.
     let (_, relaxed) = store
         .preview(far_deadline(), |preview| {
             preview.preview_admission(dependent_request(EventKind::MarkStale))
@@ -7369,7 +7369,7 @@ fn preview_refuses_an_operation_whose_authority_an_earlier_one_changed() {
         Some((kernel::Outcome::Deny, kernel::Disposition::Quarantined))
     );
 
-    // With the quarantine committed, the same relaxation previews alone as the denial the commit recorded. commentlint: allow(JUDGE)
+    // With the quarantine committed, the same relaxation previews alone as the denial the commit recorded.
     let (_, relaxed) = store
         .preview(far_deadline(), |preview| {
             preview.preview_admission(dependent_request(EventKind::MarkStale))

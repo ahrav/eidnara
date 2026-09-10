@@ -34,7 +34,7 @@ struct PreservedRegion {
     placeholder: String,
     original: String,
     /// The original is input that spelled a placeholder; it is restored as
-    /// itself and never expanded, since it names no minted region. commentlint: allow(JUDGE)
+    /// itself and never expanded, since it names no minted region.
     literal: bool,
 }
 
@@ -538,7 +538,7 @@ fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
 
     // Input that already spells a placeholder (`\0EIDNARA_PRES_<n>\0`) is
     // captured first, as its own literal region, so restoration cannot mistake
-    // it for a region minted below. commentlint: allow(JUDGE)
+    // it for a region minted below.
     working = protect_literal_placeholders(&working, &mut preserved);
 
     static FENCED: OnceLock<Regex> = OnceLock::new();

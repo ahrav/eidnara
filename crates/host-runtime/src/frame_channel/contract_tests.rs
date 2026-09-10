@@ -4,7 +4,7 @@
 //! the concrete `ShmReceiver` receive side, shared lifecycle tokens, and
 //! byte-charge ownership —
 //! through a [`ChannelFactory`]. The sole instantiation below uses the
-//! production ring transport. commentlint: allow(JUDGE)
+//! production ring transport.
 
 use std::future::Future;
 use std::sync::{Arc, Condvar, Mutex};

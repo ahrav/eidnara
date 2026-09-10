@@ -7,7 +7,7 @@
 //! `visible_as_of` re-evaluates stored admission decisions and never consults
 //! evidence liveness, so an admitted subject whose trigger evidence was
 //! deleted is served until a consumer of the `admission_state` target records
-//! a new decision. This module proves that work row is emitted; the consumer's withdrawal decision is outside this binary's scope. commentlint: allow(JUDGE)
+//! a new decision. This module proves that work row is emitted; the consumer's withdrawal decision is outside this binary's scope.
 
 use kernel::{
     ArtifactDeletionKind, ArtifactErrorKind, ArtifactHandle, Sensitivity, Surface,
@@ -34,7 +34,7 @@ struct Subject {
     handle: ArtifactHandle,
     object_id: String,
     evidence_object_ids: Vec<String>,
-    /// Live reference to different bytes; a deletion scoped by digest alone leaves it untouched, one missing its `object_id` predicate does not. commentlint: allow(JUDGE)
+    /// Live reference to different bytes; a deletion scoped by digest alone leaves it untouched, one missing its `object_id` predicate does not.
     unrelated: ArtifactHandle,
     unrelated_object_id: String,
 }
@@ -380,7 +380,7 @@ fn deletion_invalidates_references_and_emits_complete_work_across_restart() {
     let reingested_handle = proof.store().ingest_artifact(reingested).unwrap();
     assert_eq!(reingested_handle.digest, handle.digest);
     assert_eq!(count_sql(&proof, live_refs), 1);
-    // The reingest commit leaves the alignment projection behind the tip, and the replay's already-applied branch rebuilds it; bringing the projection current first lets the digest comparison cover the alignment tables. commentlint: allow(JUDGE)
+    // The reingest commit leaves the alignment projection behind the tip, and the replay's already-applied branch rebuilds it; bringing the projection current first lets the digest comparison cover the alignment tables.
     proof.store().rebuild_alignment().unwrap();
     let before_replay = proof.digest();
 
@@ -428,7 +428,7 @@ fn deletion_fault_before_commit_leaves_references_live_and_no_barrier_across_res
     assert!(auto_inject_ids(&proof).contains(&object_id));
     let before_tip = proof.tip();
     proof.fault_deletion(deletion("delete", &handle.digest));
-    // `ReferenceCommit` covers several failure sites; an unchanged tip distinguishes a fault before the reference commit from one after it. commentlint: allow(JUDGE)
+    // `ReferenceCommit` covers several failure sites; an unchanged tip distinguishes a fault before the reference commit from one after it.
     assert_eq!(proof.tip(), before_tip);
     // Both references remain live; no barrier or propagation row exists.
     assert!(auto_inject_ids(&proof).contains(&object_id));
@@ -444,7 +444,7 @@ fn deletion_fault_before_commit_leaves_references_live_and_no_barrier_across_res
         0
     );
     // Re-asserted after the positive control so a drifted source_kind literal
-    // fails loudly instead of matching zero rows here. commentlint: allow(JUDGE)
+    // fails loudly instead of matching zero rows here.
     let propagation_outbox_sql =
         "SELECT COUNT(*) FROM outbox WHERE source_kind='artifact_deletion'";
     assert_eq!(count_sql(&proof, propagation_outbox_sql), 0);

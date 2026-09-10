@@ -285,7 +285,7 @@ fn load_repair_target(
 /// The checkout and the object the intent describes must still be the live
 /// ones: a moved HEAD or a corrected/invalidated object means the evidence no
 /// longer describes the checkout, so the repair is a `Conflict` and the object
-/// stays uncertain for this request. commentlint: allow(JUDGE)
+/// stays uncertain for this request.
 fn revalidate_repair(
     snapshot: &CheckoutSnapshot,
     intent: &RepairIntent,
@@ -363,7 +363,7 @@ pub fn commit_read_repair(
         Ok(receipt) => {
             // A replay skips the closure, so the checkout and target checks it
             // would have run happen here; a replay also asserts an effect that
-            // retirement or correction can have undone since. commentlint: allow(JUDGE)
+            // retirement or correction can have undone since.
             if receipt.replayed {
                 let target = store.read_repair_target(&intent.object_id, budget);
                 match target.and_then(|target| revalidate_repair(snapshot, intent, target)) {
@@ -532,7 +532,7 @@ const BLOCK_SCAN_ID_CHUNK: usize = 512;
 
 impl KernelStore {
     /// Reader-side twin of [`load_repair_target`] for a replayed receipt, which
-    /// never enters the writer closure. commentlint: allow(JUDGE)
+    /// never enters the writer closure.
     fn read_repair_target(
         &self,
         object_id: &str,
@@ -560,7 +560,7 @@ impl KernelStore {
     /// compared: a later same-kind record from another checkout state (stale
     /// at A, then stale at B, then back to A) leaves this repair's row live but
     /// no longer latest, and the block it expresses is the one this repair
-    /// would have recorded. commentlint: allow(JUDGE)
+    /// would have recorded.
     ///
     /// Defense in depth behind the generation: retiring or correcting a record
     /// records an invalidation, which moves the generation and produces a fresh

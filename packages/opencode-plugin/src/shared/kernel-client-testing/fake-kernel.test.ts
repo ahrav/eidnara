@@ -211,7 +211,7 @@ describe("FakeKernel read filtering and row cap", () => {
     });
 
     it("serves rows newest first, then by object id within one commit", () => {
-        // The daemon's serving order, which its row cap and byte budget truncate as a prefix; a lexicographic order would rank an old `mem_a` above a newer `mem_z` and change which rows a cap keeps. commentlint: allow(JUDGE)
+        // The daemon's serving order, which its row cap and byte budget truncate as a prefix; a lexicographic order would rank an old `mem_a` above a newer `mem_z` and change which rows a cap keeps.
         const kernel = new FakeKernel();
         kernel.seedDecision({ object_id: "mem_z", decision_kind: "ARCHITECTURE", summary: "old" });
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "new" });
@@ -232,7 +232,7 @@ describe("FakeKernel read filtering and row cap", () => {
     });
 
     it("leaves a filtered read uncapped by the unfiltered row cap", () => {
-        // A filter names at most `MAX_READ_OBJECT_IDS` rows, far under the daemon's newest-rows cap, so only the byte budget can truncate it. commentlint: allow(JUDGE)
+        // A filter names at most `MAX_READ_OBJECT_IDS` rows, far under the daemon's newest-rows cap, so only the byte budget can truncate it.
         const kernel = new FakeKernel();
         seedThree(kernel);
         kernel.readRowCap = 1;
@@ -321,7 +321,7 @@ describe("FakeKernel admission classes", () => {
     });
 
     it("refuses a taint the derived source does not admit as invalid_input", () => {
-        // A `user` write derives `user_inferred`; `repo_untrusted_text` ranks below it but is not a taint `model_inference` admits. commentlint: allow(JUDGE)
+        // A `user` write derives `user_inferred`; `repo_untrusted_text` ranks below it but is not a taint `model_inference` admits.
         const kernel = new FakeKernel();
         const reply = kernel.reply(
             commitCallWith(insert, {
@@ -527,7 +527,7 @@ describe("FakeKernel envelope limits", () => {
             object_id: `mem_${i}`,
             known_as_of: 0,
         }));
-        // The client refuses the envelope itself before any transport call; a transport-driven reply exercises the fake's own refusal. commentlint: allow(JUDGE)
+        // The client refuses the envelope itself before any transport call; a transport-driven reply exercises the fake's own refusal.
         const refusedByClient = await client.commit({
             actor: "assistant",
             operationId: "op-1",

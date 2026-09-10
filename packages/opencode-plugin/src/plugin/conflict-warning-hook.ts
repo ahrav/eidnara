@@ -186,7 +186,7 @@ function findIgnoredMarkerMessageIds(messages: SdkMessage[], marker: string): st
     return ids;
 }
 
-/** The same predicate as `findIgnoredMarkerMessageIds`, evaluated over every row of the session. `substr` compares the marker prefix so marker text is never read as a `LIKE` pattern. commentlint: allow(JUDGE) */
+/** The same predicate as `findIgnoredMarkerMessageIds`, evaluated over every row of the session. `substr` compares the marker prefix so marker text is never read as a `LIKE` pattern. */
 const MARKER_MESSAGE_IDS_SQL = `
 SELECT m.id AS id
 FROM message m

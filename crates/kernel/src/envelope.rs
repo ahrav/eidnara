@@ -160,7 +160,7 @@ pub struct ObjectState {
     pub latest_change_commit_seq: Option<i64>,
 }
 
-/// Filters observations by dependency edge, observation kind, and writer identity: the registry source kind, domain, and exact scope (`None` selects unscoped rows). Kinds are free-form literals any producer may reuse, so the writer identity is what keeps another producer's rows out of the result. commentlint: allow(JUDGE)
+/// Filters observations by dependency edge, observation kind, and writer identity: the registry source kind, domain, and exact scope (`None` selects unscoped rows). Kinds are free-form literals any producer may reuse, so the writer identity is what keeps another producer's rows out of the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DependentObservationQuery<'a> {
     pub dependency_object_id: &'a str,
@@ -268,7 +268,7 @@ pub struct Envelope<'tx> {
     poisoned: Option<KernelError>,
 }
 
-/// No `&mut Envelope` is reachable, so nothing lands in the log. The one mutation, [`Preview::preview_admission`], seeds the same-transaction prior cache the way `record_admission` does inside a commit, so a later operation in the same preview is judged against an earlier one's decision as the commit judges it. The authority cascade over a decision's dependents is not simulated; an operation whose authority chain an earlier operation in the preview touched is refused with [`KernelError::PreviewAuthorityChanged`] instead of being judged against stale authority. commentlint: allow(JUDGE)
+/// No `&mut Envelope` is reachable, so nothing lands in the log. The one mutation, [`Preview::preview_admission`], seeds the same-transaction prior cache the way `record_admission` does inside a commit, so a later operation in the same preview is judged against an earlier one's decision as the commit judges it. The authority cascade over a decision's dependents is not simulated; an operation whose authority chain an earlier operation in the preview touched is refused with [`KernelError::PreviewAuthorityChanged`] instead of being judged against stale authority.
 pub struct Preview<'tx> {
     pub(super) envelope: Envelope<'tx>,
 }
@@ -282,7 +282,7 @@ impl<'tx> std::ops::Deref for Preview<'tx> {
 }
 
 impl Envelope<'_> {
-    /// A recorded failure is returned by every later mutation and by `commit`, so a caller that discards a mutation's `Err` cannot commit a transaction whose change set no longer describes its writes. Every public mutator on the envelope goes through this gate. commentlint: allow(JUDGE)
+    /// A recorded failure is returned by every later mutation and by `commit`, so a caller that discards a mutation's `Err` cannot commit a transaction whose change set no longer describes its writes. Every public mutator on the envelope goes through this gate.
     pub(super) fn guarded<T>(
         &mut self,
         mutation: impl FnOnce(&mut Self) -> Result<T, KernelError>,
@@ -447,7 +447,7 @@ impl Envelope<'_> {
         load_object_state(self.tx, object_id)
     }
 
-    /// Returns object IDs for the live observations `query` selects, ordered by creating commit and then object ID, so the order is stable across reads and does not depend on rowids; a following retirement acts on the rows this returned. The writer filter runs in the query, so the row count is bounded by what that writer wrote rather than by every row any producer attached to the dependency. commentlint: allow(JUDGE)
+    /// Returns object IDs for the live observations `query` selects, ordered by creating commit and then object ID, so the order is stable across reads and does not depend on rowids; a following retirement acts on the rows this returned. The writer filter runs in the query, so the row count is bounded by what that writer wrote rather than by every row any producer attached to the dependency.
     pub fn live_dependent_observations(
         &self,
         query: &DependentObservationQuery<'_>,

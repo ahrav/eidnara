@@ -4,7 +4,7 @@
 //! path, the spec's own monotone restriction when a reference is added, the
 //! unknown and dereferenced cases, and the admission surface hiding
 //! sensitive rows on remote-capable surfaces and secret rows everywhere.
-//! A daemon gate that turns these decisions into refused requests is outside this binary's scope. commentlint: allow(JUDGE)
+//! A daemon gate that turns these decisions into refused requests is outside this binary's scope.
 
 use kernel::{
     ArtifactDestination, ArtifactEligibility, ArtifactHandle, EligibilityDeniedReason, EventKind,

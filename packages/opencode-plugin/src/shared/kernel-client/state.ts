@@ -43,7 +43,7 @@ export const INVALID_REASONS = [
 ] as const;
 export type DaemonInvalidReason = (typeof INVALID_REASONS)[number];
 
-/** `daemon_absent` and `outcome_unknown` are minted by the client; the daemon cannot report its own absence or a response the transport lost after the request was sent. commentlint: allow(JUDGE) */
+/** `daemon_absent` and `outcome_unknown` are minted by the client; the daemon cannot report its own absence or a response the transport lost after the request was sent. */
 export type UnavailableReason = DaemonUnavailableReason | "daemon_absent" | "outcome_unknown";
 /** `unrecognized_state` is minted by the client for a `state` it cannot classify. */
 export type InvalidReason = DaemonInvalidReason | "unrecognized_state";

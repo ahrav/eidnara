@@ -46,7 +46,7 @@ export async function revalidateProviderPath(
     return revalidated;
 }
 
-/** `dataDirectory` mirrors the host's data-root rule in `crates/host-runtime/src/instance.rs`. commentlint: allow(JUDGE)
+/** `dataDirectory` mirrors the host's data-root rule in `crates/host-runtime/src/instance.rs`.
  *  `HOME` is resolved only for a `~` path or the home-derived fallback.
  *  The host never consults `HOME` beside an absolute XDG_DATA_HOME.
  *  Refusing an absolute path over an unusable `HOME` would reject an environment the host accepts. */
@@ -105,7 +105,7 @@ function absoluteOrNull(value: string | undefined): string | null {
     return value;
 }
 
-/** Matches the kernel's `SYMLOOP_MAX` (40 on Linux) that `realpath` enforces. commentlint: allow(JUDGE)
+/** Matches the kernel's `SYMLOOP_MAX` (40 on Linux) that `realpath` enforces.
  *  A dangling target bypasses `realpath`'s symlink limit, so this walk enforces
  *  the bound. A target that normalizes back to its own link would otherwise
  *  recurse forever. */
@@ -132,7 +132,7 @@ async function canonicalPath(
                     if (hopsRemaining === 0) {
                         throw fsError(path, new Error("too many levels of symbolic links"));
                     }
-                    // A relative target's `..` resolves against the real parent commentlint: allow(JUDGE)
+                    // A relative target's `..` resolves against the real parent
                     // directory, not a symlinked lexical parent.
                     const [target, realParent] = await Promise.all([
                         readlink(candidate),

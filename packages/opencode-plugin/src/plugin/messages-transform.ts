@@ -27,7 +27,7 @@ export function createMessagesTransformHandler(args: {
     eidnara: EidnaraTransformHooks;
     /** `getEidnara` lets a later hook instance replace `eidnara` without rebuilding the handler. */
     getEidnara?: () => EidnaraTransformHooks;
-    /** The session's resolved transform mode; `ts` passes the input through unchanged. commentlint: allow(JUDGE) */
+    /** The session's resolved transform mode; `ts` passes the input through unchanged. */
     transformMode: TransformMode;
 }): (input: Record<string, never>, output: MessagesTransformOutput) => Promise<MessageWithParts[]> {
     if (args.transformMode === "ts") {

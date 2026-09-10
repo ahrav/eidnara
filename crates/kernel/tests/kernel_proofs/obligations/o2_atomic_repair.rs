@@ -49,8 +49,8 @@ fn set(ids: [&str; 3]) -> BTreeSet<String> {
     ids.iter().map(|id| id.to_string()).collect()
 }
 
-/// The three corrections share one transaction, so a reader cannot observe a partial correction. commentlint: allow(JUDGE)
-/// The test covers only: `known_as_of(tip_before)` keeps returning the pre-state while the writer holds the open envelope and after the commit lands, and the two-statement read (`facts` for the tip, then `known_as_of(tip)`) never returns rows past the requested `commit_seq`. commentlint: allow(JUDGE)
+/// The three corrections share one transaction, so a reader cannot observe a partial correction.
+/// The test covers only: `known_as_of(tip_before)` keeps returning the pre-state while the writer holds the open envelope and after the commit lands, and the two-statement read (`facts` for the tip, then `known_as_of(tip)`) never returns rows past the requested `commit_seq`.
 #[test]
 fn concurrent_reader_never_observes_a_partial_three_object_correction() {
     let mut proof = seeded();

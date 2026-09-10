@@ -668,7 +668,7 @@ pub fn host_status_response_json(
         if crate::handler::HealthStatus::parse(status).is_none() {
             continue;
         }
-        // A component whose health check panicked reports no metrics; its allowlisted status still names it in the response so a failing subsystem is never hidden. commentlint: allow(JUDGE)
+        // A component whose health check panicked reports no metrics; its allowlisted status still names it in the response so a failing subsystem is never hidden.
         let mut sanitized_metrics = serde_json::Map::new();
         let metrics = component
             .get("metrics")

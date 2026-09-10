@@ -2226,7 +2226,7 @@ impl PreparedWrite {
         };
         // A placeholder longer than the secret it replaces can carry the
         // redacted text past the bound the input met; the stored value has to
-        // meet it too, or a later re-scan of the row refuses its own content. commentlint: allow(JUDGE)
+        // meet it too, or a later re-scan of the row refuses its own content.
         ensure_durable_text_bound(&output)?;
         let detection_action = match policy {
             PreparedFieldPolicy::Content => "substitute",
@@ -3382,7 +3382,7 @@ fn ensure_durable_text_bound(input: &str) -> Result<(), MemoryStoreError> {
 /// The row version after `current`, as SQLite can store it. `row_version` is
 /// a signed `i64` column, so a successor past `i64::MAX` is refused rather
 /// than wrapped into a negative value that a later load would read back as an
-/// enormous unsigned version. commentlint: allow(JUDGE)
+/// enormous unsigned version.
 fn next_row_version(current: i64) -> rusqlite::Result<u64> {
     let next = u64::try_from(current.max(0)).unwrap_or(0).saturating_add(1);
     if i64::try_from(next).is_err() {
@@ -9279,7 +9279,7 @@ impl MemoryStore {
                 .as_ref()
                 .map_or(NO_ROW, |(version, _, _)| *version);
             let cas_ok = match request.expected_target_row_version {
-                // A value outside `i64` cannot equal a stored version; an unchecked cast could alias `NO_ROW`. commentlint: allow(JUDGE)
+                // A value outside `i64` cannot equal a stored version; an unchecked cast could alias `NO_ROW`.
                 Some(expected) => {
                     i64::try_from(expected).is_ok_and(|expected| current_target_version == expected)
                 }
@@ -12174,7 +12174,7 @@ impl MemoryStore {
             )?;
             for id in &ids {
                 coordinated.domain_owner("project", project_path, id.to_string());
-                // An `acked` delivery blocks the reset only when `acked_at >= notes.ready_at`: re-evaluation writes a fresh `ready_at`, so acknowledgements from an earlier surfacing cycle do not pin the note. commentlint: allow(JUDGE)
+                // An `acked` delivery blocks the reset only when `acked_at >= notes.ready_at`: re-evaluation writes a fresh `ready_at`, so acknowledgements from an earlier surfacing cycle do not pin the note.
                 tx.execute(
                     "UPDATE notes SET status = 'ready', status_version = status_version + 1,
                         state_version = state_version + 1, updated_at_ms = ?1
@@ -13207,7 +13207,7 @@ impl MemoryStore {
                             .to_string(),
                     ));
                 }
-                // The checksum hashes the retained JSON, so a frame the store cannot materialize faithfully is refused instead of coerced into a row that no longer matches the verified source. commentlint: allow(JUDGE)
+                // The checksum hashes the retained JSON, so a frame the store cannot materialize faithfully is refused instead of coerced into a row that no longer matches the verified source.
                 if !object.get("content").is_some_and(Value::is_string) {
                     return Err(MemoryStoreError::Serde(
                         "note seed snapshot content must be a string".to_string(),
@@ -13469,7 +13469,7 @@ fn write_seed_compartment_tx(
     Ok(changed != 0)
 }
 
-/// A snapshot replaces the workspace it names and unlinks its members from whatever workspace they were in. `None` removes only this project's membership. Either way a workspace with no members left is dropped. commentlint: allow(JUDGE)
+/// A snapshot replaces the workspace it names and unlinks its members from whatever workspace they were in. `None` removes only this project's membership. Either way a workspace with no members left is dropped.
 fn replace_workspace_tx(
     tx: &GuardedConn<'_>,
     project_path: &str,
@@ -13858,7 +13858,7 @@ fn append_compartments_tx(
     // Validate the whole append before writing its first row. This keeps a rejected
     // batch atomic and makes ordinal-overlap corruption impossible even if a caller
     // bypassed the historian's optimistic publish fence.
-    // Coverage resolution reads the set by sequence and refuses a later row that starts at or before the previous row's end, so a range behind the current tail is reported as overlapping the tail. commentlint: allow(JUDGE)
+    // Coverage resolution reads the set by sequence and refuses a later row that starts at or before the previous row's end, so a range behind the current tail is reported as overlapping the tail.
     for (index, compartment) in compartments.iter().enumerate() {
         let conflict = ranges
             .iter()
@@ -22689,7 +22689,7 @@ mod shadow_tests {
     /// Redacting a field at `MAX_DURABLE_TEXT_BYTES` can exceed the durable
     /// bound when the placeholder is longer than the secret, so preparation
     /// rejects the output rather than storing a row that its own re-scan
-    /// refuses. commentlint: allow(JUDGE)
+    /// refuses.
     #[test]
     fn a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused() {
         let secret = "\npassword=hunter-two";

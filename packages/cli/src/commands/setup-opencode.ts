@@ -44,7 +44,7 @@ const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 /** Mirrors the `@opencode-ai/plugin` peer dependency in `packages/opencode-plugin/package.json`. */
 export const OPENCODE_MINIMUM_VERSION = "1.15.0";
 
-/** With `enabled: false` the plugin skips every hook at startup, so native compaction must stay on. commentlint: allow(JUDGE) */
+/** With `enabled: false` the plugin skips every hook at startup, so native compaction must stay on. */
 function resolveWriterModes(sharedConfigPath: string, directory: string): EidnaraModes {
     const modes = readEidnaraModes(sharedConfigPath);
     if (!modes.enabled) {
@@ -77,7 +77,7 @@ export function addPluginToOpenCodeConfig(
      * When compactionEnabled is false, the writer does not change compaction fields.
      */
     compactionEnabled = true,
-    /** Plugin entries already effective from other config layers, such as a project config's dev path; an Eidnara entry among them suppresses the global one so OpenCode does not load the plugin twice. commentlint: allow(JUDGE) */
+    /** Plugin entries already effective from other config layers, such as a project config's dev path; an Eidnara entry among them suppresses the global one so OpenCode does not load the plugin twice. */
     effectiveElsewhere: readonly unknown[] = [],
 ): void {
     const existsAtCommit = existsSync(configPath);
@@ -310,8 +310,8 @@ export function writeEidnaraConfig(
 }
 
 /**
- * A parseable config can still hold a schema-invalid block such as `"historian": "old-model"`; config loading logs "invalid agent configuration, ignoring" for it, and the writer starts fresh the same way. commentlint: allow(JUDGE)
- * A plain object is returned as is because comment-json keeps a block's comments as symbol-keyed metadata that a spread copy loses. commentlint: allow(JUDGE)
+ * A parseable config can still hold a schema-invalid block such as `"historian": "old-model"`; config loading logs "invalid agent configuration, ignoring" for it, and the writer starts fresh the same way.
+ * A plain object is returned as is because comment-json keeps a block's comments as symbol-keyed metadata that a spread copy loses.
  */
 function asPlainRecord(value: unknown): Record<string, unknown> {
     return isRecord(value) ? value : {};
@@ -355,7 +355,7 @@ export function hasAnthropicModel(models: readonly (string | null)[]): boolean {
 }
 
 /**
- * `detectConflicts` and `fixConflicts` skip unparseable files, so these repair targets are checked before any write. commentlint: allow(JUDGE)
+ * `detectConflicts` and `fixConflicts` skip unparseable files, so these repair targets are checked before any write.
  * Only the effective member of each project `.jsonc`/`.json` pair is listed,
  * matching the file OpenCode loads, so a stale shadowed sibling cannot block setup.
  * OMO files count only when a conflict repair can reach them; the caller

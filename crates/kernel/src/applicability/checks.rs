@@ -82,7 +82,7 @@ impl ConfigContent {
     /// `None` unless every document in the YAML stream parses and at least one
     /// is a mapping or sequence. A TOML or INI file parses as one plain scalar
     /// or fails, so structure here means the file is YAML; the line heuristic
-    /// applies otherwise. commentlint: allow(JUDGE)
+    /// applies otherwise.
     fn yaml(&self) -> Option<&[serde_norway::Value]> {
         self.yaml_documents()
             .filter(|documents| documents.iter().any(yaml_is_structured))
@@ -369,7 +369,7 @@ fn yaml_is_structured(value: &serde_norway::Value) -> bool {
 /// A line scan cannot tell a mapping key from the same text inside a block
 /// scalar (`description: |` followed by an indented `enabled: true`), so a
 /// parsed YAML document is walked structurally like JSON. Only string keys
-/// are compared. commentlint: allow(JUDGE)
+/// are compared.
 fn yaml_contains_key(value: &serde_norway::Value, key: &str) -> bool {
     match value {
         serde_norway::Value::Mapping(map) => map.iter().any(|(name, nested)| {
@@ -397,7 +397,7 @@ enum KeyPresence {
 /// (after whitespace and optional quoting) and be followed by a delimiter.
 /// A TOML multi-line string can hold a line shaped exactly like an
 /// assignment, so a document containing one is undecidable rather than
-/// scanned. commentlint: allow(JUDGE)
+/// scanned.
 fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
     if let Some(value) = content.json() {
         return present(json_contains_key(value, key));
@@ -406,7 +406,7 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
         // `[server]` alone parses as a YAML flow sequence of one scalar and as
         // a TOML table header; only the TOML reading defines a key, so a
         // document of scalar-only sequences that has table-header lines is
-        // read as TOML. commentlint: allow(JUDGE)
+        // read as TOML.
         let scalar_sequences_only = documents.iter().all(|document| {
             matches!(document, serde_norway::Value::Sequence(items)
                 if items.iter().all(|item| !yaml_is_structured(item)))
@@ -427,7 +427,7 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
     // A YAML document whose root is a block scalar (`|` or `>`) or a quoted
     // scalar parses as one string and holds no keys; its lines are content,
     // not assignments. A bare TOML or INI line also parses as a YAML plain
-    // scalar, which is why only these marked forms decide here. commentlint: allow(JUDGE)
+    // scalar, which is why only these marked forms decide here.
     if content
         .yaml_documents()
         .is_some_and(|documents| documents.iter().all(yaml_is_scalar))
@@ -448,7 +448,7 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
 /// and INI `key: value`. Strings (basic with escapes, literal), arrays,
 /// inline tables, and comments are tokenized, so text inside a value is
 /// never a key. `None` when the document holds a multi-line string, whose
-/// lines the tokenizer does not model. commentlint: allow(JUDGE)
+/// lines the tokenizer does not model.
 fn toml_keys(text: &str) -> Option<Vec<String>> {
     if text.contains("\"\"\"") || text.contains("'''") {
         return None;
@@ -461,7 +461,7 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
             continue;
         }
         // An open array treats a following `[` line as an element, not a
-        // table header. commentlint: allow(JUDGE)
+        // table header.
         if value.is_open() {
             value.collect_keys(line, &mut keys);
             continue;
@@ -485,7 +485,7 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
 }
 
 /// The key text of a `[a.b]` or `[[a.b]]` header followed only by whitespace
-/// or a `#` comment. A bracket inside a quoted key segment is not structural. commentlint: allow(JUDGE)
+/// or a `#` comment. A bracket inside a quoted key segment is not structural.
 fn table_header(line: &str) -> Option<&str> {
     let (open, close) = if line.starts_with("[[") {
         ("[[", "]]")
@@ -514,7 +514,7 @@ fn table_header(line: &str) -> Option<&str> {
 
 /// Segments of a dotted key, with a quoted segment as one key whatever dots it
 /// holds and a basic-quoted segment honoring escapes. `None` for a malformed
-/// key. commentlint: allow(JUDGE)
+/// key.
 fn key_segments(lhs: &str) -> Option<Vec<String>> {
     let mut segments = Vec::new();
     let mut rest = lhs.trim();
@@ -544,7 +544,7 @@ fn key_segments(lhs: &str) -> Option<Vec<String>> {
 
 /// The unescaped contents of the quoted string at the start of `text` and the
 /// text after its closing quote. A basic string honors `\\` escapes; a literal
-/// string has none. commentlint: allow(JUDGE)
+/// string has none.
 fn quoted(text: &str) -> Option<(String, &str)> {
     let mut chars = text.char_indices().peekable();
     let (_, quote) = chars.next()?;
@@ -608,7 +608,7 @@ fn split_at_delimiter(line: &str) -> Option<(&str, &str)> {
 struct ValueScan {
     // The innermost open container decides what a comma separates: keys in
     // an inline table, elements in an array. Counts cannot tell the two
-    // apart once they nest, so the containers are kept in order. commentlint: allow(JUDGE)
+    // apart once they nest, so the containers are kept in order.
     containers: Vec<Container>,
     expecting_key: bool,
 }
@@ -761,7 +761,7 @@ fn enclosing_gitlink<'p>(index: &gix::index::State, tracked: &'p str) -> Option<
 /// never saw. A tracked path is compared by blob id against its index entry;
 /// an untracked path that is present and not ignored appeared after the
 /// snapshot. `None` when the path is tracked but the check read no content,
-/// which leaves nothing to compare. commentlint: allow(JUDGE)
+/// which leaves nothing to compare.
 pub(super) fn observation_matches_index(
     cache: &mut CheckCache,
     snapshot: &CheckoutSnapshot,
@@ -771,20 +771,20 @@ pub(super) fn observation_matches_index(
     let repo = snapshot.repo();
     let index = snapshot.index();
     // A path beneath a tracked gitlink lives in the submodule's index; the
-    // superproject index only says the gitlink exists. commentlint: allow(JUDGE)
+    // superproject index only says the gitlink exists.
     if let Some(gitlink) = enclosing_gitlink(index, tracked) {
         // A gitlink that was clean at the snapshot has its worktree equal to
         // the commit the superproject index records, so that commit's tree is
         // the snapshot-time reference; the submodule's live index is not,
         // since a stage after the snapshot moves it. A dirty gitlink is in the
-        // dirty set and the gate catches the overlap before this runs. commentlint: allow(JUDGE)
+        // dirty set and the gate catches the overlap before this runs.
         let commit = index.entry_by_path(gitlink.into())?.id;
         let Some(nested) = snapshot.nested_index(gitlink) else {
             return Some(false);
         };
         let relative = &tracked[gitlink.len() + 1..];
         // The recorded commit is the only snapshot-time reference; without it
-        // the live observation cannot be validated and is not accepted. commentlint: allow(JUDGE)
+        // the live observation cannot be validated and is not accepted.
         let Some(mut tree) = nested
             .repo
             .find_commit(commit)
@@ -840,7 +840,7 @@ fn observation_matches_entry(
     let executable = match cache.resolve(snapshot, path) {
         Resolved::RegularFile { executable } => executable,
         // An absent path is consistent with no entry, or with a skip-worktree
-        // entry the checkout never materializes. commentlint: allow(JUDGE)
+        // entry the checkout never materializes.
         Resolved::Absent => {
             return Some(
                 entry.is_none()
@@ -850,7 +850,7 @@ fn observation_matches_entry(
             );
         }
         // A directory is what a recorded gitlink looks like on disk; any other
-        // non-file shape under a tracked entry diverged from the index. commentlint: allow(JUDGE)
+        // non-file shape under a tracked entry diverged from the index.
         Resolved::NotAFile(_) => {
             return Some(match entry {
                 None => true,
@@ -879,7 +879,7 @@ fn observation_matches_entry(
     };
     // A chmod alone moves git's mode between 100644 and 100755 and counts as
     // a modification where the filesystem tracks the bit, so the mode is
-    // compared before the bytes. commentlint: allow(JUDGE)
+    // compared before the bytes.
     let capabilities = repo.filesystem_options().ok()?;
     let observed = if executable { "exec" } else { "file" };
     if !tracked_mode_matches(entry_mode, observed, capabilities) {
@@ -895,7 +895,7 @@ fn observation_matches_entry(
     )
     .ok()?;
     // Raw bytes first; a `text eol=crlf` file only matches after the
-    // conversion git applies on the way into the index. commentlint: allow(JUDGE)
+    // conversion git applies on the way into the index.
     Some(
         blob == entry_id
             || normalized_blob_id_in(repo, index, tracked, content.text.as_bytes())

@@ -6,7 +6,7 @@ import {
 export type AgentBlockKind = "historian" | "sidekick";
 
 /**
- * Config loading drops an entire `historian` or `sidekick` block when any field in it fails validation ("invalid agent configuration, ignoring"), so a stale field would silently discard the model setup just wrote. commentlint: allow(JUDGE)
+ * Config loading drops an entire `historian` or `sidekick` block when any field in it fails validation ("invalid agent configuration, ignoring"), so a stale field would silently discard the model setup just wrote.
  * Fields are deleted in place because a comment-json block carries its
  * comments as symbol-keyed metadata that a copy would lose.
  */
