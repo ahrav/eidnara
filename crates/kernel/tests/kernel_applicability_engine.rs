@@ -1276,6 +1276,15 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "bracket-key.toml",
                 "[\"a]b\"]\nport = 1\n[[\"c]]d\".e]]\nid = 1\n",
             ),
+            ("open-bracket.ini", "pattern = [abc\nenabled = true\n"),
+            (
+                "open-table.toml",
+                "server = { enabled = true\nflag = true\n",
+            ),
+            (
+                "apostrophe-section.ini",
+                "[owner's settings]\nenabled = true\n",
+            ),
         ],
         "base",
         1,
@@ -1376,6 +1385,22 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("bracket-key.toml", "c]]d", ApplicabilityState::Current),
         ("bracket-key.toml", "e", ApplicabilityState::Current),
         ("bracket-key.toml", "a", ApplicabilityState::Stale),
+        // An unclosed container consumes every following line as value
+        // content, so the scan cannot treat them as keys.
+        ("open-bracket.ini", "enabled", ApplicabilityState::Uncertain),
+        ("open-bracket.ini", "pattern", ApplicabilityState::Uncertain),
+        ("open-table.toml", "flag", ApplicabilityState::Uncertain),
+        // A quote inside a bare header segment is literal, as INI allows.
+        (
+            "apostrophe-section.ini",
+            "owner's settings",
+            ApplicabilityState::Current,
+        ),
+        (
+            "apostrophe-section.ini",
+            "enabled",
+            ApplicabilityState::Current,
+        ),
     ]
     .into_iter()
     .enumerate()

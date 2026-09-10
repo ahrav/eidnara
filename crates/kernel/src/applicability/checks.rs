@@ -481,11 +481,18 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
         keys.extend(segments);
         value.collect_keys(rest, &mut keys);
     }
+    // A container still open at the end consumed every later line as value
+    // content; whatever those lines defined is unreadable, not absent.
+    if value.is_open() {
+        return None;
+    }
     Some(keys)
 }
 
-/// The key text of a `[a.b]` or `[[a.b]]` header followed only by whitespace
-/// or a `#` comment. A bracket inside a quoted key segment is not structural.
+/// The key text of a `[a.b]` or `[[a.b]]` header. Accepts only whitespace or
+/// a `#` comment after the closing bracket. A quote starts a quoted segment
+/// only at a segment start; brackets inside quoted segments are not
+/// structural, and an apostrophe inside a bare INI section name is literal.
 fn table_header(line: &str) -> Option<&str> {
     let (open, close) = if line.starts_with("[[") {
         ("[[", "]]")
@@ -496,18 +503,22 @@ fn table_header(line: &str) -> Option<&str> {
     };
     let body = &line[open.len()..];
     let mut pos = 0usize;
+    let mut segment_start = true;
     while pos < body.len() {
         let rest = &body[pos..];
         if let Some(after) = rest.strip_prefix(close) {
             let after = after.trim_start();
             return (after.is_empty() || after.starts_with('#')).then_some(&body[..pos]);
         }
-        if rest.starts_with(['"', '\'']) {
+        if segment_start && rest.starts_with(['"', '\'']) {
             let (_, after) = quoted(rest)?;
             pos = body.len() - after.len();
+            segment_start = false;
             continue;
         }
-        pos += rest.chars().next()?.len_utf8();
+        let ch = rest.chars().next()?;
+        segment_start = ch == '.' || (segment_start && ch.is_whitespace());
+        pos += ch.len_utf8();
     }
     None
 }
