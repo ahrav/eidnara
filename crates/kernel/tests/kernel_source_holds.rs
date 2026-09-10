@@ -1910,6 +1910,16 @@ fn an_empty_consumer_set_names_no_safe_horizon_so_replay_evidence_is_kept() {
         })
         .unwrap();
     assert_eq!(fixture.count("SELECT COUNT(*) FROM outbox_consumers"), 0);
+    let digest = fixture.entry_by_evidence(&doomed).digest.clone();
+    // Inside the invalidation grace period the horizon is not the only keeper,
+    // so the sweep reports nothing withheld for replay.
+    let swept = fixture.store.run_staging_maintenance(wall_ms()).unwrap();
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+    assert_eq!(
+        swept.artifact_gc.withheld_for_replay, 0,
+        "a candidate the grace period still keeps is not counted against the horizon"
+    );
+    assert!(fixture.object_present(&digest));
     let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
     // The sweep reports what the horizon kept: the one deleted artifact. The
     // ten live ones are kept by their live reference, not by the horizon.
@@ -1919,7 +1929,6 @@ fn an_empty_consumer_set_names_no_safe_horizon_so_replay_evidence_is_kept() {
         swept.artifact_gc.withheld_for_replay, 1,
         "the no-consumer horizon reports the artifact it withholds"
     );
-    let digest = fixture.entry_by_evidence(&doomed).digest.clone();
     assert!(
         fixture.object_present(&digest),
         "deleted descriptor evidence is kept while no consumer names a horizon"

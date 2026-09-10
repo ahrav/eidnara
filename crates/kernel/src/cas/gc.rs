@@ -531,31 +531,6 @@ fn prepare_reclaim(
     if active_pin {
         return Ok(Some(Withheld::Retained));
     }
-    // A source descriptor whose creation no registered consumer has acknowledged
-    // yet is still ahead of some consumer's replay, and replay needs the bytes
-    // it cites. Publication does not release this; only checkpoints do. An
-    // empty consumer set names no safe horizon, so it protects everything,
-    // matching how outbox pruning refuses without consumers.
-    let unacknowledged_replay: bool = tx
-        .query_row(
-            &format!(
-                "SELECT EXISTS(
-                     SELECT 1 FROM evidence_meta e
-                     JOIN observations b ON b.evidence_id=e.evidence_id
-                     WHERE e.artifact_digest=?1
-                       AND b.observation_kind='{}'
-                       AND b.created_commit_seq>COALESCE(
-                           (SELECT MIN(checkpoint_commit_seq) FROM outbox_consumers),-1)
-                 )",
-                crate::source_descriptor::SOURCE_DESCRIPTOR_KIND
-            ),
-            [&candidate.digest],
-            |row| row.get(0),
-        )
-        .map_err(|_| KernelError::Io)?;
-    if unacknowledged_replay {
-        return Ok(Some(Withheld::UnacknowledgedReplay));
-    }
 
     let writer_epoch = i64::try_from(lease_epoch).map_err(|_| KernelError::InvalidInput)?;
     let live_reservation_expires_at: Option<i64> = tx
@@ -601,6 +576,29 @@ fn prepare_reclaim(
         if !elapsed(now, modified_at, ORPHAN_GRACE_MS) {
             return Ok(Some(Withheld::Retained));
         }
+    }
+    // The horizon rule runs after other retention rules so `withheld_for_replay`
+    // reports it as the sole reason for retention. `-1` stands in for the
+    // horizon when no consumer is registered, so every descriptor is past it.
+    let unacknowledged_replay: bool = tx
+        .query_row(
+            &format!(
+                "SELECT EXISTS(
+                     SELECT 1 FROM evidence_meta e
+                     JOIN observations b ON b.evidence_id=e.evidence_id
+                     WHERE e.artifact_digest=?1
+                       AND b.observation_kind='{}'
+                       AND b.created_commit_seq>COALESCE(
+                           (SELECT MIN(checkpoint_commit_seq) FROM outbox_consumers),-1)
+                 )",
+                crate::source_descriptor::SOURCE_DESCRIPTOR_KIND
+            ),
+            [&candidate.digest],
+            |row| row.get(0),
+        )
+        .map_err(|_| KernelError::Io)?;
+    if unacknowledged_replay {
+        return Ok(Some(Withheld::UnacknowledgedReplay));
     }
 
     let changed = tx

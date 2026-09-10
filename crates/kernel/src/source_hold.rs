@@ -441,11 +441,11 @@ impl KernelStore {
         })
     }
 
-    /// Moves the consumer's checkpoint to `through` only when the hold is
-    /// valid and already references every byte a replay of `(S, through]`
-    /// needs, in the same writer transaction. A failed or skipped extension
-    /// therefore cannot authorize acknowledgement, and the hold keeps the
-    /// bytes protected after the checkpoint moves until it is released.
+    /// Moves the consumer's checkpoint to `through` in the same writer transaction that checks the hold.
+    /// The hold is unreleased, unexpired, not purge-degraded, and references every byte required to replay `(S, through]`.
+    /// `Self::source_hold_status` checks object presence before publication; this method does not.
+    /// A failed or skipped extension cannot authorize acknowledgement.
+    /// The hold keeps the bytes protected after the checkpoint moves until it is released.
     /// Acknowledging through a hold asserts that the consumer's state
     /// reflects the corpus at S plus the window, so a checkpoint below S
     /// moves over `(checkpoint, S]` on the strength of the S baseline.
