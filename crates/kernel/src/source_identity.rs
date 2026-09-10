@@ -266,10 +266,12 @@ fn finish(prefix: &[u8], role: u8, tail: &[&str], span: Option<Span>) -> Vec<u8>
     out
 }
 
-/// Encodes an occurrence after checking every identity rule. The span is
-/// checked for shape here and against its buffer by [`validate_span`], which
-/// the caller runs once it holds the bytes.
-pub fn encode(occurrence: &Occurrence<'_>) -> Result<EncodedOccurrence, OccurrenceRefusal> {
+/// The buffer supplies span bounds and UTF-8 boundaries, not identity bytes.
+/// Whole-buffer spans normalize to `None` before occurrence and lineage IDs are minted.
+pub fn encode(
+    occurrence: &Occurrence<'_>,
+    buffer: &str,
+) -> Result<EncodedOccurrence, OccurrenceRefusal> {
     let class =
         OccurrenceClass::from_code(occurrence.class).ok_or(OccurrenceRefusal::UnknownClass)?;
     let fields = class.identity_fields();
@@ -319,11 +321,8 @@ pub fn encode(occurrence: &Occurrence<'_>) -> Result<EncodedOccurrence, Occurren
     if !class.representations().contains(&occurrence.representation) {
         return Err(OccurrenceRefusal::UnknownRepresentation);
     }
-    if let Some(span) = occurrence.span
-        && (usize::try_from(span.start).is_err() || usize::try_from(span.end).is_err())
-    {
-        return Err(OccurrenceRefusal::MalformedSpan);
-    }
+    validate_span(occurrence.span, buffer)?;
+    let span = normalize_span(occurrence.span, buffer);
 
     let mut prefix = Vec::new();
     push_str(&mut prefix, class.code());
@@ -336,20 +335,15 @@ pub fn encode(occurrence: &Occurrence<'_>) -> Result<EncodedOccurrence, Occurren
         &prefix,
         ROLE_OCCURRENCE,
         &[occurrence.revision, occurrence.representation],
-        occurrence.span,
+        span,
     );
-    let lineage = finish(
-        &prefix,
-        ROLE_LINEAGE,
-        &[occurrence.representation],
-        occurrence.span,
-    );
+    let lineage = finish(&prefix, ROLE_LINEAGE, &[occurrence.representation], span);
     Ok(EncodedOccurrence {
         class,
         occurrence_id: format!("{:x}", Sha256::digest(&tuple)),
         lineage_id: format!("{:x}", Sha256::digest(&lineage)),
         tuple,
         revision,
-        span: occurrence.span,
+        span,
     })
 }

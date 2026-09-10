@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use kernel::source_identity::{
-    HARNESSES, Occurrence, OccurrenceClass, OccurrenceRefusal, Span, encode, normalize_span,
-    payload_id, select, validate_span,
+    HARNESSES, Occurrence, OccurrenceClass, OccurrenceRefusal, Span, encode, payload_id, select,
+    validate_span,
 };
 use kernel::{
     ArtifactIngestRequest, CommitIntent, DomainSpec, KernelError, KernelStore, ProviderEgress,
@@ -67,7 +67,6 @@ fn encode_record(record: &Value) -> Result<(String, String, String), &'static st
         representation: record["representation"].as_str().unwrap_or(""),
         span: None,
     };
-    encode(&occurrence).map_err(OccurrenceRefusal::name)?;
     let payload = record["payload"].as_str().ok_or("payload_not_string")?;
     let span = match record.get("span") {
         None | Some(Value::Null) => None,
@@ -79,18 +78,17 @@ fn encode_record(record: &Value) -> Result<(String, String, String), &'static st
             record_span(record)
         }
     };
-    validate_span(span, payload).map_err(OccurrenceRefusal::name)?;
-    let span = normalize_span(span, payload);
-    let encoded = encode(&Occurrence { span, ..occurrence }).map_err(OccurrenceRefusal::name)?;
+    let encoded =
+        encode(&Occurrence { span, ..occurrence }, payload).map_err(OccurrenceRefusal::name)?;
     Ok((
         encoded.occurrence_id,
         encoded.lineage_id,
-        payload_id(select(span, payload)),
+        payload_id(select(encoded.span, payload)),
     ))
 }
 
 #[test]
-fn the_kernel_encoder_reproduces_every_golden_identifier_and_refusal() {
+fn the_kernel_encoder_matches_golden_identifiers_and_string_payload_refusals() {
     let fixtures = fixture("source-identity-fixtures.json");
     let contracts = fixture("construction-contracts.json");
     assert_eq!(
@@ -184,7 +182,12 @@ fn the_kernel_encoder_reproduces_every_golden_identifier_and_refusal() {
         .filter(|name| *name != "payload_not_string")
         .collect();
     assert_eq!(kernel_names, expected);
-    for record in fixtures["invalid_records"].as_array().unwrap() {
+    for record in fixtures["invalid_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["payload"].is_string())
+    {
         let id = record["id"].as_str().unwrap();
         let expected = record["expected_refusal"].as_str().unwrap();
         match encode_record(record) {
@@ -495,15 +498,18 @@ fn descriptors_match_an_independent_ledger_and_identical_text_stays_distinct() {
 
     // The ledger: what the test expects each publication to produce, computed
     // from the fixture's own inputs.
-    let expected_a = encode(&message(MSG_A, "1")).unwrap();
-    let expected_b = encode(&message(MSG_B, "1")).unwrap();
-    let expected_tool = encode(&Occurrence {
-        class: "raw_tool_spans",
-        identity: TOOL,
-        revision: "1",
-        representation: "tool_output",
-        span,
-    })
+    let expected_a = encode(&message(MSG_A, "1"), text).unwrap();
+    let expected_b = encode(&message(MSG_B, "1"), text).unwrap();
+    let expected_tool = encode(
+        &Occurrence {
+            class: "raw_tool_spans",
+            identity: TOOL,
+            revision: "1",
+            representation: "tool_output",
+            span,
+        },
+        tool_text,
+    )
     .unwrap();
     assert_ne!(expected_a.occurrence_id, expected_b.occurrence_id);
     assert_eq!(payload_id(text.as_bytes()), evidence.1);
@@ -542,21 +548,22 @@ fn descriptors_match_an_independent_ledger_and_identical_text_stays_distinct() {
     );
     assert!(a.replaced_object_id.is_none());
 
-    for (outcome, occurrence, evidence, span) in [
-        (&a, message(MSG_A, "1"), &evidence, None),
-        (&b, message(MSG_B, "1"), &evidence, None),
+    for (outcome, occurrence, evidence, span, buffer) in [
+        (&a, message(MSG_A, "1"), &evidence, None, text),
+        (&b, message(MSG_B, "1"), &evidence, None, text),
         (
             &tool,
             tool_request.occurrence.clone(),
             &tool_evidence,
             Some((0u64, 13u64)),
+            tool_text,
         ),
     ] {
         let detail = fixture.detail(&outcome.object_id).unwrap();
         assert_eq!(detail.occurrence_id, outcome.occurrence_id);
         assert_eq!(
             serde_json::to_value(&detail).unwrap()["occurrence_tuple"],
-            serde_json::json!(encode(&occurrence).unwrap().tuple),
+            serde_json::json!(encode(&occurrence, buffer).unwrap().tuple),
             "the stored descriptor retains the exact occurrence encoding"
         );
         assert_eq!(detail.lineage_id, outcome.lineage_id);
@@ -1025,6 +1032,18 @@ fn malformed_requests_fail_closed_before_any_row_is_written() {
             SourceDescriptorError::Occurrence(OccurrenceRefusal::SpanOutOfRange),
         ),
         (
+            "invalid span precedes missing evidence",
+            SourceDescriptorRequest {
+                evidence_id: "missing-evidence",
+                occurrence: Occurrence {
+                    span: Some(Span { start: 0, end: 99 }),
+                    ..message(MSG_A, "1")
+                },
+                ..request(message(MSG_A, "1"), &evidence, "some text")
+            },
+            SourceDescriptorError::Occurrence(OccurrenceRefusal::SpanOutOfRange),
+        ),
+        (
             "reversed span",
             SourceDescriptorRequest {
                 occurrence: Occurrence {
@@ -1448,8 +1467,8 @@ fn an_occurrence_id_never_aliases_unequal_tuple_bytes() {
                 })
                 .unwrap();
         }
-        let a = encode(&message(MSG_A, "1")).unwrap();
-        let b = encode(&message(MSG_B, "1")).unwrap();
+        let a = encode(&message(MSG_A, "1"), text).unwrap();
+        let b = encode(&message(MSG_B, "1"), text).unwrap();
         assert_ne!(a.tuple, b.tuple);
         assert_ne!(a.lineage_id, b.lineage_id);
         let connection = rusqlite::Connection::open_with_flags(
@@ -1490,6 +1509,187 @@ fn an_occurrence_id_never_aliases_unequal_tuple_bytes() {
 }
 
 #[test]
+fn public_encoder_canonicalizes_whole_buffer_selection() {
+    for buffer in ["aé", ""] {
+        let whole = message(MSG_A, "1");
+        let explicit = Occurrence {
+            span: Some(Span {
+                start: 0,
+                end: buffer.len() as u64,
+            }),
+            ..whole.clone()
+        };
+        validate_span(explicit.span, buffer).unwrap();
+        assert_eq!(
+            encode(&explicit, buffer).unwrap(),
+            encode(&whole, buffer).unwrap()
+        );
+    }
+    let buffer = "aéb";
+    let whole = message(MSG_A, "1");
+    let part = Occurrence {
+        span: Some(Span { start: 0, end: 3 }),
+        ..whole.clone()
+    };
+    assert_ne!(
+        encode(&part, buffer).unwrap().occurrence_id,
+        encode(&whole, buffer).unwrap().occurrence_id
+    );
+    for (span, expected) in [
+        (Span { start: 3, end: 1 }, OccurrenceRefusal::SpanReversed),
+        (Span { start: 0, end: 5 }, OccurrenceRefusal::SpanOutOfRange),
+        (
+            Span { start: 0, end: 2 },
+            OccurrenceRefusal::SpanNotUtf8Aligned,
+        ),
+    ] {
+        let invalid = Occurrence {
+            span: Some(span),
+            ..whole.clone()
+        };
+        assert_eq!(encode(&invalid, buffer).err(), Some(expected));
+        let invalid_class = Occurrence {
+            class: "unknown",
+            ..invalid
+        };
+        assert_eq!(
+            encode(&invalid_class, buffer).err(),
+            Some(OccurrenceRefusal::UnknownClass)
+        );
+    }
+}
+
+#[test]
+fn generic_observation_writes_cannot_mint_or_replace_descriptors() {
+    let fixture = Fixture::open();
+    let text = "some text";
+    let evidence = fixture.retain("text", text);
+    let (descriptor, _, _) = fixture
+        .publish("typed", &request(message(MSG_A, "1"), &evidence, text))
+        .unwrap();
+    let generic = kernel::ObservationSpec {
+        observation_id: "generic".to_string(),
+        object_id: "generic".to_string(),
+        domain_id: DOMAIN.to_string(),
+        proposition_id: None,
+        scope_id: None,
+        anchor_id: None,
+        evidence_id: None,
+        observation_kind: "probe".to_string(),
+        payload: kernel::ObservationPayload {
+            summary: "probe".to_string(),
+            classification: "probe".to_string(),
+            detail: None,
+        },
+        observed_at: 1,
+        dependencies: Vec::new(),
+        source_kind: "messages".to_string(),
+        source_id: descriptor.lineage_id.clone(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+    };
+    fixture
+        .store
+        .commit(intent("generic"), |envelope| {
+            envelope.insert_observation(generic.clone())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    for (i, (predecessor, kind)) in [
+        (None, SOURCE_DESCRIPTOR_KIND),
+        (Some("generic"), SOURCE_DESCRIPTOR_KIND),
+        (Some(descriptor.object_id.as_str()), "probe"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let forged = kernel::ObservationSpec {
+            observation_id: format!("forged-{i}"),
+            object_id: format!("forged-{i}"),
+            observation_kind: kind.to_string(),
+            source_revision: 2,
+            ..generic.clone()
+        };
+        let receipt = fixture
+            .store
+            .commit(intent(&format!("forge-{i}")), |envelope| {
+                let result = match predecessor {
+                    None => envelope.insert_observation(forged),
+                    Some(id) => envelope.correct_observation(id, forged),
+                };
+                assert_eq!(result.err(), Some(KernelError::InvalidInput));
+                Ok(String::new())
+            });
+        assert_eq!(receipt.err(), Some(KernelError::InvalidInput));
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.live(&descriptor.object_id), Some(true));
+        assert_eq!(fixture.live("generic"), Some(true));
+        assert_eq!(fixture.live(&format!("forged-{i}")), None);
+    }
+}
+
+#[test]
+fn lineage_collision_checks_include_other_source_classes() {
+    for retired in [false, true] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let (original, _, _) = fixture
+            .publish("first", &request(message(MSG_A, "1"), &evidence, text))
+            .unwrap();
+        if retired {
+            fixture
+                .store
+                .commit(intent("retire"), |envelope| {
+                    envelope.retire_observation(&original.object_id)?;
+                    Ok(String::new())
+                })
+                .unwrap();
+        }
+        let incoming = Occurrence {
+            class: "canonical_claims",
+            identity: &[("object_id", "claim-7")],
+            revision: "2",
+            representation: "decision_summary",
+            span: None,
+        };
+        let encoded = encode(&incoming, text).unwrap();
+        let alias_id = descriptor_object_id(&encoded.lineage_id, "1");
+        let mut connection = rusqlite::Connection::open_with_flags(
+            fixture.root.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO object_registry SELECT ?1,object_kind,domain_id,source_kind,?2,
+             source_revision,created_commit_seq,invalidated_commit_seq,superseded_by,sensitivity_class
+             FROM object_registry WHERE object_id=?3",
+            rusqlite::params![alias_id, encoded.lineage_id, original.object_id],
+        ).unwrap();
+        tx.execute(
+            "INSERT INTO observations SELECT ?1,?1,proposition_id,scope_id,anchor_id,evidence_id,
+             observation_kind,observation_payload,observed_at,created_commit_seq,
+             invalidated_commit_seq,superseded_by,sensitivity_class
+             FROM observations WHERE object_id=?2",
+            rusqlite::params![alias_id, original.object_id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let tip = fixture.store.tip().unwrap();
+        let result = fixture.publish("collision", &request(incoming, &evidence, text));
+        assert_eq!(result.err(), Some(SourceDescriptorError::LineageCollision));
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.live(&alias_id), Some(!retired));
+        assert_eq!(
+            fixture.live(&descriptor_object_id(&encoded.lineage_id, "2")),
+            None
+        );
+    }
+}
+
+#[test]
 fn name_only_remediation_changes_no_descriptor_input() {
     let fixture = Fixture::open();
     let evidence = fixture.retain("text", "some text");
@@ -1518,7 +1718,7 @@ fn name_only_remediation_changes_no_descriptor_input() {
     assert_eq!(fixture.live(&before.object_id), Some(true));
     // Re-deriving the identity from the same inputs yields the same ids: the
     // domain name is not an input.
-    let again = encode(&message(MSG_A, "1")).unwrap();
+    let again = encode(&message(MSG_A, "1"), "some text").unwrap();
     assert_eq!(again.occurrence_id, before.occurrence_id);
     assert_eq!(again.lineage_id, before.lineage_id);
 }

@@ -15,8 +15,7 @@ use super::envelope::{Envelope, Sensitivity};
 use super::redaction::{identity, redact};
 use super::slice::{ObservationPayload, ObservationSpec};
 use super::source_identity::{
-    EncodedOccurrence, Occurrence, OccurrenceRefusal, encode, normalize_span, payload_id, select,
-    validate_span,
+    EncodedOccurrence, Occurrence, OccurrenceRefusal, encode, payload_id, select,
 };
 use super::{CachedSql, KernelError, cas::is_exact_retention, map_sqlite};
 
@@ -201,20 +200,14 @@ impl Envelope<'_> {
         Ok(outcomes.pop().expect("one outcome per request"))
     }
 
-    /// Publishes descriptors in request order inside this commit. For each:
-    /// the occurrence is encoded and checked; the evidence row must be live,
-    /// retained exactly, and carry `artifact_digest`, which is looked up once
-    /// per distinct `(evidence, digest)` in the batch; the request's own
-    /// buffer must hash to `artifact_digest`; then the span is checked
-    /// against that buffer (a span covering the whole buffer is normalized to
-    /// the whole-block selection). The stored detail must survive the
-    /// redactor unchanged, so no identity value can be content. The live
-    /// predecessor of the lineage is found under this writer transaction and
-    /// invalidated together with the new row; a revision that does not
-    /// advance the lineage, a lineage owned by another domain, and a lineage
-    /// id whose stored fields differ from the fresh ones are refused without
-    /// touching either row. A refusal anywhere poisons the envelope, so the
-    /// commit fails even if the caller discards the error.
+    /// Publishes descriptors in request order inside this commit.
+    /// Encoding validates identity and span before evidence checks; a whole-buffer span encodes as a whole-block selection.
+    /// Each buffer must hash to its artifact digest, and cited evidence must be live and exactly retained.
+    /// Evidence metadata is checked once per distinct `(evidence, digest)` pair in the batch.
+    /// Identity values and stored detail must survive redaction unchanged so their identifiers remain valid.
+    /// Each lineage may appear once per envelope, and all calls share [`MAX_DESCRIPTORS_PER_COMMIT`].
+    /// Publication replaces a live predecessor atomically and refuses stale revisions, domain changes, and unequal tuples sharing a digest.
+    /// A refusal poisons the envelope, so the commit fails even if the caller discards the error.
     pub fn publish_source_descriptors(
         &mut self,
         requests: &[SourceDescriptorRequest<'_>],
@@ -234,20 +227,12 @@ impl Envelope<'_> {
         let mut checked_evidence: HashSet<(&str, &str)> = HashSet::new();
         let mut verified = Vec::with_capacity(requests.len());
         for request in requests {
-            let mut encoded = encode(&request.occurrence)?;
+            let encoded = encode(&request.occurrence, request.buffer)?;
             if checked_evidence.insert((request.evidence_id, request.artifact_digest)) {
                 self.check_evidence(request)?;
             }
             if payload_id(request.buffer.as_bytes()) != request.artifact_digest {
                 return Err(SourceDescriptorError::BufferMismatch);
-            }
-            validate_span(encoded.span, request.buffer)?;
-            let span = normalize_span(encoded.span, request.buffer);
-            if span != encoded.span {
-                encoded = encode(&Occurrence {
-                    span,
-                    ..request.occurrence.clone()
-                })?;
             }
             if !self.descriptor_lineages.insert(encoded.lineage_id.clone()) {
                 return Err(SourceDescriptorError::DuplicateLineage);
@@ -331,10 +316,10 @@ impl Envelope<'_> {
         };
         match &predecessor {
             None => {
-                self.insert_observation(spec)?;
+                self.insert_observation_inner(spec)?;
             }
             Some((replaced, _)) => {
-                self.correct_observation(replaced, spec)?;
+                self.correct_observation_inner(replaced, spec)?;
             }
         }
         Ok(SourceDescriptorOutcome {
@@ -380,13 +365,14 @@ impl Envelope<'_> {
         domain_id: &str,
         fresh: &SourceDescriptorDetail,
     ) -> Result<Option<(String, i64)>, SourceDescriptorError> {
+        let object_pattern = descriptor_object_id(&fresh.lineage_id, "*");
         let mut statement = self
             .tx
             .prepare_cached(
                 "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
                  FROM object_registry o
                  JOIN observations b ON b.object_id=o.object_id
-                 WHERE o.object_kind='observation' AND o.source_kind=?1 AND o.source_id=?2
+                 WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id GLOB ?2
                    AND b.observation_kind=?3 AND o.invalidated_commit_seq IS NULL
                    AND b.invalidated_commit_seq IS NULL
                  LIMIT 2",
@@ -395,8 +381,8 @@ impl Envelope<'_> {
         let live: Vec<(String, String, i64, Vec<u8>)> = statement
             .query_map(
                 [
-                    fresh.class.as_str(),
                     fresh.lineage_id.as_str(),
+                    object_pattern.as_str(),
                     SOURCE_DESCRIPTOR_KIND,
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -418,12 +404,12 @@ impl Envelope<'_> {
                     "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
                      FROM object_registry o
                      JOIN observations b ON b.object_id=o.object_id
-                     WHERE o.object_kind='observation' AND o.source_kind=?1 AND o.source_id=?2
+                     WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id GLOB ?2
                        AND b.observation_kind=?3
                      ORDER BY o.source_revision DESC LIMIT 1",
                     [
-                        fresh.class.as_str(),
                         fresh.lineage_id.as_str(),
+                        object_pattern.as_str(),
                         SOURCE_DESCRIPTOR_KIND,
                     ],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
