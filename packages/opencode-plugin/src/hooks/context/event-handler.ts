@@ -6,6 +6,10 @@ import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsAfterAuthOnce } from "../../shared/models-dev-cache";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
+    clearToolPermissionDenied,
+    invalidateToolPermissionDenied,
+} from "./ctx-reduce-availability";
+import {
     type ContextUsage,
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
@@ -88,6 +92,12 @@ function invalidateOnOverflow(
 export function createEventHandler(deps: EventHandlerDeps) {
     return async (input: { event: { type: string; properties?: unknown } }): Promise<void> => {
         const properties = getSessionProperties(input.event.properties);
+
+        if (input.event.type === "session.updated") {
+            const sessionId = resolveSessionId(properties);
+            if (sessionId) invalidateToolPermissionDenied(sessionId);
+            return;
+        }
 
         if (input.event.type === "session.created") {
             const info = getSessionCreatedInfo(input.event.properties);
@@ -315,6 +325,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 return;
             }
 
+            invalidateToolPermissionDenied(sessionId);
+
             // Native compaction deletes the boundary message, so the marker rows would otherwise be orphaned.
             try {
                 removeCompactionMarkerForSession(sessionId);
@@ -334,6 +346,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             if (!sessionId) {
                 return;
             }
+            clearToolPermissionDenied(sessionId);
             const eventDirectory =
                 typeof properties?.info === "object" &&
                 properties.info !== null &&

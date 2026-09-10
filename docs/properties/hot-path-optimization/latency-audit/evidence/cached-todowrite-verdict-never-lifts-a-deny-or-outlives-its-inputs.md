@@ -3,6 +3,12 @@
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 
+Historical reference warning: The discovery trail and initial investigation
+below use pre-implementation line numbers. Those relative source/test links
+are stale against the working tree; the pre-change code is available at
+`ab2ef4156b69454b407bd9682d5617ad13c8372f`. They are not live implementation
+claims. The single-flight investigation at the end has current links.
+
 ## Discovery trigger
 
 The audit counts two SDK calls per pass for the `todowrite` permission read
@@ -135,3 +141,255 @@ only; none constructs a cached deny.
 [t440]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L440
 [t119]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.test.ts#L119
 [t318]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L318
+
+## Historical first implementation investigation
+
+This section preserves the first local implementation and its execution
+results. Its `cache-*` relative code locators are stale after the single-flight
+revision, which was not committed as a separate snapshot. The current design
+and retention ledger follow this section; the earlier counts remain history.
+
+### Q: What default and freshness contract does the implementation use?
+
+- Investigation: 2026-09-10, working tree on
+  `ab2ef4156b69454b407bd9682d5617ad13c8372f`, branch
+  `perf/todowrite-permission-cache`. The discovery narrative and its line
+  locators above describe the stated `9132344` baseline, not this working tree.
+- User approval provenance: The implementation request explicitly resolves
+  the plugin maintainer's open decision: rejection, timeout, missing client,
+  or unavailable APIs must report todowrite absent, including empty-cache and
+  expired-allow cases. Successful verdicts may be reused for at most 30 seconds
+  without a live read. The user accepts silent permission edits remaining
+  unobserved within that window because there is no permission-change
+  subscription. Freshness invalidates on `session.updated`, native
+  `session.compacted`, and `/ctx-flush`; deletion clears entries. Invalidation
+  must retain the last deny to preserve the P5 witness.
+- Findings: The [resolver][cache-read] owns the timeout and fail-closed
+  outcome for both [transform][cache-transform] and [capture][cache-capture].
+  The frozen tools-map cache and `ctx_reduce` paths remain separate. The
+  `todo_tool_present` wire name and all schemas remain unchanged.
+- Findings: [Keys][cache-keys] encode session separately from the JSON tuple
+  `(toolName, activeAgent ?? null)` using two SHA-256 hex digests. This preserves
+  tuple boundaries, including NULs and lone surrogates, without retaining raw
+  identifiers. Unknown agent's JSON null is distinct from every string,
+  including the empty string. Identity relies on SHA-256 collision resistance.
+- Findings: [Freshness][cache-read] uses `performance.now()` at read start,
+  before either SDK request. Hits do not extend expiry. The 2,000 ms timeout
+  wraps the live evaluator; only the successful bounded await may publish.
+  Every new read replaces its entry object. Invalidation sets a negative
+  expiry; deletion and eviction remove the entry. Publication checks both
+  identity and expiry. A superseded completion returns deny. The underlying
+  SDK promises can finish after timeout but cannot write cache state.
+- Findings: [Session updates][cache-events], [compaction and deletion][cache-compaction],
+  and [flush][cache-flush] invalidate
+  only the affected session's permission entries. The scan is bounded by
+  2,000 entries and does not refresh LRU order. Failed reads leave the last
+  success stale, not fresh; missing-client/API calls produce no success entry.
+- Conclusion: resolved with user-approved default and finite freshness bound.
+
+### Q: What retained-resident state does this cache add or resize?
+
+- Sources examined: [entry and cap][cache-cap], [keys][cache-keys],
+  [bounded map iteration][cache-iteration], and [eviction case][cache-eviction].
+- Findings: The permission cache replaces the prior 2,000 Boolean entries;
+  it is not a second cache. The entry cap stays 2,000 across all sessions,
+  tools, and agents. Each key has 129 ASCII code units: two 64-character
+  digests and one separator. The logical key payload ceiling is therefore
+  258,000 code units, or 516,000 bytes if charged at two bytes per code unit.
+  Values add exactly 4,000 scalar slots total: one Boolean-or-undefined verdict
+  and one numeric expiry per entry. No SDK payload, original identifier,
+  cached promise, or per-session generation map is retained by the cache.
+- Declared retained-resident total adjustment:
+  `R_after = R_before - R_old_permission_cache + R_permission_cache`, where
+  `R_permission_cache` accounts for at most 2,000 map nodes, 2,000 value
+  objects, the bounded key strings above, 4,000 scalar slots, and one map.
+  This is a structural retention budget, not an exact VM heap-byte claim.
+  String representation, map capacity, object headers, allocator overhead,
+  and transient hashing/SDK allocations are unmeasured. No process RSS or
+  numeric aggregate heap total is claimed.
+- Retention: Stale successes and failed-read placeholders remain until LRU
+  eviction or deletion. They never qualify as fresh successes. In-flight SDK
+  work is not cached or coalesced and keeps its existing timeout limitation:
+  timeout bounds the hook wait, not the lifetime of an uncooperative SDK call.
+- Conclusion: entry count, identifier payload, scalar count, and retention
+  policy are bounded; runtime heap overhead remains unmeasured.
+
+### Q: What did local verification establish?
+
+- Fresh proof-first hook command:
+  `bun run --cwd packages/opencode-plugin test src/hooks/context/hook.test.ts --test-name-pattern 'cached deny and live|shares fresh permission|permission client is unavailable'`.
+  Result before production edits: 2 passed, 2 failed. A shared-hit test saw
+  three SDK reads instead of one; missing-client capture forwarded a snapshot.
+- Focused command:
+  `bun run --cwd packages/opencode-plugin test src/hooks/context/ctx-reduce-availability.test.ts src/hooks/context/hook.test.ts src/hooks/context/hook-handlers.test.ts src/hooks/context/rust-mode-transform.test.ts src/hooks/context/event-handler.test.ts src/shared/bounded-session-map.test.ts`.
+  First integration run: 157 passed, 4 failed. Two fixtures still assumed the
+  old fail-open default; two assertions counted detached capture sends before
+  their promise continuations drained. Explicit successful SDK fixtures and
+  the existing next-tick drain pattern fix those setup errors.
+- Final focused run: 162 passed, 0 failed, 635 assertions on Bun 1.3.14.
+  [Hook cases][cache-hook-tests] cover both consumers and the constant P5
+  marker; [resolver cases][cache-unit-tests] cover identities, TTL, failure
+  states, late completions, and LRU eviction.
+- `bun run --cwd packages/opencode-plugin typecheck` passes.
+  `bun run --cwd packages/opencode-plugin lint --diagnostic-level=error`
+  passes. An earlier lint run found five formatting errors, corrected by
+  scoped patches. The unfiltered package lint also passes and reports 49
+  existing unrelated warnings.
+  `scripts/forbid-comment-markers.sh` passes.
+- Documentation checks: All 29 added file/line links resolve to the inspected
+  working-tree ranges. P1 and P5 retain `Status: active` and now record
+  `Exercised: yes`. Historical evidence remains intact; the evidence files
+  exceed the method's length target to preserve it.
+- Missing evidence: The outer orchestrator owns full `bun run check:repo`,
+  plugin smoke, independent reviews, and shipping. This campaign is not a
+  production-shape latency comparison or a merge verdict.
+- Conclusion: the constructed P1 cases pass under the approved contract.
+
+[cache-read]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L293-L323
+[cache-transform]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L75-L88
+[cache-capture]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L259-L265
+[cache-keys]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L78-L90
+[cache-cap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L59-L66
+[cache-events]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L96-L100
+[cache-compaction]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L322-L349
+[cache-flush]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L395-L400
+[cache-iteration]: ../../../../../packages/opencode-plugin/src/shared/bounded-session-map.ts#L65-L67
+[cache-eviction]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L494-L504
+[cache-hook-tests]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L162-L400
+[cache-unit-tests]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347-L505
+
+## Single-flight investigation
+
+### Q: Can overlapping successful reads invent a deny?
+
+- Sources examined: [resolver overlap][singleflight-overlap],
+  [transform/capture overlap][singleflight-hook], and
+  [shared resolver][singleflight-resolver].
+- Proof-first result: The command
+  `bun run --cwd packages/opencode-plugin test src/hooks/context/ctx-reduce-availability.test.ts src/hooks/context/hook.test.ts --test-name-pattern 'overlapping same-key|overlapping transform and capture'`
+  runs three tests before the single-flight fix: 0 passed, 3 failed, 7
+  assertions. The resolver returns `[true, false]` rather than `[false, false]`.
+  Both hook variants send `todo_tool_present: false` instead of true.
+- Findings: Each invalidation-free key shares one pending promise. Followers
+  join its existing 2,000 ms timeout. Invalidation sets an explicit flag and
+  the next read replaces the entry, retaining its last successful verdict.
+  Deletion and global LRU eviction remove the entry. Publication checks
+  entry identity, invalidation, and read-start TTL; each waiter checks again
+  before returning. No fresh-state enum or separate generation map is needed.
+- Findings: A clock-only settlement test advances `performance.now()` by
+  30,000 ms without running timers. The successful SDK response cannot publish
+  or return allow even when the timeout callback has not run. Pending-entry
+  eviction denies both waiters and cannot repopulate the key. An invalidated
+  fill does not block a fresh fill for that key.
+- Conclusion: resolved. Successful same-key overlap shares the live answer;
+  revoked or expired work cannot publish or return allow.
+
+### Q: What permission evidence and observation APIs apply?
+
+- Findings: The [typed SDK reader][singleflight-reader] rejects missing named
+  agents, malformed response shapes, and non-null SDK errors. Undefined agent
+  evaluates session rules alone. The core key distinguishes undefined from all
+  strings, but host hooks normalize empty agent strings to undefined. Distinct
+  real agent inputs remain distinct keys. The missing-client/API gate logs and
+  denies even when the cache contains a fresh allow.
+- Findings: The private reader takes the nonoptional typed client and has no
+  duplicate API availability guard. The shared resolver owns fallback and
+  logging. `peekToolPermissionDeniedForTest` requires the explicit agent input;
+  only tests call it. It observes last successful state without claiming
+  freshness or touching LRU order.
+- P5 scope: The marker proves cached-deny-plus-live-failure reachability.
+  It does not prove that cached deny causes a different fallback result:
+  fail-closed empty-cache and expired-allow cases also deny.
+- Conclusion: resolved under the user's explicit policy. Every
+  `session.updated` still invalidates freshness; the policy is not narrowed
+  to permission-only changes.
+
+### Q: What is the current retained-state ledger?
+
+- Sources examined: [entry fields and cap][singleflight-cap],
+  [key encoding][singleflight-keys], and [lifetime tests][singleflight-lifetime].
+- Settled cache: At most 2,000 entries globally, each with a 129-code-unit
+  digest key, three scalar fields (`denied`, `expiresAt`, `invalidated`), and
+  one optional pending-promise reference. Logical key payload remains at most
+  258,000 code units, charged as 516,000 bytes at two bytes per code unit.
+  This means 6,000 scalar fields and 2,000 reference slots, plus map nodes,
+  value objects, and string/container overhead. Settled entries do not retain
+  SDK payloads or raw identifiers through a pending promise.
+- Pending cache: At most one shared fill promise per retained entry, at most
+  2,000 such references globally. Fill promises, timeout state, waiter
+  continuations, and request/SDK state add dynamic memory. Raw identifiers and
+  SDK responses can remain live during a fill. A reference cap is not a byte
+  bound on this request-owned data or on the number of callers waiting.
+- Declared total adjustment:
+  `R_after = R_before - R_old_permission_cache + R_permission_structure + R_pending_fills`.
+  `R_permission_structure` includes the fixed payload and field counts above;
+  `R_pending_fills` includes the retained promises and their dynamic state.
+  Neither VM heap overhead nor total process RSS is measured. This ledger
+  does not claim an exact byte total or a physical in-flight memory bound.
+- Limits: Invalidation and deletion scan the global cache, at most 2,000
+  entries. All sessions and agents compete for that cap; eviction can discard
+  another session's fresh verdict or revoke its pending fill. Failed reads
+  do not become fresh cache entries, so a later call retries. No backoff or
+  failure cache is introduced. Timeout bounds the logical wait, not the
+  lifetime of uncooperative SDK work. Invalidated or evicted fills may still
+  exist outside the cache; there is no global physical-work admission limit.
+- Conclusion: the settled footprint and retained fill-reference count are
+  bounded. Dynamic request memory and VM overhead remain unmeasured. No
+  latency benefit is claimed for hashing, cache hits, or invalidation scans.
+
+### Q: What verification follows the single-flight fix?
+
+- The same six-file focused command recorded above passes 169 tests, 0
+  failures, 675 assertions on Bun 1.3.14. An intermediate run passed 168 tests
+  with 668 assertions; lint then reported four format/import-order errors,
+  corrected by scoped patches before the final run.
+- `bun run --cwd packages/opencode-plugin typecheck`,
+  `bun run --cwd packages/opencode-plugin lint --diagnostic-level=error`,
+  `scripts/forbid-comment-markers.sh`, and `git diff --check` pass.
+- Test types: Package typecheck excludes tests. A supplemental TypeScript API
+  program adds the six focused test files to the package configuration and
+  compares diagnostics with HEAD source supplied through an in-memory compiler
+  host. HEAD and the working tree each report two diagnostics; there are no new
+  diagnostic signatures. Both remaining errors are TS2352 and TS2493 at
+  `hook.test.ts:1297`, the preexisting `promptMock.mock.calls[0]?.[0]` assertion.
+  The tests do not have a clean typecheck result. A transient production
+  `boolean | undefined` return diagnostic was fixed before package typecheck.
+- Missing evidence: Full repo checks, smoke, independent review, and shipping
+  remain owned by the outer orchestrator. Historical execution results above
+  are retained rather than rewritten to match this revision.
+- Conclusion: all required local runtime and package gates pass; the two
+  preexisting test-type diagnostics remain explicit.
+
+[singleflight-overlap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L368-L391
+[singleflight-hook]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L408-L465
+[singleflight-resolver]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L295-L351
+[singleflight-reader]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L353-L382
+[singleflight-cap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L59-L68
+[singleflight-keys]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L80-L91
+[singleflight-lifetime]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347-L604
+
+### Q: How does an empty host agent reach the permission cache?
+
+- The host boundary treats an empty agent as absent. Both the
+  [transform extractor][host-agent-transform] and [capture hook][host-agent-capture]
+  normalize it to undefined. The core digest scheme and its string-collision
+  tests remain unchanged; an empty host value is not a fictitious named agent.
+- The [shared-fill fixture][singleflight-hook] uses SDK `agents: []` for the
+  empty host case. Session allow and deny rules determine the outcome. An
+  undefined capture joins the empty-agent transform's fill, and a subsequent
+  empty-agent capture reuses it with no second SDK read.
+- Proof-first hook run: 1 passed, 2 failed, 13 assertions. The empty-agent allow
+  case returned false; the deny case performed three SDK reads instead of one.
+  After normalization, the six-file focused family passes 170 tests, 0
+  failures, 680 assertions. The existing database host-agent normalization
+  test also passes: 1 test, 2 assertions.
+- Package typecheck and lint pass. These package commands exclude test type
+  checking; the earlier supplemental diagnostic findings remain historical.
+  The outer orchestrator reports that full `check:repo` and smoke passed before
+  this boundary correction, including 3,744 plugin tests. Those full gates
+  were not rerun locally for this correction.
+- Conclusion: empty host agent and undefined use session rules and one shared
+  key; nonempty real agent names remain distinct.
+
+[host-agent-transform]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L66-L73
+[host-agent-capture]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L264-L265
