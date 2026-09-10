@@ -29,10 +29,8 @@ export interface MemorySearchResult {
     source: "memory";
     content: string;
     score: number;
-    /** Opaque public claim identity (`mcm_<32hex>`). */
-    publicClaimId: string;
-    /** Canonical current revision locator the content was read from. */
-    revisionLocator: string;
+    /** Kernel object id of the memory (`mem_<32hex>`). */
+    objectId: string;
     category: string;
     /** `exact` for an object-id lookup, `lexical` for term-overlap ranking. */
     matchType: "exact" | "lexical";
@@ -45,10 +43,9 @@ export interface MemorySearchResult {
 export interface AntiMemorySearchResult {
     source: "anti_memory";
     score: number;
-    publicClaimId: string;
-    revisionLocator: string;
+    /** Kernel object id of the anti-memory (`mem_<32hex>`). */
+    objectId: string;
     contentDigest: string;
-    claimId: number;
     normalizedHash: string;
     trigger: string;
     rejectedStrategy: string;
@@ -136,16 +133,15 @@ export async function readObjectRowsChunked(args: {
 }
 
 const OBJECT_ID = /^mem_[0-9a-f]{32}$/;
-/** The `revisionLocator` shape search results emit: `<object id>@<created commit seq>`. */
-const REVISION_LOCATOR = /^(mem_[0-9a-f]{32})@\d+$/;
+const OBJECT_ID_AT_COMMIT = /^(mem_[0-9a-f]{32})@\d+$/;
 
-/** The bare object id of an id or revision-locator token; `null` for ordinary text. */
+/** The bare object id of an id or `id@commit` token; `null` for ordinary text. */
 function objectIdFromToken(token: string): string | null {
     if (OBJECT_ID.test(token)) return token;
-    return REVISION_LOCATOR.exec(token)?.[1] ?? null;
+    return OBJECT_ID_AT_COMMIT.exec(token)?.[1] ?? null;
 }
 
-/** Object ids when the whole query is a list of ids or revision locators; `null` for ordinary text. A pasted locator resolves its object's current row: the commit-seq suffix names the revision the result was read from, and the store serves one live row per id. commentlint: allow(JUDGE) */
+/** Object ids when the whole query is a list of ids or `id@commit` tokens; `null` for ordinary text. Results render bare ids; the `@commit` suffix is accepted because earlier releases rendered it, and it is ignored for the lookup, since the store serves one live row per id. commentlint: allow(JUDGE) */
 export function parseObjectIdQuery(query: string): string[] | null {
     const tokens = query
         .trim()
@@ -186,20 +182,15 @@ export function memoryResultFromRow(
     matchType: KernelMemoryMatchType,
 ): KernelMemorySearchResult {
     const decision = row.decision;
-    const revisionLocator = `${row.object.object_id}@${row.object.created_commit_seq}`;
     if (decision?.decision_kind === ANTI_MEMORY_CATEGORY) {
         const payload = antiMemoryPayloadFromSummary(decision.payload.summary);
-        // Kernel rows carry no claim-lane row: the digest of the served
-        // summary stands in for both content hashes, and the sentinel claim
-        // id marks the absence of a local rowid.
+        // The digest of the served summary stands in for both content hashes.
         const digest = createHash("sha256").update(decision.payload.summary, "utf8").digest("hex");
         return {
             source: "anti_memory",
             score,
-            publicClaimId: row.object.object_id,
-            revisionLocator,
+            objectId: row.object.object_id,
             contentDigest: digest,
-            claimId: -1,
             normalizedHash: digest,
             trigger: payload?.trigger ?? "",
             rejectedStrategy: payload?.rejectedStrategy ?? decision.payload.summary,
@@ -220,8 +211,7 @@ export function memoryResultFromRow(
             ? `${decision.payload.summary}\n${decision.payload.rationale}`
             : (decision?.payload.summary ?? ""),
         score,
-        publicClaimId: row.object.object_id,
-        revisionLocator,
+        objectId: row.object.object_id,
         category: decision?.decision_kind ?? row.object.object_kind,
         matchType,
         ...(row.labeled ? { policyLabel: "labeled" } : {}),

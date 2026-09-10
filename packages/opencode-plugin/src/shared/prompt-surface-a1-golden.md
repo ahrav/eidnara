@@ -5,7 +5,7 @@ Token counts are Claude BPE estimates on the raw text.
 
 ## 1. System-prompt guidance section
 
-### PRIMARY full (reduce=on): 8681 chars, ~2025 tokens
+### PRIMARY full (reduce=on): 8302 chars, ~1934 tokens
 
 ```markdown
 ## Eidnara
@@ -27,8 +27,8 @@ Use `ctx_reduce` to mark spent tagged content as discardable and reclaim space. 
 Do not announce or narrate `ctx_reduce` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
 Use `ctx_note` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Eidnara preserves your full context across both compaction and restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).
 Use `ctx_memory` for durable project knowledge: create what future sessions must know, and revise/archive/merge stale or duplicate memories. Memories persist across sessions and every new session starts with them.
-`ctx_memory` identifiers are host-specific. Follow the current tool schema: when it exposes `objectId`/`objectIds`, use only `mem_<32hex>` object IDs from `ctx_memory` replies or `ctx_search` hits; when it exposes `publicClaimId`/`publicClaimIds`, use `mcm_<32hex>` claim IDs and any required mutation token. Never interchange these ID forms.
-Lines in `<project-memory>` carry `mem_<32hex>` object IDs. They are valid handles when the current `ctx_memory` schema accepts `objectId`/`objectIds`; use them directly. They are display-only when the schema accepts `publicClaimId`/`publicClaimIds`; search the memory content to obtain its `mcm_<32hex>` claim ID before changing it.
+`ctx_memory` addresses memories by `objectId`/`objectIds`: use only `mem_<32hex>` object IDs from `ctx_memory` replies or `ctx_search` hits. No other ID form exists.
+Lines in `<project-memory>` carry `mem_<32hex>` object IDs; they are valid `ctx_memory` handles, so use them directly.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with `ctx_memory` so future sessions don't repeat the search. Examples:
 - Found a project's source code path after searching → `ctx_memory(action="create", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")`
 - Discovered a non-obvious build/test command → `ctx_memory(action="create", category="PROJECT_RULES", content="Always run the full release checklist before publishing")`
@@ -66,7 +66,7 @@ Before your turn finishes, consider using `ctx_reduce` to drop large tool output
 Prefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.
 ```
 
-### PRIMARY full (reduce=off): 6140 chars, ~1431 tokens
+### PRIMARY full (reduce=off): 5761 chars, ~1340 tokens
 
 ```markdown
 ## Eidnara
@@ -83,8 +83,8 @@ Because of this:
 
 Use `ctx_note` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Eidnara preserves your full context across both compaction and restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).
 Use `ctx_memory` for durable project knowledge: create what future sessions must know, and revise/archive/merge stale or duplicate memories. Memories persist across sessions and every new session starts with them.
-`ctx_memory` identifiers are host-specific. Follow the current tool schema: when it exposes `objectId`/`objectIds`, use only `mem_<32hex>` object IDs from `ctx_memory` replies or `ctx_search` hits; when it exposes `publicClaimId`/`publicClaimIds`, use `mcm_<32hex>` claim IDs and any required mutation token. Never interchange these ID forms.
-Lines in `<project-memory>` carry `mem_<32hex>` object IDs. They are valid handles when the current `ctx_memory` schema accepts `objectId`/`objectIds`; use them directly. They are display-only when the schema accepts `publicClaimId`/`publicClaimIds`; search the memory content to obtain its `mcm_<32hex>` claim ID before changing it.
+`ctx_memory` addresses memories by `objectId`/`objectIds`: use only `mem_<32hex>` object IDs from `ctx_memory` replies or `ctx_search` hits. No other ID form exists.
+Lines in `<project-memory>` carry `mem_<32hex>` object IDs; they are valid `ctx_memory` handles, so use them directly.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with `ctx_memory` so future sessions don't repeat the search. Examples:
 - Found a project's source code path after searching → `ctx_memory(action="create", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")`
 - Discovered a non-obvious build/test command → `ctx_memory(action="create", category="PROJECT_RULES", content="Always run the full release checklist before publishing")`
@@ -101,7 +101,7 @@ Eidnara control metadata is not reply syntax. Never reproduce `<system-reminder>
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
 ```
 
-### PRIMARY light (reduce=on): 6346 chars, ~1469 tokens
+### PRIMARY light (reduce=on): 6054 chars, ~1396 tokens
 
 ```markdown
 ## Eidnara
@@ -122,8 +122,8 @@ In primary sessions with ctx_reduce, the system tags messages and tool outputs a
 In primary sessions, NEVER narrate ctx_reduce; call it silently after extracting a spent output because it marks content discardable and QUEUES release rather than deleting immediately. The last 20 tags stay protected until they age out. Use drop grammar "3-5", "1,2,9", or "1-5,8,12-15".
 Use `ctx_note` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Eidnara preserves your full context across both compaction and restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).
 Use `ctx_memory` for durable project knowledge: create what future sessions must know, and revise/archive/merge stale or duplicate memories. Memories persist across sessions and every new session starts with them.
-`ctx_memory` identifiers are host-specific. Follow its schema: `objectId`/`objectIds` accept `mem_<32hex>` object IDs from tool results, while `publicClaimId`/`publicClaimIds` accept `mcm_<32hex>` claim IDs and may require mutation tokens. Never interchange them.
-The `mem_<32hex>` IDs in `<project-memory>` are valid handles when `ctx_memory` exposes `objectId`/`objectIds`; use them directly. They are display-only when the tool exposes `publicClaimId`/`publicClaimIds`; search the content for a `mcm_<32hex>` claim ID before changing it.
+`ctx_memory` addresses memories by `objectId`/`objectIds`: `mem_<32hex>` object IDs from tool results. No other ID form exists.
+The `mem_<32hex>` IDs in `<project-memory>` are valid `ctx_memory` handles; use them directly.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with `ctx_memory` so future sessions don't repeat the search. Examples:
 - Found a project's source code path after searching → `ctx_memory(action="create", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")`
 - Discovered a non-obvious build/test command → `ctx_memory(action="create", category="PROJECT_RULES", content="Always run the full release checklist before publishing")`
@@ -135,7 +135,7 @@ For primary ctx_reduce choices, NEVER blanket-drop a large range because mixed-v
 Consider small targeted drops after acted-on reads or searches, completed logical steps, before context switches, and before the turn ends; this keeps the working set tidy without changing task scope.
 ```
 
-### PRIMARY light (reduce=off): 5352 chars, ~1236 tokens
+### PRIMARY light (reduce=off): 5060 chars, ~1163 tokens
 
 ```markdown
 ## Eidnara
@@ -154,8 +154,8 @@ When ctx_reduce is unavailable, context is automatic; never prune, heed reductio
 
 Use `ctx_note` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Eidnara preserves your full context across both compaction AND restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).
 Use `ctx_memory` for durable project knowledge: create what future sessions must know, and revise/archive/merge stale or duplicate memories. Memories persist across sessions and every new session starts with them.
-`ctx_memory` identifiers are host-specific. Follow its schema: `objectId`/`objectIds` accept `mem_<32hex>` object IDs from tool results, while `publicClaimId`/`publicClaimIds` accept `mcm_<32hex>` claim IDs and may require mutation tokens. Never interchange them.
-The `mem_<32hex>` IDs in `<project-memory>` are valid handles when `ctx_memory` exposes `objectId`/`objectIds`; use them directly. They are display-only when the tool exposes `publicClaimId`/`publicClaimIds`; search the content for a `mcm_<32hex>` claim ID before changing it.
+`ctx_memory` addresses memories by `objectId`/`objectIds`: `mem_<32hex>` object IDs from tool results. No other ID form exists.
+The `mem_<32hex>` IDs in `<project-memory>` are valid `ctx_memory` handles; use them directly.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with `ctx_memory` so future sessions don't repeat the search. Examples:
 - Found a project's source code path after searching → `ctx_memory(action="create", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")`
 - Discovered a non-obvious build/test command → `ctx_memory(action="create", category="PROJECT_RULES", content="Always run the full release checklist before publishing")`
@@ -481,9 +481,9 @@ The hash handler persists the MD5 of `output.system.join("\\n")`. For this sourc
 
 | Variant | Guidance bytes | MD5 system-prompt hash |
 |---|---:|---|
-| PRIMARY full (reduce=on) | 8752 | `d6287fbf228ef14d40326db3b6510ec4` |
-| PRIMARY full (reduce=off) | 6185 | `ba4d631135f847fbe17a8cf07ec6a3b6` |
-| PRIMARY light (reduce=on) | 6404 | `4d9de850986e487b0a6fb0bf99b5ca23` |
-| PRIMARY light (reduce=off) | 5402 | `4a72d18b1ee499adfe982e3ba60867f9` |
+| PRIMARY full (reduce=on) | 8360 | `c17853cd2804f93988a39b007b197177` |
+| PRIMARY full (reduce=off) | 5793 | `89f68b9b6ff59fc5b96d31da68290ed7` |
+| PRIMARY light (reduce=on) | 6086 | `361c149bf3a87751bfc77400cecc4fc6` |
+| PRIMARY light (reduce=off) | 5084 | `89af9527805af76dd8f1e661b587aa5d` |
 
 The OpenCode regression test compares every guidance block with its daemon asset, recomputes each baseline row, and separately checks this document's tool snapshot for omitted `prompt_surface` and explicit `{ default: "full" }` registration.

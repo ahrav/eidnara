@@ -1668,8 +1668,8 @@ pub struct ModuleMeta {
     #[serde(default)]
     pub shadow_quarantined_pass_count: u64,
     /// Stores the last watermarks acknowledged from the sender, using the same
-    /// compare-and-swap update as the mirror rows so restarts and retries see one
-    /// consistent state.
+    /// compare-and-swap update as the other shadow fields so restarts and retries
+    /// see one consistent state.
     #[serde(default)]
     pub shadow_acked_watermarks: Value,
 }
@@ -14563,7 +14563,7 @@ impl MemoryStore {
                     return Ok(LeaseSelected::Invalid);
                 }
                 // Selection ran on the narrow projection; load the full row once for
-                // the note that actually won so the claim snapshot has content,
+                // the note that actually won so the leased snapshot has content,
                 // condition, and the compiled artifact.
                 let note = load_note_tx(tx, note_id)?;
                 Ok(LeaseSelected::Claim {
@@ -15174,7 +15174,7 @@ mod tests {
             "private_key",
             "access_key",
         ];
-        const PRESERVED_NAMES: [&str; 3] = ["block_id", "target_key", "revision_locator"];
+        const PRESERVED_NAMES: [&str; 3] = ["block_id", "target_key", "anchor_locator"];
 
         // A mixed object preserves the identity field and scans its neighbour.
         let content = prepare_json_content_preserving_identities(

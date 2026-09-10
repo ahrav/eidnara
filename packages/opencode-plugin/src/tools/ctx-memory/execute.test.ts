@@ -1,9 +1,6 @@
 import { describe, expect, setSystemTime, test } from "bun:test";
 import { KernelClient } from "../../shared/kernel-client";
-import {
-    ClaimOperationInputError,
-    renderAntiMemoryContent,
-} from "../../shared/kernel-client/anti-memory";
+import { MemoryInputError, renderAntiMemoryContent } from "../../shared/kernel-client/anti-memory";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import { CTX_MEMORY_RESPONSE_BUDGET_BYTES } from "./constants";
 import { CTX_MEMORY_ACTOR, type CtxMemoryWriteIdentity, executeCtxMemory } from "./execute";
@@ -210,7 +207,7 @@ describe("executeCtxMemory", () => {
                 },
                 "call-create-mixed",
             ),
-        ).rejects.toBeInstanceOf(ClaimOperationInputError);
+        ).rejects.toBeInstanceOf(MemoryInputError);
         expect(kernel.liveRows()).toHaveLength(0);
     });
 
@@ -223,7 +220,7 @@ describe("executeCtxMemory", () => {
                 { category: "NOT_A_CATEGORY", content: CONTENT },
                 "call-create-bogus",
             ),
-        ).rejects.toBeInstanceOf(ClaimOperationInputError);
+        ).rejects.toBeInstanceOf(MemoryInputError);
         expect(kernel.liveRows()).toHaveLength(0);
     });
 
@@ -367,7 +364,7 @@ describe("executeCtxMemory", () => {
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
         await expect(
             run(client, "archive", rawArgs({ objectId: "mem_a", reason: 5 }), "call-archive-num"),
-        ).rejects.toBeInstanceOf(ClaimOperationInputError);
+        ).rejects.toBeInstanceOf(MemoryInputError);
         expect(kernel.liveRows()).toHaveLength(1);
     });
 

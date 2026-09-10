@@ -449,7 +449,7 @@ mod tests {
 
     fn memory(row: &GoldenMemory) -> CanonicalMemory {
         CanonicalMemory {
-            object_id: format!("mcm_{:032x}", row.id),
+            object_id: format!("mem_{:032x}", row.id),
             category: row.category.clone(),
             content: row.content.clone(),
         }
@@ -464,11 +464,11 @@ mod tests {
     #[test]
     fn memory_historian_context_uses_object_identity() {
         let block = render_historian_memory_block(&[CanonicalMemory {
-            object_id: format!("mcm_{}", "a".repeat(32)),
+            object_id: format!("mem_{}", "a".repeat(32)),
             category: "CONSTRAINTS".to_string(),
             content: "Use the public contract.".to_string(),
         }]);
-        assert!(block.contains("mcm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(block.contains("mem_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         assert!(!block.contains("#1"));
     }
 

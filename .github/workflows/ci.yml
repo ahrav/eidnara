@@ -182,6 +182,93 @@ jobs:
             exit 1
           fi
 
+      - name: Retired memory-plane identifiers
+        # The retired second memory plane (its mirror, its intent ledger, its
+        # operation contract, its fallback reads, and its two-lane selection) is
+        # deleted; its identifiers must not return to production source. Same
+        # three passes and exit-status contract as the predecessor-token gate:
+        # content, tracked pathnames, and whole index blobs so a two-word name
+        # split across a line break is still found. Bracketed characters keep
+        # `TOKENS` from matching this workflow file. Unlike the predecessor gate
+        # the scan excludes crate `tests/` targets, `*.test.ts`, `docs/`,
+        # `NOTICE`, and prose, following the schema-migration gate: the property
+        # catalogs keep the deleted design as invalidated history, and the
+        # tests that prove a retired name is refused spell it as a needle.
+        # Inline `#[cfg(test)]` modules are scanned, so they spell needles in
+        # halves with `concat!`.
+        # Identifier spellings (`_`, `-`, `.`, or nothing between the words)
+        # need a left boundary only, so a longer identifier that starts with a
+        # name is found and a prefix constructor such as a bare `m[c]m_` is too.
+        # `Committe[d]Clai[m]Mirro[r]Row` lacks a left boundary before its name,
+        # so `committe[d]${sep}clai[m]${sep}mirror` is its own entry; the full
+        # compound is listed because `committe[d]${sep}clai[m]` alone matches
+        # `packages/e2e-tests/src/incident-pool/evidence.ts`.
+        # Prose spellings (whitespace between the words) need a right boundary
+        # as well, so ordinary text that merely starts with one of the words,
+        # such as "compatibility readiness", passes.
+        run: |
+          set -euo pipefail
+          sep='[-_.]*'
+          ws='[[:space:]]+'
+          end='([^0-9a-z]|$)'
+          IDENT="clai[m]${sep}(mirror|intent|operation|lane|snapshot|compat)"
+          IDENT+="|public${sep}clai[m]${sep}id|snapsho[t]${sep}vector"
+          IDENT+="|revisio[n]${sep}locator|compat(ibility)?${sep}rea[d]"
+          IDENT+="|dua[l]${sep}lane|mirro[r]${sep}row|m[c]m_"
+          IDENT+="|committe[d]${sep}clai[m]${sep}mirror"
+          PROSE="clai[m]${ws}(mirror|intent|operation|lane|snapshot)s?${end}"
+          PROSE+="|public${ws}clai[m]${ws}ids?${end}|snapsho[t]${ws}vectors?${end}"
+          PROSE+="|revisio[n]${ws}locators?${end}|compat(ibility)?${ws}rea[d]s?${end}"
+          PROSE+="|dua[l]${ws}lanes?${end}|mirro[r]${ws}rows?${end}"
+          TOKENS="(^|[^0-9a-z])(${IDENT}|${PROSE})"
+          paths=(':(exclude,glob)crates/*/tests/**' ':!docs/' ':!NOTICE'
+            ':!*.md' ':!*.test.ts' ':!*.test.tsx')
+          status=0
+          git grep -n -I -i -E -e "$TOKENS" -- "${paths[@]}" || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "retired memory-plane identifiers found"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "git grep failed with exit $status"
+            exit 1
+          fi
+          tracked="$RUNNER_TEMP/tracked-production-files"
+          git ls-files -z -- "${paths[@]}" > "$tracked"
+          if [ ! -s "$tracked" ]; then
+            echo "git ls-files listed no tracked files"
+            exit 1
+          fi
+          status=0
+          grep -z -i -E -e "$TOKENS" < "$tracked" | tr '\0' '\n' || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "retired memory-plane identifiers found in a tracked pathname"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "grep failed with exit $status"
+            exit 1
+          fi
+          found=0
+          while IFS= read -r -d '' file; do
+            if git show ":$file" |
+              grep -I -i -z -E -e "$TOKENS" >/dev/null; then
+              echo "$file"
+              found=1
+            else
+              status=("${PIPESTATUS[@]}")
+              if [ "${status[0]}" -ne 0 ] || [ "${status[1]}" -ne 1 ]; then
+                echo "scan of $file failed: git show exit ${status[0]}," \
+                  "grep exit ${status[1]}"
+                exit 1
+              fi
+            fi
+          done < "$tracked"
+          if [ "$found" -ne 0 ]; then
+            echo "retired memory-plane identifiers found across a line break"
+            exit 1
+          fi
+
       - name: Schema-migration identifiers
         # Version-ledger identifiers must not appear outside test files and
         # prose. Only the auto-discovered `tests/` target of a crate is a test

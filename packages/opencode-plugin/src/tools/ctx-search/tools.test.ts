@@ -437,7 +437,7 @@ describe("executeCtxSearch", () => {
         expect(execution.omittedCount).toBe(50 - execution.delivered.length);
         const omitted = execution.prePack[execution.prePack.length - 1];
         expect(execution.delivered).not.toContain(omitted);
-        expect(execution.text).not.toContain(`id=${omitted?.publicClaimId}`);
+        expect(execution.text).not.toContain(`id=${omitted?.objectId}`);
     });
 
     it("returns an empty-results completed delivery, not a failure, for zero results", async () => {
