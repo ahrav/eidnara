@@ -27842,7 +27842,7 @@ mod tests {
             concat!("mirror_", "row"),
             concat!("public", "ClaimId"),
             concat!("mutation", "Token"),
-            concat!("mc", "m_"),
+            concat!("m", "cm_"),
         ];
         let mut offending = Vec::new();
         for path in files {
