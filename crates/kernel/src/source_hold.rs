@@ -18,9 +18,14 @@ use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
 const SOURCE_HOLD_KIND: &str = "source_hold";
 
-/// Unreleased holds one owner may have at once. Admission bounds one capture;
-/// this bounds what repeated captures can pin together.
-pub const MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER: usize = 32;
+/// Admission bounds each capture; this limit bounds the evidence that repeated
+/// captures by one consumer can pin together.
+pub const MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER: usize = 32;
+
+/// Maximum duration of a source hold. An unreleased hold blocks artifact
+/// reclamation until expiry or explicit release, so a longer deadline is
+/// refused rather than pinning the corpus for years.
+pub const MAX_SOURCE_HOLD_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 /// Separates consumer and policy inside `capture_pins.owner_id`. Both parts
 /// are restricted to token bytes, so the separator can never appear in either.
@@ -70,8 +75,7 @@ pub enum SourceHoldInvalidity {
     Expired,
     /// A purge deleted evidence the hold referenced; the pin is degraded.
     PurgeDegraded,
-    /// An evidence row the hold references is gone, or its object file could
-    /// not be verified present on disk.
+    /// A referenced evidence row is gone, or its object file is absent from disk.
     MissingBytes,
 }
 
@@ -119,7 +123,9 @@ pub enum SourceHoldError {
         references: usize,
         encoded_bytes: u64,
     },
-    #[error("source hold owner already has {MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER} unreleased holds")]
+    #[error(
+        "source hold consumer already has {MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER} unreleased holds"
+    )]
     HoldLimitReached,
     #[error("source hold binding does not match the stored hold")]
     BindingMismatch,
@@ -209,6 +215,9 @@ impl KernelStore {
         if !is_token(&binding.consumer_id) || !is_token(&binding.source_policy_version) {
             return Err(SourceHoldError::InvalidRequest);
         }
+        if bounds.expiry_ms.get() > MAX_SOURCE_HOLD_LIFETIME_MS {
+            return Err(SourceHoldError::InvalidRequest);
+        }
         let expiry =
             i64::try_from(bounds.expiry_ms.get()).map_err(|_| SourceHoldError::InvalidRequest)?;
         if binding.lease_epoch != self.lease_epoch() {
@@ -232,12 +241,13 @@ impl KernelStore {
         let active: i64 = tx
             .query_row_cached(
                 "SELECT COUNT(*) FROM capture_pins
-                 WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL",
-                params![SOURCE_HOLD_KIND, owner_id(binding)],
+                 WHERE pin_kind=?1 AND substr(owner_id,1,length(?2))=?2
+                   AND released_at IS NULL",
+                params![SOURCE_HOLD_KIND, owner_prefix(&binding.consumer_id)],
                 |row| row.get(0),
             )
             .map_err(sqlite)?;
-        if usize::try_from(active).map_err(corrupt)? >= MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER {
+        if usize::try_from(active).map_err(corrupt)? >= MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER {
             return Err(SourceHoldError::HoldLimitReached);
         }
         let snapshot: i64 = tx
@@ -349,7 +359,8 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
-        let hold = self.load_valid_hold(&tx, binding, hold_id, now)?;
+        let pin = self.load_valid_pin(&tx, binding, hold_id, now)?;
+        let hold = self.hold_from_pin(&tx, binding, hold_id, &pin)?;
         // Every referenced evidence row must still exist with its object on disk.
         let digests = {
             let mut statement = tx
@@ -368,14 +379,21 @@ impl KernelStore {
         // The filesystem probes run with no reader connection held.
         drop(tx);
         drop(reader);
-        let verified = digests.iter().all(|digest| {
-            digest.as_deref().is_some_and(|digest| {
-                is_artifact_digest(digest)
-                    && self.artifact_object_presence(digest) == ObjectPresence::Present
-            })
-        });
-        if !verified {
-            return Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes));
+        for digest in &digests {
+            let Some(digest) = digest
+                .as_deref()
+                .filter(|digest| is_artifact_digest(digest))
+            else {
+                return Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes));
+            };
+            match self.artifact_object_presence(digest) {
+                ObjectPresence::Present => {}
+                ObjectPresence::Absent => {
+                    return Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes));
+                }
+                // The probe failed, not the bytes; the hold still protects them.
+                ObjectPresence::Unreadable => return Err(KernelError::Io.into()),
+            }
         }
         Ok(hold)
     }
@@ -397,7 +415,7 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
-        let hold = self.load_valid_hold(&tx, binding, hold_id, now)?;
+        let pin = self.load_valid_pin(&tx, binding, hold_id, now)?;
         let (class, object_id, revision) = match cursor {
             Some(cursor) => (
                 cursor.class.as_str(),
@@ -420,7 +438,7 @@ impl KernelStore {
             .map_err(sqlite)?;
         let mut rows = statement
             .query_map(
-                params![hold.snapshot, class, object_id, revision, fetch],
+                params![pin.snapshot, class, object_id, revision, fetch],
                 |row| {
                     Ok((
                         HeldDescriptor {
@@ -476,7 +494,7 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
-        self.load_hold(&tx, binding, hold_id)?
+        self.load_pin(&tx, binding, hold_id)?
             .ok_or(SourceHoldError::Invalid(SourceHoldInvalidity::Missing))?;
         release_capture_pin_in_tx(&tx, hold_id, released_at)?;
         tx.commit().map_err(sqlite)?;
@@ -501,41 +519,18 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
-        let stale: Vec<String> = {
-            let mut statement = tx
-                .prepare_cached(
-                    "SELECT capture_pin_id FROM capture_pins
-                     WHERE pin_kind=?1 AND substr(owner_id,1,length(?2))=?2
-                       AND lease_epoch<>?3 AND released_at IS NULL
-                     ORDER BY capture_pin_id",
-                )
-                .map_err(sqlite)?;
-            statement
-                .query_map(
-                    params![SOURCE_HOLD_KIND, owner_prefix(consumer_id), epoch],
-                    |row| row.get(0),
-                )
-                .map_err(sqlite)?
-                .collect::<rusqlite::Result<_>>()
-                .map_err(sqlite)?
-        };
-        for hold_id in &stale {
-            if !release_capture_pin_in_tx(&tx, hold_id, released_at)? {
-                return Err(KernelError::CorruptCanonicalRow.into());
-            }
-        }
+        let stale = release_consumer_holds_in_tx(&tx, consumer_id, Some(epoch), released_at)?;
         tx.commit().map_err(sqlite)?;
         Ok(stale)
     }
 
-    /// The hold under this binding, or `None` when no such pin exists. The
-    /// binding is checked before anything else about the hold is disclosed.
-    fn load_hold(
+    /// Returns `None` when no pin exists or its `pin_kind` is not `SOURCE_HOLD_KIND`.
+    fn load_pin(
         &self,
         tx: &Transaction<'_>,
         binding: &SourceHoldBinding,
         hold_id: &str,
-    ) -> Result<Option<StoredHold>, SourceHoldError> {
+    ) -> Result<Option<StoredPin>, SourceHoldError> {
         let row = tx
             .query_row_cached(
                 "SELECT pin_kind,owner_id,commit_seq,lease_epoch,created_at,expires_at,
@@ -567,6 +562,47 @@ impl KernelStore {
         if pin.owner != owner_id(binding) || epoch != binding.lease_epoch {
             return Err(SourceHoldError::BindingMismatch);
         }
+        Ok(Some(StoredPin {
+            snapshot: pin.snapshot,
+            captured_at: pin.captured_at,
+            expires_at: pin.expires_at.ok_or_else(|| corrupt(()))?,
+            released: pin.released_at.is_some(),
+            purge_degraded: pin.purge_degraded_at.is_some(),
+        }))
+    }
+
+    fn load_valid_pin(
+        &self,
+        tx: &Transaction<'_>,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+    ) -> Result<StoredPin, SourceHoldError> {
+        let pin = self
+            .load_pin(tx, binding, hold_id)?
+            .ok_or(SourceHoldError::Invalid(SourceHoldInvalidity::Missing))?;
+        let invalidity = if pin.released {
+            Some(SourceHoldInvalidity::Released)
+        } else if pin.purge_degraded {
+            Some(SourceHoldInvalidity::PurgeDegraded)
+        } else if now >= pin.expires_at {
+            Some(SourceHoldInvalidity::Expired)
+        } else {
+            None
+        };
+        match invalidity {
+            Some(invalidity) => Err(SourceHoldError::Invalid(invalidity)),
+            None => Ok(pin),
+        }
+    }
+
+    fn hold_from_pin(
+        &self,
+        tx: &Transaction<'_>,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        pin: &StoredPin,
+    ) -> Result<SourceHold, SourceHoldError> {
         let (references, encoded_bytes): (i64, Option<i64>) = tx
             .query_row_cached(
                 "SELECT COUNT(*),SUM(e.byte_length) FROM capture_pin_refs r
@@ -576,47 +612,51 @@ impl KernelStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(sqlite)?;
-        Ok(Some(StoredHold {
-            hold: SourceHold {
-                hold_id: hold_id.to_string(),
-                binding: binding.clone(),
-                snapshot: pin.snapshot,
-                captured_at: pin.captured_at,
-                expires_at: pin.expires_at.ok_or_else(|| corrupt(()))?,
-                references: usize::try_from(references).map_err(corrupt)?,
-                encoded_bytes: u64::try_from(encoded_bytes.unwrap_or(0)).map_err(corrupt)?,
-            },
-            released: pin.released_at.is_some(),
-            purge_degraded: pin.purge_degraded_at.is_some(),
-        }))
+        Ok(SourceHold {
+            hold_id: hold_id.to_string(),
+            binding: binding.clone(),
+            snapshot: pin.snapshot,
+            captured_at: pin.captured_at,
+            expires_at: pin.expires_at,
+            references: usize::try_from(references).map_err(corrupt)?,
+            encoded_bytes: u64::try_from(encoded_bytes.unwrap_or(0)).map_err(corrupt)?,
+        })
     }
+}
 
-    /// [`Self::load_hold`], refusing a hold that is missing, released,
-    /// purge-degraded, or expired at `now`.
-    fn load_valid_hold(
-        &self,
-        tx: &Transaction<'_>,
-        binding: &SourceHoldBinding,
-        hold_id: &str,
-        now: i64,
-    ) -> Result<SourceHold, SourceHoldError> {
-        let stored = self
-            .load_hold(tx, binding, hold_id)?
-            .ok_or(SourceHoldError::Invalid(SourceHoldInvalidity::Missing))?;
-        let invalidity = if stored.released {
-            Some(SourceHoldInvalidity::Released)
-        } else if stored.purge_degraded {
-            Some(SourceHoldInvalidity::PurgeDegraded)
-        } else if now >= stored.hold.expires_at {
-            Some(SourceHoldInvalidity::Expired)
-        } else {
-            None
-        };
-        match invalidity {
-            Some(invalidity) => Err(SourceHoldError::Invalid(invalidity)),
-            None => Ok(stored.hold),
+/// `keep_epoch` excludes holds whose `lease_epoch` matches it; `None` releases
+/// every unreleased hold of the consumer. Returns the released hold ids in
+/// `capture_pin_id` order.
+pub(crate) fn release_consumer_holds_in_tx(
+    tx: &Transaction<'_>,
+    consumer_id: &str,
+    keep_epoch: Option<i64>,
+    released_at: i64,
+) -> Result<Vec<String>, KernelError> {
+    let held: Vec<String> = {
+        let mut statement = tx
+            .prepare_cached(
+                "SELECT capture_pin_id FROM capture_pins
+                 WHERE pin_kind=?1 AND substr(owner_id,1,length(?2))=?2
+                   AND (?3 IS NULL OR lease_epoch<>?3) AND released_at IS NULL
+                 ORDER BY capture_pin_id",
+            )
+            .map_err(map_sqlite)?;
+        statement
+            .query_map(
+                params![SOURCE_HOLD_KIND, owner_prefix(consumer_id), keep_epoch],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(map_sqlite)?
+    };
+    for hold_id in &held {
+        if !release_capture_pin_in_tx(tx, hold_id, released_at)? {
+            return Err(KernelError::CorruptCanonicalRow);
         }
     }
+    Ok(held)
 }
 
 struct PinRow {
@@ -630,8 +670,10 @@ struct PinRow {
     purge_degraded_at: Option<i64>,
 }
 
-struct StoredHold {
-    hold: SourceHold,
+struct StoredPin {
+    snapshot: i64,
+    captured_at: i64,
+    expires_at: i64,
     released: bool,
     purge_degraded: bool,
 }

@@ -100,8 +100,9 @@ pub use source_descriptor::{
     SourceDescriptorRequest, descriptor_object_id,
 };
 pub use source_hold::{
-    HeldCursor, HeldDescriptor, HeldPage, MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER, SourceHold,
-    SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourceHoldInvalidity,
+    HeldCursor, HeldDescriptor, HeldPage, MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER,
+    MAX_SOURCE_HOLD_LIFETIME_MS, SourceHold, SourceHoldBinding, SourceHoldBounds, SourceHoldError,
+    SourceHoldInvalidity,
 };
 
 /// `Connection::execute` and `Connection::query_row` prepare their statement
