@@ -214,6 +214,30 @@ fn stored_detail(payload: &[u8]) -> Result<SourceDescriptorDetail, KernelError> 
 }
 
 impl Envelope<'_> {
+    /// Registry inserts use several writers; commit validation admits reserved IDs only when this envelope's descriptor publisher owns them.
+    pub(super) fn check_descriptor_ownership(&self) -> Result<(), KernelError> {
+        let mut statement = self
+            .tx
+            .prepare_cached(
+                "SELECT object_id,source_id FROM object_registry
+                 WHERE created_commit_seq=?1 AND object_id GLOB ?2",
+            )
+            .map_err(map_sqlite)?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![self.commit_seq, format!("{DESCRIPTOR_OBJECT_ID_PREFIX}*")],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(map_sqlite)?;
+        for row in rows {
+            let (object_id, lineage_id) = row.map_err(map_sqlite)?;
+            if self.descriptor_objects.get(&lineage_id) != Some(&object_id) {
+                return Err(KernelError::InvalidInput);
+            }
+        }
+        Ok(())
+    }
+
     /// Publishes one descriptor; see [`Envelope::publish_source_descriptors`].
     pub fn publish_source_descriptor(
         &mut self,
@@ -244,7 +268,7 @@ impl Envelope<'_> {
         &mut self,
         requests: &[SourceDescriptorRequest<'_>],
     ) -> Result<Vec<SourceDescriptorOutcome>, SourceDescriptorError> {
-        if requests.len() > MAX_DESCRIPTORS_PER_COMMIT - self.descriptor_lineages.len() {
+        if requests.len() > MAX_DESCRIPTORS_PER_COMMIT - self.descriptor_objects.len() {
             return Err(SourceDescriptorError::BatchTooLarge);
         }
         let mut checked_evidence: HashSet<(&str, &str)> = HashSet::new();
@@ -257,7 +281,14 @@ impl Envelope<'_> {
             if payload_id(request.buffer.as_bytes()) != request.artifact_digest {
                 return Err(SourceDescriptorError::BufferMismatch);
             }
-            if !self.descriptor_lineages.insert(encoded.lineage_id.clone()) {
+            if self
+                .descriptor_objects
+                .insert(
+                    encoded.lineage_id.clone(),
+                    descriptor_object_id(&encoded.lineage_id, request.occurrence.revision),
+                )
+                .is_some()
+            {
                 return Err(SourceDescriptorError::DuplicateLineage);
             }
             verified.push(encoded);

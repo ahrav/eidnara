@@ -1769,6 +1769,92 @@ fn git_descriptors_require_source_policy_provenance() {
 }
 
 #[test]
+fn every_object_writer_preserves_descriptor_registry_ownership() {
+    let mut failures = Vec::new();
+    for kind in ["domain", "scope", "decision", "co-published-decision"] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let encoded = encode(&message(MSG_A, "1"), text).unwrap();
+        let reserved_id = descriptor_object_id(&encoded.lineage_id, "1");
+        let tip = fixture.store.tip().unwrap();
+        let receipt = fixture.store.commit(intent(kind), |envelope| {
+            if kind == "co-published-decision" {
+                envelope
+                    .publish_source_descriptor(&request(message(MSG_A, "2"), &evidence, text))
+                    .unwrap();
+            }
+            match kind {
+                "domain" => envelope.insert_domain(DomainSpec {
+                    domain_id: "foreign-domain".to_string(),
+                    object_id: reserved_id.clone(),
+                    name: "foreign".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: encoded.lineage_id.clone(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?,
+                "scope" => {
+                    envelope.insert_scope(kernel::ScopeSpec {
+                        scope_id: "foreign-scope".to_string(),
+                        object_id: reserved_id.clone(),
+                        domain_id: DOMAIN.to_string(),
+                        source_kind: "fixture".to_string(),
+                        source_id: encoded.lineage_id.clone(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                        terms: vec![kernel::ScopeTermSpec {
+                            dimension: kernel::Dimension::Project.as_str().to_string(),
+                            operator: "exact".to_string(),
+                            exact_value: Some("b".repeat(64)),
+                            ..kernel::ScopeTermSpec::default()
+                        }],
+                    })?;
+                }
+                _ => {
+                    envelope.insert_decision(kernel::DecisionSpec {
+                        decision_id: "foreign-decision".to_string(),
+                        object_id: reserved_id.clone(),
+                        domain_id: DOMAIN.to_string(),
+                        proposition_id: None,
+                        scope_id: None,
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: "probe".to_string(),
+                        payload: kernel::DecisionPayload {
+                            summary: "probe".to_string(),
+                            rationale: "probe".to_string(),
+                        },
+                        source_kind: "messages".to_string(),
+                        source_id: encoded.lineage_id.clone(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                    })?;
+                }
+            }
+            Ok(String::new())
+        });
+        let error = receipt.err();
+        if error != Some(KernelError::InvalidInput) {
+            failures.push((kind, error));
+            continue;
+        }
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.live(&reserved_id), None);
+        assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+        let (published, _, _) = fixture
+            .publish("valid", &request(message(MSG_A, "1"), &evidence, text))
+            .unwrap();
+        assert_eq!(published.object_id, reserved_id);
+        assert_eq!(fixture.live(&reserved_id), Some(true));
+    }
+    assert!(
+        failures.is_empty(),
+        "reserved descriptor IDs must be refused: {failures:?}"
+    );
+}
+
+#[test]
 fn name_only_remediation_changes_no_descriptor_input() {
     let fixture = Fixture::open();
     let evidence = fixture.retain("text", "some text");
