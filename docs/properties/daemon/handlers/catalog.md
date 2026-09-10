@@ -659,8 +659,12 @@ receipt's operation key, and the receipt digest, so two projects that hold one
 root in turn and reuse a session and command id are two kernel receipts. The model's
 `shareable` is recorded true only for a memory the serving view classes normal and
 serves at `ExplicitSearch` at commit time. The same kernel commit retires this project's prior live
-classifications for each memory; another project's row citing the memory through
-`classifies` is skipped, not retired and not a failure. That commit
+classifications for each memory, meaning rows in its scope, in the memory domain,
+from `dreamer.classify`; another project's or producer's row citing the memory
+through `classifies` is skipped, not retired and not a failure. Authority is read
+again immediately before the write (`classify_write_refusal`): a project that no
+longer holds `MODULE` at the run's generation writes nothing and the receipt
+completes `failed` with the authority code. That commit
 precedes receipt completion: a crash between them leaves canonical effects but
 an unknown receipt outcome on recovery, not a second dispatch. Normal kernel
 write failure is recorded as `dreamer_kernel_write_failed`; a receipt read-back

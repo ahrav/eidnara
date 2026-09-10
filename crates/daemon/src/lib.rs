@@ -9903,6 +9903,13 @@ impl DreamerRuntime {
                 if !fenced
                     && let Ok(result) = &attempt_output
                     && let Ok(classifications) = parse_output(result, expected_ids)
+                    && classify_write_refusal(
+                        &store,
+                        &route_root,
+                        &authority_project,
+                        authority_generation,
+                    )
+                    .is_none()
                     && let Ok(commit) = self
                         .record_classifications(
                             route.kernel_project,
@@ -10013,42 +10020,51 @@ impl DreamerRuntime {
         // between the two leaves the classifications written and the receipt
         // open with an ended attempt; the retry settles that receipt unknown
         // and never dispatches again, so the write stands and no second one
-        // is made.
-        let (terminal_kind, response_json) = match self
-            .record_classifications(
-                route.kernel_project,
-                &ClassifyWriteIdentity {
-                    authority_project: receipt_key.project,
-                    operation_key: receipt_key.operation_key,
-                    request_digest: &binding_record.request_digest,
-                    cause: &format!("{ledger_session}:{command_id}"),
-                    generation,
-                    known_as_of: pool.known_as_of,
-                },
-                &classifications,
-            )
-            .await
-        {
-            Ok(commit) => (
-                DreamerTerminalKind::Complete,
-                classify_success_response(
-                    &model,
-                    attempts,
-                    &child_session,
-                    pool.known_as_of,
-                    &commit,
+        // is made. Authority is read again first: the entry check predates
+        // the model call, which a drain or a move can outlast.
+        let (terminal_kind, response_json) = match classify_write_refusal(
+            &store,
+            &route_root,
+            &authority_project,
+            authority_generation,
+        ) {
+            Some(refusal) => (DreamerTerminalKind::Failed, refusal.to_string()),
+            None => match self
+                .record_classifications(
+                    route.kernel_project,
+                    &ClassifyWriteIdentity {
+                        authority_project: receipt_key.project,
+                        operation_key: receipt_key.operation_key,
+                        request_digest: &binding_record.request_digest,
+                        cause: &format!("{ledger_session}:{command_id}"),
+                        generation,
+                        known_as_of: pool.known_as_of,
+                    },
+                    &classifications,
                 )
-                .to_string(),
-            ),
-            Err(detail) => (
-                DreamerTerminalKind::Failed,
-                json!({
-                    "ok": false,
-                    "code": "dreamer_kernel_write_failed",
-                    "message": detail,
-                })
-                .to_string(),
-            ),
+                .await
+            {
+                Ok(commit) => (
+                    DreamerTerminalKind::Complete,
+                    classify_success_response(
+                        &model,
+                        attempts,
+                        &child_session,
+                        pool.known_as_of,
+                        &commit,
+                    )
+                    .to_string(),
+                ),
+                Err(detail) => (
+                    DreamerTerminalKind::Failed,
+                    json!({
+                        "ok": false,
+                        "code": "dreamer_kernel_write_failed",
+                        "message": detail,
+                    })
+                    .to_string(),
+                ),
+            },
         };
         match store.complete_dreamer_receipt(
             receipt_key,
@@ -14061,16 +14077,20 @@ impl DreamerRuntime {
                             CLASSIFY_DEPENDENCY_KIND,
                             CLASSIFY_OBSERVATION_KIND,
                         )? {
-                            // `classifies` is not a projected dependency kind, so `kernel.commit` lets any project cite this memory through it; a foreign project's row is not this project's classification and stays live. commentlint: allow(JUDGE)
+                            // `classifies` and `memory_classification` are free-form literals `kernel.commit` does not reserve, so any project, and any producer in this one, may write such a row; only a live row this code path wrote (memory domain, `dreamer.classify` source) in this project's scope is a prior classification to retire. commentlint: allow(JUDGE)
                             match kernel_routes::commit::scoped_object_state(
                                 envelope,
                                 &mut filter,
                                 &prior,
                             ) {
-                                Ok(_) => {
+                                Ok(state)
+                                    if state.object.domain_id
+                                        == canonical_memory::MEMORY_DOMAIN_ID
+                                        && state.object.source_kind == CLASSIFY_KERNEL_PRODUCER =>
+                                {
                                     envelope.retire_observation(&prior)?;
                                 }
-                                Err(kernel::KernelError::NotFound) => {}
+                                Ok(_) | Err(kernel::KernelError::NotFound) => {}
                                 Err(error) => return Err(error),
                             }
                         }
@@ -14221,6 +14241,42 @@ fn memories_authority_for_route(
         project: authority.project,
         generation: authority.generation,
     }))
+}
+
+/// The failure a classify receipt records instead of writing when `authority_project` no longer holds `MODULE` at `authority_generation` for `route_root`; `None` when it still does. The entry check guards the receipt, but a model call can outlast a drain or a move, and a write under lost authority lands in a store that no longer answers for the project. The authority row is outside the kernel transaction, so this narrows the window from the model call to the commit rather than closing it. commentlint: allow(JUDGE)
+fn classify_write_refusal(
+    store: &MemoryStore,
+    route_root: &str,
+    authority_project: &str,
+    authority_generation: u64,
+) -> Option<Value> {
+    let refusal =
+        |code: &str, message: String| Some(json!({"ok": false, "code": code, "message": message}));
+    match memories_authority_for_route(store, route_root) {
+        Ok(MemoriesAuthority::Module(authority)) if authority.project != authority_project => {
+            refusal(
+                "authority_project_mismatch",
+                format!(
+                    "the route now resolves to {}, the run was for {authority_project}",
+                    authority.project
+                ),
+            )
+        }
+        Ok(MemoriesAuthority::Module(authority))
+            if authority.generation != authority_generation =>
+        {
+            refusal(
+                "authority_generation_mismatch",
+                format!(
+                    "authority generation is {}, the run was for {authority_generation}",
+                    authority.generation
+                ),
+            )
+        }
+        Ok(MemoriesAuthority::Module(_)) => None,
+        Ok(MemoriesAuthority::NotModule { message }) => refusal("authority_not_module", message),
+        Err(error) => refusal("authority_lookup_failed", error.to_string()),
+    }
 }
 
 /// The daemon state the Dreamer scheduler reads and drives: the open store,
@@ -30784,9 +30840,9 @@ mod tests {
         assert_eq!(by_memory(&normal).detail["shareable"], json!(true));
     }
 
-    /// Another project's `memory_classification` row citing this memory through the non-projected `classifies` kind is not this project's classification: it stays live and the commit succeeds. commentlint: allow(JUDGE)
+    /// `memory_classification` and `classifies` are free-form literals: another project's row citing this memory, and another producer's row in this project, are not this project's classifications; both stay live and the commit succeeds. commentlint: allow(JUDGE)
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_leaves_another_projects_classification_of_the_memory_live() {
+    async fn dreamer_run_task_retires_only_the_classification_rows_it_wrote() {
         let memory = test_memory_id(1);
         let producer = Arc::new(ProducerState::default());
         producer
@@ -30798,56 +30854,61 @@ mod tests {
                 length_capped: false,
             }));
         let harness = DreamerHarness::start(&producer).await;
+        let own_scope = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
         let other_root = harness._dir.path().join("other-project");
         std::fs::create_dir_all(&other_root).unwrap();
         let other = binding_with_harness(other_root.to_str().unwrap(), "pi", "ses").kernel_project;
         let other_scope = other.scope_id();
         let kernel = harness.handler.kernel.kernel_store().unwrap();
         let foreign = "observation:foreign-classification".to_string();
-        kernel
-            .commit(
-                kernel_route_fixtures::intent("foreign-classification"),
-                |envelope| {
-                    let mut domains = HashSet::new();
-                    let mut ready = false;
-                    let mut refused = None;
-                    kernel_routes::commit::ensure_scope(
-                        envelope,
-                        &other,
-                        &mut ready,
-                        &mut domains,
-                        &mut refused,
-                    )?;
-                    envelope.insert_observation(kernel::ObservationSpec {
-                        observation_id: foreign.clone(),
-                        object_id: foreign.clone(),
-                        domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
-                        proposition_id: None,
-                        scope_id: Some(other_scope.clone()),
-                        anchor_id: None,
-                        evidence_id: None,
-                        observation_kind: CLASSIFY_OBSERVATION_KIND.to_string(),
-                        payload: kernel::ObservationPayload {
-                            summary: "importance 1, scope project, shareable false".to_string(),
-                            classification: "project".to_string(),
-                            detail: None,
-                        },
-                        observed_at: 1,
-                        dependencies: vec![kernel::ObservationDependencySpec {
-                            dependency_object_id: memory.clone(),
-                            dependency_kind: CLASSIFY_DEPENDENCY_KIND.to_string(),
-                            dependency_payload: None,
-                        }],
-                        source_kind: "repo".to_string(),
-                        source_id: "foreign".to_string(),
-                        source_revision: 1,
-                        sensitivity: kernel::Sensitivity::Normal,
-                    })?;
-                    Ok(String::new())
+        let other_producer = "observation:other-producer-classification".to_string();
+        let row =
+            |observation_id: &str, scope_id: &str, source_kind: &str| kernel::ObservationSpec {
+                observation_id: observation_id.to_string(),
+                object_id: observation_id.to_string(),
+                domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
+                proposition_id: None,
+                scope_id: Some(scope_id.to_string()),
+                anchor_id: None,
+                evidence_id: None,
+                observation_kind: CLASSIFY_OBSERVATION_KIND.to_string(),
+                payload: kernel::ObservationPayload {
+                    summary: "importance 1, scope project, shareable false".to_string(),
+                    classification: "project".to_string(),
+                    detail: None,
                 },
-            )
+                observed_at: 1,
+                dependencies: vec![kernel::ObservationDependencySpec {
+                    dependency_object_id: memory.clone(),
+                    dependency_kind: CLASSIFY_DEPENDENCY_KIND.to_string(),
+                    dependency_payload: None,
+                }],
+                source_kind: source_kind.to_string(),
+                source_id: observation_id.to_string(),
+                source_revision: 1,
+                sensitivity: kernel::Sensitivity::Normal,
+            };
+        kernel
+            .commit(kernel_route_fixtures::intent("rows-not-ours"), |envelope| {
+                let mut domains = HashSet::new();
+                let mut ready = false;
+                let mut refused = None;
+                kernel_routes::commit::ensure_scope(
+                    envelope,
+                    &other,
+                    &mut ready,
+                    &mut domains,
+                    &mut refused,
+                )?;
+                envelope.insert_observation(row(&foreign, &other_scope, "repo"))?;
+                envelope.insert_observation(row(&other_producer, &own_scope, "repo"))?;
+                Ok(String::new())
+            })
             .unwrap();
         assert_eq!(kernel_dependency(&kernel, &foreign), memory);
+        assert_eq!(kernel_dependency(&kernel, &other_producer), memory);
 
         let response = response_of(
             harness
@@ -30869,10 +30930,56 @@ mod tests {
         };
         assert!(
             live(&foreign),
-            "the foreign row is not this project's to retire"
+            "the foreign project's row is not this project's to retire"
+        );
+        assert!(
+            live(&other_producer),
+            "another producer's row in this project is not a Dreamer classification"
         );
         let own = classification_object_id(&harness.kernel_operation_key("own-run"), &memory);
         assert!(live(&own), "this project's classification is written");
+    }
+
+    /// The entry check predates the model call, which a drain can outlast; the canonical write reads authority again and a run whose project no longer holds `MODULE` writes nothing and completes its receipt failed. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_writes_nothing_when_authority_drains_during_the_model_call() {
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: classify_manifest(&ids),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer).await;
+        let store = Arc::clone(&harness.store);
+        *producer.on_start.lock().unwrap() = Some(Box::new(move || {
+            let draining = store
+                .authority_begin_drain("context", "git:identity", "memories", "lease", i64::MAX, 1)
+                .unwrap();
+            assert_ne!(draining.state, "MODULE");
+        }));
+        let tip = harness.kernel_tip();
+        let outcome = harness
+            .classify(classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS), "drained")
+            .await;
+        assert_eq!(error_code_of(&outcome), "authority_not_module");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.kernel_tip(), tip, "no canonical write");
+        assert!(harness.classifications().is_empty());
+        let receipt = harness.receipt("drained");
+        assert!(
+            matches!(
+                receipt.state,
+                DreamerReceiptState::Complete {
+                    terminal_kind: DreamerTerminalKind::Failed,
+                    ..
+                }
+            ),
+            "{receipt:?}"
+        );
     }
 
     /// A pool whose escaped rendering passes the byte bound is refused before

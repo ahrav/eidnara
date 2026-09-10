@@ -104,9 +104,19 @@ default-production reachability, subject to the route's authority checks.
   the same session and command id is a distinct kernel receipt.
   The same commit retires this project's prior live classifications through
   `Envelope::live_dependent_observations` in `crates/kernel/src/envelope.rs`
-  and `retire_observation` in `crates/kernel/src/slice/write.rs`; a row that
-  `scoped_object_state` places outside the project is skipped, since the
-  `classifies` kind is not projected and any project may cite the memory.
+  and `retire_observation` in `crates/kernel/src/slice/write.rs`; only a row
+  in this project's scope, in the memory domain, with source kind
+  `dreamer.classify` is retired, since `classifies` and
+  `memory_classification` are free-form literals any project or producer may
+  write.
+- `classify_write_refusal` reads the route's memories authority again
+  immediately before each canonical write (the success path and the
+  known-result fallback). A project that no longer holds `MODULE` at the
+  run's generation writes nothing; the receipt completes `failed` with
+  `authority_not_module`, `authority_project_mismatch`,
+  `authority_generation_mismatch`, or `authority_lookup_failed`. The
+  authority row is outside the kernel transaction, so this narrows the
+  window from the model call to the commit rather than closing it.
 - Normal kernel-write failure is recorded as `dreamer_kernel_write_failed`;
   kernel conflicts retain the `kernel.commit` reason classification. Both
   that completion and the exhausted-chain and success completions distinguish
@@ -238,13 +248,18 @@ the producer is never started again.
    `shareable=false` and the normal row `shareable=true`
    (`record_classifications_never_records_a_sensitive_or_hidden_memory_as_shareable`).
 15. Another project's `memory_classification` observation citing the memory
-   through `classifies`, then a classify of that memory: assert `classified`
-   is 1, the foreign row still live, and this project's row written
-   (`dreamer_run_task_leaves_another_projects_classification_of_the_memory_live`).
+   through `classifies`, and another producer's such row in this project,
+   then a classify of that memory: assert `classified` is 1, both rows still
+   live, and this project's row written
+   (`dreamer_run_task_retires_only_the_classification_rows_it_wrote`).
 16. Two authority projects hold one root in turn and reuse a session and command
    id: assert the second run dispatches, commits at a new tip with a distinct
    `commit_seq`, and its row retires the first's rather than replaying it
    (`dreamer_run_task_keys_the_kernel_write_by_authority_project_on_a_shared_root`).
+17. Authority drained from the producer's `on_start` hook, after the entry
+   check and before the write: assert `authority_not_module`, one start, an
+   unchanged kernel tip, no classification, and a `failed` receipt
+   (`dreamer_run_task_writes_nothing_when_authority_drains_during_the_model_call`).
 
 The stranded-receipt, fenced-cleanup, and terminal-status tests use the async
 object-id harness:
