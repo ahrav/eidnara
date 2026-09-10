@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,10 +14,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kernel::source_identity::Occurrence;
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest,
-    CommitIntent, DomainSpec, HeldCursor, HeldDescriptor, KernelStore,
-    MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER, ProviderEgress, RemediationTarget, RepositoryProvenance,
-    Sensitivity, SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding,
-    SourceHoldBounds, SourceHoldError, SourceHoldInvalidity,
+    CommitIntent, DomainSpec, HeldCursor, HeldDescriptor, KernelError, KernelStore,
+    MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER, MAX_SOURCE_HOLD_LIFETIME_MS, ProviderEgress,
+    RemediationTarget, RepositoryProvenance, Sensitivity, SourceDescriptorPolicy,
+    SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    SourceHoldError, SourceHoldInvalidity,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -263,6 +265,13 @@ impl Fixture {
                 revision: &revision_text,
                 representation: representation(class),
                 span: None,
+            },
+            source_policy: if class == "git_commits" {
+                SourceDescriptorPolicy::Git {
+                    version: POLICY.to_string(),
+                }
+            } else {
+                SourceDescriptorPolicy::Native
             },
             domain_id: DOMAIN,
             scope_id: None,
@@ -691,7 +700,7 @@ fn a_hold_equals_the_five_class_ledger_at_s_and_needs_a_registered_consumer() {
 
     // Repeated captures are bounded per owner; releasing one frees a slot.
     let mut extra = Vec::new();
-    while extra.len() + 2 < MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER {
+    while extra.len() + 2 < MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER {
         extra.push(
             fixture
                 .store
@@ -703,6 +712,16 @@ fn a_hold_equals_the_five_class_ledger_at_s_and_needs_a_registered_consumer() {
         fixture
             .store
             .capture_source_hold(&fixture.binding(), wide())
+            .unwrap_err(),
+        SourceHoldError::HoldLimitReached
+    );
+    // The cap is per consumer: a fresh policy version is not a fresh budget.
+    let mut other_policy_at_cap = fixture.binding();
+    other_policy_at_cap.source_policy_version = "source-policy.v2".to_string();
+    assert_eq!(
+        fixture
+            .store
+            .capture_source_hold(&other_policy_at_cap, wide())
             .unwrap_err(),
         SourceHoldError::HoldLimitReached
     );
@@ -809,7 +828,7 @@ fn writer_serialized_capture_leaves_no_gap_between_s_and_protection_under_concur
     // Two artifacts are logically deleted before the loop: reclaimable once
     // the grace period passes, unless a hold captured before the deletion
     // pins them. The sweep clock sits past the grace period the whole time.
-    let long = bounds(60 * DAY_MS);
+    let long = bounds(MAX_SOURCE_HOLD_LIFETIME_MS);
     let pinned_before_delete = fixture
         .store
         .capture_source_hold(&fixture.binding(), long)
@@ -1193,15 +1212,31 @@ fn purge_expiry_missing_bytes_and_release_invalidate_the_hold_without_moving_the
         Ok(after_purge.clone())
     );
     let gone = fixture.held_all(&after_purge, 64)[0].clone();
-    fs::remove_file(
-        fixture
-            .root
-            .path()
-            .join("artifacts/objects")
-            .join(&gone.artifact_digest[..2])
-            .join(&gone.artifact_digest[2..]),
-    )
-    .unwrap();
+    let gone_path = fixture
+        .root
+        .path()
+        .join("artifacts/objects")
+        .join(&gone.artifact_digest[..2])
+        .join(&gone.artifact_digest[2..]);
+    // A shard that cannot be probed is an I/O failure, not `MissingBytes`: the
+    // hold still protects its bytes.
+    let shard = gone_path.parent().unwrap();
+    fs::set_permissions(shard, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::metadata(&gone_path).is_ok() {
+        // A privileged test process ignores the mode bits.
+        fs::set_permissions(shard, fs::Permissions::from_mode(0o700)).unwrap();
+    } else {
+        assert_eq!(
+            status(&fixture, &after_purge, after_purge.captured_at),
+            Err(SourceHoldError::Kernel(KernelError::Io))
+        );
+        fs::set_permissions(shard, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            status(&fixture, &after_purge, after_purge.captured_at),
+            Ok(after_purge.clone())
+        );
+    }
+    fs::remove_file(&gone_path).unwrap();
     assert_eq!(
         status(&fixture, &after_purge, after_purge.captured_at),
         Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes))
@@ -1248,7 +1283,7 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
     let mut fixture = Fixture::open();
     fixture.seed_five_classes();
     let old_binding = fixture.binding();
-    let long = bounds(60 * DAY_MS);
+    let long = bounds(MAX_SOURCE_HOLD_LIFETIME_MS);
     let old = fixture
         .store
         .capture_source_hold(&old_binding, long)
@@ -1478,7 +1513,7 @@ fn replay_evidence_created_after_s_survives_publication_pruning_and_gc_until_ack
     }
     let hold = fixture
         .store
-        .capture_source_hold(&binding, bounds(60 * DAY_MS))
+        .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
         .unwrap();
     let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
 
@@ -1958,4 +1993,107 @@ fn an_empty_consumer_set_names_no_safe_horizon_so_replay_evidence_is_kept() {
     );
     assert_eq!(swept.artifact_gc.reclaimed_objects, 1);
     assert!(!fixture.object_present(&digest));
+}
+
+#[test]
+fn retention_is_capped_and_a_removed_consumer_leaves_no_hold_behind() {
+    for abandon in [false, true] {
+        let mut fixture = Fixture::open();
+        fixture.seed_five_classes();
+        let binding = fixture.binding();
+
+        // A lifetime past the kernel ceiling is refused whole; the ceiling itself
+        // is admitted.
+        assert_eq!(
+            fixture
+                .store
+                .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS + 1))
+                .unwrap_err(),
+            SourceHoldError::InvalidRequest
+        );
+        let capped = fixture
+            .store
+            .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
+            .unwrap();
+        assert_eq!(
+            capped.expires_at - capped.captured_at,
+            i64::try_from(MAX_SOURCE_HOLD_LIFETIME_MS).unwrap()
+        );
+
+        // The consumer holds under two policy versions; another consumer holds too.
+        let mut other_policy = binding.clone();
+        other_policy.source_policy_version = "source-policy.v2".to_string();
+        let second = fixture
+            .store
+            .capture_source_hold(&other_policy, wide())
+            .unwrap();
+        fixture
+            .store
+            .commit(intent("other-consumer"), |envelope| {
+                envelope.register_outbox_consumer("other", 1)?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let other_binding = SourceHoldBinding {
+            consumer_id: "other".to_string(),
+            ..binding.clone()
+        };
+        let other = fixture
+            .store
+            .capture_source_hold(&other_binding, wide())
+            .unwrap();
+
+        let tip = fixture.store.tip().unwrap();
+        fixture.store.acknowledge_outbox(CONSUMER, tip, 1).unwrap();
+        fixture
+            .store
+            .commit(intent("remove-consumer"), |envelope| {
+                if abandon {
+                    envelope.abandon_outbox_consumer(
+                        CONSUMER,
+                        kernel::ConsumerAbandonment {
+                            operator_id: "operator".to_string(),
+                            reason: "retired".to_string(),
+                            abandoned_at: 9,
+                            barrier_id: None,
+                        },
+                    )?;
+                } else {
+                    envelope.deregister_outbox_consumer(CONSUMER, 9)?;
+                }
+                Ok(String::new())
+            })
+            .unwrap();
+        for hold in [&capped, &second] {
+            assert_eq!(
+                fixture
+                    .store
+                    .source_hold_status(&hold.binding, &hold.hold_id, hold.captured_at),
+                Err(SourceHoldError::Invalid(SourceHoldInvalidity::Released)),
+                "abandon={abandon}, hold={}",
+                hold.hold_id
+            );
+            assert!(fixture.pin_refs(&hold.hold_id).is_empty());
+        }
+        assert_eq!(
+            fixture.count(
+                "SELECT COUNT(*) FROM capture_pins
+             WHERE pin_kind='source_hold' AND released_at IS NULL"
+            ),
+            1
+        );
+        assert_eq!(
+            fixture.count(
+                "SELECT COUNT(*) FROM capture_pins
+             WHERE pin_kind='source_hold' AND released_at=9"
+            ),
+            2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .source_hold_status(&other_binding, &other.hold_id, other.captured_at),
+            Ok(other.clone())
+        );
+    }
 }
