@@ -316,7 +316,10 @@ impl From<ArtifactErrorKind> for KernelOutcome {
             ArtifactErrorKind::ReAdmissionBlocked
             | ArtifactErrorKind::ReferenceUnavailable
             | ArtifactErrorKind::UnredactableSecret
-            | ArtifactErrorKind::ScanIncomplete => Self::invalid(InvalidReason::ArtifactUnusable),
+            | ArtifactErrorKind::ScanIncomplete
+            | ArtifactErrorKind::ExactBytesRewritten
+            | ArtifactErrorKind::UnsupportedShape
+            | ArtifactErrorKind::DigestCollision => Self::invalid(InvalidReason::ArtifactUnusable),
         }
     }
 }
@@ -382,7 +385,10 @@ mod tests {
             K::ReAdmissionBlocked
             | K::ReferenceUnavailable
             | K::UnredactableSecret
-            | K::ScanIncomplete => KernelOutcome::invalid(InvalidReason::ArtifactUnusable),
+            | K::ScanIncomplete
+            | K::ExactBytesRewritten
+            | K::UnsupportedShape
+            | K::DigestCollision => KernelOutcome::invalid(InvalidReason::ArtifactUnusable),
         }
     }
 

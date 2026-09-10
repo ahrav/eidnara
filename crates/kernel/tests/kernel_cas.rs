@@ -1253,7 +1253,10 @@ fn oversized_existing_object_is_rejected_during_ingest_verification() {
         .ingest_artifact(request("oversize-verify", payload))
         .unwrap_err();
 
-    assert_eq!(error.kind(), ArtifactErrorKind::CorruptObject);
+    // The object under this digest existed before the attempt, so the
+    // mismatch is a collision with stored bytes rather than corruption of
+    // bytes this attempt wrote.
+    assert_eq!(error.kind(), ArtifactErrorKind::DigestCollision);
     assert_eq!(reservation_count(root.path()), 0);
     assert_eq!(staged_entries(root.path()), 0);
 }

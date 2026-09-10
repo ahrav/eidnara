@@ -17,8 +17,8 @@ use sha2::{Digest, Sha256};
 use super::ArtifactIngestFault;
 use super::{
     ArtifactError, ArtifactErrorKind, ArtifactHandle, ArtifactIngestHook, ArtifactIngestRequest,
-    IngestFaults, MAX_PAYLOAD_BYTES, MAX_PAYLOAD_DETECTIONS, MAX_TEXT_FIELD_BYTES, ProviderEgress,
-    is_artifact_digest, read_capped,
+    IngestFaults, MAX_PAYLOAD_BYTES, MAX_PAYLOAD_DETECTIONS, MAX_TEXT_FIELD_BYTES, PayloadFidelity,
+    ProviderEgress, is_artifact_digest, read_capped,
 };
 use crate::current_time_ms;
 use crate::durable_fs::{
@@ -66,7 +66,10 @@ struct PreparedArtifact {
 }
 
 impl PreparedArtifact {
-    fn new(mut request: ArtifactIngestRequest) -> Result<Self, ArtifactError> {
+    fn new(
+        mut request: ArtifactIngestRequest,
+        fidelity: PayloadFidelity,
+    ) -> Result<Self, ArtifactError> {
         if request.payload.len() > MAX_PAYLOAD_BYTES {
             return Err(ArtifactError::new(ArtifactErrorKind::PayloadTooLarge));
         }
@@ -136,10 +139,24 @@ impl PreparedArtifact {
             Ok(text) => {
                 let mut redaction = redact_payload(text, MAX_PAYLOAD_DETECTIONS)
                     .map_err(|error| ArtifactError::new(scan_failure(error)))?;
-                // The redacted text becomes the stored bytes without a copy;
-                // only its detections are needed afterwards.
-                let bytes = std::mem::take(&mut redaction.text).into_bytes();
-                (redaction, bytes, true)
+                match fidelity {
+                    PayloadFidelity::Redacting => {
+                        // The redacted text becomes the stored bytes without a copy;
+                        // only its detections are needed afterwards.
+                        let bytes = std::mem::take(&mut redaction.text).into_bytes();
+                        (redaction, bytes, true)
+                    }
+                    PayloadFidelity::Exact if redaction.detections.is_empty() => {
+                        redaction.text = String::new();
+                        (redaction, std::mem::take(&mut request.payload), true)
+                    }
+                    PayloadFidelity::Exact => {
+                        return Err(ArtifactError::new(ArtifactErrorKind::ExactBytesRewritten));
+                    }
+                }
+            }
+            Err(_) if fidelity == PayloadFidelity::Exact => {
+                return Err(ArtifactError::new(ArtifactErrorKind::UnsupportedShape));
             }
             Err(_) => {
                 // Lossy decoding expands invalid bytes to three-byte U+FFFD sequences;
@@ -240,7 +257,42 @@ impl KernelStore {
         &self,
         request: ArtifactIngestRequest,
     ) -> Result<ArtifactHandle, ArtifactError> {
-        self.ingest_artifact_inner(request, IngestFaults::default(), None, None)
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Redacting,
+            IngestFaults::default(),
+            None,
+            None,
+        )
+    }
+
+    /// Stores the offered UTF-8 text unchanged or refuses before anything is written: a recognized
+    /// secret is `ExactBytesRewritten`, bytes that are not UTF-8 are `UnsupportedShape`, and a scan
+    /// that cannot vouch for the payload is reported as such. The refusal is decided before a
+    /// temporary file exists, so no partial artifact carries the bytes. Everything after admission
+    /// is the shared publication path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactError`] for the refusals above and for every failure `ingest_artifact` reports.
+    pub fn ingest_exact_artifact(
+        &self,
+        request: ArtifactIngestRequest,
+    ) -> Result<ArtifactHandle, ArtifactError> {
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Exact,
+            IngestFaults::default(),
+            None,
+            None,
+        )
+    }
+
+    /// Artifacts that reached the staging step on this store since it opened.
+    #[cfg(feature = "test-support")]
+    pub fn staged_artifacts_for_test(&self) -> usize {
+        self.staged_artifacts
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Runs artifact ingestion with one injected failure point.
@@ -254,7 +306,13 @@ impl KernelStore {
         request: ArtifactIngestRequest,
         fault: ArtifactIngestFault,
     ) -> Result<ArtifactHandle, ArtifactError> {
-        self.ingest_artifact_inner(request, fault.into(), None, None)
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Redacting,
+            fault.into(),
+            None,
+            None,
+        )
     }
 
     /// Runs `hook` after the staged file is synced and before writer acquisition.
@@ -268,7 +326,13 @@ impl KernelStore {
         request: ArtifactIngestRequest,
         mut hook: impl FnMut(&str),
     ) -> Result<ArtifactHandle, ArtifactError> {
-        self.ingest_artifact_inner(request, IngestFaults::default(), Some(&mut hook), None)
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Redacting,
+            IngestFaults::default(),
+            Some(&mut hook),
+            None,
+        )
     }
 
     /// Reports durable protocol boundaries while optionally injecting a failure.
@@ -285,12 +349,19 @@ impl KernelStore {
         mut hook: impl FnMut(ArtifactIngestHook),
     ) -> Result<ArtifactHandle, ArtifactError> {
         let faults = fault.map(IngestFaults::from).unwrap_or_default();
-        self.ingest_artifact_inner(request, faults, None, Some(&mut hook))
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Redacting,
+            faults,
+            None,
+            Some(&mut hook),
+        )
     }
 
     fn ingest_artifact_inner(
         &self,
         request: ArtifactIngestRequest,
+        fidelity: PayloadFidelity,
         faults: IngestFaults,
         temp_written_hook: Option<&mut dyn FnMut(&str)>,
         mut protocol_hook: Option<&mut dyn FnMut(ArtifactIngestHook)>,
@@ -298,9 +369,12 @@ impl KernelStore {
         if self.cas_is_failed() {
             return Err(ArtifactError::new(ArtifactErrorKind::IngestionFailClosed));
         }
-        let prepared = PreparedArtifact::new(request)?;
+        let prepared = PreparedArtifact::new(request, fidelity)?;
         let byte_length = u64::try_from(prepared.bytes.len())
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
+        #[cfg(feature = "test-support")]
+        self.staged_artifacts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let tmp = &self.tmp_directory;
         let objects = &self.objects_directory;
@@ -465,7 +539,7 @@ impl KernelStore {
         if let Some(hook) = protocol_hook.as_mut() {
             hook(ArtifactIngestHook::AfterPublish);
         }
-        if let Err(error) = verify_object(&shard, &prepared.digest[2..], &prepared.digest) {
+        if let Err(error) = verify_object(&shard, &prepared.digest[2..], &prepared, published_new) {
             self.cleanup_failed_reference(
                 &mut writer,
                 &reservation_id,
@@ -1099,24 +1173,32 @@ fn artifact_is_reclaiming(
         .map_err(|_| KernelError::Io)
 }
 
-fn verify_object(shard: &File, name: &str, digest: &str) -> Result<(), ArtifactError> {
+/// Reads the object back and compares it with the bytes that were offered, not only with their
+/// digest. Bytes this attempt published that read back differently are corruption; bytes that were
+/// already stored under the digest and differ are a collision, and nothing is replaced.
+fn verify_object(
+    shard: &File,
+    name: &str,
+    prepared: &PreparedArtifact,
+    published_new: bool,
+) -> Result<(), ArtifactError> {
+    let digest = prepared.digest.as_str();
     let object = open_regular_nofollow(shard, name)
         .map_err(|_| ArtifactError::for_digest(ArtifactErrorKind::MissingObject, digest))?;
+    let mismatch = if published_new {
+        ArtifactErrorKind::CorruptObject
+    } else {
+        ArtifactErrorKind::DigestCollision
+    };
     let Some(bytes) = read_capped(object)
         .map_err(|_| ArtifactError::for_digest(ArtifactErrorKind::MissingObject, digest))?
     else {
-        return Err(ArtifactError::for_digest(
-            ArtifactErrorKind::CorruptObject,
-            digest,
-        ));
+        return Err(ArtifactError::for_digest(mismatch, digest));
     };
-    if format!("{:x}", Sha256::digest(bytes)) != digest {
-        return Err(ArtifactError::for_digest(
-            ArtifactErrorKind::CorruptObject,
-            digest,
-        ));
+    if bytes == prepared.bytes {
+        return Ok(());
     }
-    Ok(())
+    Err(ArtifactError::for_digest(mismatch, digest))
 }
 
 fn stat_bytes(stat: &rfs::Stat) -> u64 {

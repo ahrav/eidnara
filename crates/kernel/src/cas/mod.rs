@@ -216,6 +216,14 @@ pub enum ArtifactErrorKind {
     StorageConstraint,
     PurgeIntent,
     PurgeUnlinkPending,
+    /// An exact ingest found a recognized secret. Redaction would store bytes other than the ones
+    /// offered, so the payload is refused instead; the reason names no content.
+    ExactBytesRewritten,
+    /// An exact ingest received bytes that are not valid UTF-8 text.
+    UnsupportedShape,
+    /// The digest names a stored object whose bytes differ from the payload. Nothing is replaced;
+    /// the offered bytes are refused.
+    DigestCollision,
 }
 
 impl ArtifactErrorKind {
@@ -244,7 +252,19 @@ impl ArtifactErrorKind {
         Self::StorageConstraint,
         Self::PurgeIntent,
         Self::PurgeUnlinkPending,
+        Self::ExactBytesRewritten,
+        Self::UnsupportedShape,
+        Self::DigestCollision,
     ];
+}
+
+/// Whether ingestion may store bytes other than the ones offered. `Redacting` replaces recognized
+/// secrets in text payloads with placeholders and stores the result; `Exact` stores the offered
+/// UTF-8 text unchanged or refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PayloadFidelity {
+    Redacting,
+    Exact,
 }
 
 /// Bounded artifact failure with optional capacity or digest context.
@@ -409,6 +429,17 @@ impl fmt::Display for ArtifactErrorMessage<'_> {
             ArtifactErrorKind::StorageConstraint => {
                 formatter.write_str("artifact reference violates a storage constraint")
             }
+            ArtifactErrorKind::ExactBytesRewritten => formatter.write_str(
+                "artifact payload holds a recognized secret and exact retention refuses to rewrite it",
+            ),
+            ArtifactErrorKind::UnsupportedShape => {
+                formatter.write_str("artifact payload is not valid UTF-8 text")
+            }
+            ArtifactErrorKind::DigestCollision => write!(
+                formatter,
+                "artifact digest {} names stored bytes that differ from the payload",
+                self.digest.as_deref().unwrap_or("unknown")
+            ),
         }
     }
 }
@@ -602,7 +633,10 @@ mod error_kind_tests {
                 | ArtifactErrorKind::OperationKeyReused
                 | ArtifactErrorKind::StorageConstraint
                 | ArtifactErrorKind::PurgeIntent
-                | ArtifactErrorKind::PurgeUnlinkPending => {}
+                | ArtifactErrorKind::PurgeUnlinkPending
+                | ArtifactErrorKind::ExactBytesRewritten
+                | ArtifactErrorKind::UnsupportedShape
+                | ArtifactErrorKind::DigestCollision => {}
             }
         }
         for (index, kind) in ArtifactErrorKind::ALL.iter().enumerate() {
