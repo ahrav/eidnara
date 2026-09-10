@@ -1173,9 +1173,8 @@ fn artifact_is_reclaiming(
         .map_err(|_| KernelError::Io)
 }
 
-/// Reads the object back and compares it with the bytes that were offered, not only with their
-/// digest. Bytes this attempt published that read back differently are corruption; bytes that were
-/// already stored under the digest and differ are a collision, and nothing is replaced.
+/// Oversized or digest-mismatched content is store corruption whichever attempt wrote it.
+/// A pre-existing object with the expected digest but different bytes is a digest collision.
 fn verify_object(
     shard: &File,
     name: &str,
@@ -1185,20 +1184,23 @@ fn verify_object(
     let digest = prepared.digest.as_str();
     let object = open_regular_nofollow(shard, name)
         .map_err(|_| ArtifactError::for_digest(ArtifactErrorKind::MissingObject, digest))?;
-    let mismatch = if published_new {
-        ArtifactErrorKind::CorruptObject
-    } else {
-        ArtifactErrorKind::DigestCollision
-    };
     let Some(bytes) = read_capped(object)
         .map_err(|_| ArtifactError::for_digest(ArtifactErrorKind::MissingObject, digest))?
     else {
-        return Err(ArtifactError::for_digest(mismatch, digest));
+        return Err(ArtifactError::for_digest(
+            ArtifactErrorKind::CorruptObject,
+            digest,
+        ));
     };
     if bytes == prepared.bytes {
         return Ok(());
     }
-    Err(ArtifactError::for_digest(mismatch, digest))
+    let kind = if !published_new && format!("{:x}", Sha256::digest(&bytes)) == digest {
+        ArtifactErrorKind::DigestCollision
+    } else {
+        ArtifactErrorKind::CorruptObject
+    };
+    Err(ArtifactError::for_digest(kind, digest))
 }
 
 fn stat_bytes(stat: &rfs::Stat) -> u64 {
@@ -1325,4 +1327,126 @@ fn injected_storage_error() -> StorageError {
 #[cfg(not(feature = "test-support"))]
 fn injected_storage_error() -> StorageError {
     unreachable!("fault injection requires the test-support feature")
+}
+
+#[cfg(test)]
+mod verify_object_tests {
+    use std::fs::{self, File};
+    use std::os::unix::fs::PermissionsExt;
+
+    use sha2::{Digest, Sha256};
+
+    use super::{PreparedArtifact, verify_object};
+    use crate::cas::{
+        ArtifactErrorKind, ArtifactIngestRequest, MAX_PAYLOAD_BYTES, PayloadFidelity,
+    };
+    use crate::{CommitIntent, ProviderEgress, Sensitivity};
+
+    fn prepared(payload: &[u8]) -> PreparedArtifact {
+        let request = ArtifactIngestRequest {
+            intent: CommitIntent {
+                producer: "verify-object-test".to_string(),
+                operation_key: "verify".to_string(),
+                request_digest: format!("{:x}", Sha256::digest(payload)),
+                actor: "test".to_string(),
+                cause: "proof".to_string(),
+            },
+            payload: payload.to_vec(),
+            evidence_id: "evidence".to_string(),
+            object_id: "object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "tool_output".to_string(),
+            source_id: "native/verify".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        };
+        PreparedArtifact::new(request, PayloadFidelity::Exact).unwrap()
+    }
+
+    /// A shard holding one object that `open_regular_nofollow` accepts.
+    fn shard_with(name: &str, stored: &[u8]) -> (tempfile::TempDir, File) {
+        let shard = tempfile::tempdir().unwrap();
+        fs::set_permissions(shard.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = shard.path().join(name);
+        fs::write(&path, stored).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let directory = File::open(shard.path()).unwrap();
+        (shard, directory)
+    }
+
+    fn kind(
+        prepared: &PreparedArtifact,
+        stored: &[u8],
+        published_new: bool,
+    ) -> Option<ArtifactErrorKind> {
+        let name = prepared.digest[2..].to_string();
+        let (_shard, directory) = shard_with(&name, stored);
+        verify_object(&directory, &name, prepared, published_new)
+            .err()
+            .map(|error| error.kind())
+    }
+
+    #[test]
+    fn identical_bytes_verify_on_both_publication_outcomes() {
+        let prepared = prepared(b"offered");
+        assert_eq!(kind(&prepared, b"offered", true), None);
+        assert_eq!(kind(&prepared, b"offered", false), None);
+    }
+
+    #[test]
+    fn bytes_this_attempt_published_that_differ_are_corruption() {
+        let prepared = prepared(b"offered");
+        assert_eq!(
+            kind(&prepared, b"torn", true),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+    }
+
+    #[test]
+    fn a_pre_existing_object_that_does_not_hash_to_the_digest_is_corruption() {
+        let prepared = prepared(b"offered");
+        assert_eq!(
+            kind(&prepared, b"bit rot", false),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+    }
+
+    #[test]
+    fn an_oversized_object_is_corruption_on_both_publication_outcomes() {
+        let prepared = prepared(b"offered");
+        let oversized = vec![b'z'; MAX_PAYLOAD_BYTES + 1];
+        assert_eq!(
+            kind(&prepared, &oversized, true),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+        assert_eq!(
+            kind(&prepared, &oversized, false),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+    }
+
+    /// No two byte strings with the same SHA-256 are known, so the collision is
+    /// staged by naming the prepared payload with the digest of the stored bytes.
+    #[test]
+    fn a_pre_existing_object_that_hashes_to_the_digest_yet_differs_is_a_collision() {
+        let stored = b"stored under the offered digest";
+        let mut prepared = prepared(b"offered");
+        prepared.digest = format!("{:x}", Sha256::digest(stored));
+        assert_eq!(
+            kind(&prepared, stored, false),
+            Some(ArtifactErrorKind::DigestCollision)
+        );
+        // Bytes this attempt wrote never collide with themselves, so the same
+        // mismatch after a fresh publication is corruption of what was written.
+        assert_eq!(
+            kind(&prepared, stored, true),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+    }
 }
