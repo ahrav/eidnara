@@ -55,4 +55,13 @@ describe("forbid-comment-markers.sh --staged", () => {
         expect(status).toBe(1);
         expect(stderr).toContain("forbidden comment marker");
     });
+
+    test("names the offending file and line when several files are staged", () => {
+        stage("clean.ts", "const a = 1;\nconst b = 2;\nconst c = 3;\n");
+        stage("a.ts", `let value = 1;\nlet other = 2; // ${MARKER}\n`);
+        const { status, stderr } = stagedScan();
+        expect(status).toBe(1);
+        expect(stderr).toContain("a.ts:2:");
+        expect(stderr).not.toContain("clean.ts");
+    });
 });

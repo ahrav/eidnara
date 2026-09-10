@@ -463,7 +463,7 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
         // An open array treats a following `[` line as an element, not a
         // table header.
         if value.is_open() {
-            value.collect_keys(line, &mut keys);
+            value.collect_keys(line, &mut keys)?;
             continue;
         }
         if let Some(inner) = table_header(line) {
@@ -479,7 +479,7 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
             continue;
         };
         keys.extend(segments);
-        value.collect_keys(rest, &mut keys);
+        value.collect_keys(rest, &mut keys)?;
     }
     // A container still open at the end consumed every later line as value
     // content; whatever those lines defined is unreadable, not absent.
@@ -639,8 +639,10 @@ impl ValueScan {
 
     /// Keys defined inside the value: an inline table at any depth defines its
     /// keys, including inside arrays; strings and comments define none. An
-    /// unterminated string ends the value and closes its containers.
-    fn collect_keys(&mut self, text: &str, keys: &mut Vec<String>) {
+    /// unterminated string ends a bare value at the line. Inside an open
+    /// container the same string may hide the closing bracket, so the rest
+    /// of the document is unreadable and the scan yields `None`.
+    fn collect_keys(&mut self, text: &str, keys: &mut Vec<String>) -> Option<()> {
         let mut pos = 0usize;
         while pos < text.len() {
             let rest = &text[pos..];
@@ -652,9 +654,11 @@ impl ValueScan {
                 '#' => break,
                 '"' | '\'' => {
                     let Some((quoted_text, after)) = quoted(rest) else {
-                        self.containers.clear();
+                        if !self.containers.is_empty() {
+                            return None;
+                        }
                         self.expecting_key = false;
-                        return;
+                        return Some(());
                     };
                     pos = text.len() - after.len();
                     if self.expecting_key {
@@ -698,6 +702,7 @@ impl ValueScan {
             }
             pos += ch.len_utf8();
         }
+        Some(())
     }
 }
 

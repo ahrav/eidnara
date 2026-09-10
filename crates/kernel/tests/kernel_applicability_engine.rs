@@ -1286,6 +1286,10 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "[owner's settings]\nenabled = true\n",
             ),
             ("quote-led-section.ini", "['80s settings]\nenabled = true\n"),
+            (
+                "unclosed-string-in-array.toml",
+                "values = [\n  \"unclosed\n  key = 1\n]\n",
+            ),
         ],
         "base",
         1,
@@ -1413,6 +1417,18 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
             "quote-led-section.ini",
             "enabled",
             ApplicabilityState::Current,
+        ),
+        // A string left open on a continuation line of a multi-line container
+        // leaves the rest of the document unreadable.
+        (
+            "unclosed-string-in-array.toml",
+            "key",
+            ApplicabilityState::Uncertain,
+        ),
+        (
+            "unclosed-string-in-array.toml",
+            "values",
+            ApplicabilityState::Uncertain,
         ),
     ]
     .into_iter()

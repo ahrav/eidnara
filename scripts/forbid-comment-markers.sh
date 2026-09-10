@@ -15,19 +15,24 @@ report_tool_failure() {
 }
 
 if [ "${1:-}" = "--staged" ]; then
-  # `>` marks added content, which distinguishes it from `+++` file headers
-  # and from added lines that begin with `+`.
-  diff=$(git diff --cached -U0 --no-color --output-indicator-new='>')
+  # `>` distinguishes added content from diff headers and added lines
+  # beginning with `+`. `--no-prefix` keeps header paths directly usable;
+  # `@@` supplies added-line numbers.
+  diff=$(git diff --cached -U0 --no-color --no-prefix --output-indicator-new='>')
   status=0
-  matches=$(printf '%s\n' "$diff" | grep -E '^>' | grep -n -i -E -e "$PATTERN") || status=$?
-  if [ "$status" -eq 0 ]; then
+  matches=$(printf '%s\n' "$diff" | awk -v pattern="$PATTERN" '
+    /^\+\+\+ / { file = substr($0, 5) }
+    /^@@ / { match($0, /\+[0-9]+/); line = substr($0, RSTART + 1, RLENGTH - 1) + 0 }
+    /^>/ { if (tolower($0) ~ pattern) print file ":" line ": " substr($0, 2); line++ }
+  ') || status=$?
+  if [ "$status" -ne 0 ]; then
+    report_tool_failure "awk" "$status"
+  fi
+  if [ -n "$matches" ]; then
     echo "forbidden comment marker in staged changes:" >&2
     echo "$matches" >&2
     echo "Remove the marker and stage the file again." >&2
     exit 1
-  fi
-  if [ "$status" -ne 1 ]; then
-    report_tool_failure "grep" "$status"
   fi
   exit 0
 fi
