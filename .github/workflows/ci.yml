@@ -31,7 +31,7 @@ jobs:
   # `steps.filter` runs only for pull requests; missing outputs make every job run.
   #
   # `docs/` stays out of the Rust filters: the schema-migration step in `gates` rejects any manifest path or `include!` that reaches `docs/` or a `.md` file. commentlint: allow(JUDGE)
-  # Tests read `release/` manifests and `docs/host-wire-protocol.md` at runtime, so `test` includes them in addition to `rust`. commentlint: allow(JUDGE)
+  # Tests read `release/` manifests, `docs/host-wire-protocol.md`, and the RP2.1 fault maps and witness matrix at runtime, so `test` includes them in addition to `rust`. commentlint: allow(JUDGE)
   changes:
     name: changed paths
     runs-on: ubuntu-latest
@@ -79,6 +79,8 @@ jobs:
               - '.config/nextest.toml'
               - 'release/**'
               - 'docs/host-wire-protocol.md'
+              - 'docs/properties/rp2-1/*/fault-map.md'
+              - 'docs/properties/rp2-1/witness-matrix.md'
             native:
               - *workflow
               - *cargo

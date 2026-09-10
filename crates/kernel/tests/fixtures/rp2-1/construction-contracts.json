@@ -1,0 +1,353 @@
+{
+  "version": 1,
+  "identity_contract_version": "rp21-identity-v1",
+  "ticket": "https://github.com/ahrav/eidnara/issues/352",
+  "tuple_encoding": {
+    "version_byte": 1,
+    "field_order": [
+      "class",
+      "namespaced_identity",
+      "revision",
+      "representation",
+      "span"
+    ]
+  },
+  "excluded_inputs": [
+    "domains.name",
+    "any other in-place mutable field without historical bytes or an approved snapshot mechanism"
+  ],
+  "remediation_applicability": {
+    "field": "domains.name",
+    "mapping_consumes_field": false,
+    "consequence": "Name-only operator_remediation changes no projection input; the conditional remediation record carries a recorded applicability decision and a name-only control, not a fabricated witness."
+  },
+  "classes": {
+    "messages": {
+      "identity_fields": [
+        "project_id",
+        "harness",
+        "session_id",
+        "message_id",
+        "block_index"
+      ],
+      "representations": [
+        "text"
+      ],
+      "span_default": "whole",
+      "dense_default": true
+    },
+    "canonical_claims": {
+      "identity_fields": [
+        "object_id"
+      ],
+      "representations": [
+        "decision_summary",
+        "rationale"
+      ],
+      "span_default": "whole",
+      "dense_default": true
+    },
+    "promoted_memory": {
+      "identity_fields": [
+        "decision_object_id"
+      ],
+      "representations": [
+        "summary"
+      ],
+      "span_default": "whole",
+      "dense_default": true
+    },
+    "git_commits": {
+      "identity_fields": [
+        "repository_id",
+        "object_format",
+        "oid"
+      ],
+      "representations": [
+        "commit_message"
+      ],
+      "span_default": "whole",
+      "dense_default": true
+    },
+    "raw_tool_spans": {
+      "identity_fields": [
+        "project_id",
+        "harness",
+        "session_id",
+        "parent_message_id",
+        "tool_call_id",
+        "result_revision",
+        "block_index"
+      ],
+      "representations": [
+        "tool_output",
+        "tool_error"
+      ],
+      "span_default": "whole",
+      "dense_default": false
+    }
+  },
+  "admission_dimensions": [
+    "row_count",
+    "encoded_bytes",
+    "source_bytes",
+    "payload_size",
+    "identity_and_range_bounds",
+    "logical_decoded_memory_charge",
+    "local_mutation_charge",
+    "pending_count",
+    "pending_bytes",
+    "embedding_input_bytes",
+    "embedding_input_tokens",
+    "capture_reference_count",
+    "capture_work"
+  ],
+  "capability_dispositions": {
+    "disposition_values": [
+      "required",
+      "optional_disabled",
+      "not_applicable"
+    ],
+    "evidence_status": "unwitnessed",
+    "rule": "A required capability that a harness does not support fails acceptance for that harness; simulation of a capability is not evidence.",
+    "capabilities": [
+      {
+        "capability": "message_text_block_capture",
+        "classes": [
+          "messages"
+        ],
+        "opencode": "required",
+        "pi": "required"
+      },
+      {
+        "capability": "durable_session_identity",
+        "classes": [
+          "messages",
+          "raw_tool_spans"
+        ],
+        "opencode": "required",
+        "pi": "required"
+      },
+      {
+        "capability": "tool_result_native_string_capture",
+        "classes": [
+          "raw_tool_spans"
+        ],
+        "opencode": "required",
+        "pi": "required"
+      },
+      {
+        "capability": "tool_result_revision_identity",
+        "classes": [
+          "raw_tool_spans"
+        ],
+        "opencode": "required",
+        "pi": "required"
+      },
+      {
+        "capability": "multipart_error_result_capture",
+        "classes": [
+          "raw_tool_spans"
+        ],
+        "opencode": "required",
+        "pi": "required"
+      },
+      {
+        "capability": "git_repository_scope_declaration",
+        "classes": [
+          "git_commits"
+        ],
+        "opencode": "required",
+        "pi": "required"
+      },
+      {
+        "capability": "projection_hook_activation",
+        "classes": [
+          "messages",
+          "canonical_claims",
+          "promoted_memory",
+          "git_commits",
+          "raw_tool_spans"
+        ],
+        "opencode": "required",
+        "pi": "required"
+      },
+      {
+        "capability": "dense_raw_tool_embedding",
+        "classes": [
+          "raw_tool_spans"
+        ],
+        "opencode": "optional_disabled",
+        "pi": "optional_disabled"
+      },
+      {
+        "capability": "host_mural_rendering",
+        "classes": [],
+        "opencode": "not_applicable",
+        "pi": "not_applicable"
+      }
+    ]
+  },
+  "hook_defaults": {
+    "gates": [
+      "class_coverage",
+      "freshness",
+      "resource",
+      "capability",
+      "both_harness"
+    ],
+    "both_harness_evidence": [
+      "opencode",
+      "pi"
+    ],
+    "invalidation_identity": [
+      "schema_version",
+      "tokenizer_fingerprint",
+      "embedding_model",
+      "projection_policy_version",
+      "identity_contract_version",
+      "limit_manifest_protocol_version"
+    ],
+    "entry_points": [
+      "startup",
+      "reload",
+      "dispatch",
+      "explicit"
+    ],
+    "default_state": "disabled"
+  },
+  "hooks": {
+    "rp21.message_cleanup": {
+      "classes": [
+        "messages"
+      ],
+      "constructing_ticket": 377
+    },
+    "rp21.embedding.bootstrap": {
+      "classes": [
+        "messages",
+        "canonical_claims",
+        "promoted_memory",
+        "git_commits"
+      ],
+      "constructing_ticket": 368
+    },
+    "rp21.embedding.routing": {
+      "classes": [
+        "messages",
+        "canonical_claims",
+        "promoted_memory",
+        "git_commits"
+      ],
+      "constructing_ticket": 368
+    },
+    "rp21.embedding.registry": {
+      "classes": [
+        "messages",
+        "canonical_claims",
+        "promoted_memory",
+        "git_commits"
+      ],
+      "constructing_ticket": 368
+    },
+    "rp21.embedding.backfill": {
+      "classes": [
+        "messages",
+        "canonical_claims",
+        "promoted_memory",
+        "git_commits"
+      ],
+      "constructing_ticket": 371
+    },
+    "rp21.embedding.identity_gc": {
+      "classes": [
+        "messages",
+        "canonical_claims",
+        "promoted_memory",
+        "git_commits"
+      ],
+      "constructing_ticket": 370
+    },
+    "rp21.promoted_memory.embeddings": {
+      "classes": [
+        "promoted_memory"
+      ],
+      "constructing_ticket": 374
+    },
+    "rp21.git.ingest": {
+      "classes": [
+        "git_commits"
+      ],
+      "constructing_ticket": 375
+    },
+    "rp21.git.durable_rows": {
+      "classes": [
+        "git_commits"
+      ],
+      "constructing_ticket": 375
+    },
+    "rp21.git.jobs": {
+      "classes": [
+        "git_commits"
+      ],
+      "constructing_ticket": 375
+    },
+    "rp21.git.sweeps": {
+      "classes": [
+        "git_commits"
+      ],
+      "constructing_ticket": 376
+    },
+    "rp21.git.leases": {
+      "classes": [
+        "git_commits"
+      ],
+      "constructing_ticket": 376
+    }
+  },
+  "limit_manifest_interface": {
+    "protocol_version": null,
+    "required_fields": [
+      "protocol_version",
+      "workload",
+      "hardware",
+      "corpus_snapshot",
+      "metric",
+      "sampling",
+      "limits",
+      "approvers",
+      "approval_digest"
+    ],
+    "limits": {
+      "export_page_rows": null,
+      "export_page_encoded_bytes": null,
+      "export_row_standalone_encoded_bytes": null,
+      "export_live_decoded_bytes": null,
+      "catchup_batch_commits": null,
+      "catchup_batch_encoded_bytes": null,
+      "catchup_batch_source_bytes": null,
+      "local_transaction_rows": null,
+      "local_transaction_bytes": null,
+      "pending_count": null,
+      "pending_bytes": null,
+      "embedding_input_bytes": null,
+      "embedding_input_tokens": null,
+      "supervisor_slice_ms": null,
+      "retry_attempts": null,
+      "lease_duration_ms": null,
+      "capture_reference_count": null,
+      "capture_hold_expiry_ms": null,
+      "capture_disk_bytes": null,
+      "catchup_lag_commits": null,
+      "B_catchup_ms": null,
+      "B_recovery_ms": null,
+      "B_authorized_recovery_ms": null,
+      "embedding_recovery_attempts": null,
+      "query_service_opportunities": null,
+      "physical_drain_ms": null,
+      "decoded_heap_high_water_bytes": null
+    },
+    "placeholder_rule": "A null or unapproved limit fails closed at startup, reload, and dispatch; test controls are not defaults.",
+    "change_rule": "Changing any limit after a candidate run requires a new protocol_version and cannot retroactively pass that run."
+  }
+}
