@@ -3,12 +3,6 @@
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 
-Status: invalidated. The measurement milestone this record served was removed
-from the plan; with no recorded stage delta there is no `boundary-changed`
-label to protect. The timing line stays a daemon-to-plugin diagnostic
-convention. The evidence below is the discovery-time trail and is kept
-unchanged.
-
 ## Discovery trigger
 
 The per-stage timings are the only production numbers a latency change can

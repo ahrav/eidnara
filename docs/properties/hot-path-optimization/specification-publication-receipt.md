@@ -1,4 +1,4 @@
-# Specification 351 publication receipt
+# Hot-path optimization specification publication receipt
 
 - Specification: [Spec: behavior-preserving hot-path optimization](https://github.com/ahrav/eidnara/issues/351).
 - Publication date: 2026-09-10.

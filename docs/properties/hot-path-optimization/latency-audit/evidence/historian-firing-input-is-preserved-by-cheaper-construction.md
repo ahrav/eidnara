@@ -98,7 +98,7 @@ test; none exercises a format change across a restart.
 [t-golden]: ../../../../../crates/daemon/src/historian_chunk.rs#L1749-L1760
 [t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1762-L1763
 [fp]: ../../../../../crates/daemon/src/historian.rs#L140-L158
-[fp-field]: ../../../../../crates/daemon/src/historian.rs#L204
+[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L588
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
 [t-fp]: ../../../../../crates/daemon/src/historian.rs#L4006-L4033

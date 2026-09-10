@@ -1076,3 +1076,21 @@ None.
 `reachable`, or `unreachable`; no liveness record. The W12 evidence file
 exceeds the 60 to 120 line target (173 lines including 34 link definitions)
 to keep every verified anchor; the C6 and W13 files are within it.
+
+[call-bind]: ../../../../crates/daemon/src/lib.rs#L11788
+[call-fire]: ../../../../crates/daemon/src/lib.rs#L5051
+[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1940-L1979
+[cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L779-L849
+[copies]: ../../../../crates/daemon/src/lib.rs#L15408-L15417
+[diff-ref]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
+[eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
+[fmt]: ../../../../crates/daemon/src/transform.rs#L1216-L1349
+[from-writer]: ../../../../crates/host-runtime/src/handler.rs#L465-L472
+[ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L73-L82
+[normalize]: ../../../../crates/daemon/src/transform.rs#L2083-L2100
+[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4298-L4316
+[stepper]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L163-L192
+[todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
+[ts-stages]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
+[tt]: ../../../../crates/daemon/src/transform.rs#L1018-L1197
+[walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1228-L1288

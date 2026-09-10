@@ -34,16 +34,13 @@ Generic lifecycle, fencing, snapshot, redaction, and tokenizer obligations
 remain in their canonical catalogs below.
 
 The five-area specification is
-[Spec: behavior-preserving hot-path optimization](https://github.com/ahrav/eidnara/issues/351).
+[Spec: behavior-preserving hot-path optimization][spec-five-area].
 Its approval covers this catalog's K, E, S, H, and R groups, not additional
-concurrent supplements.
-[The publication receipt](specification-publication-receipt.md) records
-exact-body verification and the local artifact boundary. That specification
-was later closed as superseded by
-[Spec: Hot-path latency (HP1)](https://github.com/ahrav/eidnara/issues/350),
-which names this catalog and its [`latency-audit`](latency-audit/catalog.md)
-area as the authority for its constraints; the records here are unchanged by
-that succession.
+concurrent supplements. [The publication receipt][receipt] records exact-body
+verification and the local artifact boundary. That specification is closed
+and superseded by [Spec: Hot-path latency (HP1)][spec-hp1], which names this
+catalog and its [`latency-audit`](latency-audit/catalog.md) area as the
+authority for its constraints.
 
 ## Reachability and boundaries
 
@@ -657,3 +654,6 @@ them without creating implementation tickets.
 [identity-old]: ../memory-store/catalog.md#durable-identity-decision-is-made-inside-the-write-transaction
 [value-old]: ../memory-store/catalog.md#preserved-identity-name-does-not-exempt-its-value
 [refusal-old]: ../memory-store/catalog.md#refused-durable-write-leaves-no-row-and-no-receipt
+[spec-five-area]: https://github.com/ahrav/eidnara/issues/351
+[spec-hp1]: https://github.com/ahrav/eidnara/issues/350
+[receipt]: specification-publication-receipt.md

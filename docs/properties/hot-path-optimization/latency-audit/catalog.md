@@ -103,8 +103,8 @@ HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
 | G1 | [artifact-admission-fails-closed-against-on-disk-object-bytes][g1] | safety | always |
 | G2 | [reported-artifact-usage-equals-on-disk-object-bytes-after-recovery][g2] | safety | always |
 | G3 | [artifact-byte-decrement-paths-are-exercised][g3] | reachability | sometimes |
-| W1 | [optimized-stage-is-measured-at-production-shape][w1] | reachability | sometimes |
-| W2 | [stage-timing-fields-keep-their-boundaries][w2] | safety | always |
+| W1 | [optimized-stage-is-measured-at-production-shape][w1] (invalidated) | reachability | sometimes |
+| W2 | [stage-timing-fields-keep-their-boundaries][w2] (invalidated) | safety | always |
 | W3 | [token-cache-is-a-pure-declared-memo-behind-one-estimator-interface][w3] | safety | always |
 | W4 | [bounded-secret-scan-finds-every-whole-input-finding][w4] | safety | always |
 | W5 | [historian-firing-input-is-preserved-by-cheaper-construction][w5] | safety | always |
@@ -117,13 +117,13 @@ HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
 | W12 | [worker-thread-panics-stay-inside-the-redaction-boundary][w12] | safety | always |
 | W13 | [cron-schedule-is-evaluated-for-a-configured-project][w13] | reachability | sometimes |
 
-The distribution is twenty-eight `always` checks and eleven `sometimes`
-checks.
-No record uses `always-or-unreached`, `reachable`, or `unreachable`. W1 and W2
-are invalidated: the measurement milestone they served was removed from the
-plan, and measurement is a per-ticket payoff check on the units whose benefit
-is uncertain rather than a catalog obligation. Their records stay in the index
-for traceability and are not active claims. There is
+Twenty-seven `always` checks and ten `sometimes` checks are active. Two
+records are invalidated and stay in the index for traceability:
+[optimized-stage-is-measured-at-production-shape][w1] (W1, `sometimes`) and
+[stage-timing-fields-keep-their-boundaries][w2] (W2, `always`). No catalog
+record owns a before-and-after measurement artifact; each optimization change
+proves its own payoff where the benefit is uncertain.
+No record uses `always-or-unreached`, `reachable`, or `unreachable`. There is
 no liveness claim with an invented deadline; C3's backoff and W6's search cap
 restate bounds the code already fixes.
 
@@ -1513,10 +1513,8 @@ Open questions: None.
 
 Type: reachability
 Reachability: test-only
-Status: invalidated - dropped with the measurement milestone. The plan no
-longer carries a measurement contract; each optimization ticket records its
-own payoff check where the benefit is uncertain. The record below is kept as
-authored for traceability and is not an active claim.
+Status: invalidated - no catalog record owns a before-and-after measurement
+artifact; the record is kept as authored for traceability.
 Exercised: not yet - No daemon measurement records build, host, and workload
 identity, and no bench reaches `Handler::handle` or a production-sized steady
 session.
@@ -1571,11 +1569,9 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: invalidated - dropped with the measurement milestone. Without a
-recorded before-and-after measurement there is no stage delta for a moved
-timer boundary to misreport; the timing line stays a daemon-to-plugin
-diagnostic convention. The record below is kept as authored for traceability
-and is not an active claim.
+Status: invalidated - with no recorded stage delta there is nothing for a
+moved timer boundary to misreport; the record is kept as authored for
+traceability.
 Exercised: partial - The line's key set and the default deserialization are
 pinned; nothing ties the TypeScript key list to the Rust struct or asserts
 what a field brackets.
@@ -2690,7 +2686,7 @@ evaluation of this area and its disposition are recorded in
 [trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L692
 [trunc]: ../../../../crates/daemon/src/historian_chunk.rs#L742-L777
 [fp]: ../../../../crates/daemon/src/historian.rs#L140-L158
-[fp-field]: ../../../../crates/daemon/src/historian.rs#L204
+[fp-field]: ../../../../crates/memory-store/src/lib.rs#L588
 [fp-verify]: ../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../crates/daemon/src/historian.rs#L407-L417
 [diff-header]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L1-L11

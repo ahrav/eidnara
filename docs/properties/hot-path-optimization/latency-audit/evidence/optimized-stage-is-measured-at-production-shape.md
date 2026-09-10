@@ -3,11 +3,6 @@
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 
-Status: invalidated. The measurement milestone this record served was removed
-from the plan; measurement is a per-ticket payoff check on the units whose
-benefit is uncertain, so no catalog record owns a before-and-after artifact.
-The evidence below is the discovery-time trail and is kept unchanged.
-
 ## Discovery trigger
 
 Every other record in this area constrains what an optimization must preserve.
