@@ -2939,7 +2939,7 @@ impl KernelStore {
         })
     }
 
-    /// One read snapshot under the seqlock discipline of `egress_candidates`, so the returned snapshot says whether a classification merge overlapped everything `read` saw. commentlint: allow(JUDGE)
+    /// One read snapshot under the seqlock discipline of `egress_candidates`, so the returned snapshot says whether a classification merge overlapped everything `read` saw.
     pub(crate) fn egress_read<T>(
         &self,
         read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
