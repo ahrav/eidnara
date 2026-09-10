@@ -1,19 +1,18 @@
-//! `kernel.eligibility.batch`: one verdict per candidate, computed from the
-//! object registry, the bound project's scope, and artifact egress facts, and
-//! cached per candidate for the store incarnation and tip it was computed at.
+//! `kernel.eligibility.batch`: the kernel judges one verdict per candidate; the daemon caches each verdict by store lease epoch, tip, and classification generation.
 
 use std::collections::{HashMap, VecDeque};
 
 use context_core::canonical_json::is_lower_hex;
 use host_runtime::RouteHandle;
 use kernel::{
-    ArtifactDestination, ArtifactEligibility, EgressCandidate, EgressSnapshot, KernelError,
-    KernelStore, Sensitivity, SurfaceVisibility,
+    ArtifactDestination, EgressSnapshot, EligibilityBatch, EligibilityCandidate,
+    EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
+    MAX_ELIGIBILITY_OBJECT_ID_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::project::{ProjectBinding, ScopeFilter, stored_terms};
+use super::project::ProjectBinding;
 use super::{KernelOpenCoordinator, KernelOutcome, blocking, kernel_response, state_only};
 use crate::Handler;
 use crate::dispatch::PreparedOutcome;
@@ -21,19 +20,18 @@ use crate::dispatch::PreparedOutcome;
 const OPERATION: &str = "kernel.eligibility.batch";
 /// Entries held before the oldest is evicted.
 const CACHE_CAPACITY: usize = 4096;
-/// Longest `object_id` a candidate may carry. Every candidate becomes a
-/// cache key whether or not the object exists, so the id length is what
-/// bounds the bytes an entry retains.
-pub const MAX_OBJECT_ID_BYTES: usize = 512;
+/// Every candidate becomes a cache key whether or not the object exists, so
+/// the id length is what bounds the bytes an entry retains.
+pub const MAX_OBJECT_ID_BYTES: usize = MAX_ELIGIBILITY_OBJECT_ID_BYTES;
 /// Bytes one entry may retain: the key's strings, held once in the map and
 /// once in the eviction order, plus the fixed-size fields and node overhead.
 const ENTRY_BYTES_MAX: u64 = 2 * (MAX_OBJECT_ID_BYTES as u64 + 64 + 128) + 256;
 /// Resident bytes the verdict cache may hold at capacity.
 pub const CACHE_BUDGET_BYTES: u64 = CACHE_CAPACITY as u64 * ENTRY_BYTES_MAX;
-/// One batch is one registry read plus one `judge` per miss on the blocking
-/// pool, so the candidate count bounds the work a single request can queue.
-const MAX_CANDIDATES: usize = 1024;
 
+/// The wire spelling. The daemon owns wire literals, so the kernel verdict is
+/// mapped here rather than serialized directly; the exhaustive match breaks
+/// the build when the kernel adds a verdict the wire does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
@@ -45,6 +43,20 @@ pub enum Verdict {
     /// The object is live but `kernel.read` hides it on every surface.
     Hidden,
     ProviderSensitive,
+}
+
+impl From<EligibilityVerdict> for Verdict {
+    fn from(verdict: EligibilityVerdict) -> Self {
+        match verdict {
+            EligibilityVerdict::Ok => Verdict::Ok,
+            EligibilityVerdict::Retracted => Verdict::Retracted,
+            EligibilityVerdict::Superseded => Verdict::Superseded,
+            EligibilityVerdict::Stale => Verdict::Stale,
+            EligibilityVerdict::WrongScope => Verdict::WrongScope,
+            EligibilityVerdict::Hidden => Verdict::Hidden,
+            EligibilityVerdict::ProviderSensitive => Verdict::ProviderSensitive,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +75,16 @@ struct Candidate {
     artifact_digest: Option<String>,
 }
 
+impl Candidate {
+    fn to_kernel(&self) -> EligibilityCandidate {
+        EligibilityCandidate {
+            object_id: self.object_id.clone(),
+            source_revision: self.source_revision,
+            artifact_digest: self.artifact_digest.clone(),
+        }
+    }
+}
+
 /// A verdict is a function of these inputs and nothing else, so an entry is
 /// valid exactly as long as every part of its key still names the same state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -79,16 +101,16 @@ struct CacheKey {
 
 #[derive(Debug, Default)]
 pub(crate) struct VerdictCache {
-    entries: HashMap<CacheKey, Verdict>,
+    entries: HashMap<CacheKey, EligibilityVerdict>,
     order: VecDeque<CacheKey>,
 }
 
 impl VerdictCache {
-    fn get(&self, key: &CacheKey) -> Option<Verdict> {
+    fn get(&self, key: &CacheKey) -> Option<EligibilityVerdict> {
         self.entries.get(key).copied()
     }
 
-    fn insert(&mut self, key: CacheKey, verdict: Verdict) {
+    fn insert(&mut self, key: CacheKey, verdict: EligibilityVerdict) {
         if self.entries.insert(key.clone(), verdict).is_some() {
             return;
         }
@@ -119,66 +141,14 @@ fn parse_destination(value: &str) -> Option<ArtifactDestination> {
     }
 }
 
-/// Verdict order is fixed: an object that is gone or replaced is reported as
-/// such before its revision, scope, or sensitivity is considered.
-///
-/// The sensitivity judged is the one the serving view folds onto the object
-/// from its admission history, since that is the class a read handed the
-/// caller; the registry class stands in when no admission decision serves the
-/// object. A secret object is refused for every destination and a non-normal
-/// object for a remote one, whether or not the candidate cites an artifact.
-/// An object no read serves, hidden by admission or never admitted, is
-/// refused as `Hidden`.
-fn judge(
-    store: &KernelStore,
-    filter: &mut ScopeFilter,
-    candidate: &Candidate,
-    facts: &EgressCandidate,
-    destination: ArtifactDestination,
-) -> Result<Verdict, KernelError> {
-    let Some(state) = &facts.state else {
-        return Ok(Verdict::Retracted);
-    };
-    if state.object.superseded_by.is_some() {
-        return Ok(Verdict::Superseded);
-    }
-    if state.object.invalidated_commit_seq.is_some() {
-        return Ok(Verdict::Retracted);
-    }
-    if state.object.source_revision != candidate.source_revision {
-        return Ok(Verdict::Stale);
-    }
-    if !filter.matches(state.scope_id.as_deref(), &mut stored_terms(store))? {
-        return Ok(Verdict::WrongScope);
-    }
-    let sensitivity = facts
-        .served
-        .map_or(state.object.sensitivity, |served| served.sensitivity);
-    if sensitivity == Sensitivity::Secret
-        || (destination == ArtifactDestination::Remote && sensitivity != Sensitivity::Normal)
-    {
-        return Ok(Verdict::ProviderSensitive);
-    }
-    if facts
-        .served
-        .is_none_or(|served| served.visibility == SurfaceVisibility::Hidden)
-    {
-        return Ok(Verdict::Hidden);
-    }
-    if let Some(artifact) = &facts.artifact
-        && artifact.eligibility != ArtifactEligibility::Allowed
-    {
-        return Ok(Verdict::ProviderSensitive);
-    }
-    Ok(Verdict::Ok)
-}
-
 struct BatchResponse {
     known_as_of: i64,
     verdicts: Vec<(String, Verdict)>,
     cache_hits: usize,
 }
 
+/// `None` when the snapshot has no cache identity: nothing is looked up and
+/// nothing is stored.
 fn cache_keys(
     store: &KernelStore,
     project: &ProjectBinding,
@@ -186,8 +156,6 @@ fn cache_keys(
     candidates: &[Candidate],
     snapshot: EgressSnapshot,
 ) -> Option<Vec<CacheKey>> {
-    // Without a classification generation the snapshot has no cache identity:
-    // nothing is looked up and nothing is stored.
     let generation = snapshot.classification_generation?;
     let lease_epoch = store.lease_epoch();
     let project_scope_id = project.scope_id();
@@ -208,13 +176,13 @@ fn cache_keys(
     )
 }
 
+/// The cache guard is held only for the lookups and later for the inserts,
+/// never across the kernel judgement.
 fn lookup(
     coordinator: &KernelOpenCoordinator,
     keys: Option<&[CacheKey]>,
     len: usize,
-) -> Vec<Option<Verdict>> {
-    // `judge` reads SQLite, so the cache guard is held only for the lookups
-    // and then again for the inserts, never across a judgement.
+) -> Vec<Option<EligibilityVerdict>> {
     match keys {
         Some(keys) => {
             let cache = coordinator.eligibility_cache();
@@ -222,58 +190,6 @@ fn lookup(
         }
         None => vec![None; len],
     }
-}
-
-fn named(
-    candidates: &[Candidate],
-    indices: impl Iterator<Item = usize>,
-) -> Vec<(String, Option<String>)> {
-    indices
-        .map(|index| {
-            (
-                candidates[index].object_id.clone(),
-                candidates[index].artifact_digest.clone(),
-            )
-        })
-        .collect()
-}
-
-// The vector lives for one batch and misses dominate it, so boxing `Miss`
-// would add one allocation per miss to save padding on the hits.
-#[allow(clippy::large_enum_variant)]
-enum Resolution {
-    Hit(Verdict),
-    /// The key is `None` when the snapshot has no cache identity, so the
-    /// verdict judged from `facts` is not stored.
-    Miss {
-        facts: EgressCandidate,
-        key: Option<CacheKey>,
-    },
-}
-
-/// `miss_facts` holds one entry per `None` in `cached`, in candidate order.
-fn resolve(
-    cached: Vec<Option<Verdict>>,
-    keys: Option<Vec<CacheKey>>,
-    miss_facts: Vec<EgressCandidate>,
-) -> Vec<Resolution> {
-    let mut keys = keys.map(Vec::into_iter);
-    let mut miss_facts = miss_facts.into_iter();
-    cached
-        .into_iter()
-        .map(|hit| {
-            let key = keys.as_mut().and_then(Iterator::next);
-            match hit {
-                Some(verdict) => Resolution::Hit(verdict),
-                None => Resolution::Miss {
-                    facts: miss_facts
-                        .next()
-                        .expect("egress_candidates returns one entry per named candidate"),
-                    key,
-                },
-            }
-        })
-        .collect()
 }
 
 fn evaluate(
@@ -289,86 +205,97 @@ fn evaluate(
         project,
         destination,
         candidates,
-        |named| store.egress_candidates(named, destination),
+        |candidates| store.judge_eligibility(project.scope(), destination, candidates),
     )
 }
 
-/// Looks the cache up before touching the registry, so a batch whose verdicts
-/// are all cached costs one snapshot read. The facts for the misses are read
-/// at whatever state the store has by then; when a commit or a classification
-/// merge moved it in between, the hits were judged against an older state
-/// than the misses, so the batch is redone at the facts' snapshot with every
-/// candidate's facts in hand.
+/// Cached verdicts fill the hits and `judged` supplies one verdict per miss,
+/// in candidate order.
+fn splice(
+    cached: &[Option<EligibilityVerdict>],
+    judged: impl IntoIterator<Item = EligibilityVerdict>,
+) -> Vec<EligibilityVerdict> {
+    let mut judged = judged.into_iter();
+    cached
+        .iter()
+        .map(|hit| hit.unwrap_or_else(|| judged.next().expect("one verdict per miss")))
+        .collect()
+}
+
+/// Looks the cache up before asking the kernel, so a batch whose verdicts are
+/// all cached costs one snapshot read. The misses are judged at whatever state
+/// the store has by then; when a commit or a classification merge moved it in
+/// between, the hits were judged against an older state than the misses, so
+/// the whole batch is judged again at one snapshot and any entry the cache
+/// already holds for that snapshot is served from the cache.
 ///
-/// `read_facts` lets tests move the store between the snapshot and facts reads.
+/// `judge` lets tests move the store between the snapshot and the judgement.
 fn evaluate_with(
     store: &KernelStore,
     coordinator: &KernelOpenCoordinator,
     project: &ProjectBinding,
     destination: ArtifactDestination,
     candidates: &[Candidate],
-    mut read_facts: impl FnMut(
-        &[(String, Option<String>)],
-    ) -> Result<(EgressSnapshot, Vec<EgressCandidate>), KernelError>,
+    mut judge: impl FnMut(&[EligibilityCandidate]) -> Result<EligibilityBatch, KernelError>,
 ) -> Result<BatchResponse, KernelError> {
-    let snapshot = store.egress_snapshot()?;
-    let keys = cache_keys(store, project, destination, candidates, snapshot);
-    let cached = lookup(coordinator, keys.as_deref(), candidates.len());
-    let misses: Vec<usize> = (0..candidates.len())
-        .filter(|&index| cached[index].is_none())
+    let mut snapshot = store.egress_snapshot()?;
+    let mut keys = cache_keys(store, project, destination, candidates, snapshot);
+    let mut cached = lookup(coordinator, keys.as_deref(), candidates.len());
+    let misses: Vec<EligibilityCandidate> = candidates
+        .iter()
+        .zip(&cached)
+        .filter(|(_, hit)| hit.is_none())
+        .map(|(candidate, _)| candidate.to_kernel())
         .collect();
-    let (facts_snapshot, miss_facts) = if misses.is_empty() {
-        (snapshot, Vec::new())
+    let verdicts = if misses.is_empty() {
+        splice(&cached, [])
     } else {
-        read_facts(&named(candidates, misses.iter().copied()))?
-    };
-    let (snapshot, resolutions) = if facts_snapshot == snapshot {
-        (snapshot, resolve(cached, keys, miss_facts))
-    } else {
-        let (snapshot, facts) = if misses.len() == candidates.len() {
-            (facts_snapshot, miss_facts)
+        let batch = judge(&misses)?;
+        if batch.snapshot == snapshot {
+            splice(&cached, batch.verdicts)
         } else {
-            read_facts(&named(candidates, 0..candidates.len()))?
-        };
-        let keys = cache_keys(store, project, destination, candidates, snapshot);
-        let cached = lookup(coordinator, keys.as_deref(), candidates.len());
-        let miss_facts = facts
+            let batch = if misses.len() == candidates.len() {
+                batch
+            } else {
+                let all: Vec<EligibilityCandidate> =
+                    candidates.iter().map(Candidate::to_kernel).collect();
+                judge(&all)?
+            };
+            snapshot = batch.snapshot;
+            keys = cache_keys(store, project, destination, candidates, snapshot);
+            cached = lookup(coordinator, keys.as_deref(), candidates.len());
+            let misses = batch
+                .verdicts
+                .into_iter()
+                .zip(&cached)
+                .filter(|(_, hit)| hit.is_none())
+                .map(|(verdict, _)| verdict);
+            splice(&cached, misses)
+        }
+    };
+    let cache_hits = cached.iter().filter(|hit| hit.is_some()).count();
+    if let Some(keys) = keys {
+        let fresh: Vec<(CacheKey, EligibilityVerdict)> = keys
             .into_iter()
             .zip(&cached)
-            .filter(|(_, hit)| hit.is_none())
-            .map(|(facts, _)| facts)
+            .zip(&verdicts)
+            .filter(|((_, hit), _)| hit.is_none())
+            .map(|((key, _), verdict)| (key, *verdict))
             .collect();
-        (snapshot, resolve(cached, keys, miss_facts))
-    };
-    let cache_hits = resolutions
-        .iter()
-        .filter(|resolution| matches!(resolution, Resolution::Hit(_)))
-        .count();
-    let mut filter = ScopeFilter::new(project);
-    let mut verdicts = Vec::with_capacity(candidates.len());
-    let mut fresh: Vec<(CacheKey, Verdict)> = Vec::new();
-    for (candidate, resolution) in candidates.iter().zip(resolutions) {
-        let verdict = match resolution {
-            Resolution::Hit(verdict) => verdict,
-            Resolution::Miss { facts, key } => {
-                let verdict = judge(store, &mut filter, candidate, &facts, destination)?;
-                if let Some(key) = key {
-                    fresh.push((key, verdict));
-                }
-                verdict
+        if !fresh.is_empty() {
+            let mut cache = coordinator.eligibility_cache();
+            for (key, verdict) in fresh {
+                cache.insert(key, verdict);
             }
-        };
-        verdicts.push((candidate.object_id.clone(), verdict));
-    }
-    if !fresh.is_empty() {
-        let mut cache = coordinator.eligibility_cache();
-        for (key, verdict) in fresh {
-            cache.insert(key, verdict);
         }
     }
     Ok(BatchResponse {
         known_as_of: snapshot.tip,
-        verdicts,
+        verdicts: candidates
+            .iter()
+            .zip(verdicts)
+            .map(|(candidate, verdict)| (candidate.object_id.clone(), Verdict::from(verdict)))
+            .collect(),
         cache_hits,
     })
 }
@@ -389,9 +316,9 @@ impl Handler {
                 "{OPERATION} destination must be local or remote"
             ));
         };
-        if parsed.candidates.len() > MAX_CANDIDATES {
+        if parsed.candidates.len() > MAX_ELIGIBILITY_CANDIDATES {
             return crate::invalid_params_error(format!(
-                "{OPERATION} carries at most {MAX_CANDIDATES} candidates"
+                "{OPERATION} carries at most {MAX_ELIGIBILITY_CANDIDATES} candidates"
             ));
         }
         if parsed.candidates.iter().any(|candidate| {
@@ -517,15 +444,22 @@ mod tests {
             &fixture.project,
             ArtifactDestination::Local,
             candidates,
-            |named| {
+            |requested| {
                 let mut reads = reads.borrow_mut();
-                reads.push(named.iter().map(|(id, _)| id.clone()).collect());
+                reads.push(
+                    requested
+                        .iter()
+                        .map(|candidate| candidate.object_id.clone())
+                        .collect(),
+                );
                 if move_on_first_read && reads.len() == 1 {
                     move_tip(&fixture.store);
                 }
-                fixture
-                    .store
-                    .egress_candidates(named, ArtifactDestination::Local)
+                fixture.store.judge_eligibility(
+                    fixture.project.scope(),
+                    ArtifactDestination::Local,
+                    requested,
+                )
             },
         )
         .unwrap();
@@ -536,21 +470,24 @@ mod tests {
     fn the_cache_is_bounded_and_evicts_its_oldest_entry_first() {
         let mut cache = VerdictCache::default();
         for index in 0..=CACHE_CAPACITY {
-            cache.insert(key(index), Verdict::Ok);
+            cache.insert(key(index), EligibilityVerdict::Ok);
         }
         assert_eq!(cache.len(), CACHE_CAPACITY);
         assert_eq!(cache.get(&key(0)), None);
-        assert_eq!(cache.get(&key(CACHE_CAPACITY)), Some(Verdict::Ok));
+        assert_eq!(
+            cache.get(&key(CACHE_CAPACITY)),
+            Some(EligibilityVerdict::Ok)
+        );
         // Re-inserting an existing key replaces its verdict without growing the order.
-        cache.insert(key(1), Verdict::Stale);
-        assert_eq!(cache.get(&key(1)), Some(Verdict::Stale));
+        cache.insert(key(1), EligibilityVerdict::Stale);
+        assert_eq!(cache.get(&key(1)), Some(EligibilityVerdict::Stale));
         assert_eq!(cache.order.len(), CACHE_CAPACITY);
         cache.clear();
         assert_eq!(cache.len(), 0);
     }
 
     #[test]
-    fn only_the_misses_are_read_when_the_snapshot_holds() {
+    fn only_the_misses_are_judged_when_the_snapshot_holds() {
         let fixture = fixture();
         let candidates = candidates(2);
         let warm = evaluate(
@@ -571,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hit_from_an_older_snapshot_is_discarded_when_the_misses_read_a_newer_one() {
+    fn a_hit_from_an_older_snapshot_is_discarded_when_the_misses_see_a_newer_one() {
         let fixture = fixture();
         let candidates = candidates(2);
         let warm = evaluate(
@@ -584,7 +521,7 @@ mod tests {
         .unwrap();
 
         let (response, reads) = evaluate_recording(&fixture, &candidates, true);
-        // The miss read the moved store, so the batch is re-read in full.
+        // The miss saw the moved store, so the batch is judged again in full.
         assert_eq!(
             reads,
             vec![
@@ -609,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_with_no_hits_is_not_re_read_when_the_snapshot_moves() {
+    fn a_batch_with_no_hits_is_not_judged_again_when_the_snapshot_moves() {
         let fixture = fixture();
         let candidates = candidates(2);
         let before = fixture.store.egress_snapshot().unwrap();

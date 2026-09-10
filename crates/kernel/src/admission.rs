@@ -2919,64 +2919,11 @@ impl KernelStore {
         candidates: &[(String, Option<String>)],
         destination: ArtifactDestination,
     ) -> Result<(EgressSnapshot, Vec<EgressCandidate>), KernelError> {
-        let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
-        let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
-        let generation_before = self.classification_generation.load(Ordering::SeqCst);
-        let (tip, candidates) = self.read_snapshot(0, |tx, tip| {
-            // Hidden at `ExplicitSearch`, the widest surface, means hidden everywhere.
-            let served: HashMap<String, ServedClass> =
-                served_rows(tx, Surface::ExplicitSearch, tip, Some(&ids), None)?
-                    .into_iter()
-                    .map(|(object, visibility, _)| {
-                        (
-                            object.object_id,
-                            ServedClass {
-                                sensitivity: object.sensitivity,
-                                visibility,
-                            },
-                        )
-                    })
-                    .collect();
-            // One registry read for the batch, and one egress-facts read per
-            // distinct digest, instead of one of each per candidate.
-            let states = load_object_states(tx, &ids)?;
-            let mut artifacts: HashMap<&str, ArtifactEgressFacts> = HashMap::new();
-            candidates
-                .iter()
-                .map(|(object_id, digest)| {
-                    let state = states.get(object_id.as_str()).cloned();
-                    let served = served.get(object_id).copied();
-                    let artifact = match digest {
-                        Some(digest) if !crate::cas::is_artifact_digest(digest) => {
-                            return Err(KernelError::InvalidInput);
-                        }
-                        Some(digest) => Some(match artifacts.get(digest.as_str()) {
-                            Some(facts) => *facts,
-                            None => {
-                                let facts = crate::cas::egress_facts_tx(tx, digest, destination)
-                                    .map_err(map_sqlite)?;
-                                artifacts.insert(digest.as_str(), facts);
-                                facts
-                            }
-                        }),
-                        None => None,
-                    };
-                    Ok(EgressCandidate {
-                        state,
-                        served,
-                        artifact,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })?;
-        let generation_after = self.classification_generation.load(Ordering::SeqCst);
-        Ok((
-            EgressSnapshot {
-                tip,
-                classification_generation: stable_generation(generation_before, generation_after),
-            },
-            candidates,
-        ))
+        let named: Vec<(&str, Option<&str>)> = candidates
+            .iter()
+            .map(|(object_id, digest)| (object_id.as_str(), digest.as_deref()))
+            .collect();
+        self.egress_read(|tx, tip| egress_candidates_tx(tx, tip, &named, destination))
     }
 
     /// The state an egress verdict computed now would be keyed by, read
@@ -2991,6 +2938,78 @@ impl KernelStore {
             classification_generation: stable_generation(generation_before, generation_after),
         })
     }
+
+    /// One read snapshot under the seqlock discipline of `egress_candidates`, so the returned snapshot says whether a classification merge overlapped everything `read` saw.
+    pub(crate) fn egress_read<T>(
+        &self,
+        read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
+    ) -> Result<(EgressSnapshot, T), KernelError> {
+        let generation_before = self.classification_generation.load(Ordering::SeqCst);
+        let (tip, value) = self.read_snapshot(0, read)?;
+        let generation_after = self.classification_generation.load(Ordering::SeqCst);
+        Ok((
+            EgressSnapshot {
+                tip,
+                classification_generation: stable_generation(generation_before, generation_after),
+            },
+            value,
+        ))
+    }
+}
+
+pub(crate) fn egress_candidates_tx(
+    tx: &Transaction<'_>,
+    tip: i64,
+    candidates: &[(&str, Option<&str>)],
+    destination: ArtifactDestination,
+) -> Result<Vec<EgressCandidate>, KernelError> {
+    let ids: Vec<&str> = candidates.iter().map(|(id, _)| *id).collect();
+    let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
+    // Hidden at `ExplicitSearch`, the widest surface, means hidden everywhere.
+    let served: HashMap<String, ServedClass> =
+        served_rows(tx, Surface::ExplicitSearch, tip, Some(&ids), None)?
+            .into_iter()
+            .map(|(object, visibility, _)| {
+                (
+                    object.object_id,
+                    ServedClass {
+                        sensitivity: object.sensitivity,
+                        visibility,
+                    },
+                )
+            })
+            .collect();
+    // One registry read for the batch, and one egress-facts read per
+    // distinct digest, instead of one of each per candidate.
+    let states = load_object_states(tx, &ids)?;
+    let mut artifacts: HashMap<&str, ArtifactEgressFacts> = HashMap::new();
+    candidates
+        .iter()
+        .map(|(object_id, digest)| {
+            let state = states.get(*object_id).cloned();
+            let served = served.get(*object_id).copied();
+            let artifact = match digest {
+                Some(digest) if !crate::cas::is_artifact_digest(digest) => {
+                    return Err(KernelError::InvalidInput);
+                }
+                Some(digest) => Some(match artifacts.get(digest) {
+                    Some(facts) => *facts,
+                    None => {
+                        let facts = crate::cas::egress_facts_tx(tx, digest, destination)
+                            .map_err(map_sqlite)?;
+                        artifacts.insert(digest, facts);
+                        facts
+                    }
+                }),
+                None => None,
+            };
+            Ok(EgressCandidate {
+                state,
+                served,
+                artifact,
+            })
+        })
+        .collect()
 }
 
 /// A seqlock read: an even, unchanged generation proves no classification

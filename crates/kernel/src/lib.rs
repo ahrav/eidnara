@@ -12,6 +12,7 @@ pub mod applicability;
 mod backup;
 mod cas;
 mod durable_fs;
+mod eligibility;
 mod envelope;
 mod facts;
 mod object_write;
@@ -56,6 +57,10 @@ pub use cas::{
     ArtifactError, ArtifactErrorKind, ArtifactGcResult, ArtifactHandle, ArtifactIngestRequest,
     BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason, MAX_PAYLOAD_BYTES,
     ProviderEgress,
+};
+pub use eligibility::{
+    EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,
+    MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope,
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DependentObservationQuery, DomainSpec,
