@@ -158,6 +158,9 @@ pub struct KernelStore {
     /// commit-log row, so a reader keyed on the tip alone can still tell that
     /// its egress facts are stale.
     pub(super) classification_generation: AtomicU64,
+    /// Advances when a restore installs a different database under this handle, so a
+    /// `CommitReadRequest` captured against the displaced history is refused.
+    pub(super) restore_generation: AtomicU64,
     /// Outbox payload rows selected by this store's `read_complete_commits` calls.
     #[cfg(feature = "test-support")]
     pub(super) materialized_outbox_rows: AtomicUsize,
@@ -377,6 +380,7 @@ impl KernelStore {
             shard_directories: Mutex::new(std::collections::BTreeMap::new()),
             lease_epoch,
             classification_generation: AtomicU64::new(0),
+            restore_generation: AtomicU64::new(0),
             #[cfg(feature = "test-support")]
             materialized_outbox_rows: AtomicUsize::new(0),
             db_path,

@@ -60,7 +60,8 @@ pub use cas::{
     ProviderEgress,
 };
 pub use commit_read::{
-    CommitPage, CommitPageBounds, CommitReadError, CommitReadRequest, CompleteCommit, PageEnd,
+    CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
+    CompleteCommit, PageEnd,
 };
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,

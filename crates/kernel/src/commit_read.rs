@@ -13,12 +13,20 @@ use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReadRequest {
     pub consumer_id: String,
-    /// The store incarnation the target was captured in, as `KernelStore::lease_epoch` reports it.
-    pub lease_epoch: u64,
+    /// The incarnation the target was captured in, as `KernelStore::commit_read_incarnation` reports it.
+    pub incarnation: CommitReadIncarnation,
     /// Commits at or below this sequence are already applied.
     pub after_commit: i64,
     /// The fixed terminal target; nothing above it is read.
     pub through_commit: i64,
+}
+
+/// Identifies the database history a captured target refers to. Reopening the store changes it.
+/// Restoring changes it as well: a restore can make a commit sequence refer to a different commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommitReadIncarnation {
+    lease_epoch: u64,
+    restore_generation: u64,
 }
 
 /// Page capacity, checked from `COUNT` and `SUM(LENGTH())` before any payload is selected.
@@ -168,6 +176,16 @@ impl KernelStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// The incarnation a `CommitReadRequest` must carry to read from this store's current history.
+    pub fn commit_read_incarnation(&self) -> CommitReadIncarnation {
+        CommitReadIncarnation {
+            lease_epoch: self.lease_epoch(),
+            restore_generation: self
+                .restore_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
     /// Reads whole commits in `(after_commit, through_commit]` for a registered consumer until a
     /// bound is reached. Shapes are measured with `COUNT` and `SUM(LENGTH())` before a payload is
     /// selected, so admission precedes materialization. Consumer, incarnation, target, and
@@ -185,10 +203,12 @@ impl KernelStore {
         {
             return Err(CommitReadError::InvalidRequest);
         }
-        if request.lease_epoch != self.lease_epoch() {
+        let mut reader = self.lock_reader()?;
+        // A restore increments `restore_generation` while it holds every reader guard, so an
+        // incarnation compared under this guard identifies the database the read uses.
+        if request.incarnation != self.commit_read_incarnation() {
             return Err(CommitReadError::IncarnationMismatch);
         }
-        let mut reader = self.lock_reader()?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
@@ -238,9 +258,16 @@ impl KernelStore {
         let mut end = None;
         for commit_seq in sequences {
             let commit_seq = commit_seq.map_err(sqlite)?;
+            // A page full by count ends before inspecting the next commit; defects in that commit
+            // belong to the page it opens.
+            if commits.len() == bounds.max_commits.get() {
+                end = Some(PageEnd::Deferred {
+                    next_commit: commit_seq,
+                });
+                break;
+            }
             let shape = shape(&tx, commit_seq)?;
-            let fits = commits.len() < bounds.max_commits.get()
-                && used_rows + shape.rows <= bounds.max_rows.get()
+            let fits = used_rows + shape.rows <= bounds.max_rows.get()
                 && used_bytes + shape.payload_bytes <= bounds.max_payload_bytes.get();
             if !fits {
                 end = Some(if commits.is_empty() {

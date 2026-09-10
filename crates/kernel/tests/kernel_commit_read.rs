@@ -4,10 +4,12 @@
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::os::unix::fs::PermissionsExt;
+use std::time::{Duration, Instant};
 
 use kernel::{
-    CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest, CompleteCommit, DomainSpec,
-    KernelError, KernelStore, PageEnd, Sensitivity,
+    BackupRequest, CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest,
+    CompleteCommit, DomainSpec, KernelError, KernelStore, PageEnd, Sensitivity,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -79,7 +81,7 @@ impl Fixture {
     fn request(&self, after: i64, through: i64) -> CommitReadRequest {
         CommitReadRequest {
             consumer_id: CONSUMER.to_string(),
-            lease_epoch: self.store.lease_epoch(),
+            incarnation: self.store.commit_read_incarnation(),
             after_commit: after,
             through_commit: through,
         }
@@ -504,6 +506,26 @@ fn missing_rows_and_malformed_ordinals_fail_and_leave_progress_untouched() {
         .read_complete_commits(&fixture.request(0, many - 1), wide())
         .unwrap();
     assert!(!page.commits.is_empty());
+    // A page that is already full by commit count ends before the damaged
+    // commit is inspected: the healthy commit is delivered and deferred, and the
+    // refusal arrives on the page the damaged commit would open.
+    let full = fixture
+        .store
+        .read_complete_commits(&fixture.request(many - 2, tip), bounds(1, 1024, 1 << 20))
+        .unwrap();
+    assert_eq!(
+        observed(&full.commits),
+        vec![(many - 1, fixture.ledger.commits[&(many - 1)].clone())]
+    );
+    assert_eq!(full.through, many - 1);
+    assert_eq!(full.end, PageEnd::Deferred { next_commit: many });
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&fixture.request(many - 1, tip), bounds(1, 1024, 1 << 20))
+            .unwrap_err(),
+        CommitReadError::MissingHistory { commit_seq: many }
+    );
 
     // Restore the row under a wrong ordinal: counts agree, ordinals do not.
     fixture
@@ -810,15 +832,6 @@ fn retries_keep_the_captured_target_and_the_wrong_reader_fails_closed() {
             .unwrap_err(),
         CommitReadError::UnknownConsumer
     );
-    let mut wrong_incarnation = fixture.request(0, target);
-    wrong_incarnation.lease_epoch += 1;
-    assert_eq!(
-        fixture
-            .store
-            .read_complete_commits(&wrong_incarnation, wide())
-            .unwrap_err(),
-        CommitReadError::IncarnationMismatch
-    );
     let tip = fixture.tip();
     assert_eq!(
         fixture
@@ -846,7 +859,7 @@ fn retries_keep_the_captured_target_and_the_wrong_reader_fails_closed() {
         reopened.read_complete_commits(&stale, wide()).unwrap_err(),
         CommitReadError::IncarnationMismatch
     );
-    stale.lease_epoch = reopened.lease_epoch();
+    stale.incarnation = reopened.commit_read_incarnation();
     let again = reopened.read_complete_commits(&stale, wide()).unwrap();
     assert_eq!(again, first);
 }
@@ -896,4 +909,54 @@ fn acknowledgement_and_pruning_bound_what_a_consumer_may_still_read() {
     );
     assert!(pending.last().unwrap().commit_boundary);
     assert_eq!(fixture.published_rows(), 0);
+}
+
+#[test]
+fn a_restore_under_the_same_handle_is_a_new_incarnation() {
+    let fixture = seeded();
+    let target = *fixture.ledger.commits.keys().nth(2).unwrap();
+    let captured = fixture.request(0, target);
+    let first = fixture
+        .store
+        .read_complete_commits(&captured, wide())
+        .unwrap();
+    assert_eq!(first.through, target);
+
+    let mut other = Fixture::open();
+    other.register(CONSUMER);
+    other.insert_domains("other-one", &[20]);
+    other.insert_domains("other-many", &[21, 22]);
+    assert!(other.tip() >= target);
+    let destination = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = other
+        .store
+        .backup(BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.store.restore(&backup.destination_path).unwrap(),
+        other.tip()
+    );
+
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&captured, wide())
+            .unwrap_err(),
+        CommitReadError::IncarnationMismatch
+    );
+    let restored = fixture
+        .store
+        .read_complete_commits(&fixture.request(0, target), wide())
+        .unwrap();
+    let expected = other
+        .store
+        .read_complete_commits(&other.request(0, target), wide())
+        .unwrap();
+    assert_eq!(restored, expected);
+    assert_ne!(restored, first);
 }
