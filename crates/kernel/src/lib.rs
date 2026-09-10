@@ -11,6 +11,7 @@ mod anchor;
 pub mod applicability;
 mod backup;
 mod cas;
+mod commit_read;
 mod durable_fs;
 mod eligibility;
 mod envelope;
@@ -57,6 +58,10 @@ pub use cas::{
     ArtifactError, ArtifactErrorKind, ArtifactGcResult, ArtifactHandle, ArtifactIngestRequest,
     BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason, MAX_PAYLOAD_BYTES,
     ProviderEgress,
+};
+pub use commit_read::{
+    CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
+    CommitReadTarget, CompleteCommit, PageEnd,
 };
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,
