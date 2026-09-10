@@ -52,7 +52,7 @@ Construct a full JobTable and verify refusal leaves durable work discoverable.
 Include Existing and retryable-failure replacement as different legal outcomes.
 Observe the persistent source before each new worker, and use one component
 identity in the trace to detect a bypass or duplicate routing authority.
-`rp21_embedding_pending_rediscovered_after_descriptor_loss` records the durable
+`search_projection_embedding_pending_rediscovered_after_descriptor_loss` records the durable
 row, attempted admission, suppressed response, and second discovery only.
 Per-K reconciliation is the primary oracle; aggregate call counts are secondary.
 

@@ -1,4 +1,4 @@
-# rp21-ack-follows-local-release
+# ack-follows-local-release
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -70,8 +70,8 @@ No physical cross-database atomicity is assumed.
 5. Lose an ack response after kernel COMMIT; reconcile the stored checkpoint
    and retry without repeating logical work.
 6. Inject local commit failure and require no corresponding advancing ack.
-7. Reference `rp21_ack_local_commit_interrupted`, `rp21_ack_writer_contended`,
-   and `rp21_ack_response_lost` from commit/fault events, not forbidden overlap.
+7. Reference `search_projection_ack_local_commit_interrupted`, `search_projection_ack_writer_contended`,
+   and `search_projection_ack_response_lost` from commit/fault events, not forbidden overlap.
    Their single definition site is the fault map; no projection-side alias
    or duplicate definition is required.
 

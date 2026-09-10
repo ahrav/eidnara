@@ -9,9 +9,9 @@ enablement. RP2.9 approves numeric limits; the release owner reconciles the
 release gate; the coordinator closes witnesses.
 
 The machine-readable form is
-[`crates/kernel/tests/fixtures/rp2-1/construction-contracts.json`](../../../crates/kernel/tests/fixtures/rp2-1/construction-contracts.json),
-checked by the kernel test `rp21_construction_inputs` together with the
-[independent identity fixtures](../../../crates/kernel/tests/fixtures/rp2-1/source-identity-fixtures.json)
+[`crates/kernel/tests/fixtures/search-projection/construction-contracts.json`](../../../crates/kernel/tests/fixtures/search-projection/construction-contracts.json),
+checked by the kernel test `search_projection_construction_inputs` together with the
+[independent identity fixtures](../../../crates/kernel/tests/fixtures/search-projection/source-identity-fixtures.json)
 and the [witness matrix](witness-matrix.md). The test pins the fixture's
 enumerations: the five classes and their dense defaults, the tuple field order
 and version byte, the admission dimensions, every capability disposition on
@@ -25,7 +25,7 @@ identity-contract version.
 Contract identifiers are `CC1` through `CC12`. The adoption table at the end
 maps each later ticket to the contracts it consumes. Changing any contract
 changes `identity_contract_version`
-(`rp21-identity-v1`), which is one of the invalidation identities every hook
+(`search-projection-identity-v1`), which is one of the invalidation identities every hook
 carries (CC10) and one of the five rebuild triggers in the specification's C7.
 
 ## CC1. Source classes and stable identifiers
@@ -173,7 +173,7 @@ erasure deadline.
 This is a recorded applicability decision for the conditional records that
 depend on the approved mapping. The witness matrix carries it as the
 `conditional applicability` cell of
-`rp21_projection_remediation_without_revision_change`, satisfied by the
+`search_projection_remediation_without_revision_change`, satisfied by the
 decision plus a name-only control that reconstructs mapped input bytes before
 and after a remediation and finds them equal. Any other in-place mutable
 selected field needs historical bytes at the fixed sequence S or an approved
@@ -256,18 +256,18 @@ identity_contract_version, limit_manifest_protocol_version)`.
 
 | Hook | Classes | Built by |
 | --- | --- | --- |
-| `rp21.message_cleanup` | messages | #377 |
-| `rp21.embedding.bootstrap` | messages, claims, promoted memory, git | #368 |
-| `rp21.embedding.routing` | messages, claims, promoted memory, git | #368 |
-| `rp21.embedding.registry` | messages, claims, promoted memory, git | #368 |
-| `rp21.embedding.backfill` | messages, claims, promoted memory, git | #371 |
-| `rp21.embedding.identity_gc` | messages, claims, promoted memory, git | #370 |
-| `rp21.promoted_memory.embeddings` | promoted memory | #374 |
-| `rp21.git.ingest` | git | #375 |
-| `rp21.git.durable_rows` | git | #375 |
-| `rp21.git.jobs` | git | #375 |
-| `rp21.git.sweeps` | git | #376 |
-| `rp21.git.leases` | git | #376 |
+| `search_projection.message_cleanup` | messages | #377 |
+| `search_projection.embedding.bootstrap` | messages, claims, promoted memory, git | #368 |
+| `search_projection.embedding.routing` | messages, claims, promoted memory, git | #368 |
+| `search_projection.embedding.registry` | messages, claims, promoted memory, git | #368 |
+| `search_projection.embedding.backfill` | messages, claims, promoted memory, git | #371 |
+| `search_projection.embedding.identity_gc` | messages, claims, promoted memory, git | #370 |
+| `search_projection.promoted_memory.embeddings` | promoted memory | #374 |
+| `search_projection.git.ingest` | git | #375 |
+| `search_projection.git.durable_rows` | git | #375 |
+| `search_projection.git.jobs` | git | #375 |
+| `search_projection.git.sweeps` | git | #376 |
+| `search_projection.git.leases` | git | #376 |
 
 The gate manifest that implements this map is U4h's work (#380). The witness
 matrix requires a missing, a failed, an unsupported, and an inapplicable

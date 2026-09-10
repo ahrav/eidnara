@@ -1,4 +1,4 @@
-# rp21-disable-preserves-consumer-obligations
+# disable-preserves-consumer-obligations
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -62,8 +62,8 @@ consumer identity even if a replacement consumer is registered later.
 4. Request authorized abandonment with a recorded incomplete deletion barrier.
 5. Reopen after lifecycle interruption and reconcile durable audit/checkpoint
    state before any retry or enablement.
-6. Record `rp21_disable_pending_consumer`, `rp21_disable_last_consumer`, and
-   `rp21_abandon_request_with_barrier` independently of transition success.
+6. Record `search_projection_disable_pending_consumer`, `search_projection_disable_last_consumer`, and
+   `search_projection_abandon_request_with_barrier` independently of transition success.
 7. Reuse the transform catalog's withheld-versus-empty property and its real
    daemon test at `crates/daemon/tests/transform_canonical_memory.rs:230-302`.
 
@@ -88,6 +88,6 @@ consumer identity even if a replacement consumer is registered later.
 - Conclusion: Needs human input from the daemon lifecycle owner.
 
 Bounded progress after authorization belongs to
-[rp21-catchup-and-authorized-recovery-converge](../catalog.md#rp21-catchup-and-authorized-recovery-converge).
+[catchup-and-authorized-recovery-converge](../catalog.md#catchup-and-authorized-recovery-converge).
 It requires every prerequisite/gate accepted and explicit authorization before
 admission. It does not weaken this record's prohibition on automatic enablement.

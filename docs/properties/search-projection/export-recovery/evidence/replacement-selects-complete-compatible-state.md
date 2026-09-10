@@ -1,4 +1,4 @@
-# rp21-replacement-selects-complete-compatible-state
+# replacement-selects-complete-compatible-state
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -60,7 +60,7 @@ Generic directory identity remains an existing property to reuse.
 5. Observe that the old consumer is released only after durable verification.
 6. Make the prior projection incompatible; require explicit unavailability if
    the new one is incomplete, not an unconditional old-state fallback.
-7. Record `rp21_replacement_switch_interrupted` independently of selection success.
+7. Record `search_projection_replacement_switch_interrupted` independently of selection success.
 
 ## Investigation log
 

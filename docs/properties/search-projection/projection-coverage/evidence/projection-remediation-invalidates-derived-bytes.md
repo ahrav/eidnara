@@ -79,7 +79,7 @@ Sensitivity admission and retention policy remain explicit owner decisions.
    observations. Old bytes must not regain current status through replay.
 6. Repeated remediation with no further byte change as a control, rather than
    requiring another embedding simply because an audit event exists.
-7. Marker `rp21_projection_remediation_without_revision_change` from
+7. Marker `search_projection_remediation_without_revision_change` from
    [fault-map](../fault-map.md), with canonical field and input-change witnesses.
 
 ## Investigation log

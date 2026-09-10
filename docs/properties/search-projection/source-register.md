@@ -76,18 +76,18 @@ do not claim an independent re-audit of every per-part evidence citation.
 
 | Local input under this directory | SHA-256 |
 | --- | --- |
-| [export-recovery/catalog.md](export-recovery/catalog.md) | `cef68f087d4bade794bafd8a7073d5d2c9e618c69092b808a02e9cd34b43a734` |
+| [export-recovery/catalog.md](export-recovery/catalog.md) | `6868ce20062a2ea2a5201d980f659bb323fa21252b0971d81a1d4eac97c57553` |
 | [export-recovery/existing-checks.md](export-recovery/existing-checks.md) | `2d1b69f20d6c6cd816bdc79730fd9c2f62b2eadf16d7daa34ddd8c8f884a199f` |
-| [export-recovery/fault-map.md](export-recovery/fault-map.md) | `0f63eb5616f7661ecf5eb00035be5b67fcf815b6ab11b25056e26f3ed66c9212` |
-| [export-recovery/portfolio-evaluation.md](export-recovery/portfolio-evaluation.md) | `b97b935437618ef85f84863e95c66e50d22a6daee1e104727d778e5317fedb22` |
-| [projection-coverage/catalog.md](projection-coverage/catalog.md) | `671542fc6b6ae295b27e47f86099a0e9a54969de196a90e4cc3abc7d451bc97e` |
+| [export-recovery/fault-map.md](export-recovery/fault-map.md) | `5d417f090a3c9a3a382439121935a2394a4aadf90cd080ceb1ecb5232bf3d6df` |
+| [export-recovery/portfolio-evaluation.md](export-recovery/portfolio-evaluation.md) | `c3aa35f40a22b69c1224672add638e230f718fd40b2f688feea703ae451dff5b` |
+| [projection-coverage/catalog.md](projection-coverage/catalog.md) | `a8bfd3459166c095a6b1ce268f43ebced87d7f004cddd4cc0c5771ca5e421db4` |
 | [projection-coverage/existing-checks.md](projection-coverage/existing-checks.md) | `bc7db870bb3531908eea15229b564e9f689a0ba5535e0d80af81d5e8d1f413c8` |
-| [projection-coverage/fault-map.md](projection-coverage/fault-map.md) | `8318cc427c534d193aca16b4abab242a6b7ff5b434e87c86c8555d5572489ba2` |
-| [projection-coverage/portfolio-evaluation.md](projection-coverage/portfolio-evaluation.md) | `20b48daf88ed8f8fb72c85a34fd256690f5051a03cbd8fa9a31777b901e79394` |
-| [embedding/catalog.md](embedding/catalog.md) | `17f6f8502e8cb0116e817d6114af71facb06137354b7b1afc06e8cff7d355a08` |
+| [projection-coverage/fault-map.md](projection-coverage/fault-map.md) | `25d27cca8192b79871f18074cd68bed99fe2953c57f84c953c1188787ae32fa6` |
+| [projection-coverage/portfolio-evaluation.md](projection-coverage/portfolio-evaluation.md) | `c7e6236473d011cf65c1e8e881ae413fff81f468fa8ae50da4c7e0a093185e5c` |
+| [embedding/catalog.md](embedding/catalog.md) | `93c62e5667e68689b2568c23de896ebc223311c9e7983221e7c959a01b5a9c34` |
 | [embedding/existing-checks.md](embedding/existing-checks.md) | `dd5ac07e701a5b4010524457b69aad2a578dc8cd9f71b21ae00284129c5ac6a1` |
-| [embedding/fault-map.md](embedding/fault-map.md) | `75e5c6d839de31e2ef174e0b976c966427e7fd7e9ddc879a63fce42c0ddec931` |
-| [embedding/portfolio-evaluation.md](embedding/portfolio-evaluation.md) | `25e8153666018c19bf428d80c6850bcae178ed94a9fc89a6ff85a36361021e4e` |
+| [embedding/fault-map.md](embedding/fault-map.md) | `581a88e60bc14f1a2f544d3a59e693af57f693b7091e5c3c830ef8a331444927` |
+| [embedding/portfolio-evaluation.md](embedding/portfolio-evaluation.md) | `18465b4e46b9271d779b1599e751cd68dd6fd2052d64212eb9d37c0e1c60aa3f` |
 
 The root [evaluation](portfolio-evaluation.md) records the controlling
 coordinator-commissioned analyst attribution. Per-part references to findings

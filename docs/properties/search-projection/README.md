@@ -35,7 +35,7 @@ Source inspection is pinned to Eidnara HEAD
 catalogs were authored as uncommitted working-tree artifacts against that
 commit. Ticket P1 ([#352](https://github.com/ahrav/eidnara/issues/352)) carries
 them into the repository unchanged, together with the three P1 documents above,
-the fixtures under `crates/kernel/tests/fixtures/rp2-1/`, and the kernel test
+the fixtures under `crates/kernel/tests/fixtures/search-projection/`, and the kernel test
 that checks them. The hashes in the source register describe the catalog files
 as they are. External Commons files have separate content hashes because the
 Eidnara revision cannot pin them.
@@ -63,7 +63,7 @@ One specification issue is published. The specification task itself produced
 no product code, tests, builds, benchmarks, implementation tickets, commits, or
 PRs. P1 adds documentation, test fixtures, one kernel integration test, and two
 CI path-filter entries; it changes no product code. The test
-`rp21_construction_inputs` extracts the marker definitions from the three fault
+`search_projection_construction_inputs` extracts the marker definitions from the three fault
 maps and checks the fixtures and the witness matrix against them. Static
 artifact checks do not satisfy
 implementation acceptance. Numeric RP2.9 approval, source/persistence decisions,

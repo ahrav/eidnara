@@ -51,8 +51,8 @@ result or page while racing the delete phase with dispatch or identity update.
 Verify current pending/vector state survives and old completion cannot become
 current after deletion. Include an independently obsolete, unreferenced control
 so a no-op collector cannot masquerade as meaningful GC coverage.
-`rp21_embedding_gc_candidate_has_concurrent_holder` witnesses the race premise.
-`rp21_embedding_gc_obsolete_identity_is_unreferenced` witnesses cleanup scope.
+`search_projection_embedding_gc_candidate_has_concurrent_holder` witnesses the race premise.
+`search_projection_embedding_gc_obsolete_identity_is_unreferenced` witnesses cleanup scope.
 Read per-identity durable state and physical holder counts independently of the
 collector's selected list; that list is not the oracle for safe deletion.
 

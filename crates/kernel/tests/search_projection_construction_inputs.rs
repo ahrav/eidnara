@@ -34,18 +34,18 @@ const SOURCE_CLASSES: [(&str, bool); 5] = [
     ("raw_tool_spans", false),
 ];
 const HOOKS: [&str; 12] = [
-    "rp21.message_cleanup",
-    "rp21.embedding.bootstrap",
-    "rp21.embedding.routing",
-    "rp21.embedding.registry",
-    "rp21.embedding.backfill",
-    "rp21.embedding.identity_gc",
-    "rp21.promoted_memory.embeddings",
-    "rp21.git.ingest",
-    "rp21.git.durable_rows",
-    "rp21.git.jobs",
-    "rp21.git.sweeps",
-    "rp21.git.leases",
+    "search_projection.message_cleanup",
+    "search_projection.embedding.bootstrap",
+    "search_projection.embedding.routing",
+    "search_projection.embedding.registry",
+    "search_projection.embedding.backfill",
+    "search_projection.embedding.identity_gc",
+    "search_projection.promoted_memory.embeddings",
+    "search_projection.git.ingest",
+    "search_projection.git.durable_rows",
+    "search_projection.git.jobs",
+    "search_projection.git.sweeps",
+    "search_projection.git.leases",
 ];
 const GATES: [&str; 5] = [
     "class_coverage",
@@ -129,8 +129,8 @@ const CAPABILITY_DISPOSITIONS: [(&str, &str); 9] = [
     ("host_mural_rendering", "not_applicable"),
 ];
 const TICKETS: std::ops::RangeInclusive<u64> = 352..=388;
-const RESULT_MARKER: &str = "rp21_projection_acceptance_situations_witnessed";
-const CONDITIONAL_CELLS: [&str; 1] = ["rp21_projection_remediation_without_revision_change"];
+const RESULT_MARKER: &str = "search_projection_acceptance_situations_witnessed";
+const CONDITIONAL_CELLS: [&str; 1] = ["search_projection_remediation_without_revision_change"];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -142,7 +142,7 @@ fn read(path: &Path) -> String {
 
 fn fixture(name: &str) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/rp2-1")
+        .join("tests/fixtures/search-projection")
         .join(name);
     serde_json::from_str(&read(&path)).unwrap_or_else(|err| panic!("parse {name}: {err}"))
 }
@@ -166,7 +166,7 @@ fn marker_tokens(text: &str) -> Vec<String> {
         .skip(1)
         .step_by(2)
         .filter(|segment| {
-            segment.starts_with("rp21_")
+            segment.starts_with("search_projection_")
                 && segment
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
@@ -440,10 +440,10 @@ fn gate_cells_enumerate_every_hook_entry_point_and_evidence_state() {
             .collect();
         assert_eq!(actual, expected, "{name} scenario product");
     };
-    expect_product("rp21_projection_missing_gate_evidence", &[""]);
-    expect_product("rp21_projection_failed_gate_evidence", &[""]);
+    expect_product("search_projection_missing_gate_evidence", &[""]);
+    expect_product("search_projection_failed_gate_evidence", &[""]);
     expect_product(
-        "rp21_projection_unsupported_or_inapplicable_evidence",
+        "search_projection_unsupported_or_inapplicable_evidence",
         &["unsupported", "inapplicable"],
     );
     let control = matrix["gate_controls"]["valid_supported_activation"]
@@ -455,13 +455,13 @@ fn gate_cells_enumerate_every_hook_entry_point_and_evidence_state() {
 fn scenario_column(cell: &Value) -> String {
     let scenarios = str_list(&cell["scenario_ids"]);
     match marker(cell) {
-        "rp21_projection_missing_gate_evidence" | "rp21_projection_failed_gate_evidence" => {
+        "search_projection_missing_gate_evidence" | "search_projection_failed_gate_evidence" => {
             format!(
                 "every hook × every entry point ({} cells: `<hook>@<entry>`)",
                 scenarios.len()
             )
         }
-        "rp21_projection_unsupported_or_inapplicable_evidence" => format!(
+        "search_projection_unsupported_or_inapplicable_evidence" => format!(
             "every hook × every entry point × {{`unsupported`, `inapplicable`}} ({} cells: `<hook>@<entry>@<state>`)",
             scenarios.len()
         ),
@@ -551,7 +551,7 @@ fn markdown_matrix_restates_the_fixture_exactly() {
 
     let result = section(&text, "## Result marker");
     assert!(result.contains(&format!("`{RESULT_MARKER}`")));
-    assert!(!result.contains("| `rp21_"));
+    assert!(!result.contains("| `search_projection_"));
 
     assert_eq!(
         table_rows(section(&text, "## Coverage by acceptance criterion")),
@@ -577,7 +577,7 @@ fn markdown_matrix_restates_the_fixture_exactly() {
 #[test]
 fn contracts_freeze_the_five_classes() {
     let contracts = fixture("construction-contracts.json");
-    assert_eq!(contracts["identity_contract_version"], "rp21-identity-v1");
+    assert_eq!(contracts["identity_contract_version"], "search-projection-identity-v1");
     let classes = contracts["classes"].as_object().expect("classes");
     assert_eq!(
         classes.keys().map(String::as_str).collect::<BTreeSet<_>>(),

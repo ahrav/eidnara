@@ -36,15 +36,15 @@ second four-lens run by this author or implementation evidence for the claims.
 
 | Finding | Classification | Verified evidence and decision | Artifact status |
 | --- | --- | --- | --- |
-| G2 | gap | Complete-prefix safety allowed permanent CatchingUp. P, lines 106-110, names Current; no production driver exists. Add ordinary healthy finite-backlog progress in [rp21-catchup-and-authorized-recovery-converge](catalog.md#rp21-catchup-and-authorized-recovery-converge). | Applied; RP2.9 interval/envelope and implementation remain open. |
+| G2 | gap | Complete-prefix safety allowed permanent CatchingUp. P, lines 106-110, names Current; no production driver exists. Add ordinary healthy finite-backlog progress in [catchup-and-authorized-recovery-converge](catalog.md#catchup-and-authorized-recovery-converge). | Applied; RP2.9 interval/envelope and implementation remain open. |
 | G5 | gap | P, line 116, requires operator recovery after disable. The new record also covers Disabled only after explicit authorization and all prerequisite/gate acceptances. No automatic enablement is authorized. | Applied in the same new record; authority persistence remains an owner question. |
 | G3 | gap | `crates/kernel/tests/cas_fault_injection.rs:1-6` excludes power-loss proof; `:1046-1094` implements child barrier, bounded wait, kill, and reap. | Inventoried unaudited as a reusable pattern; concrete search hooks/oracles remain missing. Cost text no longer proposes a broad new harness. |
-| R1 | refinement | `crates/kernel/src/outbox.rs:530-570` owns kernel ack, which cannot inspect search durability. [rp21-ack-follows-local-release](catalog.md#rp21-ack-follows-local-release) exclusively owns ack/lock correctness. | Canonical ack marker definitions remain only in this part's fault map. Projection references them; its local atomicity guarantee remains separate. |
+| R1 | refinement | `crates/kernel/src/outbox.rs:530-570` owns kernel ack, which cannot inspect search durability. [ack-follows-local-release](catalog.md#ack-follows-local-release) exclusively owns ack/lock correctness. | Canonical ack marker definitions remain only in this part's fault map. Projection references them; its local atomicity guarantee remains separate. |
 | R2 | refinement | `crates/host-runtime/examples/perf_host.rs:5-33` uses unsafe `GlobalAlloc` and cumulative request counters; it does not measure live decoded heap. Kernel has `forbid(unsafe_code)` at `crates/kernel/src/lib.rs:5`. | Missing observer/lint boundary is explicit in catalog, evidence, inventory, and fault map. Logical charge is a potential implementation approach, not physical-heap proof. No allocator/dependency/lint change is prescribed. |
 | G1 | gap, narrowed | `crates/kernel/src/envelope.rs:240-242` supports domain-name remediation only. `:395-438` rewrites `domains.name` with unchanged source revision and emits `operator_remediation`. The source mapping does not establish a projected dependency. | Add the control event and mutable-S validity/abort case. Reject the broader claim of an established RP2.1 byte dependency; no revision change or occurrence generation is invented. |
 | R7 | refinement | `pending_outbox_reads_unpublished_rows_in_order_with_commit_boundaries` spans `crates/kernel/tests/kernel_outbox.rs:622-698`. | Standardized all references to 622-698. |
 | B4 | bias/refinement | Host staging has a supplied-payload CLI caller at `crates/daemon/src/bin/eidnara-host.rs:964-993`; the mirror source cited by invalidated facade prose is absent. | Added a durable [reuse-correction section](existing-checks.md#durable-reuse-corrections); older catalogs are not edited or treated as current reachability proof. |
-| At-rest sensitivity gap | owner question | Egress gates and remediation do not establish storage policy for staged or retained derived bytes. | Recorded in [the authority record](catalog.md#rp21-recovery-preserves-canonical-authority) and its investigation log. No policy is introduced. |
+| At-rest sensitivity gap | owner question | Egress gates and remediation do not establish storage policy for staged or retained derived bytes. | Recorded in [the authority record](catalog.md#recovery-preserves-canonical-authority) and its investigation log. No policy is introduced. |
 
 ## Shared ownership and applicability
 
@@ -52,7 +52,7 @@ second four-lens run by this author or implementation evidence for the claims.
   atomicity, source mapping, message cleanup, git sweeps, and source coverage:
   [projection-source-inventory-complete](../projection-coverage/catalog.md#projection-source-inventory-complete).
 - This part exclusively defines ack/lock checks and
-  `rp21_ack_local_commit_interrupted` / `rp21_ack_response_lost` in
+  `search_projection_ack_local_commit_interrupted` / `search_projection_ack_response_lost` in
   [the marker table](fault-map.md#independent-situation-markers). The first
   observes local COMMIT then terminates before ack attempt; the second observes
   durable ack COMMIT then loses the response. Projection references those

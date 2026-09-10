@@ -56,7 +56,7 @@ persistence boundary, reopen without clean shutdown, and read V(K) and Complete(
 Require exact identity and vector-byte agreement whenever Complete(K) survives.
 Inject failed and lost vector-commit responses; reconcile the actual reopened
 state instead of assuming what the error means. Include vector-only residue.
-`rp21_embedding_process_killed_at_persistence_boundary` names the independent
+`search_projection_embedding_process_killed_at_persistence_boundary` names the independent
 crash situation. It never requires a missing vector or surviving false marker.
 The storage contract must distinguish process death from power loss before
 `/testing:crash-consistency-and-failpoint-testing` chooses physical fault tools.

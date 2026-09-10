@@ -1,4 +1,4 @@
-# rp21-catchup-and-authorized-recovery-converge
+# catchup-and-authorized-recovery-converge
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -76,8 +76,8 @@ Ack/lock correctness remains with this part's existing ack-order record.
    and admit a finite recovery target; include registration/bootstrap if needed.
 3. Observe selected coverage, durable prefixes, and Current by the applicable
    approved bound. Unavailable forever is not success for an admitted episode.
-4. Reference `rp21_healthy_lagged_target_admitted` and
-   `rp21_authorized_recovery_current_observed` from the single fault-map
+4. Reference `search_projection_healthy_lagged_target_admitted` and
+   `search_projection_authorized_recovery_current_observed` from the single fault-map
    definition site. The latter positively witnesses authorization followed by
    Current, independently of whether the deadline check passes.
 5. Keep unauthorized or gate-rejected recovery unavailable under the lifecycle

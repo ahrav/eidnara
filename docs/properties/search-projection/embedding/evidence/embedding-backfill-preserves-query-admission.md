@@ -55,7 +55,7 @@ native calls under the approved service bound. Replenish background work long
 enough to expose service ordering, then stop pressure for recovery observation.
 Assert both admission preservation and bounded start/completion where D permits.
 Run above-envelope queries separately to check explicit overload disposition.
-`rp21_embedding_query_arrives_during_backfill_saturation` records occupancy and
+`search_projection_embedding_query_arrives_during_backfill_saturation` records occupancy and
 arrival before any admission decision, so rejection is not needed to fire it.
 Do not reuse the FIFO test's wall-clock values as production service limits.
 The handoff chooses the cheapest admission/service oracle before load testing.

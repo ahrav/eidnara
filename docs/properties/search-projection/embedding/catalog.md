@@ -475,7 +475,7 @@ Open questions:
 - Durable Complete(K) implies a matching durable vector only under the
   completion record. JobTable Ready, input hash equality, and total vector count
   do not dominate that property. No broader dominance is claimed.
-- [Catch-up and authorized recovery](../export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge)
+- [Catch-up and authorized recovery](../export-recovery/catalog.md#catchup-and-authorized-recovery-converge)
   owns projection-level convergence. Embedding restart recovery consumes its
   durable current pending state and does not duplicate that recovery record.
 

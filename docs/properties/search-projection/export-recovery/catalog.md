@@ -82,20 +82,20 @@ Notation below names **oracle concepts, not existing APIs or schema**:
 
 | Slug | Type | Reachability | Semantics | Status | Confidence |
 | --- | --- | --- | --- | --- | --- |
-| [rp21-export-fixed-s-exactly-once](#rp21-export-fixed-s-exactly-once) | safety | test-only | always | active | medium |
-| [rp21-export-retention-fence-covers-read](#rp21-export-retention-fence-covers-read) | safety | test-only | always | active | medium |
-| [rp21-export-predecode-bounds](#rp21-export-predecode-bounds) | safety | test-only | always | active | medium |
-| [rp21-catchup-complete-commit-prefix](#rp21-catchup-complete-commit-prefix) | safety | test-only | always | active | medium |
-| [rp21-ack-follows-local-release](#rp21-ack-follows-local-release) | safety | test-only | always | active | medium |
-| [rp21-replacement-selects-complete-compatible-state](#rp21-replacement-selects-complete-compatible-state) | safety | test-only | always | active | medium |
-| [rp21-rebuild-after-pruning-converges](#rp21-rebuild-after-pruning-converges) | liveness | test-only | always per admitted episode; RP2.9-blocked | active | medium |
-| [rp21-catchup-and-authorized-recovery-converge](#rp21-catchup-and-authorized-recovery-converge) | liveness | test-only | always per admitted episode; RP2.9-blocked | active | medium |
-| [rp21-disable-preserves-consumer-obligations](#rp21-disable-preserves-consumer-obligations) | safety | test-only | always | active | medium |
-| [rp21-recovery-preserves-canonical-authority](#rp21-recovery-preserves-canonical-authority) | safety | test-only | always | active | medium |
+| [export-fixed-s-exactly-once](#export-fixed-s-exactly-once) | safety | test-only | always | active | medium |
+| [export-retention-fence-covers-read](#export-retention-fence-covers-read) | safety | test-only | always | active | medium |
+| [export-predecode-bounds](#export-predecode-bounds) | safety | test-only | always | active | medium |
+| [catchup-complete-commit-prefix](#catchup-complete-commit-prefix) | safety | test-only | always | active | medium |
+| [ack-follows-local-release](#ack-follows-local-release) | safety | test-only | always | active | medium |
+| [replacement-selects-complete-compatible-state](#replacement-selects-complete-compatible-state) | safety | test-only | always | active | medium |
+| [rebuild-after-pruning-converges](#rebuild-after-pruning-converges) | liveness | test-only | always per admitted episode; RP2.9-blocked | active | medium |
+| [catchup-and-authorized-recovery-converge](#catchup-and-authorized-recovery-converge) | liveness | test-only | always per admitted episode; RP2.9-blocked | active | medium |
+| [disable-preserves-consumer-obligations](#disable-preserves-consumer-obligations) | safety | test-only | always | active | medium |
+| [recovery-preserves-canonical-authority](#recovery-preserves-canonical-authority) | safety | test-only | always | active | medium |
 
 ## Records
 
-### rp21-export-fixed-s-exactly-once
+### export-fixed-s-exactly-once
 
 Type: safety
 Reachability: test-only
@@ -117,7 +117,7 @@ an already-read key and an unread key; include an empty final page and a class
 boundary. Compare with an independent canonical fixture ledger at S. Include
 in-place remediation; its effect on export bytes is conditional on the approved
 mapping consuming the affected field, not assumed for all RP2.1 sources.
-Confidence: medium - [evidence](evidence/rp21-export-fixed-s-exactly-once.md).
+Confidence: medium - [evidence](evidence/export-fixed-s-exactly-once.md).
 P establishes the claim; historical predicates exist, but stable export is
 proposed and has no production caller, hence the reachability classification.
 Existing check: `crates/kernel/tests/kernel_slice.rs:466-559` and
@@ -134,7 +134,7 @@ Open questions:
   S bytes be supplied or their loss detected without reversing remediation?
   (needs human input)
 
-### rp21-export-retention-fence-covers-read
+### export-retention-fence-covers-read
 
 Type: safety
 Reachability: test-only
@@ -153,7 +153,7 @@ field, fence invalidation, or restart after S but before completion.
 Required faults and enabling state: A registered bootstrap consumer, unread
 source bytes, pruning pressure, and a fault that invalidates coverage while
 the replacement is incomplete. Also attempt pruning with a valid fence.
-Confidence: medium - [evidence](evidence/rp21-export-retention-fence-covers-read.md).
+Confidence: medium - [evidence](evidence/export-retention-fence-covers-read.md).
 Current retention primitives are verified; their export-specific composition
 is absent, so this is a proposed-only test target.
 Existing check: `crates/kernel/tests/kernel_outbox.rs:156-224` checks the prune
@@ -167,7 +167,7 @@ Open questions:
 - How is partial-state cleanup retried and bounded after a removal failure?
   (needs human input)
 
-### rp21-export-predecode-bounds
+### export-predecode-bounds
 
 Type: safety
 Reachability: test-only
@@ -188,7 +188,7 @@ Required faults and enabling state: Exact-cap and over-cap payloads, a page
 with insufficient residual byte budget, and independent decode-entry and
 allocation/high-water observations. A row that fits alone may move to the next
 page; it may not disappear from the export.
-Confidence: medium - [evidence](evidence/rp21-export-predecode-bounds.md).
+Confidence: medium - [evidence](evidence/export-predecode-bounds.md).
 Existing SQL size lookup is reusable; bounded export and its live decoded-heap
 observer remain absent. Kernel forbids unsafe code at
 `crates/kernel/src/lib.rs:5`; this is a proposed-only test target, not permission
@@ -206,7 +206,7 @@ Open questions:
   existing unsafe perf allocator counts cumulative requested bytes instead.
   (needs human input)
 
-### rp21-catchup-complete-commit-prefix
+### catchup-complete-commit-prefix
 
 Type: safety
 Reachability: test-only
@@ -226,7 +226,7 @@ published-but-retained rows after S, duplicate delivery, an empty commit, and
 `operator_remediation`. Account for that control event even when approved
 mapping has no dependency on its domain-name field. Use the canonical
 transaction ledger as oracle, not `pending_outbox` results.
-Confidence: medium - [evidence](evidence/rp21-catchup-complete-commit-prefix.md).
+Confidence: medium - [evidence](evidence/catchup-complete-commit-prefix.md).
 Existing publisher boundaries are verified; the proposed consumer-specific
 reader/driver is absent, so its reachability is `test-only`.
 Existing check: `crates/kernel/tests/kernel_outbox.rs:86-153`, `:417-434`, and
@@ -240,7 +240,7 @@ Open questions:
 - How does a commit larger than the local transaction/batch cap complete or
   fail explicitly without unbounded buffering? (needs human input)
 
-### rp21-ack-follows-local-release
+### ack-follows-local-release
 
 Type: safety
 Reachability: test-only
@@ -260,7 +260,7 @@ and lost response after kernel COMMIT.
 Required faults and enabling state: A real local transaction, a contended
 kernel writer, and interruption on both sides of local release and ack. Record
 attempted acks, returned acks, and durable checkpoints separately.
-Confidence: medium - [evidence](evidence/rp21-ack-follows-local-release.md).
+Confidence: medium - [evidence](evidence/ack-follows-local-release.md).
 Kernel writer acquisition is verified; production search transactions are
 absent, so the composite obligation is a proposed-only test target.
 Existing check: `crates/kernel/tests/kernel_outbox.rs:86-153` checks monotonic
@@ -274,7 +274,7 @@ Open questions:
   to a deterministic observer without adding a second coordinator?
   (needs human input)
 
-### rp21-replacement-selects-complete-compatible-state
+### replacement-selects-complete-compatible-state
 
 Type: safety
 Reachability: test-only
@@ -295,7 +295,7 @@ an incomplete candidate, corrupt local files, and compatibility change.
 Required faults and enabling state: Distinguishable old/new projections, a
 reader during selection, staged catch-up work, and interruption at each
 publication boundary. If no compatible prior exists, unavailability is valid.
-Confidence: medium - [evidence](evidence/rp21-replacement-selects-complete-compatible-state.md).
+Confidence: medium - [evidence](evidence/replacement-selects-complete-compatible-state.md).
 P U5 establishes the search-specific claim; its production selector does not
 exist, which justifies `test-only` independently of host lifecycle reachability.
 Existing check: Reuse
@@ -311,7 +311,7 @@ Open questions:
 - How does old-consumer release honor already recorded deletion barriers and
   a tip that advances during cutover? (needs human input)
 
-### rp21-rebuild-after-pruning-converges
+### rebuild-after-pruning-converges
 
 Type: liveness
 Reachability: test-only
@@ -334,7 +334,7 @@ Required faults and enabling state: Prove older outbox rows are absent, search
 state is absent, and retained canonical state is nonempty; include correction
 and deletion before pruning. Stop new writes and fault injection for the
 admitted window; separately test source loss as the fence safety case.
-Confidence: medium - [evidence](evidence/rp21-rebuild-after-pruning-converges.md).
+Confidence: medium - [evidence](evidence/rebuild-after-pruning-converges.md).
 P U5 supplies the convergence obligation; no production recovery implementation
 or numerical bound exists, hence `test-only` and no exercise claim.
 Existing check: None for search reconstruction after pruning.
@@ -351,7 +351,7 @@ Open questions:
 - Is final ack reconciliation part of the RP2.9 recovery acceptance boundary
   or a separately bounded phase? (needs human input)
 
-### rp21-catchup-and-authorized-recovery-converge
+### catchup-and-authorized-recovery-converge
 
 Type: liveness
 Reachability: test-only
@@ -382,7 +382,7 @@ Disabled-to-authorized-recovery episode; confirm every admission prerequisite
 independently of progress. Re-register and bootstrap if the chosen recovery
 requires them. Source inventory and bounded source sweeps are dependencies of
 `O(T)`, owned by projection-coverage rather than a second implementation here.
-Confidence: medium - [evidence](evidence/rp21-catchup-and-authorized-recovery-converge.md).
+Confidence: medium - [evidence](evidence/catchup-and-authorized-recovery-converge.md).
 P defines CatchingUp/Current and operator recovery; current kernel primitives
 do not implement that production controller, which justifies `test-only`.
 Existing check: None for either complete episode. The real-kernel fixture at
@@ -397,7 +397,7 @@ Open questions:
 - Which authority records recovery authorization and all prerequisite/gate
   acceptance across restart? (needs human input)
 
-### rp21-disable-preserves-consumer-obligations
+### disable-preserves-consumer-obligations
 
 Type: safety
 Reachability: test-only
@@ -419,7 +419,7 @@ crash during lifecycle change, and a blocked deletion barrier.
 Required faults and enabling state: Lagging and caught-up consumers, last and
 non-last removal, a recorded barrier, and explicit operator abandonment as a
 separate scenario. Observe durable rows and each serving surface independently.
-Confidence: medium - [evidence](evidence/rp21-disable-preserves-consumer-obligations.md).
+Confidence: medium - [evidence](evidence/disable-preserves-consumer-obligations.md).
 The kernel guards are verified; the subject is the unimplemented retrieval
 transition, so its classification is `test-only`.
 Existing check: `crates/kernel/tests/kernel_outbox.rs:247-330`,
@@ -435,7 +435,7 @@ Open questions:
 - Who authorizes recovery and how is disabled state preserved across restart?
   (needs human input)
 
-### rp21-recovery-preserves-canonical-authority
+### recovery-preserves-canonical-authority
 
 Type: safety
 Reachability: test-only
@@ -458,7 +458,7 @@ disagree with canonical state, one deliberate identity mismatch at a time,
 and canonical reads made unavailable. Keep a separate ledger of intended
 canonical operations, including authorized domain-name `operator_remediation`,
 so in-place legitimate changes are not false positives or undone by recovery.
-Confidence: medium - [evidence](evidence/rp21-recovery-preserves-canonical-authority.md).
+Confidence: medium - [evidence](evidence/recovery-preserves-canonical-authority.md).
 Canonical reader and eligibility policy exist; the recovery-specific production
 composition is absent and therefore classified `test-only`.
 Existing check: `crates/kernel/tests/kernel_outbox.rs:333-414` checks that an
@@ -482,16 +482,16 @@ Open questions:
 
 | Property | Shared mechanism and relationship | Handoff |
 | --- | --- | --- |
-| rp21-export-fixed-s-exactly-once | Supplies `E(S)` to catch-up; needs retention and agreed class/tombstone oracle. | `/testing:test-strategy`; source-coverage owner defines input mapping. |
-| rp21-export-retention-fence-covers-read | Protects exact export and rebuild; outbox retention alone does not imply byte retention. | `/testing:test-strategy`, then `/testing:deterministic-simulation-testing` for prune/GC timing. |
-| rp21-export-predecode-bounds | Independent of semantic exactness; size queries are a reuse seam. | `/testing:test-strategy`; RP2.9 supplies accounting/limits. |
-| rp21-catchup-complete-commit-prefix | Completes export at T; relies on row-owner atomic application but is not implied by monotonic ack. | `/testing:test-strategy`, `/testing:deterministic-simulation-testing`; projection-row owner supplies apply oracle. |
-| rp21-ack-follows-local-release | Sole owner of ack-after-local-durability, lock ownership, and ack-loss checks/markers; consumes row/checkpoint/job atomicity. | `/testing:test-strategy`, `/testing:deterministic-simulation-testing`; projection owner references this record and markers rather than defining them. |
-| rp21-replacement-selects-complete-compatible-state | Adds search completeness to existing generic selector validity; consumes export and catch-up. | `/testing:test-strategy`; publication owner reuses lifecycle machinery. |
-| rp21-rebuild-after-pruning-converges | Composes export, complete catch-up, ack, and publication under a finite healthy window. None alone implies convergence. | `/testing:test-strategy`, `/testing:deterministic-simulation-testing`; RP2.9 approves bound. |
-| rp21-catchup-and-authorized-recovery-converge | Covers ordinary backlog progress and explicitly authorized Disabled recovery; deletion-after-pruning stays the separate rebuild case. | `/testing:test-strategy`; RP2.9 owns per-mode bounds; projection-coverage owns source inventory/sweep obligations. |
-| rp21-disable-preserves-consumer-obligations | Shares retention/barrier mechanisms; exact existing withheld rendering is linked. | `/testing:test-strategy`; daemon lifecycle owner resolves pending disable. |
-| rp21-recovery-preserves-canonical-authority | Applies across all recovery paths; compatible selection alone does not prove canonical permission. | `/testing:test-strategy`; canonical/eligibility owner defines authoritative comparison. |
+| export-fixed-s-exactly-once | Supplies `E(S)` to catch-up; needs retention and agreed class/tombstone oracle. | `/testing:test-strategy`; source-coverage owner defines input mapping. |
+| export-retention-fence-covers-read | Protects exact export and rebuild; outbox retention alone does not imply byte retention. | `/testing:test-strategy`, then `/testing:deterministic-simulation-testing` for prune/GC timing. |
+| export-predecode-bounds | Independent of semantic exactness; size queries are a reuse seam. | `/testing:test-strategy`; RP2.9 supplies accounting/limits. |
+| catchup-complete-commit-prefix | Completes export at T; relies on row-owner atomic application but is not implied by monotonic ack. | `/testing:test-strategy`, `/testing:deterministic-simulation-testing`; projection-row owner supplies apply oracle. |
+| ack-follows-local-release | Sole owner of ack-after-local-durability, lock ownership, and ack-loss checks/markers; consumes row/checkpoint/job atomicity. | `/testing:test-strategy`, `/testing:deterministic-simulation-testing`; projection owner references this record and markers rather than defining them. |
+| replacement-selects-complete-compatible-state | Adds search completeness to existing generic selector validity; consumes export and catch-up. | `/testing:test-strategy`; publication owner reuses lifecycle machinery. |
+| rebuild-after-pruning-converges | Composes export, complete catch-up, ack, and publication under a finite healthy window. None alone implies convergence. | `/testing:test-strategy`, `/testing:deterministic-simulation-testing`; RP2.9 approves bound. |
+| catchup-and-authorized-recovery-converge | Covers ordinary backlog progress and explicitly authorized Disabled recovery; deletion-after-pruning stays the separate rebuild case. | `/testing:test-strategy`; RP2.9 owns per-mode bounds; projection-coverage owns source inventory/sweep obligations. |
+| disable-preserves-consumer-obligations | Shares retention/barrier mechanisms; exact existing withheld rendering is linked. | `/testing:test-strategy`; daemon lifecycle owner resolves pending disable. |
+| recovery-preserves-canonical-authority | Applies across all recovery paths; compatible selection alone does not prove canonical permission. | `/testing:test-strategy`; canonical/eligibility owner defines authoritative comparison. |
 
 All referenced test checks remain `unaudited`; adequacy goes to
 `/testing:invariant-test-review`. Runtime guard enforcement goes to

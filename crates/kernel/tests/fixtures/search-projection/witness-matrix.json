@@ -7,7 +7,7 @@
     "projection-coverage": 24,
     "embedding": 16
   },
-  "result_marker": "rp21_projection_acceptance_situations_witnessed",
+  "result_marker": "search_projection_acceptance_situations_witnessed",
   "acceptance_criteria": [
     "AC1",
     "AC2",
@@ -34,18 +34,18 @@
     "T9"
   ],
   "hooks": [
-    "rp21.message_cleanup",
-    "rp21.embedding.bootstrap",
-    "rp21.embedding.routing",
-    "rp21.embedding.registry",
-    "rp21.embedding.backfill",
-    "rp21.embedding.identity_gc",
-    "rp21.promoted_memory.embeddings",
-    "rp21.git.ingest",
-    "rp21.git.durable_rows",
-    "rp21.git.jobs",
-    "rp21.git.sweeps",
-    "rp21.git.leases"
+    "search_projection.message_cleanup",
+    "search_projection.embedding.bootstrap",
+    "search_projection.embedding.routing",
+    "search_projection.embedding.registry",
+    "search_projection.embedding.backfill",
+    "search_projection.embedding.identity_gc",
+    "search_projection.promoted_memory.embeddings",
+    "search_projection.git.ingest",
+    "search_projection.git.durable_rows",
+    "search_projection.git.jobs",
+    "search_projection.git.sweeps",
+    "search_projection.git.leases"
   ],
   "entry_points": [
     "startup",
@@ -91,9 +91,9 @@
   ],
   "cells": [
     {
-      "marker": "rp21_export_writes_between_pages",
+      "marker": "search_projection_export_writes_between_pages",
       "part": "export-recovery",
-      "property": "rp21-export-fixed-s-exactly-once",
+      "property": "export-fixed-s-exactly-once",
       "acceptance_criteria": [
         "AC1"
       ],
@@ -114,9 +114,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_export_operator_remediation_during_snapshot",
+      "marker": "search_projection_export_operator_remediation_during_snapshot",
       "part": "export-recovery",
-      "property": "rp21-export-fixed-s-exactly-once",
+      "property": "export-fixed-s-exactly-once",
       "acceptance_criteria": [
         "AC1",
         "AC10"
@@ -137,9 +137,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_export_prune_with_fence",
+      "marker": "search_projection_export_prune_with_fence",
       "part": "export-recovery",
-      "property": "rp21-export-retention-fence-covers-read",
+      "property": "export-retention-fence-covers-read",
       "acceptance_criteria": [
         "AC1"
       ],
@@ -159,9 +159,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_export_retention_lost_mid_build",
+      "marker": "search_projection_export_retention_lost_mid_build",
       "part": "export-recovery",
-      "property": "rp21-export-retention-fence-covers-read",
+      "property": "export-retention-fence-covers-read",
       "acceptance_criteria": [
         "AC1"
       ],
@@ -185,9 +185,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_export_oversize_row_present",
+      "marker": "search_projection_export_oversize_row_present",
       "part": "export-recovery",
-      "property": "rp21-export-predecode-bounds",
+      "property": "export-predecode-bounds",
       "acceptance_criteria": [
         "AC1"
       ],
@@ -207,9 +207,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_export_page_budget_edge",
+      "marker": "search_projection_export_page_budget_edge",
       "part": "export-recovery",
-      "property": "rp21-export-predecode-bounds",
+      "property": "export-predecode-bounds",
       "acceptance_criteria": [
         "AC1"
       ],
@@ -229,9 +229,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_catchup_split_commit",
+      "marker": "search_projection_catchup_split_commit",
       "part": "export-recovery",
-      "property": "rp21-catchup-complete-commit-prefix",
+      "property": "catchup-complete-commit-prefix",
       "acceptance_criteria": [
         "AC2"
       ],
@@ -251,9 +251,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_catchup_published_retained",
+      "marker": "search_projection_catchup_published_retained",
       "part": "export-recovery",
-      "property": "rp21-catchup-complete-commit-prefix",
+      "property": "catchup-complete-commit-prefix",
       "acceptance_criteria": [
         "AC2"
       ],
@@ -272,9 +272,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_catchup_empty_commit",
+      "marker": "search_projection_catchup_empty_commit",
       "part": "export-recovery",
-      "property": "rp21-catchup-complete-commit-prefix",
+      "property": "catchup-complete-commit-prefix",
       "acceptance_criteria": [
         "AC2"
       ],
@@ -293,9 +293,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_ack_local_commit_interrupted",
+      "marker": "search_projection_ack_local_commit_interrupted",
       "part": "export-recovery",
-      "property": "rp21-ack-follows-local-release",
+      "property": "ack-follows-local-release",
       "acceptance_criteria": [
         "AC2"
       ],
@@ -314,9 +314,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_ack_writer_contended",
+      "marker": "search_projection_ack_writer_contended",
       "part": "export-recovery",
-      "property": "rp21-ack-follows-local-release",
+      "property": "ack-follows-local-release",
       "acceptance_criteria": [
         "AC2"
       ],
@@ -335,9 +335,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_ack_response_lost",
+      "marker": "search_projection_ack_response_lost",
       "part": "export-recovery",
-      "property": "rp21-ack-follows-local-release",
+      "property": "ack-follows-local-release",
       "acceptance_criteria": [
         "AC2"
       ],
@@ -356,9 +356,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_replacement_switch_interrupted",
+      "marker": "search_projection_replacement_switch_interrupted",
       "part": "export-recovery",
-      "property": "rp21-replacement-selects-complete-compatible-state",
+      "property": "replacement-selects-complete-compatible-state",
       "acceptance_criteria": [
         "AC6"
       ],
@@ -381,9 +381,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_rebuild_missing_db_after_prune",
+      "marker": "search_projection_rebuild_missing_db_after_prune",
       "part": "export-recovery",
-      "property": "rp21-rebuild-after-pruning-converges",
+      "property": "rebuild-after-pruning-converges",
       "acceptance_criteria": [
         "AC7"
       ],
@@ -402,9 +402,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_rebuild_quiet_window_admitted",
+      "marker": "search_projection_rebuild_quiet_window_admitted",
       "part": "export-recovery",
-      "property": "rp21-rebuild-after-pruning-converges",
+      "property": "rebuild-after-pruning-converges",
       "acceptance_criteria": [
         "AC7"
       ],
@@ -423,9 +423,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_healthy_lagged_target_admitted",
+      "marker": "search_projection_healthy_lagged_target_admitted",
       "part": "export-recovery",
-      "property": "rp21-catchup-and-authorized-recovery-converge",
+      "property": "catchup-and-authorized-recovery-converge",
       "acceptance_criteria": [
         "AC7"
       ],
@@ -445,9 +445,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_authorized_recovery_current_observed",
+      "marker": "search_projection_authorized_recovery_current_observed",
       "part": "export-recovery",
-      "property": "rp21-catchup-and-authorized-recovery-converge",
+      "property": "catchup-and-authorized-recovery-converge",
       "acceptance_criteria": [
         "AC7",
         "AC9"
@@ -467,9 +467,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_disable_pending_consumer",
+      "marker": "search_projection_disable_pending_consumer",
       "part": "export-recovery",
-      "property": "rp21-disable-preserves-consumer-obligations",
+      "property": "disable-preserves-consumer-obligations",
       "acceptance_criteria": [
         "AC9"
       ],
@@ -488,9 +488,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_disable_last_consumer",
+      "marker": "search_projection_disable_last_consumer",
       "part": "export-recovery",
-      "property": "rp21-disable-preserves-consumer-obligations",
+      "property": "disable-preserves-consumer-obligations",
       "acceptance_criteria": [
         "AC9"
       ],
@@ -509,9 +509,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_abandon_request_with_barrier",
+      "marker": "search_projection_abandon_request_with_barrier",
       "part": "export-recovery",
-      "property": "rp21-disable-preserves-consumer-obligations",
+      "property": "disable-preserves-consumer-obligations",
       "acceptance_criteria": [
         "AC9"
       ],
@@ -530,9 +530,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_recovery_stale_authority",
+      "marker": "search_projection_recovery_stale_authority",
       "part": "export-recovery",
-      "property": "rp21-recovery-preserves-canonical-authority",
+      "property": "recovery-preserves-canonical-authority",
       "acceptance_criteria": [
         "AC6"
       ],
@@ -553,9 +553,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_recovery_contract_mismatch",
+      "marker": "search_projection_recovery_contract_mismatch",
       "part": "export-recovery",
-      "property": "rp21-recovery-preserves-canonical-authority",
+      "property": "recovery-preserves-canonical-authority",
       "acceptance_criteria": [
         "AC6"
       ],
@@ -579,9 +579,9 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_recovery_authority_unavailable",
+      "marker": "search_projection_recovery_authority_unavailable",
       "part": "export-recovery",
-      "property": "rp21-recovery-preserves-canonical-authority",
+      "property": "recovery-preserves-canonical-authority",
       "acceptance_criteria": [
         "AC6"
       ],
@@ -601,7 +601,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_atomic_uncommitted_kill",
+      "marker": "search_projection_atomic_uncommitted_kill",
       "part": "projection-coverage",
       "property": "projection-commit-checkpoint-pending-atomic",
       "acceptance_criteria": [
@@ -622,7 +622,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_old_prefix_after_delete",
+      "marker": "search_projection_old_prefix_after_delete",
       "part": "projection-coverage",
       "property": "projection-replay-does-not-resurrect",
       "acceptance_criteria": [
@@ -644,7 +644,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_duplicate_after_reopen",
+      "marker": "search_projection_duplicate_after_reopen",
       "part": "projection-coverage",
       "property": "projection-replay-does-not-resurrect",
       "acceptance_criteria": [
@@ -665,7 +665,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_equal_bytes_distinct_tuples",
+      "marker": "search_projection_equal_bytes_distinct_tuples",
       "part": "projection-coverage",
       "property": "projection-occurrence-payload-separation",
       "acceptance_criteria": [
@@ -691,7 +691,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_forced_payload_collision",
+      "marker": "search_projection_forced_payload_collision",
       "part": "projection-coverage",
       "property": "projection-occurrence-payload-separation",
       "acceptance_criteria": [
@@ -713,7 +713,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_messages_revised",
+      "marker": "search_projection_messages_revised",
       "part": "projection-coverage",
       "property": "projection-source-inventory-complete",
       "acceptance_criteria": [
@@ -735,7 +735,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_claims_deleted",
+      "marker": "search_projection_claims_deleted",
       "part": "projection-coverage",
       "property": "projection-source-inventory-complete",
       "acceptance_criteria": [
@@ -756,7 +756,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_promoted_memory_revised",
+      "marker": "search_projection_promoted_memory_revised",
       "part": "projection-coverage",
       "property": "projection-source-inventory-complete",
       "acceptance_criteria": [
@@ -777,7 +777,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_git_rows_removed",
+      "marker": "search_projection_git_rows_removed",
       "part": "projection-coverage",
       "property": "projection-source-inventory-complete",
       "acceptance_criteria": [
@@ -799,7 +799,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_tool_selection_changed",
+      "marker": "search_projection_tool_selection_changed",
       "part": "projection-coverage",
       "property": "projection-source-inventory-complete",
       "acceptance_criteria": [
@@ -821,7 +821,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_complete_declared_nonempty_inventory",
+      "marker": "search_projection_complete_declared_nonempty_inventory",
       "part": "projection-coverage",
       "property": "projection-source-inventory-complete",
       "acceptance_criteria": [
@@ -847,7 +847,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_raw_multibyte_default",
+      "marker": "search_projection_raw_multibyte_default",
       "part": "projection-coverage",
       "property": "projection-raw-tools-exact-and-lexical",
       "acceptance_criteria": [
@@ -868,7 +868,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_raw_multipart_error",
+      "marker": "search_projection_raw_multipart_error",
       "part": "projection-coverage",
       "property": "projection-raw-tools-exact-and-lexical",
       "acceptance_criteria": [
@@ -890,7 +890,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_missing_gate_evidence",
+      "marker": "search_projection_missing_gate_evidence",
       "part": "projection-coverage",
       "property": "projection-n13-hooks-stay-gated",
       "acceptance_criteria": [
@@ -900,54 +900,54 @@
         "T7"
       ],
       "scenario_ids": [
-        "rp21.message_cleanup@startup",
-        "rp21.message_cleanup@reload",
-        "rp21.message_cleanup@dispatch",
-        "rp21.message_cleanup@explicit",
-        "rp21.embedding.bootstrap@startup",
-        "rp21.embedding.bootstrap@reload",
-        "rp21.embedding.bootstrap@dispatch",
-        "rp21.embedding.bootstrap@explicit",
-        "rp21.embedding.routing@startup",
-        "rp21.embedding.routing@reload",
-        "rp21.embedding.routing@dispatch",
-        "rp21.embedding.routing@explicit",
-        "rp21.embedding.registry@startup",
-        "rp21.embedding.registry@reload",
-        "rp21.embedding.registry@dispatch",
-        "rp21.embedding.registry@explicit",
-        "rp21.embedding.backfill@startup",
-        "rp21.embedding.backfill@reload",
-        "rp21.embedding.backfill@dispatch",
-        "rp21.embedding.backfill@explicit",
-        "rp21.embedding.identity_gc@startup",
-        "rp21.embedding.identity_gc@reload",
-        "rp21.embedding.identity_gc@dispatch",
-        "rp21.embedding.identity_gc@explicit",
-        "rp21.promoted_memory.embeddings@startup",
-        "rp21.promoted_memory.embeddings@reload",
-        "rp21.promoted_memory.embeddings@dispatch",
-        "rp21.promoted_memory.embeddings@explicit",
-        "rp21.git.ingest@startup",
-        "rp21.git.ingest@reload",
-        "rp21.git.ingest@dispatch",
-        "rp21.git.ingest@explicit",
-        "rp21.git.durable_rows@startup",
-        "rp21.git.durable_rows@reload",
-        "rp21.git.durable_rows@dispatch",
-        "rp21.git.durable_rows@explicit",
-        "rp21.git.jobs@startup",
-        "rp21.git.jobs@reload",
-        "rp21.git.jobs@dispatch",
-        "rp21.git.jobs@explicit",
-        "rp21.git.sweeps@startup",
-        "rp21.git.sweeps@reload",
-        "rp21.git.sweeps@dispatch",
-        "rp21.git.sweeps@explicit",
-        "rp21.git.leases@startup",
-        "rp21.git.leases@reload",
-        "rp21.git.leases@dispatch",
-        "rp21.git.leases@explicit"
+        "search_projection.message_cleanup@startup",
+        "search_projection.message_cleanup@reload",
+        "search_projection.message_cleanup@dispatch",
+        "search_projection.message_cleanup@explicit",
+        "search_projection.embedding.bootstrap@startup",
+        "search_projection.embedding.bootstrap@reload",
+        "search_projection.embedding.bootstrap@dispatch",
+        "search_projection.embedding.bootstrap@explicit",
+        "search_projection.embedding.routing@startup",
+        "search_projection.embedding.routing@reload",
+        "search_projection.embedding.routing@dispatch",
+        "search_projection.embedding.routing@explicit",
+        "search_projection.embedding.registry@startup",
+        "search_projection.embedding.registry@reload",
+        "search_projection.embedding.registry@dispatch",
+        "search_projection.embedding.registry@explicit",
+        "search_projection.embedding.backfill@startup",
+        "search_projection.embedding.backfill@reload",
+        "search_projection.embedding.backfill@dispatch",
+        "search_projection.embedding.backfill@explicit",
+        "search_projection.embedding.identity_gc@startup",
+        "search_projection.embedding.identity_gc@reload",
+        "search_projection.embedding.identity_gc@dispatch",
+        "search_projection.embedding.identity_gc@explicit",
+        "search_projection.promoted_memory.embeddings@startup",
+        "search_projection.promoted_memory.embeddings@reload",
+        "search_projection.promoted_memory.embeddings@dispatch",
+        "search_projection.promoted_memory.embeddings@explicit",
+        "search_projection.git.ingest@startup",
+        "search_projection.git.ingest@reload",
+        "search_projection.git.ingest@dispatch",
+        "search_projection.git.ingest@explicit",
+        "search_projection.git.durable_rows@startup",
+        "search_projection.git.durable_rows@reload",
+        "search_projection.git.durable_rows@dispatch",
+        "search_projection.git.durable_rows@explicit",
+        "search_projection.git.jobs@startup",
+        "search_projection.git.jobs@reload",
+        "search_projection.git.jobs@dispatch",
+        "search_projection.git.jobs@explicit",
+        "search_projection.git.sweeps@startup",
+        "search_projection.git.sweeps@reload",
+        "search_projection.git.sweeps@dispatch",
+        "search_projection.git.sweeps@explicit",
+        "search_projection.git.leases@startup",
+        "search_projection.git.leases@reload",
+        "search_projection.git.leases@dispatch",
+        "search_projection.git.leases@explicit"
       ],
       "independent_oracle": "Independent hook manifest and absent evidence for the named gate; the refused activation names gate and entry point.",
       "negative_control": "Activation with absent evidence must fail.",
@@ -958,7 +958,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_failed_gate_evidence",
+      "marker": "search_projection_failed_gate_evidence",
       "part": "projection-coverage",
       "property": "projection-n13-hooks-stay-gated",
       "acceptance_criteria": [
@@ -968,54 +968,54 @@
         "T7"
       ],
       "scenario_ids": [
-        "rp21.message_cleanup@startup",
-        "rp21.message_cleanup@reload",
-        "rp21.message_cleanup@dispatch",
-        "rp21.message_cleanup@explicit",
-        "rp21.embedding.bootstrap@startup",
-        "rp21.embedding.bootstrap@reload",
-        "rp21.embedding.bootstrap@dispatch",
-        "rp21.embedding.bootstrap@explicit",
-        "rp21.embedding.routing@startup",
-        "rp21.embedding.routing@reload",
-        "rp21.embedding.routing@dispatch",
-        "rp21.embedding.routing@explicit",
-        "rp21.embedding.registry@startup",
-        "rp21.embedding.registry@reload",
-        "rp21.embedding.registry@dispatch",
-        "rp21.embedding.registry@explicit",
-        "rp21.embedding.backfill@startup",
-        "rp21.embedding.backfill@reload",
-        "rp21.embedding.backfill@dispatch",
-        "rp21.embedding.backfill@explicit",
-        "rp21.embedding.identity_gc@startup",
-        "rp21.embedding.identity_gc@reload",
-        "rp21.embedding.identity_gc@dispatch",
-        "rp21.embedding.identity_gc@explicit",
-        "rp21.promoted_memory.embeddings@startup",
-        "rp21.promoted_memory.embeddings@reload",
-        "rp21.promoted_memory.embeddings@dispatch",
-        "rp21.promoted_memory.embeddings@explicit",
-        "rp21.git.ingest@startup",
-        "rp21.git.ingest@reload",
-        "rp21.git.ingest@dispatch",
-        "rp21.git.ingest@explicit",
-        "rp21.git.durable_rows@startup",
-        "rp21.git.durable_rows@reload",
-        "rp21.git.durable_rows@dispatch",
-        "rp21.git.durable_rows@explicit",
-        "rp21.git.jobs@startup",
-        "rp21.git.jobs@reload",
-        "rp21.git.jobs@dispatch",
-        "rp21.git.jobs@explicit",
-        "rp21.git.sweeps@startup",
-        "rp21.git.sweeps@reload",
-        "rp21.git.sweeps@dispatch",
-        "rp21.git.sweeps@explicit",
-        "rp21.git.leases@startup",
-        "rp21.git.leases@reload",
-        "rp21.git.leases@dispatch",
-        "rp21.git.leases@explicit"
+        "search_projection.message_cleanup@startup",
+        "search_projection.message_cleanup@reload",
+        "search_projection.message_cleanup@dispatch",
+        "search_projection.message_cleanup@explicit",
+        "search_projection.embedding.bootstrap@startup",
+        "search_projection.embedding.bootstrap@reload",
+        "search_projection.embedding.bootstrap@dispatch",
+        "search_projection.embedding.bootstrap@explicit",
+        "search_projection.embedding.routing@startup",
+        "search_projection.embedding.routing@reload",
+        "search_projection.embedding.routing@dispatch",
+        "search_projection.embedding.routing@explicit",
+        "search_projection.embedding.registry@startup",
+        "search_projection.embedding.registry@reload",
+        "search_projection.embedding.registry@dispatch",
+        "search_projection.embedding.registry@explicit",
+        "search_projection.embedding.backfill@startup",
+        "search_projection.embedding.backfill@reload",
+        "search_projection.embedding.backfill@dispatch",
+        "search_projection.embedding.backfill@explicit",
+        "search_projection.embedding.identity_gc@startup",
+        "search_projection.embedding.identity_gc@reload",
+        "search_projection.embedding.identity_gc@dispatch",
+        "search_projection.embedding.identity_gc@explicit",
+        "search_projection.promoted_memory.embeddings@startup",
+        "search_projection.promoted_memory.embeddings@reload",
+        "search_projection.promoted_memory.embeddings@dispatch",
+        "search_projection.promoted_memory.embeddings@explicit",
+        "search_projection.git.ingest@startup",
+        "search_projection.git.ingest@reload",
+        "search_projection.git.ingest@dispatch",
+        "search_projection.git.ingest@explicit",
+        "search_projection.git.durable_rows@startup",
+        "search_projection.git.durable_rows@reload",
+        "search_projection.git.durable_rows@dispatch",
+        "search_projection.git.durable_rows@explicit",
+        "search_projection.git.jobs@startup",
+        "search_projection.git.jobs@reload",
+        "search_projection.git.jobs@dispatch",
+        "search_projection.git.jobs@explicit",
+        "search_projection.git.sweeps@startup",
+        "search_projection.git.sweeps@reload",
+        "search_projection.git.sweeps@dispatch",
+        "search_projection.git.sweeps@explicit",
+        "search_projection.git.leases@startup",
+        "search_projection.git.leases@reload",
+        "search_projection.git.leases@dispatch",
+        "search_projection.git.leases@explicit"
       ],
       "independent_oracle": "Present evidence that fails its gate; the refused activation names gate and entry point.",
       "negative_control": "Activation with failed evidence must fail.",
@@ -1026,7 +1026,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_unsupported_or_inapplicable_evidence",
+      "marker": "search_projection_unsupported_or_inapplicable_evidence",
       "part": "projection-coverage",
       "property": "projection-n13-hooks-stay-gated",
       "acceptance_criteria": [
@@ -1037,102 +1037,102 @@
         "T7"
       ],
       "scenario_ids": [
-        "rp21.message_cleanup@startup@unsupported",
-        "rp21.message_cleanup@startup@inapplicable",
-        "rp21.message_cleanup@reload@unsupported",
-        "rp21.message_cleanup@reload@inapplicable",
-        "rp21.message_cleanup@dispatch@unsupported",
-        "rp21.message_cleanup@dispatch@inapplicable",
-        "rp21.message_cleanup@explicit@unsupported",
-        "rp21.message_cleanup@explicit@inapplicable",
-        "rp21.embedding.bootstrap@startup@unsupported",
-        "rp21.embedding.bootstrap@startup@inapplicable",
-        "rp21.embedding.bootstrap@reload@unsupported",
-        "rp21.embedding.bootstrap@reload@inapplicable",
-        "rp21.embedding.bootstrap@dispatch@unsupported",
-        "rp21.embedding.bootstrap@dispatch@inapplicable",
-        "rp21.embedding.bootstrap@explicit@unsupported",
-        "rp21.embedding.bootstrap@explicit@inapplicable",
-        "rp21.embedding.routing@startup@unsupported",
-        "rp21.embedding.routing@startup@inapplicable",
-        "rp21.embedding.routing@reload@unsupported",
-        "rp21.embedding.routing@reload@inapplicable",
-        "rp21.embedding.routing@dispatch@unsupported",
-        "rp21.embedding.routing@dispatch@inapplicable",
-        "rp21.embedding.routing@explicit@unsupported",
-        "rp21.embedding.routing@explicit@inapplicable",
-        "rp21.embedding.registry@startup@unsupported",
-        "rp21.embedding.registry@startup@inapplicable",
-        "rp21.embedding.registry@reload@unsupported",
-        "rp21.embedding.registry@reload@inapplicable",
-        "rp21.embedding.registry@dispatch@unsupported",
-        "rp21.embedding.registry@dispatch@inapplicable",
-        "rp21.embedding.registry@explicit@unsupported",
-        "rp21.embedding.registry@explicit@inapplicable",
-        "rp21.embedding.backfill@startup@unsupported",
-        "rp21.embedding.backfill@startup@inapplicable",
-        "rp21.embedding.backfill@reload@unsupported",
-        "rp21.embedding.backfill@reload@inapplicable",
-        "rp21.embedding.backfill@dispatch@unsupported",
-        "rp21.embedding.backfill@dispatch@inapplicable",
-        "rp21.embedding.backfill@explicit@unsupported",
-        "rp21.embedding.backfill@explicit@inapplicable",
-        "rp21.embedding.identity_gc@startup@unsupported",
-        "rp21.embedding.identity_gc@startup@inapplicable",
-        "rp21.embedding.identity_gc@reload@unsupported",
-        "rp21.embedding.identity_gc@reload@inapplicable",
-        "rp21.embedding.identity_gc@dispatch@unsupported",
-        "rp21.embedding.identity_gc@dispatch@inapplicable",
-        "rp21.embedding.identity_gc@explicit@unsupported",
-        "rp21.embedding.identity_gc@explicit@inapplicable",
-        "rp21.promoted_memory.embeddings@startup@unsupported",
-        "rp21.promoted_memory.embeddings@startup@inapplicable",
-        "rp21.promoted_memory.embeddings@reload@unsupported",
-        "rp21.promoted_memory.embeddings@reload@inapplicable",
-        "rp21.promoted_memory.embeddings@dispatch@unsupported",
-        "rp21.promoted_memory.embeddings@dispatch@inapplicable",
-        "rp21.promoted_memory.embeddings@explicit@unsupported",
-        "rp21.promoted_memory.embeddings@explicit@inapplicable",
-        "rp21.git.ingest@startup@unsupported",
-        "rp21.git.ingest@startup@inapplicable",
-        "rp21.git.ingest@reload@unsupported",
-        "rp21.git.ingest@reload@inapplicable",
-        "rp21.git.ingest@dispatch@unsupported",
-        "rp21.git.ingest@dispatch@inapplicable",
-        "rp21.git.ingest@explicit@unsupported",
-        "rp21.git.ingest@explicit@inapplicable",
-        "rp21.git.durable_rows@startup@unsupported",
-        "rp21.git.durable_rows@startup@inapplicable",
-        "rp21.git.durable_rows@reload@unsupported",
-        "rp21.git.durable_rows@reload@inapplicable",
-        "rp21.git.durable_rows@dispatch@unsupported",
-        "rp21.git.durable_rows@dispatch@inapplicable",
-        "rp21.git.durable_rows@explicit@unsupported",
-        "rp21.git.durable_rows@explicit@inapplicable",
-        "rp21.git.jobs@startup@unsupported",
-        "rp21.git.jobs@startup@inapplicable",
-        "rp21.git.jobs@reload@unsupported",
-        "rp21.git.jobs@reload@inapplicable",
-        "rp21.git.jobs@dispatch@unsupported",
-        "rp21.git.jobs@dispatch@inapplicable",
-        "rp21.git.jobs@explicit@unsupported",
-        "rp21.git.jobs@explicit@inapplicable",
-        "rp21.git.sweeps@startup@unsupported",
-        "rp21.git.sweeps@startup@inapplicable",
-        "rp21.git.sweeps@reload@unsupported",
-        "rp21.git.sweeps@reload@inapplicable",
-        "rp21.git.sweeps@dispatch@unsupported",
-        "rp21.git.sweeps@dispatch@inapplicable",
-        "rp21.git.sweeps@explicit@unsupported",
-        "rp21.git.sweeps@explicit@inapplicable",
-        "rp21.git.leases@startup@unsupported",
-        "rp21.git.leases@startup@inapplicable",
-        "rp21.git.leases@reload@unsupported",
-        "rp21.git.leases@reload@inapplicable",
-        "rp21.git.leases@dispatch@unsupported",
-        "rp21.git.leases@dispatch@inapplicable",
-        "rp21.git.leases@explicit@unsupported",
-        "rp21.git.leases@explicit@inapplicable"
+        "search_projection.message_cleanup@startup@unsupported",
+        "search_projection.message_cleanup@startup@inapplicable",
+        "search_projection.message_cleanup@reload@unsupported",
+        "search_projection.message_cleanup@reload@inapplicable",
+        "search_projection.message_cleanup@dispatch@unsupported",
+        "search_projection.message_cleanup@dispatch@inapplicable",
+        "search_projection.message_cleanup@explicit@unsupported",
+        "search_projection.message_cleanup@explicit@inapplicable",
+        "search_projection.embedding.bootstrap@startup@unsupported",
+        "search_projection.embedding.bootstrap@startup@inapplicable",
+        "search_projection.embedding.bootstrap@reload@unsupported",
+        "search_projection.embedding.bootstrap@reload@inapplicable",
+        "search_projection.embedding.bootstrap@dispatch@unsupported",
+        "search_projection.embedding.bootstrap@dispatch@inapplicable",
+        "search_projection.embedding.bootstrap@explicit@unsupported",
+        "search_projection.embedding.bootstrap@explicit@inapplicable",
+        "search_projection.embedding.routing@startup@unsupported",
+        "search_projection.embedding.routing@startup@inapplicable",
+        "search_projection.embedding.routing@reload@unsupported",
+        "search_projection.embedding.routing@reload@inapplicable",
+        "search_projection.embedding.routing@dispatch@unsupported",
+        "search_projection.embedding.routing@dispatch@inapplicable",
+        "search_projection.embedding.routing@explicit@unsupported",
+        "search_projection.embedding.routing@explicit@inapplicable",
+        "search_projection.embedding.registry@startup@unsupported",
+        "search_projection.embedding.registry@startup@inapplicable",
+        "search_projection.embedding.registry@reload@unsupported",
+        "search_projection.embedding.registry@reload@inapplicable",
+        "search_projection.embedding.registry@dispatch@unsupported",
+        "search_projection.embedding.registry@dispatch@inapplicable",
+        "search_projection.embedding.registry@explicit@unsupported",
+        "search_projection.embedding.registry@explicit@inapplicable",
+        "search_projection.embedding.backfill@startup@unsupported",
+        "search_projection.embedding.backfill@startup@inapplicable",
+        "search_projection.embedding.backfill@reload@unsupported",
+        "search_projection.embedding.backfill@reload@inapplicable",
+        "search_projection.embedding.backfill@dispatch@unsupported",
+        "search_projection.embedding.backfill@dispatch@inapplicable",
+        "search_projection.embedding.backfill@explicit@unsupported",
+        "search_projection.embedding.backfill@explicit@inapplicable",
+        "search_projection.embedding.identity_gc@startup@unsupported",
+        "search_projection.embedding.identity_gc@startup@inapplicable",
+        "search_projection.embedding.identity_gc@reload@unsupported",
+        "search_projection.embedding.identity_gc@reload@inapplicable",
+        "search_projection.embedding.identity_gc@dispatch@unsupported",
+        "search_projection.embedding.identity_gc@dispatch@inapplicable",
+        "search_projection.embedding.identity_gc@explicit@unsupported",
+        "search_projection.embedding.identity_gc@explicit@inapplicable",
+        "search_projection.promoted_memory.embeddings@startup@unsupported",
+        "search_projection.promoted_memory.embeddings@startup@inapplicable",
+        "search_projection.promoted_memory.embeddings@reload@unsupported",
+        "search_projection.promoted_memory.embeddings@reload@inapplicable",
+        "search_projection.promoted_memory.embeddings@dispatch@unsupported",
+        "search_projection.promoted_memory.embeddings@dispatch@inapplicable",
+        "search_projection.promoted_memory.embeddings@explicit@unsupported",
+        "search_projection.promoted_memory.embeddings@explicit@inapplicable",
+        "search_projection.git.ingest@startup@unsupported",
+        "search_projection.git.ingest@startup@inapplicable",
+        "search_projection.git.ingest@reload@unsupported",
+        "search_projection.git.ingest@reload@inapplicable",
+        "search_projection.git.ingest@dispatch@unsupported",
+        "search_projection.git.ingest@dispatch@inapplicable",
+        "search_projection.git.ingest@explicit@unsupported",
+        "search_projection.git.ingest@explicit@inapplicable",
+        "search_projection.git.durable_rows@startup@unsupported",
+        "search_projection.git.durable_rows@startup@inapplicable",
+        "search_projection.git.durable_rows@reload@unsupported",
+        "search_projection.git.durable_rows@reload@inapplicable",
+        "search_projection.git.durable_rows@dispatch@unsupported",
+        "search_projection.git.durable_rows@dispatch@inapplicable",
+        "search_projection.git.durable_rows@explicit@unsupported",
+        "search_projection.git.durable_rows@explicit@inapplicable",
+        "search_projection.git.jobs@startup@unsupported",
+        "search_projection.git.jobs@startup@inapplicable",
+        "search_projection.git.jobs@reload@unsupported",
+        "search_projection.git.jobs@reload@inapplicable",
+        "search_projection.git.jobs@dispatch@unsupported",
+        "search_projection.git.jobs@dispatch@inapplicable",
+        "search_projection.git.jobs@explicit@unsupported",
+        "search_projection.git.jobs@explicit@inapplicable",
+        "search_projection.git.sweeps@startup@unsupported",
+        "search_projection.git.sweeps@startup@inapplicable",
+        "search_projection.git.sweeps@reload@unsupported",
+        "search_projection.git.sweeps@reload@inapplicable",
+        "search_projection.git.sweeps@dispatch@unsupported",
+        "search_projection.git.sweeps@dispatch@inapplicable",
+        "search_projection.git.sweeps@explicit@unsupported",
+        "search_projection.git.sweeps@explicit@inapplicable",
+        "search_projection.git.leases@startup@unsupported",
+        "search_projection.git.leases@startup@inapplicable",
+        "search_projection.git.leases@reload@unsupported",
+        "search_projection.git.leases@reload@inapplicable",
+        "search_projection.git.leases@dispatch@unsupported",
+        "search_projection.git.leases@dispatch@inapplicable",
+        "search_projection.git.leases@explicit@unsupported",
+        "search_projection.git.leases@explicit@inapplicable"
       ],
       "independent_oracle": "Capability disposition from CC8 and evidence target identity; bounded scenario value distinguishes the two cases.",
       "negative_control": "Simulated capability or evidence applied to the wrong target must fail.",
@@ -1143,7 +1143,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_stale_grant_after_retirement",
+      "marker": "search_projection_stale_grant_after_retirement",
       "part": "projection-coverage",
       "property": "projection-canonical-eligibility-authority",
       "acceptance_criteria": [
@@ -1165,7 +1165,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_pinned_adapter_pair",
+      "marker": "search_projection_pinned_adapter_pair",
       "part": "projection-coverage",
       "property": "projection-canonical-eligibility-authority",
       "acceptance_criteria": [
@@ -1188,7 +1188,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_lexical_current_vector_old",
+      "marker": "search_projection_lexical_current_vector_old",
       "part": "projection-coverage",
       "property": "projection-lexical-dense-coverage-distinct",
       "acceptance_criteria": [
@@ -1210,7 +1210,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_same_render_new_revision",
+      "marker": "search_projection_same_render_new_revision",
       "part": "projection-coverage",
       "property": "projection-lexical-dense-coverage-distinct",
       "acceptance_criteria": [
@@ -1231,7 +1231,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_pending_full_next_commit",
+      "marker": "search_projection_pending_full_next_commit",
       "part": "projection-coverage",
       "property": "projection-bounded-admission-preserves-progress",
       "acceptance_criteria": [
@@ -1253,7 +1253,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_complete_commit_over_cap",
+      "marker": "search_projection_complete_commit_over_cap",
       "part": "projection-coverage",
       "property": "projection-bounded-admission-preserves-progress",
       "acceptance_criteria": [
@@ -1275,7 +1275,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_projection_remediation_without_revision_change",
+      "marker": "search_projection_remediation_without_revision_change",
       "part": "projection-coverage",
       "property": "projection-remediation-invalidates-derived-bytes",
       "acceptance_criteria": [
@@ -1299,7 +1299,7 @@
       "applicability_decision": "CC7: the approved mapping excludes domains.name; premise absent from scope"
     },
     {
-      "marker": "rp21_projection_acceptance_situations_witnessed",
+      "marker": "search_projection_acceptance_situations_witnessed",
       "part": "projection-coverage",
       "property": "projection-acceptance-situations-witnessed",
       "acceptance_criteria": [
@@ -1328,7 +1328,7 @@
       "cell_kind": "result"
     },
     {
-      "marker": "rp21_embedding_full_sequence_straddles_window",
+      "marker": "search_projection_embedding_full_sequence_straddles_window",
       "part": "embedding",
       "property": "embedding-count-authority-is-untruncated",
       "acceptance_criteria": [
@@ -1349,7 +1349,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_invalid_input_offered_to_ready_lane",
+      "marker": "search_projection_embedding_invalid_input_offered_to_ready_lane",
       "part": "embedding",
       "property": "embedding-input-is-rejected-before-inference",
       "acceptance_criteria": [
@@ -1373,7 +1373,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_pending_rediscovered_after_descriptor_loss",
+      "marker": "search_projection_embedding_pending_rediscovered_after_descriptor_loss",
       "part": "embedding",
       "property": "embedding-pending-drives-one-job-table",
       "acceptance_criteria": [
@@ -1396,7 +1396,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_identity_changed_with_result_held",
+      "marker": "search_projection_embedding_identity_changed_with_result_held",
       "part": "embedding",
       "property": "embedding-completion-is-identity-fenced",
       "acceptance_criteria": [
@@ -1423,7 +1423,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_process_killed_at_persistence_boundary",
+      "marker": "search_projection_embedding_process_killed_at_persistence_boundary",
       "part": "embedding",
       "property": "embedding-complete-requires-durable-vector",
       "acceptance_criteria": [
@@ -1446,7 +1446,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_restart_has_stable_pending_and_service",
+      "marker": "search_projection_embedding_restart_has_stable_pending_and_service",
       "part": "embedding",
       "property": "embedding-restart-retries-durable-pending",
       "acceptance_criteria": [
@@ -1468,7 +1468,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_query_arrives_during_backfill_saturation",
+      "marker": "search_projection_embedding_query_arrives_during_backfill_saturation",
       "part": "embedding",
       "property": "embedding-backfill-preserves-query-admission",
       "acceptance_criteria": [
@@ -1489,7 +1489,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_gc_candidate_has_concurrent_holder",
+      "marker": "search_projection_embedding_gc_candidate_has_concurrent_holder",
       "part": "embedding",
       "property": "embedding-identity-gc-preserves-live-work",
       "acceptance_criteria": [
@@ -1513,7 +1513,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_stop_occurs_with_native_work_held",
+      "marker": "search_projection_embedding_stop_occurs_with_native_work_held",
       "part": "embedding",
       "property": "embedding-supervisor-shares-budget-and-joins",
       "acceptance_criteria": [
@@ -1537,7 +1537,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_verified_path_replaced_after_load",
+      "marker": "search_projection_embedding_verified_path_replaced_after_load",
       "part": "embedding",
       "property": "embedding-count-authority-is-untruncated",
       "acceptance_criteria": [
@@ -1558,7 +1558,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_model_name_changes_without_fingerprint_change",
+      "marker": "search_projection_embedding_model_name_changes_without_fingerprint_change",
       "part": "embedding",
       "property": "embedding-completion-is-identity-fenced",
       "acceptance_criteria": [
@@ -1581,7 +1581,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_shared_payload_has_distinct_occurrences",
+      "marker": "search_projection_embedding_shared_payload_has_distinct_occurrences",
       "part": "embedding",
       "property": "embedding-identity-gc-preserves-live-work",
       "acceptance_criteria": [
@@ -1605,7 +1605,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_vector_commit_response_is_lost",
+      "marker": "search_projection_embedding_vector_commit_response_is_lost",
       "part": "embedding",
       "property": "embedding-complete-requires-durable-vector",
       "acceptance_criteria": [
@@ -1626,7 +1626,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_retryable_failure_precedes_recovery",
+      "marker": "search_projection_embedding_retryable_failure_precedes_recovery",
       "part": "embedding",
       "property": "embedding-restart-retries-durable-pending",
       "acceptance_criteria": [
@@ -1647,7 +1647,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_budget_crosses_between_stages",
+      "marker": "search_projection_embedding_budget_crosses_between_stages",
       "part": "embedding",
       "property": "embedding-supervisor-shares-budget-and-joins",
       "acceptance_criteria": [
@@ -1670,7 +1670,7 @@
       "cell_kind": "required"
     },
     {
-      "marker": "rp21_embedding_gc_obsolete_identity_is_unreferenced",
+      "marker": "search_projection_embedding_gc_obsolete_identity_is_unreferenced",
       "part": "embedding",
       "property": "embedding-identity-gc-preserves-live-work",
       "acceptance_criteria": [

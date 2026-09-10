@@ -50,7 +50,7 @@ The check applies per admitted recovery episode with independently witnessed
 premises. It remains RP2.9-blocked. A missing required episode cannot pass the
 [shared acceptance check](../../projection-coverage/catalog.md#projection-acceptance-situations-witnessed).
 Projection catch-up and authorized recovery have their own
-[convergence record](../../export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge).
+[convergence record](../../export-recovery/catalog.md#catchup-and-authorized-recovery-converge).
 
 ## What a test must construct
 
@@ -61,7 +61,7 @@ Stop faults and require Complete(K) plus V(K) within approved attempts/window.
 Include retryable execution failure, result expiry, and lost descriptor cases.
 Include a changed-identity control that becomes obsolete without completing
 newer work. Keep attempts, accepted jobs, and committed product effects separate.
-`rp21_embedding_restart_has_stable_pending_and_service` records a fresh process,
+`search_projection_embedding_restart_has_stable_pending_and_service` records a fresh process,
 durable current pending work, and available service, not successful recovery.
 No in-memory reset or orderly route close substitutes for actual termination.
 Adapt the existing kernel CAS process-crash pattern rather than add a broad

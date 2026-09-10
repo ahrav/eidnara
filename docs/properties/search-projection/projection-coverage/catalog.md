@@ -518,7 +518,7 @@ review or a successful acceptance campaign.
 [index]: ../../../../../commons/docs/plans/2026-09-10-eidnara-rp2-plan-index.md
 [parent]: ../../../../../commons/docs/plans/2026-09-08-0523-feat-eidnara-native-rust-cutover-plan.md
 [n1]: ../../../../../commons/docs/plans/2026-09-08-1614-feat-eidnara-rust-product-state-ownership-plan.md
-[ack-owner]: ../export-recovery/catalog.md#rp21-ack-follows-local-release
-[progress-owner]: ../export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge
+[ack-owner]: ../export-recovery/catalog.md#ack-follows-local-release
+[progress-owner]: ../export-recovery/catalog.md#catchup-and-authorized-recovery-converge
 [export-faults]: ../export-recovery/fault-map.md
 [embedding-faults]: ../embedding/fault-map.md

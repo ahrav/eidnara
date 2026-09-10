@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "identity_contract_version": "rp21-identity-v1",
+  "identity_contract_version": "search-projection-identity-v1",
   "ticket": "https://github.com/ahrav/eidnara/issues/352",
   "tuple_encoding": {
     "version_byte": 1,
@@ -217,13 +217,13 @@
     "default_state": "disabled"
   },
   "hooks": {
-    "rp21.message_cleanup": {
+    "search_projection.message_cleanup": {
       "classes": [
         "messages"
       ],
       "constructing_ticket": 377
     },
-    "rp21.embedding.bootstrap": {
+    "search_projection.embedding.bootstrap": {
       "classes": [
         "messages",
         "canonical_claims",
@@ -232,7 +232,7 @@
       ],
       "constructing_ticket": 368
     },
-    "rp21.embedding.routing": {
+    "search_projection.embedding.routing": {
       "classes": [
         "messages",
         "canonical_claims",
@@ -241,7 +241,7 @@
       ],
       "constructing_ticket": 368
     },
-    "rp21.embedding.registry": {
+    "search_projection.embedding.registry": {
       "classes": [
         "messages",
         "canonical_claims",
@@ -250,7 +250,7 @@
       ],
       "constructing_ticket": 368
     },
-    "rp21.embedding.backfill": {
+    "search_projection.embedding.backfill": {
       "classes": [
         "messages",
         "canonical_claims",
@@ -259,7 +259,7 @@
       ],
       "constructing_ticket": 371
     },
-    "rp21.embedding.identity_gc": {
+    "search_projection.embedding.identity_gc": {
       "classes": [
         "messages",
         "canonical_claims",
@@ -268,37 +268,37 @@
       ],
       "constructing_ticket": 370
     },
-    "rp21.promoted_memory.embeddings": {
+    "search_projection.promoted_memory.embeddings": {
       "classes": [
         "promoted_memory"
       ],
       "constructing_ticket": 374
     },
-    "rp21.git.ingest": {
+    "search_projection.git.ingest": {
       "classes": [
         "git_commits"
       ],
       "constructing_ticket": 375
     },
-    "rp21.git.durable_rows": {
+    "search_projection.git.durable_rows": {
       "classes": [
         "git_commits"
       ],
       "constructing_ticket": 375
     },
-    "rp21.git.jobs": {
+    "search_projection.git.jobs": {
       "classes": [
         "git_commits"
       ],
       "constructing_ticket": 375
     },
-    "rp21.git.sweeps": {
+    "search_projection.git.sweeps": {
       "classes": [
         "git_commits"
       ],
       "constructing_ticket": 376
     },
-    "rp21.git.leases": {
+    "search_projection.git.leases": {
       "classes": [
         "git_commits"
       ],

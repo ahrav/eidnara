@@ -51,7 +51,7 @@ counter that always returns an expected number. Include identity/count failure
 and a valid control input proving the engine boundary is reachable.
 Read lexical state independently before and after rejection, and observe no
 product completion for that K. Projection owns the coverage-state encoding.
-`rp21_embedding_invalid_input_offered_to_ready_lane` records the offered input
+`search_projection_embedding_invalid_input_offered_to_ready_lane` records the offered input
 and readiness, not the desired zero-call outcome. Inspect captured engine text
 for accepted cases to detect silent preflight trimming or replacement.
 Existing DeterministicEngine captures calls and text at

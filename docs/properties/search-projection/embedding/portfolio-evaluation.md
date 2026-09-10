@@ -51,7 +51,7 @@ Embedding adds no duplicate reachability record. The 16 marker names remain
 constant; applicable same-revision remediation extends an existing dimension.
 
 G2 belongs to export/recovery's
-[rp21-catchup-and-authorized-recovery-converge](../export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge).
+[catchup-and-authorized-recovery-converge](../export-recovery/catalog.md#catchup-and-authorized-recovery-converge).
 Embedding restart recovery consumes current durable pending state produced by
 that path. It does not duplicate steady catch-up or authorized recovery.
 

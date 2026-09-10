@@ -1,4 +1,4 @@
-# rp21-rebuild-after-pruning-converges
+# rebuild-after-pruning-converges
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -68,8 +68,8 @@ positive convergence case. A kept-disabled candidate is not successful recovery.
 5. Stop faults and pressure; admit one finite episode with fixed t0 and T.
 6. Require complete canonical coverage, compatible selection, and the declared
    ack completion boundary within `B_recovery_ms` and approved work/attempt caps.
-7. Use `rp21_rebuild_missing_db_after_prune` and
-   `rp21_rebuild_quiet_window_admitted` as independent situation witnesses.
+7. Use `search_projection_rebuild_missing_db_after_prune` and
+   `search_projection_rebuild_quiet_window_admitted` as independent situation witnesses.
 8. Report absence of approved bounds as blocked evaluation, never a pass.
 
 ## Investigation log
@@ -94,7 +94,7 @@ positive convergence case. A kept-disabled candidate is not successful recovery.
   reconciliation pending that decision; a later split needs an explicit bound
   for both phases, not an unbounded tail.
 
-The separate [catch-up and authorized recovery record](../catalog.md#rp21-catchup-and-authorized-recovery-converge)
+The separate [catch-up and authorized recovery record](../catalog.md#catchup-and-authorized-recovery-converge)
 owns ordinary finite-backlog progress and recovery from Disabled. This record
 keeps deletion after pruning as its required situation. Both use `always`
 per admitted episode and remain RP2.9-blocked rather than inventing timeouts.

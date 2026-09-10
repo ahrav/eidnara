@@ -1,4 +1,4 @@
-# rp21-export-predecode-bounds
+# export-predecode-bounds
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -70,8 +70,8 @@ are distinct limits; this property does not claim a bound on total RSS.
 6. Observe live decoded high water through a permitted, independently reviewed
    boundary on JSON shapes with different expansion. This observer is missing;
    cumulative perf counters or logical charge alone cannot clear the claim.
-7. Record `rp21_export_oversize_row_present` and
-   `rp21_export_page_budget_edge` from fixture sizes and requested keys.
+7. Record `search_projection_export_oversize_row_present` and
+   `search_projection_export_page_budget_edge` from fixture sizes and requested keys.
 
 ## Investigation log
 

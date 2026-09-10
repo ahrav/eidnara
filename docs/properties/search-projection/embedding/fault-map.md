@@ -37,19 +37,19 @@ maps. An optional or unreached inference path cannot pass embedding acceptance.
 
 | Property | Required faults and enabling state | Independent marker |
 | --- | --- | --- |
-| [embedding-count-authority-is-untruncated](catalog.md#embedding-count-authority-is-untruncated) | F1; oracle token sequence exceeds the window while bytes fit; both tokenizer artifact identities are observed. | `rp21_embedding_full_sequence_straddles_window` |
-| [embedding-input-is-rejected-before-inference](catalog.md#embedding-input-is-rejected-before-inference) | F2; invalid input is offered to a ready lane after a valid control input; startup call count has been recorded. | `rp21_embedding_invalid_input_offered_to_ready_lane` |
-| [embedding-pending-drives-one-job-table](catalog.md#embedding-pending-drives-one-job-table) | F3; committed K is discovered twice, with admission response suppressed and capacity pressure in a separate case. | `rp21_embedding_pending_rediscovered_after_descriptor_loss` |
-| [embedding-completion-is-identity-fenced](catalog.md#embedding-completion-is-identity-fenced) | F4; dispatch captures K, then an independent source/identity update commits before held completion is released. | `rp21_embedding_identity_changed_with_result_held` |
-| [embedding-complete-requires-durable-vector](catalog.md#embedding-complete-requires-durable-vector) | F5; a validated result exists and the process is terminated at a recorded persistence boundary. | `rp21_embedding_process_killed_at_persistence_boundary` |
-| [embedding-restart-retries-durable-pending](catalog.md#embedding-restart-retries-durable-pending) | F6; pre-crash durable Pending(K), fresh process/table, unchanged identity, and healthy recovery service window. | `rp21_embedding_restart_has_stable_pending_and_service` |
-| [embedding-backfill-preserves-query-admission](catalog.md#embedding-backfill-preserves-query-admission) | F7; backfill fills its declared envelope before a valid query arrives with query occupancy below its cap. | `rp21_embedding_query_arrives_during_backfill_saturation` |
-| [embedding-identity-gc-preserves-live-work](catalog.md#embedding-identity-gc-preserves-live-work) | F8; obsolete candidate selected while a result/reference is held; identity update or dispatch races its deletion phase. | `rp21_embedding_gc_candidate_has_concurrent_holder` |
-| [embedding-supervisor-shares-budget-and-joins](catalog.md#embedding-supervisor-shares-budget-and-joins) | F9; cancellation/deadline is observed independently while native work is blocked and another slice is due. | `rp21_embedding_stop_occurs_with_native_work_held` |
+| [embedding-count-authority-is-untruncated](catalog.md#embedding-count-authority-is-untruncated) | F1; oracle token sequence exceeds the window while bytes fit; both tokenizer artifact identities are observed. | `search_projection_embedding_full_sequence_straddles_window` |
+| [embedding-input-is-rejected-before-inference](catalog.md#embedding-input-is-rejected-before-inference) | F2; invalid input is offered to a ready lane after a valid control input; startup call count has been recorded. | `search_projection_embedding_invalid_input_offered_to_ready_lane` |
+| [embedding-pending-drives-one-job-table](catalog.md#embedding-pending-drives-one-job-table) | F3; committed K is discovered twice, with admission response suppressed and capacity pressure in a separate case. | `search_projection_embedding_pending_rediscovered_after_descriptor_loss` |
+| [embedding-completion-is-identity-fenced](catalog.md#embedding-completion-is-identity-fenced) | F4; dispatch captures K, then an independent source/identity update commits before held completion is released. | `search_projection_embedding_identity_changed_with_result_held` |
+| [embedding-complete-requires-durable-vector](catalog.md#embedding-complete-requires-durable-vector) | F5; a validated result exists and the process is terminated at a recorded persistence boundary. | `search_projection_embedding_process_killed_at_persistence_boundary` |
+| [embedding-restart-retries-durable-pending](catalog.md#embedding-restart-retries-durable-pending) | F6; pre-crash durable Pending(K), fresh process/table, unchanged identity, and healthy recovery service window. | `search_projection_embedding_restart_has_stable_pending_and_service` |
+| [embedding-backfill-preserves-query-admission](catalog.md#embedding-backfill-preserves-query-admission) | F7; backfill fills its declared envelope before a valid query arrives with query occupancy below its cap. | `search_projection_embedding_query_arrives_during_backfill_saturation` |
+| [embedding-identity-gc-preserves-live-work](catalog.md#embedding-identity-gc-preserves-live-work) | F8; obsolete candidate selected while a result/reference is held; identity update or dispatch races its deletion phase. | `search_projection_embedding_gc_candidate_has_concurrent_holder` |
+| [embedding-supervisor-shares-budget-and-joins](catalog.md#embedding-supervisor-shares-budget-and-joins) | F9; cancellation/deadline is observed independently while native work is blocked and another slice is due. | `search_projection_embedding_stop_occurs_with_native_work_held` |
 
 ### Completion-fence scenario dimensions
 
-`rp21_embedding_identity_changed_with_result_held` covers independent changes
+`search_projection_embedding_identity_changed_with_result_held` covers independent changes
 to revision, model, fingerprint, dimensions, epoch, input hash, and tombstone
 state. Extend its input-hash dimension with same-revision operator remediation
 when the approved input mapping depends on the changed field. This is not a
@@ -73,13 +73,13 @@ They prevent a broad marker from hiding an omitted conjunct of a record.
 
 | Marker | Required observation |
 | --- | --- |
-| `rp21_embedding_verified_path_replaced_after_load` | Verified bytes are retained and the corresponding artifact pathname is replaced before counting. |
-| `rp21_embedding_model_name_changes_without_fingerprint_change` | Model name changes while fingerprint and vector dimension are deliberately held equal. |
-| `rp21_embedding_shared_payload_has_distinct_occurrences` | Two occurrence IDs with identical payload bytes coexist during completion or GC. |
-| `rp21_embedding_vector_commit_response_is_lost` | Storage commit is attempted and its response is suppressed before completion is attempted. |
-| `rp21_embedding_retryable_failure_precedes_recovery` | A submitted attempt receives the injected retryable failure before the fault-free window starts. |
-| `rp21_embedding_budget_crosses_between_stages` | The original D is crossed between two stage entry points while the operation still has work. |
-| `rp21_embedding_gc_obsolete_identity_is_unreferenced` | An independently identified obsolete identity has no live reference before the bounded GC slice. |
+| `search_projection_embedding_verified_path_replaced_after_load` | Verified bytes are retained and the corresponding artifact pathname is replaced before counting. |
+| `search_projection_embedding_model_name_changes_without_fingerprint_change` | Model name changes while fingerprint and vector dimension are deliberately held equal. |
+| `search_projection_embedding_shared_payload_has_distinct_occurrences` | Two occurrence IDs with identical payload bytes coexist during completion or GC. |
+| `search_projection_embedding_vector_commit_response_is_lost` | Storage commit is attempted and its response is suppressed before completion is attempted. |
+| `search_projection_embedding_retryable_failure_precedes_recovery` | A submitted attempt receives the injected retryable failure before the fault-free window starts. |
+| `search_projection_embedding_budget_crosses_between_stages` | The original D is crossed between two stage entry points while the operation still has work. |
+| `search_projection_embedding_gc_obsolete_identity_is_unreferenced` | An independently identified obsolete identity has no live reference before the bounded GC slice. |
 
 No marker requires stale work to complete, a vector to be lost, admission to
 starve, or resources to leak. An unfired marker is a workload gap or a changed

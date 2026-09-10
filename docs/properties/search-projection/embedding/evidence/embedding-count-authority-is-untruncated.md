@@ -53,7 +53,7 @@ different suffixes, Unicode, special-token-looking text, and short/long batch
 neighbors. Record the count's artifact digest receipt and returned unit.
 Replace the artifact pathname after verification while retaining verified bytes.
 Compare repeated counts and batch-independent counts to the fixture sequence.
-The marker `rp21_embedding_full_sequence_straddles_window` observes the oracle
+The marker `search_projection_embedding_full_sequence_straddles_window` observes the oracle
 input condition, not whether the implementation silently truncates.
 Route fixture and type-boundary decisions to `/testing:test-strategy`.
 

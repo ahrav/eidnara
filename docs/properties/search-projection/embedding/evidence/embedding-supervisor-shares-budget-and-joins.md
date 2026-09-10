@@ -58,8 +58,8 @@ response while its task, CPU permit, and charges remain live. Release the gate
 and observe physical completion before counting those resources as reclaimed.
 Make another maintenance slice due while a bounded embedding slice runs.
 Check work counters and admission after stop, not just a task handle's status.
-`rp21_embedding_stop_occurs_with_native_work_held` witnesses stop plus physical
-work; `rp21_embedding_budget_crosses_between_stages` witnesses deadline carry.
+`search_projection_embedding_stop_occurs_with_native_work_held` witnesses stop plus physical
+work; `search_projection_embedding_budget_crosses_between_stages` witnesses deadline carry.
 For a never-returning backend, report the missing physical-drain guarantee
 instead of interpreting an arbitrary harness timeout as a successful join.
 

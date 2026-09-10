@@ -66,7 +66,7 @@ Use valid vector shape when testing other identity fields so a shape rejection
 does not mask a missing revision or model comparison.
 Observe the product write boundary and compare current vector/completion state
 to an independent pre-result snapshot. A matching control case must complete.
-`rp21_embedding_identity_changed_with_result_held` records the update window;
+`search_projection_embedding_identity_changed_with_result_held` records the update window;
 its input-hash dimension includes applicable same-revision remediation. No new
 marker is needed, and acceptance/rejection is not part of its precondition.
 

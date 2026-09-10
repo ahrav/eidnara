@@ -107,4 +107,4 @@ unaudited adjacent coverage. Their exact guarantees are reused by link in
 [memory]: ../../../../../crates/daemon/src/canonical_memory.rs#L141-L212
 [tool]: ../../../../../crates/daemon/src/codec/opencode.rs#L490-L559
 [workspace]: ../../../../../Cargo.toml#L3-L17
-[progress]: ../../export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge
+[progress]: ../../export-recovery/catalog.md#catchup-and-authorized-recovery-converge

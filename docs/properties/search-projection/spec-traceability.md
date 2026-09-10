@@ -78,16 +78,16 @@ All records remain proposed, active, `test-only`, and unexercised.
 
 | Canonical property | Specification obligation | Testing seam |
 | --- | --- | --- |
-| [rp21-export-fixed-s-exactly-once](export-recovery/catalog.md#rp21-export-fixed-s-exactly-once) | C2/C4; U1; AC1/AC10 | T4 exact S/key/byte ledger; conditional remediation. |
-| [rp21-export-retention-fence-covers-read](export-recovery/catalog.md#rp21-export-retention-fence-covers-read) | C2; U1/U5; AC1 | T7 registration/source-history loss, with T4 oracle. |
-| [rp21-export-predecode-bounds](export-recovery/catalog.md#rp21-export-predecode-bounds) | C2/C6; U1; AC1 | T6 size/decode/high-water observations. |
-| [rp21-catchup-complete-commit-prefix](export-recovery/catalog.md#rp21-catchup-complete-commit-prefix) | C2/C3; U2/U5; AC2 | T4 split/published/empty/control commit ledger. |
-| [rp21-ack-follows-local-release](export-recovery/catalog.md#rp21-ack-follows-local-release) | C3; U2; AC2 | T5 local release/kernel writer/ack and response loss. |
-| [rp21-replacement-selects-complete-compatible-state](export-recovery/catalog.md#rp21-replacement-selects-complete-compatible-state) | C7; U5; AC6 | T5 selector crash/reopen, compatibility and consumer release. |
-| [rp21-rebuild-after-pruning-converges](export-recovery/catalog.md#rp21-rebuild-after-pruning-converges) | C7; U5; AC7 | T9 deletion-after-pruning bounded episode. |
-| [rp21-catchup-and-authorized-recovery-converge](export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge) | C7; U5; AC7/AC9 | T9 normal and explicitly authorized recovery modes. |
-| [rp21-disable-preserves-consumer-obligations](export-recovery/catalog.md#rp21-disable-preserves-consumer-obligations) | Failure and Rollback; U5; AC9 | T7 lagging/caught-up and last/non-last/barrier lifecycle matrix. |
-| [rp21-recovery-preserves-canonical-authority](export-recovery/catalog.md#rp21-recovery-preserves-canonical-authority) | C1/C7; Failure and Rollback; AC6 | T7 canonical mutation ledger and final verdicts. |
+| [export-fixed-s-exactly-once](export-recovery/catalog.md#export-fixed-s-exactly-once) | C2/C4; U1; AC1/AC10 | T4 exact S/key/byte ledger; conditional remediation. |
+| [export-retention-fence-covers-read](export-recovery/catalog.md#export-retention-fence-covers-read) | C2; U1/U5; AC1 | T7 registration/source-history loss, with T4 oracle. |
+| [export-predecode-bounds](export-recovery/catalog.md#export-predecode-bounds) | C2/C6; U1; AC1 | T6 size/decode/high-water observations. |
+| [catchup-complete-commit-prefix](export-recovery/catalog.md#catchup-complete-commit-prefix) | C2/C3; U2/U5; AC2 | T4 split/published/empty/control commit ledger. |
+| [ack-follows-local-release](export-recovery/catalog.md#ack-follows-local-release) | C3; U2; AC2 | T5 local release/kernel writer/ack and response loss. |
+| [replacement-selects-complete-compatible-state](export-recovery/catalog.md#replacement-selects-complete-compatible-state) | C7; U5; AC6 | T5 selector crash/reopen, compatibility and consumer release. |
+| [rebuild-after-pruning-converges](export-recovery/catalog.md#rebuild-after-pruning-converges) | C7; U5; AC7 | T9 deletion-after-pruning bounded episode. |
+| [catchup-and-authorized-recovery-converge](export-recovery/catalog.md#catchup-and-authorized-recovery-converge) | C7; U5; AC7/AC9 | T9 normal and explicitly authorized recovery modes. |
+| [disable-preserves-consumer-obligations](export-recovery/catalog.md#disable-preserves-consumer-obligations) | Failure and Rollback; U5; AC9 | T7 lagging/caught-up and last/non-last/barrier lifecycle matrix. |
+| [recovery-preserves-canonical-authority](export-recovery/catalog.md#recovery-preserves-canonical-authority) | C1/C7; Failure and Rollback; AC6 | T7 canonical mutation ledger and final verdicts. |
 | [projection-commit-checkpoint-pending-atomic](projection-coverage/catalog.md#projection-commit-checkpoint-pending-atomic) | C3; U2; AC2 | T5 reopened rows/checkpoint/pending prefix. |
 | [projection-replay-does-not-resurrect](projection-coverage/catalog.md#projection-replay-does-not-resurrect) | C3; U2; AC2/AC3 | T4 duplicate/overlap/old-prefix replay. |
 | [projection-occurrence-payload-separation](projection-coverage/catalog.md#projection-occurrence-payload-separation) | C4; KTD4; U2; AC3 | T1 independent tuples/bytes and collision. |

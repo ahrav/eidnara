@@ -95,4 +95,4 @@ The catalog does not prescribe a second queue, retry plane or arbitrary timeout.
 [test]: ../../../../../crates/kernel/tests/kernel_outbox.rs#L622-L698
 [ack]: ../../../../../crates/kernel/src/outbox.rs#L530-L570
 [workspace]: ../../../../../Cargo.toml#L3-L17
-[ack-owner]: ../../export-recovery/catalog.md#rp21-ack-follows-local-release
+[ack-owner]: ../../export-recovery/catalog.md#ack-follows-local-release

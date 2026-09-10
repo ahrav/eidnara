@@ -73,7 +73,7 @@ Required work cannot disappear merely because process-local dispatch occurred.
 5. A second local reader during commit so mixed local state is observable.
 6. Per-identity comparison of rows, tombstones, checkpoint and outstanding work.
 7. The local precommit kill marker in [fault-map](../fault-map.md), plus the
-   canonical `rp21_ack_local_commit_interrupted` and `rp21_ack_response_lost`
+   canonical `search_projection_ack_local_commit_interrupted` and `search_projection_ack_response_lost`
    witnesses from [export/recovery][export-faults] where the episode uses them.
 
 The product construction is proposed. CAS kill/barrier/reopen machinery exists;
@@ -105,7 +105,7 @@ Physical power-loss durability needs separate storage-contract evidence.
 [ack]: ../../../../../crates/kernel/src/outbox.rs#L530-L570
 [pending]: ../../../../../crates/kernel/src/outbox.rs#L419-L477
 [workspace]: ../../../../../Cargo.toml#L3-L17
-[ack-owner]: ../../export-recovery/catalog.md#rp21-ack-follows-local-release
+[ack-owner]: ../../export-recovery/catalog.md#ack-follows-local-release
 [export-faults]: ../../export-recovery/fault-map.md
 [crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L1046-L1094
 [reopen]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990

@@ -32,10 +32,10 @@ reran the evaluator's four lenses independently.
 | Finding | Class | Disposition and evidence |
 | --- | --- | --- |
 | G1: remediation can change canonical bytes without source revision | gap, qualified | Added [projection-remediation-invalidates-derived-bytes][remediation]. `crates/kernel/src/envelope.rs:395-438` rewrites only `domains.name` and emits `operator_remediation`; no RP2.1 input dependence is established. The record requires approved bounded mapping and independently reconstructed current bytes/hash. It does not assume all occurrence or embedding-key fields agree, mandate a generation/revision, or invent an erasure SLA. |
-| G2: ordinary catch-up and authorized recovery need finite convergence | gap, cross-part owner | Linked [rp21-catchup-and-authorized-recovery-converge][progress]. Export/recovery owns progress and `Current` outcomes; RP2.9 owns numeric bounds. Projection completeness and the root witness matrix consume those outcomes without another liveness algorithm. |
+| G2: ordinary catch-up and authorized recovery need finite convergence | gap, cross-part owner | Linked [catchup-and-authorized-recovery-converge][progress]. Export/recovery owns progress and `Current` outcomes; RP2.9 owns numeric bounds. Projection completeness and the root witness matrix consume those outcomes without another liveness algorithm. |
 | G3: crash substrate exists even though product hooks do not | refinement | Inventoried `cas_fault_injection.rs:1046-1094` kill/barrier/reap and `:350-388,924-990` reopened-state comparison as unaudited. Search/embedding product hooks and oracles remain missing. No power-loss proof or RP2.9 timeout is inferred from the CAS tests. |
-| G4: offered source input does not reach completeness antecedent | gap | Added `rp21_projection_complete_declared_nonempty_inventory`: a product completeness declaration plus known nonempty independent bounded inventory. Correctness of its contents is a separate safety check. |
-| R1: local atomicity duplicated ack bounds and lock order | refinement | Local atomic CHECK now covers rows/checkpoint/pending only. [rp21-ack-follows-local-release][ack-owner] is sole ack/order owner. Duplicate local ack markers are removed; references consume canonical lowercase names from [export fault map][export-map]. Local precommit kill remains here. |
+| G4: offered source input does not reach completeness antecedent | gap | Added `search_projection_complete_declared_nonempty_inventory`: a product completeness declaration plus known nonempty independent bounded inventory. Correctness of its contents is a separate safety check. |
+| R1: local atomicity duplicated ack bounds and lock order | refinement | Local atomic CHECK now covers rows/checkpoint/pending only. [ack-follows-local-release][ack-owner] is sole ack/order owner. Duplicate local ack markers are removed; references consume canonical lowercase names from [export fault map][export-map]. Local precommit kill remains here. |
 | R3: evidence gate classified as live absent-route behavior | refinement | `projection-n13-hooks-stay-gated` is `test-only`, `Exercised: not yet`. Existing route/config tests are adjacent unaudited checks, not gate exercise. Missing, failed and unsupported/inapplicable evidence have separate scenario markers. |
 | R4: index omitted confidence | refinement | Index now uses `Slug | Type | Reachability | Semantics | Status | Confidence`, matching each record. |
 | R7: test location described as reader | refinement | `canonical_memory.rs:282-312` is explicitly a test; `:141-212` is the reader. Neither is a full source oracle. |
@@ -103,7 +103,7 @@ and no completed acceptance campaign is claimed.
 
 [remediation]: catalog.md#projection-remediation-invalidates-derived-bytes
 [acceptance]: catalog.md#projection-acceptance-situations-witnessed
-[ack-owner]: ../export-recovery/catalog.md#rp21-ack-follows-local-release
-[progress]: ../export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge
+[ack-owner]: ../export-recovery/catalog.md#ack-follows-local-release
+[progress]: ../export-recovery/catalog.md#catchup-and-authorized-recovery-converge
 [export-map]: ../export-recovery/fault-map.md
 [legacy]: existing-checks.md#legacy-catalog-currency-and-policy-limits

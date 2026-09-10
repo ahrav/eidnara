@@ -1,4 +1,4 @@
-# rp21-recovery-preserves-canonical-authority
+# recovery-preserves-canonical-authority
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -71,8 +71,8 @@ policy. Recovery orchestration must preserve both authorities, not copy either.
 5. Compare source facts to the independent ledger after each recovery mutation;
    separately reconcile authorized registration/ack/abandon control records.
 6. Check that every used occurrence has canonical authorization and validation.
-7. Record `rp21_recovery_stale_authority`, `rp21_recovery_contract_mismatch`, and
-   `rp21_recovery_authority_unavailable` from fixture changes and fault injection.
+7. Record `search_projection_recovery_stale_authority`, `search_projection_recovery_contract_mismatch`, and
+   `search_projection_recovery_authority_unavailable` from fixture changes and fault injection.
 8. Do not let the system under test label its own arbitrary writes legitimate.
 
 ## Investigation log

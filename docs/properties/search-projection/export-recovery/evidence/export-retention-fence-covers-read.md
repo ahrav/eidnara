@@ -1,4 +1,4 @@
-# rp21-export-retention-fence-covers-read
+# export-retention-fence-covers-read
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -68,8 +68,8 @@ Source retention must honor canonical deletion authority rather than override it
 4. Observe explicit abort and exclusion of the partial candidate from selection.
 5. Inject cleanup failure and require visible failure/pending cleanup, not a
    success claim that the partial artifact was removed.
-6. Record `rp21_export_prune_with_fence` and
-   `rp21_export_retention_lost_mid_build` from the independent fault controller.
+6. Record `search_projection_export_prune_with_fence` and
+   `search_projection_export_retention_lost_mid_build` from the independent fault controller.
 7. Keep positive convergence separate: that episode has retained sources for
    the entire admitted recovery window.
 

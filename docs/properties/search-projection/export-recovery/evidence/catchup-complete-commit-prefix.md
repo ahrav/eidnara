@@ -1,4 +1,4 @@
-# rp21-catchup-complete-commit-prefix
+# catchup-complete-commit-prefix
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -66,9 +66,9 @@ as if they used the same units. The ack-order record consumes this prefix.
 4. Repeat a delivered batch and interrupt between two parts of one commit.
 5. Compare applied logical commit/ordinal history with an independent ledger.
 6. Require no durable prefix advancement on a partial commit or read failure.
-7. Record `rp21_catchup_split_commit`, `rp21_catchup_published_retained`, and
-   `rp21_catchup_empty_commit` from inputs/delivery, independently of success.
-   The shared `rp21_export_operator_remediation_during_snapshot` witness
+7. Record `search_projection_catchup_split_commit`, `search_projection_catchup_published_retained`, and
+   `search_projection_catchup_empty_commit` from inputs/delivery, independently of success.
+   The shared `search_projection_export_operator_remediation_during_snapshot` witness
    constructs a remediation event for later catch-up without assuming its
    field is projected or mandating a new occurrence generation.
 

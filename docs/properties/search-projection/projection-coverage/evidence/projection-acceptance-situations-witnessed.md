@@ -78,7 +78,7 @@ All numeric limits, recovery windows and work caps remain RP2.9 approvals.
    required supported-path controls that the negative cases cannot substitute for.
 7. A completed witness ledger whose missing/unknown/skipped cells cause failure.
    It must not silently rebuild `R` from the markers that happened to fire.
-8. Fixed root marker `rp21_projection_acceptance_situations_witnessed`; all
+8. Fixed root marker `search_projection_acceptance_situations_witnessed`; all
    scenario identities are data attached to constant marker names.
 
 The [binding matrix](../fault-map.md#binding-acceptance-matrix) is the reusable
@@ -104,5 +104,5 @@ required observations and the coordinator owns approval and scope.
 [projection-map]: ../fault-map.md
 [export-map]: ../../export-recovery/fault-map.md
 [embedding-map]: ../../embedding/fault-map.md
-[progress]: ../../export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge
+[progress]: ../../export-recovery/catalog.md#catchup-and-authorized-recovery-converge
 [cas]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L391-L423

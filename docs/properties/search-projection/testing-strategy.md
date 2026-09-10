@@ -85,8 +85,8 @@ projected hash, ignore one identity dimension, or delete a live holder.
 
 Primary properties:
 
-- [rp21-export-fixed-s-exactly-once](export-recovery/catalog.md#rp21-export-fixed-s-exactly-once)
-- [rp21-catchup-complete-commit-prefix](export-recovery/catalog.md#rp21-catchup-complete-commit-prefix)
+- [export-fixed-s-exactly-once](export-recovery/catalog.md#export-fixed-s-exactly-once)
+- [catchup-complete-commit-prefix](export-recovery/catalog.md#catchup-complete-commit-prefix)
 - [projection-replay-does-not-resurrect](projection-coverage/catalog.md#projection-replay-does-not-resurrect)
 - [projection-source-inventory-complete](projection-coverage/catalog.md#projection-source-inventory-complete)
 - [projection-lexical-dense-coverage-distinct](projection-coverage/catalog.md#projection-lexical-dense-coverage-distinct)
@@ -119,9 +119,9 @@ oracle; preserve exact required identifiers, revisions, and bytes.
 Primary properties:
 
 - [projection-commit-checkpoint-pending-atomic](projection-coverage/catalog.md#projection-commit-checkpoint-pending-atomic)
-- [rp21-ack-follows-local-release](export-recovery/catalog.md#rp21-ack-follows-local-release)
+- [ack-follows-local-release](export-recovery/catalog.md#ack-follows-local-release)
 - [embedding-complete-requires-durable-vector](embedding/catalog.md#embedding-complete-requires-durable-vector)
-- [rp21-replacement-selects-complete-compatible-state](export-recovery/catalog.md#rp21-replacement-selects-complete-compatible-state)
+- [replacement-selects-complete-compatible-state](export-recovery/catalog.md#replacement-selects-complete-compatible-state)
 
 Reuse CAS child stdout barrier, bounded parent wait, kill/reap, and reopened-state
 comparison. Introduce only concrete product cuts around local COMMIT/release,
@@ -131,8 +131,8 @@ executed in a surviving process is not a crash. Recover twice and compare the
 same independently specified complete prefix and selected compatible state.
 
 Projection owns local rows/checkpoint/pending atomicity. Export/recovery alone
-owns ack/lock ordering and `rp21_ack_local_commit_interrupted` plus
-`rp21_ack_response_lost`; reuse those definitions. Embedding owns durable
+owns ack/lock ordering and `search_projection_ack_local_commit_interrupted` plus
+`search_projection_ack_response_lost`; reuse those definitions. Embedding owns durable
 vector-before-completion. Count attempts and observed acknowledgements separately
 from durable effects per identity. Lost responses remain unknown until readback;
 aggregate totals can conceal per-identity duplication or loss.
@@ -148,7 +148,7 @@ power-loss, torn-write, or cold-device persistence.
 
 Primary properties:
 
-- [rp21-export-predecode-bounds](export-recovery/catalog.md#rp21-export-predecode-bounds)
+- [export-predecode-bounds](export-recovery/catalog.md#export-predecode-bounds)
 - [projection-bounded-admission-preserves-progress](projection-coverage/catalog.md#projection-bounded-admission-preserves-progress)
 
 Observe independently measured encoded sizes and decoder/materialization entry
@@ -170,11 +170,11 @@ only RP2.9-approved envelopes can clear acceptance bounds.
 
 Primary properties:
 
-- [rp21-export-retention-fence-covers-read](export-recovery/catalog.md#rp21-export-retention-fence-covers-read)
+- [export-retention-fence-covers-read](export-recovery/catalog.md#export-retention-fence-covers-read)
 - [projection-n13-hooks-stay-gated](projection-coverage/catalog.md#projection-n13-hooks-stay-gated)
 - [projection-canonical-eligibility-authority](projection-coverage/catalog.md#projection-canonical-eligibility-authority)
-- [rp21-disable-preserves-consumer-obligations](export-recovery/catalog.md#rp21-disable-preserves-consumer-obligations)
-- [rp21-recovery-preserves-canonical-authority](export-recovery/catalog.md#rp21-recovery-preserves-canonical-authority)
+- [disable-preserves-consumer-obligations](export-recovery/catalog.md#disable-preserves-consumer-obligations)
+- [recovery-preserves-canonical-authority](export-recovery/catalog.md#recovery-preserves-canonical-authority)
 
 Use real daemon/kernel fixtures, independent source and hook inventories, and
 actual consumer/barrier rows. Attempt pruning under a valid export fence and
@@ -227,8 +227,8 @@ bounds before this group can establish bounded service.
 
 Primary properties:
 
-- [rp21-rebuild-after-pruning-converges](export-recovery/catalog.md#rp21-rebuild-after-pruning-converges)
-- [rp21-catchup-and-authorized-recovery-converge](export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge)
+- [rebuild-after-pruning-converges](export-recovery/catalog.md#rebuild-after-pruning-converges)
+- [catchup-and-authorized-recovery-converge](export-recovery/catalog.md#catchup-and-authorized-recovery-converge)
 - [embedding-restart-retries-durable-pending](embedding/catalog.md#embedding-restart-retries-durable-pending)
 
 Construct four explicit episodes: ordinary finite backlog; projection deletion

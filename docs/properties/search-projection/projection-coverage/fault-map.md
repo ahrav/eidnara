@@ -40,30 +40,30 @@ cannot stand in for model, scope and sensitivity cases.
 
 | Property | Constant marker | Independent preconditions |
 | --- | --- | --- |
-| [projection-commit-checkpoint-pending-atomic][atomic] | `rp21_projection_atomic_uncommitted_kill` | A multirow dense-required commit enters the local transaction and the process is killed before COMMIT is issued. |
-| [projection-replay-does-not-resurrect][replay] | `rp21_projection_old_prefix_after_delete` | A deletion commit and a later old-prefix delivery are both issued against the same source lineage. |
-| [projection-replay-does-not-resurrect][replay] | `rp21_projection_duplicate_after_reopen` | A prefix has been applied, the store reopens, and identical input is delivered again. |
-| [projection-occurrence-payload-separation][identity] | `rp21_projection_equal_bytes_distinct_tuples` | Two fixture-owned source tuples differ while their independently captured payload bytes are equal. |
-| [projection-occurrence-payload-separation][identity] | `rp21_projection_forced_payload_collision` | Two unequal source buffers are submitted with an injected identical digest result. |
-| [projection-source-inventory-complete][inventory] | `rp21_projection_messages_revised` | Message input and its later source revision are offered through the source adapter. |
-| [projection-source-inventory-complete][inventory] | `rp21_projection_claims_deleted` | Canonical claim creation and retirement are committed. |
-| [projection-source-inventory-complete][inventory] | `rp21_projection_promoted_memory_revised` | An explicitly promoted memory and its canonical replacement are committed. |
-| [projection-source-inventory-complete][inventory] | `rp21_projection_git_rows_removed` | Durable commit-source entries and a source-policy removal event are offered. |
-| [projection-source-inventory-complete][inventory] | `rp21_projection_tool_selection_changed` | A raw tool result is offered under two declared span selections. |
-| [projection-source-inventory-complete][inventory] | `rp21_projection_complete_declared_nonempty_inventory` | The independent bounded source inventory `E(c,p)` is known and nonempty, and the product emits a completeness declaration for that checkpoint/policy. Equality with the projection is checked separately. |
-| [projection-raw-tools-exact-and-lexical][raw] | `rp21_projection_raw_multibyte_default` | A source buffer with multibyte text, CRLF and overlapping selected spans is offered with default dense-tool policy disabled. |
-| [projection-raw-tools-exact-and-lexical][raw] | `rp21_projection_raw_multipart_error` | An error result with multiple native parts is captured before any projection conversion. |
-| [projection-n13-hooks-stay-gated][gates] | `rp21_projection_missing_gate_evidence` | A named N1.3 activation is attempted with required acceptance evidence absent; the scenario identifies the missing gate and entry point. |
-| [projection-n13-hooks-stay-gated][gates] | `rp21_projection_failed_gate_evidence` | A named N1.3 activation is attempted with present evidence that fails its required gate; the scenario identifies the failed gate and entry point. |
-| [projection-n13-hooks-stay-gated][gates] | `rp21_projection_unsupported_or_inapplicable_evidence` | Activation is attempted with an unsupported adapter or evidence inapplicable to its target. A bounded scenario value distinguishes these two cases from missing and failed evidence. |
-| [projection-canonical-eligibility-authority][eligibility] | `rp21_projection_stale_grant_after_retirement` | A projected grant is retained, its canonical source is retired, and both adapter validations are requested. |
-| [projection-canonical-eligibility-authority][eligibility] | `rp21_projection_pinned_adapter_pair` | Both adapters receive the same mixed candidate batch, scope, destination and pinned canonical facts. |
-| [projection-lexical-dense-coverage-distinct][coverage] | `rp21_projection_lexical_current_vector_old` | A lexical row is current and fixture-owned vector metadata names an older revision or model before the report is requested. |
-| [projection-lexical-dense-coverage-distinct][coverage] | `rp21_projection_same_render_new_revision` | Two source revisions render equal text but retain different canonical revision identities. |
-| [projection-bounded-admission-preserves-progress][bounds] | `rp21_projection_pending_full_next_commit` | Pending count equals the approved cap and a complete source commit requiring another job is offered. |
-| [projection-bounded-admission-preserves-progress][bounds] | `rp21_projection_complete_commit_over_cap` | Fixture-measured bytes or row count of one complete commit exceed the declared local cap before admission. |
-| [projection-remediation-invalidates-derived-bytes][remediation] | `rp21_projection_remediation_without_revision_change` | A witnessed `domains.name` remediation changes independently reconstructed input bytes under approved bounded `M`, while the canonical source revision is unchanged. Record actual before/after occurrence tuples and input hashes; do not assert that every embedding-key field agrees. |
-| [projection-acceptance-situations-witnessed][acceptance] | `rp21_projection_acceptance_situations_witnessed` | A completed approved campaign has independent witnesses for every required cell of its frozen nonempty three-surface matrix `R`. The root marker is excluded from `R`; unknown, skipped or unfired required cells prevent this witness. |
+| [projection-commit-checkpoint-pending-atomic][atomic] | `search_projection_atomic_uncommitted_kill` | A multirow dense-required commit enters the local transaction and the process is killed before COMMIT is issued. |
+| [projection-replay-does-not-resurrect][replay] | `search_projection_old_prefix_after_delete` | A deletion commit and a later old-prefix delivery are both issued against the same source lineage. |
+| [projection-replay-does-not-resurrect][replay] | `search_projection_duplicate_after_reopen` | A prefix has been applied, the store reopens, and identical input is delivered again. |
+| [projection-occurrence-payload-separation][identity] | `search_projection_equal_bytes_distinct_tuples` | Two fixture-owned source tuples differ while their independently captured payload bytes are equal. |
+| [projection-occurrence-payload-separation][identity] | `search_projection_forced_payload_collision` | Two unequal source buffers are submitted with an injected identical digest result. |
+| [projection-source-inventory-complete][inventory] | `search_projection_messages_revised` | Message input and its later source revision are offered through the source adapter. |
+| [projection-source-inventory-complete][inventory] | `search_projection_claims_deleted` | Canonical claim creation and retirement are committed. |
+| [projection-source-inventory-complete][inventory] | `search_projection_promoted_memory_revised` | An explicitly promoted memory and its canonical replacement are committed. |
+| [projection-source-inventory-complete][inventory] | `search_projection_git_rows_removed` | Durable commit-source entries and a source-policy removal event are offered. |
+| [projection-source-inventory-complete][inventory] | `search_projection_tool_selection_changed` | A raw tool result is offered under two declared span selections. |
+| [projection-source-inventory-complete][inventory] | `search_projection_complete_declared_nonempty_inventory` | The independent bounded source inventory `E(c,p)` is known and nonempty, and the product emits a completeness declaration for that checkpoint/policy. Equality with the projection is checked separately. |
+| [projection-raw-tools-exact-and-lexical][raw] | `search_projection_raw_multibyte_default` | A source buffer with multibyte text, CRLF and overlapping selected spans is offered with default dense-tool policy disabled. |
+| [projection-raw-tools-exact-and-lexical][raw] | `search_projection_raw_multipart_error` | An error result with multiple native parts is captured before any projection conversion. |
+| [projection-n13-hooks-stay-gated][gates] | `search_projection_missing_gate_evidence` | A named N1.3 activation is attempted with required acceptance evidence absent; the scenario identifies the missing gate and entry point. |
+| [projection-n13-hooks-stay-gated][gates] | `search_projection_failed_gate_evidence` | A named N1.3 activation is attempted with present evidence that fails its required gate; the scenario identifies the failed gate and entry point. |
+| [projection-n13-hooks-stay-gated][gates] | `search_projection_unsupported_or_inapplicable_evidence` | Activation is attempted with an unsupported adapter or evidence inapplicable to its target. A bounded scenario value distinguishes these two cases from missing and failed evidence. |
+| [projection-canonical-eligibility-authority][eligibility] | `search_projection_stale_grant_after_retirement` | A projected grant is retained, its canonical source is retired, and both adapter validations are requested. |
+| [projection-canonical-eligibility-authority][eligibility] | `search_projection_pinned_adapter_pair` | Both adapters receive the same mixed candidate batch, scope, destination and pinned canonical facts. |
+| [projection-lexical-dense-coverage-distinct][coverage] | `search_projection_lexical_current_vector_old` | A lexical row is current and fixture-owned vector metadata names an older revision or model before the report is requested. |
+| [projection-lexical-dense-coverage-distinct][coverage] | `search_projection_same_render_new_revision` | Two source revisions render equal text but retain different canonical revision identities. |
+| [projection-bounded-admission-preserves-progress][bounds] | `search_projection_pending_full_next_commit` | Pending count equals the approved cap and a complete source commit requiring another job is offered. |
+| [projection-bounded-admission-preserves-progress][bounds] | `search_projection_complete_commit_over_cap` | Fixture-measured bytes or row count of one complete commit exceed the declared local cap before admission. |
+| [projection-remediation-invalidates-derived-bytes][remediation] | `search_projection_remediation_without_revision_change` | A witnessed `domains.name` remediation changes independently reconstructed input bytes under approved bounded `M`, while the canonical source revision is unchanged. Record actual before/after occurrence tuples and input hashes; do not assert that every embedding-key field agrees. |
+| [projection-acceptance-situations-witnessed][acceptance] | `search_projection_acceptance_situations_witnessed` | A completed approved campaign has independent witnesses for every required cell of its frozen nonempty three-surface matrix `R`. The root marker is excluded from `R`; unknown, skipped or unfired required cells prevent this witness. |
 
 The old-vector marker describes an allowed stored input awaiting repair, not
 a report that incorrectly counts that vector. The raw-default marker records
@@ -74,8 +74,8 @@ not successful execution of disabled work.
 ## Shared marker ownership
 
 Cross-store acknowledgement has one owner:
-[rp21-ack-follows-local-release][ack-owner]. Consume
-`rp21_ack_local_commit_interrupted` and `rp21_ack_response_lost` from
+[ack-follows-local-release][ack-owner]. Consume
+`search_projection_ack_local_commit_interrupted` and `search_projection_ack_response_lost` from
 [export-recovery/fault-map.md][export-faults] without redefining them here.
 Their boundary traces may also support local-state comparison after reopen.
 The local pre-COMMIT kill marker remains owned by this map. The contended-writer
@@ -161,7 +161,7 @@ recorded in [portfolio-evaluation.md](portfolio-evaluation.md).
 [bounds]: catalog.md#projection-bounded-admission-preserves-progress
 [remediation]: catalog.md#projection-remediation-invalidates-derived-bytes
 [acceptance]: catalog.md#projection-acceptance-situations-witnessed
-[ack-owner]: ../export-recovery/catalog.md#rp21-ack-follows-local-release
-[progress-owner]: ../export-recovery/catalog.md#rp21-catchup-and-authorized-recovery-converge
+[ack-owner]: ../export-recovery/catalog.md#ack-follows-local-release
+[progress-owner]: ../export-recovery/catalog.md#catchup-and-authorized-recovery-converge
 [export-faults]: ../export-recovery/fault-map.md
 [embedding-faults]: ../embedding/fault-map.md

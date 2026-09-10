@@ -1,4 +1,4 @@
-# rp21-export-fixed-s-exactly-once
+# export-fixed-s-exactly-once
 
 Repository: `/local/home/ahrav/scratch/eidnara`.
 HEAD: `913234433ae36a80a6e22c6aac14c7f9aab74386`. Date: 2026-09-10.
@@ -71,10 +71,10 @@ The source-coverage owner defines which canonical histories are export inputs.
 4. Check every cursor advance and that all accepted pages retain S.
 5. Compare the concatenated complete result to sorted `E(S)` with exact
    multiplicity, not just set membership or a row count.
-6. Record `rp21_export_writes_between_pages` from operation timing, independently
+6. Record `search_projection_export_writes_between_pages` from operation timing, independently
    of the equality assertion. The marker fires even when export is correct.
 7. Commit domain-name remediation during export and account for its control
-   event. Record `rp21_export_operator_remediation_during_snapshot`; compare
+   event. Record `search_projection_export_operator_remediation_during_snapshot`; compare
    affected bytes only if approved mapping includes them, otherwise record
    nondependence. No new occurrence generation is prescribed.
 
