@@ -96,10 +96,12 @@ use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
 use classify::{
-    CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK,
-    CLASSIFY_TEMPERATURE, DREAMER_ATTEMPT_BUDGET, DREAMER_ATTEMPT_BUDGET_WINDOW,
-    MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_PROMPT_BYTES, attempt_child_session_id,
-    classify_request_timeout, validate_classify_manifest,
+    CLASSIFY_AWAIT_TIMEOUT, CLASSIFY_MAX_OUTPUT_TOKENS, CLASSIFY_PROMPT_TEMPLATE_VERSION,
+    CLASSIFY_SCHEMA_VERSION, CLASSIFY_SYSTEM_PROMPT, CLASSIFY_TASK, CLASSIFY_TEMPERATURE,
+    Classification, ClassifyPoolRow, DREAMER_ATTEMPT_BUDGET, DREAMER_ATTEMPT_BUDGET_WINDOW,
+    MAX_CLASSIFY_MODEL_CHAIN, MAX_CLASSIFY_OBJECTS, MAX_CLASSIFY_PROMPT_BYTES,
+    attempt_child_session_id, classify_request_timeout, object_id_is_renderable,
+    parse_classify_output, render_classify_prompt,
 };
 use config::{ConfigCache, DaemonConfig, derive_historian_chunk_tokens};
 use healing::{SerializerProfile, tail_reclaim};
@@ -3064,6 +3066,9 @@ struct DreamerRunGuard {
 /// implementation.
 pub(crate) struct DreamerRuntime {
     producer_factory: Arc<dyn HistorianProducerFactory>,
+    /// The canonical store the pool is read from and classifications are
+    /// written to.
+    kernel: Arc<kernel_routes::KernelOpenCoordinator>,
     /// active_dreamer_runs contains only module-minted zero-tool dreamer sessions; prefixes are diagnostics only.
     /// Registered IDs may bypass transform only after route validation.
     active_dreamer_runs: Arc<Mutex<HashSet<String>>>,
@@ -3084,9 +3089,13 @@ pub(crate) trait DreamerTaskInputs: Send + Sync {
 }
 
 impl DreamerRuntime {
-    fn new(producer_factory: Arc<dyn HistorianProducerFactory>) -> Self {
+    fn new(
+        producer_factory: Arc<dyn HistorianProducerFactory>,
+        kernel: Arc<kernel_routes::KernelOpenCoordinator>,
+    ) -> Self {
         Self {
             producer_factory,
+            kernel,
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             inflight_dream_commands: Arc::new(Mutex::new(HashSet::new())),
             task_inputs: Mutex::new(None),
@@ -3502,17 +3511,21 @@ impl Handler {
             }),
             None => Arc::new(MissingProducerFactory),
         };
+        let kernel = Arc::new(kernel_routes::KernelOpenCoordinator::new());
         Handler {
             connection_key_hook: Mutex::new(None),
             connection_key_hook_failure: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
-            kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
+            kernel: Arc::clone(&kernel),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel,
             tasks: TaskTracker::new(),
-            dreamer: Arc::new(DreamerRuntime::new(Arc::clone(&producer_factory))),
+            dreamer: Arc::new(DreamerRuntime::new(
+                Arc::clone(&producer_factory),
+                Arc::clone(&kernel),
+            )),
             producer_factory,
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
@@ -3839,17 +3852,21 @@ impl Handler {
         config: DaemonConfig,
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
+        let kernel = Arc::new(kernel_routes::KernelOpenCoordinator::new());
         Handler {
             connection_key_hook: Mutex::new(None),
             connection_key_hook_failure: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
-            kernel: Arc::new(kernel_routes::KernelOpenCoordinator::new()),
+            kernel: Arc::clone(&kernel),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel: CancellationToken::new(),
             tasks: TaskTracker::new(),
-            dreamer: Arc::new(DreamerRuntime::new(Arc::clone(&factory))),
+            dreamer: Arc::new(DreamerRuntime::new(
+                Arc::clone(&factory),
+                Arc::clone(&kernel),
+            )),
             producer_factory: factory,
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
@@ -9531,8 +9548,7 @@ impl DreamerRuntime {
             leased_project,
             task,
         } = run;
-        let prompt_body = task.prompt_body.as_str();
-        let expected_ids = &task.expected_ids;
+        let expected_ids = &task.object_ids;
         let model_chain = &task.model_chain;
         let timeout_ms = task.timeout_ms;
         let task = CLASSIFY_TASK;
@@ -9607,11 +9623,15 @@ impl DreamerRuntime {
         let system_prompt_hash = sha256_hex(CLASSIFY_SYSTEM_PROMPT.as_bytes());
         // Everything that decides what the model is asked and how its answer is
         // read is digested, so a template or schema change cannot replay a result
-        // produced under the old one.
+        // produced under the old one. The kernel scope is digested too: the
+        // receipt is keyed by authority project, several roots can hold one
+        // project, and the classifications land in one root's scope, so a
+        // completed receipt must not answer a request from another root.
         let request_digest = match dreamer_request_digest(&json!({
+            "digest_version": CLASSIFY_REQUEST_DIGEST_VERSION,
             "task": task,
-            "prompt_body": prompt_body,
-            "items": expected_ids,
+            "kernel_scope": route.kernel_project.scope_id(),
+            "object_ids": expected_ids,
             "model_chain": model_chain,
             "timeout_ms": timeout_ms,
             "await_timeout_ms": u64::try_from(CLASSIFY_AWAIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
@@ -9699,6 +9719,28 @@ impl DreamerRuntime {
                 };
             }
         };
+        // The pool is read only once a dispatch is owed: replays and resumes
+        // never touch the kernel. A request failure is recorded on the receipt
+        // and replayed; a `PoolFailure::Kernel` leaves the receipt open so a
+        // retry reads the pool again.
+        let pool = match self.render_pool(route.kernel_project, expected_ids).await {
+            Ok(pool) => pool,
+            Err(PoolFailure::Kernel(outcome)) => return outcome,
+            Err(PoolFailure::Request(rejection)) => {
+                return match store.complete_dreamer_receipt(
+                    receipt_key,
+                    generation,
+                    DreamerTerminalKind::Failed,
+                    &rejection.to_string(),
+                    now_ms(),
+                ) {
+                    Ok(DreamerTransition::Applied) => read_dream_task_response(&store, receipt_key),
+                    Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
+                    Err(error) => dreamer_ledger_failed(error),
+                };
+            }
+        };
+        let prompt_body = pool.prompt.as_str();
         let mut attempts = 0usize;
         let mut last_error = String::new();
         let mut output = None;
@@ -9875,13 +9917,43 @@ impl DreamerRuntime {
             if let Err(stop) = ledger_stop(finished) {
                 // A usable result in hand is a known outcome even though its attempt
                 // row cannot record one, so it is offered as the receipt's terminal
-                // response first.
-                if let Ok(result) = &attempt_output
-                    && length_capped_or_invalid(result, expected_ids).is_ok()
+                // response first. A fenced attempt write is not: another
+                // generation owns the command, so nothing canonical is written
+                // for it here.
+                let fenced = matches!(&stop, PreparedOutcome::Error { code, .. } if code == "dreamer_ledger_fenced");
+                if !fenced
+                    && let Ok(result) = &attempt_output
+                    && let Ok(classifications) = parse_output(result, expected_ids)
+                    && classify_write_refusal(
+                        &store,
+                        &route_root,
+                        &authority_project,
+                        authority_generation,
+                    )
+                    .is_none()
+                    && let Ok(commit) = self
+                        .record_classifications(
+                            route.kernel_project,
+                            &ClassifyWriteIdentity {
+                                authority_project: receipt_key.project,
+                                operation_key: receipt_key.operation_key,
+                                request_digest: &binding_record.request_digest,
+                                cause: &format!("{ledger_session}:{command_id}"),
+                                generation,
+                                known_as_of: pool.known_as_of,
+                            },
+                            &classifications,
+                        )
+                        .await
                 {
-                    let response_json =
-                        classify_success_response(model, result, attempts, &child_session)
-                            .to_string();
+                    let response_json = classify_success_response(
+                        model,
+                        attempts,
+                        &child_session,
+                        pool.known_as_of,
+                        &commit,
+                    )
+                    .to_string();
                     if let Ok(DreamerTransition::Applied) = store.complete_dreamer_receipt(
                         receipt_key,
                         generation,
@@ -9907,9 +9979,9 @@ impl DreamerRuntime {
                 );
             }
             match attempt_output {
-                Ok(result) => match length_capped_or_invalid(&result, expected_ids) {
-                    Ok(()) => {
-                        output = Some((model.clone(), result, child_session, producer));
+                Ok(result) => match parse_output(&result, expected_ids) {
+                    Ok(classifications) => {
+                        output = Some((model.clone(), classifications, child_session, producer));
                         break;
                     }
                     Err(detail) => match producer.purge_session(&child_session).await {
@@ -9963,13 +10035,62 @@ impl DreamerRuntime {
                 Err(error) => dreamer_ledger_failed(error),
             };
         }
-        let (model, result, child_session, mut producer) = output.expect("classifier output set");
-        let response_json =
-            classify_success_response(&model, &result, attempts, &child_session).to_string();
+        let (model, classifications, child_session, mut producer) =
+            output.expect("classifier output set");
+        // The canonical write precedes the receipt's completion. A crash
+        // between the two leaves the classifications written and the receipt
+        // open with an ended attempt; the retry settles that receipt unknown
+        // and never dispatches again, so the write stands and no second one
+        // is made. Authority is read again first: the entry check predates
+        // the model call, which a drain or a move can outlast.
+        let (terminal_kind, response_json) = match classify_write_refusal(
+            &store,
+            &route_root,
+            &authority_project,
+            authority_generation,
+        ) {
+            Some(refusal) => (DreamerTerminalKind::Failed, refusal.to_string()),
+            None => match self
+                .record_classifications(
+                    route.kernel_project,
+                    &ClassifyWriteIdentity {
+                        authority_project: receipt_key.project,
+                        operation_key: receipt_key.operation_key,
+                        request_digest: &binding_record.request_digest,
+                        cause: &format!("{ledger_session}:{command_id}"),
+                        generation,
+                        known_as_of: pool.known_as_of,
+                    },
+                    &classifications,
+                )
+                .await
+            {
+                Ok(commit) => (
+                    DreamerTerminalKind::Complete,
+                    classify_success_response(
+                        &model,
+                        attempts,
+                        &child_session,
+                        pool.known_as_of,
+                        &commit,
+                    )
+                    .to_string(),
+                ),
+                Err(detail) => (
+                    DreamerTerminalKind::Failed,
+                    json!({
+                        "ok": false,
+                        "code": "dreamer_kernel_write_failed",
+                        "message": detail,
+                    })
+                    .to_string(),
+                ),
+            },
+        };
         match store.complete_dreamer_receipt(
             receipt_key,
             generation,
-            DreamerTerminalKind::Complete,
+            terminal_kind,
             &response_json,
             now_ms(),
         ) {
@@ -12692,11 +12813,24 @@ pub mod kernel_route_fixtures {
         kind: &str,
         summary: &str,
     ) {
+        commit_verified_memory_with_rationale(store, key, object_id, scope_id, kind, summary, "");
+    }
+
+    pub fn commit_verified_memory_with_rationale(
+        store: &KernelStore,
+        key: &str,
+        object_id: &str,
+        scope_id: &str,
+        kind: &str,
+        summary: &str,
+        rationale: &str,
+    ) {
         store
             .commit(intent(key), |envelope| {
                 ensure_domain(envelope, MEMORY_DOMAIN)?;
-                envelope
-                    .insert_decision(memory_decision_spec(object_id, scope_id, kind, summary))?;
+                let mut spec = memory_decision_spec(object_id, scope_id, kind, summary);
+                spec.payload.rationale = rationale.to_string();
+                envelope.insert_decision(spec)?;
                 verify_decision(envelope, object_id)?;
                 Ok(String::new())
             })
@@ -13700,41 +13834,386 @@ fn classify_attempt_timeout(ceiling: Duration, deadline: Instant) -> Duration {
     ceiling.min(deadline.saturating_duration_since(Instant::now()))
 }
 
-/// Accept a classify attempt only when its output is usable and its manifest covers exactly the requested memories.
-/// Reject a generation unless its manifest covers exactly the requested memories.
-/// Reject length-capped generations even when their truncated prefixes parse.
-/// Caching unusable output leaves the remaining chain unavailable.
-/// every retry.
-fn length_capped_or_invalid(
+/// A length-capped generation is not parsed: its tail is missing, and the
+/// parser would report a coverage gap that hides the real cause.
+fn parse_output(
     result: &historian_producer::ProducerOutput,
     expected_ids: &BTreeSet<String>,
-) -> Result<(), String> {
+) -> Result<Vec<Classification>, String> {
     if result.length_capped {
         return Err("a length-capped generation".to_owned());
     }
-    validate_classify_manifest(&result.text, expected_ids)
+    parse_classify_output(&result.text, expected_ids)
 }
 
+/// The reply a completed classify run records and answers with. It carries
+/// what the run did and where it wrote, never what the model said.
 fn classify_success_response(
     model: &str,
-    result: &historian_producer::ProducerOutput,
     attempts: usize,
     child_session: &str,
+    known_as_of: i64,
+    commit: &ClassifyCommit,
 ) -> Value {
     json!({
         "ok": true,
-        "manifest_text": result.text,
-        "truncated": result.length_capped,
+        "classified": commit.classified,
+        "commit_seq": commit.commit_seq,
         "diagnostics": {
             "task": CLASSIFY_TASK,
             "model": model,
             "attempts": attempts,
             "child_session_id": child_session,
+            "known_as_of": known_as_of,
+            "schema_version": CLASSIFY_SCHEMA_VERSION,
+            "prompt_template_version": CLASSIFY_PROMPT_TEMPLATE_VERSION,
             "temperature": CLASSIFY_TEMPERATURE,
             "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
             "await_timeout_ms": CLASSIFY_AWAIT_TIMEOUT.as_millis(),
         }
     })
+}
+
+/// The rendered pool of one classify run and the snapshot it was read at.
+struct ClassifyPool {
+    prompt: String,
+    known_as_of: i64,
+}
+
+/// Why a pool could not be rendered, split by what a retry can change.
+enum PoolFailure {
+    /// A property of the request or of the rows it names: an id the project
+    /// does not hold, a non-memory decision, a pool past the byte bound. The
+    /// receipt records it, so a retry replays the refusal without a read.
+    Request(Value),
+    /// An open receipt with no attempt lets a retry take ownership and repeat the kernel read.
+    Kernel(PreparedOutcome),
+}
+
+/// What a classification commit is keyed and stamped by.
+struct ClassifyWriteIdentity<'a> {
+    /// The Dreamer receipt's project; the kernel key includes it because a route digest is the same for every project that held the root in turn. commentlint: allow(JUDGE)
+    authority_project: &'a str,
+    operation_key: &'a str,
+    /// The receipt's request digest, reused as the kernel request digest.
+    request_digest: &'a str,
+    cause: &'a str,
+    generation: u64,
+    known_as_of: i64,
+}
+
+/// The kernel operation key of one classify receipt's commit: the route digest, the producer family, the authority project's digest, and the receipt's operation key. The project id is digested, as the route is, so an id the kernel's secret detector would refuse cannot block the write. commentlint: allow(JUDGE)
+fn classify_kernel_operation_key(
+    project: &kernel_routes::ProjectBinding,
+    authority_project: &str,
+    receipt_operation_key: &str,
+) -> Option<String> {
+    project.operation_key(
+        CLASSIFY_KERNEL_PRODUCER,
+        &format!(
+            "{}:{receipt_operation_key}",
+            sha256_hex(authority_project.as_bytes())
+        ),
+    )
+}
+
+/// What the kernel recorded for one run's classifications.
+#[derive(Debug)]
+struct ClassifyCommit {
+    commit_seq: i64,
+    classified: usize,
+}
+
+impl DreamerRuntime {
+    /// Reads canonical memory rows at the kernel tip and renders the prompt.
+    ///
+    /// Missing, invisible, and cross-project IDs return the same request failure.
+    async fn render_pool(
+        &self,
+        project: &kernel_routes::ProjectBinding,
+        object_ids: &BTreeSet<String>,
+    ) -> Result<ClassifyPool, PoolFailure> {
+        let request_failure = |code: &str, message: String| {
+            PoolFailure::Request(json!({"ok": false, "code": code, "message": message}))
+        };
+        let kernel = self
+            .kernel
+            .kernel_store()
+            .map_err(|state| kernel_unavailable(&state))?;
+        let ids: Vec<String> = object_ids.iter().cloned().collect();
+        let project = project.clone();
+        let read = match kernel_routes::blocking(move || {
+            kernel_routes::read::read_visible(
+                &kernel,
+                &project,
+                kernel::Surface::ExplicitSearch,
+                None,
+                kernel_routes::read::RowSelection::Objects(&ids),
+            )
+        })
+        .await
+        .map_err(|state| kernel_unavailable(&state))?
+        {
+            Ok(read) => read,
+            // `KernelOutcome` distinguishes unavailable kernels from request failures.
+            Err(error) => {
+                let message = error.to_string();
+                return Err(match kernel_routes::KernelOutcome::from(error) {
+                    state @ kernel_routes::KernelOutcome::Unavailable { .. } => {
+                        kernel_unavailable(&state)
+                    }
+                    _ => request_failure("kernel_read_failed", message),
+                });
+            }
+        };
+        // `read_visible` drops rows past `MAX_READ_ROW_BYTES` instead of failing; a dropped row would otherwise look like an object the project lacks. commentlint: allow(JUDGE)
+        if read.truncated {
+            return Err(request_failure(
+                "payload_too_large",
+                format!(
+                    "the named memories exceed the {} byte kernel read budget",
+                    kernel_routes::read::MAX_READ_ROW_BYTES
+                ),
+            ));
+        }
+        let mut rows = Vec::with_capacity(object_ids.len());
+        for id in object_ids {
+            // A visible decision from another domain is not a memory, whatever
+            // project holds it; the answer does not say which check failed.
+            let Some((row, decision)) = read
+                .rows
+                .iter()
+                .find(|row| {
+                    row.object.object_id == *id
+                        && row.object.domain_id == canonical_memory::MEMORY_DOMAIN_ID
+                })
+                .zip(read.decisions.get(id))
+            else {
+                return Err(request_failure(
+                    "invalid_params",
+                    "classify object_ids must name memories the bound project holds".to_string(),
+                ));
+            };
+            // The daemon has no local-model notion, so a dispatch is remote egress: the serving view's folded class must be normal, the bar `kernel.egress.decide` sets for an owner bound for a remote destination. `ExplicitSearch` serves sensitive rows, so the surface does not enforce it. commentlint: allow(JUDGE)
+            if row.object.sensitivity != kernel::Sensitivity::Normal {
+                return Err(request_failure(
+                    "sensitive_remote",
+                    "classify object_ids must name memories served at normal sensitivity; a sensitive memory is not sent to a model provider".to_string(),
+                ));
+            }
+            rows.push(ClassifyPoolRow {
+                object_id: id,
+                kind: &decision.decision_kind,
+                body: &decision.payload.summary,
+            });
+        }
+        let Some(prompt) = render_classify_prompt(&rows) else {
+            return Err(request_failure(
+                "payload_too_large",
+                format!("the rendered classify pool exceeds {MAX_CLASSIFY_PROMPT_BYTES} bytes"),
+            ));
+        };
+        Ok(ClassifyPool {
+            prompt,
+            known_as_of: read.known_as_of,
+        })
+    }
+
+    /// Records `classifications` as one observation per memory in the memory domain.
+    /// Each recorded classification depends on the memory it classifies.
+    /// Each is admitted under the Dreamer source and taint classes.
+    /// Each retires that memory's earlier classification by this project in the same commit; another project's row citing the memory is left alone.
+    /// `shareable` is recorded true only when the model said so and the serving view, at commit time, classes the memory normal and serves it at `ExplicitSearch`.
+    /// The commit is keyed by the receipt's operation key and digest under the project's namespace, so a repeat under the same receipt replays the kernel's receipt and writes nothing new.
+    async fn record_classifications(
+        &self,
+        project: &kernel_routes::ProjectBinding,
+        identity: &ClassifyWriteIdentity<'_>,
+        classifications: &[Classification],
+    ) -> Result<ClassifyCommit, String> {
+        let kernel = self
+            .kernel
+            .kernel_store()
+            .map_err(|state| format!("kernel unavailable: {}", state.state_key()))?;
+        // The kernel keys receipts store-wide, the Dreamer ledger per project:
+        // the route and authority-project digests join the key so two projects'
+        // commands with one session and command id stay two kernel receipts,
+        // including two projects that held the same root in turn.
+        let operation_key = classify_kernel_operation_key(
+            project,
+            identity.authority_project,
+            identity.operation_key,
+        )
+        .ok_or_else(|| "the receipt operation key is blank".to_string())?;
+        let intent = kernel::CommitIntent {
+            producer: CLASSIFY_KERNEL_PRODUCER.to_string(),
+            operation_key: operation_key.clone(),
+            request_digest: identity.request_digest.to_string(),
+            actor: CLASSIFY_KERNEL_PRODUCER.to_string(),
+            cause: identity.cause.to_string(),
+        };
+        let observed_at = now_ms();
+        let scope_id = project.scope_id();
+        let project = project.clone();
+        let classifications = classifications.to_vec();
+        let generation = identity.generation;
+        let known_as_of = identity.known_as_of;
+        let classified = classifications.len();
+        let receipt = kernel_routes::blocking(move || {
+            // `entered` and `refused` classify post-commit conflicts.
+            let mut entered = false;
+            let mut refused = None;
+            let result = kernel.commit_before(
+                Instant::now() + CLASSIFY_KERNEL_WRITE_TIMEOUT,
+                intent,
+                |envelope| {
+                    entered = true;
+                    let mut domains = HashSet::new();
+                    let mut scope_ready = false;
+                    kernel_routes::commit::ensure_domain(
+                        envelope,
+                        canonical_memory::MEMORY_DOMAIN_ID,
+                        &mut domains,
+                    )?;
+                    kernel_routes::commit::ensure_scope(
+                        envelope,
+                        &project,
+                        &mut scope_ready,
+                        &mut domains,
+                        &mut refused,
+                    )?;
+                    let mut filter = kernel_routes::project::ScopeFilter::new(&project);
+                    // The model's `shareable` is an untrusted judgment. The serving view at commit time floors it: a memory is recorded shareable only when its folded class is normal and it is served at `ExplicitSearch`, the widest surface, so a memory rejected or quarantined since the read, or one no admission serves (`served_rows_for` returns hidden rows and omits unadmitted ones), is never recorded shareable, whatever the model said. commentlint: allow(JUDGE)
+                    let classified_ids: Vec<&str> = classifications
+                        .iter()
+                        .map(|classification| classification.object_id.as_str())
+                        .collect();
+                    let served = envelope.served_rows_for(&classified_ids, None)?;
+                    for classification in &classifications {
+                        // The memory must still be the bound project's at
+                        // commit time, not only at the read.
+                        kernel_routes::commit::scoped_object_state(
+                            envelope,
+                            &mut filter,
+                            &classification.object_id,
+                        )?;
+                        let shareable = classification.shareable
+                            && served.get(&classification.object_id).is_some_and(|row| {
+                                row.object.sensitivity == kernel::Sensitivity::Normal
+                                    && row.visibility(kernel::Surface::ExplicitSearch)
+                                        != kernel::SurfaceVisibility::Hidden
+                            });
+                        // Retire prior classifications in this commit to maintain one live classification per memory. `classifies` and `memory_classification` are free-form literals `kernel.commit` does not reserve, so any project, and any producer in this one, may attach such rows to the memory; the query selects only rows this code path wrote (memory domain, `dreamer.classify` source, this project's scope), so the writer holds the lock for its own rows and not for an arbitrary number of another producer's. commentlint: allow(JUDGE)
+                        for prior in envelope.live_dependent_observations(
+                            &kernel::DependentObservationQuery {
+                                dependency_object_id: &classification.object_id,
+                                dependency_kind: CLASSIFY_DEPENDENCY_KIND,
+                                observation_kind: CLASSIFY_OBSERVATION_KIND,
+                                source_kind: CLASSIFY_KERNEL_PRODUCER,
+                                domain_id: canonical_memory::MEMORY_DOMAIN_ID,
+                                scope_id: Some(&scope_id),
+                            },
+                        )? {
+                            envelope.retire_observation(&prior)?;
+                        }
+                        let observation_id =
+                            classification_object_id(&operation_key, &classification.object_id);
+                        envelope.insert_observation(kernel::ObservationSpec {
+                            observation_id: observation_id.clone(),
+                            object_id: observation_id.clone(),
+                            domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
+                            proposition_id: None,
+                            scope_id: Some(scope_id.clone()),
+                            anchor_id: None,
+                            evidence_id: None,
+                            observation_kind: CLASSIFY_OBSERVATION_KIND.to_string(),
+                            payload: kernel::ObservationPayload {
+                                summary: format!(
+                                    "importance {}, scope {}, shareable {}",
+                                    classification.importance, classification.scope, shareable
+                                ),
+                                classification: classification.scope.clone(),
+                                detail: Some(
+                                    json!({
+                                        "schema_version": CLASSIFY_SCHEMA_VERSION,
+                                        "importance": classification.importance,
+                                        "scope": classification.scope,
+                                        "shareable": shareable,
+                                    })
+                                    .to_string(),
+                                ),
+                            },
+                            observed_at,
+                            dependencies: vec![kernel::ObservationDependencySpec {
+                                dependency_object_id: classification.object_id.clone(),
+                                dependency_kind: CLASSIFY_DEPENDENCY_KIND.to_string(),
+                                dependency_payload: None,
+                            }],
+                            source_kind: CLASSIFY_KERNEL_PRODUCER.to_string(),
+                            source_id: operation_key.clone(),
+                            source_revision: i64::try_from(generation).unwrap_or(i64::MAX),
+                            sensitivity: kernel::Sensitivity::Normal,
+                        })?;
+                        // The classes are this code path's, whatever any caller
+                        // asserted: a model's inference, under the Dreamer's taint.
+                        envelope.record_admission(kernel::AdmissionRequest {
+                            candidate_id: None,
+                            subject_object_id: Some(observation_id),
+                            source_class: Some(kernel::SourceClass::ModelInference),
+                            taint_class: Some(kernel::TaintClass::DreamerInference),
+                            event: kernel::AdmissionEvent {
+                                kind: kernel::EventKind::Other,
+                                trigger_object_id: Some(classification.object_id.clone()),
+                                approval_object_id: None,
+                                evidence_id: None,
+                                reason: CLASSIFY_KERNEL_PRODUCER.to_string(),
+                            },
+                        })?;
+                    }
+                    Ok(json!({
+                        "classified": classified,
+                        "known_as_of": known_as_of,
+                    })
+                    .to_string())
+                },
+            );
+            match result {
+                Ok(receipt) => Ok(receipt),
+                Err(kernel::KernelError::Conflict) => Err(match refused {
+                    Some(failure) => failure,
+                    None if !entered => kernel_routes::commit::CommitFailure::OperationKeyReused,
+                    None => kernel_routes::commit::CommitFailure::StorageConstraint,
+                }),
+                Err(error) => Err(kernel_routes::commit::CommitFailure::Kernel(error)),
+            }
+        })
+        .await
+        .map_err(|state| format!("kernel unavailable: {}", state.state_key()))?
+        .map_err(|failure| {
+            format!(
+                "kernel commit refused: {}",
+                kernel_routes::KernelOutcome::from(failure).state_key()
+            )
+        })?;
+        Ok(ClassifyCommit {
+            commit_seq: receipt.commit_seq,
+            classified,
+        })
+    }
+}
+
+/// How long a classification commit may wait for the kernel writer.
+const CLASSIFY_KERNEL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The object id of one memory's classification under one kernel operation
+/// key: stable for a replay of the receipt, distinct across receipts and
+/// projects.
+fn classification_object_id(operation_key: &str, memory_object_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(operation_key.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(memory_object_id.as_bytes());
+    format!("memory-classification:{:x}", hasher.finalize())
 }
 
 enum MemoriesAuthority {
@@ -13784,6 +14263,48 @@ fn memories_authority_for_route(
         project: authority.project,
         generation: authority.generation,
     }))
+}
+
+/// The failure a classify receipt records instead of writing when `authority_project` no longer holds `MODULE` at `authority_generation` for `route_root`; `None` when it still does. The entry check guards the receipt, but a model call can outlast a drain or a move, and a write under lost authority lands in a store that no longer answers for the project. The authority row is outside the kernel transaction, so this narrows the window from the model call to the commit rather than closing it. commentlint: allow(JUDGE)
+fn classify_write_refusal(
+    store: &MemoryStore,
+    route_root: &str,
+    authority_project: &str,
+    authority_generation: u64,
+) -> Option<Value> {
+    let refusal =
+        |code: &str, message: String| Some(json!({"ok": false, "code": code, "message": message}));
+    match memories_authority_for_route(store, route_root) {
+        Ok(MemoriesAuthority::Module(authority)) if authority.project != authority_project => {
+            refusal(
+                "authority_project_mismatch",
+                format!(
+                    "the route now resolves to {}, the run was for {authority_project}",
+                    authority.project
+                ),
+            )
+        }
+        Ok(MemoriesAuthority::Module(authority))
+            if authority.generation != authority_generation =>
+        {
+            refusal(
+                "authority_generation_mismatch",
+                format!(
+                    "authority generation is {}, the run was for {authority_generation}",
+                    authority.generation
+                ),
+            )
+        }
+        Ok(MemoriesAuthority::Module(_)) => None,
+        Ok(MemoriesAuthority::NotModule { message }) => refusal("authority_not_module", message),
+        // `authority_lookup_failed` names the pre-receipt read, which the scheduler retries by re-leasing the slot; a lookup failure here is recorded on the receipt as terminal and replays, so it carries a code the scheduler does not retain. commentlint: allow(JUDGE)
+        Err(error) => refusal(
+            "authority_unverified",
+            format!(
+                "memories authority could not be read before the canonical write, so nothing was written: {error}"
+            ),
+        ),
+    }
 }
 
 /// The daemon state the Dreamer scheduler reads and drives: the open store,
@@ -13906,9 +14427,11 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                         serde_json::from_slice(&bytes).ok()
                     })
                     .unwrap_or_else(|| json!({"ok": false, "code": "dreamer_ledger_corrupt"})),
-                // The protocol classifies only these codes as store errors; all others are command responses.
+                // The protocol classifies only these codes as store errors; all others are command responses. `authority_lookup_failed` and `dreamer_ledger_failed` leave no receipt or an open one; `kernel_unavailable` leaves the receipt open without an attempt, so a re-leased command retries the pool read on the next tick. commentlint: allow(JUDGE)
                 PreparedOutcome::Error { code, message }
-                    if code == "authority_lookup_failed" || code == "dreamer_ledger_failed" =>
+                    if code == "authority_lookup_failed"
+                        || code == "dreamer_ledger_failed"
+                        || code == "kernel_unavailable" =>
                 {
                     return dreamer_scheduler::TaskRunOutcome::StoreUnavailable {
                         reason: format!("{code}: {message}"),
@@ -13931,6 +14454,8 @@ pub(crate) struct DreamerRoute<'a> {
     pub(crate) project_root: &'a Path,
     pub(crate) harness: &'a str,
     pub(crate) credential_fingerprints: &'a std::collections::BTreeMap<String, String>,
+    /// The kernel project the pool is read from and the results are written to.
+    pub(crate) kernel_project: &'a kernel_routes::ProjectBinding,
 }
 
 impl<'a> DreamerRoute<'a> {
@@ -13939,50 +14464,66 @@ impl<'a> DreamerRoute<'a> {
             project_root: &binding.project_root,
             harness: &binding.harness,
             credential_fingerprints: &binding.credential_fingerprints,
+            kernel_project: &binding.kernel_project,
         }
     }
 }
 
 /// One validated classify payload: the effect-defining inputs the receipt
-/// digests and the chain dispatches.
+/// digests and the chain dispatches. The prompt is not among them: Rust
+/// renders it from the named objects' canonical rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClassifyRequest {
-    pub(crate) prompt_body: String,
-    pub(crate) expected_ids: BTreeSet<String>,
+    /// Kernel object ids of the memories to classify, all in the bound project.
+    pub(crate) object_ids: BTreeSet<String>,
     pub(crate) model_chain: Vec<String>,
     pub(crate) timeout_ms: u64,
 }
 
+/// The longest object id a request may name; the kernel's own cap is far
+/// higher, but a request is not where an id that long is minted.
+const MAX_CLASSIFY_OBJECT_ID_BYTES: usize = 512;
+
 impl ClassifyRequest {
-    /// Validates the wire `payload` of a `dreamer.run_task` request.
+    /// Validates the wire `payload` of a `dreamer.run_task` request. A payload
+    /// that carries a host-rendered prompt or claim-lane items is refused
+    /// outright rather than having those fields ignored, so a caller built
+    /// against the retired shape learns it at once.
     fn parse(payload: &serde_json::Map<String, Value>) -> Result<Self, PreparedOutcome> {
-        let Some(prompt_body) = payload.get("prompt_body").and_then(Value::as_str) else {
-            return Err(invalid_params_error(
-                "classify payload requires prompt_body",
-            ));
-        };
-        if prompt_body.len() > MAX_CLASSIFY_PROMPT_BYTES {
-            return Err(PreparedOutcome::Error {
-                code: "payload_too_large".to_string(),
-                message: format!("classify prompt_body exceeds {MAX_CLASSIFY_PROMPT_BYTES} bytes"),
-            });
+        for retired in ["prompt_body", "items"] {
+            if payload.contains_key(retired) {
+                return Err(invalid_params_error(format!(
+                    "classify payload no longer accepts {retired}; name object_ids in the bound project"
+                )));
+            }
         }
-        let Some(items) = payload.get("items").and_then(Value::as_array) else {
-            return Err(invalid_params_error("classify payload requires items"));
+        let Some(ids) = payload.get("object_ids").and_then(Value::as_array) else {
+            return Err(invalid_params_error("classify payload requires object_ids"));
         };
-        let mut expected_ids: BTreeSet<String> = BTreeSet::new();
-        for item in items {
-            let Some(public_claim_id) = item.get("public_claim_id").and_then(Value::as_str) else {
+        if ids.is_empty() {
+            return Err(invalid_params_error(
+                "classify object_ids must not be empty",
+            ));
+        }
+        if ids.len() > MAX_CLASSIFY_OBJECTS {
+            return Err(invalid_params_error(format!(
+                "classify object_ids exceeds {MAX_CLASSIFY_OBJECTS} entries"
+            )));
+        }
+        let mut object_ids: BTreeSet<String> = BTreeSet::new();
+        for id in ids {
+            let Some(id) = id.as_str().filter(|id| {
+                id.len() <= MAX_CLASSIFY_OBJECT_ID_BYTES && object_id_is_renderable(id)
+            }) else {
                 return Err(invalid_params_error(
-                    "classify items require a public_claim_id string",
+                    "classify object_ids entries must be object id strings without whitespace, quotes, or XML delimiters",
                 ));
             };
-            if !context_core::claim_operation::is_valid_public_claim_id(public_claim_id) {
+            if !object_ids.insert(id.to_owned()) {
                 return Err(invalid_params_error(
-                    "classify items require a well-formed public_claim_id",
+                    "classify object_ids must not repeat an id",
                 ));
             }
-            expected_ids.insert(public_claim_id.to_owned());
         }
         let Some(models) = payload.get("model_chain").and_then(Value::as_array) else {
             return Err(invalid_params_error(
@@ -14026,8 +14567,7 @@ impl ClassifyRequest {
             ));
         };
         Ok(Self {
-            prompt_body: prompt_body.to_string(),
-            expected_ids,
+            object_ids,
             model_chain,
             timeout_ms,
         })
@@ -14050,10 +14590,16 @@ pub(crate) struct DreamerRunRequest<'a> {
 
 /// The receipt producer every `dreamer.run_task` request is recorded under.
 const DREAMER_RECEIPT_PRODUCER: &str = "dreamer.run_task";
-/// Version of the classify prompt template the attempt rows record.
-const CLASSIFY_PROMPT_TEMPLATE_VERSION: u32 = 1;
-/// Version of the classify output schema the attempt rows record.
-const CLASSIFY_SCHEMA_VERSION: u32 = 1;
+/// The kernel producer classification writes are committed under; the
+/// operation key is the receipt's, so the kernel write replays with the receipt.
+const CLASSIFY_KERNEL_PRODUCER: &str = "dreamer.classify";
+/// The observation kind a classification is recorded as, in the memory domain.
+const CLASSIFY_OBSERVATION_KIND: &str = "memory_classification";
+/// The dependency kind linking a classification to the memory it classifies.
+const CLASSIFY_DEPENDENCY_KIND: &str = "classifies";
+/// Version of the request digest's input shape; bumped when the digested
+/// fields change so a receipt from the earlier shape never replays.
+const CLASSIFY_REQUEST_DIGEST_VERSION: u32 = 3;
 
 /// The receipt's operation key for one client request: a digest of the
 /// length-prefixed ledger session and command id, so the two cannot alias and
@@ -14166,6 +14712,13 @@ fn complete_receipt_as_unknown(
         Ok(DreamerTransition::Fenced) => dreamer_ledger_fenced(),
         Err(error) => dreamer_ledger_failed(error),
     }
+}
+
+fn kernel_unavailable(state: &kernel_routes::KernelOutcome) -> PoolFailure {
+    PoolFailure::Kernel(PreparedOutcome::Error {
+        code: "kernel_unavailable".to_string(),
+        message: state.state_key(),
+    })
 }
 
 fn read_dream_task_response(store: &MemoryStore, key: DreamerReceiptKey<'_>) -> PreparedOutcome {
@@ -27599,14 +28152,46 @@ mod tests {
     }
 
     impl DreamerHarness {
-        fn start(producer: &Arc<ProducerState>) -> Self {
+        /// A handler over a real store and kernel, with `SEEDED_MEMORIES`
+        /// verified memories in the bound project so requests have canonical
+        /// rows to classify.
+        async fn start(producer: &Arc<ProducerState>) -> Self {
             let (handler, store, dir, project) =
-                handler_with_store(Arc::clone(producer), default_test_config());
+                handler_with_store_and_kernel(Arc::clone(producer), default_test_config()).await;
             let route_root = project.to_str().unwrap();
             // A poisoned historian chain verifies that the classify loop does not read route config models.
             let mut route_binding = binding_with_harness(route_root, "pi", "ses");
             route_binding.config.model_chain = vec!["test/route-only-model".to_string()];
+            let scope_id = route_binding.kernel_project.scope_id();
+            let kernel = handler.kernel.kernel_store().unwrap();
+            // The project's scope object, as the first routed commit would create it.
+            kernel
+                .commit(kernel_route_fixtures::intent("project-scope"), |envelope| {
+                    let mut domains = HashSet::new();
+                    let mut ready = false;
+                    let mut refused = None;
+                    kernel_routes::commit::ensure_scope(
+                        envelope,
+                        &route_binding.kernel_project,
+                        &mut ready,
+                        &mut domains,
+                        &mut refused,
+                    )?;
+                    Ok(String::new())
+                })
+                .unwrap();
             handler.bind_route(test_route(7), route_binding);
+            for seed in 1..=SEEDED_MEMORIES {
+                let id = test_memory_id(seed);
+                kernel_route_fixtures::commit_verified_memory(
+                    &kernel,
+                    &format!("seed-{seed}"),
+                    &id,
+                    &scope_id,
+                    "PROJECT_RULES",
+                    &format!("seeded memory {seed}"),
+                );
+            }
             activate_module_authority(&store, "context", "git:identity", route_root, "memories");
             let generation = store
                 .authority_status("context", "git:identity", "memories")
@@ -27682,6 +28267,85 @@ mod tests {
                 .unwrap()
                 .expect("the command has a receipt")
         }
+
+        /// Every classification observation in the kernel at the tip, with the
+        /// memory it depends on, ordered by object id.
+        fn classifications(&self) -> Vec<WrittenClassification> {
+            let kernel = self.handler.kernel.kernel_store().unwrap();
+            let tip = kernel.tip().unwrap();
+            let slice = kernel.slice_as_of(tip).unwrap();
+            let mut written = Vec::new();
+            for observation in slice
+                .observations
+                .iter()
+                .filter(|row| row.observation_kind == CLASSIFY_OBSERVATION_KIND)
+            {
+                let (_, states) = kernel
+                    .object_states(std::slice::from_ref(&observation.object_id))
+                    .unwrap();
+                let state = states[0].clone().expect("observation object");
+                let (_, admission) = kernel
+                    .preview(Instant::now() + CLASSIFY_KERNEL_WRITE_TIMEOUT, |envelope| {
+                        envelope.subject_admission(&observation.object_id)
+                    })
+                    .unwrap();
+                let (prior, _) = admission.expect("classification is admitted");
+                written.push(WrittenClassification {
+                    object_id: observation.object_id.clone(),
+                    scope_id: observation.scope_id.clone(),
+                    source_kind: state.object.source_kind.clone(),
+                    classification: observation.payload.classification.clone(),
+                    detail: serde_json::from_str(
+                        observation.payload.detail.as_deref().unwrap_or("null"),
+                    )
+                    .unwrap(),
+                    source_class: prior.source_class.as_str().to_string(),
+                    taint_class: prior.taint_class.as_str().to_string(),
+                    depends_on: Some(kernel_dependency(&kernel, &observation.observation_id)),
+                });
+            }
+            written.sort_by(|a, b| a.object_id.cmp(&b.object_id));
+            written
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct WrittenClassification {
+        object_id: String,
+        scope_id: Option<String>,
+        source_kind: String,
+        classification: String,
+        detail: Value,
+        source_class: String,
+        taint_class: String,
+        /// The memory the observation depends on through `classifies`.
+        depends_on: Option<String>,
+    }
+
+    /// The `classifies` dependency target recorded for `observation_id`.
+    fn kernel_dependency(kernel: &kernel::KernelStore, observation_id: &str) -> String {
+        let targets = kernel
+            .observation_dependency_targets_for_test(observation_id, CLASSIFY_DEPENDENCY_KIND)
+            .unwrap();
+        assert_eq!(targets.len(), 1, "one classifies dependency: {targets:?}");
+        targets.into_iter().next().unwrap()
+    }
+
+    /// The kernel operation key a classify receipt commits under for this
+    /// harness's project.
+    impl DreamerHarness {
+        fn kernel_operation_key(&self, command_id: &str) -> String {
+            classify_kernel_operation_key(
+                &binding_with_harness(&self.route_root, "pi", "ses").kernel_project,
+                "git:identity",
+                &dreamer_operation_key("ses", command_id),
+            )
+            .unwrap()
+        }
+
+        fn kernel_tip(&self) -> i64 {
+            self.handler.kernel.kernel_store().unwrap().tip().unwrap()
+        }
     }
 
     async fn dreamer_classify_outcome(
@@ -27689,7 +28353,7 @@ mod tests {
         payload: Value,
         command_id: &str,
     ) -> (Arc<ProducerState>, PreparedOutcome) {
-        let harness = DreamerHarness::start(producer);
+        let harness = DreamerHarness::start(producer).await;
         let outcome = harness.classify(payload, command_id).await;
         (Arc::clone(producer), outcome)
     }
@@ -27697,6 +28361,9 @@ mod tests {
     fn response_of(outcome: PreparedOutcome) -> Value {
         match outcome {
             PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            PreparedOutcome::Error { code, message } => {
+                panic!("expected a response, got error {code}: {message}")
+            }
             other => panic!("expected a response: {other:?}"),
         }
     }
@@ -27714,35 +28381,37 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_replays_from_the_receipt_and_refuses_a_changed_request() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
-        let claims = [test_claim_id(1), test_claim_id(2)];
-        let sensitive_text = ["password=", "dreamer-fixture"].concat();
+        let ids = [test_memory_id(1), test_memory_id(2)];
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
             .lock()
             .unwrap()
             .push_back(Ok(ProducerOutput {
-                text: format!("{sensitive_text}\n{}", claim_manifest(&claims)),
+                text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let first = response_of(harness.classify(payload.clone(), "replayed").await);
         assert_eq!(first["ok"], json!(true));
-        assert!(!first.to_string().contains(&sensitive_text));
-        assert_eq!(
-            first["manifest_text"],
-            json!(format!(
-                "password=<REDACTED:password>\n{}",
-                claim_manifest(&claims)
-            ))
+        assert_eq!(first["classified"], json!(2));
+        assert!(first["commit_seq"].is_i64(), "{first}");
+        assert!(
+            first.get("manifest_text").is_none() && !first.to_string().contains("<classify>"),
+            "the reply never carries model text: {first}"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(producer.purges.lock().unwrap().len(), 1);
+        let written = harness.classifications();
+        assert_eq!(written.len(), 2, "{written:?}");
 
+        let tip = harness.kernel_tip();
         let replayed = response_of(harness.classify(payload.clone(), "replayed").await);
         assert_eq!(replayed, first);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.kernel_tip(), tip, "a replay commits nothing");
+        assert_eq!(harness.classifications(), written);
 
         let receipt = harness.receipt("replayed");
         match &receipt.state {
@@ -27777,7 +28446,7 @@ mod tests {
         );
 
         for (field, value) in [
-            ("prompt_body", json!("classify differently")),
+            ("object_ids", json!([test_memory_id(1)])),
             ("timeout_ms", json!(TEST_CLASSIFY_TIMEOUT_MS + 1)),
         ] {
             let mut changed = payload.clone();
@@ -27792,7 +28461,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_does_not_count_connection_failures_as_dispatches() {
         for recover in [false, true] {
-            let claims = [test_claim_id(1)];
+            let ids = [test_memory_id(1)];
             let producer = Arc::new(ProducerState::default());
             producer
                 .connect_errors
@@ -27806,11 +28475,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push_back(Ok(ProducerOutput {
-                    text: claim_manifest(&claims),
+                    text: classify_manifest(&ids),
                     length_capped: false,
                 }));
-            let harness = DreamerHarness::start(&producer);
-            let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+            let harness = DreamerHarness::start(&producer).await;
+            let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
             if recover {
                 payload["model_chain"] = json!(["test/model", "test/fallback"]);
             }
@@ -27856,7 +28525,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_records_one_attempt_row_per_model_in_the_chain() {
         use memory_store::dreamer_ledger::DreamerTerminalKind;
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         {
             let mut results = producer.await_results.lock().unwrap();
@@ -27864,12 +28533,12 @@ mod tests {
                 "first model refused".to_string(),
             )));
             results.push_back(Ok(ProducerOutput {
-                text: claim_manifest(&claims),
+                text: classify_manifest(&ids),
                 length_capped: false,
             }));
         }
-        let harness = DreamerHarness::start(&producer);
-        let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         payload["model_chain"] = json!(["test/first", "test/second"]);
         let response = response_of(harness.classify(payload, "chain").await);
         assert_eq!(response["ok"], json!(true));
@@ -27913,7 +28582,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_stops_the_chain_when_the_send_outcome_crosses_an_incarnation() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer.start_errors.lock().unwrap().push_back(Err(
             HistorianProducerError::CrossIncarnationUnknown {
@@ -27921,8 +28590,8 @@ mod tests {
                 identity_changed: false,
             },
         ));
-        let harness = DreamerHarness::start(&producer);
-        let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         payload["model_chain"] = json!(["test/first", "test/second"]);
         let outcome = harness.classify(payload.clone(), "cross-incarnation").await;
         assert_eq!(error_code_of(&outcome), "dreamer_outcome_unknown");
@@ -27959,17 +28628,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_recovers_a_receipt_stranded_before_any_dispatch() {
         use memory_store::dreamer_ledger::DreamerReceiptState;
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
             .lock()
             .unwrap()
             .push_back(Ok(ProducerOutput {
-                text: claim_manifest(&claims),
+                text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         harness
             .store
             .execute_tag_sql_for_test(
@@ -27978,7 +28647,7 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'injected attempt insert fault'); END;",
             )
             .unwrap();
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let stranded = harness.classify(payload.clone(), "stranded").await;
         assert_eq!(error_code_of(&stranded), "dreamer_ledger_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
@@ -28016,17 +28685,17 @@ mod tests {
     async fn dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
         for fence_during_start in [true, false] {
-            let claims = [test_claim_id(1)];
+            let ids = [test_memory_id(1)];
             let producer = Arc::new(ProducerState::default());
             producer
                 .await_results
                 .lock()
                 .unwrap()
                 .push_back(Ok(ProducerOutput {
-                    text: claim_manifest(&claims),
+                    text: classify_manifest(&ids),
                     length_capped: false,
                 }));
-            let harness = DreamerHarness::start(&producer);
+            let harness = DreamerHarness::start(&producer).await;
             let operation_key = dreamer_operation_key("ses", "fenced-mid-run");
             let hook_store = Arc::clone(&harness.store);
             let hook_key = operation_key.clone();
@@ -28049,7 +28718,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(transition, DreamerTransition::Applied);
             }));
-            let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+            let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
             let outcome = harness.classify(payload, "fenced-mid-run").await;
             assert_eq!(error_code_of(&outcome), "dreamer_ledger_fenced");
             assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
@@ -28088,7 +28757,7 @@ mod tests {
     async fn dreamer_run_task_does_not_count_a_proven_not_sent_start_as_a_dispatch() {
         use historian_producer::{HistorianCallFailure, HistorianSendOutcome};
         use memory_store::dreamer_ledger::DreamerTerminalKind;
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .start_errors
@@ -28106,11 +28775,11 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(Ok(ProducerOutput {
-                text: claim_manifest(&claims),
+                text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer);
-        let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         payload["model_chain"] = json!(["test/first", "test/second"]);
         let response = response_of(harness.classify(payload, "not-sent").await);
         assert_eq!(response["ok"], json!(true));
@@ -28151,7 +28820,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_fails_closed_when_the_failure_record_cannot_be_written() {
         use memory_store::dreamer_ledger::DreamerReceiptState;
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
@@ -28160,7 +28829,7 @@ mod tests {
             .push_back(Err(HistorianProducerError::Protocol(
                 "provider refused".to_string(),
             )));
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         harness
             .store
             .execute_tag_sql_for_test(
@@ -28169,7 +28838,7 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END;",
             )
             .unwrap();
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let outcome = harness.classify(payload.clone(), "faulted").await;
         assert_eq!(error_code_of(&outcome), "dreamer_ledger_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
@@ -28207,18 +28876,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_keeps_a_known_result_when_only_the_attempt_record_fails() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
-        let claims = [test_claim_id(1)];
-        let sensitive_text = ["password=", "dreamer-fixture"].concat();
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
             .lock()
             .unwrap()
             .push_back(Ok(ProducerOutput {
-                text: format!("{sensitive_text}\n{}", claim_manifest(&claims)),
+                text: classify_manifest(&ids),
                 length_capped: false,
             }));
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         harness
             .store
             .execute_tag_sql_for_test(
@@ -28227,17 +28895,11 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'injected attempt fault'); END;",
             )
             .unwrap();
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let first = response_of(harness.classify(payload.clone(), "kept").await);
         assert_eq!(first["ok"], json!(true));
-        assert!(!first.to_string().contains(&sensitive_text));
-        assert_eq!(
-            first["manifest_text"],
-            json!(format!(
-                "password=<REDACTED:password>\n{}",
-                claim_manifest(&claims)
-            ))
-        );
+        assert_eq!(first["classified"], json!(1));
+        assert_eq!(harness.classifications().len(), 1);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
         assert_eq!(producer.purges.lock().unwrap().len(), 1);
         let receipt = harness.receipt("kept");
@@ -28281,7 +28943,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_records_an_exhausted_chain_as_a_terminal_failure() {
         use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let sensitive_text = ["password=", "dreamer-fixture"].concat();
         let producer = Arc::new(ProducerState::default());
         producer
@@ -28291,8 +28953,8 @@ mod tests {
             .push_back(Err(HistorianProducerError::Protocol(
                 sensitive_text.clone(),
             )));
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let failed = harness.classify(payload.clone(), "exhausted").await;
         assert_eq!(error_code_of(&failed), "dreamer_run_failed");
         let PreparedOutcome::Error { message, .. } = &failed else {
@@ -28329,7 +28991,83 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
-    /// Each `seed` produces a distinct, well-formed public claim ID.
+    /// Output outside the schema is rejected without coercion, and neither the
+    /// error the caller sees nor the failure the receipt records carries any of
+    /// the model's text; the attempt that produced it stays billable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_rejects_out_of_domain_output_without_echoing_it() {
+        use memory_store::dreamer_ledger::{DreamerReceiptState, DreamerTerminalKind};
+        let id = test_memory_id(1);
+        let secret = "MODEL-SECRET-SENTINEL";
+        for (text, why) in [
+            (
+                format!(
+                    "<classify><memory id=\"{id}\" importance=\"250\" scope=\"project\" shareable=\"true\"/></classify>"
+                ),
+                "importance outside 1-100",
+            ),
+            (
+                format!(
+                    "<classify><memory id=\"{id}\" importance=\"50\" scope=\"{secret}\" shareable=\"true\"/></classify>"
+                ),
+                "unknown scope",
+            ),
+            (
+                format!(
+                    "<classify><memory id=\"{id}\" importance=\"50\" scope=\"project\" shareable=\"true\" {secret}=\"1\"/></classify>"
+                ),
+                "unknown attribute",
+            ),
+            (
+                format!(
+                    "{secret}\n<classify><memory id=\"{id}\" importance=\"50\" scope=\"project\" shareable=\"true\"/></classify>"
+                ),
+                "narration before the envelope",
+            ),
+        ] {
+            let producer = Arc::new(ProducerState::default());
+            producer
+                .await_results
+                .lock()
+                .unwrap()
+                .push_back(Ok(ProducerOutput {
+                    text,
+                    length_capped: false,
+                }));
+            let harness = DreamerHarness::start(&producer).await;
+            let payload = classify_payload(std::slice::from_ref(&id), TEST_CLASSIFY_TIMEOUT_MS);
+            let failed = harness.classify(payload, why).await;
+            let PreparedOutcome::Error { code, message } = &failed else {
+                panic!("{why}: {failed:?}");
+            };
+            assert_eq!(code, "dreamer_run_failed", "{why}");
+            assert!(!message.contains(secret), "{why}: {message}");
+            assert!(!message.contains("importance=\""), "{why}: {message}");
+            assert!(
+                harness.classifications().is_empty(),
+                "{why}: nothing is coerced"
+            );
+            let receipt = harness.receipt(why);
+            match &receipt.state {
+                DreamerReceiptState::Complete {
+                    terminal_kind: DreamerTerminalKind::Failed,
+                    result_json,
+                    ..
+                } => assert!(!result_json.contains(secret), "{why}: {result_json}"),
+                other => panic!("{why}: {other:?}"),
+            }
+            // The model answered, so the attempt ended and counts; the request
+            // failed on validation, which the receipt records.
+            let attempts = harness.attempts(why);
+            assert_eq!(attempts.len(), 1, "{why}");
+            assert_eq!(
+                attempts[0].terminal_kind,
+                Some(DreamerTerminalKind::Complete),
+                "{why}"
+            );
+        }
+    }
+
     impl DreamerHarness {
         fn attempts(&self, command_id: &str) -> Vec<memory_store::dreamer_ledger::DreamerAttempt> {
             let operation_key = dreamer_operation_key("ses", command_id);
@@ -28353,11 +29091,10 @@ mod tests {
         ) {
             producer.block_output.store(true, Ordering::SeqCst);
             let request = self.classify(payload, command_id);
-            let interrupted = tokio::time::timeout(Duration::from_millis(200), request).await;
-            assert!(
-                interrupted.is_err(),
-                "the request must still be awaiting output"
-            );
+            tokio::select! {
+                outcome = request => panic!("the request ended before interruption: {outcome:?}"),
+                () = wait_for_count(&producer.await_outputs, 1) => {}
+            }
             producer.block_output.store(false, Ordering::SeqCst);
             assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
             assert_eq!(
@@ -28371,10 +29108,10 @@ mod tests {
     /// knows settles the command as unknown, terminal, with no second dispatch.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_settles_a_missing_run_after_restart_as_unknown_without_redispatch() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "restart")
             .await;
@@ -28439,10 +29176,10 @@ mod tests {
     /// later retry.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_leaves_a_run_the_runtime_still_holds_open() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "held")
             .await;
@@ -28461,11 +29198,11 @@ mod tests {
     /// `timeout_ms` does not bound the producer's request timeout.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_bounds_the_recovery_probe_by_the_request_deadline() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         // The digest covers `timeout_ms`, so both legs carry the same 1 s budget.
-        let payload = claim_native_payload(&claims, 1_000);
+        let payload = classify_payload(&ids, 1_000);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "stalled-probe")
             .await;
@@ -28490,10 +29227,10 @@ mod tests {
     /// later retry replays the settled outcome without asking the runtime.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_settles_a_run_the_runtime_reports_ended_as_unknown() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "ended")
             .await;
@@ -28613,7 +29350,7 @@ mod tests {
     async fn dreamer_scheduler_sees_only_user_scheduled_module_projects() {
         use dreamer_scheduler::SchedulerHost;
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         let bridge = harness.scheduler_bridge();
         assert!(
             bridge.scheduled_projects().unwrap().is_empty(),
@@ -28730,7 +29467,7 @@ mod tests {
     async fn dreamer_scheduler_bridge_reports_a_store_failure_instead_of_no_projects() {
         use dreamer_scheduler::SchedulerHost;
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
         let bridge = harness.scheduler_bridge();
         assert_eq!(bridge.scheduled_projects().unwrap().len(), 1);
@@ -28751,7 +29488,7 @@ mod tests {
     async fn dreamer_scheduler_bridge_follows_the_most_recent_binding_on_a_root() {
         use dreamer_scheduler::SchedulerHost;
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         let bridge = harness.scheduler_bridge();
         let root = harness.route_root.clone();
         let bind = |channel: u16, harness_name: &str, schedule: Option<&str>| {
@@ -28806,7 +29543,7 @@ mod tests {
     async fn dreamer_scheduler_bridge_reports_a_project_once_across_its_roots() {
         use dreamer_scheduler::SchedulerHost;
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         let bridge = harness.scheduler_bridge();
         harness.schedule(Some("*/15 * * * *"));
         let worktree = harness._dir.path().join("worktree");
@@ -28849,11 +29586,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_scheduler_bridge_refuses_a_root_that_moved_to_another_project() {
         use dreamer_scheduler::SchedulerHost;
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
-        harness.install_task_inputs(&claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS));
+        harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
         let bridge = harness.scheduler_bridge();
         let projects = bridge.scheduled_projects().unwrap();
         assert_eq!(projects[0].project, "git:identity");
@@ -28923,11 +29660,19 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_scheduler_bridge_reports_a_store_failure_inside_the_run_as_unavailable() {
         use dreamer_scheduler::SchedulerHost;
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: classify_manifest(&ids),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
-        harness.install_task_inputs(&claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS));
+        harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
         let bridge = harness.scheduler_bridge();
         let projects = bridge.scheduled_projects().unwrap();
         assert_eq!(projects.len(), 1);
@@ -28959,9 +29704,155 @@ mod tests {
                 "unavailable",
             )
             .await;
+        match outcome {
+            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+                assert_eq!(response["classified"], json!(1), "{response}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A pool read against a kernel that is not ready leaves the receipt open with no attempt; the bridge reports it as `StoreUnavailable` so the slot is retained and the same command id is asked again once the kernel opens, instead of the slot advancing past an orphaned receipt. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_retains_the_slot_while_the_kernel_is_starting() {
+        use dreamer_scheduler::SchedulerHost;
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(classify_manifest(&ids));
+        let predecessor = DreamerHarness::start(&producer).await;
+        let kernel_root = predecessor._dir.path().join("kernel");
+        predecessor
+            .handler
+            .kernel
+            .mark_unavailable(kernel_routes::UnavailableKind::Store);
+        let harness = DreamerHarness::start_with_store(&producer, &predecessor);
+        assert_eq!(
+            harness.handler.kernel.state(),
+            kernel_routes::KernelState::Starting
+        );
+        harness.schedule(Some("*/15 * * * *"));
+        harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
+        let bridge = harness.scheduler_bridge();
+        let projects = bridge.scheduled_projects().unwrap();
+        assert_eq!(projects.len(), 1);
+
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "kernel-starting",
+            )
+            .await;
         assert!(
-            matches!(outcome, dreamer_scheduler::TaskRunOutcome::Ran { .. }),
+            matches!(
+                &outcome,
+                dreamer_scheduler::TaskRunOutcome::StoreUnavailable { reason }
+                    if reason.starts_with("kernel_unavailable:")
+            ),
             "{outcome:?}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            scheduler_receipt(&harness.store, "kernel-starting")
+                .expect("the receipt is written before the pool read")
+                .state,
+            DreamerReceiptState::InProgress { .. }
+        ));
+
+        harness
+            .handler
+            .kernel
+            .open(
+                kernel_root,
+                StoreOpenPolicy::default(),
+                harness.handler.cancel.clone(),
+            )
+            .await;
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "kernel-starting",
+            )
+            .await;
+        match outcome {
+            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+                assert_eq!(response["classified"], json!(1), "{response}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// An authority read that fails immediately before the canonical write is recorded on the receipt as terminal under `authority_unverified`; the bridge treats that as the command's answer, not a store outage, so the slot is consumed rather than retained against a receipt that replays the same failure forever. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_consumes_a_slot_whose_write_time_authority_read_failed() {
+        use dreamer_scheduler::SchedulerHost;
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
+        harness.schedule(Some("*/15 * * * *"));
+        harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
+        let bridge = harness.scheduler_bridge();
+        let projects = bridge.scheduled_projects().unwrap();
+        let store = Arc::clone(&harness.store);
+        *producer.on_start.lock().unwrap() = Some(Box::new(move || {
+            store.fail_next_authority_route_read_for_test();
+        }));
+        let tip = harness.kernel_tip();
+
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "unverified",
+            )
+            .await;
+        match &outcome {
+            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+                assert_eq!(
+                    response["code"],
+                    json!("authority_unverified"),
+                    "{response}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.kernel_tip(), tip, "no canonical write");
+        assert!(matches!(
+            scheduler_receipt(&harness.store, "unverified")
+                .expect("the receipt is complete")
+                .state,
+            DreamerReceiptState::Complete {
+                terminal_kind: DreamerTerminalKind::Failed,
+                ..
+            }
+        ));
+        let replay = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "unverified",
+            )
+            .await;
+        assert!(
+            matches!(
+                &replay,
+                dreamer_scheduler::TaskRunOutcome::Ran { response }
+                    if response["code"] == json!("authority_unverified")
+            ),
+            "{replay:?}"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
@@ -28974,11 +29865,11 @@ mod tests {
     async fn dreamer_scheduled_run_writes_one_receipt_and_a_restart_adds_no_attempt() {
         use dreamer_scheduler::{DreamerScheduler, ManualClock, TickEvent, slot_command_id};
         const T0: i64 = 1_767_225_600_000;
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness.install_task_inputs(&payload);
         let bridge: Arc<dyn dreamer_scheduler::SchedulerHost> =
             Arc::new(harness.scheduler_bridge());
@@ -29005,12 +29896,12 @@ mod tests {
         let mut scheduler = DreamerScheduler::new(clock.shared());
         assert!(scheduler.tick(bridge.as_ref()).await.is_empty());
         clock.advance(Duration::from_secs(15 * 60));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), scheduler.tick(bridge.as_ref()))
-                .await
-                .is_err(),
-            "the run must still be awaiting output"
-        );
+        tokio::select! {
+            events = scheduler.tick(bridge.as_ref()) => {
+                panic!("the scheduled run ended before interruption: {events:?}");
+            }
+            () = wait_for_count(&producer.await_outputs, 1) => {}
+        }
         producer.block_output.store(false, Ordering::SeqCst);
         drop(scheduler);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
@@ -29020,8 +29911,11 @@ mod tests {
             "the receipt precedes the dispatch"
         );
         assert!(
-            producer.prompts.lock().unwrap()[0].contains("classify"),
-            "the dispatched prompt is built from the task's classify prompt"
+            producer.prompts.lock().unwrap()[0].contains(&format!(
+                "<memory id=\"{}\" kind=\"PROJECT_RULES\">",
+                test_memory_id(1)
+            )),
+            "the dispatched prompt is rendered from the canonical row"
         );
         let receipt = scheduler_receipt(&harness.store, &command_id).expect("receipt");
         assert_eq!(
@@ -29115,7 +30009,7 @@ mod tests {
     /// predecessor could not have used.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_takes_over_an_undispatched_receipt_and_dispatches_once() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         // The predecessor's producer connection failed, so its receipt is open with no attempt row.
         producer
@@ -29123,8 +30017,8 @@ mod tests {
             .lock()
             .unwrap()
             .push_back(HistorianProducerError::Protocol("runtime away".to_string()));
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         // The connect failure exhausts the one-model chain and the failure record completes the receipt, so the crash shape is written back directly: an open receipt whose only attempt row was proven never sent.
         let failed = harness.classify(payload.clone(), "takeover").await;
         assert_eq!(error_code_of(&failed), "dreamer_run_failed");
@@ -29161,7 +30055,7 @@ mod tests {
             .outputs
             .lock()
             .unwrap()
-            .push_back(claim_manifest(&claims));
+            .push_back(classify_manifest(&ids));
         let resumed = harness.classify(payload.clone(), "takeover").await;
         let body = response_of(resumed);
         assert_eq!(body["ok"], json!(true), "{body}");
@@ -29204,7 +30098,7 @@ mod tests {
     /// by `count_dreamer_attempts`.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_records_a_cancelled_attempt_as_terminal_and_billable() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
@@ -29216,9 +30110,9 @@ mod tests {
             .outputs
             .lock()
             .unwrap()
-            .push_back(claim_manifest(&claims));
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let outcome = harness.classify(payload.clone(), "cancelled").await;
         assert_eq!(error_code_of(&outcome), "dreamer_run_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
@@ -29253,15 +30147,15 @@ mod tests {
     /// holds a producer past one await.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_clamps_the_request_timeout_to_the_host_ceiling() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .outputs
             .lock()
             .unwrap()
-            .push_back(claim_manifest(&claims));
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, 7 * 24 * 60 * 60 * 1000);
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, 7 * 24 * 60 * 60 * 1000);
         let outcome = harness.classify(payload, "clamped").await;
         assert_eq!(response_of(outcome)["ok"], json!(true));
         let awaited = producer.await_timeouts.lock().unwrap().clone();
@@ -29279,11 +30173,11 @@ mod tests {
     /// for as long as the connector allows, outside `timeout_ms`.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_bounds_producer_startup_by_the_request_deadline() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
+        let harness = DreamerHarness::start(&producer).await;
         producer.block_connect.store(true, Ordering::SeqCst);
-        let request = harness.classify(claim_native_payload(&claims, 1_000), "stalled-connect");
+        let request = harness.classify(classify_payload(&ids, 1_000), "stalled-connect");
         let outcome = tokio::time::timeout(Duration::from_secs(10), request)
             .await
             .expect("connect is cut off by the request deadline");
@@ -29309,15 +30203,15 @@ mod tests {
     /// before any receipt or dispatch, while a completed command still replays.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_refuses_a_project_whose_attempt_budget_is_exhausted() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .outputs
             .lock()
             .unwrap()
-            .push_back(claim_manifest(&claims));
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let first = harness.classify(payload.clone(), "within-budget").await;
         assert_eq!(response_of(first)["ok"], json!(true));
         // Fill the durable count to the budget with attempts the ledger already holds.
@@ -29365,7 +30259,7 @@ mod tests {
         // The same identity with other bytes is a conflict here too, not a replay of the old success.
         let connects = producer.connects.load(Ordering::SeqCst);
         let mut changed = payload;
-        changed["prompt_body"] = json!("classify differently");
+        changed["timeout_ms"] = json!(TEST_CLASSIFY_TIMEOUT_MS + 1);
         let conflict = harness.classify(changed, "within-budget").await;
         assert_eq!(error_code_of(&conflict), "dreamer_request_conflict");
         assert_eq!(producer.connects.load(Ordering::SeqCst), connects);
@@ -29377,15 +30271,15 @@ mod tests {
     /// `budget - 1` dispatches once, then fails closed through its receipt.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_stops_the_chain_when_the_attempt_budget_is_spent_mid_chain() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .outputs
             .lock()
             .unwrap()
-            .push_back(claim_manifest(&claims));
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         assert_eq!(
             response_of(harness.classify(payload.clone(), "spender").await)["ok"],
             json!(true)
@@ -29466,10 +30360,10 @@ mod tests {
     /// so it settles unknown without asking the runtime or dispatching again.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_settles_an_open_attempt_without_a_handle_as_unknown() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "no-handle")
             .await;
@@ -29502,14 +30396,14 @@ mod tests {
     /// ended attempt, settles unknown, and never dispatches or replays success.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_does_not_replay_a_success_whose_completion_never_landed() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .outputs
             .lock()
             .unwrap()
-            .push_back(claim_manifest(&claims));
-        let harness = DreamerHarness::start(&producer);
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
         harness
             .store
             .execute_tag_sql_for_test(
@@ -29518,7 +30412,7 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END;",
             )
             .unwrap();
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         let outcome = harness.classify(payload.clone(), "lost-success").await;
         assert_eq!(error_code_of(&outcome), "dreamer_ledger_failed");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
@@ -29555,20 +30449,20 @@ mod tests {
     /// one past it is refused before any producer is reached.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_enforces_the_model_chain_cap_before_dispatch() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .outputs
             .lock()
             .unwrap()
-            .push_back(claim_manifest(&claims));
-        let harness = DreamerHarness::start(&producer);
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
         let chain = |count: usize| -> Vec<String> {
             (0..count)
                 .map(|index| format!("test/model-{index}"))
                 .collect()
         };
-        let mut over = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let mut over = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         over["model_chain"] = json!(chain(MAX_CLASSIFY_MODEL_CHAIN + 1));
         let refused = harness.classify(over, "over-cap").await;
         assert_eq!(error_code_of(&refused), "invalid_params");
@@ -29584,7 +30478,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let mut at_cap = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+        let mut at_cap = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         at_cap["model_chain"] = json!(chain(MAX_CLASSIFY_MODEL_CHAIN));
         let accepted = harness.classify(at_cap, "at-cap").await;
         assert_eq!(response_of(accepted)["ok"], json!(true));
@@ -29596,15 +30490,15 @@ mod tests {
     /// dispatch, is refused.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_still_settles_open_receipts_when_the_budget_is_exhausted() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         producer
             .outputs
             .lock()
             .unwrap()
-            .push_back(claim_manifest(&claims));
-        let harness = DreamerHarness::start(&producer);
-        let payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
         // A completed command supplies the rows the budget is filled from.
         assert_eq!(
             response_of(harness.classify(payload.clone(), "spender").await)["ok"],
@@ -29684,31 +30578,29 @@ mod tests {
         );
     }
 
-    fn test_claim_id(seed: u8) -> String {
-        format!("mcm_{}", format!("{seed:02x}").repeat(16))
+    /// The kernel object id of the `seed`th memory a harness seeds.
+    fn test_memory_id(seed: u8) -> String {
+        format!("memory:test-{seed:02x}")
     }
 
-    /// `runClassifyThroughModule` sends this payload for a claim-native chunk, matching `CLASSIFY_SYSTEM_PROMPT`.
-    fn claim_native_payload(claims: &[String], timeout_ms: u64) -> Value {
+    /// The memories every [`DreamerHarness`] seeds in the bound project.
+    const SEEDED_MEMORIES: u8 = 8;
+
+    /// A classify request naming `ids` in the bound project.
+    fn classify_payload(ids: &[String], timeout_ms: u64) -> Value {
         json!({
-            "prompt_body": "classify",
+            "object_ids": ids,
             "model_chain": ["test/model"],
             "timeout_ms": timeout_ms,
-            "items": claims.iter().map(|claim| json!({
-                "public_claim_id": claim,
-                "revision_locator": format!("{claim}/r1/{}", "b".repeat(64)),
-                "content_digest": "b".repeat(64),
-                "mutation_token": { "publicClaimId": claim },
-            })).collect::<Vec<_>>(),
         })
     }
 
-    fn claim_manifest(claims: &[String]) -> String {
-        let entries: String = claims
+    fn classify_manifest(ids: &[String]) -> String {
+        let entries: String = ids
             .iter()
-            .map(|claim| {
+            .map(|id| {
                 format!(
-                    "<memory claim=\"{claim}\" importance=\"80\" scope=\"project\" shareable=\"true\"/>"
+                    "<memory id=\"{id}\" importance=\"80\" scope=\"project\" shareable=\"true\"/>"
                 )
             })
             .collect();
@@ -29716,61 +30608,1079 @@ mod tests {
     }
 
     /// The request parser, expected-ID set, and manifest validator use the claim's public ID.
+    /// A successful run writes one classification observation per memory to
+    /// canonical kernel state under the Dreamer classes this code path stands
+    /// for, in the bound project's scope, depending on the classified memory,
+    /// and the reply carries the write, not the model's text.
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_accepts_claim_native_items_and_manifest() {
-        let claims = [test_claim_id(1), test_claim_id(2)];
+    async fn dreamer_run_task_writes_classifications_to_canonical_state() {
+        let ids = [test_memory_id(1), test_memory_id(2)];
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
             .lock()
             .unwrap()
             .push_back(Ok(ProducerOutput {
-                text: claim_manifest(&claims),
+                text: format!(
+                    "<classify><memory id=\"{}\" importance=\"80\" scope=\"project\" shareable=\"true\"/>\
+                     <memory id=\"{}\" importance=\"15\" scope=\"universe\" shareable=\"false\"/></classify>",
+                    ids[0], ids[1]
+                ),
                 length_capped: false,
             }));
-        let (producer, outcome) = dreamer_classify_outcome(
-            &producer,
-            claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS),
-            "claim-native",
-        )
-        .await;
-        let response = match outcome {
-            PreparedOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
-            other => panic!("a claim-native classify must be accepted: {other:?}"),
-        };
+        let harness = DreamerHarness::start(&producer).await;
+        // Caller-asserted provenance literals ride along in the payload; the
+        // parser does not read them, and the classes come from the code path.
+        let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
+        payload["source_kind"] = json!("explicit_user");
+        payload["taint_class"] = json!("current_code");
+        payload["source_class"] = json!("trusted_local_code");
+        let response = response_of(harness.classify(payload, "writes").await);
         assert_eq!(response["ok"], json!(true));
-        assert_eq!(response["manifest_text"], json!(claim_manifest(&claims)));
+        assert_eq!(response["classified"], json!(2));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        let written = harness.classifications();
+        assert_eq!(written.len(), 2, "{written:?}");
+        let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
+        let operation_key = harness.kernel_operation_key("writes");
+        for (memory, (importance, scope, shareable)) in ids
+            .iter()
+            .zip([(80, "project", true), (15, "universe", false)])
+        {
+            // Each observation is found through the memory it classifies.
+            let row = written
+                .iter()
+                .find(|row| row.depends_on.as_deref() == Some(memory.as_str()))
+                .unwrap_or_else(|| panic!("{memory} has a classification: {written:?}"));
+            assert_eq!(
+                row.object_id,
+                classification_object_id(&operation_key, memory)
+            );
+            assert_eq!(row.scope_id.as_deref(), Some(scope_id.as_str()));
+            assert_eq!(row.source_kind, CLASSIFY_KERNEL_PRODUCER);
+            assert_eq!(row.source_class, "model_inference");
+            assert_eq!(row.taint_class, "dreamer_inference");
+            assert_eq!(row.classification, scope);
+            assert_eq!(
+                row.detail,
+                json!({
+                    "schema_version": CLASSIFY_SCHEMA_VERSION,
+                    "importance": importance,
+                    "scope": scope,
+                    "shareable": shareable,
+                })
+            );
+        }
     }
 
+    /// Each commit retires reclassified memories' prior classifications, leaving one live classification per memory; a memory the later run did not name keeps its classification. commentlint: allow(JUDGE)
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_rejects_items_that_are_not_claim_identities() {
-        let claim = test_claim_id(1);
-        for items in [
-            // The request parser rejects legacy integer `memory_id` identities.
-            json!([{ "memory_id": 7 }]),
-            json!([{ "public_claim_id": 7 }]),
-            json!([{ "public_claim_id": "" }]),
-            json!([{ "public_claim_id": "mcm_short" }]),
-            json!([{ "public_claim_id": &claim[4..] }]),
+    async fn dreamer_run_task_retires_the_prior_classification_of_a_reclassified_memory() {
+        let (first, second, other) = (test_memory_id(1), test_memory_id(2), test_memory_id(3));
+        let producer = Arc::new(ProducerState::default());
+        {
+            let mut results = producer.await_results.lock().unwrap();
+            results.push_back(Ok(ProducerOutput {
+                text: format!(
+                    "<classify><memory id=\"{first}\" importance=\"80\" scope=\"project\" shareable=\"true\"/>\
+                     <memory id=\"{second}\" importance=\"20\" scope=\"universe\" shareable=\"false\"/>\
+                     <memory id=\"{other}\" importance=\"50\" scope=\"ecosystem\" shareable=\"true\"/></classify>"
+                ),
+                length_capped: false,
+            }));
+            results.push_back(Ok(ProducerOutput {
+                text: format!(
+                    "<classify><memory id=\"{first}\" importance=\"5\" scope=\"ecosystem\" shareable=\"false\"/>\
+                     <memory id=\"{second}\" importance=\"95\" scope=\"project\" shareable=\"true\"/></classify>"
+                ),
+                length_capped: false,
+            }));
+        }
+        let harness = DreamerHarness::start(&producer).await;
+        let all = [first.clone(), second.clone(), other.clone()];
+        let response = response_of(
+            harness
+                .classify(
+                    classify_payload(&all, TEST_CLASSIFY_TIMEOUT_MS),
+                    "first-run",
+                )
+                .await,
+        );
+        assert_eq!(response["classified"], json!(3));
+        let before = harness.classifications();
+        assert_eq!(before.len(), 3, "{before:?}");
+        let retained = before
+            .iter()
+            .find(|row| row.depends_on.as_deref() == Some(other.as_str()))
+            .cloned()
+            .expect("the third memory is classified");
+
+        let two = [first.clone(), second.clone()];
+        let response = response_of(
+            harness
+                .classify(
+                    classify_payload(&two, TEST_CLASSIFY_TIMEOUT_MS),
+                    "second-run",
+                )
+                .await,
+        );
+        assert_eq!(response["classified"], json!(2));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
+        let after = harness.classifications();
+        assert_eq!(
+            after.len(),
+            3,
+            "one live classification per memory: {after:?}"
+        );
+        let by_memory = |memory: &str| {
+            after
+                .iter()
+                .find(|row| row.depends_on.as_deref() == Some(memory))
+                .unwrap_or_else(|| panic!("{memory}: {after:?}"))
+        };
+        let second_key = harness.kernel_operation_key("second-run");
+        for (memory, importance, scope, shareable) in [
+            (&first, 5, "ecosystem", false),
+            (&second, 95, "project", true),
+        ] {
+            let row = by_memory(memory);
+            assert_eq!(row.object_id, classification_object_id(&second_key, memory));
+            assert_eq!(
+                row.detail,
+                json!({
+                    "schema_version": CLASSIFY_SCHEMA_VERSION,
+                    "importance": importance,
+                    "scope": scope,
+                    "shareable": shareable,
+                })
+            );
+        }
+        assert_eq!(by_memory(&other), &retained);
+        // Earlier classifications are invalidated at the second run's commit.
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let first_key = harness.kernel_operation_key("first-run");
+        for memory in &two {
+            let prior = classification_object_id(&first_key, memory);
+            let (_, states) = kernel.object_states(std::slice::from_ref(&prior)).unwrap();
+            let state = states[0]
+                .clone()
+                .unwrap_or_else(|| panic!("{prior} is in the store"));
+            assert_eq!(
+                state.object.invalidated_commit_seq,
+                Some(response["commit_seq"].as_i64().unwrap()),
+                "{memory}: the prior classification is retired by the reclassifying commit"
+            );
+        }
+        // A replay of the second run still writes nothing.
+        let tip = harness.kernel_tip();
+        response_of(
+            harness
+                .classify(
+                    classify_payload(&two, TEST_CLASSIFY_TIMEOUT_MS),
+                    "second-run",
+                )
+                .await,
+        );
+        assert_eq!(harness.kernel_tip(), tip);
+        assert_eq!(harness.classifications(), after);
+    }
+
+    /// The kernel keys receipts store-wide; the classify commit key carries the
+    /// project, so two projects whose sessions reuse a command id each write
+    /// their own classifications and each replay their own.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_keys_the_kernel_write_by_project() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        // A second project, bound on another route, with its own memory.
+        let other_root = harness._dir.path().join("other-project");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let other_root = other_root.to_str().unwrap().to_string();
+        let mut other_binding = binding_with_harness(&other_root, "pi", "ses");
+        other_binding.config.model_chain = vec!["test/route-only-model".to_string()];
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        kernel
+            .commit(
+                kernel_route_fixtures::intent("other-project-scope"),
+                |envelope| {
+                    let mut domains = HashSet::new();
+                    let mut ready = false;
+                    let mut refused = None;
+                    kernel_routes::commit::ensure_scope(
+                        envelope,
+                        &other_binding.kernel_project,
+                        &mut ready,
+                        &mut domains,
+                        &mut refused,
+                    )?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        kernel_route_fixtures::commit_verified_memory(
+            &kernel,
+            "other-memory",
+            "memory:other",
+            &other_binding.kernel_project.scope_id(),
+            "ARCHITECTURE",
+            "the other project's memory",
+        );
+        let other_scope = other_binding.kernel_project.scope_id();
+        harness.handler.bind_route(test_route(8), other_binding);
+        activate_module_authority(
+            &harness.store,
+            "context",
+            "git:other",
+            &other_root,
+            "memories",
+        );
+        let other_generation = harness
+            .store
+            .authority_status("context", "git:other", "memories")
+            .unwrap()
+            .unwrap()
+            .generation;
+
+        for (memory, route, generation) in [
+            (test_memory_id(1), test_route(7), harness.generation),
+            ("memory:other".to_string(), test_route(8), other_generation),
+        ] {
+            producer
+                .await_results
+                .lock()
+                .unwrap()
+                .push_back(Ok(ProducerOutput {
+                    text: classify_manifest(std::slice::from_ref(&memory)),
+                    length_capped: false,
+                }));
+            let outcome = harness
+                .handler
+                .handle_dreamer_run_task(
+                    route,
+                    &json!({
+                        "v": 1,
+                        "session_id": "ses",
+                        "task": CLASSIFY_TASK,
+                        "command_id": "shared-command",
+                        "authority_generation": generation,
+                        "payload": classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS),
+                    }),
+                )
+                .await;
+            assert_eq!(response_of(outcome)["classified"], json!(1), "{memory}");
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
+        let written = harness.classifications();
+        assert_eq!(written.len(), 2, "{written:?}");
+        let by_memory = |memory: &str| {
+            written
+                .iter()
+                .find(|row| row.depends_on.as_deref() == Some(memory))
+                .unwrap_or_else(|| panic!("{memory}: {written:?}"))
+        };
+        assert_eq!(
+            by_memory("memory:other").scope_id.as_deref(),
+            Some(other_scope.as_str())
+        );
+        assert_ne!(
+            by_memory("memory:other").scope_id,
+            by_memory(&test_memory_id(1)).scope_id
+        );
+    }
+
+    /// Two authority projects hold the same root in turn and reuse a session and command id. The Dreamer ledger keys receipts by project, so the second project dispatches; its kernel commit must not replay the first project's receipt, which a key built from the route digest alone would. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_keys_the_kernel_write_by_authority_project_on_a_shared_root() {
+        let memory = test_memory_id(1);
+        let producer = Arc::new(ProducerState::default());
+        for _ in 0..2 {
+            producer
+                .await_results
+                .lock()
+                .unwrap()
+                .push_back(Ok(ProducerOutput {
+                    text: classify_manifest(std::slice::from_ref(&memory)),
+                    length_capped: false,
+                }));
+        }
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS);
+        let first = response_of(harness.classify(payload.clone(), "shared").await);
+        assert_eq!(first["classified"], json!(1));
+        let first_tip = harness.kernel_tip();
+
+        // The route now resolves the root to `git:other`; the request is not leased.
+        activate_module_authority(
+            &harness.store,
+            "context",
+            "git:other",
+            &harness.route_root,
+            "memories",
+        );
+        let other = harness
+            .store
+            .authority_status("context", "git:other", "memories")
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.state, "MODULE");
+        let second = response_of(
+            harness
+                .handler
+                .handle_dreamer_run_task(
+                    test_route(7),
+                    &json!({
+                        "v": 1,
+                        "session_id": "ses",
+                        "task": CLASSIFY_TASK,
+                        "command_id": "shared",
+                        "authority_generation": other.generation,
+                        "payload": payload,
+                    }),
+                )
+                .await,
+        );
+        assert_eq!(second["classified"], json!(1), "{second}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
+        assert!(
+            harness.kernel_tip() > first_tip,
+            "the second project's commit is written, not replayed from the first's receipt"
+        );
+        assert_ne!(
+            second["commit_seq"], first["commit_seq"],
+            "the two projects' commits are distinct kernel receipts"
+        );
+        // Both projects write under the root's scope, so the second commit
+        // retires the first's row: one live classification, keyed by the
+        // second project.
+        let written = harness.classifications();
+        let other_key = classify_kernel_operation_key(
+            &binding_with_harness(&harness.route_root, "pi", "ses").kernel_project,
+            "git:other",
+            &dreamer_operation_key("ses", "shared"),
+        )
+        .unwrap();
+        assert_ne!(other_key, harness.kernel_operation_key("shared"));
+        assert_eq!(
+            written
+                .iter()
+                .map(|row| row.object_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![classification_object_id(&other_key, &memory).as_str()],
+            "{written:?}"
+        );
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let first_id = classification_object_id(&harness.kernel_operation_key("shared"), &memory);
+        let (_, states) = kernel
+            .object_states(std::slice::from_ref(&first_id))
+            .unwrap();
+        assert_eq!(
+            states[0]
+                .clone()
+                .unwrap_or_else(|| panic!("{first_id} is in the store"))
+                .object
+                .invalidated_commit_seq,
+            Some(second["commit_seq"].as_i64().unwrap()),
+            "the first project's row is retired by the second commit"
+        );
+    }
+
+    /// Two roots hold one authority project and share a session and command id. The receipt is keyed by project, so the second root would otherwise replay the first root's completed receipt before its own pool read; the digest carries the kernel scope, so the second root's request is a conflict and neither replays nor dispatches. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_does_not_replay_a_receipt_across_roots_of_one_project() {
+        let memory = test_memory_id(1);
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: classify_manifest(std::slice::from_ref(&memory)),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS);
+        let first = response_of(harness.classify(payload.clone(), "shared").await);
+        assert_eq!(first["classified"], json!(1));
+
+        let worktree = harness._dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        harness
+            .store
+            .bind_authority_route("context", "git:identity", worktree.to_str().unwrap())
+            .unwrap();
+        harness.handler.bind_route(
+            test_route(8),
+            binding_with_harness(worktree.to_str().unwrap(), "pi", "ses"),
+        );
+        let tip = harness.kernel_tip();
+        let outcome = harness
+            .handler
+            .handle_dreamer_run_task(
+                test_route(8),
+                &json!({
+                    "v": 1,
+                    "session_id": "ses",
+                    "task": CLASSIFY_TASK,
+                    "command_id": "shared",
+                    "authority_generation": harness.generation,
+                    "payload": payload,
+                }),
+            )
+            .await;
+        assert_eq!(error_code_of(&outcome), "dreamer_request_conflict");
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            1,
+            "no second dispatch"
+        );
+        assert_eq!(
+            harness.kernel_tip(),
+            tip,
+            "nothing written for the second root"
+        );
+        assert_eq!(harness.classifications().len(), 1);
+    }
+
+    /// A scope row with a different project digest rejects classification
+    /// writes, and the failure names that reason as `kernel.commit` does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_classifications_names_a_reserved_scope_in_its_failure() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let other_root = harness._dir.path().join("reserved-project");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let other = binding_with_harness(other_root.to_str().unwrap(), "pi", "ses").kernel_project;
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        // The scope row carries the other project's id but a stranger's digest.
+        let reserved = kernel_route_fixtures::project_scope_spec(
+            &other.scope_id(),
+            &kernel_route_fixtures::sha256_hex(b"/somewhere/else"),
+        );
+        kernel
+            .commit(
+                kernel_route_fixtures::intent("reserved-scope"),
+                |envelope| {
+                    kernel_route_fixtures::ensure_domain(envelope, kernel_route_fixtures::DOMAIN)?;
+                    envelope.insert_scope(reserved.clone())?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let error = harness
+            .handler
+            .dreamer
+            .record_classifications(
+                &other,
+                &ClassifyWriteIdentity {
+                    authority_project: "git:identity",
+                    operation_key: &dreamer_operation_key("ses", "reserved"),
+                    request_digest: &"d".repeat(64),
+                    cause: "ses:reserved",
+                    generation: 1,
+                    known_as_of: 1,
+                },
+                &[Classification {
+                    object_id: test_memory_id(1),
+                    importance: 50,
+                    scope: "project".to_string(),
+                    shareable: true,
+                }],
+            )
+            .await
+            .expect_err("a reserved scope refuses the write");
+        assert!(
+            error.contains("invalid:scope_reserved"),
+            "the failure names the reserved scope: {error}"
+        );
+    }
+
+    /// A visible decision from another domain is not a memory: the request is
+    /// refused the same way an absent object is, and nothing is dispatched.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_refuses_decisions_outside_the_memory_domain() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
+        kernel
+            .commit(kernel_route_fixtures::intent("other-domain"), |envelope| {
+                kernel_route_fixtures::ensure_domain(envelope, "notes")?;
+                envelope.insert_decision(kernel_route_fixtures::decision_spec_in_domain(
+                    "decision:note",
+                    &scope_id,
+                    "notes",
+                    "NOTE",
+                    "a note, not a memory",
+                ))?;
+                kernel_route_fixtures::verify_decision(envelope, "decision:note")?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let ids = [test_memory_id(1), "decision:note".to_string()];
+        let outcome = harness
+            .classify(classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS), "note")
+            .await;
+        assert_eq!(error_code_of(&outcome), "invalid_params");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(harness.classifications().is_empty());
+    }
+
+    fn commit_sensitive_memory(harness: &DreamerHarness, object_id: &str) {
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
+        kernel
+            .commit(
+                kernel_route_fixtures::intent(&format!("{object_id}-sensitive")),
+                |envelope| {
+                    kernel_route_fixtures::ensure_domain(
+                        envelope,
+                        kernel_route_fixtures::MEMORY_DOMAIN,
+                    )?;
+                    let mut spec = kernel_route_fixtures::memory_decision_spec(
+                        object_id,
+                        &scope_id,
+                        "PROJECT_RULES",
+                        "a memory admitted as sensitive",
+                    );
+                    spec.sensitivity = kernel::Sensitivity::Sensitive;
+                    envelope.insert_decision(spec)?;
+                    kernel_route_fixtures::verify_decision(envelope, object_id)?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    }
+
+    /// `ExplicitSearch` serves sensitive rows, so the pool read itself must refuse them before a producer connects, and the refusal replays from the receipt. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_refuses_a_memory_served_above_normal_sensitivity() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let sensitive = "memory:sensitive".to_string();
+        commit_sensitive_memory(&harness, &sensitive);
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let binding = binding_with_harness(&harness.route_root, "pi", "ses").kernel_project;
+        let read = kernel_routes::read::read_visible(
+            &kernel,
+            &binding,
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::Objects(std::slice::from_ref(&sensitive)),
+        )
+        .unwrap();
+        let row = read
+            .rows
+            .iter()
+            .find(|row| row.object.object_id == sensitive)
+            .expect("the explicit-search surface serves the sensitive memory");
+        assert_eq!(row.object.sensitivity, kernel::Sensitivity::Sensitive);
+
+        let ids = [test_memory_id(1), sensitive.clone()];
+        let outcome = harness
+            .classify(
+                classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS),
+                "sensitive",
+            )
+            .await;
+        assert_eq!(error_code_of(&outcome), "sensitive_remote");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(harness.classifications().is_empty());
+        let receipt = harness.receipt("sensitive");
+        assert!(
+            matches!(
+                receipt.state,
+                DreamerReceiptState::Complete {
+                    terminal_kind: DreamerTerminalKind::Failed,
+                    ..
+                }
+            ),
+            "{receipt:?}"
+        );
+        let replay = harness
+            .classify(
+                classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS),
+                "sensitive",
+            )
+            .await;
+        assert_eq!(error_code_of(&replay), "sensitive_remote");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// A memory served above normal, or hidden on every surface, at commit time is recorded `shareable=false` whatever the manifest said; the pool read refuses or omits such a memory up front, so this guards a class or disposition that changed between the read and the commit. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_classifications_never_records_a_sensitive_or_hidden_memory_as_shareable() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let sensitive = "memory:sensitive".to_string();
+        commit_sensitive_memory(&harness, &sensitive);
+        let binding = binding_with_harness(&harness.route_root, "pi", "ses").kernel_project;
+        let normal = test_memory_id(1);
+        let quarantined = test_memory_id(2);
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        kernel
+            .commit(
+                kernel_route_fixtures::intent("quarantine-memory"),
+                |envelope| {
+                    envelope.record_admission(kernel_route_fixtures::admission(
+                        &quarantined,
+                        kernel::EventKind::Quarantine,
+                        None,
+                        (
+                            kernel::SourceClass::TrustedLocalCode,
+                            kernel::TaintClass::CurrentCode,
+                        ),
+                    ))?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let (_, served) = kernel
+            .preview(Instant::now() + CLASSIFY_KERNEL_WRITE_TIMEOUT, |envelope| {
+                envelope.served_rows_for(&[quarantined.as_str()], None)
+            })
+            .unwrap();
+        let row = served
+            .get(&quarantined)
+            .expect("the quarantined memory is still admitted");
+        assert_eq!(row.object.sensitivity, kernel::Sensitivity::Normal);
+        assert_eq!(
+            row.visibility(kernel::Surface::ExplicitSearch),
+            kernel::SurfaceVisibility::Hidden
+        );
+        let classification = |object_id: &String| Classification {
+            object_id: object_id.clone(),
+            importance: 50,
+            scope: "project".to_string(),
+            shareable: true,
+        };
+        let commit = harness
+            .handler
+            .dreamer
+            .record_classifications(
+                &binding,
+                &ClassifyWriteIdentity {
+                    authority_project: "git:identity",
+                    operation_key: &dreamer_operation_key("ses", "floor"),
+                    request_digest: &"d".repeat(64),
+                    cause: "ses:floor",
+                    generation: 1,
+                    known_as_of: 1,
+                },
+                &[
+                    classification(&sensitive),
+                    classification(&quarantined),
+                    classification(&normal),
+                ],
+            )
+            .await
+            .expect("the write succeeds");
+        assert_eq!(commit.classified, 3);
+        let written = harness.classifications();
+        let by_memory = |memory: &str| {
+            written
+                .iter()
+                .find(|row| row.depends_on.as_deref() == Some(memory))
+                .unwrap_or_else(|| panic!("{memory}: {written:?}"))
+        };
+        assert_eq!(by_memory(&sensitive).detail["shareable"], json!(false));
+        assert_eq!(by_memory(&quarantined).detail["shareable"], json!(false));
+        assert_eq!(by_memory(&normal).detail["shareable"], json!(true));
+    }
+
+    /// `memory_classification` and `classifies` are free-form literals: another project's row citing this memory, and another producer's row in this project, are not this project's classifications; both stay live and the commit succeeds. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_retires_only_the_classification_rows_it_wrote() {
+        let memory = test_memory_id(1);
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: classify_manifest(std::slice::from_ref(&memory)),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer).await;
+        let own_scope = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
+        let other_root = harness._dir.path().join("other-project");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let other = binding_with_harness(other_root.to_str().unwrap(), "pi", "ses").kernel_project;
+        let other_scope = other.scope_id();
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let foreign = "observation:foreign-classification".to_string();
+        let other_producer = "observation:other-producer-classification".to_string();
+        let row =
+            |observation_id: &str, scope_id: &str, source_kind: &str| kernel::ObservationSpec {
+                observation_id: observation_id.to_string(),
+                object_id: observation_id.to_string(),
+                domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
+                proposition_id: None,
+                scope_id: Some(scope_id.to_string()),
+                anchor_id: None,
+                evidence_id: None,
+                observation_kind: CLASSIFY_OBSERVATION_KIND.to_string(),
+                payload: kernel::ObservationPayload {
+                    summary: "importance 1, scope project, shareable false".to_string(),
+                    classification: "project".to_string(),
+                    detail: None,
+                },
+                observed_at: 1,
+                dependencies: vec![kernel::ObservationDependencySpec {
+                    dependency_object_id: memory.clone(),
+                    dependency_kind: CLASSIFY_DEPENDENCY_KIND.to_string(),
+                    dependency_payload: None,
+                }],
+                source_kind: source_kind.to_string(),
+                source_id: observation_id.to_string(),
+                source_revision: 1,
+                sensitivity: kernel::Sensitivity::Normal,
+            };
+        kernel
+            .commit(kernel_route_fixtures::intent("rows-not-ours"), |envelope| {
+                let mut domains = HashSet::new();
+                let mut ready = false;
+                let mut refused = None;
+                kernel_routes::commit::ensure_scope(
+                    envelope,
+                    &other,
+                    &mut ready,
+                    &mut domains,
+                    &mut refused,
+                )?;
+                envelope.insert_observation(row(&foreign, &other_scope, "repo"))?;
+                envelope.insert_observation(row(&other_producer, &own_scope, "repo"))?;
+                Ok(String::new())
+            })
+            .unwrap();
+        assert_eq!(kernel_dependency(&kernel, &foreign), memory);
+        assert_eq!(kernel_dependency(&kernel, &other_producer), memory);
+
+        let response = response_of(
+            harness
+                .classify(
+                    classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS),
+                    "own-run",
+                )
+                .await,
+        );
+        assert_eq!(response["classified"], json!(1));
+        let live = |object_id: &str| {
+            let (_, states) = kernel.object_states(&[object_id.to_string()]).unwrap();
+            states[0]
+                .clone()
+                .unwrap_or_else(|| panic!("{object_id} is in the store"))
+                .object
+                .invalidated_commit_seq
+                .is_none()
+        };
+        assert!(
+            live(&foreign),
+            "the foreign project's row is not this project's to retire"
+        );
+        assert!(
+            live(&other_producer),
+            "another producer's row in this project is not a Dreamer classification"
+        );
+        let own = classification_object_id(&harness.kernel_operation_key("own-run"), &memory);
+        assert!(live(&own), "this project's classification is written");
+    }
+
+    /// The entry check predates the model call, which a drain can outlast; the canonical write reads authority again and a run whose project no longer holds `MODULE` writes nothing and completes its receipt failed. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_writes_nothing_when_authority_drains_during_the_model_call() {
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: classify_manifest(&ids),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer).await;
+        let store = Arc::clone(&harness.store);
+        *producer.on_start.lock().unwrap() = Some(Box::new(move || {
+            let draining = store
+                .authority_begin_drain("context", "git:identity", "memories", "lease", i64::MAX, 1)
+                .unwrap();
+            assert_ne!(draining.state, "MODULE");
+        }));
+        let tip = harness.kernel_tip();
+        let outcome = harness
+            .classify(classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS), "drained")
+            .await;
+        assert_eq!(error_code_of(&outcome), "authority_not_module");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.kernel_tip(), tip, "no canonical write");
+        assert!(harness.classifications().is_empty());
+        let receipt = harness.receipt("drained");
+        assert!(
+            matches!(
+                receipt.state,
+                DreamerReceiptState::Complete {
+                    terminal_kind: DreamerTerminalKind::Failed,
+                    ..
+                }
+            ),
+            "{receipt:?}"
+        );
+    }
+
+    /// A pool whose escaped rendering passes the byte bound is refused before
+    /// any producer is connected, and nothing is truncated to make it fit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_refuses_a_pool_over_the_prompt_byte_bound() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
+        // Fits the read budget raw; escaping quintuples it past the prompt bound.
+        let body = "&".repeat(MAX_CLASSIFY_PROMPT_BYTES / 4);
+        kernel_route_fixtures::commit_verified_memory(
+            &kernel,
+            "huge",
+            "memory:huge",
+            &scope_id,
+            "PROJECT_RULES",
+            &body,
+        );
+        let outcome = harness
+            .classify(
+                classify_payload(&["memory:huge".to_string()], TEST_CLASSIFY_TIMEOUT_MS),
+                "huge",
+            )
+            .await;
+        assert_eq!(error_code_of(&outcome), "payload_too_large");
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.classifications().is_empty());
+    }
+
+    /// `read_visible` truncates rows past `MAX_READ_ROW_BYTES` rather than failing, so a dropped memory must not be reported as one the project does not hold: the request is refused as too large and nothing is dispatched. commentlint: allow(JUDGE)
+    /// The stored rationales carry the bytes past `MAX_READ_ROW_BYTES`, while
+    /// the rendered summaries remain within the prompt bound.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_refuses_a_pool_over_the_kernel_read_budget_as_too_large() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
+        // Each text field is capped at the redactor's input bound, so the
+        // budget is crossed by count rather than by one row.
+        let rationale = "r".repeat(context_core::redaction::MAX_REDACTABLE_BYTES);
+        let wide = kernel_routes::read::MAX_READ_ROW_BYTES / rationale.len() + 1;
+        assert!(wide <= MAX_CLASSIFY_OBJECTS, "{wide} rows fit one request");
+        let ids: Vec<String> = (0..wide).map(|n| format!("memory:wide-{n}")).collect();
+        for id in &ids {
+            kernel_route_fixtures::commit_verified_memory_with_rationale(
+                &kernel,
+                id,
+                id,
+                &scope_id,
+                "PROJECT_RULES",
+                "a short summary",
+                &rationale,
+            );
+        }
+        let outcome = harness
+            .classify(classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS), "wide")
+            .await;
+        assert_eq!(error_code_of(&outcome), "payload_too_large", "{outcome:?}");
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+        assert!(harness.classifications().is_empty());
+    }
+
+    /// The retired request shape is refused: a host-rendered prompt or
+    /// claim-lane items are `invalid_params` at parse time, before any
+    /// authority or ledger read; a public claim id where an object id belongs
+    /// parses as an id and is refused because no such kernel object exists in
+    /// the project, still with no dispatch and no write.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_rejects_the_retired_request_shape() {
+        let id = test_memory_id(1);
+        for (payload, why) in [
+            (
+                json!({"prompt_body": "classify", "object_ids": [id], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "a host-rendered prompt",
+            ),
+            (
+                json!({"items": [{"public_claim_id": "mcm_0101010101010101010101010101010101"}], "object_ids": [id], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "claim-lane items",
+            ),
+            (
+                json!({"object_ids": ["mcm_01010101010101010101010101010101"], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "a public claim id where an object id belongs",
+            ),
+            (
+                json!({"object_ids": [], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "no objects",
+            ),
+            (
+                json!({"object_ids": [id, id], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "a repeated object id",
+            ),
+            (
+                json!({"object_ids": [7], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "a non-string object id",
+            ),
+            (
+                json!({"object_ids": (0..=MAX_CLASSIFY_OBJECTS).map(|n| format!("memory:{n}")).collect::<Vec<_>>(), "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                "more objects than the cap",
+            ),
         ] {
             let producer = Arc::new(ProducerState::default());
-            let mut payload = claim_native_payload(&[], TEST_CLASSIFY_TIMEOUT_MS);
-            payload["items"] = items.clone();
-            let (producer, outcome) =
-                dreamer_classify_outcome(&producer, payload, "claim-items-shape").await;
-            match outcome {
-                PreparedOutcome::Error { code, .. } => {
-                    assert_eq!(code, "invalid_params", "items {items}")
-                }
-                other => panic!("expected invalid_params for {items}, got {other:?}"),
-            }
+            let harness = DreamerHarness::start(&producer).await;
+            let outcome = harness.classify(payload.clone(), "retired-shape").await;
+            let code = match outcome {
+                PreparedOutcome::Error { code, .. } => code,
+                other => panic!("expected invalid_params for {why}, got {other:?}"),
+            };
+            // A public claim id where an object id belongs is well-formed as a
+            // request, so it is refused because the project does not hold it;
+            // the other shapes are refused by the parser. Either way the code is
+            // the same and nothing runs.
+            assert_eq!(code, "invalid_params", "{why}");
             assert_eq!(
                 producer.starts.load(Ordering::SeqCst),
                 0,
-                "a rejected identity must never start a run: {items}"
+                "a rejected request never starts a run: {why}"
             );
+            assert!(harness.classifications().is_empty(), "{why}");
         }
+    }
+
+    /// An object the bound project does not hold, whether absent or another
+    /// project's, ends the command as a recorded request failure with no
+    /// dispatch, and the reply does not say which.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_refuses_objects_outside_the_bound_project() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        // A memory in another project's scope.
+        let other_scope = kernel_route_fixtures::project_scope_spec(
+            "project:other",
+            &kernel_route_fixtures::sha256_hex(b"/somewhere/else"),
+        );
+        kernel
+            .commit(kernel_route_fixtures::intent("other-scope"), |envelope| {
+                kernel_route_fixtures::ensure_domain(envelope, kernel_route_fixtures::DOMAIN)?;
+                envelope.insert_scope(other_scope.clone())?;
+                Ok(String::new())
+            })
+            .unwrap();
+        kernel_route_fixtures::commit_verified_memory(
+            &kernel,
+            "other-memory",
+            "memory:other-project",
+            "project:other",
+            "PROJECT_RULES",
+            "belongs elsewhere",
+        );
+        for (ids, why) in [
+            (
+                vec![test_memory_id(1), "memory:absent".to_string()],
+                "an absent object",
+            ),
+            (
+                vec![test_memory_id(1), "memory:other-project".to_string()],
+                "another project's object",
+            ),
+        ] {
+            let outcome = harness
+                .classify(classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS), why)
+                .await;
+            match outcome {
+                PreparedOutcome::Error { code, message } => {
+                    assert_eq!(code, "invalid_params", "{why}");
+                    assert!(
+                        !message.contains("absent") && !message.contains("other-project"),
+                        "{why}: the reply names no id: {message}"
+                    );
+                }
+                other => panic!("{why}: {other:?}"),
+            }
+            assert_eq!(producer.starts.load(Ordering::SeqCst), 0, "{why}");
+            assert!(harness.classifications().is_empty(), "{why}");
+            // The command is terminal: a retry replays the refusal without a read.
+            let again = harness
+                .classify(classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS), why)
+                .await;
+            assert_eq!(error_code_of(&again), "invalid_params", "{why}");
+        }
+    }
+
+    /// A kernel that is not open when the pool is read is a condition of the
+    /// daemon, not of the request: the command answers `kernel_unavailable`,
+    /// its receipt stays open with no attempt, and the same command runs once
+    /// the kernel opens. A daemon restart is exactly this window, since the
+    /// memory store opens before the kernel does.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_leaves_the_receipt_open_while_the_kernel_is_starting() {
+        use memory_store::dreamer_ledger::DreamerReceiptState;
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(classify_manifest(&ids));
+        let predecessor = DreamerHarness::start(&producer).await;
+        let kernel_root = predecessor._dir.path().join("kernel");
+        // The predecessor lets go of the kernel lease; the successor's kernel
+        // has not opened yet.
+        predecessor
+            .handler
+            .kernel
+            .mark_unavailable(kernel_routes::UnavailableKind::Store);
+        let harness = DreamerHarness::start_with_store(&producer, &predecessor);
+        assert_eq!(
+            harness.handler.kernel.state(),
+            kernel_routes::KernelState::Starting
+        );
+        let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
+        let outcome = harness.classify(payload.clone(), "kernel-starting").await;
+        assert_eq!(error_code_of(&outcome), "kernel_unavailable");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(
+            matches!(
+                harness.receipt("kernel-starting").state,
+                DreamerReceiptState::InProgress { .. }
+            ),
+            "a kernel that is not ready leaves the receipt open: {:?}",
+            harness.receipt("kernel-starting").state
+        );
+        assert!(harness.attempts("kernel-starting").is_empty());
+
+        harness
+            .handler
+            .kernel
+            .open(
+                kernel_root,
+                StoreOpenPolicy::default(),
+                harness.handler.cancel.clone(),
+            )
+            .await;
+        assert_eq!(
+            harness.handler.kernel.state(),
+            kernel_routes::KernelState::Ready
+        );
+        let response = response_of(harness.classify(payload, "kernel-starting").await);
+        assert_eq!(response["classified"], json!(1), "{response}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.classifications().len(), 1);
     }
 
     /// The request shape is checked before any authority state is read: a
@@ -29783,8 +31693,8 @@ mod tests {
             handler_with_store(Arc::clone(&producer), default_test_config());
         let route_root = project.to_str().unwrap();
         handler.bind_route(test_route(7), binding_with_harness(route_root, "pi", "ses"));
-        let mut payload = claim_native_payload(&[test_claim_id(1)], TEST_CLASSIFY_TIMEOUT_MS);
-        payload.as_object_mut().unwrap().remove("prompt_body");
+        let mut payload = classify_payload(&[test_memory_id(1)], TEST_CLASSIFY_TIMEOUT_MS);
+        payload["object_ids"] = json!([]);
         let request = |generation: u64| {
             json!({
                 "v": 1,
@@ -29830,21 +31740,21 @@ mod tests {
     /// A manifest that names an unrequested claim advances the chain instead of ending it.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_rejects_a_manifest_naming_an_unexpected_claim() {
-        let requested = test_claim_id(1);
-        let unexpected = test_claim_id(9);
+        let requested = test_memory_id(1);
+        let unexpected = test_memory_id(9);
         let producer = Arc::new(ProducerState::default());
         producer.await_results.lock().unwrap().extend([
             Ok(ProducerOutput {
-                text: claim_manifest(&[requested.clone(), unexpected]),
+                text: classify_manifest(&[requested.clone(), unexpected]),
                 length_capped: false,
             }),
             Ok(ProducerOutput {
-                text: claim_manifest(std::slice::from_ref(&requested)),
+                text: classify_manifest(std::slice::from_ref(&requested)),
                 length_capped: false,
             }),
         ]);
         let mut payload =
-            claim_native_payload(std::slice::from_ref(&requested), TEST_CLASSIFY_TIMEOUT_MS);
+            classify_payload(std::slice::from_ref(&requested), TEST_CLASSIFY_TIMEOUT_MS);
         payload["model_chain"] = json!(["test/unexpected-claim", "test/exact"]);
         let (producer, outcome) =
             dreamer_classify_outcome(&producer, payload, "unexpected-claim").await;
@@ -29857,9 +31767,10 @@ mod tests {
             json!("test/exact"),
             "the over-covering manifest must not be the accepted one"
         );
-        assert_eq!(
-            response["manifest_text"],
-            json!(claim_manifest(&[requested]))
+        assert_eq!(response["classified"], json!(1));
+        assert!(
+            !response.to_string().contains("test-09"),
+            "the rejected output's ids never reach the reply: {response}"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -29873,10 +31784,10 @@ mod tests {
     /// ceiling.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_requires_a_positive_timeout_ms() {
-        let claims = [test_claim_id(1)];
+        let ids = [test_memory_id(1)];
         for timeout in [None, Some(json!(0)), Some(json!(-1)), Some(json!("600000"))] {
             let producer = Arc::new(ProducerState::default());
-            let mut payload = claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS);
+            let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
             match &timeout {
                 None => {
                     payload

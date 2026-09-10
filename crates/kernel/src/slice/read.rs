@@ -103,6 +103,40 @@ impl KernelStore {
         Ok(rows)
     }
 
+    /// The object ids `observation_id` depends on through `dependency_kind`,
+    /// in insertion order. Dependencies are written with the observation and
+    /// never change, so no snapshot sequence applies. An unknown observation
+    /// has no dependencies and yields an empty vector.
+    #[cfg(feature = "test-support")]
+    pub fn observation_dependency_targets_for_test(
+        &self,
+        observation_id: &str,
+        dependency_kind: &str,
+    ) -> Result<Vec<String>, KernelError> {
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|_| KernelError::Io)?;
+        let targets = {
+            let mut statement = tx
+                .prepare_cached(
+                    "SELECT dependency_object_id FROM observation_dependencies
+                      WHERE observation_id=?1 AND dependency_kind=?2
+                      ORDER BY rowid",
+                )
+                .map_err(|_| KernelError::Io)?;
+            statement
+                .query_map([observation_id, dependency_kind], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|_| KernelError::Io)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|_| KernelError::Io)?
+        };
+        tx.commit().map_err(|_| KernelError::Io)?;
+        Ok(targets)
+    }
+
     /// Returns decision-payload sizes in bytes at snapshot `requested`, keyed by `object_id`: the query reads `length(decision_payload)` only, so a caller can bound how many full payloads it materializes before asking for any of them. commentlint: allow(JUDGE)
     ///
     /// Uses the same id binding, snapshot, and error semantics as [`Self::decisions_for_objects_as_of`]; no payload is parsed, so [`KernelError::CorruptCanonicalRow`] is never returned. commentlint: allow(JUDGE)
