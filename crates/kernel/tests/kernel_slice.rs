@@ -789,6 +789,48 @@ fn live_dependent_observations_follow_the_dependency_edge_and_drop_retired_rows(
 }
 
 #[test]
+fn live_dependent_observations_are_ordered_by_commit_then_object_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    // The later commit inserts its rows in reverse-lexical order; the earlier
+    // commit's row sorts first whatever its id.
+    store
+        .commit(intent("first", 'a'), |envelope| {
+            envelope.insert_decision(decision(1))?;
+            envelope.insert_observation(observation(9, "decision-object-1"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    store
+        .commit(intent("second", 'b'), |envelope| {
+            envelope.insert_observation(observation(3, "decision-object-1"))?;
+            envelope.insert_observation(observation(2, "decision-object-1"))?;
+            envelope.insert_observation(observation(1, "decision-object-1"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    store
+        .commit(intent("read", 'c'), |envelope| {
+            assert_eq!(
+                envelope.live_dependent_observations(
+                    "decision-object-1",
+                    "implements",
+                    "implementation"
+                )?,
+                [
+                    "observation-object-9",
+                    "observation-object-1",
+                    "observation-object-2",
+                    "observation-object-3",
+                ]
+            );
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+#[test]
 fn a_secret_bearing_slice_identifier_is_refused_rather_than_redacted() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();

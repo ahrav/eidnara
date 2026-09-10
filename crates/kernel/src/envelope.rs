@@ -436,7 +436,7 @@ impl Envelope<'_> {
         load_object_state(self.tx, object_id)
     }
 
-    /// Returns object IDs for live `observation_kind` observations that depend on `dependency_object_id` through `dependency_kind`, in insertion order; a following retirement acts on the rows this returned. commentlint: allow(JUDGE)
+    /// Returns object IDs for live `observation_kind` observations that depend on `dependency_object_id` through `dependency_kind`, ordered by creating commit and then object ID, so the order is stable across reads and does not depend on rowids; a following retirement acts on the rows this returned. commentlint: allow(JUDGE)
     pub fn live_dependent_observations(
         &self,
         dependency_object_id: &str,
