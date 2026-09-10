@@ -362,22 +362,9 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| KernelError::Io)?;
         check_fence(&tx, self.lease_epoch())?;
-        let changed = tx
-            .execute(
-                "UPDATE capture_pins SET released_at=?1
-                 WHERE capture_pin_id=?2 AND released_at IS NULL",
-                params![released_at, capture_pin_id],
-            )
-            .map_err(|_| KernelError::Io)?;
-        if changed != 1 {
+        if !release_capture_pin_in_tx(&tx, capture_pin_id, released_at)? {
             return Err(KernelError::NotFound);
         }
-        tx.execute(
-            "UPDATE capture_pin_refs SET released_at=?1
-             WHERE capture_pin_id=?2 AND released_at IS NULL",
-            params![released_at, capture_pin_id],
-        )
-        .map_err(|_| KernelError::Io)?;
         tx.commit().map_err(|_| KernelError::Io)
     }
 
@@ -1009,6 +996,33 @@ fn capture_state_inner(
         max_sensitivity,
         pin_id,
     })
+}
+
+/// Marks the pin and every reference it owns released at `released_at`,
+/// inside the caller's transaction. Returns `false` when the pin was already
+/// released or does not exist, so callers decide whether that is an error.
+pub(crate) fn release_capture_pin_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    capture_pin_id: &str,
+    released_at: i64,
+) -> Result<bool, KernelError> {
+    let changed = tx
+        .execute(
+            "UPDATE capture_pins SET released_at=?1
+             WHERE capture_pin_id=?2 AND released_at IS NULL",
+            params![released_at, capture_pin_id],
+        )
+        .map_err(|_| KernelError::Io)?;
+    if changed != 1 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE capture_pin_refs SET released_at=?1
+         WHERE capture_pin_id=?2 AND released_at IS NULL",
+        params![released_at, capture_pin_id],
+    )
+    .map_err(|_| KernelError::Io)?;
+    Ok(true)
 }
 
 fn rollback_capture_pin(writer: &mut Connection, lease_epoch: u64, pin_id: &str) {

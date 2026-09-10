@@ -25,6 +25,7 @@ pub mod schema;
 mod scope;
 mod slice;
 mod source_descriptor;
+mod source_hold;
 pub mod source_identity;
 
 pub use admission::{
@@ -97,6 +98,10 @@ pub use source_descriptor::{
     MAX_DESCRIPTORS_PER_COMMIT, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND,
     SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome,
     SourceDescriptorRequest, descriptor_object_id,
+};
+pub use source_hold::{
+    HeldCursor, HeldDescriptor, HeldPage, MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER, SourceHold,
+    SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourceHoldInvalidity,
 };
 
 /// `Connection::execute` and `Connection::query_row` prepare their statement
