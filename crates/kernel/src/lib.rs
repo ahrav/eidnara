@@ -61,7 +61,7 @@ pub use cas::{
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
-    CompleteCommit, PageEnd,
+    CommitReadTarget, CompleteCommit, PageEnd,
 };
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,

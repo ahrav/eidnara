@@ -13,7 +13,6 @@ use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReadRequest {
     pub consumer_id: String,
-    /// The incarnation the target was captured in, as `KernelStore::commit_read_incarnation` reports it.
     pub incarnation: CommitReadIncarnation,
     /// Commits at or below this sequence are already applied.
     pub after_commit: i64,
@@ -21,12 +20,21 @@ pub struct CommitReadRequest {
     pub through_commit: i64,
 }
 
-/// Identifies the database history a captured target refers to. Reopening the store changes it.
-/// Restoring changes it as well: a restore can make a commit sequence refer to a different commit.
+/// Identifies the history that a captured request's commit sequences refer to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommitReadIncarnation {
+    database: u128,
     lease_epoch: u64,
+    /// Restoring an older backup retains `database` but allows commit sequences to be reused.
     restore_generation: u64,
+}
+
+/// A reader guard captures the target and incarnation together, preventing a restore from
+/// separating them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitReadTarget {
+    pub through_commit: i64,
+    pub incarnation: CommitReadIncarnation,
 }
 
 /// Page capacity, checked from `COUNT` and `SUM(LENGTH())` before any payload is selected.
@@ -97,6 +105,14 @@ pub enum CommitReadError {
 
 fn sqlite(error: rusqlite::Error) -> CommitReadError {
     CommitReadError::Kernel(map_sqlite(error))
+}
+
+fn tip(tx: &Transaction<'_>) -> rusqlite::Result<i64> {
+    tx.query_row_cached(
+        "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
+        [],
+        |row| row.get(0),
+    )
 }
 
 struct CommitShape {
@@ -176,14 +192,40 @@ impl KernelStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The incarnation a `CommitReadRequest` must carry to read from this store's current history.
-    pub fn commit_read_incarnation(&self) -> CommitReadIncarnation {
-        CommitReadIncarnation {
+    /// Captures the committed tip and the incarnation it belongs to from one reader snapshot.
+    pub fn capture_commit_read_target(&self) -> Result<CommitReadTarget, KernelError> {
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(map_sqlite)?;
+        Ok(CommitReadTarget {
+            through_commit: tip(&tx).map_err(map_sqlite)?,
+            incarnation: self.incarnation(&tx)?,
+        })
+    }
+
+    /// Must run under a reader guard because a restore holds every guard while advancing
+    /// `restore_generation` and swapping the database.
+    fn incarnation(&self, tx: &Transaction<'_>) -> Result<CommitReadIncarnation, KernelError> {
+        let database: String = tx
+            .query_row_cached(
+                "SELECT database_incarnation_id FROM kernel_format_marker",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)?;
+        if database.len() != 32 {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        let database =
+            u128::from_str_radix(&database, 16).map_err(|_| KernelError::CorruptCanonicalRow)?;
+        Ok(CommitReadIncarnation {
+            database,
             lease_epoch: self.lease_epoch(),
             restore_generation: self
                 .restore_generation
                 .load(std::sync::atomic::Ordering::SeqCst),
-        }
+        })
     }
 
     /// Reads whole commits in `(after_commit, through_commit]` for a registered consumer until a
@@ -204,14 +246,12 @@ impl KernelStore {
             return Err(CommitReadError::InvalidRequest);
         }
         let mut reader = self.lock_reader()?;
-        // A restore increments `restore_generation` while it holds every reader guard, so an
-        // incarnation compared under this guard identifies the database the read uses.
-        if request.incarnation != self.commit_read_incarnation() {
-            return Err(CommitReadError::IncarnationMismatch);
-        }
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
+        if request.incarnation != self.incarnation(&tx)? {
+            return Err(CommitReadError::IncarnationMismatch);
+        }
         let checkpoint: i64 = tx
             .query_row_cached(
                 "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
@@ -224,14 +264,7 @@ impl KernelStore {
         if request.after_commit < checkpoint {
             return Err(CommitReadError::BelowCheckpoint);
         }
-        let tip: i64 = tx
-            .query_row_cached(
-                "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sqlite)?;
-        if request.through_commit > tip {
+        if request.through_commit > tip(&tx).map_err(sqlite)? {
             return Err(CommitReadError::TargetBeyondTip);
         }
         // One more than the page can hold, so the commit that ends the page is seen without enumerating the whole range.

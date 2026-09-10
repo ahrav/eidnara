@@ -81,7 +81,7 @@ impl Fixture {
     fn request(&self, after: i64, through: i64) -> CommitReadRequest {
         CommitReadRequest {
             consumer_id: CONSUMER.to_string(),
-            incarnation: self.store.commit_read_incarnation(),
+            incarnation: self.store.capture_commit_read_target().unwrap().incarnation,
             after_commit: after,
             through_commit: through,
         }
@@ -792,10 +792,19 @@ fn admission_precedes_materialization_and_refusal_moves_nothing() {
 #[test]
 fn retries_keep_the_captured_target_and_the_wrong_reader_fails_closed() {
     let mut fixture = seeded();
-    let target = fixture.tip();
+    let capture = fixture.store.capture_commit_read_target().unwrap();
+    let target = capture.through_commit;
+    assert_eq!(target, fixture.tip());
+    let request = CommitReadRequest {
+        consumer_id: CONSUMER.to_string(),
+        incarnation: capture.incarnation,
+        after_commit: 0,
+        through_commit: target,
+    };
+    assert_eq!(request, fixture.request(0, target));
     let first = fixture
         .store
-        .read_complete_commits(&fixture.request(0, target), wide())
+        .read_complete_commits(&request, wide())
         .unwrap();
     assert_eq!(first.through, target);
 
@@ -859,7 +868,7 @@ fn retries_keep_the_captured_target_and_the_wrong_reader_fails_closed() {
         reopened.read_complete_commits(&stale, wide()).unwrap_err(),
         CommitReadError::IncarnationMismatch
     );
-    stale.incarnation = reopened.commit_read_incarnation();
+    stale.incarnation = reopened.capture_commit_read_target().unwrap().incarnation;
     let again = reopened.read_complete_commits(&stale, wide()).unwrap();
     assert_eq!(again, first);
 }
@@ -927,6 +936,13 @@ fn a_restore_under_the_same_handle_is_a_new_incarnation() {
     other.insert_domains("other-one", &[20]);
     other.insert_domains("other-many", &[21, 22]);
     assert!(other.tip() >= target);
+    assert_eq!(
+        fixture
+            .store
+            .read_complete_commits(&other.request(0, target), wide())
+            .unwrap_err(),
+        CommitReadError::IncarnationMismatch
+    );
     let destination = tempfile::tempdir().unwrap();
     std::fs::set_permissions(destination.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let backup = other
