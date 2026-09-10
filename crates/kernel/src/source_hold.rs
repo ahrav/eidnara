@@ -14,7 +14,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::backup::release_capture_pin_in_tx;
-use super::cas::{ObjectPresence, is_artifact_digest};
+use super::cas::{ArtifactErrorKind, ObjectPresence, is_artifact_digest};
 use super::envelope::check_fence;
 use super::outbox::acknowledge_outbox_in_tx;
 use super::source_descriptor::SOURCE_DESCRIPTOR_KIND;
@@ -87,7 +87,7 @@ pub enum SourceHoldInvalidity {
     Expired,
     /// A purge deleted evidence the hold referenced; the pin is degraded.
     PurgeDegraded,
-    /// A referenced evidence row is gone, or its object file is absent from disk.
+    /// A referenced evidence row is gone, or its object file is absent or corrupt.
     MissingBytes,
 }
 
@@ -222,11 +222,13 @@ impl Window {
             }
             Descriptors::CreatedInWindow => "",
         };
+        // The descriptor-only index and join order let keyset pages stop at LIMIT without sorting.
         format!(
-            "FROM observations b
-             JOIN object_registry o ON o.object_id=b.object_id
-             JOIN evidence_meta e ON e.evidence_id=b.evidence_id
-             WHERE b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+            "FROM object_registry o INDEXED BY idx_objects_source_descriptor_page
+             CROSS JOIN observations b ON b.object_id=o.object_id
+             CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+             WHERE o.object_id GLOB 'srcdesc:*'
+               AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
                AND b.created_commit_seq>?2 AND b.created_commit_seq<=?1
                {descriptor_liveness}
                AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>?1)"
@@ -241,6 +243,18 @@ impl Window {
                AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
                               WHERE r.capture_pin_id=?3 AND r.evidence_id=e.evidence_id)
              GROUP BY e.evidence_id",
+            self.cited_evidence_sql()
+        )
+    }
+
+    fn held_descriptors_sql(self) -> String {
+        format!(
+            "SELECT o.source_kind,o.object_id,o.source_revision,e.evidence_id,
+                    e.artifact_digest,e.byte_length,b.invalidated_commit_seq
+             {}
+               AND (o.source_kind,o.object_id,o.source_revision)>(?3,?4,?5)
+             ORDER BY o.source_kind,o.object_id,o.source_revision
+             LIMIT ?6",
             self.cited_evidence_sql()
         )
     }
@@ -501,6 +515,8 @@ impl KernelStore {
     /// Checked before a candidate built from the hold is published, and never
     /// answered from a cached earlier check. A hold that no longer protects
     /// its bytes is reported as [`SourceHoldError::Invalid`].
+    /// Each distinct object is read and hashed, with one object buffer bounded
+    /// by [`crate::MAX_PAYLOAD_BYTES`]. Storage failures return [`KernelError::Io`].
     pub fn source_hold_status(
         &self,
         binding: &SourceHoldBinding,
@@ -517,7 +533,7 @@ impl KernelStore {
         let digests = {
             let mut statement = tx
                 .prepare_cached(
-                    "SELECT e.artifact_digest FROM capture_pin_refs r
+                    "SELECT DISTINCT e.artifact_digest FROM capture_pin_refs r
                      LEFT JOIN evidence_meta e ON e.evidence_id=r.evidence_id
                      WHERE r.capture_pin_id=?1",
                 )
@@ -546,6 +562,13 @@ impl KernelStore {
                 // The probe failed, not the bytes; the hold still protects them.
                 ObjectPresence::Unreadable => return Err(KernelError::Io.into()),
             }
+            self.read_verified_object(digest).map_err(|error| {
+                if error.kind() == ArtifactErrorKind::CorruptObject {
+                    SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes)
+                } else {
+                    SourceHoldError::Kernel(KernelError::Io)
+                }
+            })?;
         }
         Ok(hold)
     }
@@ -579,15 +602,7 @@ impl KernelStore {
         let fetch = i64::try_from(limit.get().saturating_add(1)).unwrap_or(i64::MAX);
         let window = Window::at_snapshot(pin.snapshot);
         let mut statement = tx
-            .prepare_cached(&format!(
-                "SELECT o.source_kind,o.object_id,o.source_revision,e.evidence_id,
-                        e.artifact_digest,e.byte_length,b.invalidated_commit_seq
-                 {}
-                   AND (o.source_kind,o.object_id,o.source_revision)>(?3,?4,?5)
-                 ORDER BY o.source_kind,o.object_id,o.source_revision
-                 LIMIT ?6",
-                window.cited_evidence_sql()
-            ))
+            .prepare_cached(&window.held_descriptors_sql())
             .map_err(sqlite)?;
         let mut rows = statement
             .query_map(
@@ -960,4 +975,94 @@ struct StoredPin {
     expires_at: i64,
     released: bool,
     purge_degraded: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, StatementStatus, params};
+
+    use super::Window;
+    use crate::schema::apply_kernel_schema;
+
+    #[test]
+    fn held_pages_seek_without_sorting_the_inventory() {
+        let mut baseline_steps = None;
+        for count in [32, 512] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            apply_kernel_schema(&mut conn, "00000000000000000000000000000000", 0).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "INSERT INTO commit_log VALUES (1,'query-plan',1,'test','seed','digest',0,'test','test');
+                 INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+                     source_revision,created_commit_seq,sensitivity_class)
+                 VALUES ('domain','domain','domain','domain','domain',1,1,'normal'),
+                        ('evidence','evidence','domain','artifact','evidence',1,1,'normal');
+                 INSERT INTO domains(domain_id,object_id,name,created_commit_seq,sensitivity_class)
+                 VALUES ('domain','domain','domain',1,'normal');
+                 INSERT INTO evidence_meta(evidence_id,object_id,artifact_reference,artifact_digest,
+                     byte_length,media_type,retention_class,provider_egress_class,redaction_metadata,
+                     created_commit_seq,sensitivity_class)
+                 VALUES ('evidence','evidence','object','digest',1,'text/plain','canonical',
+                         'local_only',x'5b5d',1,'normal');",
+            )
+            .unwrap();
+            for index in 0..count {
+                for (prefix, kind) in [("srcdesc:", "source_descriptor"), ("other:", "other")] {
+                    let id = format!("{prefix}{index:06}:1");
+                    tx.execute(
+                        "INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,
+                             source_id,source_revision,created_commit_seq,sensitivity_class)
+                         VALUES (?1,'observation','domain','messages',?1,1,1,'normal')",
+                        [&id],
+                    )
+                    .unwrap();
+                    tx.execute(
+                        "INSERT INTO observations(observation_id,object_id,evidence_id,
+                             observation_kind,observation_payload,observed_at,created_commit_seq,
+                             sensitivity_class)
+                         VALUES (?1,?1,'evidence',?2,x'7b7d',0,1,'normal')",
+                        params![id, kind],
+                    )
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            let window = Window::at_snapshot(1);
+            for after in [0, count / 2, count - 10] {
+                let mut statement = conn.prepare(&window.held_descriptors_sql()).unwrap();
+                let rows = statement
+                    .query_map(
+                        params![
+                            window.through,
+                            window.after,
+                            "messages",
+                            format!("srcdesc:{after:06}:1"),
+                            1,
+                            9
+                        ],
+                        |row| row.get::<_, String>(1),
+                    )
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                let expected: Vec<_> = (after + 1..after + 10)
+                    .map(|index| format!("srcdesc:{index:06}:1"))
+                    .collect();
+                assert_eq!(rows, expected);
+                let sorts = statement.get_status(StatementStatus::Sort);
+                let steps = statement.get_status(StatementStatus::VmStep);
+                eprintln!(
+                    "SQLite {}: count={count}, after={after}, sorts={sorts}, steps={steps}",
+                    rusqlite::version()
+                );
+                assert_eq!(sorts, 0, "a held page must not sort the inventory");
+                let baseline = *baseline_steps.get_or_insert(steps);
+                assert!(
+                    steps <= baseline * 2,
+                    "page work grew from {baseline} to {steps} steps"
+                );
+            }
+        }
+    }
 }
