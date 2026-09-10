@@ -554,6 +554,11 @@ fn descriptors_match_an_independent_ledger_and_identical_text_stays_distinct() {
     ] {
         let detail = fixture.detail(&outcome.object_id).unwrap();
         assert_eq!(detail.occurrence_id, outcome.occurrence_id);
+        assert_eq!(
+            serde_json::to_value(&detail).unwrap()["occurrence_tuple"],
+            serde_json::json!(encode(&occurrence).unwrap().tuple),
+            "the stored descriptor retains the exact occurrence encoding"
+        );
         assert_eq!(detail.lineage_id, outcome.lineage_id);
         assert_eq!(detail.payload_id, outcome.payload_id);
         assert_eq!(detail.artifact_digest, evidence.1);
@@ -1212,7 +1217,7 @@ fn a_swallowed_refusal_still_fails_the_commit() {
 }
 
 #[test]
-fn an_advancing_revision_that_collides_with_a_retired_row_is_a_conflict() {
+fn retirement_preserves_domain_ownership_without_reusing_old_revision_ids() {
     let fixture = Fixture::open();
     let v1 = fixture.retain("v1", "first text");
     let v2 = fixture.retain("v2", "second text");
@@ -1227,9 +1232,29 @@ fn an_advancing_revision_that_collides_with_a_retired_row_is_a_conflict() {
         .store
         .commit(intent("retire-3"), |envelope| {
             envelope.retire_observation(&third.object_id)?;
+            envelope.insert_domain(DomainSpec {
+                domain_id: "other-domain".to_string(),
+                object_id: "other-domain-object".to_string(),
+                name: "other".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "other-domain".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
             Ok(String::new())
         })
         .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    let foreign = SourceDescriptorRequest {
+        domain_id: "other-domain",
+        ..request(message(MSG_A, "4"), &v3, "third text")
+    };
+    assert_eq!(
+        fixture.publish("foreign-after-retirement", &foreign).err(),
+        Some(SourceDescriptorError::DomainMismatch)
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
     // With no live head, revision 2 starts a fresh chain.
     let (second, _, _) = fixture
         .publish("rev-2", &request(message(MSG_A, "2"), &v2, "second text"))
@@ -1301,6 +1326,167 @@ fn a_lineage_id_never_replaces_native_identity() {
     assert_eq!(error, SourceDescriptorError::LineageCollision);
     assert_eq!(fixture.store.tip().unwrap(), tip);
     assert_eq!(fixture.live(&first.object_id), Some(true));
+}
+
+#[test]
+fn duplicate_lineages_are_refused_explicitly_within_one_commit() {
+    for separate_calls in [false, true] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let first = request(message(MSG_A, "1"), &evidence, text);
+        let second = request(
+            Occurrence {
+                span: Some(Span {
+                    start: 0,
+                    end: text.len() as u64,
+                }),
+                ..message(MSG_A, "2")
+            },
+            &evidence,
+            text,
+        );
+        let tip = fixture.store.tip().unwrap();
+        let receipt = fixture
+            .store
+            .commit(intent("duplicate-lineage"), |envelope| {
+                let error = if separate_calls {
+                    envelope.publish_source_descriptor(&first).unwrap();
+                    envelope.publish_source_descriptor(&second).unwrap_err()
+                } else {
+                    envelope
+                        .publish_source_descriptors(&[first, second])
+                        .unwrap_err()
+                };
+                assert_eq!(
+                    error.to_string(),
+                    "descriptor lineage is published twice in one commit"
+                );
+                Ok(String::new())
+            });
+        assert!(
+            receipt.is_err(),
+            "discarding the refusal cannot commit partial work"
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    }
+}
+
+#[test]
+fn descriptor_bound_covers_all_calls_in_the_envelope() {
+    let max = kernel::MAX_DESCRIPTORS_PER_COMMIT;
+    for chunk_size in [1, max] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let ids: Vec<String> = (0..=max).map(|i| format!("claim-{i}")).collect();
+        let identities: Vec<_> = ids.iter().map(|id| [("object_id", id.as_str())]).collect();
+        let requests: Vec<_> = identities
+            .iter()
+            .map(|identity| {
+                request(
+                    Occurrence {
+                        class: "canonical_claims",
+                        identity,
+                        revision: "1",
+                        representation: "decision_summary",
+                        span: None,
+                    },
+                    &evidence,
+                    text,
+                )
+            })
+            .collect();
+        assert_eq!(
+            fixture.publish_batch("oversized", &requests).err(),
+            Some(SourceDescriptorError::BatchTooLarge)
+        );
+        let tip = fixture.store.tip().unwrap();
+        let receipt = fixture
+            .store
+            .commit(intent("cumulative-bound"), |envelope| {
+                for batch in requests[..max].chunks(chunk_size) {
+                    envelope.publish_source_descriptors(batch).unwrap();
+                }
+                assert_eq!(
+                    envelope.publish_source_descriptor(&requests[max]).err(),
+                    Some(SourceDescriptorError::BatchTooLarge)
+                );
+                Ok(String::new())
+            });
+        assert!(receipt.is_err());
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+        assert_eq!(
+            fixture
+                .publish_batch("at-bound", &requests[..max])
+                .unwrap()
+                .len(),
+            max
+        );
+        fixture.publish("fresh-envelope", &requests[max]).unwrap();
+        assert_eq!(fixture.descriptor_object_ids_at_tip().len(), max + 1);
+    }
+}
+
+#[test]
+fn an_occurrence_id_never_aliases_unequal_tuple_bytes() {
+    for retired in [false, true] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let (first, _, _) = fixture
+            .publish("first", &request(message(MSG_A, "1"), &evidence, text))
+            .unwrap();
+        if retired {
+            fixture
+                .store
+                .commit(intent("retire"), |envelope| {
+                    envelope.retire_observation(&first.object_id)?;
+                    Ok(String::new())
+                })
+                .unwrap();
+        }
+        let a = encode(&message(MSG_A, "1")).unwrap();
+        let b = encode(&message(MSG_B, "1")).unwrap();
+        assert_ne!(a.tuple, b.tuple);
+        assert_ne!(a.lineage_id, b.lineage_id);
+        let connection = rusqlite::Connection::open_with_flags(
+            fixture.root.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
+        let (observation_id, payload): (String, Vec<u8>) = connection
+            .query_row(
+                "SELECT observation_id,observation_payload FROM observations WHERE object_id=?1",
+                [&first.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(observation_id, format!("srcocc:{}", first.occurrence_id));
+        let mut stored: Value = serde_json::from_slice(&payload).unwrap();
+        let mut detail: Value = serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+        detail["occurrence_id"] = serde_json::json!(b.occurrence_id);
+        detail["occurrence_tuple"] = serde_json::json!(a.tuple);
+        stored["detail"] = Value::String(serde_json::to_string(&detail).unwrap());
+        connection.execute(
+            "UPDATE observations SET observation_id=?1,observation_payload=?2 WHERE object_id=?3",
+            rusqlite::params![format!("srcocc:{}", b.occurrence_id), serde_json::to_vec(&stored).unwrap(), first.object_id],
+        ).unwrap();
+        let tip = fixture.store.tip().unwrap();
+        let result = fixture.publish("colliding", &request(message(MSG_B, "1"), &evidence, text));
+        assert_eq!(
+            result.err().map(|error| error.to_string()),
+            Some("descriptor occurrence id names a different stored tuple".to_string())
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.live(&first.object_id), Some(!retired));
+        assert_eq!(
+            fixture.live(&descriptor_object_id(&b.lineage_id, "1")),
+            None
+        );
+    }
 }
 
 #[test]

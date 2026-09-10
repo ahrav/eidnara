@@ -9,7 +9,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -265,6 +265,7 @@ pub struct Envelope<'tx> {
     pub(super) changes: Vec<PendingChange>,
     pub(super) admission_ordinal: usize,
     pub(super) admission_latest: HashMap<AdmissionKey, StoredAdmission>,
+    pub(super) descriptor_lineages: HashSet<String>,
     poisoned: Option<KernelError>,
 }
 
@@ -685,6 +686,7 @@ impl KernelStore {
                     changes: Vec::new(),
                     admission_ordinal: 0,
                     admission_latest: HashMap::new(),
+                    descriptor_lineages: HashSet::new(),
                     poisoned: None,
                 },
             })
@@ -1133,6 +1135,7 @@ fn commit_prepared_with_writer(
         changes: Vec::new(),
         admission_ordinal: 0,
         admission_latest: HashMap::new(),
+        descriptor_lineages: HashSet::new(),
         poisoned: None,
     };
     let result = operation(&mut envelope)?;

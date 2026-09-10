@@ -49,9 +49,7 @@ pub struct SourceDescriptorRequest<'a> {
     pub observed_at: i64,
 }
 
-/// The versioned detail stored on the descriptor observation. Every field is
-/// an identifier, a digest, or a bounded native identity value; no payload
-/// text is stored here, and a detail the redactor would rewrite is refused.
+/// Descriptor rows store versioned metadata and encoded identity tuples, not payload text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceDescriptorDetail {
     pub descriptor_version: u32,
@@ -62,6 +60,8 @@ pub struct SourceDescriptorDetail {
     pub representation: String,
     pub span: Option<(u64, u64)>,
     pub occurrence_id: String,
+    /// Encoded identity bytes support collision checks without trusting the digest.
+    pub occurrence_tuple: Vec<u8>,
     pub lineage_id: String,
     pub payload_id: String,
     pub artifact_digest: String,
@@ -100,6 +100,10 @@ pub enum SourceDescriptorError {
     DomainMismatch,
     #[error("descriptor lineage id names a different stored tuple")]
     LineageCollision,
+    #[error("descriptor occurrence id names a different stored tuple")]
+    OccurrenceCollision,
+    #[error("descriptor lineage is published twice in one commit")]
+    DuplicateLineage,
     #[error("descriptor batch exceeds the per-commit bound")]
     BatchTooLarge,
     #[error(transparent)]
@@ -156,6 +160,7 @@ fn detail_for(
         representation: request.occurrence.representation.to_string(),
         span: encoded.span.map(|span| (span.start, span.end)),
         occurrence_id: encoded.occurrence_id.clone(),
+        occurrence_tuple: encoded.tuple.clone(),
         lineage_id: encoded.lineage_id.clone(),
         payload_id: payload_id.to_string(),
         artifact_digest: request.artifact_digest.to_string(),
@@ -170,6 +175,20 @@ fn same_lineage(stored: &SourceDescriptorDetail, fresh: &SourceDescriptorDetail)
         && stored.identity == fresh.identity
         && stored.representation == fresh.representation
         && stored.span == fresh.span
+}
+
+fn stored_detail(payload: &[u8]) -> Result<SourceDescriptorDetail, KernelError> {
+    let stored: ObservationPayload =
+        serde_json::from_slice(payload).map_err(|_| KernelError::CorruptCanonicalRow)?;
+    let detail: SourceDescriptorDetail = stored
+        .detail
+        .as_deref()
+        .and_then(|detail| serde_json::from_str(detail).ok())
+        .ok_or(KernelError::CorruptCanonicalRow)?;
+    if detail.descriptor_version != SOURCE_DESCRIPTOR_DETAIL_VERSION {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
+    Ok(detail)
 }
 
 impl Envelope<'_> {
@@ -209,11 +228,11 @@ impl Envelope<'_> {
         &mut self,
         requests: &[SourceDescriptorRequest<'_>],
     ) -> Result<Vec<SourceDescriptorOutcome>, SourceDescriptorError> {
-        if requests.len() > MAX_DESCRIPTORS_PER_COMMIT {
+        if requests.len() > MAX_DESCRIPTORS_PER_COMMIT - self.descriptor_lineages.len() {
             return Err(SourceDescriptorError::BatchTooLarge);
         }
         let mut checked_evidence: HashSet<(&str, &str)> = HashSet::new();
-        let mut outcomes = Vec::with_capacity(requests.len());
+        let mut verified = Vec::with_capacity(requests.len());
         for request in requests {
             let mut encoded = encode(&request.occurrence)?;
             if checked_evidence.insert((request.evidence_id, request.artifact_digest)) {
@@ -230,9 +249,16 @@ impl Envelope<'_> {
                     ..request.occurrence.clone()
                 })?;
             }
-            outcomes.push(self.publish_verified(request, encoded)?);
+            if !self.descriptor_lineages.insert(encoded.lineage_id.clone()) {
+                return Err(SourceDescriptorError::DuplicateLineage);
+            }
+            verified.push(encoded);
         }
-        Ok(outcomes)
+        requests
+            .iter()
+            .zip(verified)
+            .map(|(request, encoded)| self.publish_verified(request, encoded))
+            .collect()
     }
 
     fn publish_verified(
@@ -260,6 +286,21 @@ impl Envelope<'_> {
         if !redact(&detail_json)?.detections.is_empty() {
             return Err(SourceDescriptorError::ContentRefused);
         }
+        let observation_id = format!("srcocc:{}", encoded.occurrence_id);
+        let existing: Option<Vec<u8>> = self
+            .tx
+            .query_row_cached(
+                "SELECT observation_payload FROM observations WHERE observation_id=?1",
+                [&observation_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        if let Some(payload) = existing
+            && stored_detail(&payload)?.occurrence_tuple != encoded.tuple
+        {
+            return Err(SourceDescriptorError::OccurrenceCollision);
+        }
         let object_id = descriptor_object_id(&encoded.lineage_id, request.occurrence.revision);
         let predecessor = self.live_lineage(request.domain_id, &detail)?;
         if let Some((_, live_revision)) = &predecessor
@@ -268,7 +309,7 @@ impl Envelope<'_> {
             return Err(SourceDescriptorError::RevisionNotAdvanced);
         }
         let spec = ObservationSpec {
-            observation_id: object_id.clone(),
+            observation_id,
             object_id: object_id.clone(),
             domain_id: request.domain_id.to_string(),
             proposition_id: None,
@@ -363,25 +404,43 @@ impl Envelope<'_> {
             .map_err(map_sqlite)?
             .collect::<rusqlite::Result<_>>()
             .map_err(map_sqlite)?;
-        let [(object_id, domain, revision, payload)] = live.as_slice() else {
-            return match live.len() {
-                0 => Ok(None),
-                _ => Err(KernelError::CorruptCanonicalRow.into()),
-            };
+        if live.len() > 1 {
+            return Err(KernelError::CorruptCanonicalRow.into());
+        }
+        let predecessor = live
+            .first()
+            .map(|(id, _, revision, _)| (id.clone(), *revision));
+        let stored = match live.into_iter().next() {
+            Some(row) => Some(row),
+            None => self
+                .tx
+                .query_row_cached(
+                    "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
+                     FROM object_registry o
+                     JOIN observations b ON b.object_id=o.object_id
+                     WHERE o.object_kind='observation' AND o.source_kind=?1 AND o.source_id=?2
+                       AND b.observation_kind=?3
+                     ORDER BY o.source_revision DESC LIMIT 1",
+                    [
+                        fresh.class.as_str(),
+                        fresh.lineage_id.as_str(),
+                        SOURCE_DESCRIPTOR_KIND,
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(map_sqlite)?,
         };
-        let stored: ObservationPayload =
-            serde_json::from_slice(payload).map_err(|_| KernelError::CorruptCanonicalRow)?;
-        let stored: SourceDescriptorDetail = stored
-            .detail
-            .as_deref()
-            .and_then(|detail| serde_json::from_str(detail).ok())
-            .ok_or(KernelError::CorruptCanonicalRow)?;
+        let Some((_, domain, _, payload)) = stored else {
+            return Ok(None);
+        };
+        let stored = stored_detail(&payload)?;
         if !same_lineage(&stored, fresh) {
             return Err(SourceDescriptorError::LineageCollision);
         }
         if domain != domain_id {
             return Err(SourceDescriptorError::DomainMismatch);
         }
-        Ok(Some((object_id.clone(), *revision)))
+        Ok(predecessor)
     }
 }
