@@ -3861,6 +3861,15 @@ impl MemoryStore {
         due_at_ms: i64,
         now_ms: i64,
     ) -> Result<DreamerTaskAcquireOutcome, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .dreamer_task_acquire_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected dreamer task acquire failure".to_string(),
+            )));
+        }
         self.acquire_task_lease(
             &DREAMER_TASK,
             project,
@@ -3914,6 +3923,15 @@ impl MemoryStore {
         response_json: &str,
         now_ms: i64,
     ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .dreamer_task_complete_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected dreamer task complete failure".to_string(),
+            )));
+        }
         self.complete_task_lease(
             &DREAMER_TASK,
             project,
@@ -3946,6 +3964,28 @@ impl MemoryStore {
             slot,
             now_ms,
         )
+    }
+
+    /// A registration generation above every one `scheduler_instance` has
+    /// recorded on the ledger, so a restarted scheduler outranks any claim its
+    /// predecessor left live. Reclaimed rows do not count, but a live claim is
+    /// never reclaimed, so the answer is above every claim that could still be
+    /// rebound. Wall time is not used: a clock that steps backwards would rank
+    /// a successor below its predecessor.
+    pub fn next_dreamer_scheduler_generation(
+        &self,
+        scheduler_instance: &str,
+    ) -> Result<i64, MemoryStoreError> {
+        self.inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COALESCE(MAX(registration_generation), 0) + 1 FROM note_eval_claims
+                      WHERE task_kind = ?1 AND evaluator_instance = ?2",
+                    params![DREAMER_TASK.task_kind, scheduler_instance],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .map_err(Into::into)
     }
 }
 
@@ -5399,6 +5439,18 @@ pub struct MemoryStore {
     authority_seed_transaction_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     historian_side_channel_fail_once: Mutex<BTreeSet<String>>,
+    /// Makes the next `authority_project_for_route` fail as a backend error,
+    /// so a caller's store-failure branch can be exercised on a healthy store.
+    #[cfg(any(test, feature = "test-support"))]
+    authority_route_read_fail_once: std::sync::atomic::AtomicBool,
+    /// Makes the next `acquire_dreamer_task` fail as a backend error before it
+    /// touches the ledger.
+    #[cfg(any(test, feature = "test-support"))]
+    dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool,
+    /// Makes the next `complete_dreamer_task` fail as a backend error before
+    /// it touches the ledger.
+    #[cfg(any(test, feature = "test-support"))]
+    dreamer_task_complete_fail_once: std::sync::atomic::AtomicBool,
 }
 
 fn valid_drop_seed_block_id(block_id: &str) -> bool {
@@ -5786,6 +5838,12 @@ impl MemoryStore {
             authority_seed_transaction_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            authority_route_read_fail_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            dreamer_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
         Ok(store)
@@ -6219,6 +6277,15 @@ impl MemoryStore {
         domain: &str,
     ) -> Result<Option<String>, MemoryStoreError> {
         validate_authority_domain(domain)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .authority_route_read_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected authority route read failure".to_string(),
+            )));
+        }
         self.inner
             .with_conn(|conn| {
                 conn.query_row(
@@ -6248,6 +6315,28 @@ impl MemoryStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(kind.to_string());
+    }
+
+    /// The next `authority_project_for_route` returns a backend error instead
+    /// of reading the ledger; every call after it reads normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_authority_route_read_for_test(&self) {
+        self.authority_route_read_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next `acquire_dreamer_task` fails as a backend error; later calls run normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_dreamer_task_acquire_for_test(&self) {
+        self.dreamer_task_acquire_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next `complete_dreamer_task` fails as a backend error; later calls run normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_dreamer_task_complete_for_test(&self) {
+        self.dreamer_task_complete_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Reject a facade write that crosses the route's active authority identity.

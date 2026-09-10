@@ -209,6 +209,14 @@ pub fn is_valid_smart_note_cron(expression: &str) -> bool {
     parse_cron(expression).is_some()
 }
 
+/// The first occurrence of `expression` strictly after `after_ms`, searched up
+/// to the parser's own cap; `None` for an invalid expression or one with no
+/// occurrence in that window. Unlike the smart-note due time this applies no
+/// clamp or jitter, so a scheduler sees the cron instant itself.
+pub fn next_cron_occurrence<Tz: TimeZone>(expression: &str, after_ms: i64, tz: &Tz) -> Option<i64> {
+    next_due_at_ms(expression, after_ms, MAX_SEARCH_MS, tz).filter(|&ms| ms != 0)
+}
+
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
