@@ -9,6 +9,5 @@
       "input": "tokens.input=45000",
       "stored": "tokens.input=45000"
     }
-  ],
-  "integrity_reject": "password=integrity-sentinel"
+  ]
 }

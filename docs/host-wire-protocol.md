@@ -548,7 +548,7 @@ Both languages MUST produce identical bytes: UTF-8 pass-through for non-ASCII, t
 | resident reservation: reserved scratch pool independent of frame admission, fail-fast `queue_full`, permanent rejection above the slice, no state, exact release | `crates/host-runtime/src/config.rs` (pool-split unit test), `crates/host-runtime/src/wire.rs`, `crates/host-runtime/src/synapse/jobs.rs` (unit tests), `crates/host-runtime/tests/synapse_protocol.rs` |
 | four operations over a real authenticated route, shutdown cleanup | `crates/host-runtime/tests/synapse_roundtrip.rs` |
 | request-key golden vectors | `crates/host-runtime/src/synapse/protocol.rs` (unit tests); the matching TypeScript golden test is a Handoff item with the embedding pipeline (`pml.4`) |
-| durable ledger recovery, receipts, atomic application | `crates/memory-store/tests/claim_intent_ledger.rs`, `crates/memory-store/tests/claim_mirror.rs` (storage is Rust; a TypeScript storage suite is a Handoff item) |
+| durable ledger recovery, receipts, atomic application | no check in this tree: the durable recovery authority for `embed.batch` is the TypeScript ledger (Section 7.5.5), and its storage suite is a Handoff item with the embedding pipeline; no Rust suite exercises it |
 
 ### 7.6 `host.status` and `host.shutdown`
 

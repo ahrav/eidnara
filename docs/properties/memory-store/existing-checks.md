@@ -3,6 +3,22 @@
 Every claim-bearing check for `crates/memory-store` (21,987 lines), `crates/context-core`
 (1,518), and `crates/tokenizer` (85).
 
+Reconciliation at this repository's HEAD. `src/claim_mirror.rs`,
+`tests/claim_mirror.rs`, the four `claim_mirror_*` tables, and the `ClaimMirror`
+durable-write family are gone from `crates/memory-store`. Every entry below that
+names a mirror function, the mirror test file, or the registry test
+`integrity_bound_claim_content_rejects_without_identity_collapse` describes the
+source tree; at HEAD those checks have no subject. `tests/baseline.rs` no longer
+lists the mirror objects, and the durable-write registry test in
+`tests/production_redaction.rs` no longer reads `claim_mirror.rs`. The
+claim-intent ledger followed: `tests/claim_intent_ledger.rs`, the intent case
+`fresh_claim_intent_identities_and_integrity_payloads_reject` in
+`tests/production_redaction.rs`, the in-crate
+`list_claim_intents_saturates_an_oversized_limit`, and the `claim_intents`
+objects in `tests/baseline.rs` are gone; every entry below that names a ledger
+function or one of those tests describes the source tree. The authority
+state-machine tests are unchanged and still pass.
+
 `crates/memory-store/src/lib.rs` is 20,650 lines, of which production is lines 1 to
 13,930. Line 13,930 closes `capped_trace_error`, 13,931 is blank, and everything
 from 13,932 on is three `#[cfg(test)]` modules. Every line reference below was

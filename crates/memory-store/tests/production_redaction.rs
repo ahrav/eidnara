@@ -11,14 +11,7 @@ use std::{
 mod scan_audit;
 
 use cache_stability::{CoreState, DurabilityClass, FrozenUnit};
-use context_core::claim_operation::{
-    ClaimCommandIdentity, ClaimIntentBinding, SnapshotVector, sha256_hex_utf8,
-};
 use context_core::redaction::RedactionErrorKind;
-use memory_store::claim_mirror::{
-    CLAIM_MIRROR_VERSION, ClaimMirrorError, ClaimMirrorLifecycle, ClaimMirrorSnapshot,
-    CommittedClaimMirrorRow,
-};
 use memory_store::{
     AuthoritySeedRow, DURABLE_WRITE_REGISTRY, FacadeMutationOutcome, LineageAnchor,
     LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MemoryStore,
@@ -34,7 +27,6 @@ use serde_json::json;
 struct Fixture {
     schema: String,
     content: Vec<ContentCase>,
-    integrity_reject: String,
 }
 
 #[derive(Deserialize)]
@@ -539,9 +531,7 @@ fn concurrent_facade_duplicate_persists_one_active_scan_batch() {
 #[test]
 fn durable_write_registry_references_real_bindings_and_checked_tests() {
     let store_source = include_str!("../src/lib.rs");
-    let claim_mirror_source = include_str!("../src/claim_mirror.rs");
     assert!(!store_source.contains("PreparedWrite::new(\""));
-    assert!(!claim_mirror_source.contains("PreparedWrite::new(\""));
 
     // The module half of `<module>::<fn>` must resolve to one of these sources, so a
     // same-named function in an unrelated file cannot satisfy the entry.
@@ -1398,101 +1388,6 @@ fn facade_note_mutations_abort_unless_the_notes_authority_is_module() {
 }
 
 #[test]
-fn integrity_bound_claim_content_rejects_without_identity_collapse() {
-    let fixture = fixture();
-    let temp = tempfile::tempdir().unwrap();
-    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-claim");
-    let store = MemoryStore::open(&descriptor).unwrap();
-    let content_digest = sha256_hex_utf8(&fixture.integrity_reject);
-    let claim_id = "mcm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let claim = CommittedClaimMirrorRow {
-        public_claim_id: claim_id.to_string(),
-        project_id: 1,
-        revision_locator: format!("{claim_id}/r1/{content_digest}"),
-        content: fixture.integrity_reject.clone(),
-        content_digest,
-        attributes: json!({"category": "workflow"}),
-        lifecycle: ClaimMirrorLifecycle::Active,
-        applicability: json!({"streams": []}),
-        policy: json!({"policyVersion": 1}),
-        provenance_label: None,
-        project_generation: 1,
-        policy_generation: 1,
-    };
-    let generations = BTreeMap::from([("1".to_string(), 1)]);
-    let snapshot = ClaimMirrorSnapshot {
-        mirror_version: CLAIM_MIRROR_VERSION,
-        vector: SnapshotVector {
-            vector_version: 1,
-            database_incarnation_id: "0123456789abcdef0123456789abcdef".to_string(),
-            workspace_epoch: "epoch".to_string(),
-            project_generations: generations.clone(),
-            policy_generations: generations,
-        },
-        project_checkpoints: BTreeMap::from([(1, 0)]),
-        claims: vec![claim],
-    };
-    let error = store
-        .replace_claim_mirror_snapshot(&snapshot, 1)
-        .unwrap_err();
-    assert!(matches!(error, ClaimMirrorError::Redaction(_)));
-    let diagnostic = error.to_string();
-    assert!(!diagnostic.contains(&fixture.integrity_reject));
-    assert!(!diagnostic.contains("integrity-sentinel"));
-    assert!(store.claim_mirror_state().unwrap().is_none());
-
-    let mut secret_epoch_snapshot = snapshot.clone();
-    secret_epoch_snapshot.vector.workspace_epoch = "password=workspace-secret".to_string();
-    secret_epoch_snapshot.claims.clear();
-    let error = store
-        .replace_claim_mirror_snapshot(&secret_epoch_snapshot, 1)
-        .unwrap_err();
-    assert!(matches!(error, ClaimMirrorError::Redaction(_)));
-    assert!(!error.to_string().contains("workspace-secret"));
-    assert!(store.claim_mirror_state().unwrap().is_none());
-
-    let clean_content = "clean claim content";
-    let clean_digest = sha256_hex_utf8(clean_content);
-    let structured = CommittedClaimMirrorRow {
-        public_claim_id: claim_id.to_string(),
-        project_id: 1,
-        revision_locator: format!("{claim_id}/r1/{clean_digest}"),
-        content: clean_content.to_string(),
-        content_digest: clean_digest,
-        attributes: json!({"category":"password=attribute-secret"}),
-        lifecycle: ClaimMirrorLifecycle::Active,
-        applicability: json!({"streams": []}),
-        policy: json!({"policyVersion": 1}),
-        provenance_label: None,
-        project_generation: 1,
-        policy_generation: 1,
-    };
-    let structured_snapshot = ClaimMirrorSnapshot {
-        claims: vec![structured],
-        ..snapshot
-    };
-    let error = store
-        .replace_claim_mirror_snapshot(&structured_snapshot, 1)
-        .unwrap_err();
-    assert!(matches!(error, ClaimMirrorError::Redaction(_)));
-    assert!(!error.to_string().contains("attribute-secret"));
-    assert!(store.claim_mirror_state().unwrap().is_none());
-
-    let mut keyed = structured_snapshot.claims[0].clone();
-    keyed.attributes = json!({"password=hunter-two": "clean"});
-    let keyed_snapshot = ClaimMirrorSnapshot {
-        claims: vec![keyed],
-        ..structured_snapshot
-    };
-    let error = store
-        .replace_claim_mirror_snapshot(&keyed_snapshot, 2)
-        .unwrap_err();
-    assert!(matches!(error, ClaimMirrorError::Redaction(_)));
-    assert!(!error.to_string().contains("hunter-two"));
-    assert!(store.claim_mirror_state().unwrap().is_none());
-}
-
-#[test]
 fn new_idempotency_identities_reject_without_substitution_or_collapse() {
     let temp = tempfile::tempdir().unwrap();
     let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-identity");
@@ -1673,94 +1568,4 @@ fn note_transition_content_redacts_and_compiled_artifacts_reject() {
         })
         .unwrap_err();
     assert!(!error.to_string().contains("compiled-secret"));
-}
-
-#[test]
-fn fresh_claim_intent_identities_and_integrity_payloads_reject() {
-    let temp = tempfile::tempdir().unwrap();
-    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-claim-intent");
-    let store = MemoryStore::open(&descriptor).unwrap();
-
-    // Staging checks the route's memories authority before it checks identities, so an
-    // unmanaged route would refuse both requests without reaching redaction.
-    store
-        .bind_authority_route("store-uuid", "project", "route")
-        .unwrap();
-    let preparing = store
-        .authority_begin_prepare("store-uuid", "project", "memories")
-        .unwrap();
-    let authority = store
-        .authority_finish_prepare(
-            "store-uuid",
-            "project",
-            "memories",
-            preparing.generation,
-            "same",
-            "same",
-            true,
-        )
-        .unwrap();
-    let binding = ClaimIntentBinding {
-        database_incarnation_id: "0123456789abcdef0123456789abcdef".to_string(),
-        format_epoch: 1,
-        authority_project: "project".to_string(),
-        authority_generation: authority.generation,
-    };
-    let clean_identity = ClaimCommandIdentity {
-        producer: "producer".to_string(),
-        operation_key: "operation".to_string(),
-    };
-    store
-        .stage_claim_intent("route", &binding, &clean_identity, &json!({}), 1)
-        .unwrap();
-
-    let secret_identity = ClaimCommandIdentity {
-        producer: "producer".to_string(),
-        operation_key: "password=operation-secret".to_string(),
-    };
-    let error = store
-        .stage_claim_intent("route", &binding, &secret_identity, &json!({}), 1)
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            MemoryStoreError::Redaction(RedactionErrorKind::SecretDetected)
-        ),
-        "{error:?}"
-    );
-    assert!(!error.to_string().contains("operation-secret"));
-    assert!(
-        store
-            .inspect_claim_intent(&secret_identity)
-            .unwrap()
-            .is_none()
-    );
-
-    let request_identity = ClaimCommandIdentity {
-        producer: "producer".to_string(),
-        operation_key: "request".to_string(),
-    };
-    let error = store
-        .stage_claim_intent(
-            "route",
-            &binding,
-            &request_identity,
-            &json!({"content":"password=request-secret"}),
-            1,
-        )
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            MemoryStoreError::Redaction(RedactionErrorKind::SecretDetected)
-        ),
-        "{error:?}"
-    );
-    assert!(!error.to_string().contains("request-secret"));
-    assert!(
-        store
-            .inspect_claim_intent(&request_identity)
-            .unwrap()
-            .is_none()
-    );
 }

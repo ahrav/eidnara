@@ -31,7 +31,6 @@ pub const CLAIM_REQUEST_DIGEST_PROTOCOL: &str = "eidnara-claim-request-v1";
 pub const DREAMER_REQUEST_ENCODING_VERSION: u32 = 1;
 pub const DREAMER_REQUEST_DIGEST_PROTOCOL: &str = "eidnara-dreamer-request-v1";
 pub const CLAIM_MUTATION_TOKEN_DIGEST_PROTOCOL: &str = "eidnara-claim-mutation-token-v1";
-pub const SNAPSHOT_VECTOR_DIGEST_PROTOCOL: &str = "eidnara-claim-snapshot-vector-v1";
 pub const APPLICABILITY_HEADS_DIGEST_PROTOCOL: &str = "eidnara-claim-applicability-heads-v1";
 pub const POLICY_HEADS_DIGEST_PROTOCOL: &str = "eidnara-claim-policy-heads-v1";
 
@@ -177,9 +176,6 @@ pub fn compute_dreamer_request_digest(inputs: &Value) -> Result<String, Contract
 }
 
 /// Reports whether `text` contains exactly `expected_len` lowercase ASCII hex bytes.
-///
-/// The claim-operation contract, intent ledger, and claim mirror use this shared
-/// check to avoid incompatible identity lengths or character sets.
 pub fn is_lower_hex(text: &str, expected_len: usize) -> bool {
     text.len() == expected_len
         && text
@@ -298,25 +294,6 @@ pub struct PolicyHeadCounts {
 
 pub fn compute_policy_heads_digest(counts: &PolicyHeadCounts) -> Result<String, ContractError> {
     protocol_digest(POLICY_HEADS_DIGEST_PROTOCOL, &wire_value(counts)?)
-}
-
-/// The vector tracks publication freshness separately from mutation fencing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SnapshotVector {
-    pub vector_version: u32,
-    pub database_incarnation_id: String,
-    pub workspace_epoch: String,
-    pub project_generations: BTreeMap<String, i64>,
-    pub policy_generations: BTreeMap<String, i64>,
-}
-
-pub fn canonical_snapshot_vector(vector: &SnapshotVector) -> Result<String, ContractError> {
-    canonical_json_encode(&wire_value(vector)?)
-}
-
-pub fn compute_snapshot_vector_digest(vector: &SnapshotVector) -> Result<String, ContractError> {
-    protocol_digest(SNAPSHOT_VECTOR_DIGEST_PROTOCOL, &wire_value(vector)?)
 }
 
 /// The ID identifies one semantic claim command.
@@ -668,10 +645,6 @@ mod tests {
             "eidnara-claim-mutation-token-v1"
         );
         assert_eq!(
-            SNAPSHOT_VECTOR_DIGEST_PROTOCOL,
-            "eidnara-claim-snapshot-vector-v1"
-        );
-        assert_eq!(
             APPLICABILITY_HEADS_DIGEST_PROTOCOL,
             "eidnara-claim-applicability-heads-v1"
         );
@@ -700,10 +673,6 @@ mod tests {
         assert_eq!(
             CLAIM_MUTATION_TOKEN_DIGEST_PROTOCOL,
             protocols["mutationToken"].as_str().unwrap()
-        );
-        assert_eq!(
-            SNAPSHOT_VECTOR_DIGEST_PROTOCOL,
-            protocols["snapshotVector"].as_str().unwrap()
         );
         assert_eq!(
             APPLICABILITY_HEADS_DIGEST_PROTOCOL,
@@ -922,21 +891,6 @@ mod tests {
             sha256_hex_utf8(&format!("{protocol}\n{canonical}")),
             case["digest"].as_str().unwrap()
         );
-    }
-
-    #[test]
-    fn snapshot_vectors_match_fixture() {
-        for case in fixture()["snapshotVectors"].as_array().unwrap() {
-            let vector: SnapshotVector = serde_json::from_value(case["vector"].clone()).unwrap();
-            assert_eq!(
-                canonical_snapshot_vector(&vector).unwrap(),
-                case["canonical"].as_str().unwrap()
-            );
-            assert_eq!(
-                compute_snapshot_vector_digest(&vector).unwrap(),
-                case["digest"].as_str().unwrap()
-            );
-        }
     }
 
     #[test]

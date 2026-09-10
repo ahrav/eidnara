@@ -104,6 +104,35 @@ correction were applied to `fault-map.md` and change no record here.
 - The `drive-fault` Cargo feature and its eight tests are gone from
   `crates/daemon` (KTD14); prose below that treats them as live describes the
   source tree.
+- The claim mirror is gone from `crates/memory-store` at `dbc4d15b`'s
+  successor: `src/claim_mirror.rs`, the `claim_mirror_state`,
+  `claim_mirror_projects`, `claim_mirror_claims`, and `claim_mirror_receipts`
+  tables and their index in `baseline.sql`, the `ClaimMirror` durable-write
+  family and its registry entry, the `SnapshotVector` re-export, and
+  `tests/claim_mirror.rs`. The mirror's in-transaction snapshot-vector
+  compare and its clear step lived in that module and went with it; nothing
+  in `lib.rs` compared a snapshot vector. The claim-intent ledger and its
+  control row outlived the mirror by one ticket (see the next bullet). Every
+  Group C record carries `Status: invalidated` and names
+  `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
+  transform catalog as the replacement; prose below that treats the mirror
+  as live describes the source tree.
+- The claim-intent ledger is gone from `crates/memory-store` as well: the
+  `claim_intents` and `claim_intent_controls` tables and their index in
+  `baseline.sql`, `ClaimIntentRecord`, the `ClaimIntent*` error variants, the
+  `ClaimIntents` durable-write family and its registry entry,
+  `stage_claim_intent`, `inspect_claim_intent`, `list_claim_intents`,
+  `acknowledge_claim_intent`, `unresolved_claim_intent_count`,
+  `begin_claim_store_rebuild`, `claim_intent_stage_fence`,
+  `authority_for_route_tx`, `set_claim_intent_transition_tx`, and
+  `tests/claim_intent_ledger.rs`. The authority machine keeps its prepare,
+  finish, abort, and drain transitions unchanged apart from the control-row
+  write each one made for the memories domain; the notes-domain fence and the
+  `dreamer.run_task` memories gate are untouched. Every Group D record and
+  `core-intent-ack-transition-legality-gap` carry `Status: invalidated`; there
+  is no successor, because canonical memory writes go through the kernel's
+  own `(producer, operation_key, request_digest)` receipts, which the kernel
+  crate's tests hold (`crates/kernel/tests/kernel_envelope.rs`).
 - `crates/memory-store` opens its store through `storage::open_sqlite`
   against one baseline (`crates/memory-store/baseline.sql`); the `eidnara-host`
   managed layout names the file `memory.sqlite`, and the development
@@ -821,6 +850,14 @@ Open questions:
 
 ## Group C: the claim mirror projection
 
+Every record in this group is invalidated at HEAD: the claim mirror module, its
+tables, and its tests are gone from `crates/memory-store` (see Provenance), and
+the replacement for what the mirror's consumers relied on is
+`canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon
+transform catalog. The group is kept as the record of the source tree; its
+`file:line` references are host-repository citations at `eb6da6109` (see
+Provenance) and name files that no longer exist here.
+
 Nine records on a projection of an authority that lives outside this store. The
 mirror is not a cache and not a second source of truth: every mutation is push-only
 from the source, there is no fill path and no method that derives a mirror row from
@@ -837,7 +874,17 @@ digest comparison against the source, and no repair path.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim mirror module (`src/claim_mirror.rs`), the four
+`claim_mirror_*` tables, the `ClaimMirror` durable-write family, and
+`tests/claim_mirror.rs` are gone from `crates/memory-store`; the writers and
+readers this record was raised on no longer exist, so its subject is
+unreachable. Canonical memory is read from the kernel, and the property its
+consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog. The record body and its evidence file keep
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:177-250` applies one receipt and
 replays the identical bytes, asserting `applied_effect_count` then `replayed`. It
 does not cover a replay interleaved with an intervening receipt, a replay after
@@ -881,7 +928,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim mirror module (`src/claim_mirror.rs`), the four
+`claim_mirror_*` tables, the `ClaimMirror` durable-write family, and
+`tests/claim_mirror.rs` are gone from `crates/memory-store`; the writers and
+readers this record was raised on no longer exist, so its subject is
+unreachable. Canonical memory is read from the kernel, and the property its
+consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog. The record body and its evidence file keep
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test reuses a receipt ID with different bytes.
 `tests/claim_mirror.rs:223-232` replays identical bytes only; `:592-624` covers a
 different guard (equal revision, different content, fresh receipt).
@@ -919,7 +976,17 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim mirror module (`src/claim_mirror.rs`), the four
+`claim_mirror_*` tables, the `ClaimMirror` durable-write family, and
+`tests/claim_mirror.rs` are gone from `crates/memory-store`; the writers and
+readers this record was raised on no longer exist, so its subject is
+unreachable. Canonical memory is read from the kernel, and the property its
+consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog. The record body and its evidence file keep
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:304-320` skips one effect and asserts
 `CheckpointMismatch`. Only the single-project, single-gap case; no multi-project
 interleave where another project occupies the intervening global effect IDs, which
@@ -961,7 +1028,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim mirror module (`src/claim_mirror.rs`), the four
+`claim_mirror_*` tables, the `ClaimMirror` durable-write family, and
+`tests/claim_mirror.rs` are gone from `crates/memory-store`; the writers and
+readers this record was raised on no longer exist, so its subject is
+unreachable. Canonical memory is read from the kernel, and the property its
+consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog. The record body and its evidence file keep
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:290-303` asserts one wrong generation is
 refused, and `:528-591` asserts untouched rows are restamped. Neither covers the
 untouched-project arm, where a receipt must present `stored + 0` for a project it
@@ -1004,7 +1081,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: invalidated
-Invalidated: by commit `3b817ad8`, which moved the transform onto canonical kernel rows (`crates/daemon/src/canonical_memory.rs`) and deleted `claim_snapshot_for_context`, the double-read vector fence, the commit-time vector check in `commit_transform`, and the historian's full-state fence with `historian_claim_block`. At HEAD `snapshot_vector_from_connection` has one caller, `replace_claim_mirror_snapshot` (`claim_mirror.rs:980`), a seed-path replay check; no read of claim rows compares a vector, so the subject of this record is unreachable. The replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon transform catalog. The record body and its evidence file keep the deleted code as quoted from the host repository at `eb6da6109`; those `file:line` references resolve there only.
+Invalidated: by commit `3b817ad8`, which moved the transform onto canonical kernel rows (`crates/daemon/src/canonical_memory.rs`) and deleted `claim_snapshot_for_context`, the double-read vector fence, the commit-time vector check in `commit_transform`, and the historian's full-state fence with `historian_claim_block`. Before the mirror's deletion, `snapshot_vector_from_connection` had one caller, `replace_claim_mirror_snapshot` (`claim_mirror.rs:980`), a seed-path replay check; both are now gone with the module, so no read of claim rows compares a vector and the subject of this record is unreachable. The replacement property is `canonical-read-staleness-is-distinguishable-from-emptiness` in the daemon transform catalog. The record body and its evidence file keep the deleted code as quoted from the host repository at `eb6da6109`; those `file:line` references resolve there only.
 Exercised: not yet - nothing constructs a mirror mutation that changes
 `acked_effect_id` without changing a generation, which is the only case that would
 distinguish the two fence strengths.
@@ -1045,7 +1122,17 @@ Open questions:
 
 Type: reachability
 Reachability: test-only
-Status: active
+Status: invalidated
+Invalidated: the claim mirror module (`src/claim_mirror.rs`), the four
+`claim_mirror_*` tables, the `ClaimMirror` durable-write family, and
+`tests/claim_mirror.rs` are gone from `crates/memory-store`; the writers and
+readers this record was raised on no longer exist, so its subject is
+unreachable. Canonical memory is read from the kernel, and the property its
+consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog. The record body and its evidence file keep
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: yes - `tests/claim_mirror.rs:377-458` and `:482-517` drive the whole
 cycle, and `tests/claim_intent_ledger.rs:288-335` drives the grant. Every one of
 these calls `begin_claim_store_rebuild` directly from test code.
@@ -1100,7 +1187,17 @@ Open questions:
 
 Type: reachability
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim mirror module (`src/claim_mirror.rs`), the four
+`claim_mirror_*` tables, the `ClaimMirror` durable-write family, and
+`tests/claim_mirror.rs` are gone from `crates/memory-store`; the writers and
+readers this record was raised on no longer exist, so its subject is
+unreachable. Canonical memory is read from the kernel, and the property its
+consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog. The record body and its evidence file keep
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_mirror.rs:461-479`
 (`u10_scenario_7_equivalent_restart_seed_is_idempotent`) seeds the same snapshot
 twice with no grant and asserts both succeed (`:470-471`), then mutates one
@@ -1157,7 +1254,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim mirror module (`src/claim_mirror.rs`), the four
+`claim_mirror_*` tables, the `ClaimMirror` durable-write family, and
+`tests/claim_mirror.rs` are gone from `crates/memory-store`; the writers and
+readers this record was raised on no longer exist, so its subject is
+unreachable. Canonical memory is read from the kernel, and the property its
+consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog. The record body and its evidence file keep
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test applies a receipt while the control row says
 `draining`, and no test asserts that an absent control row permits an apply. The
 absent-row case is the production default
@@ -1206,7 +1313,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim mirror module (`src/claim_mirror.rs`), the four
+`claim_mirror_*` tables, the `ClaimMirror` durable-write family, and
+`tests/claim_mirror.rs` are gone from `crates/memory-store`; the writers and
+readers this record was raised on no longer exist, so its subject is
+unreachable. Canonical memory is read from the kernel, and the property its
+consumers relied on is `canonical-read-staleness-is-distinguishable-from-emptiness`
+in the daemon transform catalog. The record body and its evidence file keep
+the deleted code as quoted from the host repository at `eb6da6109`, the
+source-catalog tree named in Provenance; those `file:line` references resolve
+there only, and no live source carries this subject.
 Exercised: not yet - no test reads through `list_committed_claims` with a mirror
 deliberately behind the authority, because nothing in the store can express "behind
 the authority".
@@ -1255,6 +1372,12 @@ Open questions:
 
 ## Group D: the claim intent ledger
 
+Every record in this group is invalidated at HEAD: the claim-intent ledger, its
+tables, and its tests are gone from `crates/memory-store`. The group is kept as
+the record of the source tree; its `file:line` references are host-repository
+citations at `eb6da6109` (see Provenance) and name code that no longer exists
+here.
+
 Four records on the durable row that records a claim command staged *before* the host
 mutated `context.db`. An intent is keyed by `(producer, operation_key)` alone
 (`lib.rs:1230`), carries a request digest and a four-field binding that are verified
@@ -1272,7 +1395,17 @@ a ledger problem.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - no test asserts that a control row appears after an authority
 transition. `tests/claim_intent_ledger.rs:178-179` and `:169-228` deliberately assert
 the *authority-row* fence instead, and the comment at `:11-15` shows the fixture was
@@ -1316,7 +1449,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:133-166` covers restart survival
 (`:148-151`), an incarnation binding mismatch (`:153-161`), and a digest conflict
 (`:162-165`). `format_epoch`, `authority_project`, and `authority_generation`
@@ -1356,7 +1499,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:85-131` walks staged to
 context-committed to acknowledged, and `:169-228` and `:346-401` reach
 terminal-rejected. No test attempts an illegal transition out of a terminal state, and
@@ -1399,7 +1552,17 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: partial - `tests/claim_intent_ledger.rs:337-401` proves a staged replay is
 refused once the authority is draining, which is the fence, not the effect count.
 Nothing in this crate observes the context effect, because the effect lands in a
@@ -1792,7 +1955,17 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production
-Status: active
+Status: invalidated
+Invalidated: the claim-intent ledger (`claim_intents`, `claim_intent_controls`,
+their store functions, the stage fence, and the control-row writes in the
+authority transitions) is gone from `crates/memory-store`; the rows and
+transitions this record was raised on no longer exist, so its subject is
+unreachable. No successor record: canonical memory writes are keyed and
+replayed by the kernel's own commit receipts, which the kernel crate's tests
+hold (`crates/kernel/tests/kernel_envelope.rs`). The record body and its
+evidence file keep the deleted code as quoted from the host repository at
+`eb6da6109`, the source-catalog tree named in Provenance; those `file:line`
+references resolve there only, and no live source carries this subject.
 Exercised: not yet - nothing in `context-core` asserts transition legality, because
 `context-core` does not model it. `crates/memory-store/tests/claim_intent_ledger.rs` exercises
 acknowledgements, and Group D's `intent-terminal-state-is-entered-at-most-once` is where

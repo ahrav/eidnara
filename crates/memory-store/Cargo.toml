@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Durable memory store: per-session CoreState, compartments, notes, tags, and the claim mirror, with an app-level row_version CAS inside storage's epoch-fenced transaction."
+description = "Durable memory store: per-session CoreState, compartments, notes, tags, and the Dreamer receipt ledger, with an app-level row_version CAS inside storage's epoch-fenced transaction."
 
 [dependencies]
 context-core = { workspace = true }
