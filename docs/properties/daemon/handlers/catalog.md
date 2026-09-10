@@ -695,8 +695,10 @@ root in turn and reuse a session and command id are two kernel receipts. The mod
 `shareable` is recorded true only for a memory the serving view classes normal and
 serves at `ExplicitSearch` at commit time. The same kernel commit retires this project's prior live
 classifications for each memory, meaning rows in its scope, in the memory domain,
-from `dreamer.classify`; another project's or producer's row citing the memory
-through `classifies` is skipped, not retired and not a failure. Authority is read
+from `dreamer.classify`, selected by that writer identity in the kernel query
+(`DependentObservationQuery`); another project's or producer's row citing the
+memory through `classifies` is never returned, so it is neither retired nor a
+failure nor work the writer does while holding the kernel lock. Authority is read
 again immediately before the write (`classify_write_refusal`): a project that no
 longer holds `MODULE` at the run's generation writes nothing and the receipt
 completes `failed` with the authority code, `authority_unverified` when that read

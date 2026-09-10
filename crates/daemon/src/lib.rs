@@ -14099,28 +14099,18 @@ impl DreamerRuntime {
                                     && row.visibility(kernel::Surface::ExplicitSearch)
                                         != kernel::SurfaceVisibility::Hidden
                             });
-                        // Retire prior classifications in this commit to maintain one live classification per memory.
+                        // Retire prior classifications in this commit to maintain one live classification per memory. `classifies` and `memory_classification` are free-form literals `kernel.commit` does not reserve, so any project, and any producer in this one, may attach such rows to the memory; the query selects only rows this code path wrote (memory domain, `dreamer.classify` source, this project's scope), so the writer holds the lock for its own rows and not for an arbitrary number of another producer's. commentlint: allow(JUDGE)
                         for prior in envelope.live_dependent_observations(
-                            &classification.object_id,
-                            CLASSIFY_DEPENDENCY_KIND,
-                            CLASSIFY_OBSERVATION_KIND,
+                            &kernel::DependentObservationQuery {
+                                dependency_object_id: &classification.object_id,
+                                dependency_kind: CLASSIFY_DEPENDENCY_KIND,
+                                observation_kind: CLASSIFY_OBSERVATION_KIND,
+                                source_kind: CLASSIFY_KERNEL_PRODUCER,
+                                domain_id: canonical_memory::MEMORY_DOMAIN_ID,
+                                scope_id: Some(&scope_id),
+                            },
                         )? {
-                            // `classifies` and `memory_classification` are free-form literals `kernel.commit` does not reserve, so any project, and any producer in this one, may write such a row; only a live row this code path wrote (memory domain, `dreamer.classify` source) in this project's scope is a prior classification to retire. commentlint: allow(JUDGE)
-                            match kernel_routes::commit::scoped_object_state(
-                                envelope,
-                                &mut filter,
-                                &prior,
-                            ) {
-                                Ok(state)
-                                    if state.object.domain_id
-                                        == canonical_memory::MEMORY_DOMAIN_ID
-                                        && state.object.source_kind == CLASSIFY_KERNEL_PRODUCER =>
-                                {
-                                    envelope.retire_observation(&prior)?;
-                                }
-                                Ok(_) | Err(kernel::KernelError::NotFound) => {}
-                                Err(error) => return Err(error),
-                            }
+                            envelope.retire_observation(&prior)?;
                         }
                         let observation_id =
                             classification_object_id(&operation_key, &classification.object_id);

@@ -58,10 +58,10 @@ pub use cas::{
     ProviderEgress,
 };
 pub use envelope::{
-    AlignmentProjectionSpec, CommitIntent, CommitReceipt, DomainSpec, Envelope, KnownAsOf,
-    OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, Preview, RemediationTarget,
-    RepositoryProvenance, Sensitivity, StagingCandidateRow, StagingCandidateSpec, TokenCheck,
-    TokenConflict,
+    AlignmentProjectionSpec, CommitIntent, CommitReceipt, DependentObservationQuery, DomainSpec,
+    Envelope, KnownAsOf, OPERATOR_REDACTION_PLACEHOLDER, ObjectRow, ObjectState, Preview,
+    RemediationTarget, RepositoryProvenance, Sensitivity, StagingCandidateRow,
+    StagingCandidateSpec, TokenCheck, TokenConflict,
 };
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
 #[cfg(feature = "test-support")]

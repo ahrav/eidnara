@@ -108,11 +108,14 @@ default-production reachability, subject to the route's authority checks.
   the same session and command id is a distinct kernel receipt.
   The same commit retires this project's prior live classifications through
   `Envelope::live_dependent_observations` in `crates/kernel/src/envelope.rs`
-  and `retire_observation` in `crates/kernel/src/slice/write.rs`; only a row
-  in this project's scope, in the memory domain, with source kind
-  `dreamer.classify` is retired, since `classifies` and
+  and `retire_observation` in `crates/kernel/src/slice/write.rs`. The
+  `DependentObservationQuery` carries the writer identity (source kind
+  `dreamer.classify`, the memory domain, this project's scope), so the query
+  itself returns only rows this code path wrote; `classifies` and
   `memory_classification` are free-form literals any project or producer may
-  write.
+  attach to the memory, and the filter in the query keeps the writer from
+  materializing and checking an unbounded number of another producer's rows
+  while it holds the kernel writer.
 - `classify_write_refusal` reads the route's memories authority again
   immediately before each canonical write (the success path and the
   known-result fallback). A project that no longer holds `MODULE` at the
@@ -315,11 +318,15 @@ object-id harness:
 `classify_payload`, `classify_manifest` where output is needed, and
 `DreamerHarness::start(&producer).await` in `crates/daemon/src/lib.rs`.
 The main thread's observed results are recorded in
-[the catalog](../catalog.md#dreamer-dispatched-attempt-always-settles-through-the-receipt):
-50 Dreamer tests passed, followed by 50 further runs of those 50 tests at
-default concurrency with no retries; the broader nextest run passed 2,325
-tests and skipped 5. A single-context static review found no actionable
-findings. Test adequacy remains `unaudited`. The cleanup test
+[the catalog](../catalog.md#dreamer-dispatched-attempt-always-settles-through-the-receipt).
+At `c35a4ad5`: 50 Dreamer tests passed, followed by 50 further runs of those 50
+tests at default concurrency with no retries, and that revision's daemon,
+kernel, and memory-store nextest run passed 2,325 tests and skipped 5. On the
+working tree merging `origin/main` (`2ba7dbf4`) into `3e34242e`:
+`cargo nextest run --workspace --all-targets --all-features --locked` passed
+3,589 tests and skipped 64; the two totals are different invocations at
+different commits, not one run. A single-context static review found no
+actionable findings. Test adequacy remains `unaudited`. The cleanup test
 is `dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced`; the
 ledger predicate test is
 `an_undispatched_receipt_can_be_taken_over_only_without_a_possible_dispatch`.

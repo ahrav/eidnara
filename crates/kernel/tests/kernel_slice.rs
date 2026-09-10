@@ -4,9 +4,9 @@ use std::{cell::Cell, fs};
 
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent, DecisionEventPayload,
-    DecisionEventSpec, DecisionPayload, DecisionSpec, DomainSpec, EventKind, KernelError,
-    KernelStore, ObservationDependencySpec, ObservationPayload, ObservationSpec, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceClass, TaintClass,
+    DecisionEventSpec, DecisionPayload, DecisionSpec, DependentObservationQuery, DomainSpec,
+    EventKind, KernelError, KernelStore, ObservationDependencySpec, ObservationPayload,
+    ObservationSpec, ProviderEgress, RepositoryProvenance, Sensitivity, SourceClass, TaintClass,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -80,6 +80,23 @@ fn observation(index: i64, dependency_object_id: &str) -> ObservationSpec {
         source_id: "observation".to_string(),
         source_revision: index,
         sensitivity: Sensitivity::Normal,
+    }
+}
+
+/// The query for fixture observations, which are written under source kind
+/// `fixture` in domain `domain` with no scope.
+fn fixture_dependents<'a>(
+    dependency_object_id: &'a str,
+    dependency_kind: &'a str,
+    observation_kind: &'a str,
+) -> DependentObservationQuery<'a> {
+    DependentObservationQuery {
+        dependency_object_id,
+        dependency_kind,
+        observation_kind,
+        source_kind: "fixture",
+        domain_id: "domain",
+        scope_id: None,
     }
 }
 
@@ -735,52 +752,72 @@ fn live_dependent_observations_follow_the_dependency_edge_and_drop_retired_rows(
             let mut other_edge = observation(5, "decision-object-1");
             other_edge.dependencies[0].dependency_kind = "classifies".to_string();
             envelope.insert_observation(other_edge)?;
+            // Same edge and kind, another writer: excluded by source kind.
+            let mut other_writer = observation(6, "decision-object-1");
+            other_writer.source_kind = "other-producer".to_string();
+            envelope.insert_observation(other_writer)?;
             Ok(String::new())
         })
         .unwrap();
     store
         .commit(intent("read-and-retire", 'b'), |envelope| {
             assert_eq!(
-                envelope.live_dependent_observations(
+                envelope.live_dependent_observations(&fixture_dependents(
                     "decision-object-1",
                     "implements",
                     "implementation"
-                )?,
+                ))?,
                 ["observation-object-1", "observation-object-2"]
             );
             assert_eq!(
-                envelope.live_dependent_observations(
+                envelope.live_dependent_observations(&DependentObservationQuery {
+                    source_kind: "other-producer",
+                    ..fixture_dependents("decision-object-1", "implements", "implementation")
+                })?,
+                ["observation-object-6"]
+            );
+            assert!(
+                envelope
+                    .live_dependent_observations(&DependentObservationQuery {
+                        scope_id: Some("scope:elsewhere"),
+                        ..fixture_dependents("decision-object-1", "implements", "implementation")
+                    })?
+                    .is_empty(),
+                "an unscoped row does not match a scoped query"
+            );
+            assert_eq!(
+                envelope.live_dependent_observations(&fixture_dependents(
                     "decision-object-1",
                     "classifies",
                     "implementation"
-                )?,
+                ))?,
                 ["observation-object-5"]
             );
             assert_eq!(
-                envelope.live_dependent_observations(
+                envelope.live_dependent_observations(&fixture_dependents(
                     "decision-object-1",
                     "implements",
                     "classification"
-                )?,
+                ))?,
                 ["observation-object-4"]
             );
             assert!(
                 envelope
-                    .live_dependent_observations(
+                    .live_dependent_observations(&fixture_dependents(
                         "decision-object-9",
                         "implements",
                         "implementation"
-                    )?
+                    ))?
                     .is_empty()
             );
             // A retirement in this envelope is visible to the next call.
             envelope.retire_observation("observation-object-1")?;
             assert_eq!(
-                envelope.live_dependent_observations(
+                envelope.live_dependent_observations(&fixture_dependents(
                     "decision-object-1",
                     "implements",
                     "implementation"
-                )?,
+                ))?,
                 ["observation-object-2"]
             );
             Ok(String::new())
@@ -813,11 +850,11 @@ fn live_dependent_observations_are_ordered_by_commit_then_object_id() {
     store
         .commit(intent("read", 'c'), |envelope| {
             assert_eq!(
-                envelope.live_dependent_observations(
+                envelope.live_dependent_observations(&fixture_dependents(
                     "decision-object-1",
                     "implements",
                     "implementation"
-                )?,
+                ))?,
                 [
                     "observation-object-9",
                     "observation-object-1",
