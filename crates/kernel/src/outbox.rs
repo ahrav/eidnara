@@ -586,7 +586,8 @@ impl KernelStore {
     }
 }
 
-/// Maps the twelve-column outbox projection every reader selects: the eleven stored columns in schema order, then the caller's commit-boundary expression. commentlint: allow(JUDGE)
+/// Maps the twelve-column outbox projection every reader selects: the eleven stored columns in
+/// schema order, then the caller's commit-boundary expression.
 pub(super) fn outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
     let sensitivity: String = row.get(8)?;
     Ok(OutboxEntry {

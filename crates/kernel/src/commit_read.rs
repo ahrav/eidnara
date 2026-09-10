@@ -1,4 +1,6 @@
-//! A registered consumer reads canonical commits in `(after_commit, through_commit]` one complete commit at a time; a commit is never split across pages, an oversized commit blocks rather than skips, and missing history or malformed ordinals are refusals rather than an empty stream. commentlint: allow(JUDGE)
+//! A registered consumer reads canonical commits in `(after_commit, through_commit]` one complete
+//! commit at a time; a commit is never split across pages, an oversized commit blocks rather than
+//! skips, and missing history or malformed ordinals are refusals rather than an empty stream.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -7,7 +9,7 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use super::outbox::{OutboxEntry, outbox_entry};
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
-/// Identifies the reader and the target it captured once; retries carry the same request. commentlint: allow(JUDGE)
+/// Identifies the reader and the target it captured once; retries carry the same request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReadRequest {
     pub consumer_id: String,
@@ -19,7 +21,8 @@ pub struct CommitReadRequest {
     pub through_commit: i64,
 }
 
-/// Page capacity, checked from `COUNT` and `SUM(LENGTH())` before any payload is selected. `max_payload_bytes` covers payload blobs only, not the other `OutboxEntry` columns. commentlint: allow(JUDGE)
+/// Page capacity, checked from `COUNT` and `SUM(LENGTH())` before any payload is selected.
+/// `max_payload_bytes` covers payload blobs only, not the other `OutboxEntry` columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitPageBounds {
     pub max_commits: NonZeroUsize,
@@ -27,21 +30,26 @@ pub struct CommitPageBounds {
     pub max_payload_bytes: NonZeroU64,
 }
 
-/// The whole of one canonical commit: every retained outbox row in ordinal order, or none for an empty commit. commentlint: allow(JUDGE)
+/// The whole of one canonical commit: every retained outbox row in ordinal order, or none for an
+/// empty commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteCommit {
     pub commit_seq: i64,
     pub rows: Vec<OutboxEntry>,
 }
 
-/// Why a page ended where it did. Only this value decides whether the caller is done: `through` can sit below `through_commit` when the target names a gap in `commit_log`. commentlint: allow(JUDGE)
+/// Why a page ended where it did. Only this value decides whether the caller is done: `through` can
+/// sit below `through_commit` when the target names a gap in `commit_log`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageEnd {
     /// Every commit through the target is in this or an earlier page.
     Exhausted,
-    /// The next commit did not fit this page's remaining capacity. The caller applies this page, then reads again from `through`; the next read decides whether that commit fits a page alone. commentlint: allow(JUDGE)
+    /// The next commit did not fit this page's remaining capacity. The caller applies this page,
+    /// then reads again from `through`; the next read decides whether that commit fits a page
+    /// alone.
     Deferred { next_commit: i64 },
-    /// The first commit of an otherwise empty page exceeds a bound on its own, so nothing was returned and progress cannot move past `through` without a wider bound. commentlint: allow(JUDGE)
+    /// The first commit of an otherwise empty page exceeds a bound on its own, so nothing was
+    /// returned and progress cannot move past `through` without a wider bound.
     Oversized {
         commit_seq: i64,
         rows: usize,
@@ -52,7 +60,7 @@ pub enum PageEnd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitPage {
     pub commits: Vec<CompleteCommit>,
-    /// The highest commit sequence this page completes, or `after_commit` when it completes none. commentlint: allow(JUDGE)
+    /// The highest commit sequence this page completes, or `after_commit` when it completes none.
     pub through: i64,
     pub end: PageEnd,
 }
@@ -151,7 +159,8 @@ fn outbox_rows(
     Ok(rows)
 }
 
-/// Payload rows selected by every `read_complete_commits` call in this process, so a test can show that a refused or deferred commit selected none. commentlint: allow(JUDGE)
+/// Payload rows selected by every `read_complete_commits` call in this process, so a test can show
+/// that a refused or deferred commit selected none.
 #[cfg(feature = "test-support")]
 static MATERIALIZED_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -161,7 +170,12 @@ pub fn materialized_outbox_rows_for_test() -> usize {
 }
 
 impl KernelStore {
-    /// Reads whole commits in `(after_commit, through_commit]` for a registered consumer until a bound is reached. Shapes are measured with `COUNT` and `SUM(LENGTH())` before a payload is selected, so admission precedes materialization. Consumer, incarnation, target, and checkpoint are checked before any commit is read, and the retained `change_event` inventory distinguishes an empty commit from pruned outbox history. Everything is read in one snapshot on one reader connection. commentlint: allow(JUDGE)
+    /// Reads whole commits in `(after_commit, through_commit]` for a registered consumer until a
+    /// bound is reached. Shapes are measured with `COUNT` and `SUM(LENGTH())` before a payload is
+    /// selected, so admission precedes materialization. Consumer, incarnation, target, and
+    /// checkpoint are checked before any commit is read, and the retained `change_event` inventory
+    /// distinguishes an empty commit from pruned outbox history. Everything is read in one snapshot
+    /// on one reader connection.
     pub fn read_complete_commits(
         &self,
         request: &CommitReadRequest,
@@ -202,7 +216,7 @@ impl KernelStore {
         if request.through_commit > tip {
             return Err(CommitReadError::TargetBeyondTip);
         }
-        // One more than the page can hold, so the commit that ends the page is seen without enumerating the whole range. commentlint: allow(JUDGE)
+        // One more than the page can hold, so the commit that ends the page is seen without enumerating the whole range.
         let limit = i64::try_from(bounds.max_commits.get())
             .unwrap_or(i64::MAX - 1)
             .saturating_add(1);
