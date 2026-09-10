@@ -102,10 +102,12 @@ has no task input builder, so scheduled model dispatch is test-only.
   `None` and `install_task_inputs` is `#[cfg(test)]`, so production slots
   take the not-runnable path. That reply completes the lease without creating a
   receipt or starting a model, and is recorded on the lease so the slot is not
-  retried every tick. `run_task` maps the protocol's two store-error codes,
-  `authority_lookup_failed` and `dreamer_ledger_failed`, to
-  `TaskRunOutcome::StoreUnavailable`; every other reply, success or error, is
-  the protocol's answer for the command and is recorded on the lease. A lease
+  retried every tick. `run_task` maps the protocol's store-error codes,
+  `authority_lookup_failed`, `dreamer_ledger_failed`, and `kernel_unavailable`
+  (the pool read against a kernel that is not ready, which leaves the receipt
+  open with no attempt), to `TaskRunOutcome::StoreUnavailable`; every other
+  reply, success or error, is the protocol's answer for the command and is
+  recorded on the lease. A lease
   completion error is logged, not reported as a successful durable completion,
   and retains the slot.
 - `binding_for_root` uses `RouteBindings::latest_for_root`, the same newest-bind

@@ -14303,7 +14303,13 @@ fn classify_write_refusal(
         }
         Ok(MemoriesAuthority::Module(_)) => None,
         Ok(MemoriesAuthority::NotModule { message }) => refusal("authority_not_module", message),
-        Err(error) => refusal("authority_lookup_failed", error.to_string()),
+        // `authority_lookup_failed` names the pre-receipt read, which the scheduler retries by re-leasing the slot; a lookup failure here is recorded on the receipt as terminal and replays, so it carries a code the scheduler does not retain. commentlint: allow(JUDGE)
+        Err(error) => refusal(
+            "authority_unverified",
+            format!(
+                "memories authority could not be read before the canonical write, so nothing was written: {error}"
+            ),
+        ),
     }
 }
 
@@ -14427,9 +14433,11 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                         serde_json::from_slice(&bytes).ok()
                     })
                     .unwrap_or_else(|| json!({"ok": false, "code": "dreamer_ledger_corrupt"})),
-                // The protocol classifies only these codes as store errors; all others are command responses.
+                // The protocol classifies only these codes as store errors; all others are command responses. `authority_lookup_failed` and `dreamer_ledger_failed` leave no receipt or an open one; `kernel_unavailable` leaves the receipt open without an attempt, so a re-leased command retries the pool read on the next tick. commentlint: allow(JUDGE)
                 PreparedOutcome::Error { code, message }
-                    if code == "authority_lookup_failed" || code == "dreamer_ledger_failed" =>
+                    if code == "authority_lookup_failed"
+                        || code == "dreamer_ledger_failed"
+                        || code == "kernel_unavailable" =>
                 {
                     return dreamer_scheduler::TaskRunOutcome::StoreUnavailable {
                         reason: format!("{code}: {message}"),
@@ -29708,6 +29716,150 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A pool read against a kernel that is not ready leaves the receipt open with no attempt; the bridge reports it as `StoreUnavailable` so the slot is retained and the same command id is asked again once the kernel opens, instead of the slot advancing past an orphaned receipt. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_retains_the_slot_while_the_kernel_is_starting() {
+        use dreamer_scheduler::SchedulerHost;
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(classify_manifest(&ids));
+        let predecessor = DreamerHarness::start(&producer).await;
+        let kernel_root = predecessor._dir.path().join("kernel");
+        predecessor
+            .handler
+            .kernel
+            .mark_unavailable(kernel_routes::UnavailableKind::Store);
+        let harness = DreamerHarness::start_with_store(&producer, &predecessor);
+        assert_eq!(
+            harness.handler.kernel.state(),
+            kernel_routes::KernelState::Starting
+        );
+        harness.schedule(Some("*/15 * * * *"));
+        harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
+        let bridge = harness.scheduler_bridge();
+        let projects = bridge.scheduled_projects().unwrap();
+        assert_eq!(projects.len(), 1);
+
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "kernel-starting",
+            )
+            .await;
+        assert!(
+            matches!(
+                &outcome,
+                dreamer_scheduler::TaskRunOutcome::StoreUnavailable { reason }
+                    if reason.starts_with("kernel_unavailable:")
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            scheduler_receipt(&harness.store, "kernel-starting")
+                .expect("the receipt is written before the pool read")
+                .state,
+            DreamerReceiptState::InProgress { .. }
+        ));
+
+        harness
+            .handler
+            .kernel
+            .open(
+                kernel_root,
+                StoreOpenPolicy::default(),
+                harness.handler.cancel.clone(),
+            )
+            .await;
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "kernel-starting",
+            )
+            .await;
+        match outcome {
+            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+                assert_eq!(response["classified"], json!(1), "{response}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// An authority read that fails immediately before the canonical write is recorded on the receipt as terminal under `authority_unverified`; the bridge treats that as the command's answer, not a store outage, so the slot is consumed rather than retained against a receipt that replays the same failure forever. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_consumes_a_slot_whose_write_time_authority_read_failed() {
+        use dreamer_scheduler::SchedulerHost;
+        let ids = [test_memory_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(classify_manifest(&ids));
+        let harness = DreamerHarness::start(&producer).await;
+        harness.schedule(Some("*/15 * * * *"));
+        harness.install_task_inputs(&classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS));
+        let bridge = harness.scheduler_bridge();
+        let projects = bridge.scheduled_projects().unwrap();
+        let store = Arc::clone(&harness.store);
+        *producer.on_start.lock().unwrap() = Some(Box::new(move || {
+            store.fail_next_authority_route_read_for_test();
+        }));
+        let tip = harness.kernel_tip();
+
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "unverified",
+            )
+            .await;
+        match &outcome {
+            dreamer_scheduler::TaskRunOutcome::Ran { response } => {
+                assert_eq!(
+                    response["code"],
+                    json!("authority_unverified"),
+                    "{response}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.kernel_tip(), tip, "no canonical write");
+        assert!(matches!(
+            scheduler_receipt(&harness.store, "unverified")
+                .expect("the receipt is complete")
+                .state,
+            DreamerReceiptState::Complete {
+                terminal_kind: DreamerTerminalKind::Failed,
+                ..
+            }
+        ));
+        let replay = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "unverified",
+            )
+            .await;
+        assert!(
+            matches!(
+                &replay,
+                dreamer_scheduler::TaskRunOutcome::Ran { response }
+                    if response["code"] == json!("authority_unverified")
+            ),
+            "{replay:?}"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 

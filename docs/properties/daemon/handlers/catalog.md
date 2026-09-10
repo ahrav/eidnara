@@ -699,7 +699,8 @@ from `dreamer.classify`; another project's or producer's row citing the memory
 through `classifies` is skipped, not retired and not a failure. Authority is read
 again immediately before the write (`classify_write_refusal`): a project that no
 longer holds `MODULE` at the run's generation writes nothing and the receipt
-completes `failed` with the authority code. That commit
+completes `failed` with the authority code, `authority_unverified` when that read
+itself fails, so the scheduler consumes the slot instead of retaining it. That commit
 precedes receipt completion: a crash between them leaves canonical effects but
 an unknown receipt outcome on recovery, not a second dispatch. Normal kernel
 write failure is recorded as `dreamer_kernel_write_failed`; a receipt read-back
@@ -860,8 +861,9 @@ failure from the generation lookup or from `acquire_dreamer_task` is
 `TickEvent::Retained` (`run_slot`, `:325`): `tick` does not advance that
 project (`:254`), so the slot stays due, and `run` waits the idle poll as after
 a deferred tick. A `StoreUnavailable` reply from the host (`:377`; the
-bridge maps `authority_lookup_failed` and `dreamer_ledger_failed` to it in
-`SchedulerBridge::run_task`) and a store failure from `complete_dreamer_task`
+bridge maps `authority_lookup_failed`, `dreamer_ledger_failed`, and
+`kernel_unavailable` to it in `SchedulerBridge::run_task`, the codes that leave
+no receipt or an open one with no attempt) and a store failure from `complete_dreamer_task`
 (`:402`) retain the slot the same way, with the claim left live under the
 slot's acquisition id; the next tick re-leases that claim and asks for the same
 command id, which the receipt replays or resumes without a second dispatch.

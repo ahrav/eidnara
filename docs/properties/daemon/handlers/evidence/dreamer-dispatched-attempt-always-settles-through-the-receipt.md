@@ -118,9 +118,13 @@ default-production reachability, subject to the route's authority checks.
   known-result fallback). A project that no longer holds `MODULE` at the
   run's generation writes nothing; the receipt completes `failed` with
   `authority_not_module`, `authority_project_mismatch`,
-  `authority_generation_mismatch`, or `authority_lookup_failed`. The
-  authority row is outside the kernel transaction, so this narrows the
-  window from the model call to the commit rather than closing it.
+  `authority_generation_mismatch`, or, when the read itself fails,
+  `authority_unverified`. That last code is distinct from the pre-receipt
+  `authority_lookup_failed`: the scheduler bridge retains a slot for the
+  pre-receipt failure, while a recorded terminal failure replays and must
+  consume the slot. The authority row is outside the kernel transaction, so
+  this narrows the window from the model call to the commit rather than
+  closing it.
 - Normal kernel-write failure is recorded as `dreamer_kernel_write_failed`;
   kernel conflicts retain the `kernel.commit` reason classification. Both
   that completion and the exhausted-chain and success completions distinguish
@@ -295,6 +299,16 @@ the producer is never started again.
     within `timeout_ms` as `dreamer_run_failed`, one connect, no start, no
     attempt row, and the receipt `complete` as `failed`
     (`dreamer_run_task_bounds_producer_startup_by_the_request_deadline`).
+21. The scheduler bridge asked to run a slot while the kernel is `Starting`:
+    assert `StoreUnavailable` with a `kernel_unavailable` reason, the receipt
+    open with no start; then the kernel opened and the same command id run
+    again: assert one start and one classification
+    (`dreamer_scheduler_bridge_retains_the_slot_while_the_kernel_is_starting`).
+22. The authority read armed to fail from the producer's `on_start` hook so the
+    write-time read fails: assert the bridge reports `Ran` with
+    `authority_unverified`, an unchanged kernel tip, a `failed` receipt, and a
+    rerun replaying the same answer with no new start
+    (`dreamer_scheduler_bridge_consumes_a_slot_whose_write_time_authority_read_failed`).
 
 The stranded-receipt, fenced-cleanup, and terminal-status tests use the async
 object-id harness:
