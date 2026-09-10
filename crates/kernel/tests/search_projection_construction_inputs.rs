@@ -712,7 +712,7 @@ fn contracts_freeze_the_five_classes() {
     let contracts = fixture("construction-contracts.json");
     assert_eq!(
         contracts["identity_contract_version"],
-        "search-projection-identity-v1"
+        "search-projection-identity-v2"
     );
     let classes = contracts["classes"].as_object().expect("classes");
     assert_eq!(
@@ -742,7 +742,14 @@ fn contracts_freeze_the_five_classes() {
             "span"
         ]
     );
-    assert_eq!(contracts["tuple_encoding"]["version_byte"], 1);
+    assert_eq!(contracts["tuple_encoding"]["version_byte"], 2);
+    assert_eq!(contracts["tuple_encoding"]["role_bytes"]["occurrence"], 0);
+    assert_eq!(contracts["tuple_encoding"]["role_bytes"]["lineage"], 1);
+    assert_eq!(
+        str_list(&contracts["tuple_encoding"]["lineage_field_order"]),
+        ["class", "namespaced_identity", "representation", "span"]
+    );
+    assert_eq!(contracts["tuple_encoding"]["max_identity_value_bytes"], 512);
     assert_eq!(
         str_list(&contracts["admission_dimensions"]),
         ADMISSION_DIMENSIONS
@@ -865,9 +872,11 @@ enum Refusal {
     UnknownClass,
     MissingIdentityField,
     UnknownIdentityField,
+    MalformedIdentityValue,
     UnknownHarness,
     MalformedOid,
     MissingRevision,
+    MalformedRevision,
     UnknownRepresentation,
     PayloadNotString,
     MalformedSpan,
@@ -876,13 +885,17 @@ enum Refusal {
     SpanNotUtf8Aligned,
 }
 
-const REFUSALS: [(Refusal, &str); 12] = [
+const MAX_IDENTITY_VALUE_BYTES: usize = 512;
+
+const REFUSALS: [(Refusal, &str); 14] = [
     (Refusal::UnknownClass, "unknown_class"),
     (Refusal::MissingIdentityField, "missing_identity_field"),
     (Refusal::UnknownIdentityField, "unknown_identity_field"),
+    (Refusal::MalformedIdentityValue, "malformed_identity_value"),
     (Refusal::UnknownHarness, "unknown_harness"),
     (Refusal::MalformedOid, "malformed_oid"),
     (Refusal::MissingRevision, "missing_revision"),
+    (Refusal::MalformedRevision, "malformed_revision"),
     (Refusal::UnknownRepresentation, "unknown_representation"),
     (Refusal::PayloadNotString, "payload_not_string"),
     (Refusal::MalformedSpan, "malformed_span"),
@@ -928,6 +941,15 @@ fn validate<'a>(contracts: &'a Value, record: &'a Value) -> Result<Validated<'a>
     if identity.keys().any(|key| !fields.contains(&key.as_str())) {
         return Err(Refusal::UnknownIdentityField);
     }
+    for field in &fields {
+        let value = identity[*field].as_str().expect("checked above");
+        if value.is_empty()
+            || value.len() > MAX_IDENTITY_VALUE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(Refusal::MalformedIdentityValue);
+        }
+    }
     if let Some(harness) = identity.get("harness").and_then(Value::as_str)
         && !HARNESSES.contains(&harness)
     {
@@ -951,6 +973,14 @@ fn validate<'a>(contracts: &'a Value, record: &'a Value) -> Result<Validated<'a>
         .as_str()
         .filter(|revision| !revision.is_empty())
         .ok_or(Refusal::MissingRevision)?;
+    // One number has one spelling: the shortest nonnegative decimal that fits i64.
+    let canonical = revision
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value >= 0 && value.to_string() == revision);
+    if canonical.is_none() {
+        return Err(Refusal::MalformedRevision);
+    }
     let representation = record["representation"]
         .as_str()
         .ok_or(Refusal::UnknownRepresentation)?;
@@ -1006,40 +1036,62 @@ fn push_str(out: &mut Vec<u8>, text: &str) {
 
 struct Encoded {
     tuple: Vec<u8>,
+    lineage: Vec<u8>,
     selected: Vec<u8>,
 }
 
+/// Version byte, role byte, class, identity pairs, then the role's tail and
+/// the span discriminator. The occurrence role carries the revision; the
+/// lineage role does not.
+fn finish(prefix: &[u8], role: u8, tail: &[&str], span: Option<(usize, usize)>) -> Vec<u8> {
+    let mut out = vec![2u8, role];
+    out.extend_from_slice(prefix);
+    for text in tail {
+        push_str(&mut out, text);
+    }
+    match span {
+        None => out.push(0),
+        Some((start, end)) => {
+            out.push(1);
+            out.extend_from_slice(&(start as u64).to_be_bytes());
+            out.extend_from_slice(&(end as u64).to_be_bytes());
+        }
+    }
+    out
+}
+
 fn encode(validated: &Validated<'_>) -> Encoded {
-    let mut tuple = vec![1u8];
-    push_str(&mut tuple, validated.class);
-    tuple.extend_from_slice(
+    let mut prefix = Vec::new();
+    push_str(&mut prefix, validated.class);
+    prefix.extend_from_slice(
         &u32::try_from(validated.fields.len())
             .expect("small")
             .to_be_bytes(),
     );
     for field in &validated.fields {
-        push_str(&mut tuple, field);
+        push_str(&mut prefix, field);
         push_str(
-            &mut tuple,
+            &mut prefix,
             validated.identity[*field].as_str().expect("validated"),
         );
     }
-    push_str(&mut tuple, validated.revision);
-    push_str(&mut tuple, validated.representation);
+    let tuple = finish(
+        &prefix,
+        0,
+        &[validated.revision, validated.representation],
+        validated.span,
+    );
+    let lineage = finish(&prefix, 1, &[validated.representation], validated.span);
     let payload = validated.payload.as_bytes();
     let selected = match validated.span {
-        None => {
-            tuple.push(0);
-            payload.to_vec()
-        }
-        Some((start, end)) => {
-            tuple.push(1);
-            tuple.extend_from_slice(&(start as u64).to_be_bytes());
-            tuple.extend_from_slice(&(end as u64).to_be_bytes());
-            payload[start..end].to_vec()
-        }
+        None => payload.to_vec(),
+        Some((start, end)) => payload[start..end].to_vec(),
     };
-    Encoded { tuple, selected }
+    Encoded {
+        tuple,
+        lineage,
+        selected,
+    }
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -1110,6 +1162,52 @@ fn fixture_records_match_their_golden_identities() {
             expected["expected_payload_id"],
             "{id} payload identity"
         );
+        assert_eq!(
+            hex_digest(&encoded.lineage),
+            expected["expected_lineage_id"],
+            "{id} lineage identity"
+        );
+    }
+    // A lineage id never equals any occurrence id: the role byte separates them.
+    let occurrences: BTreeSet<String> = records
+        .encoded
+        .values()
+        .map(|encoded| hex_digest(&encoded.tuple))
+        .collect();
+    for encoded in records.encoded.values() {
+        assert!(!occurrences.contains(&hex_digest(&encoded.lineage)));
+    }
+    assert!(
+        records.fixtures["expectations"]["lineage_never_equals_occurrence"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[test]
+fn fixture_records_share_a_lineage_only_across_revisions() {
+    let records = encoded_records();
+    let encoded = &records.encoded;
+    let expectations = &records.fixtures["expectations"];
+    for (a, b) in pairs(&expectations["equal_lineages"]) {
+        assert_eq!(
+            encoded[a].lineage, encoded[b].lineage,
+            "{a}/{b} share a lineage"
+        );
+    }
+    for (a, b) in pairs(&expectations["distinct_lineages"]) {
+        assert_ne!(
+            encoded[a].lineage, encoded[b].lineage,
+            "{a}/{b} lineages differ"
+        );
+    }
+    // Every equal-lineage pair differs in revision or is the same record twice.
+    for (a, b) in pairs(&expectations["equal_lineages"]) {
+        let (ra, rb) = (record(&records, a), record(&records, b));
+        assert_eq!(ra["class"], rb["class"]);
+        assert_eq!(ra["identity"], rb["identity"]);
+        assert_eq!(ra["representation"], rb["representation"]);
+        assert_eq!(ra.get("span"), rb.get("span"));
     }
 }
 

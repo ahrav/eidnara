@@ -24,6 +24,8 @@ mod retention;
 pub mod schema;
 mod scope;
 mod slice;
+mod source_descriptor;
+pub mod source_identity;
 
 pub use admission::{
     AdmissionDecision, AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, Disposition,
@@ -90,6 +92,11 @@ pub use slice::{
     DecisionEventOutcome, DecisionEventPayload, DecisionEventSpec, DecisionPayload, DecisionRow,
     DecisionSpec, DecisionWriteOutcome, ObservationDependencySpec, ObservationPayload,
     ObservationRow, ObservationSpec, ObservationWriteOutcome, RetirementOutcome, SliceSnapshot,
+};
+pub use source_descriptor::{
+    MAX_DESCRIPTORS_PER_COMMIT, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND,
+    SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome,
+    SourceDescriptorRequest, descriptor_object_id,
 };
 
 /// `Connection::execute` and `Connection::query_row` prepare their statement
