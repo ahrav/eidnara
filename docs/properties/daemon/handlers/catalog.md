@@ -637,10 +637,12 @@ this condition.
 Fault/timing angle: `begin_dreamer_receipt` runs before any producer is
 constructed (`lib.rs`, `DreamerRuntime::run_dreamer_task`), so a `Complete`
 receipt replays and an `in_progress` one goes to `resume_dreamer_receipt`
-before any connect. The digest includes sorted `object_ids`, model chain,
-requested timeout, await ceiling, output-token limit, temperature, template and
-schema versions, and system-prompt hash, but not memory bodies or a recovery
-timeout. `ClassifyRequest::parse` rejects caller-rendered `prompt_body` and
+before any connect. The digest includes the kernel scope of the bound root,
+sorted `object_ids`, model chain, requested timeout, await ceiling, output-token
+limit, temperature, template and schema versions, and system-prompt hash, but
+not memory bodies or a recovery timeout; the receipt is keyed by authority
+project, and several roots can hold one project, so a completed receipt does not
+answer a request from another root's scope. `ClassifyRequest::parse` rejects caller-rendered `prompt_body` and
 claim-lane `items`. A fresh or taken-over generation calls `render_pool` for
 canonical memories in the bound kernel project; a memory the serving view
 classes above normal is refused as `sensitive_remote` before any connect, since

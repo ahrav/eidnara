@@ -32,12 +32,15 @@ default-production reachability, subject to the route's authority checks.
   holds proceeds to `begin_dreamer_receipt`, so it replays, refuses a changed
   request, or settles under the same rules as below, and only a takeover
   (which would dispatch) is refused over budget.
-- The digest in `run_dreamer_task` includes the sorted `object_ids`, model
-  chain, requested timeout, await ceiling, output-token limit, temperature,
-  template and schema versions, and system-prompt hash. It does not include
-  the canonical memory bodies or a recovery timeout. A completed receipt with
-  matching inputs and binding replays its outcome without reading changed
-  memory text.
+- The digest in `run_dreamer_task` includes the bound root's kernel scope id,
+  the sorted `object_ids`, model chain, requested timeout, await ceiling,
+  output-token limit, temperature, template and schema versions, and
+  system-prompt hash (digest version 3). It does not include the canonical
+  memory bodies or a recovery timeout. A completed receipt with matching inputs
+  and binding replays its outcome without reading changed memory text; the
+  receipt is keyed by authority project, so the scope in the digest is what
+  keeps a second root of the same project from replaying the first root's
+  result before its own pool read.
 - `begin_dreamer_receipt` is the first write. The receipt binding has no
   harness field. Each `DreamerAttemptSpec` records `project_root`, `harness`,
   and `child_session`, so recovery uses the dispatch identity even when the
@@ -312,6 +315,11 @@ the producer is never started again.
     `authority_unverified`, an unchanged kernel tip, a `failed` receipt, and a
     rerun replaying the same answer with no new start
     (`dreamer_scheduler_bridge_consumes_a_slot_whose_write_time_authority_read_failed`).
+23. Two roots bound to one authority project in one session, the second reusing
+    the first's command id after it completed: assert
+    `dreamer_request_conflict`, one start, an unchanged kernel tip, and one
+    classification
+    (`dreamer_run_task_does_not_replay_a_receipt_across_roots_of_one_project`).
 
 The stranded-receipt, fenced-cleanup, and terminal-status tests use the async
 object-id harness:

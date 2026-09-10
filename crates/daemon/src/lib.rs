@@ -9623,10 +9623,14 @@ impl DreamerRuntime {
         let system_prompt_hash = sha256_hex(CLASSIFY_SYSTEM_PROMPT.as_bytes());
         // Everything that decides what the model is asked and how its answer is
         // read is digested, so a template or schema change cannot replay a result
-        // produced under the old one.
+        // produced under the old one. The kernel scope is digested too: the
+        // receipt is keyed by authority project, several roots can hold one
+        // project, and the classifications land in one root's scope, so a
+        // completed receipt must not answer a request from another root.
         let request_digest = match dreamer_request_digest(&json!({
             "digest_version": CLASSIFY_REQUEST_DIGEST_VERSION,
             "task": task,
+            "kernel_scope": route.kernel_project.scope_id(),
             "object_ids": expected_ids,
             "model_chain": model_chain,
             "timeout_ms": timeout_ms,
@@ -14595,7 +14599,7 @@ const CLASSIFY_OBSERVATION_KIND: &str = "memory_classification";
 const CLASSIFY_DEPENDENCY_KIND: &str = "classifies";
 /// Version of the request digest's input shape; bumped when the digested
 /// fields change so a receipt from the earlier shape never replays.
-const CLASSIFY_REQUEST_DIGEST_VERSION: u32 = 2;
+const CLASSIFY_REQUEST_DIGEST_VERSION: u32 = 3;
 
 /// The receipt's operation key for one client request: a digest of the
 /// length-prefixed ledger session and command id, so the two cannot alias and
@@ -30980,6 +30984,63 @@ mod tests {
             Some(second["commit_seq"].as_i64().unwrap()),
             "the first project's row is retired by the second commit"
         );
+    }
+
+    /// Two roots hold one authority project and share a session and command id. The receipt is keyed by project, so the second root would otherwise replay the first root's completed receipt before its own pool read; the digest carries the kernel scope, so the second root's request is a conflict and neither replays nor dispatches. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_does_not_replay_a_receipt_across_roots_of_one_project() {
+        let memory = test_memory_id(1);
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: classify_manifest(std::slice::from_ref(&memory)),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS);
+        let first = response_of(harness.classify(payload.clone(), "shared").await);
+        assert_eq!(first["classified"], json!(1));
+
+        let worktree = harness._dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        harness
+            .store
+            .bind_authority_route("context", "git:identity", worktree.to_str().unwrap())
+            .unwrap();
+        harness.handler.bind_route(
+            test_route(8),
+            binding_with_harness(worktree.to_str().unwrap(), "pi", "ses"),
+        );
+        let tip = harness.kernel_tip();
+        let outcome = harness
+            .handler
+            .handle_dreamer_run_task(
+                test_route(8),
+                &json!({
+                    "v": 1,
+                    "session_id": "ses",
+                    "task": CLASSIFY_TASK,
+                    "command_id": "shared",
+                    "authority_generation": harness.generation,
+                    "payload": payload,
+                }),
+            )
+            .await;
+        assert_eq!(error_code_of(&outcome), "dreamer_request_conflict");
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            1,
+            "no second dispatch"
+        );
+        assert_eq!(
+            harness.kernel_tip(),
+            tip,
+            "nothing written for the second root"
+        );
+        assert_eq!(harness.classifications().len(), 1);
     }
 
     /// A scope row with a different project digest rejects classification
