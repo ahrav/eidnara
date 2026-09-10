@@ -167,6 +167,36 @@ situation to reach, only an input domain to cover.
 - Missing evidence: whether a programmatically constructed non-finite
   `serde_json::Number` is even representable (serde_json normally refuses to
   construct one).
-- Conclusion: needs human input on whether to widen the fixture. The property
-  test proposed above covers the untested boundaries regardless, which is the
-  cheaper path than editing a shared cross-runtime fixture.
+- Conclusion: resolved with answer. At HEAD
+  `crates/context-core/testdata/canonical-json-contract-v1.json` carries five
+  `invalidCanonical` cases: `1.5`, `9007199254740993`, `9007199254740992`,
+  `-9007199254740992`, and `18446744073709551615`, so both `±2^53` boundaries
+  and the above-`i64::MAX` path are pinned, and
+  `crates/context-core/src/canonical_json.rs:250`
+  `integer_above_i64_max_is_not_canonical` covers the u64 path separately. The
+  property test proposed above still adds the generated interior of each region.
+
+### Q: Does a TypeScript encoder under the same fixture exist in this repository?
+
+- Sources examined: a repository-wide search for `canonicalJsonEncode`,
+  `compareCodePoints`, and `canonical-json-contract-v1.json` outside
+  `crates/context-core`; `packages/e2e-tests/src/incident-pool/history.ts:29`
+  (`canonicalJson`); the module header at
+  `crates/context-core/src/canonical_json.rs:1-4`.
+- Findings: no TypeScript encoder reads the fixture. The only TypeScript
+  canonical-JSON function in the tree, `history.ts:29`, is an incident-pool
+  harness helper: it sorts keys with JavaScript `<` (UTF-16 code-unit order),
+  escapes through `JSON.stringify`, and accepts any number, so it is not the
+  twin this record was raised against and shares no vocabulary with it. The
+  module header still says the encoding is "shared with the TypeScript runtime";
+  that names the host repository's encoder, which this repository does not
+  carry. The Rust encoder's only consumers here are the Dreamer request digest
+  (`crates/memory-store/src/dreamer_ledger.rs:686`, called from
+  `crates/daemon/src/lib.rs:9579`) and the durable-write redaction scan
+  (`crates/memory-store/src/lib.rs:3206`), both Rust.
+- Missing evidence: none for the question as asked.
+- Conclusion: resolved with answer. The record's cross-runtime clause has no
+  second runtime to compare against at HEAD, so the catalog states the record as
+  the Rust encoder's byte stability and the Dreamer digest formula, and keeps the
+  cross-runtime clause as an open question for the day an encoder under the
+  fixture is added here.
