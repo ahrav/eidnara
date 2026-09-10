@@ -491,8 +491,9 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
 
 /// The key text of a `[a.b]` or `[[a.b]]` header. Accepts only whitespace or
 /// a `#` comment after the closing bracket. A quote starts a quoted segment
-/// only at a segment start; brackets inside quoted segments are not
-/// structural, and an apostrophe inside a bare INI section name is literal.
+/// only at a segment start and only when the line closes it; brackets inside
+/// quoted segments are not structural, and any other quote is a literal
+/// character of an INI section name.
 fn table_header(line: &str) -> Option<&str> {
     let (open, close) = if line.starts_with("[[") {
         ("[[", "]]")
@@ -510,8 +511,10 @@ fn table_header(line: &str) -> Option<&str> {
             let after = after.trim_start();
             return (after.is_empty() || after.starts_with('#')).then_some(&body[..pos]);
         }
-        if segment_start && rest.starts_with(['"', '\'']) {
-            let (_, after) = quoted(rest)?;
+        if segment_start
+            && rest.starts_with(['"', '\''])
+            && let Some((_, after)) = quoted(rest)
+        {
             pos = body.len() - after.len();
             segment_start = false;
             continue;
@@ -524,14 +527,19 @@ fn table_header(line: &str) -> Option<&str> {
 }
 
 /// Segments of a dotted key, with a quoted segment as one key whatever dots it
-/// holds and a basic-quoted segment honoring escapes. `None` for a malformed
-/// key.
+/// holds and a basic-quoted segment honoring escapes. A quote-led segment the
+/// line never closes is a literal INI key. `None` for an empty segment or for
+/// text that follows a quoted segment without a dot.
 fn key_segments(lhs: &str) -> Option<Vec<String>> {
     let mut segments = Vec::new();
     let mut rest = lhs.trim();
     while !rest.is_empty() {
-        let segment = if rest.starts_with(['"', '\'']) {
-            let (segment, after) = quoted(rest)?;
+        let quoted_segment = if rest.starts_with(['"', '\'']) {
+            quoted(rest)
+        } else {
+            None
+        };
+        let segment = if let Some((segment, after)) = quoted_segment {
             rest = after.trim_start();
             segment
         } else {

@@ -15,10 +15,11 @@ report_tool_failure() {
 }
 
 if [ "${1:-}" = "--staged" ]; then
-  diff=$(git diff --cached -U0 --no-color)
+  # `>` marks added content, which distinguishes it from `+++` file headers
+  # and from added lines that begin with `+`.
+  diff=$(git diff --cached -U0 --no-color --output-indicator-new='>')
   status=0
-  # `^+[^+]` excludes `+++ b/path` headers while retaining added lines.
-  matches=$(printf '%s\n' "$diff" | grep -E '^\+[^+]' | grep -n -i -E -e "$PATTERN") || status=$?
+  matches=$(printf '%s\n' "$diff" | grep -E '^>' | grep -n -i -E -e "$PATTERN") || status=$?
   if [ "$status" -eq 0 ]; then
     echo "forbidden comment marker in staged changes:" >&2
     echo "$matches" >&2

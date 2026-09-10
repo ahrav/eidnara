@@ -1285,6 +1285,7 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "apostrophe-section.ini",
                 "[owner's settings]\nenabled = true\n",
             ),
+            ("quote-led-section.ini", "['80s settings]\nenabled = true\n"),
         ],
         "base",
         1,
@@ -1398,6 +1399,18 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ),
         (
             "apostrophe-section.ini",
+            "enabled",
+            ApplicabilityState::Current,
+        ),
+        // A quote that never closes on its line is literal even where a TOML
+        // quoted segment could start.
+        (
+            "quote-led-section.ini",
+            "'80s settings",
+            ApplicabilityState::Current,
+        ),
+        (
+            "quote-led-section.ini",
             "enabled",
             ApplicabilityState::Current,
         ),
