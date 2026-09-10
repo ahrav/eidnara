@@ -20,7 +20,7 @@ use super::source_descriptor::{SOURCE_DESCRIPTOR_DETAIL_VERSION, SourceDescripto
 use super::source_hold::{
     HeldCursor, Keyset, SourceHoldBinding, SourceHoldError, Window, check_coverage, check_window,
 };
-use super::{KernelError, KernelStore, map_sqlite};
+use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 
 /// Which descriptors a page exports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,10 +59,16 @@ pub struct SourceRow {
     pub object_id: String,
     pub revision: i64,
     pub detail: SourceDescriptorDetail,
+    /// The stable domain identifier the descriptor row belongs to.
+    pub domain_id: String,
+    pub sensitivity: Sensitivity,
     pub created_commit_seq: i64,
     /// The commit that invalidated this descriptor, when one has, at any
     /// point through the window's end or after it.
     pub invalidated_commit_seq: Option<i64>,
+    /// The newer revision that superseded this descriptor, when its
+    /// invalidation was a supersession rather than a retirement.
+    pub superseded_by: Option<String>,
     /// The exact UTF-8 text the descriptor's span selects, present exactly
     /// when the row's creation lies inside the exported window.
     pub text: Option<String>,
@@ -82,8 +88,11 @@ impl std::fmt::Debug for SourceRow {
             .field("object_id", &self.object_id)
             .field("revision", &self.revision)
             .field("detail", &self.detail)
+            .field("domain_id", &self.domain_id)
+            .field("sensitivity", &self.sensitivity)
             .field("created_commit_seq", &self.created_commit_seq)
             .field("invalidated_commit_seq", &self.invalidated_commit_seq)
+            .field("superseded_by", &self.superseded_by)
             .field("text_bytes", &self.text.as_ref().map(String::len))
             .finish()
     }
@@ -199,6 +208,9 @@ impl KernelStore {
                             payload: row.get(6)?,
                             created: row.get(7)?,
                             invalidated: row.get(8)?,
+                            domain_id: row.get(9)?,
+                            sensitivity: row.get(10)?,
+                            superseded_by: row.get(11)?,
                         })
                     },
                 )?
@@ -266,11 +278,15 @@ struct RawRow {
     payload: Vec<u8>,
     created: i64,
     invalidated: Option<i64>,
+    domain_id: String,
+    sensitivity: String,
+    superseded_by: Option<String>,
 }
 
 const ROW_SELECT: &str = "o.source_kind,o.object_id,o.source_revision,e.evidence_id,
      e.artifact_digest,e.byte_length,b.observation_payload,
-     b.created_commit_seq,b.invalidated_commit_seq";
+     b.created_commit_seq,b.invalidated_commit_seq,o.domain_id,b.sensitivity_class,
+     o.superseded_by";
 
 /// The catch-up window as one row source: the descriptors created in
 /// `(S, through]` exactly as the hold pins them, or the descriptors live at S
@@ -393,8 +409,11 @@ fn preflight(
             object_id,
             revision: raw.revision,
             detail,
+            domain_id: raw.domain_id,
+            sensitivity: Sensitivity::from_stored(&raw.sensitivity),
             created_commit_seq: raw.created,
             invalidated_commit_seq: raw.invalidated,
+            superseded_by: raw.superseded_by,
             text: None,
         },
         digest: raw.digest,

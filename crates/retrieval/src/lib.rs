@@ -12,6 +12,8 @@
 //! values are refused without a suffix, a rename, or a replacement. Payloads
 //! are never logged; refusals name identities and sizes, not content.
 
+pub mod batch;
+
 use std::num::NonZeroUsize;
 
 use kernel::Sensitivity;
@@ -46,13 +48,33 @@ pub struct ProjectionIdentity {
     pub generation_epoch: u64,
 }
 
-/// One canonical descriptor to persist: the occurrence, the whole buffer its
-/// span selects from, and the canonical row it came from. `Debug` reports the
-/// buffer's byte length, never its text.
+/// The text a record carries: either the whole buffer the span selects from,
+/// or the selection itself when the producer already cut it out.
+#[derive(Clone, Copy)]
+pub enum Payload<'a> {
+    /// The whole buffer; the span is validated against it and sliced here,
+    /// and a span covering every byte is normalized to the whole block.
+    Whole(&'a str),
+    /// The bytes the span selects, as an exporter hands them back. The span
+    /// must be as long as the text; a whole-block descriptor carries no span.
+    Selected(&'a str),
+}
+
+impl Payload<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Whole(text) | Self::Selected(text) => text.len(),
+        }
+    }
+}
+
+/// One canonical descriptor to persist: the occurrence, its text, and the
+/// canonical row it came from. `Debug` reports the text's byte length, never
+/// its content.
 #[derive(Clone)]
 pub struct OccurrenceRecord<'a> {
     pub occurrence: Occurrence<'a>,
-    pub buffer: &'a str,
+    pub payload: Payload<'a>,
     pub domain_id: &'a str,
     pub sensitivity: Sensitivity,
     pub source_object_id: &'a str,
@@ -65,7 +87,7 @@ impl std::fmt::Debug for OccurrenceRecord<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OccurrenceRecord")
             .field("occurrence", &self.occurrence)
-            .field("buffer_bytes", &self.buffer.len())
+            .field("payload_bytes", &self.payload.len())
             .field("domain_id", &self.domain_id)
             .field("sensitivity", &self.sensitivity)
             .field("source_object_id", &self.source_object_id)
@@ -206,6 +228,14 @@ pub enum ProjectionError {
     UnknownOccurrence { occurrence_id: String },
     #[error("a stored row is not in the shape the schema promises")]
     CorruptRow,
+    #[error("the batch names a hold, snapshot, or range the projection was not built with")]
+    MutationConflict,
+    #[error("the batch's rows and identities do not line up")]
+    MalformedBatch,
+    #[error("the batch exceeds the {bound} bound with {size}")]
+    BatchOverBound { bound: &'static str, size: usize },
+    #[error("vector generation {generation_id} is not registered for this projection")]
+    UnknownGeneration { generation_id: String },
     #[error("sqlite: {0}")]
     Sqlite(String),
 }
@@ -363,15 +393,30 @@ fn persist_with_digests(
             return Err(ProjectionError::NonPositiveSequence { index });
         }
         let mut encoded = encode(&record.occurrence)?;
-        validate_span(record.occurrence.span, record.buffer)?;
-        // A span selecting every byte is the whole-block selection, as the
-        // kernel's publisher normalizes it, so both spellings are one identity.
-        if covers_whole(encoded.span, record.buffer) {
-            encoded = encode(&Occurrence {
-                span: None,
-                ..record.occurrence
-            })?;
-        }
+        let selected: &[u8] = match record.payload {
+            Payload::Whole(buffer) => {
+                validate_span(record.occurrence.span, buffer)?;
+                // A span selecting every byte is the whole-block selection,
+                // as the kernel's publisher normalizes it, so both spellings
+                // are one identity.
+                if covers_whole(encoded.span, buffer) {
+                    encoded = encode(&Occurrence {
+                        span: None,
+                        ..record.occurrence
+                    })?;
+                }
+                select(record.occurrence.span, buffer)
+            }
+            Payload::Selected(text) => {
+                let span_len = encoded.span.map_or(text.len() as u64, |span| {
+                    span.end.saturating_sub(span.start)
+                });
+                if span_len != text.len() as u64 {
+                    return Err(OccurrenceRefusal::SpanOutOfRange.into());
+                }
+                text.as_bytes()
+            }
+        };
         if encoded.tuple.len() > bounds.max_tuple_bytes.get() {
             return Err(ProjectionError::OverBound {
                 index,
@@ -379,7 +424,6 @@ fn persist_with_digests(
                 size: encoded.tuple.len(),
             });
         }
-        let selected = select(record.occurrence.span, record.buffer);
         if selected.len() > bounds.max_payload_bytes.get() {
             return Err(ProjectionError::OverBound {
                 index,

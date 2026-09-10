@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, MutationIdentity, ProjectionBatch};
 use retrieval::{BASELINE, ProjectionError};
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, StoreError, open_sqlite,
@@ -135,6 +136,29 @@ impl SearchProjection {
             )));
         }
         Ok(facts)
+    }
+
+    /// Applies one complete canonical prefix in one fenced transaction and
+    /// returns only after the transaction has committed and released the
+    /// connection, so the caller acknowledges kernel progress afterwards and
+    /// never while the local transaction is open. Nothing here touches the
+    /// kernel.
+    pub fn apply_batch(
+        &self,
+        batch: &ProjectionBatch<'_>,
+        bounds: BatchBounds,
+        now: i64,
+    ) -> Result<BatchOutcome, SearchProjectionError> {
+        self.write(|conn| retrieval::batch::apply_batch(conn, batch, bounds, now))
+    }
+
+    /// Whether a batch whose commit outcome was lost is durably applied, read
+    /// from the stored checkpoint rather than assumed.
+    pub fn batch_status(
+        &self,
+        identity: &MutationIdentity,
+    ) -> Result<BatchStatus, SearchProjectionError> {
+        self.read(|conn| retrieval::batch::batch_status(conn, identity))
     }
 
     /// One epoch-fenced write transaction. The closure's rows commit together

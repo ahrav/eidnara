@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use kernel::Sensitivity;
 use kernel::source_identity::{Occurrence, OccurrenceRefusal, Span};
 use retrieval::{
-    OccurrenceRecord, PersistBounds, PersistedOccurrence, ProjectionError, ProjectionIdentity,
-    Tombstone, TombstoneReason, install_identity, persist_occurrences,
+    OccurrenceRecord, Payload, PersistBounds, PersistedOccurrence, ProjectionError,
+    ProjectionIdentity, Tombstone, TombstoneReason, install_identity, persist_occurrences,
     persist_occurrences_with_digests_for_test, read_identity, read_occurrence,
     tombstone_occurrence,
 };
@@ -147,7 +147,7 @@ impl Owned {
                 representation: &self.representation,
                 span: self.span,
             },
-            buffer: &self.payload,
+            payload: Payload::Whole(&self.payload),
             domain_id: "domain-stable-id",
             sensitivity: Sensitivity::Normal,
             source_object_id: &self.id,
