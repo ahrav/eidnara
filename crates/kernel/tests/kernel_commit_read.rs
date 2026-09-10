@@ -62,8 +62,9 @@ struct Ledger {
 }
 
 struct Fixture {
-    root: tempfile::TempDir,
+    // Fields drop in declaration order, so `store` drops before `root`.
     store: KernelStore,
+    root: tempfile::TempDir,
     ledger: Ledger,
 }
 
@@ -72,8 +73,8 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let store = KernelStore::open(root.path()).unwrap();
         Self {
-            root,
             store,
+            root,
             ledger: Ledger::default(),
         }
     }
@@ -992,8 +993,8 @@ fn a_restore_under_the_same_handle_is_a_new_incarnation() {
     let reopen = |root: tempfile::TempDir| {
         let store = KernelStore::open(root.path()).unwrap();
         Fixture {
-            root,
             store,
+            root,
             ledger: Ledger::default(),
         }
     };
