@@ -8,9 +8,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use kernel::{
-    CanonicalScope, CommitIntent, Dimension, KernelError, KernelStore, MatchOutcome,
-    ScopeMatchContext, ScopeSpec, ScopeTermFilter, ScopeTermSpec, Sensitivity, UnknownGraph,
-    scope_matches,
+    CommitIntent, Dimension, KernelError, KernelStore, ProjectScope, ScopeSpec, ScopeTermFilter,
+    ScopeTermSpec, Sensitivity,
 };
 use memory_store::canonical_root;
 use serde::Deserialize;
@@ -30,13 +29,25 @@ pub struct ProjectBinding {
     /// match a secret detector and be stored as a placeholder, which would
     /// leave the route unable to match its own rows; the digest cannot.
     digest: String,
+    /// The kernel's view of the same project: the scope every eligibility and
+    /// read decision is judged against.
+    scope: ProjectScope,
 }
 
 impl ProjectBinding {
     pub(crate) fn new(root: &Path) -> Self {
         let root = canonical_root(root);
         let digest = format!("{:x}", Sha256::digest(identity_bytes(&root)));
-        Self { root, digest }
+        let scope = ProjectScope::new(&digest).expect("a sha256 hex digest is a project term");
+        Self {
+            root,
+            digest,
+            scope,
+        }
+    }
+
+    pub(crate) fn scope(&self) -> &ProjectScope {
+        &self.scope
     }
 
     /// A request's `project_root` is compared after the same canonicalization
@@ -79,10 +90,6 @@ impl ProjectBinding {
                 ..ScopeTermSpec::default()
             }],
         }
-    }
-
-    fn match_context(&self) -> ScopeMatchContext {
-        ScopeMatchContext::new().with_value(Dimension::Project, self.digest.clone())
     }
 
     /// The term a stored scope must carry to name this project.
@@ -163,25 +170,22 @@ pub(crate) fn stored_terms(
 }
 
 /// Answers whether a row's scope names the bound project, remembering each
-/// scope's verdict for the duration of one request.
+/// scope's verdict for the duration of one request. The decision itself is
+/// the kernel's [`ProjectScope::names_project`], so a route and the kernel's
+/// own eligibility judgement cannot disagree about a scope.
 pub(crate) struct ScopeFilter {
-    context: ScopeMatchContext,
+    project: ProjectScope,
     verdicts: HashMap<String, bool>,
 }
 
 impl ScopeFilter {
     pub(crate) fn new(project: &ProjectBinding) -> Self {
         Self {
-            context: project.match_context(),
+            project: project.scope.clone(),
             verdicts: HashMap::new(),
         }
     }
 
-    /// A row with no scope has no project and is never served, and neither is
-    /// a scope with no `project` term: it constrains nothing, so it would
-    /// match every project's route. An `Uncertain` verdict (a redacted term,
-    /// a term on a dimension the route has no value for, a malformed scope)
-    /// and a scope with no stored row are both treated as not matching.
     pub(crate) fn matches(
         &mut self,
         scope_id: Option<&str>,
@@ -193,12 +197,7 @@ impl ScopeFilter {
         if let Some(verdict) = self.verdicts.get(scope_id) {
             return Ok(*verdict);
         }
-        let verdict = terms(scope_id)?.is_some_and(|terms| {
-            CanonicalScope::from_term_specs(&terms).is_ok_and(|scope| {
-                scope.term(Dimension::Project).is_some()
-                    && scope_matches(&scope, &self.context, &UnknownGraph) == MatchOutcome::Matches
-            })
-        });
+        let verdict = self.project.names_project(terms(scope_id)?.as_deref());
         self.verdicts.insert(scope_id.to_string(), verdict);
         Ok(verdict)
     }

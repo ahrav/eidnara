@@ -352,7 +352,7 @@ impl super::KernelStore {
 }
 
 /// `set_values` is stored as a JSON array of strings, mirroring `insert_scope_terms`.
-fn load_scope_terms(
+pub(crate) fn load_scope_terms(
     tx: &rusqlite::Transaction<'_>,
     scope_id: &str,
 ) -> Result<Option<Vec<ScopeTermSpec>>, KernelError> {
