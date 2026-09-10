@@ -5,7 +5,7 @@ import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
  * `new URL("alice:hunter2@example.com/v1")` reads `alice` as an opaque scheme with empty
  * `username` and `password`. `new URL("//alice:hunter2@example.com/v1")` throws without a base.
  *
- * The strip removes text through the last `@` before a path, query, or fragment, so passwords containing whitespace or raw `@` cannot reach the parse-failure fallback. commentlint: allow(JUDGE)
+ * The strip removes text through the last `@` before a path, query, or fragment, so passwords containing whitespace or raw `@` cannot reach the parse-failure fallback.
  */
 export function sanitizeDiagnosticEndpoint(value: string): string {
     const trimmed = value.trim();

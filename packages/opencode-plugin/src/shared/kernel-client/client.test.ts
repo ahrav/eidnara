@@ -212,7 +212,7 @@ describe("KernelClient gating", () => {
             controller.abort();
             throw new HostCallError("outcome_unknown", "deadline", "request_deadline");
         });
-        // The commit was sent and may have been applied; reporting a plain cancellation would invite a retry under a fresh identity and a duplicate commit. commentlint: allow(JUDGE)
+        // The commit was sent and may have been applied; reporting a plain cancellation would invite a retry under a fresh identity and a duplicate commit.
         const result = await client(transport).create(spec, {
             ...intent,
             signal: controller.signal,
@@ -348,7 +348,7 @@ describe("KernelClient transport mapping", () => {
             new HostCallError("outcome_unknown", "deadline"),
         );
         const result = await client(transport).create(spec, intent);
-        // Both attempts were sent and either may have committed; daemon_absent would read as a definitive failure and invite a fresh-identity retry. commentlint: allow(JUDGE)
+        // Both attempts were sent and either may have committed; daemon_absent would read as a definitive failure and invite a fresh-identity retry.
         expect(result.state).toEqual({ kind: "unavailable", reason: "outcome_unknown" });
         expect(transport.bodies("kernel.commit")).toHaveLength(2);
     });
@@ -359,7 +359,7 @@ describe("KernelClient transport mapping", () => {
             new HostCallError("not_sent", "connection retired"),
         );
         const result = await client(transport).create(spec, intent);
-        // `not_sent` proves only that the reissue never left; the first attempt may still have committed. commentlint: allow(JUDGE)
+        // `not_sent` proves only that the reissue never left; the first attempt may still have committed.
         expect(result.state).toEqual({ kind: "unavailable", reason: "outcome_unknown" });
         expect(transport.bodies("kernel.commit")).toHaveLength(2);
     });
@@ -367,7 +367,7 @@ describe("KernelClient transport mapping", () => {
     test("an undecodable commit response stays ambiguous instead of a definitive error", async () => {
         const transport = new FakeTransport().queue({ garbage: true });
         const result = await client(transport).create(spec, intent);
-        // The transport delivered a response, so the commit may have applied; only its receipt was lost to the malformed payload. commentlint: allow(JUDGE)
+        // The transport delivered a response, so the commit may have applied; only its receipt was lost to the malformed payload.
         expect(result.state).toEqual({ kind: "unavailable", reason: "outcome_unknown" });
     });
 
@@ -442,7 +442,7 @@ describe("KernelClient transport mapping", () => {
     });
 
     test("a rebind interrupted after a reissued write stays outcome_unknown", async () => {
-        // The first attempt was sent and may have committed; the interrupted rebind cannot resolve that, and a plain cancellation would invite a retry under a fresh identity. commentlint: allow(JUDGE)
+        // The first attempt was sent and may have committed; the interrupted rebind cannot resolve that, and a plain cancellation would invite a retry under a fresh identity.
         const controller = new AbortController();
         const transport = new FakeTransport().queue(
             new HostCallError("outcome_unknown", "deadline", "request_deadline"),
@@ -609,7 +609,7 @@ describe("KernelClient transport mapping", () => {
     });
 
     test("a daemon invalid_params rejection is invalid_input, not an internal error", async () => {
-        // The kernel routes refuse an over-limit or malformed envelope with this transport code, which is the caller's fault, not the daemon's. commentlint: allow(JUDGE)
+        // The kernel routes refuse an over-limit or malformed envelope with this transport code, which is the caller's fault, not the daemon's.
         const transport = new FakeTransport().queue(
             new HostCallError("terminal", "too many operations", "invalid_params"),
         );
@@ -626,7 +626,7 @@ describe("KernelClient transport mapping", () => {
     });
 
     test("a terminal connection-file fault is not reported as an absent daemon", async () => {
-        // host-client treats every connection-file code but `deadline_expired` as terminal; a foreign-owned or insecure file is a misconfiguration, not a daemon that is not running. commentlint: allow(JUDGE)
+        // host-client treats every connection-file code but `deadline_expired` as terminal; a foreign-owned or insecure file is a misconfiguration, not a daemon that is not running.
         for (const code of ["foreign_owner", "insecure_permissions", "invalid_key"] as const) {
             const transport = new FakeTransport().queue(new ConnectionFileError("bad file", code));
             const result = await client(transport).read({ surface: "auto_inject" });
@@ -803,7 +803,7 @@ describe("KernelClient mutations", () => {
     });
 
     test("the request digest covers the classification fields the daemon admits the write under", () => {
-        // `source_kind` and the asserted classes decide the stored trust class, so a reused key that changes them must read as a different body, not a replay. commentlint: allow(JUDGE)
+        // `source_kind` and the asserted classes decide the stored trust class, so a reused key that changes them must read as a different body, not a replay.
         const operations = [{ op: "insert_decision" as const, spec }];
         const base = deriveRequestDigest({ operations, sourceKind: "assistant" });
         expect(deriveRequestDigest({ operations, sourceKind: "user" })).not.toBe(base);
@@ -867,7 +867,7 @@ describe("KernelClient mutations", () => {
     });
 
     test("a separator inside a non-final key field is refused instead of shifting the field boundary", () => {
-        // With every field but the last separator-free, the joined bytes parse back to exactly one field list of that arity, so distinct inputs cannot collide. commentlint: allow(JUDGE)
+        // With every field but the last separator-free, the joined bytes parse back to exactly one field list of that arity, so distinct inputs cannot collide.
         expect(() => deriveObjectId("mem", "a\u001fb", "c")).toThrow(RangeError);
         expect(() =>
             deriveOperationKey({
@@ -896,7 +896,7 @@ describe("KernelClient mutations", () => {
     });
 
     test("two spellings of one project root derive one operation key", async () => {
-        // The daemon canonicalizes the bound root and prefixes every receipt key with its digest, so the client must not fold the raw spelling into the key: a redelivery through a symlink would otherwise miss the receipt the resolved path wrote. commentlint: allow(JUDGE)
+        // The daemon canonicalizes the bound root and prefixes every receipt key with its digest, so the client must not fold the raw spelling into the key: a redelivery through a symlink would otherwise miss the receipt the resolved path wrote.
         const bodies: Record<string, string>[] = [];
         for (const projectRoot of ["/repo/project", "/repo/link-to-project"]) {
             const transport = new FakeTransport().queue(commitReply(2, false, spec.object_id));
@@ -910,7 +910,7 @@ describe("KernelClient mutations", () => {
     });
 
     test("a reissue sends the identity and digest read at call entry, not a caller-mutated argument", async () => {
-        // The reissue after `outcome_unknown` must be the same operation; an argument object the caller kept and mutated during the pending call would otherwise mint a second identity or a changed body. commentlint: allow(JUDGE)
+        // The reissue after `outcome_unknown` must be the same operation; an argument object the caller kept and mutated during the pending call would otherwise mint a second identity or a changed body.
         const args = {
             ...intent,
             operations: [{ op: "insert_decision" as const, spec: { ...spec } }],
@@ -1086,7 +1086,7 @@ describe("KernelClient mutations", () => {
     });
 
     test("a refresh for more targets than one filter holds reads them in filter-sized batches", async () => {
-        // An unfiltered fallback would be subject to the daemon's newest-rows cap, where a live target can simply be past the cut. commentlint: allow(JUDGE)
+        // An unfiltered fallback would be subject to the daemon's newest-rows cap, where a live target can simply be past the cut.
         const targets = Array.from({ length: MAX_READ_OBJECT_IDS + 1 }, (_, i) => `t${i}`);
         const transport = new FakeTransport().queue(
             readReply(3, ...targets.slice(0, MAX_READ_OBJECT_IDS)),
@@ -1104,7 +1104,7 @@ describe("KernelClient mutations", () => {
     });
 
     test("a target dropped from a truncated refresh batch is re-read alone before it is judged", async () => {
-        // The byte budget keeps a newest-first prefix of a filtered read, so absence in a truncated batch proves nothing; a one-object read always fits. commentlint: allow(JUDGE)
+        // The byte budget keeps a newest-first prefix of a filtered read, so absence in a truncated batch proves nothing; a one-object read always fits.
         const transport = new FakeTransport().queue(
             { ...readReply(3, "a"), truncated: true },
             readReply(3, "b"),
@@ -1141,7 +1141,7 @@ describe("KernelClient mutations", () => {
     });
 
     test("snapshot_diverged with caller-supplied tokens is returned without a second commit", async () => {
-        // The caller's tokens are sent verbatim, so dropping the cache cannot change the retry; a second identical send only risks downgrading the definitive state to outcome_unknown. commentlint: allow(JUDGE)
+        // The caller's tokens are sent verbatim, so dropping the cache cannot change the retry; a second identical send only risks downgrading the definitive state to outcome_unknown.
         const transport = new FakeTransport().queue(DIVERGED);
         const result = await client(transport).commit({
             ...intent,
@@ -1209,7 +1209,7 @@ describe("KernelClient mutations", () => {
         expect(isAvailable(result)).toBe(true);
         const commits = transport.bodies("kernel.commit");
         expect(commits.map((body) => body.deadline_ms)).toEqual([10_000, 7_000]);
-        // Only the budget field differs between the attempts, so the daemon's receipt lookup still sees one identity and digest. commentlint: allow(JUDGE)
+        // Only the budget field differs between the attempts, so the daemon's receipt lookup still sees one identity and digest.
         const { deadline_ms: _first, ...first } = commits[0] ?? {};
         const { deadline_ms: _second, ...second } = commits[1] ?? {};
         expect(second).toEqual(first);

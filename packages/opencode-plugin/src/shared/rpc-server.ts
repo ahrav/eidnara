@@ -191,7 +191,7 @@ export class EidnaraRpcServer {
         return this.port;
     }
 
-    /** Bun 1.3.14 never settles the stop promise when a WebSocket closed by the server remains in `pendingWebSockets`. commentlint: allow(JUDGE) */
+    /** Bun 1.3.14 never settles the stop promise when a WebSocket closed by the server remains in `pendingWebSockets`. */
     stop(): void {
         for (const ws of this.sockets) {
             try {

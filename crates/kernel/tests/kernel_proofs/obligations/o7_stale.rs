@@ -8,7 +8,7 @@
 //! Deleting the admitted subject's trigger evidence does not exclude it at
 //! the tip, because `visible_as_of` never consults evidence liveness; the
 //! kernel emits `admission_state` propagation work for a consumer to record
-//! the new decision. `o6_deletion::deletion_invalidates_references_and_emits_complete_work_across_restart` proves that emission; the consumer's withdrawal decision is outside this binary's scope. commentlint: allow(JUDGE)
+//! the new decision. `o6_deletion::deletion_invalidates_references_and_emits_complete_work_across_restart` proves that emission; the consumer's withdrawal decision is outside this binary's scope.
 
 use kernel::{EventKind, Surface, SurfaceVisibility};
 

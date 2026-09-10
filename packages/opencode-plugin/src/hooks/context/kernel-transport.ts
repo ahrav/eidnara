@@ -33,7 +33,7 @@ function isKernelMethod(method: string): method is KernelMethod {
     return KERNEL_METHODS.has(method);
 }
 
-/** Both the lifecycle manager's `storage_*` demand-start codes and the daemon's terminal `store_unavailable` application error (a storage-dependent request while the store is still opening) name a store that is reachable but not serving. commentlint: allow(JUDGE) */
+/** Both the lifecycle manager's `storage_*` demand-start codes and the daemon's terminal `store_unavailable` application error (a storage-dependent request while the store is still opening) name a store that is reachable but not serving. */
 const STORE_LIFECYCLE_REASONS: Readonly<Record<string, StoreLifecycleReason>> = {
     storage_starting: "store_starting",
     storage_unavailable: "store_unavailable",
@@ -46,7 +46,7 @@ function storeLifecycleReason(error: unknown): StoreLifecycleReason | undefined 
         : undefined;
 }
 
-/** A demand-start-capable transport is reachable with no connection file because `call` starts its daemon; every other origin keeps the synchronous stat that answers `daemon_absent` before any dial. The daemon dispatches on the method encoded in the body, so `call` refuses a body whose `method` differs from the checked one; otherwise a permitted `args.method` could carry a non-kernel body to a destructive handler. The connection identity is the module's generation: a body built under an older one is refused before any send, the same generation is handed to the module as `expectedGeneration` so it re-checks after lane admission and route settlement, and the module's own proven-not-sent replay is disabled with `generationSensitive`; a body carrying one daemon's tokens is therefore never delivered to its successor. commentlint: allow(JUDGE) */
+/** A demand-start-capable transport is reachable with no connection file because `call` starts its daemon; every other origin keeps the synchronous stat that answers `daemon_absent` before any dial. The daemon dispatches on the method encoded in the body, so `call` refuses a body whose `method` differs from the checked one; otherwise a permitted `args.method` could carry a non-kernel body to a destructive handler. The connection identity is the module's generation: a body built under an older one is refused before any send, the same generation is handed to the module as `expectedGeneration` so it re-checks after lane admission and route settlement, and the module's own proven-not-sent replay is disabled with `generationSensitive`; a body carrying one daemon's tokens is therefore never delivered to its successor. */
 export function createKernelTransport(transport: HostModuleTransport): KernelTransport {
     const connectionIdentity = (): string => String(transport.generation);
     return {
@@ -106,27 +106,27 @@ export interface KernelClientConfig {
 interface SharedKernelState {
     module: HostModuleTransport;
     adapter: KernelTransport;
-    /** Process-unique per state, so the identity a client's view reports also changes when this state is evicted and a replacement's fresh module starts its generations from zero. commentlint: allow(JUDGE) */
+    /** Process-unique per state, so the identity a client's view reports also changes when this state is evicted and a replacement's fresh module starts its generations from zero. */
     epoch: number;
     tokens: TokenCache;
-    /** The `module.generation` the tokens were minted under; a later generation means the connection was invalidated, so the daemon behind the connection file may differ and the tokens are discarded. commentlint: allow(JUDGE) */
+    /** The `module.generation` the tokens were minted under; a later generation means the connection was invalidated, so the daemon behind the connection file may differ and the tokens are discarded. */
     tokenGeneration: number;
-    /** Calls that have selected this state's adapter and not yet settled. A state with active calls is never evicted: it must stay the live state for its connection file until they settle, so the tokens in their responses land in the cache of the state that served them and a session close can still reach its routes. commentlint: allow(JUDGE) */
+    /** Calls that have selected this state's adapter and not yet settled. A state with active calls is never evicted: it must stay the live state for its connection file until they settle, so the tokens in their responses land in the cache of the state that served them and a session close can still reach its routes. */
     activeCalls: number;
-    /** What clients hold: views that resolve to the live state for this connection file on every use, so a client that outlives this state's eviction follows the map to its replacement — its transport never redials the evicted `module`, and its tokens are never carried from one daemon to the next. commentlint: allow(JUDGE) */
+    /** What clients hold: views that resolve to the live state for this connection file on every use, so a client that outlives this state's eviction follows the map to its replacement — its transport never redials the evicted `module`, and its tokens are never carried from one daemon to the next. */
     transport: KernelTransport;
     tokenStore: TokenStore;
     /** The set orders project roots from least to most recently resolved and bounds per-project token buckets. */
     tokenProjectOrder: Set<string>;
 }
 
-/** Cap on project roots whose token buckets the shared cache retains per connection file; resolving a client past the cap evicts the least-recently-resolved root's tokens. commentlint: allow(JUDGE) */
+/** Cap on project roots whose token buckets the shared cache retains per connection file; resolving a client past the cap evicts the least-recently-resolved root's tokens. */
 export const MAX_TOKEN_CACHE_PROJECTS = 32;
 
-/** Cap on connection files whose shared transports the process retains: a long-lived host that `/cd`s across projects with distinct `connection_file` values would otherwise accumulate one live transport — socket, token cache, route cache — per daemon configuration forever. Resolving a client past the cap disconnects and drops the least-recently-resolved idle state; a state with calls in flight is skipped, so the map exceeds the cap only by the number of connection files busy at that moment and is trimmed again on the next resolution. A client resolved before its state's eviction reaches the replacement state through its views on its next use. commentlint: allow(JUDGE) */
+/** Cap on connection files whose shared transports the process retains: a long-lived host that `/cd`s across projects with distinct `connection_file` values would otherwise accumulate one live transport — socket, token cache, route cache — per daemon configuration forever. Resolving a client past the cap disconnects and drops the least-recently-resolved idle state; a state with calls in flight is skipped, so the map exceeds the cap only by the number of connection files busy at that moment and is trimmed again on the next resolution. A client resolved before its state's eviction reaches the replacement state through its views on its next use. */
 export const MAX_CONNECTION_FILE_STATES = 8;
 
-/** Every kernel operation resolves a client for its project root first; client resolution order therefore tracks token-cache access order. commentlint: allow(JUDGE) */
+/** Every kernel operation resolves a client for its project root first; client resolution order therefore tracks token-cache access order. */
 function touchTokenProject(shared: SharedKernelState, projectRoot: string): void {
     shared.tokenProjectOrder.delete(projectRoot);
     shared.tokenProjectOrder.add(projectRoot);
@@ -138,7 +138,7 @@ function touchTokenProject(shared: SharedKernelState, projectRoot: string): void
     }
 }
 
-/** The state's tokens, emptied first if the transport's connection generation moved since they were minted. commentlint: allow(JUDGE) */
+/** The state's tokens, emptied first if the transport's connection generation moved since they were minted. */
 function currentTokens(shared: SharedKernelState): TokenCache {
     const generation = shared.module.generation;
     if (generation !== shared.tokenGeneration) {
@@ -151,7 +151,7 @@ function currentTokens(shared: SharedKernelState): TokenCache {
 
 const sharedByConnectionFile = new Map<string, SharedKernelState>();
 
-/** Drops and disconnects the least-recently-resolved idle states until the map is within the cap. A state with calls in flight is skipped and stays the live state for its key, and so is `keep`, the state the caller is resolving right now: with every other state busy it would otherwise be the only candidate and be dropped before its first call. commentlint: allow(JUDGE) */
+/** Drops and disconnects the least-recently-resolved idle states until the map is within the cap. A state with calls in flight is skipped and stays the live state for its key, and so is `keep`, the state the caller is resolving right now: with every other state busy it would otherwise be the only candidate and be dropped before its first call. */
 function trimSharedStates(keep: SharedKernelState): void {
     if (sharedByConnectionFile.size <= MAX_CONNECTION_FILE_STATES) return;
     for (const [key, shared] of sharedByConnectionFile) {
@@ -162,12 +162,12 @@ function trimSharedStates(keep: SharedKernelState): void {
     }
 }
 
-/** Tags the key so the managed default (`undefined`, may demand-start) never shares a state with an explicit empty path (`""`, never demand-starts); `resolveConnectionOrigin` distinguishes them by presence, not value. commentlint: allow(JUDGE) */
+/** Tags the key so the managed default (`undefined`, may demand-start) never shares a state with an explicit empty path (`""`, never demand-starts); `resolveConnectionOrigin` distinguishes them by presence, not value. */
 function connectionFileKey(connectionFile: string | undefined): string {
     return connectionFile === undefined ? "managed-default" : `explicit:${connectionFile}`;
 }
 
-/** The live state for a connection file, created if its previous state was evicted; a hit does not count as a resolution, so recency still tracks `createKernelClient`. commentlint: allow(JUDGE) */
+/** The live state for a connection file, created if its previous state was evicted; a hit does not count as a resolution, so recency still tracks `createKernelClient`. */
 function liveState(connectionFile: string | undefined): SharedKernelState {
     return (
         sharedByConnectionFile.get(connectionFileKey(connectionFile)) ?? sharedState(connectionFile)
@@ -183,7 +183,7 @@ function liveTransport(connectionFile: string | undefined): KernelTransport {
         connectionFileExists: () => liveState(connectionFile).adapter.connectionFileExists(),
         connectionIdentity: () => viewIdentity(liveState(connectionFile)),
         async call(args) {
-            // The view's identity wraps the adapter's; the adapter compares against its own, so the wrapper is checked here and stripped before delegation. commentlint: allow(JUDGE)
+            // The view's identity wraps the adapter's; the adapter compares against its own, so the wrapper is checked here and stripped before delegation.
             const state = liveState(connectionFile);
             let delegated = args;
             if (args.connectionIdentity !== undefined) {
@@ -202,7 +202,7 @@ function liveTransport(connectionFile: string | undefined): KernelTransport {
     };
 }
 
-/** Every access goes through `currentTokens`, so tokens minted before a reconnect are gone before they can be read or written past. A write that names the connection identity it was served under is dropped when that identity is no longer the live one, so a response from a connection that has since been replaced cannot seed the replacement's cache. Writes touch the project first, so a bucket a retained client fills in a replacement state is tracked by `tokenProjectOrder` and stays subject to `MAX_TOKEN_CACHE_PROJECTS`. commentlint: allow(JUDGE) */
+/** Every access goes through `currentTokens`, so tokens minted before a reconnect are gone before they can be read or written past. A write that names the connection identity it was served under is dropped when that identity is no longer the live one, so a response from a connection that has since been replaced cannot seed the replacement's cache. Writes touch the project first, so a bucket a retained client fills in a replacement state is tracked by `tokenProjectOrder` and stays subject to `MAX_TOKEN_CACHE_PROJECTS`. */
 function liveTokenStore(connectionFile: string | undefined): TokenStore {
     const readable = (): TokenCache => currentTokens(liveState(connectionFile));
     const writable = (root: string, identity: string | undefined): TokenCache | undefined => {
@@ -231,7 +231,7 @@ function liveTokenStore(connectionFile: string | undefined): TokenStore {
 /** One fenced store per caller-owned cache and connection file, so every client resolved over the same cache shares the store and its record of the connection the tokens were minted under. */
 const fencedStores = new WeakMap<TokenCache, Map<string, TokenStore>>();
 
-/** A caller-owned cache fenced to the live connection for `connectionFile` by the same rule as the shared cache: every access first compares the live state's epoch and connection generation with the ones the cache was last used under and empties it when either moved, and a write naming a connection identity that is no longer live is dropped. The caller bounds the cache's project set; the shared cache's `MAX_TOKEN_CACHE_PROJECTS` does not apply to it. commentlint: allow(JUDGE) */
+/** A caller-owned cache fenced to the live connection for `connectionFile` by the same rule as the shared cache: every access first compares the live state's epoch and connection generation with the ones the cache was last used under and empties it when either moved, and a write naming a connection identity that is no longer live is dropped. The caller bounds the cache's project set; the shared cache's `MAX_TOKEN_CACHE_PROJECTS` does not apply to it. */
 function fencedTokenStore(connectionFile: string | undefined, cache: TokenCache): TokenStore {
     const key = connectionFileKey(connectionFile);
     let byConnection = fencedStores.get(cache);
@@ -304,7 +304,7 @@ function sharedState(connectionFile: string | undefined): SharedKernelState {
     return shared;
 }
 
-/** A disabled client's `gate` answers `disabled` before any transport use, so it must not occupy a shared-state slot and evict a live transport. commentlint: allow(JUDGE) */
+/** A disabled client's `gate` answers `disabled` before any transport use, so it must not occupy a shared-state slot and evict a live transport. */
 const DISABLED_TRANSPORT: KernelTransport = {
     connectionFileExists: () => false,
     call: () => Promise.reject(new Error("kernel transport unavailable: memory is disabled")),
@@ -317,13 +317,13 @@ interface KernelClientIdentity {
     config: KernelClientConfig;
 }
 
-/** A client either shares the process-wide transport for its connection file, or brings its own transport. A token's `known_as_of` is a position in one daemon's event sequence, so a cache must not outlive the daemon its tokens came from: on the shared transport, explicit `tokens` are a caller-owned cache the client keeps apart from the shared one (a forked session that must not inherit its parent's positions), and the factory fences it to the live connection exactly as it fences the shared cache. On a custom transport the caller owns the fencing; without `tokens` each client gets a fresh cache, and passing `tokens` keeps mutation-token continuity across clients on that transport. commentlint: allow(JUDGE) */
+/** A client either shares the process-wide transport for its connection file, or brings its own transport. A token's `known_as_of` is a position in one daemon's event sequence, so a cache must not outlive the daemon its tokens came from: on the shared transport, explicit `tokens` are a caller-owned cache the client keeps apart from the shared one (a forked session that must not inherit its parent's positions), and the factory fences it to the live connection exactly as it fences the shared cache. On a custom transport the caller owns the fencing; without `tokens` each client gets a fresh cache, and passing `tokens` keeps mutation-token continuity across clients on that transport. */
 export type CreateKernelClientArgs = KernelClientIdentity & {
     transport?: KernelTransport;
     tokens?: TokenCache;
 };
 
-/** Applies `memory.enabled` to every client. Enabled clients for the same connection file share a transport (one dial, one route cache) and a token cache (tokens are keyed by project, not session), and take the root the transport canonicalizes, so a symlinked and a resolved spelling of one project derive the same operation keys and token bucket as the route they are bound to. commentlint: allow(JUDGE) */
+/** Applies `memory.enabled` to every client. Enabled clients for the same connection file share a transport (one dial, one route cache) and a token cache (tokens are keyed by project, not session), and take the root the transport canonicalizes, so a symlinked and a resolved spelling of one project derive the same operation keys and token bucket as the route they are bound to. */
 export function createKernelClient(args: CreateKernelClientArgs): KernelClient {
     const enabled = args.config.memory?.enabled !== false;
     const shared =
@@ -351,14 +351,14 @@ export function kernelClientResolver(config: KernelClientConfig): KernelClientRe
     return ({ sessionId, projectRoot }) => createKernelClient({ sessionId, projectRoot, config });
 }
 
-/** Releases every route the shared transport for `config` holds for `sessionId`. Each session's first call opens a host route per project root, and the host's route capacity is finite and shared across connections, so a long-lived process that serves many sessions must release them at session end rather than at connection teardown. A connection file with no live shared state has no routes to release. commentlint: allow(JUDGE) */
+/** Releases every route the shared transport for `config` holds for `sessionId`. Each session's first call opens a host route per project root, and the host's route capacity is finite and shared across connections, so a long-lived process that serves many sessions must release them at session end rather than at connection teardown. A connection file with no live shared state has no routes to release. */
 export function closeKernelSession(config: KernelClientConfig, sessionId: string): void {
     sharedByConnectionFile
         .get(connectionFileKey(config.subc?.connection_file))
         ?.module.closeSession(sessionId);
 }
 
-/** Disconnects every shared transport and drops the shared token caches between test cases; a test that dialed would otherwise leave its socket and route cache to the next one. commentlint: allow(JUDGE) */
+/** Disconnects every shared transport and drops the shared token caches between test cases; a test that dialed would otherwise leave its socket and route cache to the next one. */
 export function resetKernelClientsForTest(): void {
     for (const shared of sharedByConnectionFile.values()) shared.module.disconnect();
     sharedByConnectionFile.clear();

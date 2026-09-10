@@ -1,6 +1,6 @@
 //! One admission policy answers both read lanes with the automatic lane the
 //! stricter, `kernel.eligibility.batch` judges object id plus revision, and a
-//! verdict cached before a retirement is not served after it. commentlint: allow(JUDGE)
+//! verdict cached before a retirement is not served after it.
 
 mod support;
 
@@ -208,7 +208,7 @@ async fn a_verdict_cached_at_one_tip_is_rejudged_after_a_retirement() {
     assert_eq!(stale["known_as_of"], json!(projected_at));
 
     // `kernel.eligibility.batch` takes no `as_of`: it judges at the tip, where the
-    // cached grant misses and the candidate is denied. commentlint: allow(JUDGE)
+    // cached grant misses and the candidate is denied.
     let denied = daemon
         .eligibility("local", vec![candidate("decision-object-1", 1)])
         .await;

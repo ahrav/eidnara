@@ -697,7 +697,6 @@ impl JobTable {
 
     /// `MAX_F32_JSON_BYTES` is the longest `serde_json` encoding of a finite `f32`, e.g. `-0.0000010000001`.
     /// `f32_json_encoding_fits_the_component_budget` pins `MAX_F32_JSON_BYTES` against `serde_json`.
-    // commentlint: allow(JUDGE)
     pub(crate) const MAX_F32_JSON_BYTES: usize = 16;
     /// Reserve worst-case JSON bytes for one `f32` component plus its `,` separator.
     const ENCODED_BYTES_PER_COMPONENT: usize = Self::MAX_F32_JSON_BYTES + 1;

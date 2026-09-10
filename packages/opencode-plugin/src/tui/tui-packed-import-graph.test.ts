@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import packageJson from "../../package.json";
 
 /**
- * Relative imports reachable from `./tui` must be included by `package.json` `files` because npm loads its source from the installed tarball. commentlint: allow(JUDGE)
+ * Relative imports reachable from `./tui` must be included by `package.json` `files` because npm loads its source from the installed tarball.
  * Type-only imports are walked because `./tui`'s `types` export targets `src/tui/index.tsx`.
  */
 const PACKAGE_ROOT = resolve(import.meta.dir, "..", "..");

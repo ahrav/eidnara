@@ -9,7 +9,7 @@ import { MANAGED_SUBTREE, STORAGE_SUBDIRECTORY } from "./host-release-layout";
  * The absolute `XDG_DATA_HOME` override, or `null` when the variable is
  * unset, empty, or relative. A relative value is rejected rather than joined
  * against the working directory, which would move the storage tree with cwd.
- * Not trimmed: the daemon builds its path from the raw variable, so a trimmed value would name a different tree. commentlint: allow(JUDGE)
+ * Not trimmed: the daemon builds its path from the raw variable, so a trimmed value would name a different tree.
  */
 function configuredDataHome(): string | null {
     const value = process.env.XDG_DATA_HOME;
@@ -17,7 +17,7 @@ function configuredDataHome(): string | null {
 }
 
 /**
- * `os.homedir()` falls back to the account database when `HOME` is unset, but the daemon reads only the variable and reports no data directory. commentlint: allow(JUDGE)
+ * `os.homedir()` falls back to the account database when `HOME` is unset, but the daemon reads only the variable and reports no data directory.
  * Windows has no daemon to match and no `HOME`, so `os.homedir()` (`USERPROFILE`) stays the source there.
  */
 function homeDataDir(): string | null {

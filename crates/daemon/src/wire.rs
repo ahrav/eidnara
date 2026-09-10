@@ -142,7 +142,7 @@ impl FlatProjection {
     /// Replay rebuilds message shells through `WireMessage::from_parts` and preserves only
     /// typed fields. An unknown top-level wire field is dropped here exactly as
     /// `WireMessage::content_mut` drops it on the live edit path; blocks keep their
-    /// retained ingress JSON. commentlint: allow(JUDGE)
+    /// retained ingress JSON.
     pub(crate) fn reattach_messages_prefix(
         &self,
         prefix_messages: usize,
@@ -427,7 +427,7 @@ fn project_messages_from_state(
 ) -> Result<FlatProjection, WireError> {
     // Block ids are `mid#index`, so a repeated mid would give two messages'
     // blocks the same identities and let one message's content stand for the
-    // other's. Synthetic messages take part: their block ids collide too. commentlint: allow(JUDGE)
+    // other's. Synthetic messages take part: their block ids collide too.
     let mut seen_mids: BTreeSet<String> = builder
         .message_meta
         .iter()

@@ -130,7 +130,7 @@ export function formatMemoryCount(
     return `${snapshot.memoryCount}${snapshot.memoryTruncated ? "+" : ""}`;
 }
 
-/** A non-`available` state such as `disabled` or `unavailable:daemon_absent` replaces the count, which is 0 only because nothing was read. commentlint: allow(JUDGE) */
+/** A non-`available` state such as `disabled` or `unavailable:daemon_absent` replaces the count, which is 0 only because nothing was read. */
 export function formatMemoryStatus(
     snapshot: Pick<SidebarSnapshot, "memoryCount" | "memoryTruncated" | "memoryState">,
 ): string {

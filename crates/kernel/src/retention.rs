@@ -276,7 +276,7 @@ const ABANDON_RUNS_SQL: &str = "UPDATE extraction_runs
      SET terminal_state=?2,terminal_at=?1
      WHERE terminal_state IS NULL AND lease_expires_at<=?1";
 
-// Only runs the preceding sweep stamped with `?1` can hold live candidates: `stage_candidate` refuses a terminal run. A range bound rescans every retained abandoned run on each open. commentlint: allow(JUDGE)
+// Only runs the preceding sweep stamped with `?1` can hold live candidates: `stage_candidate` refuses a terminal run. A range bound rescans every retained abandoned run on each open.
 const ABANDON_CANDIDATES_SQL: &str = "UPDATE candidates
      SET terminal_state=?2,
          terminal_at=(SELECT terminal_at FROM extraction_runs
@@ -330,7 +330,7 @@ pub(super) fn begin_fenced_write(
     Ok(tx)
 }
 
-// The lease cap is relative to the heartbeat, so the heartbeat itself is held to the same store-clock skew bound as an initial staging; a renewal cannot otherwise walk the expiry forward an hour at a time by heartbeating just under the stored expiry. commentlint: allow(JUDGE)
+// The lease cap is relative to the heartbeat, so the heartbeat itself is held to the same store-clock skew bound as an initial staging; a renewal cannot otherwise walk the expiry forward an hour at a time by heartbeating just under the stored expiry.
 fn validate_lease(
     extraction_run_id: &str,
     heartbeat_at: i64,

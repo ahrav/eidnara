@@ -13,7 +13,7 @@ pub(crate) fn contains_redaction_placeholder(value: &str) -> bool {
         || value.contains(crate::envelope::OPERATOR_REDACTION_PLACEHOLDER)
 }
 
-/// Builds SQL equivalent to [`contains_redaction_placeholder`] for `column`, from the same marker constants so the two cannot drift. commentlint: allow(JUDGE)
+/// Builds SQL equivalent to [`contains_redaction_placeholder`] for `column`, from the same marker constants so the two cannot drift.
 /// `column` must be a trusted SQL expression.
 pub(crate) fn sql_contains_redaction_placeholder(column: &str) -> String {
     context_core::redaction::REDACTION_TOKEN_MARKERS

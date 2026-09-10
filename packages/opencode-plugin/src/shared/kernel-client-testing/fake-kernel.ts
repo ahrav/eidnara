@@ -55,7 +55,7 @@ export interface FakeObject {
     labeled: boolean;
     /** The kernel's disposition ratchet; `active` unless a disposition event moved it. */
     disposition: FakeDisposition;
-    /** The approval the latest admission decision rests on; a disposition event that names none inherits it, as the kernel's `record_admission` does. commentlint: allow(JUDGE) */
+    /** The approval the latest admission decision rests on; a disposition event that names none inherits it, as the kernel's `record_admission` does. */
     approval_object_id: string | null;
     /**
      * The project root the row was written under. `null` marks a seeded row
@@ -166,12 +166,12 @@ function conflict(reason: string): unknown {
     return { state: { kind: "conflict", reason } };
 }
 
-/** Thrown rather than returned: the daemon answers this code as an error frame with no kernel `state`, which the client maps to `invalid:invalid_input`. commentlint: allow(JUDGE) */
+/** Thrown rather than returned: the daemon answers this code as an error frame with no kernel `state`, which the client maps to `invalid:invalid_input`. */
 function invalidParams(message: string): HostCallError {
     return new HostCallError("terminal", message, "invalid_params");
 }
 
-/** Lower ranks are more trusted; an asserted class may only use a rank equal to or above the derived class. Keyed on the daemon's serialized class names. commentlint: allow(JUDGE) */
+/** Lower ranks are more trusted; an asserted class may only use a rank equal to or above the derived class. Keyed on the daemon's serialized class names. */
 const SOURCE_RANK: Record<string, number> = {
     explicit_user: 0,
     trusted_local_code: 1,
@@ -195,7 +195,7 @@ const TAINT_RANK: Record<string, number> = {
     unclassifiable: 5,
 };
 
-/** Everything a plugin relays is model output about something, so the derived source class is always `model_inference`; the taint class records what it is about. commentlint: allow(JUDGE) */
+/** Everything a plugin relays is model output about something, so the derived source class is always `model_inference`; the taint class records what it is about. */
 const DERIVED_CLASSES: Record<string, { source: string; taint: string }> = {
     assistant: { source: "model_inference", taint: "assistant_inference" },
     model: { source: "model_inference", taint: "assistant_inference" },
@@ -203,7 +203,7 @@ const DERIVED_CLASSES: Record<string, { source: string; taint: string }> = {
     user: { source: "model_inference", taint: "user_inferred" },
 };
 
-/** The taints `model_inference` admits; a pair outside the table is malformed input, not an over-declaration. commentlint: allow(JUDGE) */
+/** The taints `model_inference` admits; a pair outside the table is malformed input, not an over-declaration. */
 const MODEL_INFERENCE_TAINTS: ReadonlySet<string> = new Set([
     "user_inferred",
     "assistant_inference",
@@ -212,7 +212,7 @@ const MODEL_INFERENCE_TAINTS: ReadonlySet<string> = new Set([
     "unclassifiable",
 ]);
 
-/** An assertion above the derived class is refused rather than clamped so the caller learns its claim was not accepted. commentlint: allow(JUDGE) */
+/** An assertion above the derived class is refused rather than clamped so the caller learns its claim was not accepted. */
 function resolveClasses(
     body: Record<string, unknown>,
 ): { sourceKind: string } | { reply: unknown } {
@@ -242,7 +242,7 @@ function resolveClasses(
         }
         taint = asserted;
     }
-    // Every derived source is `model_inference` and a lower-ranked assertion was refused above, so this is the only source row the table needs. commentlint: allow(JUDGE)
+    // Every derived source is `model_inference` and a lower-ranked assertion was refused above, so this is the only source row the table needs.
     if (source !== "model_inference" || !MODEL_INFERENCE_TAINTS.has(taint)) {
         return { reply: invalid("invalid_input") };
     }
@@ -255,11 +255,11 @@ export class FakeKernel {
     /** Latest commit that changed each object; `kernel.commit` compares tokens against it. */
     readonly lastChange = new Map<string, number>();
     readonly receipts = new Map<string, Receipt>();
-    /** Every `decision_id` the store has held, live or retired; the daemon's `decisions` primary key refuses a second insert under any of them. commentlint: allow(JUDGE) */
+    /** Every `decision_id` the store has held, live or retired; the daemon's `decisions` primary key refuses a second insert under any of them. */
     readonly decisionIds = new Set<string>();
-    /** Objects the kernel would honor as approval authority: a live `adr_accepted` decision admitted by an explicit user, for as long as its own disposition stays `active`. Any other live object cited as an approval is valid to name but grants nothing, so a relaxation citing it is denied. commentlint: allow(JUDGE) */
+    /** Objects the kernel would honor as approval authority: a live `adr_accepted` decision admitted by an explicit user, for as long as its own disposition stays `active`. Any other live object cited as an approval is valid to name but grants nothing, so a relaxation citing it is denied. */
     readonly approvals = new Set<string>();
-    /** Every disposition each object has held, oldest first, so a read at `as_of` serves the disposition of that snapshot rather than the tip's. commentlint: allow(JUDGE) */
+    /** Every disposition each object has held, oldest first, so a read at `as_of` serves the disposition of that snapshot rather than the tip's. */
     private readonly dispositionHistory = new Map<
         string,
         { seq: number; disposition: FakeDisposition }[]
@@ -268,11 +268,11 @@ export class FakeKernel {
     readonly surfaceStates = new Map<Surface, MemoryState>();
     /** Forces the next commit to answer with this state. */
     nextCommitState: MemoryState | null = null;
-    /** Every read reply carries this `truncated` flag, standing in for a daemon that dropped rows to fit its per-read bounds. commentlint: allow(JUDGE) */
+    /** Every read reply carries this `truncated` flag, standing in for a daemon that dropped rows to fit its per-read bounds. */
     readTruncated = false;
-    /** Rows served per unfiltered read when set, standing in for the daemon's newest-rows cap; a read with an `object_ids` filter ignores it, as the daemon's cap never binds a filter-sized read. commentlint: allow(JUDGE) */
+    /** Rows served per unfiltered read when set, standing in for the daemon's newest-rows cap; a read with an `object_ids` filter ignores it, as the daemon's cap never binds a filter-sized read. */
     readRowCap: number | null = null;
-    /** Rows served per filtered read when set, standing in for the daemon's serialization byte budget: the `object_ids` filter bypasses the row cap but not the budget, and the budget keeps a newest-first prefix of the filtered rows. commentlint: allow(JUDGE) */
+    /** Rows served per filtered read when set, standing in for the daemon's serialization byte budget: the `object_ids` filter bypasses the row cap but not the budget, and the budget keeps a newest-first prefix of the filtered rows. */
     filteredReadRowCap: number | null = null;
     /** Runs after the client's read and before the commit's token check, standing in for a concurrent writer. */
     beforeCommit: (() => void) | null = null;
@@ -445,7 +445,7 @@ export class FakeKernel {
         if (objectIds !== null) {
             visible = visible.filter((object) => objectIds.has(object.object_id));
         }
-        // The daemon serves rows newest first, then by object id, and keeps that order's prefix when a cap binds. The row cap never binds a filtered read (a filter names at most `MAX_READ_OBJECT_IDS` rows, far under the cap), so it applies to unfiltered reads alone; the filtered cap stands in for the byte budget, which binds either way. commentlint: allow(JUDGE)
+        // The daemon serves rows newest first, then by object id, and keeps that order's prefix when a cap binds. The row cap never binds a filtered read (a filter names at most `MAX_READ_OBJECT_IDS` rows, far under the cap), so it applies to unfiltered reads alone; the filtered cap stands in for the byte budget, which binds either way.
         visible.sort(FakeKernel.servingOrder);
         let truncated = this.readTruncated;
         const cap = objectIds === null ? this.readRowCap : this.filteredReadRowCap;
@@ -568,7 +568,7 @@ export class FakeKernel {
         this.beforeCommit?.();
         const tokenConflict = this.conflictFor(tokens, projectRoot);
         if (tokenConflict) return tokenConflict;
-        // One envelope is atomic: rows change on a staged overlay in envelope order, and a refusal at any operation leaves the store and the tip untouched. commentlint: allow(JUDGE)
+        // One envelope is atomic: rows change on a staged overlay in envelope order, and a refusal at any operation leaves the store and the tip untouched.
         const seq = this.tip + 1;
         const staged = new Map<string, FakeObject>();
         const stagedDecisionIds = new Set<string>();
@@ -587,7 +587,7 @@ export class FakeKernel {
             }
             return row;
         };
-        // A commit target is looked up among this project's live objects only, so a missing, foreign, or invalidated target is `not_found` alike. commentlint: allow(JUDGE)
+        // A commit target is looked up among this project's live objects only, so a missing, foreign, or invalidated target is `not_found` alike.
         const liveTarget = (objectId: string): FakeObject | null => {
             const target = view(objectId);
             if (
@@ -599,7 +599,7 @@ export class FakeKernel {
             }
             return target;
         };
-        // The daemon's `decisions` primary key refuses a `decision_id` any row has ever carried, live or retired, in this envelope or an earlier commit. commentlint: allow(JUDGE)
+        // The daemon's `decisions` primary key refuses a `decision_id` any row has ever carried, live or retired, in this envelope or an earlier commit.
         const decisionIdHeld = (spec: Record<string, unknown>): boolean =>
             typeof spec.decision_id === "string" &&
             (this.decisionIds.has(spec.decision_id) || stagedDecisionIds.has(spec.decision_id));
@@ -639,7 +639,7 @@ export class FakeKernel {
         for (const operation of operations) {
             if (operation.op === "insert_decision") {
                 const spec = operation.spec as Record<string, unknown>;
-                // The registry's primary key refuses any held id, live or retired, this project's or another's. commentlint: allow(JUDGE)
+                // The registry's primary key refuses any held id, live or retired, this project's or another's.
                 if (view(spec.object_id as string)) return invalid("already_exists");
                 if (decisionIdHeld(spec)) return invalid("already_exists");
                 insert(spec, (spec.sensitivity as Sensitivity | undefined) ?? "normal");
@@ -648,7 +648,7 @@ export class FakeKernel {
                 if (!replaced) return invalid("not_found");
                 const spec = operation.spec as Record<string, unknown>;
                 const replacementId = spec.object_id as string;
-                // A replacement id another project holds is `not_found` whether live or retired, so its state is not revealed. A live in-project replacement is a fold survivor: the spec is discarded, the survivor keeps its stored label and revision, and the predecessor is re-pointed at it. A retired in-project one is a duplicate insert. commentlint: allow(JUDGE)
+                // A replacement id another project holds is `not_found` whether live or retired, so its state is not revealed. A live in-project replacement is a fold survivor: the spec is discarded, the survivor keeps its stored label and revision, and the predecessor is re-pointed at it. A retired in-project one is a duplicate insert.
                 const replacement = view(replacementId);
                 if (replacement && !FakeKernel.inProject(replacement, projectRoot)) {
                     return invalid("not_found");
@@ -706,7 +706,7 @@ export class FakeKernel {
                 const row = stage(judged.result.object_id);
                 row.disposition = judged.result.disposition as FakeDisposition;
                 row.approval_object_id = judged.approval;
-                // An admission event is part of the receipt but does not advance the object's token. commentlint: allow(JUDGE)
+                // An admission event is part of the receipt but does not advance the object's token.
                 touched.add(row.object_id);
                 dispositions.push(judged.result);
             } else {
@@ -790,7 +790,7 @@ export class FakeKernel {
             ) {
                 return { reply: invalid("not_found") };
             }
-            // The kernel reads approval authority at use: a seeded approval whose own disposition has since left `active` grants nothing. commentlint: allow(JUDGE)
+            // The kernel reads approval authority at use: a seeded approval whose own disposition has since left `active` grants nothing.
             approved = this.approvals.has(approval) && object.disposition === "active";
         }
         const effect = EVENT_EFFECT[event as DispositionEvent];
@@ -809,7 +809,7 @@ export class FakeKernel {
         };
     }
 
-    /** `kernel.commit` with `preview: true`: a recorded identity answers its receipt; otherwise operations are judged in order on an overlay of the tip, nothing is written, and no receipt is created. commentlint: allow(JUDGE) */
+    /** `kernel.commit` with `preview: true`: a recorded identity answers its receipt; otherwise operations are judged in order on an overlay of the tip, nothing is written, and no receipt is created. */
     private previewReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
         const tokens = (body.tokens as unknown[] | undefined) ?? [];
         if (tokens.length > 0)
@@ -859,7 +859,7 @@ export class FakeKernel {
 
     reply(call: KernelTransportCall): unknown {
         const body = call.body as Record<string, unknown>;
-        // The route is bound to the transport call's root; a body root that names another project is refused before any work. The daemon canonicalizes both roots first; the fake compares the strings. commentlint: allow(JUDGE)
+        // The route is bound to the transport call's root; a body root that names another project is refused before any work. The daemon canonicalizes both roots first; the fake compares the strings.
         if (typeof body.project_root === "string" && body.project_root !== call.projectRoot) {
             return invalid("project_mismatch");
         }

@@ -81,7 +81,7 @@ struct SendParams {
     #[serde(rename = "tools")]
     _tools: EmptyTools,
     generation: MapOnly<GenerationParams>,
-    // Absence is the only encoding of "no system prompt": a present `null` would give the same request two byte-different bodies, which the supervisor's exact-bytes fingerprint reports as `idempotency_conflict`. commentlint: allow(JUDGE)
+    // Absence is the only encoding of "no system prompt": a present `null` would give the same request two byte-different bodies, which the supervisor's exact-bytes fingerprint reports as `idempotency_conflict`.
     #[serde(default, deserialize_with = "present_string")]
     system: Option<String>,
 }
@@ -166,7 +166,7 @@ fn preflight(body: &[u8], binary: bool) -> Result<(), RequestError> {
     Ok(())
 }
 
-/// The first decode pass reads only `method`; `params` is skipped with `IgnoredAny` because its schema depends on the method and the second pass decodes it typed. commentlint: allow(JUDGE)
+/// The first decode pass reads only `method`; `params` is skipped with `IgnoredAny` because its schema depends on the method and the second pass decodes it typed.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MethodEnvelope<'a> {

@@ -99,7 +99,7 @@ impl RouteRegistry {
         }
     }
 
-    // A poisoned lock would refuse every later route on the host; no method panics with the guard held, so recovery cannot observe a half-applied transition. commentlint: allow(JUDGE)
+    // A poisoned lock would refuse every later route on the host; no method panics with the guard held, so recovery cannot observe a half-applied transition.
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -420,7 +420,7 @@ impl RouteRegistry {
 }
 
 impl Occupant {
-    // `register_dispatch` and `route_tracker` refuse a route once it leaves `Live`, so closing the tracker here lets the owner's `wait` settle without a separate `close` call. commentlint: allow(JUDGE)
+    // `register_dispatch` and `route_tracker` refuse a route once it leaves `Live`, so closing the tracker here lets the owner's `wait` settle without a separate `close` call.
     fn take_close_ownership(&mut self) -> (Vec<tokio::task::AbortHandle>, TaskTracker) {
         self.state = OccState::Closing;
         self.cancel.cancel();

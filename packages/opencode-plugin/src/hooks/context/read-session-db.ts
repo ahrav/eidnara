@@ -356,7 +356,7 @@ export function sessionHasCompactionSummaryInOpenCodeDb(sessionId: string): bool
     }
 }
 
-/** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary in `(time_created, id)` order are skipped, so a compacted session reports no usage until a post-compaction response lands. commentlint: allow(JUDGE) */
+/** Recovers persisted assistant usage after a restart or idle eviction. Rows at or before the newest compaction summary in `(time_created, id)` order are skipped, so a compacted session reports no usage until a post-compaction response lands. */
 export function findLastAssistantUsageFromOpenCodeDb(
     sessionId: string,
 ): PersistedAssistantUsage | null {

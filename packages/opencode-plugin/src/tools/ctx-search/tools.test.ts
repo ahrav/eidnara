@@ -168,7 +168,7 @@ describe("createCtxSearchTools", () => {
         );
         expect(nonArray).toContain("Error: 'sources' must be an array");
 
-        // A misspelled source silently dropped would run an empty-source search and report a misleading "No results found". commentlint: allow(JUDGE)
+        // A misspelled source silently dropped would run an empty-source search and report a misleading "No results found".
         const misspelled = await tools.ctx_search.execute(
             { query: "appear", sources: ["memor"] as unknown as ["memory"] },
             toolContext(),

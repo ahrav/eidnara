@@ -217,7 +217,7 @@ struct ReplayedChange {
     replaced_object_id: Option<String>,
 }
 
-/// Mirrors `ObjectRow`, which derives `Serialize` only. commentlint: allow(JUDGE)
+/// Mirrors `ObjectRow`, which derives `Serialize` only.
 ///
 /// `deny_unknown_fields` fails the replay when a payload carries a column this
 /// mirror lacks; `replayed_object` destructures `ObjectRow`, so an added field
@@ -305,7 +305,7 @@ fn outbox_events_replayed_from_the_first_position_rebuild_the_live_registry() {
             Ok(String::new())
         })
         .unwrap();
-    // `object-3` is already retired here, so its remediation payload carries `invalidated_commit_seq`. commentlint: allow(JUDGE)
+    // `object-3` is already retired here, so its remediation payload carries `invalidated_commit_seq`.
     store
         .commit(intent("remediate"), |envelope| {
             envelope.remediate_text(
@@ -357,7 +357,7 @@ fn outbox_events_replayed_from_the_first_position_rebuild_the_live_registry() {
                 replayed.remove(&change.object.object_id);
             }
             // Remediation can update invalidated rows; replay removes rows with
-            // `invalidated_commit_seq` set. commentlint: allow(JUDGE)
+            // `invalidated_commit_seq` set.
             "operator_remediation" => {
                 if change.object.invalidated_commit_seq.is_some() {
                     replayed.remove(&change.object.object_id);

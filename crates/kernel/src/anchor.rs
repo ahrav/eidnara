@@ -83,7 +83,7 @@ pub enum ContextDependency {
     ConfigRevision,
     PlatformVersion,
     QueryInstant,
-    /// The dependency a consumer assigns to a stored `anchor_kind` that [`AnchorKind::from_stored`] does not recognize. Every known kind maps to a narrower variant, so treating an unknown kind as consulting the whole context keeps its cache key from omitting a dependency. commentlint: allow(JUDGE)
+    /// The dependency a consumer assigns to a stored `anchor_kind` that [`AnchorKind::from_stored`] does not recognize. Every known kind maps to a narrower variant, so treating an unknown kind as consulting the whole context keeps its cache key from omitting a dependency.
     All,
 }
 

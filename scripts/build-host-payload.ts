@@ -41,7 +41,7 @@ export const PAYLOAD_TARGET = {
     package: "@eidnara/host-linux-x64-gnu",
     dir: "packages/host-linux-x64-gnu",
     target: "linux-x64-gnu",
-    /** `buildTarget()` string the addon must report; `packages/shm-native/index.ts` refuses any other value with `wrong_platform_binary`. commentlint: allow(JUDGE) */
+    /** `buildTarget()` string the addon must report; `packages/shm-native/index.ts` refuses any other value with `wrong_platform_binary`. */
     nativeTarget: "linux-x86_64",
     os: ["linux"],
     cpu: ["x64"],
@@ -50,7 +50,7 @@ export const PAYLOAD_TARGET = {
 
 const PATH_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
-/** Extensions the CLI accepts for `--addon`; `buildDevPayload` also accepts a CommonJS module so tests can run without a compiled addon. commentlint: allow(JUDGE) */
+/** Extensions the CLI accepts for `--addon`; `buildDevPayload` also accepts a CommonJS module so tests can run without a compiled addon. */
 const NATIVE_ADDON_EXTENSIONS = new Set([".so", ".node"]);
 
 export interface PayloadFileEntry {
@@ -111,7 +111,7 @@ export interface DevPayloadResult {
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-/** The daemon hashes exact manifest bytes, so canonicalJson recursively sorts object keys, preserves array order, and emits no whitespace. commentlint: allow(JUDGE) */
+/** The daemon hashes exact manifest bytes, so canonicalJson recursively sorts object keys, preserves array order, and emits no whitespace. */
 export function canonicalJson(value: unknown): string {
     return JSON.stringify(sortKeys(value as JsonValue));
 }
@@ -133,7 +133,7 @@ export function sha256Hex(bytes: Uint8Array | string): string {
     return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** The daemon strips one trailing newline from the manifest file before digesting it (`trusted_payload_sources`). commentlint: allow(JUDGE) */
+/** The daemon strips one trailing newline from the manifest file before digesting it (`trusted_payload_sources`). */
 export function payloadManifestDigest(manifest: PayloadManifest): string {
     return sha256Hex(canonicalJson(manifest));
 }
@@ -191,7 +191,7 @@ function asContract(value: unknown): ReleaseContract {
     return value as unknown as ReleaseContract;
 }
 
-/** Digests match `release_contract_sha256` (contract, one trailing newline stripped) and `production_inputs_lock_sha256` (lock, full bytes). commentlint: allow(JUDGE) */
+/** Digests match `release_contract_sha256` (contract, one trailing newline stripped) and `production_inputs_lock_sha256` (lock, full bytes). */
 export function loadReleaseContext(rootDir: string): ReleaseContext {
     const contract = asContract(readJson(rootDir, RELEASE_CONTRACT_PATH));
     const contractBytes = readFileSync(join(rootDir, RELEASE_CONTRACT_PATH));
@@ -364,7 +364,7 @@ function lstatIfPresent(path: string): ReturnType<typeof lstatSync> | undefined 
     }
 }
 
-/** Whether a payload root exists at `dir/payload`. A symlink or non-directory there is rejected because every per-file stat below would follow it. commentlint: allow(JUDGE) */
+/** Whether a payload root exists at `dir/payload`. A symlink or non-directory there is rejected because every per-file stat below would follow it. */
 function payloadRootPresent(dir: string): boolean {
     const stat = lstatIfPresent(join(dir, "payload"));
     if (stat === undefined) return false;
@@ -373,7 +373,7 @@ function payloadRootPresent(dir: string): boolean {
     return true;
 }
 
-/** Whether a package file exists at `path`. npm omits symlinks from the tarball, so anything other than a regular file there ships as absent. commentlint: allow(JUDGE) */
+/** Whether a package file exists at `path`. npm omits symlinks from the tarball, so anything other than a regular file there ships as absent. */
 function regularFilePresent(path: string, what: string): boolean {
     const stat = lstatIfPresent(path);
     if (stat === undefined) return false;
@@ -419,7 +419,7 @@ export function verifyPayloadDir(dir: string, manifest: PayloadManifest): void {
     walk("payload");
 }
 
-/** `packages/shm-native/index.ts` performs the same two probes at runtime and refuses `"debug"` and any target other than `PAYLOAD_TARGET.nativeTarget`. Callers pass an absolute path: `require` resolves a relative one against this module's directory, not the working directory. commentlint: allow(JUDGE) */
+/** `packages/shm-native/index.ts` performs the same two probes at runtime and refuses `"debug"` and any target other than `PAYLOAD_TARGET.nativeTarget`. Callers pass an absolute path: `require` resolves a relative one against this module's directory, not the working directory. */
 export function probeAddon(addonPath: string): { profile: string; target: string } {
     const module: unknown = createRequire(import.meta.url)(addonPath);
     if (
@@ -443,7 +443,7 @@ function readSourceFile(path: string, what: string): Buffer {
     return bytes;
 }
 
-/** Locally built artifacts share the builder host's libc, which the addon's `buildTarget()` (`OS-ARCH` only) cannot report, and the manifest labels them `linux-x64-gnu`. commentlint: allow(JUDGE) */
+/** Locally built artifacts share the builder host's libc, which the addon's `buildTarget()` (`OS-ARCH` only) cannot report, and the manifest labels them `linux-x64-gnu`. */
 function assertGlibcLinuxX64Host(): void {
     // `@types/node` types the report as `object`; `header.glibcVersionRuntime` is absent on musl.
     const report = process.report?.getReport?.() as
@@ -458,7 +458,7 @@ function assertGlibcLinuxX64Host(): void {
     }
 }
 
-/** A development payload launches only through the daemon's unqualified path, which release builds refuse (`payload_sources` in `eidnara-host.rs`), so only the debug launcher is a candidate. commentlint: allow(JUDGE) */
+/** A development payload launches only through the daemon's unqualified path, which release builds refuse (`payload_sources` in `eidnara-host.rs`), so only the debug launcher is a candidate. */
 function defaultLauncherPath(rootDir: string): string {
     const candidate = join(rootDir, "target", "debug", "eidnara-host");
     if (existsSync(candidate)) return candidate;
@@ -477,7 +477,7 @@ function launcherOutput(launcherPath: string, subcommand: string): string {
     return run.stdout.endsWith("\n") ? run.stdout.slice(0, -1) : run.stdout;
 }
 
-/** The launcher's compiled release contract and production-inputs lock must be the ones the manifest cites; a stale or foreign executable fails here rather than at first launch. commentlint: allow(JUDGE) */
+/** The launcher's compiled release contract and production-inputs lock must be the ones the manifest cites; a stale or foreign executable fails here rather than at first launch. */
 function assertLauncherMatchesRelease(launcherPath: string, context: ReleaseContext): void {
     // `release-info` prints the contract file, whose own trailing newline `release_contract_sha256` excludes.
     const contract = launcherOutput(launcherPath, "release-info").replace(/\n$/, "");
@@ -532,7 +532,7 @@ export function buildDevPayload(
     try {
         stageFile(launcherPath, launcherDest, 0o755);
         stageFile(addonPath, addonDest, 0o644);
-        // Bun's `require` dispatches to the native-addon loader only for a `.node` extension, so a native source is probed through its staged copy, the file consumers load. commentlint: allow(JUDGE)
+        // Bun's `require` dispatches to the native-addon loader only for a `.node` extension, so a native source is probed through its staged copy, the file consumers load.
         const probePath = NATIVE_ADDON_EXTENSIONS.has(extname(addonPath)) ? addonDest : addonPath;
         const { profile, target } = probeAddon(probePath);
         if (profile !== "release") {
@@ -641,7 +641,7 @@ export function validatePayloadPackageDir(rootDir: string): void {
         join(packageDir, MANIFEST_FILE_NAME),
         `${PAYLOAD_TARGET.dir}/${MANIFEST_FILE_NAME}`,
     );
-    // npm packs `payload/` whether or not a manifest sits beside it, and `packages/shm-native/index.ts` refuses a package without one, so both must be present or both absent. commentlint: allow(JUDGE)
+    // npm packs `payload/` whether or not a manifest sits beside it, and `packages/shm-native/index.ts` refuses a package without one, so both must be present or both absent.
     if (payloadRootPresent(packageDir) && !manifestPresent) {
         fail(`${MANIFEST_FILE_NAME} is missing but a payload directory is staged`);
     }

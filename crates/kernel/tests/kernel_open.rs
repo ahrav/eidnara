@@ -194,7 +194,6 @@ fn every_conclusive_kernel_mismatch_is_refused_and_left_untouched() {
             "user_version" => conn.pragma_update(None, "user_version", 7).unwrap(),
             // An extra table changes the schema digest, so this arm exercises the
             // digest conjunct; the inventory conjunct cannot fail on its own here.
-            // commentlint: allow(JUDGE)
             "extra_object" => {
                 conn.execute_batch("CREATE TABLE unexpected(value INTEGER) STRICT;")
                     .unwrap();

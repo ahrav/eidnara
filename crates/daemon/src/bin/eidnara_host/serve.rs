@@ -658,7 +658,7 @@ fn read_selection_file(closure_root: &Path) -> Result<SelectionFile, &'static st
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(SelectionFile::Invalid);
     };
-    // Only a recognized integer schema other than 1 is quarantined; an absent or non-integer `schema` is a malformed artifact this binary owns and may clear or replace. commentlint: allow(JUDGE)
+    // Only a recognized integer schema other than 1 is quarantined; an absent or non-integer `schema` is a malformed artifact this binary owns and may clear or replace.
     match value.get("schema").and_then(serde_json::Value::as_u64) {
         Some(1) => {}
         Some(_) => return Err(UNSUPPORTED_SELECTION_SCHEMA),
@@ -721,7 +721,7 @@ fn write_selection(closure_root: &Path, selection: &HarnessSelection) -> Result<
         .custom_flags(libc::O_NOFOLLOW)
         .open(&temp)
         .map_err(|_| "active harness selection temp creation failed")?;
-    // `open` applies the umask to `mode`, and a launcher inherited umask that masks owner bits would leave a selector no later invocation can open; `fchmod` through the descriptor restores the exact mode before promotion. commentlint: allow(JUDGE)
+    // `open` applies the umask to `mode`, and a launcher inherited umask that masks owner bits would leave a selector no later invocation can open; `fchmod` through the descriptor restores the exact mode before promotion.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(|_| "active harness selection temp creation failed")?;
     let final_path = closure_root.join(ACTIVE_HARNESS_SELECTION);
@@ -822,7 +822,7 @@ fn harness_backend(
     let closure_root = closure_root(&envelope.data_dir);
     let store = HarnessClosureStore::open(&closure_root).ok();
 
-    // A snapshot the launcher marked `Ready` that no longer validates here is a startup failure: publishing would advertise a harness the daemon cannot execute while the committed selection records it as ready. Only an explicitly `Unavailable` or absent snapshot installs the unavailable backend. commentlint: allow(JUDGE)
+    // A snapshot the launcher marked `Ready` that no longer validates here is a startup failure: publishing would advertise a harness the daemon cannot execute while the committed selection records it as ready. Only an explicitly `Unavailable` or absent snapshot installs the unavailable backend.
     let ready = |snapshot: Option<&HarnessSnapshot>| {
         matches!(snapshot, Some(HarnessSnapshot::Ready { .. }))
     };
@@ -923,7 +923,7 @@ fn read_envelope() -> Result<StartupEnvelope, &'static str> {
 /// The launcher writes the whole envelope and closes its end before the command's lifecycle work starts, so a read that is still open after this long has no writer that intends to finish.
 const LAUNCHER_ENVELOPE_READ: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Separates an envelope the launcher wrote incorrectly from one the command could not read, because the lifecycle result reports the first as `harness_unavailable` and the second as `internal_error`. commentlint: allow(JUDGE)
+/// Separates an envelope the launcher wrote incorrectly from one the command could not read, because the lifecycle result reports the first as `harness_unavailable` and the second as `internal_error`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum LauncherEnvelopeError {
     /// The bytes never arrived, exceeded the size bound, were not JSON, or carry an unknown schema.
@@ -1104,7 +1104,7 @@ pub fn run() -> Result<(), &'static str> {
     } else {
         BrocaComponent::new_with_credentials(backend, env.clone(), broca_state)
     };
-    // The daemon commits its own harness selection when the host hands it the bearer key, before publication, so a launcher killed after publication cannot leave a daemon serving harnesses that no selection on disk records. The launcher's later commit rewrites the same content. commentlint: allow(JUDGE)
+    // The daemon commits its own harness selection when the host hands it the bearer key, before publication, so a launcher killed after publication cannot leave a daemon serving harnesses that no selection on disk records. The launcher's later commit rewrites the same content.
     let selection_root = closure_root(&root);
     let selection = HarnessSelection {
         schema: 1,

@@ -275,7 +275,7 @@ fn backup_and_restore_reproduce_every_database_table_and_the_commit_seq() {
         proof.store().restore(&backup.destination_path).unwrap(),
         captured
     );
-    // `restore` displaces only the `kernel.sqlite` family (`displace_family` in `backup.rs`); the `artifacts/` tree is never touched, so its `cas_*` digests keep the post-backup listing while every table digest returns to the backup. commentlint: allow(JUDGE)
+    // `restore` displaces only the `kernel.sqlite` family (`displace_family` in `backup.rs`); the `artifacts/` tree is never touched, so its `cas_*` digests keep the post-backup listing while every table digest returns to the backup.
     let assert_restored = |proof: &Proof, what: &str| {
         let after = proof.digest();
         assert_eq!(after.tables.len(), expected.tables.len(), "{what}");

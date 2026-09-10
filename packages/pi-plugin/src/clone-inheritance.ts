@@ -36,7 +36,7 @@ export async function handlePiCloneSessionStart(
             throw new Error("Pi clone session id is empty");
         }
 
-        // Kernel tokens and `known_as_of` are process state the clone must not share, so an applied copy's first read fetches from tip; a redelivered clone event is a no-op and must not wipe tokens the session already accumulated. commentlint: allow(JUDGE)
+        // Kernel tokens and `known_as_of` are process state the clone must not share, so an applied copy's first read fetches from tip; a redelivered clone event is a no-op and must not wipe tokens the session already accumulated.
         isolatePiSessionKernelTokens(destinationSessionId);
         writeLog(
             `[eidnara][pi] clone-inheritance: isolated kernel tokens dest=${destinationSessionId} reason=fork`,

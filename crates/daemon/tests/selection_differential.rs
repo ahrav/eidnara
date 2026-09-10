@@ -581,10 +581,10 @@ mod reference {
         &s[..end]
     }
 
-    /// Clamp a diff value to a region hint (edit_marker): first `EDIT_REGION_HINT_LEN`
-    /// UTF-16 units + the sentinel. Idempotent (already-hinted values pass through). Pure.
     fn region_hint(value: &str) -> String {
-        if value.ends_with(TRUNCATION_SENTINEL) {
+        if value.ends_with(TRUNCATION_SENTINEL)
+            && utf16_len(value) <= EDIT_REGION_HINT_LEN + utf16_len(TRUNCATION_SENTINEL)
+        {
             return value.to_string();
         }
         if utf16_len(value) > EDIT_REGION_HINT_LEN {
@@ -1517,7 +1517,7 @@ fn item_spec() -> impl Strategy<Value = ItemSpec> {
         (0u8..12, 0u8..32, 0u8..3, 0u8..7),
         (
             0u8..TOOL_COUNT,
-            0u8..12,
+            0u8..INPUT_VARIANTS,
             any::<bool>(),
             0u16..4096,
             proptest::option::of(0u16..2048),
@@ -1595,6 +1595,17 @@ const DEDUP_SAFE_TOOL_INDICES: [u8; 9] = [0, 1, 21, 22, 23, 24, 25, 26, 27];
 /// The rocket's UTF-16 surrogate pair crosses `EDIT_REGION_HINT_LEN`.
 const DIFF_ACROSS_HINT_BOUNDARY: &str = "012345678901234567890123456789012345678\u{1F680}tail";
 const DIFF_AT_HINT_BOUNDARY: &str = "0123456789012345678901234567890123456789";
+/// A value `region_hint` already produced: a hint-length prefix plus the sentinel.
+const DIFF_ALREADY_HINTED: &str = "0123456789012345678901234567890123456789...[truncated]";
+
+/// One past the last `input_value` variant; `every_production_variant_is_generated`
+/// checks that the generator reaches each one.
+const INPUT_VARIANTS: u8 = 14;
+
+/// Content that happens to end with the sentinel but is far longer than a hint.
+fn long_sentinel_suffixed_diff() -> String {
+    format!("{}...[truncated]", "b".repeat(2_000))
+}
 
 /// `large_input` exceeds 500 serialized bytes and exercises `clamp_object` truncation for
 /// strings, arrays, and objects.
@@ -1642,6 +1653,14 @@ fn input_value(variant: u8) -> serde_json::Value {
         11 => serde_json::json!({
             "filePath": "src/a.rs",
             "oldString": DIFF_AT_HINT_BOUNDARY,
+        }),
+        12 => serde_json::json!({
+            "filePath": "src/a.rs",
+            "oldString": DIFF_ALREADY_HINTED,
+        }),
+        13 => serde_json::json!({
+            "filePath": "src/a.rs",
+            "oldString": long_sentinel_suffixed_diff(),
         }),
         _ => serde_json::json!({}),
     }
@@ -2332,18 +2351,34 @@ fn optimized_matches_frozen_reference_at_payload_boundaries() {
         tag_protected: false,
         exempt_protected: false,
     };
-    let edit_specs = vec![
-        spec(0, KIND_TOOL_CALL, 3, 11, Some(300)),
-        spec(0, KIND_TOOL_RESULT, 3, 11, None),
-        spec(1, KIND_TOOL_CALL, 3, 0, Some(300)),
-        spec(1, KIND_TOOL_RESULT, 3, 0, None),
-    ];
     let edit_bits: CtxBits = (0, 0.0, 1_000.0, 0, 0, false, 0, false, true, true);
-    let (optimized_edit, expected_edit, _, _) = outcome_pair!(edit_specs, edit_bits);
-    assert_eq!(optimized_edit, expected_edit);
-    assert!(optimized_edit.0.iter().any(|(_, kind, payload)| {
-        kind == "edit_marker" && payload.contains(DIFF_AT_HINT_BOUNDARY)
-    }));
+    let expected_hint = |input: u8| match input {
+        11 => DIFF_AT_HINT_BOUNDARY.to_string(),
+        12 => DIFF_ALREADY_HINTED.to_string(),
+        // Only the sentinel's presence matches a hinted value; the length
+        // does not, so the content is hinted like any other.
+        13 => format!("{}...[truncated]", "b".repeat(40)),
+        other => unreachable!("no expected hint for input variant {other}"),
+    };
+    for input in [11u8, 12, 13] {
+        let edit_specs = vec![
+            spec(0, KIND_TOOL_CALL, 3, input, Some(300)),
+            spec(0, KIND_TOOL_RESULT, 3, input, None),
+            spec(1, KIND_TOOL_CALL, 3, 0, Some(300)),
+            spec(1, KIND_TOOL_RESULT, 3, 0, None),
+        ];
+        let (optimized_edit, expected_edit, _, _) = outcome_pair!(edit_specs, edit_bits);
+        assert_eq!(optimized_edit, expected_edit, "input variant {input}");
+        let hint = expected_hint(input);
+        assert!(
+            optimized_edit.0.iter().any(|(_, kind, payload)| {
+                kind == "edit_marker"
+                    && payload.contains(&hint)
+                    && !payload.contains(&"b".repeat(41))
+            }),
+            "input variant {input}: no edit_marker carries {hint:?}"
+        );
+    }
 
     let skeleton_specs = vec![
         spec(2, KIND_TOOL_CALL, 8, 10, Some(300)),
@@ -2699,6 +2734,14 @@ fn every_production_variant_is_generated() {
         assert!(
             generated_tools.contains(&index),
             "tool index {index} is never generated"
+        );
+    }
+
+    let generated_inputs = field(&|spec: &ItemSpec| spec.input);
+    for variant in 0..INPUT_VARIANTS {
+        assert!(
+            generated_inputs.contains(&variant),
+            "input variant {variant} is never generated"
         );
     }
 

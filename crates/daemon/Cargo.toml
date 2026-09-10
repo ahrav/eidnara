@@ -53,7 +53,7 @@ base64 = { workspace = true }
 # the same malformed ones.
 base64-simd = "0.8"
 # `clock` supplies `Local::now` for guidance dates and note evaluation; it pulls in the
-# timezone-lookup crates. commentlint: allow(JUDGE)
+# timezone-lookup crates.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = { workspace = true }
 

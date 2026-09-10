@@ -1,4 +1,4 @@
-//! Discriminator proofs for `tests/support/canonical_state.rs`: equal states commentlint: allow(JUDGE)
+//! Discriminator proofs for `tests/support/canonical_state.rs`: equal states
 //! digest equal under the right profile, and each normalization step is
 //! exercised by a negative control that would pass if the step were skipped.
 //!
@@ -289,7 +289,7 @@ fn write_restore_marker(root: &Path, corrupt: bool) {
     write_restore_marker_naming(root, &root.join("kernel.sqlite"), corrupt);
 }
 
-/// The digest covers `db_path` as written, so a marker naming a foreign database verifies by bytes and fails only the kernel's path check. commentlint: allow(JUDGE)
+/// The digest covers `db_path` as written, so a marker naming a foreign database verifies by bytes and fails only the kernel's path check.
 fn write_restore_marker_naming(root: &Path, db_path: &Path, corrupt: bool) {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
@@ -384,7 +384,7 @@ fn cross_root_recovery_marker_naming_another_roots_database_is_invalid() {
     write_restore_marker(first.path(), false);
     let valid = digest(first.path(), Profile::CrossRoot);
 
-    // The `database_path` comparison in `read_valid_restore_marker` rejects the forged marker after it passes the digest and recovery-directory checks. commentlint: allow(JUDGE)
+    // The `database_path` comparison in `read_valid_restore_marker` rejects the forged marker after it passes the digest and recovery-directory checks.
     write_restore_marker_naming(second.path(), &first.path().join("kernel.sqlite"), false);
     assert!(!restore_marker_is_valid_for_test(
         &second.path().join("kernel.sqlite")
@@ -401,7 +401,7 @@ fn cross_root_recovery_marker_naming_another_roots_database_is_invalid() {
 }
 
 /// The store's `kernel_format_marker_no_update` trigger blocks the rewrite, so the test drops
-/// it first; the digest check in `canonical_state` still fires on the stored row. commentlint: allow(JUDGE)
+/// it first; the digest check in `canonical_state` still fires on the stored row.
 #[test]
 #[should_panic(expected = "kernel_format_marker.marker_digest does not match its own row")]
 fn a_format_marker_whose_created_at_was_rewritten_fails_the_digest() {

@@ -43,20 +43,20 @@ export type KernelRebind = Omit<KernelTransportCall, "method" | "body">;
 
 /** The transport surface the client depends on; `HostModuleTransport` is adapted onto it. */
 export interface KernelTransport {
-    /** False marks the daemon unreachable; a transport that starts the daemon during `call` answers true with no connection file. commentlint: allow(JUDGE) */
+    /** False marks the daemon unreachable; a transport that starts the daemon during `call` answers true with no connection file. */
     connectionFileExists(): boolean;
-    /** An opaque token that changes whenever the connection `call` would send on changes, so the daemon behind it may differ. Tokens and `as_of` positions are only valid against the daemon they were read from, so a body built under one identity must not be sent under another. commentlint: allow(JUDGE) */
+    /** An opaque token that changes whenever the connection `call` would send on changes, so the daemon behind it may differ. Tokens and `as_of` positions are only valid against the daemon they were read from, so a body built under one identity must not be sent under another. */
     connectionIdentity?(): string;
-    /** Resolves the daemon's raw response. Rejects with `StoreLifecycleError` when the daemon is reachable but its store is not ready to serve, with `ConnectionIdentityChangedError` when the body's `connectionIdentity` no longer matches and nothing was sent; any other rejection is a transport failure. commentlint: allow(JUDGE) */
+    /** Resolves the daemon's raw response. Rejects with `StoreLifecycleError` when the daemon is reachable but its store is not ready to serve, with `ConnectionIdentityChangedError` when the body's `connectionIdentity` no longer matches and nothing was sent; any other rejection is a transport failure. */
     call(args: KernelTransportCall): Promise<unknown>;
-    /** Rebinds the session route after the daemon reports `route_unbound`. The transport settles within `timeoutMs` and on `signal` exactly as `call` does, so a stalled rebind cannot hold a read or commit past the caller's deadline. commentlint: allow(JUDGE) */
+    /** Rebinds the session route after the daemon reports `route_unbound`. The transport settles within `timeoutMs` and on `signal` exactly as `call` does, so a stalled rebind cannot hold a read or commit past the caller's deadline. */
     ensureRoute(args: KernelRebind): Promise<void>;
 }
 
 /** The store lifecycle states a transport can observe before any request reaches a kernel route. */
 export type StoreLifecycleReason = "store_starting" | "store_unavailable";
 
-/** Thrown by a transport whose daemon reports the store as not ready before the request is sent; the client maps `reason` to the same-named `unavailable` state instead of `invalid:internal`. commentlint: allow(JUDGE) */
+/** Thrown by a transport whose daemon reports the store as not ready before the request is sent; the client maps `reason` to the same-named `unavailable` state instead of `invalid:internal`. */
 export class StoreLifecycleError extends Error {
     constructor(readonly reason: StoreLifecycleReason) {
         super(`daemon store is ${reason === "store_starting" ? "starting" : "unavailable"}`);
@@ -64,7 +64,7 @@ export class StoreLifecycleError extends Error {
     }
 }
 
-/** Thrown by a transport that refused to send a body built under a previous connection identity. Nothing reached a daemon, so the client treats the outcome as `snapshot_diverged`: its tokens are dropped and the caller's read-then-retry path rebuilds the request against the daemon now behind the transport. commentlint: allow(JUDGE) */
+/** Thrown by a transport that refused to send a body built under a previous connection identity. Nothing reached a daemon, so the client treats the outcome as `snapshot_diverged`: its tokens are dropped and the caller's read-then-retry path rebuilds the request against the daemon now behind the transport. */
 export class ConnectionIdentityChangedError extends Error {
     constructor() {
         super("daemon connection changed before the request was sent");
@@ -112,15 +112,15 @@ export interface ReadArgs extends CallOptions {
     surface: Surface;
     asOf?: number | null;
     gated?: boolean;
-    /** Scopes the read to the named objects before the daemon applies its row cap, so a targeted lookup reaches a live row a capped unfiltered snapshot drops. At most `MAX_READ_OBJECT_IDS` ids; a longer list answers `invalid_input` without a daemon round trip. commentlint: allow(JUDGE) */
+    /** Scopes the read to the named objects before the daemon applies its row cap, so a targeted lookup reaches a live row a capped unfiltered snapshot drops. At most `MAX_READ_OBJECT_IDS` ids; a longer list answers `invalid_input` without a daemon round trip. */
     objectIds?: readonly string[];
 }
 
 export interface IntentArgs {
     actor: string;
-    /** Stable identity the operation key hashes together with the producer and actor; a redelivered identity with different request bytes hits `operation_key_reused` instead of committing twice, so caller-controlled free text never rides here — it goes in `cause`. commentlint: allow(JUDGE) */
+    /** Stable identity the operation key hashes together with the producer and actor; a redelivered identity with different request bytes hits `operation_key_reused` instead of committing twice, so caller-controlled free text never rides here — it goes in `cause`. */
     operationId: string;
-    /** Free-text audit trail carried in `intent.cause`; never key or digest material. The daemon records it against the commit that applied, and a redelivery that regenerates the text must still replay that receipt rather than hit `operation_key_reused`. commentlint: allow(JUDGE) */
+    /** Free-text audit trail carried in `intent.cause`; never key or digest material. The daemon records it against the commit that applied, and a redelivery that regenerates the text must still replay that receipt rather than hit `operation_key_reused`. */
     cause: string;
     /** Defaults to the client's producer. */
     producer?: string;
@@ -133,7 +133,7 @@ export interface CommitArgs extends CallOptions, IntentArgs {
     /**
      * The complete token set for the envelope. When omitted, the cache supplies
      * one token per replaced or retired object and reads any object without a
-     * cached token. When given, no cache lookup happens. The daemon fences only the tokens it receives, so a target left out of a given set is mutated unfenced; the client does not refuse that, because an empty set is how a caller replays a receipt whose targets are already superseded, where a refresh read would answer `retracted` before the receipt lookup runs. commentlint: allow(JUDGE)
+     * cached token. When given, no cache lookup happens. The daemon fences only the tokens it receives, so a target left out of a given set is mutated unfenced; the client does not refuse that, because an empty set is how a caller replays a receipt whose targets are already superseded, where a refresh read would answer `retracted` before the receipt lookup runs.
      */
     tokens?: MutationToken[];
     sourceKind?: SourceKind;
@@ -143,7 +143,7 @@ export interface CommitArgs extends CallOptions, IntentArgs {
 
 export type MutationArgs = Omit<CommitArgs, "operations" | "tokens">;
 
-/** A preview carries the same intent as the commit it stands in for, so the daemon parses the identity it would later record; tokens are refused, so none are collected. commentlint: allow(JUDGE) */
+/** A preview carries the same intent as the commit it stands in for, so the daemon parses the identity it would later record; tokens are refused, so none are collected. */
 export interface PreviewArgs extends MutationArgs {
     operations: DispositionOperation[];
 }
@@ -170,7 +170,7 @@ export interface KernelMemorySnapshot {
     state: MemoryState;
     rows: ReadRow[];
     knownAsOf: number | null;
-    /** Mirrors the read's `truncated` flag: the daemon dropped rows to fit its per-read bounds, so `rows` is a capped prefix and counts derived from it are lower bounds. commentlint: allow(JUDGE) */
+    /** Mirrors the read's `truncated` flag: the daemon dropped rows to fit its per-read bounds, so `rows` is a capped prefix and counts derived from it are lower bounds. */
     truncated?: boolean;
 }
 
@@ -210,7 +210,7 @@ export interface KernelClientOptions {
 const DEFAULT_PRODUCER = "plugin";
 const DEFAULT_DEADLINE_MS = 10_000;
 /**
- * Fields of the operation key are joined with the ASCII unit separator. Every field but the last must be separator-free; then the joined bytes parse back to exactly one field list of that arity, so distinct inputs cannot collide by concatenation. The last field may itself be a separator-joined composite. commentlint: allow(JUDGE)
+ * Fields of the operation key are joined with the ASCII unit separator. Every field but the last must be separator-free; then the joined bytes parse back to exactly one field list of that arity, so distinct inputs cannot collide by concatenation. The last field may itself be a separator-joined composite.
  */
 export const OPERATION_KEY_SEPARATOR = "\u001f";
 
@@ -223,7 +223,7 @@ export function isSeparatorFree(value: string): boolean {
     return !value.includes(OPERATION_KEY_SEPARATOR);
 }
 
-/** Rejects a non-final separator because it shifts field boundaries; persisted ids pin the join encoding, so escaping is not an option. commentlint: allow(JUDGE) */
+/** Rejects a non-final separator because it shifts field boundaries; persisted ids pin the join encoding, so escaping is not an option. */
 function joinKeyFields(fields: readonly string[]): string {
     for (let index = 0; index + 1 < fields.length; index += 1) {
         if (!isSeparatorFree(fields[index] as string)) {
@@ -235,12 +235,12 @@ function joinKeyFields(fields: readonly string[]): string {
     return fields.join(OPERATION_KEY_SEPARATOR);
 }
 
-/** Stores persist ids minted here, so the separator, field order, and 32-hex slice are frozen byte-for-byte: the same inputs always resolve to the same id. Throws `RangeError` when a non-final field contains the separator. commentlint: allow(JUDGE) */
+/** Stores persist ids minted here, so the separator, field order, and 32-hex slice are frozen byte-for-byte: the same inputs always resolve to the same id. Throws `RangeError` when a non-final field contains the separator. */
 export function deriveObjectId(prefix: string, ...fields: readonly string[]): string {
     return `${prefix}_${sha256Hex(joinKeyFields(fields)).slice(0, 32)}`;
 }
 
-/** The body fields a commit is admitted under. `tokens` and `deadline_ms` stay out because the divergence retry and reissue legitimately change them. commentlint: allow(JUDGE) */
+/** The body fields a commit is admitted under. `tokens` and `deadline_ms` stay out because the divergence retry and reissue legitimately change them. */
 export interface RequestDigestInput {
     operations: readonly CommitOperation[];
     sourceKind: SourceKind;
@@ -248,7 +248,7 @@ export interface RequestDigestInput {
     assertedTaintClass?: string;
 }
 
-/** Covers the operations and the classification fields (`source_kind`, asserted classes) that decide the stored trust class, so a reused key that changes any of them reads as a different body rather than a replay. commentlint: allow(JUDGE) */
+/** Covers the operations and the classification fields (`source_kind`, asserted classes) that decide the stored trust class, so a reused key that changes any of them reads as a different body rather than a replay. */
 export function deriveRequestDigest(input: RequestDigestInput): string {
     const body = {
         operations: input.operations,
@@ -256,11 +256,11 @@ export function deriveRequestDigest(input: RequestDigestInput): string {
         asserted_source_class: input.assertedSourceClass,
         asserted_taint_class: input.assertedTaintClass,
     };
-    // The JSON round-trip drops explicitly-undefined keys so a spec built by spread and a spec that omits the field hash identically; `stableStringify` then fixes key order. commentlint: allow(JUDGE)
+    // The JSON round-trip drops explicitly-undefined keys so a spec built by spread and a spec that omits the field hash identically; `stableStringify` then fixes key order.
     return sha256Hex(stableStringify(JSON.parse(JSON.stringify(body))));
 }
 
-/** The key names only the stable operation identity — never the body, which travels in `request_digest`, and never the free-text `cause` — so a redelivered identity with different bytes hits the daemon's `operation_key_reused` rejection instead of committing as a second operation. The project is not hashed here: the daemon prefixes every receipt key with the digest of the canonicalized bound root, so a root reached through a symlink and through its resolved path share one receipt namespace, which a client-side hash of the raw spelling would split. Throws `RangeError` when `producer` or `actor` contains the separator; `operationId` may be a separator-joined composite. commentlint: allow(JUDGE) */
+/** The key names only the stable operation identity — never the body, which travels in `request_digest`, and never the free-text `cause` — so a redelivered identity with different bytes hits the daemon's `operation_key_reused` rejection instead of committing as a second operation. The project is not hashed here: the daemon prefixes every receipt key with the digest of the canonicalized bound root, so a root reached through a symlink and through its resolved path share one receipt namespace, which a client-side hash of the raw spelling would split. Throws `RangeError` when `producer` or `actor` contains the separator; `operationId` may be a separator-joined composite. */
 export function deriveOperationKey(parts: {
     producer: string;
     actor: string;
@@ -269,7 +269,7 @@ export function deriveOperationKey(parts: {
     return sha256Hex(joinKeyFields([parts.producer, parts.actor, parts.operationId]));
 }
 
-/** A successful invocation carries the connection identity its body was sent under, so the tokens in the response are recorded against the connection that minted them. commentlint: allow(JUDGE) */
+/** A successful invocation carries the connection identity its body was sent under, so the tokens in the response are recorded against the connection that minted them. */
 type Invoked =
     | { ok: true; raw: unknown; connectionIdentity?: string }
     | { ok: false; state: NonAvailableState };
@@ -277,9 +277,9 @@ type Invoked =
 interface InvokeOptions {
     signal?: AbortSignal;
     deadline: Deadline;
-    /** A write whose `outcome_unknown` is reissued once under the same identity and digest; the body is rebuilt per attempt so only `deadline_ms` reflects the budget left. commentlint: allow(JUDGE) */
+    /** A write whose `outcome_unknown` is reissued once under the same identity and digest; the body is rebuilt per attempt so only `deadline_ms` reflects the budget left. */
     reissuable: boolean;
-    /** A mutating call whose exhausted `outcome_unknown` must stay ambiguous: reads answer `daemon_absent` because re-reading is always safe, but a sent write may have committed and a definitive-looking failure invites a retry under a fresh identity. commentlint: allow(JUDGE) */
+    /** A mutating call whose exhausted `outcome_unknown` must stay ambiguous: reads answer `daemon_absent` because re-reading is always safe, but a sent write may have committed and a definitive-looking failure invites a retry under a fresh identity. */
     mutating?: boolean;
 }
 
@@ -287,7 +287,7 @@ function errorCodeOf(error: unknown): string | undefined {
     return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
 }
 
-/** host-client owns which connect-time failures are transient; a terminal `ConnectionFileError` falls through to `invalid(internal)` rather than reading as an absent daemon. commentlint: allow(JUDGE) */
+/** host-client owns which connect-time failures are transient; a terminal `ConnectionFileError` falls through to `invalid(internal)` rather than reading as an absent daemon. */
 function isDaemonAbsent(error: unknown): boolean {
     return isConnectTransient(error) || errorCodeOf(error) === "EIDNARA_HOST_CONNECTION_BACKOFF";
 }
@@ -347,7 +347,7 @@ export class KernelClient {
         };
     }
 
-    /** An invalid budget is the caller's input, so it answers `invalid_input` rather than letting `Deadline.start`'s `RangeError` escape into the tool. commentlint: allow(JUDGE) */
+    /** An invalid budget is the caller's input, so it answers `invalid_input` rather than letting `Deadline.start`'s `RangeError` escape into the tool. */
     private deadline(options: CallOptions): Deadline | NonAvailableState {
         const timeoutMs = options.deadlineMs ?? this.defaultDeadlineMs;
         if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
@@ -375,7 +375,7 @@ export class KernelClient {
         if (gated) return { ok: false, state: gated };
         let rebound = false;
         let reissued = false;
-        // After a mutating call's ambiguous send, every later failure exit stays `outcome_unknown`: a reissue that is never sent, an unbound route, or a transport error cannot resolve whether the first attempt committed, and any definitive-looking failure invites a retry under a fresh identity. commentlint: allow(JUDGE)
+        // After a mutating call's ambiguous send, every later failure exit stays `outcome_unknown`: a reissue that is never sent, an unbound route, or a transport error cannot resolve whether the first attempt committed, and any definitive-looking failure invites a retry under a fresh identity.
         const failed = (state: MemoryState): Invoked => ({
             ok: false,
             state:
@@ -384,9 +384,9 @@ export class KernelClient {
                     : nonAvailable(state),
         });
         const absent = (): Invoked => failed(unavailable("daemon_absent"));
-        // The identity is read once, so every attempt — the first send, a reissue, a rebound route — carries the identity the call began under; a transport whose connection moved refuses it instead of delivering another daemon's tokens. commentlint: allow(JUDGE)
+        // The identity is read once, so every attempt — the first send, a reissue, a rebound route — carries the identity the call began under; a transport whose connection moved refuses it instead of delivering another daemon's tokens.
         const connectionIdentity = this.transport.connectionIdentity?.();
-        // The caller's signal or the deadline ended the attempt. After a reissued unknown outcome on a write, or when the interrupted attempt itself threw one, the request may still be applied; a plain cancellation would invite a retry under a fresh identity. commentlint: allow(JUDGE)
+        // The caller's signal or the deadline ended the attempt. After a reissued unknown outcome on a write, or when the interrupted attempt itself threw one, the request may still be applied; a plain cancellation would invite a retry under a fresh identity.
         const interrupted = (unknownOutcome = false): Invoked => ({
             ok: false,
             state:
@@ -415,10 +415,10 @@ export class KernelClient {
                     ...(connectionIdentity === undefined ? {} : { connectionIdentity }),
                 };
             } catch (error) {
-                // A refused identity means the tokens this body carried belong to a daemon that is gone; they are dropped before any exit, including a cancellation, so the caller's next body is not built from them. commentlint: allow(JUDGE)
+                // A refused identity means the tokens this body carried belong to a daemon that is gone; they are dropped before any exit, including a cancellation, so the caller's next body is not built from them.
                 const identityChanged = error instanceof ConnectionIdentityChangedError;
                 if (identityChanged) this.tokens.dropProject(this.projectRoot);
-                // An `outcome_unknown` thrown from a write while cancellation or the deadline fires must keep its classification: the daemon may have committed, and reporting an ordinary cancellation would claim a definitively unapplied request. commentlint: allow(JUDGE)
+                // An `outcome_unknown` thrown from a write while cancellation or the deadline fires must keep its classification: the daemon may have committed, and reporting an ordinary cancellation would claim a definitively unapplied request.
                 const unknownOutcome = isHostCallError(error) && error.kind === "outcome_unknown";
                 if (options.signal?.aborted || options.deadline.isExpired()) {
                     return interrupted(unknownOutcome);
@@ -445,7 +445,7 @@ export class KernelClient {
                                 ...bounds(),
                             });
                         } catch {
-                            // A rebind cut short by the caller or the budget is a cancellation; any other failure leaves the route unbound and the daemon unreachable. commentlint: allow(JUDGE)
+                            // A rebind cut short by the caller or the budget is a cancellation; any other failure leaves the route unbound and the daemon unreachable.
                             if (options.signal?.aborted || options.deadline.isExpired()) {
                                 return interrupted();
                             }
@@ -482,7 +482,7 @@ export class KernelClient {
                 : { connectionIdentity: invoked.connectionIdentity };
         const parsed = parse(invoked.raw);
         if (parsed.state.kind !== "available" || parsed.payload === null) {
-            // A daemon-produced negative state proves a mutating request was not applied, but an undecodable response does not: the commit may have succeeded and only its receipt was lost to a malformed or version-skewed payload, so a definitive-looking error would invite a fresh-identity retry. commentlint: allow(JUDGE)
+            // A daemon-produced negative state proves a mutating request was not applied, but an undecodable response does not: the commit may have succeeded and only its receipt was lost to a malformed or version-skewed payload, so a definitive-looking error would invite a fresh-identity retry.
             const undecodable =
                 (parsed.state.kind === "invalid" && parsed.state.reason === "unrecognized_state") ||
                 (parsed.state.kind === "available" && parsed.payload === null);
@@ -508,7 +508,7 @@ export class KernelClient {
         const { result, connectionIdentity } = await this.call(
             "kernel.read",
             () => body,
-            // Reads have no side effects, so an ambiguous transport outcome reissues once instead of answering daemon_absent for a transient drop. commentlint: allow(JUDGE)
+            // Reads have no side effects, so an ambiguous transport outcome reissues once instead of answering daemon_absent for a transient drop.
             { signal: args.signal, deadline, reissuable: true },
             parseReadResponse,
         );
@@ -578,7 +578,7 @@ export class KernelClient {
             ...(args.assertedTaintClass === undefined
                 ? {}
                 : { asserted_taint_class: args.assertedTaintClass }),
-            // The daemon spends `deadline_ms` waiting for its writer, so each attempt sends what is left of the caller's budget after the refresh read, an earlier attempt, or a reissue consumed part of it; the original total would let a late attempt park a daemon thread past the client's own deadline. commentlint: allow(JUDGE)
+            // The daemon spends `deadline_ms` waiting for its writer, so each attempt sends what is left of the caller's budget after the refresh read, an earlier attempt, or a reissue consumed part of it; the original total would let a late attempt park a daemon thread past the client's own deadline.
             ...(args.deadlineMs === undefined
                 ? {}
                 : { deadline_ms: Math.max(1, Math.floor(deadline.remainingMs())) }),
@@ -597,7 +597,7 @@ export class KernelClient {
 
     private collectTokens(args: CommitArgs): { tokens: MutationToken[]; missing: string[] } {
         if (args.tokens !== undefined) return { tokens: [...args.tokens], missing: [] };
-        // Reads name the transport's current identity so the store drops tokens minted under a previous connection before they can enter this body. commentlint: allow(JUDGE)
+        // Reads name the transport's current identity so the store drops tokens minted under a previous connection before they can enter this body.
         const connectionIdentity = this.transport.connectionIdentity?.();
         const tokens: MutationToken[] = [];
         const missing: string[] = [];
@@ -622,7 +622,7 @@ export class KernelClient {
     }
 
     /**
-     * A filtered read bypasses the daemon's newest-rows cap but remains subject to its byte budget, which keeps a newest-first prefix; so an id absent from a truncated batch is re-read alone before it is judged, since one row always fits the budget. commentlint: allow(JUDGE)
+     * A filtered read bypasses the daemon's newest-rows cap but remains subject to its byte budget, which keeps a newest-first prefix; so an id absent from a truncated batch is re-read alone before it is judged, since one row always fits the budget.
      * Returns the first non-available state, or `null` once every id has been read to a complete snapshot.
      */
     private async refreshTokens(
@@ -640,7 +640,7 @@ export class KernelClient {
                 const single =
                     batch.length === 1 ? read : await this.readTargets([id], args, deadline);
                 if (!isAvailable(single)) return single.state;
-                // A one-object filter cannot exceed the byte budget, so a truncated empty reply is a daemon contract violation, not proof of retraction. commentlint: allow(JUDGE)
+                // A one-object filter cannot exceed the byte budget, so a truncated empty reply is a daemon contract violation, not proof of retraction.
                 if (single.truncated && single.rows.length === 0) {
                     return nonAvailable(invalid("internal"));
                 }
@@ -650,7 +650,7 @@ export class KernelClient {
     }
 
     /**
-     * A target still absent after a complete refresh read is not live in this project's scope (retired, hidden, or foreign), so the envelope is never sent: the daemon checks only the tokens it receives and would otherwise mutate the object unfenced. commentlint: allow(JUDGE)
+     * A target still absent after a complete refresh read is not live in this project's scope (retired, hidden, or foreign), so the envelope is never sent: the daemon checks only the tokens it receives and would otherwise mutate the object unfenced.
      */
     private async commitOnce(args: CommitArgs, deadline: Deadline): Promise<CommitResult> {
         let { tokens, missing } = this.collectTokens(args);
@@ -678,11 +678,11 @@ export class KernelClient {
     }
 
     /**
-     * One idempotent envelope. A target without a cached token triggers one ungated `explicit_search` read first; `snapshot_diverged` drops the project's tokens and reruns the read-then-commit once. commentlint: allow(JUDGE)
-     * Caller-supplied tokens are sent verbatim, so their divergence is returned as-is: no re-read can change them, and a second identical send could only replace the definitive state with an ambiguous transport outcome. commentlint: allow(JUDGE)
+     * One idempotent envelope. A target without a cached token triggers one ungated `explicit_search` read first; `snapshot_diverged` drops the project's tokens and reruns the read-then-commit once.
+     * Caller-supplied tokens are sent verbatim, so their divergence is returned as-is: no re-read can change them, and a second identical send could only replace the definitive state with an ambiguous transport outcome.
      */
     async commit(input: CommitArgs): Promise<CommitResult> {
-        // Every attempt of one call must send the identity and digest of the first: a reissue or divergence retry that read a caller-mutated argument object would leave as a second operation. The operations are cloned through JSON, which is the form the wire and the digest both see. commentlint: allow(JUDGE)
+        // Every attempt of one call must send the identity and digest of the first: a reissue or divergence retry that read a caller-mutated argument object would leave as a second operation. The operations are cloned through JSON, which is the form the wire and the digest both see.
         const args: CommitArgs = {
             ...input,
             operations: JSON.parse(JSON.stringify(input.operations)) as CommitOperation[],
@@ -690,12 +690,12 @@ export class KernelClient {
                 ? {}
                 : { tokens: input.tokens.map((token) => ({ ...token })) }),
         };
-        // The key fields are hashed under the separator; a field carrying it is refused here so the derivation's `RangeError` never escapes into the tool. commentlint: allow(JUDGE)
+        // The key fields are hashed under the separator; a field carrying it is refused here so the derivation's `RangeError` never escapes into the tool.
         const producer = args.producer ?? this.producer;
         if (![producer, args.actor].every(isSeparatorFree)) {
             return { state: nonAvailable(invalid("invalid_input")) };
         }
-        // The daemon refuses an envelope over its limits before any kernel work; refusing here spares the refresh reads that would otherwise spend the budget on a doomed envelope. commentlint: allow(JUDGE)
+        // The daemon refuses an envelope over its limits before any kernel work; refusing here spares the refresh reads that would otherwise spend the budget on a doomed envelope.
         if (
             args.operations.length > MAX_COMMIT_OPERATIONS ||
             (args.tokens?.length ?? 0) > MAX_COMMIT_TOKENS
@@ -716,7 +716,7 @@ export class KernelClient {
         const { result } = await this.call(
             "kernel.commit",
             () => this.commitBody(args, [], deadline, true),
-            // A preview writes nothing, so an ambiguous transport outcome reissues once, as a read does. commentlint: allow(JUDGE)
+            // A preview writes nothing, so an ambiguous transport outcome reissues once, as a read does.
             { signal: args.signal, deadline, reissuable: true },
             parsePreviewResponse,
         );
@@ -729,7 +729,7 @@ export class KernelClient {
      * serving the object would change. No receipt is created, so the same
      * identity is still free for `commit`.
      *
-     * Previews carry no tokens or `as_of`, so after a connection identity refusal the same body is sent once more against the new connection, as a diverged read re-reads the tip. commentlint: allow(JUDGE)
+     * Previews carry no tokens or `as_of`, so after a connection identity refusal the same body is sent once more against the new connection, as a diverged read re-reads the tip.
      */
     async previewDispositions(input: PreviewArgs): Promise<PreviewResult> {
         const args: PreviewArgs = {

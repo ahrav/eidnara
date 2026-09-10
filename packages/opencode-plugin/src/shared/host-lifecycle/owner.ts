@@ -23,7 +23,7 @@ const MAX_PATH_COMPONENTS = 128;
 const LAUNCHER_REL_PATH = "payload/bin/eidnara-host";
 /** The manifest schema `eidnara-host` accepts in trusted mode. */
 const PAYLOAD_MANIFEST_SCHEMA = "eidnara.payload-manifest/v1";
-/** Key sets `deny_unknown_fields` enforces on `TrustedPayloadManifest` in `crates/daemon/src/bin/eidnara-host.rs`. commentlint: allow(JUDGE) */
+/** Key sets `deny_unknown_fields` enforces on `TrustedPayloadManifest` in `crates/daemon/src/bin/eidnara-host.rs`. */
 const MANIFEST_KEYS = [
     "schema",
     "release",
@@ -193,9 +193,9 @@ function readNoFollowBytes(path: string, label: string): Buffer {
 }
 
 /**
- * Input `JSON.parse` accepts that `serde_json::from_slice::<TrustedPayloadManifest>` rejects. `text` has already passed `JSON.parse`, so the scan assumes well-formed input. commentlint: allow(JUDGE)
+ * Input `JSON.parse` accepts that `serde_json::from_slice::<TrustedPayloadManifest>` rejects. `text` has already passed `JSON.parse`, so the scan assumes well-formed input.
  *
- * A repeated key: `JSON.parse` keeps the last, serde fails on the duplicate. A number outside f64: `JSON.parse` yields `Infinity`, serde fails. A `size` with a fraction or exponent: `JSON.parse` yields the plain integer, serde's `u64` rejects a float. A lone surrogate escape such as `\ud800`: `JSON.parse` yields an ill-formed string, serde fails because the value is not UTF-8. Nesting past serde's recursion limit: `JSON.parse` has no fixed limit, serde fails. commentlint: allow(JUDGE)
+ * A repeated key: `JSON.parse` keeps the last, serde fails on the duplicate. A number outside f64: `JSON.parse` yields `Infinity`, serde fails. A `size` with a fraction or exponent: `JSON.parse` yields the plain integer, serde's `u64` rejects a float. A lone surrogate escape such as `\ud800`: `JSON.parse` yields an ill-formed string, serde fails because the value is not UTF-8. Nesting past serde's recursion limit: `JSON.parse` has no fixed limit, serde fails.
  */
 function serdeRejection(text: string): string | null {
     // One frame per open container: a key set for an object, `null` for an array.

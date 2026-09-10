@@ -24,7 +24,7 @@ mod reference {
         placeholder: String,
         original: String,
         /// The original is input that spelled a placeholder; it is restored as
-        /// itself and never expanded, since it names no minted region. commentlint: allow(JUDGE)
+        /// itself and never expanded, since it names no minted region.
         literal: bool,
     }
 

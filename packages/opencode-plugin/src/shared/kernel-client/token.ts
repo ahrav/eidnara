@@ -1,6 +1,6 @@
 import type { MutationToken, ReadRow } from "./wire";
 
-/** The token operations `KernelClient` performs. `TokenCache` holds them directly; a caller may hand the client a view whose methods resolve to whichever cache currently belongs with the client's transport. Writes and reads carry the transport's `connectionIdentity` so a store can refuse to hand a body tokens minted under a connection the transport no longer represents. commentlint: allow(JUDGE) */
+/** The token operations `KernelClient` performs. `TokenCache` holds them directly; a caller may hand the client a view whose methods resolve to whichever cache currently belongs with the client's transport. Writes and reads carry the transport's `connectionIdentity` so a store can refuse to hand a body tokens minted under a connection the transport no longer represents. */
 export interface TokenStore {
     remember(
         projectRoot: string,
@@ -47,7 +47,7 @@ export class TokenCache implements TokenStore {
         return bucket;
     }
 
-    /** Drops the project when `connectionIdentity` names a connection other than the one its tokens came from; an access without an identity leaves the binding alone. commentlint: allow(JUDGE) */
+    /** Drops the project when `connectionIdentity` names a connection other than the one its tokens came from; an access without an identity leaves the binding alone. */
     private fence(projectRoot: string, connectionIdentity: string | undefined): void {
         if (connectionIdentity === undefined) return;
         const bound = this.identity.get(projectRoot);

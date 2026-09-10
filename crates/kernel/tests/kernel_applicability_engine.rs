@@ -1268,6 +1268,28 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
                 "escaped-key.toml",
                 "\"\\u0065nabled\" = true\n\"\\U00000074ab\".leaf = 1\n",
             ),
+            (
+                "multiline-array.toml",
+                "values = [\n  { nested = true },\n  \"ghost = 1\",\n  [\"phantom\"]\n]\n[after]\nflag = true\n",
+            ),
+            (
+                "bracket-key.toml",
+                "[\"a]b\"]\nport = 1\n[[\"c]]d\".e]]\nid = 1\n",
+            ),
+            ("open-bracket.ini", "pattern = [abc\nenabled = true\n"),
+            (
+                "open-table.toml",
+                "server = { enabled = true\nflag = true\n",
+            ),
+            (
+                "apostrophe-section.ini",
+                "[owner's settings]\nenabled = true\n",
+            ),
+            ("quote-led-section.ini", "['80s settings]\nenabled = true\n"),
+            (
+                "unclosed-string-in-array.toml",
+                "values = [\n  \"unclosed\n  key = 1\n]\n",
+            ),
         ],
         "base",
         1,
@@ -1330,13 +1352,13 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("array.toml", "values", ApplicabilityState::Current),
         ("array.toml", "enabled", ApplicabilityState::Stale),
         // A string element of an array nested inside two inline tables is
-        // content, not a key. commentlint: allow(JUDGE)
+        // content, not a key.
         ("deep-array.toml", "child", ApplicabilityState::Current),
         ("deep-array.toml", "options", ApplicabilityState::Current),
         ("deep-array.toml", "flag", ApplicabilityState::Current),
         ("deep-array.toml", "phantom", ApplicabilityState::Stale),
         // `[server]` alone also parses as a YAML flow sequence; the table
-        // header reading defines the key. commentlint: allow(JUDGE)
+        // header reading defines the key.
         ("header-only.toml", "server", ApplicabilityState::Current),
         ("header-only.toml", "absent", ApplicabilityState::Stale),
         ("header-comment.toml", "server", ApplicabilityState::Current),
@@ -1345,6 +1367,69 @@ fn a_toml_multiline_string_leaves_the_key_undecided() {
         ("escaped-key.toml", "u0065nabled", ApplicabilityState::Stale),
         ("escaped-key.toml", "tab", ApplicabilityState::Current),
         ("escaped-key.toml", "leaf", ApplicabilityState::Current),
+        // A `[` line inside a multi-line array is an element, not a table
+        // header; an inline table inside it still defines its keys, and the
+        // table header after the array closes is read again.
+        (
+            "multiline-array.toml",
+            "values",
+            ApplicabilityState::Current,
+        ),
+        ("multiline-array.toml", "phantom", ApplicabilityState::Stale),
+        (
+            "multiline-array.toml",
+            "nested",
+            ApplicabilityState::Current,
+        ),
+        ("multiline-array.toml", "ghost", ApplicabilityState::Stale),
+        ("multiline-array.toml", "after", ApplicabilityState::Current),
+        ("multiline-array.toml", "flag", ApplicabilityState::Current),
+        // A closing bracket inside a quoted header segment is part of the key.
+        ("bracket-key.toml", "a]b", ApplicabilityState::Current),
+        ("bracket-key.toml", "port", ApplicabilityState::Current),
+        ("bracket-key.toml", "c]]d", ApplicabilityState::Current),
+        ("bracket-key.toml", "e", ApplicabilityState::Current),
+        ("bracket-key.toml", "a", ApplicabilityState::Stale),
+        // An unclosed container consumes every following line as value
+        // content, so the scan cannot treat them as keys.
+        ("open-bracket.ini", "enabled", ApplicabilityState::Uncertain),
+        ("open-bracket.ini", "pattern", ApplicabilityState::Uncertain),
+        ("open-table.toml", "flag", ApplicabilityState::Uncertain),
+        // A quote inside a bare header segment is literal, as INI allows.
+        (
+            "apostrophe-section.ini",
+            "owner's settings",
+            ApplicabilityState::Current,
+        ),
+        (
+            "apostrophe-section.ini",
+            "enabled",
+            ApplicabilityState::Current,
+        ),
+        // A quote that never closes on its line is literal even where a TOML
+        // quoted segment could start.
+        (
+            "quote-led-section.ini",
+            "'80s settings",
+            ApplicabilityState::Current,
+        ),
+        (
+            "quote-led-section.ini",
+            "enabled",
+            ApplicabilityState::Current,
+        ),
+        // A string left open on a continuation line of a multi-line container
+        // leaves the rest of the document unreadable.
+        (
+            "unclosed-string-in-array.toml",
+            "key",
+            ApplicabilityState::Uncertain,
+        ),
+        (
+            "unclosed-string-in-array.toml",
+            "values",
+            ApplicabilityState::Uncertain,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -3100,7 +3185,7 @@ fn a_real_uncommitted_edit_still_trips_the_dirty_gate() {
     );
 }
 
-/// An assume-valid index entry suppresses Git's worktree check; modified bytes still make dependent objects DirtyTreeUncertain. commentlint: allow(JUDGE)
+/// An assume-valid index entry suppresses Git's worktree check; modified bytes still make dependent objects DirtyTreeUncertain.
 #[test]
 fn an_edited_assume_valid_file_still_trips_the_dirty_gate() {
     use gix::index::entry::Flags;

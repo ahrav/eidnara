@@ -33,7 +33,7 @@ const ENTRY = join(SRC, "index.ts");
 const TUI_ENTRY = join(SRC, "tui/index.tsx");
 const ROOTS = [ENTRY, TUI_ENTRY, ...TESTS];
 
-/** Not-ported subsystems; a path under any of them reachable from a bundle root is residue. The bundler names inputs relative to `SRC`, so a subsystem directly under `src` has no leading slash and the prefix must also accept the start of the path; the file alternative accepts both extensions `sourceFiles` scans. commentlint: allow(JUDGE) */
+/** Not-ported subsystems; a path under any of them reachable from a bundle root is residue. The bundler names inputs relative to `SRC`, so a subsystem directly under `src` has no leading slash and the prefix must also accept the start of the path; the file alternative accepts both extensions `sourceFiles` scans. */
 const NOT_PORTED =
     /(^|\/)(memory|dreamer|storage[^/]*|search[^/]*|embedding[^/]*|git-commits|git-anchors|user-memory)(\/|\.tsx?$)/;
 

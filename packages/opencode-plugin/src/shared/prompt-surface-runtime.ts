@@ -105,9 +105,9 @@ function markerCount(content: string): number {
 
 class GuidanceOversizedError extends Error {}
 
-// The size seen by an earlier `stat` cannot bound this read because the file can change between the two calls. commentlint: allow(JUDGE)
-// One descriptor opened with `O_NOFOLLOW | O_NONBLOCK` makes a swapped-in symlink fail the open and a swapped-in FIFO fail the descriptor type check instead of blocking. commentlint: allow(JUDGE)
-// The bound is enforced on the bytes read, so a file growing under the read still throws `GuidanceOversizedError`. commentlint: allow(JUDGE)
+// The size seen by an earlier `stat` cannot bound this read because the file can change between the two calls.
+// One descriptor opened with `O_NOFOLLOW | O_NONBLOCK` makes a swapped-in symlink fail the open and a swapped-in FIFO fail the descriptor type check instead of blocking.
+// The bound is enforced on the bytes read, so a file growing under the read still throws `GuidanceOversizedError`.
 function readBoundedUtf8(path: string, limit: number): string {
     const flags =
         fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);

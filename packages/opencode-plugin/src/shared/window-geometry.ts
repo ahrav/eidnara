@@ -565,7 +565,6 @@ export function deriveWindowGeometry(
         // Sound narrowing: the early return above requires `softContext` or
         // `input` to be positive, and a positive `input` with a non-positive
         // `softContext` sets `preCarvedInput`, so `softContext` is positive here.
-        // commentlint: allow(JUDGE)
         const window = softContext as number;
         // With an OpenCode overlay, reserve output unless the overlay explicitly
         // states `separate`; the provider table alone does not unlock zero reserve.

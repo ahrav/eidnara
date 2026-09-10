@@ -47,7 +47,7 @@ export function registerCtxMemoryMarkCommand(
                 return;
             }
             const projectRoot = resolveProjectRootDirectory(ctx.cwd);
-            // Pi invalidates a command's `ctx` when its session is replaced or reloaded, so reading it throws once the invoking session is gone; a commit after that would reopen the closed session's daemon route. commentlint: allow(JUDGE)
+            // Pi invalidates a command's `ctx` when its session is replaced or reloaded, so reading it throws once the invoking session is gone; a commit after that would reopen the closed session's daemon route.
             const isCancelled = (): boolean => {
                 try {
                     return resolveSessionId(ctx) !== sessionId;

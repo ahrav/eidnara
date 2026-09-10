@@ -15,7 +15,7 @@ export class MemoryInputError extends Error {
     }
 }
 
-/** Anti-memories age out: a rejected strategy is a warning about a point in time, not a permanent rule, so a write without an explicit expiry gets this horizon. commentlint: allow(JUDGE) */
+/** Anti-memories age out: a rejected strategy is a warning about a point in time, not a permanent rule, so a write without an explicit expiry gets this horizon. */
 export const ANTI_MEMORY_DEFAULT_TTL_MS = 90 * 24 * 60 * 60 * 1_000;
 
 export interface AntiMemoryPayload {
@@ -29,7 +29,7 @@ export interface AntiMemoryPayload {
     rootCause?: string | null;
     recovery?: string | null;
     nonApplicableWhen?: string | null;
-    /** Epoch milliseconds after which the payload no longer surfaces; rides in the rendered text because kernel decisions carry no lifecycle expiry. commentlint: allow(JUDGE) */
+    /** Epoch milliseconds after which the payload no longer surfaces; rides in the rendered text because kernel decisions carry no lifecycle expiry. */
     expiresAt?: number | null;
 }
 
@@ -59,7 +59,7 @@ function optionalText(value: unknown, field: string): string | null {
     return requiredText(value, field);
 }
 
-/** `undefined` and `null` both mean no expiry; anything else must be a positive epoch-milliseconds integer. commentlint: allow(JUDGE) */
+/** `undefined` and `null` both mean no expiry; anything else must be a positive epoch-milliseconds integer. */
 function optionalEpochMs(value: unknown, field: string): number | null {
     if (value === undefined || value === null) return null;
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
@@ -74,7 +74,7 @@ function antiMemoryExpiry(payload: AntiMemoryPayload): number | null {
     return optionalEpochMs(payload.expiresAt, "expiresAt");
 }
 
-/** `true` once the payload's expiry horizon has passed; a payload without one never expires. commentlint: allow(JUDGE) */
+/** `true` once the payload's expiry horizon has passed; a payload without one never expires. */
 export function antiMemoryExpired(payload: AntiMemoryPayload, nowMs: number): boolean {
     const expiresAt = antiMemoryExpiry(payload);
     return expiresAt !== null && expiresAt <= nowMs;
@@ -97,7 +97,7 @@ export function normalizeAntiMemoryPayload(payload: AntiMemoryPayload): StoredAn
     };
 }
 
-/** Renders the payload as given: an absent expiry produces no `Expires at` line rather than a defaulted one, because the output is a deterministic function of its input that round-trips through `parseAntiMemoryContent` byte for byte. A caller that wants the default horizon applies `ANTI_MEMORY_DEFAULT_TTL_MS` before rendering. commentlint: allow(JUDGE) */
+/** Renders the payload as given: an absent expiry produces no `Expires at` line rather than a defaulted one, because the output is a deterministic function of its input that round-trips through `parseAntiMemoryContent` byte for byte. A caller that wants the default horizon applies `ANTI_MEMORY_DEFAULT_TTL_MS` before rendering. */
 export function renderAntiMemoryContent(payload: AntiMemoryPayload): string {
     const stored = normalizeAntiMemoryPayload(payload);
     const expiresAt = antiMemoryExpiry(payload);

@@ -567,7 +567,6 @@ trait ProducerConnection: Send + Sync {
     /// Closing a route the connection no longer tracks returns `Ok(())`,
     /// matching the client's idempotent close, so cleanup after a cancelled
     /// open or a closed connection cannot fail spuriously.
-    /// commentlint: allow(JUDGE)
     async fn close_route(&self, route: RouteHandle) -> Result<(), HistorianProducerError>;
     async fn close(&self) -> Result<(), HistorianProducerError>;
 }
@@ -578,7 +577,7 @@ trait ProducerConnection: Send + Sync {
 /// fenced route behind each handle. On `request` and `request_stream`, a handle
 /// it never opened, or one already closed, fails the way the client fails a
 /// route from another generation: a `route_not_live` call error whose outcome
-/// is `NotSent`. commentlint: allow(JUDGE)
+/// is `NotSent`.
 struct ManagedConnection {
     client: Client,
     routes: Mutex<HashMap<RouteHandle, ClientRoute>>,
@@ -661,7 +660,7 @@ impl ProducerConnection for ManagedConnection {
         // The client's own `close_route` is idempotent and its `close` drains
         // every route, so a handle absent from the map is already closed.
         // Failing it as `route_not_live` would turn cleanup after a cancelled
-        // open into a spurious error. commentlint: allow(JUDGE)
+        // open into a spurious error.
         let Some(fenced) = self.routes().get(&route).copied() else {
             return Ok(());
         };
@@ -736,7 +735,7 @@ fn map_client_error(error: ClientError) -> HistorianProducerError {
 /// The host scopes handler state by the `RouteIdentity` a route was opened with,
 /// and session-level methods such as `session.delete` carry no session in their
 /// body, so a handle opened for one session must never carry another session's
-/// requests. commentlint: allow(JUDGE)
+/// requests.
 #[derive(Debug, Clone)]
 struct BoundRoute {
     session: String,
@@ -1064,7 +1063,6 @@ impl HistorianProducer {
     /// Cancellation closes the connection, invalidating handles cached in
     /// `command_route` and `subscribe_route`; stale handles fail with
     /// `route_not_live` on the next call, not with a cancellation error.
-    /// commentlint: allow(JUDGE)
     async fn open_bound_route(&self) -> Result<BoundRoute, HistorianProducerError> {
         let semantic = self.semantic_identity()?;
         let session = semantic.session.clone();
@@ -1503,7 +1501,7 @@ mod tests {
         closed_routes: Vec<RouteHandle>,
         // Routes opened on this connection and not yet closed, mirroring
         // `ManagedConnection`'s handle map so the fake exercises the same
-        // close-route liveness contract. commentlint: allow(JUDGE)
+        // close-route liveness contract.
         live_routes: HashSet<RouteHandle>,
         close_route_errors: VecDeque<HistorianProducerError>,
         close_calls: usize,
@@ -1570,7 +1568,7 @@ mod tests {
         async fn close_route(&self, route: RouteHandle) -> Result<(), HistorianProducerError> {
             let mut state = self.state.lock().unwrap();
             // Mirrors `ManagedConnection`: a route this connection no longer
-            // tracks is already closed. commentlint: allow(JUDGE)
+            // tracks is already closed.
             if !state.live_routes.contains(&route) {
                 return Ok(());
             }

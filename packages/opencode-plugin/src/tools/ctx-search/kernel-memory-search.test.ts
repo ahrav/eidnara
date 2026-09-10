@@ -403,7 +403,7 @@ describe("readObjectRowsChunked snapshot pin", () => {
             ok: false,
             state: { kind: "unavailable", reason: "snapshot_diverged" },
         });
-        // The client re-reads the tip once after the daemon answers the pin as diverged; the chunked read rejects that tip reply instead of mixing it in. commentlint: allow(JUDGE)
+        // The client re-reads the tip once after the daemon answers the pin as diverged; the chunked read rejects that tip reply instead of mixing it in.
         expect(asOfBodies(transport)).toEqual([null, 4, null]);
     });
 });

@@ -32,7 +32,7 @@ export interface ContextUsageEntry {
     newestResponseID?: string;
 }
 
-/** Returns whether `messageID` predates the newest assistant response, with or without usage tokens, using the persisted response when in-memory state is unavailable. OpenCode message ids are time-ordered, so id order tracks response order. commentlint: allow(JUDGE) */
+/** Returns whether `messageID` predates the newest assistant response, with or without usage tokens, using the persisted response when in-memory state is unavailable. OpenCode message ids are time-ordered, so id order tracks response order. */
 export function isOlderThanNewestResponse(
     contextUsageMap: BoundedSessionMap<ContextUsageEntry>,
     sessionId: string,
@@ -177,7 +177,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             );
 
             if (!hasUsageTokens) {
-                // A response without usage is still the newest response; an edit to an older row must not displace the live model or usage while it exists. commentlint: allow(JUDGE)
+                // A response without usage is still the newest response; an edit to an older row must not displace the live model or usage while it exists.
                 const entry = deps.contextUsageMap.get(info.sessionID);
                 if (
                     entry &&
@@ -273,12 +273,12 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 });
                 // The removed row may sit below the work-metrics watermark; the next poll re-reads the session.
                 clearWorkMetricsCarry(info.sessionID);
-                // Live usage describes one assistant response; once that response is gone, so is the usage, and the sticky snapshot must not restore it. commentlint: allow(JUDGE)
+                // Live usage describes one assistant response; once that response is gone, so is the usage, and the sticky snapshot must not restore it.
                 if (deps.contextUsageMap.get(info.sessionID)?.messageID === info.messageID) {
                     deps.contextUsageMap.delete(info.sessionID);
                     clearSidebarSnapshotCache(info.sessionID);
                 }
-                // The live model follows every assistant response, including one with no usage tokens, so a removal at or after the newest usage response re-derives it from the newest remaining persisted response. commentlint: allow(JUDGE)
+                // The live model follows every assistant response, including one with no usage tokens, so a removal at or after the newest usage response re-derives it from the newest remaining persisted response.
                 if (
                     !isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
                 ) {

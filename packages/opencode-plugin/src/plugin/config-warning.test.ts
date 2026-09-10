@@ -5,7 +5,7 @@ import { createConfigWarningDelivery, formatConfigWarning } from "./config-warni
 
 const WARNING = formatConfigWarning(["cache_ttl must be a duration"]);
 
-/** A rejecting `prompt` yields the `failed` disposition; the default-title `skipped` path waits on a production backoff and is covered by `safe-notification-target.test.ts`. commentlint: allow(JUDGE) */
+/** A rejecting `prompt` yields the `failed` disposition; the default-title `skipped` path waits on a production backoff and is covered by `safe-notification-target.test.ts`. */
 function client(options: { title: string; sessions?: string[]; promptRejects?: boolean }) {
     const prompt = mock(async () => {
         if (options.promptRejects) throw new Error("prompt unavailable");

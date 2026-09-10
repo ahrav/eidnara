@@ -52,7 +52,7 @@ fn keyword_coverage_holds(rule: &Rule) -> bool {
     })
 }
 
-/// The evaluator drops a keyed candidate unless its key carries one of `evaluator::SECRET_KEY_WORDS`, so anchors that cover them make absent anchors sufficient to reject every candidate. commentlint: allow(JUDGE)
+/// The evaluator drops a keyed candidate unless its key carries one of `evaluator::SECRET_KEY_WORDS`, so anchors that cover them make absent anchors sufficient to reject every candidate.
 fn key_word_coverage_holds(rule: &Rule) -> bool {
     if rule.declaration.key_group.is_none() {
         return false;

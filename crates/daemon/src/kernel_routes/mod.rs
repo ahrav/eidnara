@@ -353,7 +353,7 @@ fn open_failure_kind(error: KernelError) -> UnavailableKind {
 
 /// A worker panic is reported as a failed open rather than re-raised: the
 /// open task owns the phase transition, and a panic would end it while the
-/// phase still reads `Starting`. commentlint: allow(JUDGE)
+/// phase still reads `Starting`.
 async fn open_once(root: PathBuf) -> Result<KernelStore, KernelError> {
     match tokio::task::spawn_blocking(move || KernelStore::open(&root)).await {
         Ok(result) => result,

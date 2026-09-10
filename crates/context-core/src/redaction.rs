@@ -264,7 +264,7 @@ impl Redactor {
             while !valid.is_empty() {
                 let take = char_floor(valid, MAX_REDACTABLE_BYTES - buffer.len());
                 if take == 0 {
-                    // Sliding a full buffer frees at least one character because `WINDOW_OVERLAP_BYTES * 2 <= MAX_REDACTABLE_BYTES`. commentlint: allow(JUDGE)
+                    // Sliding a full buffer frees at least one character because `WINDOW_OVERLAP_BYTES * 2 <= MAX_REDACTABLE_BYTES`.
                     debug_assert!(window_advance(&buffer) > 0);
                     if scan.slide(&mut buffer, &mut start)? {
                         return Ok(true);

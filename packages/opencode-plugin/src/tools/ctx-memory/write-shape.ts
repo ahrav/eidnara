@@ -25,7 +25,7 @@ export function requireTaxonomyCategory(category: string | undefined): string | 
     return category;
 }
 
-/** The wrappers fall back to unvalidated raw arguments when schema parsing fails, so each optional string field is type-checked before any `.trim()` call can throw a TypeError outside the input-error path. `null` stays admitted: every downstream read treats it as absent. commentlint: allow(JUDGE) */
+/** The wrappers fall back to unvalidated raw arguments when schema parsing fails, so each optional string field is type-checked before any `.trim()` call can throw a TypeError outside the input-error path. `null` stays admitted: every downstream read treats it as absent. */
 export function assertCtxMemoryFieldTypes(args: CtxMemoryWriteShape): void {
     for (const field of ["content", "category", "reason", "objectId"] as const) {
         const value = (args as Record<string, unknown>)[field];
@@ -35,7 +35,7 @@ export function assertCtxMemoryFieldTypes(args: CtxMemoryWriteShape): void {
     }
 }
 
-/** `null` in `content` or `antiMemory` counts as absent on both arms, the same admission the field-type check grants, so a raw-argument anti-memory create carrying `content: null` is a valid anti-memory write rather than a mixed one. commentlint: allow(JUDGE) */
+/** `null` in `content` or `antiMemory` counts as absent on both arms, the same admission the field-type check grants, so a raw-argument anti-memory create carrying `content: null` is a valid anti-memory write rather than a mixed one. */
 export function assertCtxMemoryWriteShape(args: CtxMemoryWriteShape): void {
     assertCtxMemoryFieldTypes(args);
     if (args.action !== "create" && args.action !== "revise") return;

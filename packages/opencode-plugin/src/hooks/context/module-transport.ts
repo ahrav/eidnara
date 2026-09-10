@@ -724,7 +724,7 @@ export class HostModuleTransport {
         signal?: AbortSignal;
         /** `call()` does not retry after reconnecting; callers rebuild for the new connection. */
         generationSensitive?: boolean;
-        /** The connection generation the body was built under. Checked after lane admission and route settlement, right before the send, so a turnover that lands while this call waits in the session lane returns `connection_generation_changed` instead of delivering the body to the new connection. commentlint: allow(JUDGE) */
+        /** The connection generation the body was built under. Checked after lane admission and route settlement, right before the send, so a turnover that lands while this call waits in the session lane returns `connection_generation_changed` instead of delivering the body to the new connection. */
         expectedGeneration?: number;
         /** Producer-backed calls can outlive the default transport budget. */
         timeoutMs?: number;
@@ -1104,12 +1104,12 @@ export class HostModuleTransport {
         return this.connectionFile;
     }
 
-    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. commentlint: allow(JUDGE) */
+    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. */
     get generation(): number {
         return this.connectionGeneration;
     }
 
-    /** Tears down the live connection, its routes, and cached capabilities so an owner evicting this transport does not strand a socket, channel poller, or ring mappings for the process lifetime. A later call on this instance redials. commentlint: allow(JUDGE) */
+    /** Tears down the live connection, its routes, and cached capabilities so an owner evicting this transport does not strand a socket, channel poller, or ring mappings for the process lifetime. A later call on this instance redials. */
     disconnect(): void {
         void this.invalidateConnection();
     }
@@ -1118,7 +1118,7 @@ export class HostModuleTransport {
         return this.connectionOrigin === "managed-default" && this.demandStart !== undefined;
     }
 
-    /** Evicts and closes the cached route for one `(session, root)` after the daemon answers `route_unbound`. The daemon has no session binding for the channel but the host still owns it; dropping only the cached handle would leave that host route allocated until the connection generation changes, and every recovery would consume another one. The close is not awaited: `HostClient.closeRoute` flushes under its own shutdown deadline, and the caller's deadline does not reach here, so waiting could hold a cancelled kernel call open for seconds. commentlint: allow(JUDGE) */
+    /** Evicts and closes the cached route for one `(session, root)` after the daemon answers `route_unbound`. The daemon has no session binding for the channel but the host still owns it; dropping only the cached handle would leave that host route allocated until the connection generation changes, and every recovery would consume another one. The close is not awaited: `HostClient.closeRoute` flushes under its own shutdown deadline, and the caller's deadline does not reach here, so waiting could hold a cancelled kernel call open for seconds. */
     forgetRoute(sessionId: string, rawProjectRoot: string): void {
         const routeKey = `${sessionId}\0${this.canonicalRoot(rawProjectRoot)}`;
         const existing = this.routes.get(routeKey);
@@ -1145,7 +1145,7 @@ export class HostModuleTransport {
         this.routes.delete(routeKey);
     }
 
-    /** `canonicalRoot` resolves symlinks on every call so a retargeted link keys its new target. Missing roots retain their last resolution, or the input spelling, to avoid request failure or route-key rebinding. The method is public so clients built over this transport can key state by the same root bound to the route. commentlint: allow(JUDGE) */
+    /** `canonicalRoot` resolves symlinks on every call so a retargeted link keys its new target. Missing roots retain their last resolution, or the input spelling, to avoid request failure or route-key rebinding. The method is public so clients built over this transport can key state by the same root bound to the route. */
     canonicalRoot(root: string): string {
         let resolved: string;
         try {
@@ -1428,7 +1428,7 @@ export function createHostModuleClient(connectionFile: string | undefined): Host
     };
 }
 
-/** The daemon client plus the teardown its owner calls when the runtime that created it is disposed. A disposed runtime that only closed its sessions would leave the transport's socket, channel poller, and ring mappings cached for the process lifetime, and a reload with a different connection file would then hold one live transport per reload. commentlint: allow(JUDGE) */
+/** The daemon client plus the teardown its owner calls when the runtime that created it is disposed. A disposed runtime that only closed its sessions would leave the transport's socket, channel poller, and ring mappings cached for the process lifetime, and a reload with a different connection file would then hold one live transport per reload. */
 export interface HostModuleClient extends RustModeModuleClient {
     disconnect(): void;
 }

@@ -138,7 +138,7 @@ fn parse_cron(expression: &str) -> Option<ParsedCron> {
         month: parse_field(tokens[3], 1, 12, false)?,
         dow: parse_field(tokens[4], 0, 7, true)?,
         // Vixie cron sets DOM_STAR/DOW_STAR from a leading `*`, so `*/2` and `*,5`
-        // are unrestricted like a bare `*`. commentlint: allow(JUDGE)
+        // are unrestricted like a bare `*`.
         dom_restricted: !tokens[2].starts_with('*'),
         dow_restricted: !tokens[4].starts_with('*'),
     })
@@ -246,7 +246,7 @@ pub fn next_smart_note_check_due_at<Tz: TimeZone>(
     let bounded = jittered.clamp(SMART_NOTE_CHECK_FLOOR_MS, SMART_NOTE_CHECK_CEILING_MS);
     // A `now` within one interval of `i64::MAX` has no representable next due
     // time; saturating keeps the note in the future rather than wrapping it
-    // negative and making it appear overdue. commentlint: allow(JUDGE)
+    // negative and making it appear overdue.
     now.saturating_add(bounded)
 }
 
@@ -432,7 +432,7 @@ fn reduce_compile<Tz: TimeZone>(
     let artifact = match outcome {
         CompileOutcome::CompilationFailed => {
             // A `failing` note's count is the check-phase tally that triggered reauthoring,
-            // so compilation attempts start from zero. commentlint: allow(JUDGE)
+            // so compilation attempts start from zero.
             let prior_failures = if pre.check_status == "failing" {
                 0
             } else {

@@ -21,7 +21,7 @@ export interface SessionDirectoryDeps {
     directory?: string;
     /** Caches each session's first resolved route root so later daemon calls use the same root. */
     sessionDirectoryBySession?: Map<string, string>;
-    /** The maximum attempt count denotes a completed read; failures carry the earliest retry time. commentlint: allow(JUDGE) */
+    /** The maximum attempt count denotes a completed read; failures carry the earliest retry time. */
     sessionMetadataReadStateBySession?: Map<string, SessionMetadataReadState>;
     /** Tracks sessions whose directory response has a non-empty string `parentID`. */
     subagentSessions?: Set<string>;
@@ -42,7 +42,7 @@ export function knownSessionDirectory(deps: SessionDirectoryDeps, sessionId: str
  * The daemon keys session state by `(session, project_root)`, so all calls for one session use one
  * directory. A missing, failed, or slow read pins the fallback directory so later successful reads
  * cannot change the daemon route. Child classification is independent of routing and gets one
- * retry after a failed first read. commentlint: allow(JUDGE)
+ * retry after a failed first read.
  */
 export async function resolveSessionDirectory(
     deps: SessionDirectoryDeps,

@@ -20,7 +20,7 @@ use crate::{
 ///
 /// `NOTICE` records the Gossip-rs corpus digest this document is adapted from;
 /// the `facebook-page-access-token` character class is spelled `EAA[CM]` here,
-/// the same two-letter set as upstream in the other order. commentlint: allow(JUDGE)
+/// the same two-letter set as upstream in the other order.
 pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
@@ -379,7 +379,7 @@ impl RuleSet {
         self.value_safelist.is_match(bytes)
     }
 
-    /// Binds rules, profile, and limits into one digest. Evaluator constants are not hashed: `REVISION.semantic_digest_version` binds them and must change with them, and `evaluator::tests::evaluator_constants_are_pinned` trips when one of the tables changes. commentlint: allow(JUDGE)
+    /// Binds rules, profile, and limits into one digest. Evaluator constants are not hashed: `REVISION.semantic_digest_version` binds them and must change with them, and `evaluator::tests::evaluator_constants_are_pinned` trips when one of the tables changes.
     ///
     /// Integer limits use little-endian 64-bit encoding. Rules are sorted before
     /// encoding, so storage order does not affect the digest.

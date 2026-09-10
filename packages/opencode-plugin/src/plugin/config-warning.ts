@@ -1,7 +1,7 @@
 import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
 import { log } from "../shared/logger";
 
-/** Every attempt costs one host SDK read, so an undeliverable warning stops retrying after this many. commentlint: allow(JUDGE) */
+/** Every attempt costs one host SDK read, so an undeliverable warning stops retrying after this many. */
 const MAX_DELIVERY_ATTEMPTS = 10;
 
 export function formatConfigWarning(warnings: readonly string[]): string {
@@ -26,7 +26,7 @@ export interface ConfigWarningDelivery {
     deliverTo(sessionId: string): Promise<void>;
 }
 
-/** Concurrent callers share one in-flight attempt, so the startup timer and a `chat.message` hook cannot persist the warning twice. commentlint: allow(JUDGE) */
+/** Concurrent callers share one in-flight attempt, so the startup timer and a `chat.message` hook cannot persist the warning twice. */
 export function createConfigWarningDelivery(client: unknown, text: string): ConfigWarningDelivery {
     let delivered = false;
     let attempts = 0;

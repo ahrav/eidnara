@@ -86,7 +86,7 @@ export function synapseReadiness(metrics: Record<string, unknown>): SynapseReadi
     if (state === "ready") return { state: "ready", reason: "healthy" };
     if (state === "starting") return { state: "starting", reason: "synapse_starting" };
     if (state === "unsupported") return { state: "unsupported", reason: "synapse_unsupported" };
-    // The fixed profile always carries a Synapse lane and reports `unsupported` as an explicit literal, so an absent component, like a named one with a missing or out-of-set state, is a lane that cannot prove readiness and fails rather than reading as absent or unsupported. commentlint: allow(JUDGE)
+    // The fixed profile always carries a Synapse lane and reports `unsupported` as an explicit literal, so an absent component, like a named one with a missing or out-of-set state, is a lane that cannot prove readiness and fails rather than reading as absent or unsupported.
     return { state: "degraded", reason: "synapse_degraded" };
 }
 
@@ -163,7 +163,7 @@ async function probeManagedStorage(
             });
             assertStorageProbePeer(client, expectedDaemonId);
             const state = storageState(snapshot.metrics);
-            // An abort means no waiter remains; the observation is left indeterminate rather than polled to the deadline. commentlint: allow(JUDGE)
+            // An abort means no waiter remains; the observation is left indeterminate rather than polled to the deadline.
             if (state !== "starting" || monotonicNow() >= deadline || signal?.aborted) return state;
             await new Promise<void>((resolve) => {
                 const onAbort = (): void => {
@@ -172,7 +172,7 @@ async function probeManagedStorage(
                 };
                 const timer = setTimeout(
                     () => {
-                        // `once` removes the listener only when abort fires; the timer path must remove it too or every poll iteration leaves one behind. commentlint: allow(JUDGE)
+                        // `once` removes the listener only when abort fires; the timer path must remove it too or every poll iteration leaves one behind.
                         signal?.removeEventListener("abort", onAbort);
                         resolve();
                     },
@@ -187,7 +187,7 @@ async function probeManagedStorage(
         return monotonicNow() >= deadline ? "starting" : "unavailable";
     } finally {
         // The connected channel holds a referenced interval, so a one-shot caller stays alive until this client closes.
-        // Teardown runs under `closeAsync`'s own shutdown deadline and is not awaited, so a settled state reaches the policy inside its storage budget. commentlint: allow(JUDGE)
+        // Teardown runs under `closeAsync`'s own shutdown deadline and is not awaited, so a settled state reaches the policy inside its storage budget.
         if (client !== undefined) void client.closeAsync().catch(() => undefined);
     }
 }
@@ -311,7 +311,7 @@ async function probeManagedCompatibility(
     try {
         return await readCompatibilityProbe(client, deadline, signal);
     } finally {
-        // Teardown is not awaited: the policy shares this probe across demands and a caller without its own deadline waits for the promise to settle, so a slow Goodbye flush would hold a completed observation for a second aggregate. commentlint: allow(JUDGE)
+        // Teardown is not awaited: the policy shares this probe across demands and a caller without its own deadline waits for the promise to settle, so a slow Goodbye flush would hold a completed observation for a second aggregate.
         void client.closeAsync().catch(() => undefined);
     }
 }
@@ -412,9 +412,9 @@ interface SharedStoragePoll {
 }
 
 /**
- * A waiter that outlives its own budget answers `starting`, the state a private poll of that length would have returned; the shared poll keeps running for the waiters still entitled to wait. `onIdle` fires when the last waiter leaves a poll that has not settled. commentlint: allow(JUDGE)
+ * A waiter that outlives its own budget answers `starting`, the state a private poll of that length would have returned; the shared poll keeps running for the waiters still entitled to wait. `onIdle` fires when the last waiter leaves a poll that has not settled.
  *
- * A waiter whose caller aborts leaves at once, so a canceled demand stops holding the shared poll (and its connection) open for the rest of its budget. commentlint: allow(JUDGE)
+ * A waiter whose caller aborts leaves at once, so a canceled demand stops holding the shared poll (and its connection) open for the rest of its budget.
  */
 function joinStoragePoll(
     poll: SharedStoragePoll,
@@ -464,11 +464,11 @@ function joinStoragePoll(
 }
 
 /**
- * The compatibility probe records the storage state with the reporting daemon ID. A storage probe expecting that daemon answers a terminal `ready` or `unavailable` from the record, so readiness and compatibility describe one observation and the storage probe opens no connection of its own; a `starting` record still polls within the storage budget. commentlint: allow(JUDGE)
+ * The compatibility probe records the storage state with the reporting daemon ID. A storage probe expecting that daemon answers a terminal `ready` or `unavailable` from the record, so readiness and compatibility describe one observation and the storage probe opens no connection of its own; a `starting` record still polls within the storage budget.
  *
- * The record is not consumed on read. The policy shares one compatibility probe across concurrent demands and each of them runs its own storage probe, so a one-shot slot would hand the observation to the first waiter and send every other waiter to open a connection. Each later compatibility probe replaces the record, and a storage probe always follows the compatibility probe of its own demand, so no demand reads a record older than its own observation. commentlint: allow(JUDGE)
+ * The record is not consumed on read. The policy shares one compatibility probe across concurrent demands and each of them runs its own storage probe, so a one-shot slot would hand the observation to the first waiter and send every other waiter to open a connection. Each later compatibility probe replaces the record, and a storage probe always follows the compatibility probe of its own demand, so no demand reads a record older than its own observation.
  *
- * Polls for the same daemon coalesce for the same reason: each connection attaches and prefaults a shared-memory ring, so a burst of demands during startup would otherwise spend admission on redundant probes. The shared poll runs on the hard storage budget rather than the first waiter's remaining budget, so a nearly expired waiter arriving first cannot mint a poll too short for the waiters that join it; each waiter bounds its own wait, and the poll is aborted once no waiter remains. commentlint: allow(JUDGE)
+ * Polls for the same daemon coalesce for the same reason: each connection attaches and prefaults a shared-memory ring, so a burst of demands during startup would otherwise spend admission on redundant probes. The shared poll runs on the hard storage budget rather than the first waiter's remaining budget, so a nearly expired waiter arriving first cannot mint a poll too short for the waiters that join it; each waiter bounds its own wait, and the poll is aborted once no waiter remains.
  */
 export function managedProbes(io: ManagedProbeIo): ManagedProbes {
     let observed: { daemonId: Uint8Array; state: StorageReadinessState } | null = null;
@@ -478,7 +478,7 @@ export function managedProbes(io: ManagedProbeIo): ManagedProbes {
         async compatibilityProbe(budgetMs, signal) {
             const sequence = ++issued;
             const probe = await io.compatibility(budgetMs, signal);
-            // Only the most recently issued probe may write the record. A probe the policy already gave up on can still settle after its replacement, and its older storage state must not displace the newer one. commentlint: allow(JUDGE)
+            // Only the most recently issued probe may write the record. A probe the policy already gave up on can still settle after its replacement, and its older storage state must not displace the newer one.
             if (sequence === issued) {
                 observed =
                     probe.status === null
@@ -539,7 +539,7 @@ function findDeclaringParentRoot(moduleUrl: string, packageName: string): string
             text = readFileSync(packagePath, "utf8");
         } catch (error) {
             const code = (error as NodeJS.ErrnoException).code;
-            // Only a genuine absence lets the walk climb. A descriptor that exists but cannot be read may name this package, and climbing past it would certify a farther install's payload as the declaring one. commentlint: allow(JUDGE)
+            // Only a genuine absence lets the walk climb. A descriptor that exists but cannot be read may name this package, and climbing past it would certify a farther install's payload as the declaring one.
             if (code !== "ENOENT" && code !== "ENOTDIR") {
                 throw new BootstrapError(
                     "unsupported_install_layout",
@@ -581,7 +581,7 @@ function parseJsonOrNull(text: string): unknown {
 export function createManagedLifecyclePolicy(
     options: ManagedLifecyclePolicyOptions,
 ): HostLifecyclePolicy {
-    // Construction admits the data root, stages the bootstrap under it, and pins the probes to it; the policy's per-command root resolution reads the same snapshot so a later mutation of the supplied object cannot send commands to one root and probes to another. commentlint: allow(JUDGE)
+    // Construction admits the data root, stages the bootstrap under it, and pins the probes to it; the policy's per-command root resolution reads the same snapshot so a later mutation of the supplied object cannot send commands to one root and probes to another.
     const env: Record<string, string | undefined> = { ...(options.env ?? process.env) };
     const root = resolveLifecycleDataRoot(env);
     if (!root.ok) return new HostLifecyclePolicy({ ...options, env });
@@ -599,7 +599,7 @@ export function createManagedLifecyclePolicy(
     }
 
     try {
-        // A compiled Bun caller declares its module from an embedded filesystem with no physical package tree, so the parent walk would fail before the external root is examined; the payload resolver never reads the lexical root once an explicit root is supplied. commentlint: allow(JUDGE)
+        // A compiled Bun caller declares its module from an embedded filesystem with no physical package tree, so the parent walk would fail before the external root is examined; the payload resolver never reads the lexical root once an explicit root is supplied.
         const payloadLocator =
             options.explicitExternalRoot === undefined
                 ? {

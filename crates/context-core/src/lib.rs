@@ -9,7 +9,7 @@ pub mod canonical_json;
 pub mod decay;
 pub mod redaction;
 
-/// Defaults to [`Unknown`](Self::Unknown) so a defaulted input is rejected rather than destructively rebuilt. commentlint: allow(JUDGE)
+/// Defaults to [`Unknown`](Self::Unknown) so a defaulted input is rejected rather than destructively rebuilt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PersistedShape {
     /// A fresh shape selects bootstrap Hard before any defer can replay a baseline.

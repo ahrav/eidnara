@@ -136,7 +136,7 @@ impl LlmExecutionBackend for PiBackend {
         if self.descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
             return Some("extension_budget_exceeded");
         }
-        // The probe re-verifies the whole closure exactly as `run_pi` does before launch, so a rejected send and a failed run report the same subreason. commentlint: allow(JUDGE)
+        // The probe re-verifies the whole closure exactly as `run_pi` does before launch, so a rejected send and a failed run report the same subreason.
         let Ok(closure) = self.descriptor.closure.revalidate() else {
             return Some("closure_incomplete");
         };
@@ -229,7 +229,7 @@ async fn run_pi_with_provider_fallback(
     run_pi(retry, request, events, cancel, canonical).await
 }
 
-/// Bounds cleanup so a stalled filesystem cannot wedge the setup-abort path; an elapsed bound reports the cleanup as unproven. commentlint: allow(JUDGE)
+/// Bounds cleanup so a stalled filesystem cannot wedge the setup-abort path; an elapsed bound reports the cleanup as unproven.
 async fn abort_setup_with_dir(
     abort: subprocess::SetupAbort,
     dir: PrivateDir,
@@ -276,7 +276,7 @@ async fn run_pi(
     let interpreter_node = descriptor.interpreter_node.clone();
     let entrypoint_node = descriptor.entrypoint_node.clone();
     let extension_nodes = descriptor.provider_extension_nodes.clone();
-    // The whole closure is re-verified immediately before launch and every node resolved from that fresh handle; see `ValidatedHarnessClosure::revalidate`. commentlint: allow(JUDGE)
+    // The whole closure is re-verified immediately before launch and every node resolved from that fresh handle; see `ValidatedHarnessClosure::revalidate`.
     let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
         let closure = closure.revalidate().ok()?;
         let interpreter = closure.resolve_node_descriptor(&interpreter_node).ok()?;
@@ -287,7 +287,7 @@ async fn run_pi(
         }
         Some((interpreter, entrypoint, extensions))
     }));
-    // An abandoned resolution only reads the closure store, so it leaves no residue. commentlint: allow(JUDGE)
+    // An abandoned resolution only reads the closure store, so it leaves no residue.
     let resolved = match subprocess::race_setup(&cancel, setup_deadline, &mut resolve).await {
         Ok(resolved) => resolved,
         Err(abort) => return subprocess::setup_aborted_terminal(Harness::Pi, abort),
@@ -306,7 +306,7 @@ async fn run_pi(
         Ok(Err(err)) => return subprocess::spawn_failure(Harness::Pi, &err),
         Err(abort) => {
             // The in-flight creation gets a grace period to return its directory for cleanup.
-            // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort. commentlint: allow(JUDGE)
+            // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort.
             let cleanup = match tokio::time::timeout(limits.termination_grace, &mut create).await {
                 Ok(Ok(dir)) => subprocess::bounded_cleanup(dir, limits.termination_grace).await,
                 Ok(Err(_)) => Ok(()),
@@ -327,7 +327,7 @@ async fn run_pi(
         match subprocess::race_setup(&cancel, setup_deadline, &mut write).await {
             Ok(written) => Ok(written),
             Err(abort) => {
-                // The in-flight write gets a grace period to land inside the directory before that directory is removed. commentlint: allow(JUDGE)
+                // The in-flight write gets a grace period to land inside the directory before that directory is removed.
                 let _ = tokio::time::timeout(limits.termination_grace, &mut write).await;
                 Err(abort)
             }
@@ -353,7 +353,7 @@ async fn run_pi(
             match subprocess::race_setup(&cancel, setup_deadline, &mut write).await {
                 Ok(written) => Ok(Some(written)),
                 Err(abort) => {
-                    // The in-flight write gets a grace period to land inside the directory before that directory is removed. commentlint: allow(JUDGE)
+                    // The in-flight write gets a grace period to land inside the directory before that directory is removed.
                     let _ = tokio::time::timeout(limits.termination_grace, &mut write).await;
                     Err(abort)
                 }
@@ -439,7 +439,7 @@ async fn run_pi(
         state_root,
     };
 
-    // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one attempt budget for first attempts and retries alike. commentlint: allow(JUDGE)
+    // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one attempt budget for first attempts and retries alike.
     let remaining = setup_deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
         return subprocess::merge_cleanup(
@@ -529,11 +529,11 @@ fn pi_line_probe_signal(line: &[u8]) -> ProbeSignal {
     if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
         return ProbeSignal::Quiet;
     }
-    // A nonterminal assistant message (tool request, missing or intermediate stop reason) means the run continues, so it revokes an earlier arming like the lifecycle-start events do. commentlint: allow(JUDGE)
+    // A nonterminal assistant message (tool request, missing or intermediate stop reason) means the run continues, so it revokes an earlier arming like the lifecycle-start events do.
     if message_requests_tools(message) {
         return ProbeSignal::Continues;
     }
-    // Every Pi terminal arms provisionally: a compatibility transcript can resume with `message_start` or `auto_retry_*` after `agent_end`, and the parser then requires a later terminal, so the drain deadline must be revocable rather than kill the continuation. commentlint: allow(JUDGE)
+    // Every Pi terminal arms provisionally: a compatibility transcript can resume with `message_start` or `auto_retry_*` after `agent_end`, and the parser then requires a later terminal, so the drain deadline must be revocable rather than kill the continuation.
     match message
         .get("stopReason")
         .and_then(serde_json::Value::as_str)
@@ -589,7 +589,7 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
             | "queue_update"
             | "session_info_changed"
             | "thinking_level_changed" => {}
-            // Resumed lifecycle output invalidates every stored decision: without a later terminal, parsing returns a missing-terminal error rather than an answer the transcript itself moved past. commentlint: allow(JUDGE)
+            // Resumed lifecycle output invalidates every stored decision: without a later terminal, parsing returns a missing-terminal error rather than an answer the transcript itself moved past.
             "agent_start" | "turn_start" | "message_start" | "auto_retry_start"
             | "auto_retry_end" => {
                 provisional = None;
@@ -607,12 +607,12 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
                 if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
                     continue;
                 }
-                // Every later assistant `message_end` replaces the stored decision — a nonterminal one (tool request, missing or intermediate stop reason) clears it — so the transcript's last word always decides, and a resumption after `agent_end` invalidates that final. commentlint: allow(JUDGE)
+                // Every later assistant `message_end` replaces the stored decision — a nonterminal one (tool request, missing or intermediate stop reason) clears it — so the transcript's last word always decides, and a resumption after `agent_end` invalidates that final.
                 provisional = assistant_message_terminal(message, line_no)?;
                 agent_end_final = None;
             }
             "agent_end" => {
-                // The authoritative final event must carry a well-formed `messages` array (an empty one is valid); a malformed one cannot be allowed to leave an earlier provisional answer standing. commentlint: allow(JUDGE)
+                // The authoritative final event must carry a well-formed `messages` array (an empty one is valid); a malformed one cannot be allowed to leave an earlier provisional answer standing.
                 let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array)
                 else {
                     return Err(format!(
@@ -628,7 +628,7 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
             _ => return Err(format!("unknown event type at line {line_no}")),
         }
     }
-    // `agent_end` is authoritative: its final assistant decides, and a nonterminal final (tool request, missing or intermediate stop reason) means the run never reached a terminal answer, so the provisional `message_end` decision must not stand in for it. commentlint: allow(JUDGE)
+    // `agent_end` is authoritative: its final assistant decides, and a nonterminal final (tool request, missing or intermediate stop reason) means the run never reached a terminal answer, so the provisional `message_end` decision must not stand in for it.
     if let Some((message, line_no)) = &agent_end_final {
         return match assistant_message_terminal(message, *line_no)? {
             Some((text, terminal)) => Ok((text.into_iter().collect(), terminal)),
@@ -657,7 +657,7 @@ fn assistant_message_terminal(
         None | Some("toolUse") => None,
         // `stop` and `length` messages with tool requests are not terminal because this executor does not execute tools.
         Some("stop" | "length") if message_requests_tools(message) => None,
-        // A success message with a malformed `content` is a parse failure, not an empty answer: publishing it as completed would turn a schema change into a silently truncated result. commentlint: allow(JUDGE)
+        // A success message with a malformed `content` is a parse failure, not an empty answer: publishing it as completed would turn a schema change into a silently truncated result.
         Some("stop") => Some((
             Some(BackendEvent::AssistantText {
                 text: assistant_text(message, line_no)?,
@@ -699,7 +699,7 @@ fn assistant_message_terminal(
     Ok(decision)
 }
 
-/// `content` must be an array; an explicitly empty array is a valid empty answer. Each `text` block must carry a string `text`; other block kinds are skipped, since this executor never publishes them. commentlint: allow(JUDGE)
+/// `content` must be an array; an explicitly empty array is a valid empty answer. Each `text` block must carry a string `text`; other block kinds are skipped, since this executor never publishes them.
 fn assistant_text(message: &serde_json::Value, line_no: usize) -> Result<String, String> {
     let content = message
         .get("content")

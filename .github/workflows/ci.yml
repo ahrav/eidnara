@@ -30,8 +30,8 @@ jobs:
   # Skipping a job needs positive evidence that none of its inputs changed.
   # `steps.filter` runs only for pull requests; missing outputs make every job run.
   #
-  # `docs/` stays out of the Rust filters: the schema-migration step in `gates` rejects any manifest path or `include!` that reaches `docs/` or a `.md` file. commentlint: allow(JUDGE)
-  # Tests read `release/` manifests and `docs/host-wire-protocol.md` at runtime, so `test` includes them in addition to `rust`. commentlint: allow(JUDGE)
+  # `docs/` stays out of the Rust filters: the schema-migration step in `gates` rejects any manifest path or `include!` that reaches `docs/` or a `.md` file.
+  # Tests read `release/` manifests and `docs/host-wire-protocol.md` at runtime, so `test` includes them in addition to `rust`.
   changes:
     name: changed paths
     runs-on: ubuntu-latest
@@ -181,6 +181,11 @@ jobs:
             echo "predecessor tokens found across a line break"
             exit 1
           fi
+
+      - name: Comment markers
+        # `.githooks/pre-commit` runs this script on staged lines; CI runs it on
+        # every tracked file.
+        run: scripts/forbid-comment-markers.sh
 
       - name: Retired memory-plane identifiers
         # The retired second memory plane (its mirror, its intent ledger, its
@@ -560,7 +565,7 @@ jobs:
         if: steps.toolchains.outputs.same != 'true'
         env:
           # rust-cache keys on `rustc -vV`, which `rust-toolchain.toml`
-          # would resolve to 1.98. commentlint: allow(JUDGE)
+          # would resolve to 1.98.
           RUSTUP_TOOLCHAIN: stable
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -591,7 +596,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: changes
-    # `shm-transport` has no path dependencies, so only its own sources reach Miri. commentlint: allow(JUDGE)
+    # `shm-transport` has no path dependencies, so only its own sources reach Miri.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.shm == 'true') }}
     env:
       # A dated nightly keeps this required gate reproducible; bump the
@@ -739,7 +744,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: changes
-    # `cargo update` reads only the manifests, so on a pull request this lane reacts to manifest edits; the weekly schedule catches new registry releases. commentlint: allow(JUDGE)
+    # `cargo update` reads only the manifests, so on a pull request this lane reacts to manifest edits; the weekly schedule catches new registry releases.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.manifests == 'true') }}
     steps:
       # actions/checkout v7.0.1

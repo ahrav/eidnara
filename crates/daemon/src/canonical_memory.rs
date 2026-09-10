@@ -133,7 +133,7 @@ impl CanonicalMemoryRead {
 ///
 /// The tip is captured before the lag sample, and the visible-row read is bound to it, so a commit published between them cannot admit rows the freshness verdict did not cover.
 ///
-/// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read. commentlint: allow(JUDGE)
+/// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read.
 ///
 /// The store phase, the serving decision for a tip read on the `auto_inject`
 /// surface, and the visible-row read each withhold the composition with the

@@ -37,7 +37,7 @@ pub const DEPENDENCY_KIND_TARGET: &str = "applicability_target";
 /// Largest object applicability payload the engine decodes. A stored payload
 /// past this is uninterpretable fallback data, so the object is uncertain
 /// rather than the request spending unbounded decode and hashing time on it
-/// after its deadline. commentlint: allow(JUDGE)
+/// after its deadline.
 pub const MAX_OBJECT_PAYLOAD_BYTES: usize = 1 << 20;
 
 /// Object-side applicability inputs, decoded from the owning row's frozen

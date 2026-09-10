@@ -96,7 +96,7 @@ impl Envelope<'_> {
     ///
     /// The referenced domain must exist and remain valid. Success appends a `scope_insert`
     /// pending change. Invalid fields return `InvalidInput`; a missing domain returns `NotFound`.
-    /// Terms whose redacted form [`CanonicalScope::from_term_specs`] rejects return `InvalidInput`, so the scope algebra can evaluate every stored scope. commentlint: allow(JUDGE)
+    /// Terms whose redacted form [`CanonicalScope::from_term_specs`] rejects return `InvalidInput`, so the scope algebra can evaluate every stored scope.
     /// The surrounding envelope transaction owns commit or rollback.
     pub fn insert_scope(&mut self, spec: ScopeSpec) -> Result<ScopeWriteOutcome, KernelError> {
         self.guarded(|envelope| envelope.insert_scope_inner(spec))
@@ -212,7 +212,7 @@ impl RedactedScope {
             .into_iter()
             .map(RedactedTerm::new)
             .collect::<Result<Vec<_>, _>>()?;
-        // The stored form is what readers canonicalize, so it is the form that must decode. commentlint: allow(JUDGE)
+        // The stored form is what readers canonicalize, so it is the form that must decode.
         let stored = terms
             .iter()
             .map(RedactedTerm::stored_spec)
@@ -1614,7 +1614,7 @@ mod tests {
                 });
             prop_assert_eq!(version_req_matches(&requirement, &value), expected);
             // Independent oracle: for release versions and requirements without pre-release
-            // comparators, `version_req_matches` must match `semver`. commentlint: allow(JUDGE)
+            // comparators, `version_req_matches` must match `semver`.
             if let (Ok(req), Ok(v)) = (
                 semver::VersionReq::parse(&requirement),
                 semver::Version::parse(&value),
