@@ -1530,7 +1530,11 @@ fn replay_evidence_created_after_s_survives_publication_pruning_and_gc_until_ack
     // the slowest consumer has acknowledged past each creation.
     let tip = fixture.store.tip().unwrap();
     fixture.store.acknowledge_outbox(CONSUMER, tip, 1).unwrap();
-    fixture.store.run_staging_maintenance(far).unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(
+        swept.artifact_gc.withheld_for_replay, 2,
+        "both deleted after-S artifacts are reported as withheld by the lagging consumer"
+    );
     for entry in &after_s {
         assert!(
             fixture.object_present(&entry.digest),
@@ -1547,11 +1551,13 @@ fn replay_evidence_created_after_s_survives_publication_pruning_and_gc_until_ack
         .store
         .acknowledge_outbox("lagging", first_deleted.created, 1)
         .unwrap();
-    fixture.store.run_staging_maintenance(far).unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 1);
     assert!(!fixture.object_present(&first_deleted.digest));
     assert!(fixture.object_present(&second_deleted.digest));
     fixture.store.acknowledge_outbox("lagging", tip, 1).unwrap();
-    fixture.store.run_staging_maintenance(far).unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 0);
     for entry in &after_s {
         assert_eq!(
             fixture.object_present(&entry.digest),
@@ -1905,7 +1911,14 @@ fn an_empty_consumer_set_names_no_safe_horizon_so_replay_evidence_is_kept() {
         .unwrap();
     assert_eq!(fixture.count("SELECT COUNT(*) FROM outbox_consumers"), 0);
     let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
-    fixture.store.run_staging_maintenance(far).unwrap();
+    // The sweep reports what the horizon kept: the one deleted artifact. The
+    // ten live ones are kept by their live reference, not by the horizon.
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+    assert_eq!(
+        swept.artifact_gc.withheld_for_replay, 1,
+        "the no-consumer horizon reports the artifact it withholds"
+    );
     let digest = fixture.entry_by_evidence(&doomed).digest.clone();
     assert!(
         fixture.object_present(&digest),
@@ -1922,12 +1935,18 @@ fn an_empty_consumer_set_names_no_safe_horizon_so_replay_evidence_is_kept() {
         })
         .unwrap();
     assert!(fixture.checkpoint() < fixture.entry_by_evidence(&doomed).created);
-    fixture.store.run_staging_maintenance(far).unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 1);
     assert!(fixture.object_present(&digest));
     fixture
         .store
         .acknowledge_outbox(CONSUMER, fixture.store.tip().unwrap(), 3)
         .unwrap();
-    fixture.store.run_staging_maintenance(far).unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(
+        swept.artifact_gc.withheld_for_replay, 0,
+        "an acknowledged creation is no longer withheld"
+    );
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 1);
     assert!(!fixture.object_present(&digest));
 }
