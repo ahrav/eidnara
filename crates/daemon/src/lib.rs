@@ -13957,7 +13957,7 @@ impl DreamerRuntime {
     /// Each recorded classification depends on the memory it classifies.
     /// Each is admitted under the Dreamer source and taint classes.
     /// Each retires that memory's earlier classification by this project in the same commit; another project's row citing the memory is left alone.
-    /// `shareable` is recorded true only when the model said so and the serving view classes the memory normal at commit time.
+    /// `shareable` is recorded true only when the model said so and the serving view, at commit time, classes the memory normal and serves it at `ExplicitSearch`.
     /// The commit is keyed by the receipt's operation key and digest under the project's namespace, so a repeat under the same receipt replays the kernel's receipt and writes nothing new.
     async fn record_classifications(
         &self,
@@ -14013,7 +14013,7 @@ impl DreamerRuntime {
                         &mut refused,
                     )?;
                     let mut filter = kernel_routes::project::ScopeFilter::new(&project);
-                    // The model's `shareable` is an untrusted judgment. The serving view's folded class at commit time floors it: a memory served above normal is never recorded shareable, whatever the model said, and a memory no admission serves is treated the same way. The pool read applied the same bar; this covers a class that changed between the read and this commit. commentlint: allow(JUDGE)
+                    // The model's `shareable` is an untrusted judgment. The serving view at commit time floors it: a memory is recorded shareable only when its folded class is normal and it is served at `ExplicitSearch`, the widest surface, so a memory rejected or quarantined since the read, or one no admission serves (`served_rows_for` returns hidden rows and omits unadmitted ones), is never recorded shareable, whatever the model said. commentlint: allow(JUDGE)
                     let classified_ids: Vec<&str> = classifications
                         .iter()
                         .map(|classification| classification.object_id.as_str())
@@ -14030,6 +14030,8 @@ impl DreamerRuntime {
                         let shareable = classification.shareable
                             && served.get(&classification.object_id).is_some_and(|row| {
                                 row.object.sensitivity == kernel::Sensitivity::Normal
+                                    && row.visibility(kernel::Surface::ExplicitSearch)
+                                        != kernel::SurfaceVisibility::Hidden
                             });
                         // Retire prior classifications in this commit to maintain one live classification per memory.
                         for prior in envelope.live_dependent_observations(
@@ -30583,15 +30585,53 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
-    /// A memory served above normal at commit time is recorded `shareable=false` whatever the manifest said; the pool read refuses such a memory up front, so this guards a class that changed between the read and the commit. commentlint: allow(JUDGE)
+    /// A memory served above normal, or hidden on every surface, at commit time is recorded `shareable=false` whatever the manifest said; the pool read refuses or omits such a memory up front, so this guards a class or disposition that changed between the read and the commit. commentlint: allow(JUDGE)
     #[tokio::test(flavor = "current_thread")]
-    async fn record_classifications_never_records_a_sensitive_memory_as_shareable() {
+    async fn record_classifications_never_records_a_sensitive_or_hidden_memory_as_shareable() {
         let producer = Arc::new(ProducerState::default());
         let harness = DreamerHarness::start(&producer).await;
         let sensitive = "memory:sensitive".to_string();
         commit_sensitive_memory(&harness, &sensitive);
         let binding = binding_with_harness(&harness.route_root, "pi", "ses").kernel_project;
         let normal = test_memory_id(1);
+        let quarantined = test_memory_id(2);
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        kernel
+            .commit(
+                kernel_route_fixtures::intent("quarantine-memory"),
+                |envelope| {
+                    envelope.record_admission(kernel_route_fixtures::admission(
+                        &quarantined,
+                        kernel::EventKind::Quarantine,
+                        None,
+                        (
+                            kernel::SourceClass::TrustedLocalCode,
+                            kernel::TaintClass::CurrentCode,
+                        ),
+                    ))?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let (_, served) = kernel
+            .preview(Instant::now() + CLASSIFY_KERNEL_WRITE_TIMEOUT, |envelope| {
+                envelope.served_rows_for(&[quarantined.as_str()], None)
+            })
+            .unwrap();
+        let row = served
+            .get(&quarantined)
+            .expect("the quarantined memory is still admitted");
+        assert_eq!(row.object.sensitivity, kernel::Sensitivity::Normal);
+        assert_eq!(
+            row.visibility(kernel::Surface::ExplicitSearch),
+            kernel::SurfaceVisibility::Hidden
+        );
+        let classification = |object_id: &String| Classification {
+            object_id: object_id.clone(),
+            importance: 50,
+            scope: "project".to_string(),
+            shareable: true,
+        };
         let commit = harness
             .handler
             .dreamer
@@ -30605,23 +30645,14 @@ mod tests {
                     known_as_of: 1,
                 },
                 &[
-                    Classification {
-                        object_id: sensitive.clone(),
-                        importance: 50,
-                        scope: "project".to_string(),
-                        shareable: true,
-                    },
-                    Classification {
-                        object_id: normal.clone(),
-                        importance: 50,
-                        scope: "project".to_string(),
-                        shareable: true,
-                    },
+                    classification(&sensitive),
+                    classification(&quarantined),
+                    classification(&normal),
                 ],
             )
             .await
             .expect("the write succeeds");
-        assert_eq!(commit.classified, 2);
+        assert_eq!(commit.classified, 3);
         let written = harness.classifications();
         let by_memory = |memory: &str| {
             written
@@ -30630,6 +30661,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{memory}: {written:?}"))
         };
         assert_eq!(by_memory(&sensitive).detail["shareable"], json!(false));
+        assert_eq!(by_memory(&quarantined).detail["shareable"], json!(false));
         assert_eq!(by_memory(&normal).detail["shareable"], json!(true));
     }
 

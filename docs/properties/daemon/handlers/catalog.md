@@ -648,8 +648,8 @@ each match `Applied`, `Fenced`, and `Err` as separate arms.
 Accepted classifications become project-scoped `memory_classification`
 observations with `(ModelInference, DreamerInference)` admission, keyed by the
 project-namespaced operation key and digest under `dreamer.classify`. The model's
-`shareable` is recorded true only for a memory the serving view classes normal at
-commit time. The same kernel commit retires this project's prior live
+`shareable` is recorded true only for a memory the serving view classes normal and
+serves at `ExplicitSearch` at commit time. The same kernel commit retires this project's prior live
 classifications for each memory; another project's row citing the memory through
 `classifies` is skipped, not retired and not a failure. That commit
 precedes receipt completion: a crash between them leaves canonical effects but

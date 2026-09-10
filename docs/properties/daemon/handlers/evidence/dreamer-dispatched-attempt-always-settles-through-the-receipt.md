@@ -95,7 +95,8 @@ default-production reachability, subject to the route's authority checks.
   `memory_classification` observation per memory, scoped to the project and
   dependent on that memory, with `(ModelInference, DreamerInference)` admission.
   The model's `shareable` is floored by `Envelope::served_rows_for` in the same
-  commit: a memory served above normal is recorded `shareable=false`.
+  commit: a memory served above normal, or hidden at `ExplicitSearch`
+  (`served_rows_for` returns hidden rows), is recorded `shareable=false`.
   Its kernel receipt uses producer `dreamer.classify`, a project-namespaced
   receipt operation key, and the receipt digest. A replay writes nothing new.
   The same commit retires this project's prior live classifications through
@@ -229,9 +230,10 @@ the producer is never started again.
    start
    (`dreamer_run_task_refuses_a_memory_served_above_normal_sensitivity`).
 14. `record_classifications` called directly with `shareable=true` for a
-   `Sensitive` memory and a normal one: assert the sensitive row is recorded
+   `Sensitive` memory, a quarantined one (shown normal and hidden at
+   `ExplicitSearch`), and a normal one: assert the first two are recorded
    `shareable=false` and the normal row `shareable=true`
-   (`record_classifications_never_records_a_sensitive_memory_as_shareable`).
+   (`record_classifications_never_records_a_sensitive_or_hidden_memory_as_shareable`).
 15. Another project's `memory_classification` observation citing the memory
    through `classifies`, then a classify of that memory: assert `classified`
    is 1, the foreign row still live, and this project's row written
