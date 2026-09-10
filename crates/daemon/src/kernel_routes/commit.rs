@@ -9,7 +9,7 @@
 //! classes, so visibility follows the kernel's admission rules rather than
 //! anything the caller asserts.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use host_runtime::RouteHandle;
@@ -17,8 +17,8 @@ use kernel::{
     ALIGNMENT_DEPENDENCY_KIND, AdmissionEvent, AdmissionRequest, CommitIntent, CommitReceipt,
     DecisionPayload, DecisionSpec, Disposition, DomainSpec, Envelope, EventKind, KernelError,
     KernelStore, ObjectState, ObservationDependencySpec, ObservationPayload, ObservationSpec,
-    Outcome, PriorDecision, Sensitivity, ServedRow, SourceClass, Surface, SurfaceVisibility,
-    TaintClass, TokenCheck, TokenConflict,
+    Outcome, Preview, PriorDecision, Sensitivity, ServedRow, SourceClass, Surface,
+    SurfaceVisibility, TaintClass, TokenCheck, TokenConflict, VisibilityRow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -386,41 +386,39 @@ struct DispositionResult {
     denied: bool,
 }
 
-/// The verdict of every surface for one object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-struct SurfaceVisibilities {
-    auto_inject: &'static str,
-    auto_search: &'static str,
-    explicit_search: &'static str,
-}
-
-const fn visibility_name(visibility: SurfaceVisibility) -> &'static str {
-    match visibility {
-        SurfaceVisibility::Hidden => "hidden",
-        SurfaceVisibility::Visible => "visible",
-        SurfaceVisibility::Labeled => "labeled",
-    }
-}
+/// One `SurfaceVisibility` per `Surface`, in `Surface::ALL` order, so
+/// serialization and `changes_to` read aligned positions of one list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SurfaceVisibilities(Vec<SurfaceVisibility>);
 
 impl SurfaceVisibilities {
     fn of(visibility: impl Fn(Surface) -> SurfaceVisibility) -> Self {
-        Self {
-            auto_inject: visibility_name(visibility(Surface::AutoInject)),
-            auto_search: visibility_name(visibility(Surface::AutoSearch)),
-            explicit_search: visibility_name(visibility(Surface::ExplicitSearch)),
-        }
+        Self(
+            Surface::ALL
+                .iter()
+                .map(|surface| visibility(*surface))
+                .collect(),
+        )
     }
 
     /// Whether a surface serving the object now would show `projected`'s
     /// verdict instead; a hidden surface changing is not a visible change.
-    fn changes_to(self, projected: Self) -> bool {
-        [
-            (self.auto_inject, projected.auto_inject),
-            (self.auto_search, projected.auto_search),
-            (self.explicit_search, projected.explicit_search),
-        ]
-        .into_iter()
-        .any(|(now, next)| now != visibility_name(SurfaceVisibility::Hidden) && now != next)
+    fn changes_to(&self, projected: &Self) -> bool {
+        self.0
+            .iter()
+            .zip(&projected.0)
+            .any(|(now, next)| *now != SurfaceVisibility::Hidden && now != next)
+    }
+}
+
+impl Serialize for SurfaceVisibilities {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (surface, visibility) in Surface::ALL.iter().zip(&self.0) {
+            map.serialize_entry(surface.as_str(), visibility.as_str())?;
+        }
+        map.end()
     }
 }
 
@@ -641,44 +639,83 @@ fn record_disposition(
     ))
 }
 
-/// Judges `event` against a live decision of the bound project without
-/// recording it, and reports what each surface serves now and would serve.
-fn preview_disposition(
-    envelope: &Envelope<'_>,
-    filter: &mut ScopeFilter,
-    project: &ProjectBinding,
-    object_id: &str,
-    event: DispositionEvent,
-    approval_object_id: Option<&str>,
-) -> Result<DispositionPreview, KernelError> {
-    let (prior, request) =
-        disposition_request(envelope, filter, object_id, event, approval_object_id)?;
-    let evaluation = envelope.preview_admission(request)?;
-    let served: ServedRow = envelope
-        .served_row(object_id, Some(project.scope_term()))?
-        .ok_or(KernelError::NotFound)?;
-    let current = SurfaceVisibilities::of(|surface| served.visibility(surface));
-    let projected = SurfaceVisibilities::of(|surface| {
-        served.visibility_with(evaluation.visibility, evaluation.sensitivity, surface)
-    });
-    let visibility_changes = current.changes_to(projected);
-    Ok(DispositionPreview {
-        result: DispositionResult::new(
+/// Carries preview state between operations: the scope filter, the targets'
+/// stored serving rows read once for the whole request, and the own row each
+/// judged operation leaves its target with, so a later operation's `current`
+/// is what the surfaces serve after the earlier one.
+struct PreviewRun {
+    filter: ScopeFilter,
+    served: HashMap<String, ServedRow>,
+    judged: HashMap<String, (VisibilityRow, Sensitivity)>,
+}
+
+impl PreviewRun {
+    fn new(preview: &Preview<'_>, plan: &CommitPlan) -> Result<Self, KernelError> {
+        let ids: Vec<&str> = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                Operation::Disposition { object_id, .. } => Some(object_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        Ok(Self {
+            filter: ScopeFilter::new(&plan.project),
+            served: preview.served_rows_for(&ids, Some(plan.project.scope_term()))?,
+            judged: HashMap::new(),
+        })
+    }
+
+    /// Judges `event` against a live decision of the bound project without
+    /// recording it, and reports what each surface serves now and would serve.
+    fn disposition(
+        &mut self,
+        preview: &mut Preview<'_>,
+        object_id: &str,
+        event: DispositionEvent,
+        approval_object_id: Option<&str>,
+    ) -> Result<DispositionPreview, KernelError> {
+        let (prior, request) = disposition_request(
+            preview,
+            &mut self.filter,
             object_id,
             event,
-            prior,
-            evaluation.outcome,
-            evaluation.disposition,
-        ),
-        current,
-        projected,
-        visibility_changes,
-    })
+            approval_object_id,
+        )?;
+        let evaluation = preview.preview_admission(request)?;
+        let served = self.served.get(object_id).ok_or(KernelError::NotFound)?;
+        let current = match self.judged.get(object_id) {
+            Some(&(own, sensitivity)) => {
+                SurfaceVisibilities::of(|surface| served.visibility_with(own, sensitivity, surface))
+            }
+            None => SurfaceVisibilities::of(|surface| served.visibility(surface)),
+        };
+        let projected = SurfaceVisibilities::of(|surface| {
+            served.visibility_with(evaluation.visibility, evaluation.sensitivity, surface)
+        });
+        let visibility_changes = current.changes_to(&projected);
+        self.judged.insert(
+            object_id.to_string(),
+            (evaluation.visibility, evaluation.sensitivity),
+        );
+        Ok(DispositionPreview {
+            result: DispositionResult::new(
+                object_id,
+                event,
+                prior,
+                evaluation.outcome,
+                evaluation.disposition,
+            ),
+            current,
+            projected,
+            visibility_changes,
+        })
+    }
 }
 
 /// An identity the store already holds replays its receipt instead of being
 /// judged again, the same answer the commit gives; otherwise every operation
-/// is judged at the tip.
+/// is judged at the tip, each after the ones before it.
 enum PreviewOutcome {
     Replay(CommitReceipt),
     Judged(Vec<DispositionPreview>),
@@ -687,12 +724,12 @@ enum PreviewOutcome {
 /// Every operation of a preview must be a disposition; the tokens must be
 /// absent because a preview checks none.
 fn preview(store: &KernelStore, plan: &CommitPlan) -> Result<(i64, PreviewOutcome), CommitFailure> {
-    let mut filter = ScopeFilter::new(&plan.project);
     store
-        .preview(|envelope| {
-            if let Some(receipt) = envelope.stored_receipt(plan.intent.clone())? {
+        .preview(Instant::now() + plan.deadline, |preview| {
+            if let Some(receipt) = preview.stored_receipt(plan.intent.clone())? {
                 return Ok(PreviewOutcome::Replay(receipt));
             }
+            let mut run = PreviewRun::new(preview, plan)?;
             plan.operations
                 .iter()
                 .map(|operation| match operation {
@@ -700,14 +737,7 @@ fn preview(store: &KernelStore, plan: &CommitPlan) -> Result<(i64, PreviewOutcom
                         object_id,
                         event,
                         approval_object_id,
-                    } => preview_disposition(
-                        envelope,
-                        &mut filter,
-                        &plan.project,
-                        object_id,
-                        *event,
-                        approval_object_id.as_deref(),
-                    ),
+                    } => run.disposition(preview, object_id, *event, approval_object_id.as_deref()),
                     _ => Err(KernelError::InvalidInput),
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -993,6 +1023,14 @@ impl Handler {
                         "previews": [],
                     }),
                 ),
+                // A malformed combination of operations, not a kernel state: each operation previews on its own. commentlint: allow(JUDGE)
+                Ok(Err(CommitFailure::Kernel(KernelError::PreviewAuthorityChanged))) => {
+                    crate::invalid_params_error(format!(
+                        "{OPERATION} preview cannot judge an operation whose approval chain an \
+                         earlier operation in the same request changes; preview them in \
+                         separate requests"
+                    ))
+                }
                 Ok(Err(failure)) => state_only(KernelOutcome::from(failure)),
                 Err(outcome) => state_only(outcome),
             };

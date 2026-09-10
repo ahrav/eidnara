@@ -26,7 +26,7 @@ in it is protected by automation.
 
 Second, **this part is unusually cheap.** Its scope is a set of request handlers,
 so the primary input is a request body and the primary "fault" is sending the same
-request twice. Eleven of the 25 records need no fault of any kind, only ordinary
+request twice. Eleven of the 26 records need no fault of any kind, only ordinary
 state and a second call. Three of them are among the sharpest findings in the
 sub-part.
 
@@ -147,14 +147,17 @@ Rust side dispatches on field presence at `:7985-7986`.
 
 ## Map
 
-All 25 records: eleven from lens A (durable operation handlers, atomicity and
+All 26 records: twelve from lens A (durable operation handlers, atomicity and
 idempotency) and fourteen from lens B (staging coordinator lifecycle). The counts
 have moved this revision: lens A's structural claim that no handler in scope uses
 the claim intent ledger is now an architectural note in the catalog prose rather
 than a record, so its row is gone from this map; lens B's combined seed-and-import
 reaper record is split in two because its two halves have different reachability
 classes, and its restart marker is split in two because the graceful and abrupt
-boundaries execute different code. "Non-vacuous today" means a developer can
+boundaries execute different code. Lens A gained
+`dreamer-dispatched-attempt-always-settles-through-the-receipt`, the successor
+to the invalidated Dreamer record, whose row stays for traceability.
+"Non-vacuous today" means a developer can
 construct the required state with the current harness. It does **not** mean the
 check runs anywhere; under H0 none of them do.
 
@@ -173,6 +176,7 @@ wrapper directly above it at `:12228-12232`. No handler in scope sits behind
 | h4c-authority-prepare-route-bind-is-a-second-transaction | An `authority.prepare` whose transition result row has `state == "MODULE"`, so the `if` at `:7248` is entered, then a store fault on `bind_authority_route`'s durable call at `:4420` only (H3). The fault must be on the store call, not the binding lookup: `facade_binding(channel)` failing returns `Ok(())` without writing at `:4417-4419` | **Yes, revised from No.** A `BEFORE INSERT` trigger with `RAISE(ABORT, ...)` on `authority_route_bindings` (`memory-store:5124-5132`) fails exactly that call and nothing else in the request, since the transition arms write other tables. Two facts were checked: `RAISE(ABORT)` fires under `ON CONFLICT ... DO UPDATE`, which is this statement's form, and `with_note_conn_fenced` (`memory-store:5323-5343`) delegates to the same `inner.with_conn_fenced` rather than a separate database, so a trigger installed through the tag-SQL seam does apply. Note the near-miss the record already names: the `Ok(())` skip arm is reachable by sending prepare on an unbound administrative channel, but that arm is the documented one (`:4407-4409`) and does not produce the split state |
 | h4c-state-import-commit-clears-staging-on-every-outcome | An empty session so the preflight returns `Ready` at `:5687`, a multi-batch import so `batch_count > 1`, all batches staged so `stage` returns `Apply` at `:5734`, then a store fault on `commit_state_import` at `:5738` producing `Err(StateImportError::Store(_))` (H3) | **Yes, revised from No.** A `BEFORE INSERT` trigger with `RAISE(ABORT, ...)` on `state_imports` (`memory-store:7180-7190`, inside the import transaction) makes the commit return the `Store` error arm this record needs. The ordering was always verifiable by reading, since `complete()` at `:5744-5747` is unconditional and precedes the `match outcome` at `:5748`; what was missing and is now available is the failing outcome itself. `:26941` reaches a *refused* commit, which is a different arm taken before the write. Reachability class is `explicit-config-only`, corrected this revision to match its two siblings on the same handler |
 | h4c-dreamer-failure-path-ledger-write-is-unchecked | For the main window, a classify run that exhausts its models so `output.is_none()` at `:9983`, plus a store fault on `record_dream_task_command` at `:9989` (H3). The authority gate at `:9684-9698` must pass first. For the duplicate-guard half, two **concurrent** deliveries so the in-flight guard at `:9796-9810` returns `dreamer_run_failed` at `:9803` | **Yes, revised from Partial.** All three halves are now constructible. The model-exhaustion state is already reachable: the fixture at `:25806-25810` poisons the route model chain to prove the classify loop ignores it. The unchecked write is inducible by an aborting trigger on `dream_task_commands` (`memory-store:6945-6951`); `RAISE(ABORT)` is not swallowed by the `INSERT OR IGNORE`. The code collision is observable from the three `dreamer_run_failed` sites at `:9804`, `:9968` and `:9996`, in two of which no ledger row exists **by design**, so a caller cannot tell whether one does. One correction to the earlier row, which called the duplicate-guard half "pure H1": it is not, and two sequential calls cannot reach it. `inflight_dream_commands` is inserted at `:9802` and `DreamCommandGuard` (`:9811-9814`) removes the key on return, so a second delivery that begins after the first returns never sees the key. That half needs two overlapping in-flight calls |
+| dreamer-dispatched-attempt-always-settles-through-the-receipt | A classify run whose authority gate passes and whose model chain is exhausted, plus a store fault on `complete_dreamer_receipt` (a `BEFORE UPDATE OF state ON dreamer_receipts` trigger raising `ABORT`) (H3); for the attempt window the same trigger on `dreamer_attempts` `UPDATE OF terminal_kind`; for the restart windows a request dropped between `start` and `complete_dreamer_receipt` with the scripted producer answering `status` as `Missing`, `Terminal`, or `Active`, or never answering under a shared `timeout_ms`; for takeover a receipt left `in_progress` with no current-generation attempt other than `not_sent` rows; for cleanup fencing a generation change inside `on_start` or `on_await_output`; for the budget the durable attempt count at the budget, or one below it with a chain whose first model fails (H1 for every replay half) | **Yes.** Every window is driven by a named test in the catalog record: the receipt and attempt faults through `execute_tag_sql_for_test` triggers, the restart windows by dropping the request future while `await_output` is blocked, the stalled probe by `block_status`, takeover by a `NotSent` row, fencing by moving the receipt inside the producer hooks, and the budget by filling `dreamer_attempts`. Replaces the invalidated `h4c-dreamer-failure-path-ledger-write-is-unchecked` row above, whose unchecked write no longer exists. |
 | h4c-transform-writes-two-side-effects-before-its-fenced-commit | `serializer_profile == OpencodeAiSdk` and a request carrying a mural so `host_mural_artifact` returns `Some` at `:8209` and `upsert_project_mural_artifact` commits at `:8210-8215`. Then any `TransformError` from `run_transform`, reaching `reject_transform` at `:8330-8337` from `:8338-8340`. Optionally a due side-channel row so the drain at `:8252` has work | **Yes.** No injected fault: the pass engine's own rejections are reachable from a crafted request, and `transform_failed` has exactly one site (`:8334`), so the rejection is unambiguous to observe. The mural is content-keyed by `content_hash` (`:8213`), so the double-apply is benign; the durable consequence is that a rejected pass's artifact becomes the project's inherited mural via `cc_mural_input` (`:8224`) |
 | h4c-side-channel-drain-result-is-discarded-by-the-caller | A due historian side-channel row plus a delivery failure, so the store's per-row counters at `memory-store/src/lib.rs:9572-9581` report `failed > 0` while `:8252` binds the whole result to `let _` | **Yes, and the seam already exists and is already used.** `fail_next_historian_side_channel_for_test` (`memory-store/src/lib.rs:5249`) is called at `lib.rs:30041` by `status_diagnostics_surface_pending_historian_side_channel_failure` (`:30037`). That test proves the operator surface works, which bounds this record to a per-pass observability gap rather than silent loss |
 
@@ -387,7 +391,7 @@ rather than sharing one mutation region.
 Ranked by the cost of the cheapest oracle that yields a valid result, not by
 records unblocked per capability. Records-per-capability would put H7 or H1 at the
 top; that is the wrong answer, because the single cheapest capability here unblocks
-**zero** records and protects all 25.
+**zero** records and protects all 26.
 
 **State this plainly: several of this part's sharpest findings need no fault at
 all.** The guidance handler's no-row silent-success arm is a seeded-state unit test

@@ -160,6 +160,17 @@ pub struct ObjectState {
     pub latest_change_commit_seq: Option<i64>,
 }
 
+/// Filters observations by dependency edge, observation kind, and writer identity: the registry source kind, domain, and exact scope (`None` selects unscoped rows). Kinds are free-form literals any producer may reuse, so the writer identity is what keeps another producer's rows out of the result. commentlint: allow(JUDGE)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependentObservationQuery<'a> {
+    pub dependency_object_id: &'a str,
+    pub dependency_kind: &'a str,
+    pub observation_kind: &'a str,
+    pub source_kind: &'a str,
+    pub domain_id: &'a str,
+    pub scope_id: Option<&'a str>,
+}
+
 /// Why a mutation token no longer names the object the caller read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenConflict {
@@ -255,6 +266,19 @@ pub struct Envelope<'tx> {
     pub(super) admission_ordinal: usize,
     pub(super) admission_latest: HashMap<AdmissionKey, StoredAdmission>,
     poisoned: Option<KernelError>,
+}
+
+/// No `&mut Envelope` is reachable, so nothing lands in the log. The one mutation, [`Preview::preview_admission`], seeds the same-transaction prior cache the way `record_admission` does inside a commit, so a later operation in the same preview is judged against an earlier one's decision as the commit judges it. The authority cascade over a decision's dependents is not simulated; an operation whose authority chain an earlier operation in the preview touched is refused with [`KernelError::PreviewAuthorityChanged`] instead of being judged against stale authority. commentlint: allow(JUDGE)
+pub struct Preview<'tx> {
+    pub(super) envelope: Envelope<'tx>,
+}
+
+impl<'tx> std::ops::Deref for Preview<'tx> {
+    type Target = Envelope<'tx>;
+
+    fn deref(&self) -> &Envelope<'tx> {
+        &self.envelope
+    }
 }
 
 impl Envelope<'_> {
@@ -421,6 +445,40 @@ impl Envelope<'_> {
     /// that follows it observe one state.
     pub fn object_state(&self, object_id: &str) -> Result<Option<ObjectState>, KernelError> {
         load_object_state(self.tx, object_id)
+    }
+
+    /// Returns object IDs for the live observations `query` selects, ordered by creating commit and then object ID, so the order is stable across reads and does not depend on rowids; a following retirement acts on the rows this returned. The writer filter runs in the query, so the row count is bounded by what that writer wrote rather than by every row any producer attached to the dependency. commentlint: allow(JUDGE)
+    pub fn live_dependent_observations(
+        &self,
+        query: &DependentObservationQuery<'_>,
+    ) -> Result<Vec<String>, KernelError> {
+        let mut statement = self
+            .tx
+            .prepare_cached(
+                "SELECT o.object_id FROM observation_dependencies d
+                  JOIN observations o ON o.observation_id=d.observation_id
+                  JOIN object_registry r ON r.object_id=o.object_id
+                  WHERE d.dependency_object_id=?1 AND d.dependency_kind=?2
+                    AND o.observation_kind=?3 AND o.invalidated_commit_seq IS NULL
+                    AND r.source_kind=?4 AND r.domain_id=?5 AND o.scope_id IS ?6
+                  ORDER BY o.created_commit_seq, o.object_id",
+            )
+            .map_err(|_| KernelError::Io)?;
+        statement
+            .query_map(
+                params![
+                    query.dependency_object_id,
+                    query.dependency_kind,
+                    query.observation_kind,
+                    query.source_kind,
+                    query.domain_id,
+                    query.scope_id,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|_| KernelError::Io)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| KernelError::Io)
     }
 
     /// The receipt `KernelStore::commit` would replay for `intent` instead of
@@ -603,20 +661,24 @@ impl KernelStore {
         })
     }
 
-    /// `read` holds the envelope by shared reference over a read transaction, so its mutators are unreachable and nothing lands in the log.
     /// The envelope's `commit_seq` is the sequence the next commit would take, so `check_token` judges a token from the tip the way that commit would.
+    /// The reader is polled for until `deadline` and held for the whole of `read`, which is the caller's to bound: a pooled reader is shared with every other read path.
     pub fn preview<T>(
         &self,
-        read: impl FnOnce(&Envelope<'_>) -> Result<T, KernelError>,
+        deadline: Instant,
+        read: impl FnOnce(&mut Preview<'_>) -> Result<T, KernelError>,
     ) -> Result<(i64, T), KernelError> {
-        self.read_snapshot(0, |tx, tip| {
-            read(&Envelope {
-                tx,
-                commit_seq: tip + 1,
-                changes: Vec::new(),
-                admission_ordinal: 0,
-                admission_latest: HashMap::new(),
-                poisoned: None,
+        let mut reader = self.lock_reader_within(&AcquireLimit::until(deadline))?;
+        read_snapshot_on(&mut reader, 0, |tx, tip| {
+            read(&mut Preview {
+                envelope: Envelope {
+                    tx,
+                    commit_seq: tip + 1,
+                    changes: Vec::new(),
+                    admission_ordinal: 0,
+                    admission_latest: HashMap::new(),
+                    poisoned: None,
+                },
             })
         })
     }
@@ -676,19 +738,7 @@ impl KernelStore {
             return Err(KernelError::InvalidInput);
         }
         let mut reader = self.lock_reader()?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(map_sqlite)?;
-        let tip = tx
-            .prepare_cached("SELECT COALESCE(MAX(commit_seq),0) FROM commit_log")
-            .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
-            .map_err(map_sqlite)?;
-        if requested > tip {
-            return Err(KernelError::FutureSnapshot);
-        }
-        let result = read(&tx, tip)?;
-        tx.commit().map_err(map_sqlite)?;
-        Ok((tip, result))
+        read_snapshot_on(&mut reader, requested, read)
     }
 
     pub fn stage_candidate(
@@ -967,6 +1017,27 @@ pub(super) fn replace_alignment_projection_tx(
         return Ok(removed);
     }
     Ok(rows.len())
+}
+
+/// The deferred transaction makes `tip` and `read` observe one snapshot.
+fn read_snapshot_on<T>(
+    reader: &mut Connection,
+    requested: i64,
+    read: impl FnOnce(&Transaction<'_>, i64) -> Result<T, KernelError>,
+) -> Result<(i64, T), KernelError> {
+    let tx = reader
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(map_sqlite)?;
+    let tip = tx
+        .prepare_cached("SELECT COALESCE(MAX(commit_seq),0) FROM commit_log")
+        .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
+        .map_err(map_sqlite)?;
+    if requested > tip {
+        return Err(KernelError::FutureSnapshot);
+    }
+    let result = read(&tx, tip)?;
+    tx.commit().map_err(map_sqlite)?;
+    Ok((tip, result))
 }
 
 /// The receipt a repeat of `intent` replays; a stored key under a different

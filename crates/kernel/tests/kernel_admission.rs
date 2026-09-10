@@ -7154,9 +7154,7 @@ fn an_object_admitted_by_a_trigger_serves_no_lower_than_that_trigger_reads_today
     );
 }
 
-/// A preview envelope answers the readers a commit closure sees, judges an
-/// admission the way `record_admission` would, and replays the receipt a
-/// recorded intent holds, while the store stays exactly as it was.
+/// A preview envelope answers the readers a commit closure sees, judges an admission the way `record_admission` would, and uses each judged decision as the next admission's prior. commentlint: allow(JUDGE)
 #[test]
 fn preview_judges_like_a_commit_and_writes_nothing() {
     let directory = tempfile::tempdir().unwrap();
@@ -7188,24 +7186,24 @@ fn preview_judges_like_a_commit_and_writes_nothing() {
     let commits_before = inspect(directory.path(), "SELECT COUNT(*) FROM commit_log");
 
     let (seen_tip, ()) = store
-        .preview(|envelope| {
+        .preview(far_deadline(), |preview| {
             // A token minted at the tip is valid for the next commit, so the preview accepts it too.
             assert_eq!(
-                envelope.check_token("object", tip)?,
+                preview.check_token("object", tip)?,
                 kernel::TokenCheck::Unchanged
             );
             let stale =
-                envelope.preview_admission(subject_request("object", EventKind::MarkStale))?;
+                preview.preview_admission(subject_request("object", EventKind::MarkStale))?;
             assert_eq!(stale.disposition, kernel::Disposition::Stale);
             assert_eq!(stale.visibility, kernel::VisibilityRow::ExplicitLabeled);
             // Succession events are refused before evaluation, as `record_admission` refuses them.
             assert_eq!(
-                envelope.preview_admission(subject_request("object", EventKind::Correct)),
+                preview.preview_admission(subject_request("object", EventKind::Correct)),
                 Err(KernelError::AdmissionPolicy)
             );
-            let served = envelope
-                .served_row("object", None)?
-                .expect("admitted object is served");
+            let served = preview.served_rows_for(&["object", "never-an-object"], None)?;
+            assert_eq!(served.len(), 1);
+            let served = &served["object"];
             assert_eq!(
                 served.visibility(Surface::AutoInject),
                 kernel::SurfaceVisibility::Visible
@@ -7214,16 +7212,30 @@ fn preview_judges_like_a_commit_and_writes_nothing() {
                 served.visibility_with(stale.visibility, stale.sensitivity, Surface::AutoInject),
                 kernel::SurfaceVisibility::Hidden
             );
+            // Each previewed admission uses the preceding previewed decision as its prior, matching commit behavior: quarantine after stale is judged from stale, and relaxing back is denied without an approval. commentlint: allow(JUDGE)
             assert_eq!(
-                envelope
+                preview
+                    .subject_admission("object")?
+                    .map(|(prior, _)| prior.disposition),
+                Some(kernel::Disposition::Stale)
+            );
+            let quarantined =
+                preview.preview_admission(subject_request("object", EventKind::Quarantine))?;
+            assert_eq!(quarantined.disposition, kernel::Disposition::Quarantined);
+            let relaxed =
+                preview.preview_admission(subject_request("object", EventKind::MarkStale))?;
+            assert_eq!(relaxed.outcome, kernel::Outcome::Deny);
+            assert_eq!(relaxed.disposition, kernel::Disposition::Quarantined);
+            assert_eq!(
+                preview
                     .stored_receipt(intent("admit"))?
                     .map(|receipt| receipt.commit_seq),
                 Some(admitted.commit_seq)
             );
-            assert_eq!(envelope.stored_receipt(intent("never-committed"))?, None);
+            assert_eq!(preview.stored_receipt(intent("never-committed"))?, None);
             let mut reused = intent("admit");
             reused.request_digest = "b".repeat(64);
-            assert_eq!(envelope.stored_receipt(reused), Err(KernelError::Conflict));
+            assert_eq!(preview.stored_receipt(reused), Err(KernelError::Conflict));
             Ok(())
         })
         .unwrap();
@@ -7236,5 +7248,290 @@ fn preview_judges_like_a_commit_and_writes_nothing() {
     assert_eq!(
         inspect(directory.path(), "SELECT COUNT(*) FROM commit_log"),
         commits_before
+    );
+    // The stored prior is untouched by the previewed sequence.
+    let (_, ()) = store
+        .preview(far_deadline(), |preview| {
+            assert_eq!(
+                preview
+                    .subject_admission("object")?
+                    .map(|(prior, _)| prior.disposition),
+                Some(kernel::Disposition::Active)
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn far_deadline() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(30)
+}
+
+/// A held reader pool returns `Deadline` at the preview deadline.
+#[test]
+fn preview_stops_waiting_for_a_reader_at_its_deadline() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let held = std::sync::Barrier::new(2);
+    let started = std::time::Instant::now();
+    let (outcome, elapsed) = std::thread::scope(|threads| {
+        threads
+            .spawn(|| store.hold_readers_for_test(&held, std::time::Duration::from_millis(1_500)));
+        held.wait();
+        let outcome = store.preview(
+            std::time::Instant::now() + std::time::Duration::from_millis(200),
+            |_| Ok(()),
+        );
+        (outcome, started.elapsed())
+    });
+    assert_eq!(outcome, Err(KernelError::Deadline));
+    assert!(
+        elapsed < std::time::Duration::from_millis(1_400),
+        "the preview returned when the holder released the pool rather than at its own deadline, took {elapsed:?}"
+    );
+    let (_, ()) = store.preview(far_deadline(), |_| Ok(())).unwrap();
+}
+
+/// A commit that quarantines an approval writes that row and demotes the
+/// approval's dependents before it judges the next operation, so relaxing a
+/// quarantined dependent in the same batch is denied. A preview reads the
+/// approval's authority from the committed ledger, where the quarantine never
+/// lands; rather than report the relaxation the commit denies, it refuses the
+/// later operation. Operations that rest on no changed authority still preview.
+#[test]
+fn preview_refuses_an_operation_whose_authority_an_earlier_one_changed() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage(&store, "dependent");
+    let mut promoted = request("dependent");
+    promoted.source_class = Some(SourceClass::ModelInference);
+    promoted.taint_class = Some(TaintClass::AssistantInference);
+    promoted.event.kind = EventKind::Verify;
+    promoted.event.trigger_object_id = None;
+    promoted.event.approval_object_id = Some("approval".to_string());
+    assert_eq!(admit(&store, promoted, "dependent", "promote"), "admit");
+    let dependent_request = |kind| {
+        let mut request = subject_request("object-dependent", kind);
+        request.source_class = Some(SourceClass::ModelInference);
+        request.taint_class = Some(TaintClass::AssistantInference);
+        request
+    };
+    store
+        .commit(intent("quarantine-dependent"), |envelope| {
+            envelope.record_admission(dependent_request(EventKind::Quarantine))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let quarantine_approval = || {
+        let mut request = subject_request("approval", EventKind::Quarantine);
+        request.source_class = Some(SourceClass::ExplicitUser);
+        request.taint_class = Some(TaintClass::UserExplicit);
+        request
+    };
+
+    let (_, ()) = store
+        .preview(far_deadline(), |preview| {
+            let quarantined = preview.preview_admission(quarantine_approval())?;
+            assert_eq!(quarantined.disposition, kernel::Disposition::Quarantined);
+            assert_eq!(
+                preview.preview_admission(dependent_request(EventKind::MarkStale)),
+                Err(KernelError::PreviewAuthorityChanged)
+            );
+            // The approval itself rests on no other authority, so a second
+            // operation on it is judged against the first.
+            let again = preview.preview_admission(quarantine_approval())?;
+            assert_eq!(again.disposition, kernel::Disposition::Quarantined);
+            Ok(())
+        })
+        .unwrap();
+
+    // Alone, the relaxation rests on an approval the ledger still holds valid. commentlint: allow(JUDGE)
+    let (_, relaxed) = store
+        .preview(far_deadline(), |preview| {
+            preview.preview_admission(dependent_request(EventKind::MarkStale))
+        })
+        .unwrap();
+    assert_eq!(relaxed.outcome, kernel::Outcome::Deny);
+    assert_eq!(relaxed.disposition, kernel::Disposition::Stale);
+
+    let mut committed = None;
+    store
+        .commit(intent("batch"), |envelope| {
+            envelope.record_admission(quarantine_approval())?;
+            let decision = envelope.record_admission(dependent_request(EventKind::MarkStale))?;
+            committed = Some((decision.outcome, decision.disposition));
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        committed,
+        Some((kernel::Outcome::Deny, kernel::Disposition::Quarantined))
+    );
+
+    // With the quarantine committed, the same relaxation previews alone as the denial the commit recorded. commentlint: allow(JUDGE)
+    let (_, relaxed) = store
+        .preview(far_deadline(), |preview| {
+            preview.preview_admission(dependent_request(EventKind::MarkStale))
+        })
+        .unwrap();
+    assert_eq!(relaxed.outcome, kernel::Outcome::Deny);
+    assert_eq!(relaxed.disposition, kernel::Disposition::Quarantined);
+}
+
+/// A disposition event records a row without the trigger that admitted the
+/// object, so serving stops folding the trigger's evidence class after the
+/// event. The preview projects the row the commit writes: hidden today because
+/// the trigger's evidence was tightened to secret, labeled on `explicit_search`
+/// once the stale row replaces the admitting one, exactly what the commit then
+/// serves.
+#[test]
+fn preview_projects_the_row_the_commit_writes_without_the_stored_trigger_fold() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "later", "code_present", 1, "later-trigger");
+    ingest_evidence(&store, "backing", "trigger-later", Sensitivity::Normal);
+    Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE observations SET evidence_id='backing-evidence'
+             WHERE observation_id='observation-later'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(admit(&store, request("later"), "later", "later"), "admit");
+    ingest_evidence(&store, "backing", "trigger-later", Sensitivity::Secret);
+    let surfaces = |visibility: &dyn Fn(Surface) -> kernel::SurfaceVisibility| {
+        Surface::ALL
+            .iter()
+            .map(|surface| visibility(*surface))
+            .collect::<Vec<_>>()
+    };
+
+    let (_, (current, projected)) = store
+        .preview(far_deadline(), |preview| {
+            let served = preview.served_rows_for(&["object-later"], None)?;
+            let served = &served["object-later"];
+            let stale =
+                preview.preview_admission(subject_request("object-later", EventKind::MarkStale))?;
+            Ok((
+                surfaces(&|surface| served.visibility(surface)),
+                surfaces(&|surface| {
+                    served.visibility_with(stale.visibility, stale.sensitivity, surface)
+                }),
+            ))
+        })
+        .unwrap();
+    assert_eq!(current, [kernel::SurfaceVisibility::Hidden; 3]);
+    assert_eq!(
+        projected,
+        [
+            kernel::SurfaceVisibility::Hidden,
+            kernel::SurfaceVisibility::Hidden,
+            kernel::SurfaceVisibility::Labeled,
+        ]
+    );
+
+    store
+        .commit(intent("stale"), |envelope| {
+            envelope.record_admission(subject_request("object-later", EventKind::MarkStale))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let (_, served) = store
+        .preview(far_deadline(), |preview| {
+            let served = preview.served_rows_for(&["object-later"], None)?;
+            Ok(surfaces(&|surface| {
+                served["object-later"].visibility(surface)
+            }))
+        })
+        .unwrap();
+    assert_eq!(
+        served, projected,
+        "the preview projected what the commit serves"
+    );
+}
+
+/// A subject serves under its own row and its lineage's row. When the lineage
+/// row was promoted through an approval, quarantining that approval makes the
+/// commit demote the lineage row before it judges the next operation, so the
+/// subject's `current` verdicts are the demoted ones. The preview cannot see
+/// that demotion, so an operation on such a subject after the quarantine is
+/// refused rather than compared against the stale lineage row.
+#[test]
+fn preview_refuses_an_operation_whose_lineage_authority_an_earlier_one_changed() {
+    let directory = tempfile::tempdir().unwrap();
+    seed_approval(directory.path());
+    let store = KernelStore::open(directory.path()).unwrap();
+    stage_with_observation(&store, "target", "code_present", 1, "target-trigger");
+    assert_eq!(
+        admit(&store, request("target"), "target", "target"),
+        "admit"
+    );
+    // A sibling candidate on the target's lineage, approved while unmaterialized: the
+    // approval is recorded on a source-scoped row the target serves under too.
+    stage_in_run(&store, "run-sibling", "sibling", "source-target");
+    let mut approved = request("sibling");
+    approved.source_class = Some(SourceClass::ModelInference);
+    approved.taint_class = Some(TaintClass::AssistantInference);
+    approved.event.kind = EventKind::Approve;
+    approved.event.trigger_object_id = None;
+    approved.event.approval_object_id = Some("approval".to_string());
+    store
+        .commit(intent("approve-lineage"), |envelope| {
+            envelope.record_admission(approved)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let quarantine_approval = || {
+        let mut request = subject_request("approval", EventKind::Quarantine);
+        request.source_class = Some(SourceClass::ExplicitUser);
+        request.taint_class = Some(TaintClass::UserExplicit);
+        request
+    };
+    let surfaces = |visibility: &dyn Fn(Surface) -> kernel::SurfaceVisibility| {
+        Surface::ALL
+            .iter()
+            .map(|surface| visibility(*surface))
+            .collect::<Vec<_>>()
+    };
+
+    let (_, before) = store
+        .preview(far_deadline(), |preview| {
+            let served = preview.served_rows_for(&["object-target"], None)?;
+            let before = surfaces(&|surface| served["object-target"].visibility(surface));
+            preview.preview_admission(quarantine_approval())?;
+            assert_eq!(
+                preview.preview_admission(subject_request("object-target", EventKind::MarkStale)),
+                Err(KernelError::PreviewAuthorityChanged)
+            );
+            Ok(before)
+        })
+        .unwrap();
+    assert_eq!(before, [kernel::SurfaceVisibility::Visible; 3]);
+
+    // The commit's cascade demotes the lineage row, so the target already serves
+    // labeled when the next operation is judged.
+    store
+        .commit(intent("quarantine-approval"), |envelope| {
+            envelope.record_admission(quarantine_approval())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let (_, after) = store
+        .preview(far_deadline(), |preview| {
+            let served = preview.served_rows_for(&["object-target"], None)?;
+            Ok(surfaces(&|surface| {
+                served["object-target"].visibility(surface)
+            }))
+        })
+        .unwrap();
+    assert_eq!(
+        after,
+        [
+            kernel::SurfaceVisibility::Hidden,
+            kernel::SurfaceVisibility::Hidden,
+            kernel::SurfaceVisibility::Labeled,
+        ]
     );
 }
