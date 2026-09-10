@@ -16,8 +16,9 @@ use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest,
     CommitIntent, DomainSpec, HeldCursor, HeldDescriptor, KernelError, KernelStore,
     MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER, MAX_SOURCE_HOLD_LIFETIME_MS, ProviderEgress,
-    RemediationTarget, RepositoryProvenance, Sensitivity, SourceDescriptorRequest, SourceHold,
-    SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourceHoldInvalidity,
+    RemediationTarget, RepositoryProvenance, Sensitivity, SourceDescriptorPolicy,
+    SourceDescriptorRequest, SourceHold, SourceHoldBinding, SourceHoldBounds, SourceHoldError,
+    SourceHoldInvalidity,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -254,6 +255,13 @@ impl Fixture {
                 revision: &revision_text,
                 representation: representation(class),
                 span: None,
+            },
+            source_policy: if class == "git_commits" {
+                SourceDescriptorPolicy::Git {
+                    version: POLICY.to_string(),
+                }
+            } else {
+                SourceDescriptorPolicy::Native
             },
             domain_id: DOMAIN,
             scope_id: None,
@@ -1257,92 +1265,104 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
 }
 
 #[test]
-fn retention_is_capped_and_a_deregistered_consumer_leaves_no_hold_behind() {
-    let mut fixture = Fixture::open();
-    fixture.seed_five_classes();
-    let binding = fixture.binding();
+fn retention_is_capped_and_a_removed_consumer_leaves_no_hold_behind() {
+    for abandon in [false, true] {
+        let mut fixture = Fixture::open();
+        fixture.seed_five_classes();
+        let binding = fixture.binding();
 
-    // A lifetime past the kernel ceiling is refused whole; the ceiling itself
-    // is admitted.
-    assert_eq!(
-        fixture
-            .store
-            .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS + 1))
-            .unwrap_err(),
-        SourceHoldError::InvalidRequest
-    );
-    let capped = fixture
-        .store
-        .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
-        .unwrap();
-    assert_eq!(
-        capped.expires_at - capped.captured_at,
-        i64::try_from(MAX_SOURCE_HOLD_LIFETIME_MS).unwrap()
-    );
-
-    // The consumer holds under two policy versions; another consumer holds too.
-    let mut other_policy = binding.clone();
-    other_policy.source_policy_version = "source-policy.v2".to_string();
-    let second = fixture
-        .store
-        .capture_source_hold(&other_policy, wide())
-        .unwrap();
-    fixture
-        .store
-        .commit(intent("other-consumer"), |envelope| {
-            envelope.register_outbox_consumer("other", 1)?;
-            Ok(String::new())
-        })
-        .unwrap();
-    let other_binding = SourceHoldBinding {
-        consumer_id: "other".to_string(),
-        ..binding.clone()
-    };
-    let other = fixture
-        .store
-        .capture_source_hold(&other_binding, wide())
-        .unwrap();
-
-    // Deregistering the consumer releases every hold it owned in the same
-    // commit, so a consumer that leaves cannot keep bytes pinned until expiry.
-    let tip = fixture.store.tip().unwrap();
-    fixture.store.acknowledge_outbox(CONSUMER, tip, 1).unwrap();
-    fixture
-        .store
-        .commit(intent("deregister"), |envelope| {
-            envelope.deregister_outbox_consumer(CONSUMER, 9)?;
-            Ok(String::new())
-        })
-        .unwrap();
-    for hold in [&capped, &second] {
+        // A lifetime past the kernel ceiling is refused whole; the ceiling itself
+        // is admitted.
         assert_eq!(
             fixture
                 .store
-                .source_hold_status(&hold.binding, &hold.hold_id, hold.captured_at),
-            Err(SourceHoldError::Invalid(SourceHoldInvalidity::Released)),
-            "{}",
-            hold.hold_id
+                .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS + 1))
+                .unwrap_err(),
+            SourceHoldError::InvalidRequest
         );
-        assert!(fixture.pin_refs(&hold.hold_id).is_empty());
-    }
-    assert_eq!(
-        fixture.count(
-            "SELECT COUNT(*) FROM capture_pins
-             WHERE pin_kind='source_hold' AND released_at IS NULL"
-        ),
-        1
-    );
-    assert_eq!(
-        fixture.count(
-            "SELECT COUNT(*) FROM capture_pins
-             WHERE pin_kind='source_hold' AND released_at=9"
-        ),
-        2
-    );
-    assert_eq!(
+        let capped = fixture
+            .store
+            .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
+            .unwrap();
+        assert_eq!(
+            capped.expires_at - capped.captured_at,
+            i64::try_from(MAX_SOURCE_HOLD_LIFETIME_MS).unwrap()
+        );
+
+        // The consumer holds under two policy versions; another consumer holds too.
+        let mut other_policy = binding.clone();
+        other_policy.source_policy_version = "source-policy.v2".to_string();
+        let second = fixture
+            .store
+            .capture_source_hold(&other_policy, wide())
+            .unwrap();
         fixture
             .store
-            .source_hold_status(&other_binding, &other.hold_id, other.captured_at),
-        Ok(other.clone())
-    );
+            .commit(intent("other-consumer"), |envelope| {
+                envelope.register_outbox_consumer("other", 1)?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let other_binding = SourceHoldBinding {
+            consumer_id: "other".to_string(),
+            ..binding.clone()
+        };
+        let other = fixture
+            .store
+            .capture_source_hold(&other_binding, wide())
+            .unwrap();
+
+        let tip = fixture.store.tip().unwrap();
+        fixture.store.acknowledge_outbox(CONSUMER, tip, 1).unwrap();
+        fixture
+            .store
+            .commit(intent("remove-consumer"), |envelope| {
+                if abandon {
+                    envelope.abandon_outbox_consumer(
+                        CONSUMER,
+                        kernel::ConsumerAbandonment {
+                            operator_id: "operator".to_string(),
+                            reason: "retired".to_string(),
+                            abandoned_at: 9,
+                            barrier_id: None,
+                        },
+                    )?;
+                } else {
+                    envelope.deregister_outbox_consumer(CONSUMER, 9)?;
+                }
+                Ok(String::new())
+            })
+            .unwrap();
+        for hold in [&capped, &second] {
+            assert_eq!(
+                fixture
+                    .store
+                    .source_hold_status(&hold.binding, &hold.hold_id, hold.captured_at),
+                Err(SourceHoldError::Invalid(SourceHoldInvalidity::Released)),
+                "abandon={abandon}, hold={}",
+                hold.hold_id
+            );
+            assert!(fixture.pin_refs(&hold.hold_id).is_empty());
+        }
+        assert_eq!(
+            fixture.count(
+                "SELECT COUNT(*) FROM capture_pins
+             WHERE pin_kind='source_hold' AND released_at IS NULL"
+            ),
+            1
+        );
+        assert_eq!(
+            fixture.count(
+                "SELECT COUNT(*) FROM capture_pins
+             WHERE pin_kind='source_hold' AND released_at=9"
+            ),
+            2
+        );
+        assert_eq!(
+            fixture
+                .store
+                .source_hold_status(&other_binding, &other.hold_id, other.captured_at),
+            Ok(other.clone())
+        );
+    }
 }

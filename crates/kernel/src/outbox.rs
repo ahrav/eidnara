@@ -261,6 +261,7 @@ impl Envelope<'_> {
                 )
                 .map_err(map_sqlite)?;
         }
+        release_consumer_holds_in_tx(self.tx, &consumer_id, None, abandonment.abandoned_at)?;
         self.tx
             .execute_cached(
                 "DELETE FROM outbox_consumers WHERE consumer_id=?1",

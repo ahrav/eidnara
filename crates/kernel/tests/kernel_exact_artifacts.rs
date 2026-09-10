@@ -307,15 +307,14 @@ fn oversized_and_non_utf8_payloads_are_refused_before_materialization() {
 }
 
 #[test]
-fn a_forced_digest_collision_fails_without_replacing_stored_evidence() {
+fn a_damaged_object_at_the_offered_digest_is_refused_as_corruption_without_replacement() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
     let offered = b"the bytes being offered".to_vec();
     let digest = format!("{:x}", Sha256::digest(&offered));
-    // Plant different bytes at the path the offered digest maps to. The store
-    // has never seen either payload, so this is the only way two byte strings
-    // can meet under one digest.
+    // An object whose SHA-256 differs from its path digest is corrupt. Both
+    // lanes must report a store fault rather than blame the payload.
     let planted = b"different stored bytes";
     let path = object_path(root.path(), &digest);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -331,7 +330,7 @@ fn a_forced_digest_collision_fails_without_replacing_stored_evidence() {
             _ => store.ingest_artifact(request(lane, offered.clone())),
         }
         .unwrap_err();
-        assert_eq!(error.kind(), ArtifactErrorKind::DigestCollision, "{lane}");
+        assert_eq!(error.kind(), ArtifactErrorKind::CorruptObject, "{lane}");
         assert!(format!("{error}").contains(&digest));
         assert_eq!(
             fs::read(&path).unwrap(),

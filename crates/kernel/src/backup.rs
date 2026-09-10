@@ -676,6 +676,10 @@ impl KernelStore {
                 for (guard, connection) in readers.iter_mut().zip(new_readers) {
                     **guard = connection;
                 }
+                // `restore_generation` advances while all connection guards are held, preventing
+                // reads from pairing the displaced history's incarnation with the installed database.
+                self.restore_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(source_seq)
             }
             Err(error) => {

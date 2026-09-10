@@ -221,8 +221,8 @@ pub enum ArtifactErrorKind {
     ExactBytesRewritten,
     /// An exact ingest received bytes that are not valid UTF-8 text.
     UnsupportedShape,
-    /// The digest names a stored object whose bytes differ from the payload. Nothing is replaced;
-    /// the offered bytes are refused.
+    /// A stored object hashes to the payload's digest but holds different bytes. Nothing is
+    /// replaced; the offered bytes are refused.
     DigestCollision,
 }
 
@@ -454,6 +454,7 @@ pub use deletion::{
 pub use gc::ArtifactGcFault;
 pub use gc::ArtifactGcResult;
 pub(crate) use gc::ObjectPresence;
+pub(crate) use ingest::is_exact_retention;
 pub(crate) use read::egress_facts_tx;
 
 impl fmt::Debug for ArtifactError {
