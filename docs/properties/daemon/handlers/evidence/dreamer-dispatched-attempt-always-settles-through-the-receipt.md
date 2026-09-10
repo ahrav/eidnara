@@ -97,8 +97,11 @@ default-production reachability, subject to the route's authority checks.
   The model's `shareable` is floored by `Envelope::served_rows_for` in the same
   commit: a memory served above normal, or hidden at `ExplicitSearch`
   (`served_rows_for` returns hidden rows), is recorded `shareable=false`.
-  Its kernel receipt uses producer `dreamer.classify`, a project-namespaced
-  receipt operation key, and the receipt digest. A replay writes nothing new.
+  Its kernel receipt uses producer `dreamer.classify`, an operation key built
+  by `classify_kernel_operation_key` from the route digest, the authority
+  project's digest, and the receipt operation key, and the receipt digest. A
+  replay writes nothing new; a second authority project on the same root with
+  the same session and command id is a distinct kernel receipt.
   The same commit retires this project's prior live classifications through
   `Envelope::live_dependent_observations` in `crates/kernel/src/envelope.rs`
   and `retire_observation` in `crates/kernel/src/slice/write.rs`; a row that
@@ -238,6 +241,10 @@ the producer is never started again.
    through `classifies`, then a classify of that memory: assert `classified`
    is 1, the foreign row still live, and this project's row written
    (`dreamer_run_task_leaves_another_projects_classification_of_the_memory_live`).
+16. Two authority projects hold one root in turn and reuse a session and command
+   id: assert the second run dispatches, commits at a new tip with a distinct
+   `commit_seq`, and its row retires the first's rather than replaying it
+   (`dreamer_run_task_keys_the_kernel_write_by_authority_project_on_a_shared_root`).
 
 The stranded-receipt, fenced-cleanup, and terminal-status tests use the async
 object-id harness:

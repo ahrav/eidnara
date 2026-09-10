@@ -35,6 +35,13 @@ all three commits. The one CI step that matters moved:
 `cargo test -p daemon --test lifecycle_cli` is `ci.yml:168` at `76cd6f41` and
 `:172` at `HEAD`, and records cite whichever the lens agent used.
 
+Numeric `lib.rs` anchors in the tables and the h4c and stagelc records are the
+lens agents' at `e447c927`; the daemon has grown since, so they do not hold at
+this branch's HEAD and are read at `e447c927`. The `handle_dreamer_run_task`
+row and the two Dreamer records below cite `lib.rs` by symbol, because those
+paths were rewritten after the lens read; their `dreamer_scheduler.rs` and
+`memory-store` anchors are verified at this branch's HEAD.
+
 Reachability provenance. Twenty-two records are `default-production` and three
 are `explicit-config-only`. The shared `default-production` evidence is one pair
 of facts: the production entry is `CompositeComponent::handle` (`:11963`), which
@@ -108,7 +115,7 @@ recognisable, or says what stands in for one.
 | `handle_transform_unpaged_value` (`:8007-8615`) | Project mural artifact (`:8210`), historian side channels (`:8252`), pass traces (`:8262`, `:8332`, `:8560`), then the fenced cache-state commit inside `apply_once` | **3 or more, in separate transactions** | None at the handler. The cache-state commit is fenced by `row_version`/`revert_epoch` inside `apply_once` | `TransformResponse` with `committed` (`:8522`) |
 | `handle_state_sync_value` (`:8642-9125`) → `apply_state_sync_wire` (`:9127-9333`) | Full shadow state, via `apply_authority_state_sync` (`:9241-9285`), plus an in-memory capability flag (`:9288-9291`) | 1 durable, plus 1 in-memory effect | `shadow_generation` + `expected_shadow_seq` fence (`:9244-9245`); paged path adds `seed_id` + digest (`:8735-8748`) | `{ok, shadow_generation, shadow_seq, row_version, ...skipped/seeded counts}` (`:9292-9306`) |
 | `handle_transform_page_value` (`:9335-9578`) | Nothing durable itself; assembles pages then delegates to the unpaged path | 0 direct | `transform_page_id` + `transform_page_digest` (consts `:636-641`) | Page ack, or the delegated transform response |
-| `handle_dreamer_run_task` (`:9605-10040`) | Dream task ledger row (`:9989` failure path, `:10016` success path) | 1, after an external model call | `command_id`, 1..=256 bytes (`:9626-9631`), plus an `authority_generation` fence (`:9690-9698`); replay read at `:9819` before any producer run | Replayed ledger response (`:9820`, `:10029`) or an error (`:9995`, `:10035`) |
+| `handle_dreamer_run_task` → `DreamerRuntime::run_dreamer_task` (symbol anchors, verified at this branch's HEAD; the function was rewritten after the lens read) | Dreamer receipt and attempt rows in the Dreamer ledger (`begin_dreamer_receipt` before any producer, `begin_dreamer_attempt` before each start, `complete_dreamer_receipt` on every settled arm), plus one `memory_classification` observation per memory through `DreamerRuntime::record_classifications` | 1 receipt write before the model call, 1 attempt write per model, 1 kernel commit after an accepted result, then 1 receipt completion; the kernel commit precedes the completion | `command_id`, 1..=256 bytes (`handle_dreamer_run_task`), under the session's ledger session and the route's authority project, plus an `authority_generation` fence and a `leased_project` check (`run_dreamer_task`); the receipt binding digests `object_ids`, model chain, timeout, and template, schema, and prompt versions; the kernel commit key adds the route and authority-project digests (`classify_kernel_operation_key`) | Replayed receipt response (`replay_dream_task_response`, `read_dream_task_response`), `dreamer_request_conflict`, `dreamer_outcome_unknown`, or the request failure the receipt recorded |
 
 Read-only handlers in scope, listed for completeness and carrying no records:
 `handle_authority_status_value` (`:7134-7167`), `handle_mirror_pull_value`
@@ -646,8 +653,10 @@ generation (`crates/daemon/src/classify.rs`, `attempt_child_session_id`), so
 they use different identities from the predecessor's runs. The exhausted-chain, success, and settle writes
 each match `Applied`, `Fenced`, and `Err` as separate arms.
 Accepted classifications become project-scoped `memory_classification`
-observations with `(ModelInference, DreamerInference)` admission, keyed by the
-project-namespaced operation key and digest under `dreamer.classify`. The model's
+observations with `(ModelInference, DreamerInference)` admission, keyed under
+`dreamer.classify` by the route digest, the authority project's digest, the
+receipt's operation key, and the receipt digest, so two projects that hold one
+root in turn and reuse a session and command id are two kernel receipts. The model's
 `shareable` is recorded true only for a memory the serving view classes normal and
 serves at `ExplicitSearch` at commit time. The same kernel commit retires this project's prior live
 classifications for each memory; another project's row citing the memory through

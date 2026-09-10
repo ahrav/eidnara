@@ -9907,6 +9907,7 @@ impl DreamerRuntime {
                         .record_classifications(
                             route.kernel_project,
                             &ClassifyWriteIdentity {
+                                authority_project: receipt_key.project,
                                 operation_key: receipt_key.operation_key,
                                 request_digest: &binding_record.request_digest,
                                 cause: &format!("{ledger_session}:{command_id}"),
@@ -10017,6 +10018,7 @@ impl DreamerRuntime {
             .record_classifications(
                 route.kernel_project,
                 &ClassifyWriteIdentity {
+                    authority_project: receipt_key.project,
                     operation_key: receipt_key.operation_key,
                     request_digest: &binding_record.request_digest,
                     cause: &format!("{ledger_session}:{command_id}"),
@@ -13842,13 +13844,29 @@ enum PoolFailure {
 
 /// What a classification commit is keyed and stamped by.
 struct ClassifyWriteIdentity<'a> {
-    /// The receipt's operation key, reused as the kernel operation key.
+    /// The Dreamer receipt's project; the kernel key includes it because a route digest is the same for every project that held the root in turn. commentlint: allow(JUDGE)
+    authority_project: &'a str,
     operation_key: &'a str,
     /// The receipt's request digest, reused as the kernel request digest.
     request_digest: &'a str,
     cause: &'a str,
     generation: u64,
     known_as_of: i64,
+}
+
+/// The kernel operation key of one classify receipt's commit: the route digest, the producer family, the authority project's digest, and the receipt's operation key. The project id is digested, as the route is, so an id the kernel's secret detector would refuse cannot block the write. commentlint: allow(JUDGE)
+fn classify_kernel_operation_key(
+    project: &kernel_routes::ProjectBinding,
+    authority_project: &str,
+    receipt_operation_key: &str,
+) -> Option<String> {
+    project.operation_key(
+        CLASSIFY_KERNEL_PRODUCER,
+        &format!(
+            "{}:{receipt_operation_key}",
+            sha256_hex(authority_project.as_bytes())
+        ),
+    )
 }
 
 /// What the kernel recorded for one run's classifications.
@@ -13970,11 +13988,15 @@ impl DreamerRuntime {
             .kernel_store()
             .map_err(|state| format!("kernel unavailable: {}", state.state_key()))?;
         // The kernel keys receipts store-wide, the Dreamer ledger per project:
-        // the project's digest joins the key so two projects' commands with
-        // one session and command id stay two kernel receipts.
-        let operation_key = project
-            .operation_key(CLASSIFY_KERNEL_PRODUCER, identity.operation_key)
-            .ok_or_else(|| "the receipt operation key is blank".to_string())?;
+        // the route and authority-project digests join the key so two projects'
+        // commands with one session and command id stay two kernel receipts,
+        // including two projects that held the same root in turn.
+        let operation_key = classify_kernel_operation_key(
+            project,
+            identity.authority_project,
+            identity.operation_key,
+        )
+        .ok_or_else(|| "the receipt operation key is blank".to_string())?;
         let intent = kernel::CommitIntent {
             producer: CLASSIFY_KERNEL_PRODUCER.to_string(),
             operation_key: operation_key.clone(),
@@ -28154,13 +28176,12 @@ mod tests {
     /// harness's project.
     impl DreamerHarness {
         fn kernel_operation_key(&self, command_id: &str) -> String {
-            binding_with_harness(&self.route_root, "pi", "ses")
-                .kernel_project
-                .operation_key(
-                    CLASSIFY_KERNEL_PRODUCER,
-                    &dreamer_operation_key("ses", command_id),
-                )
-                .unwrap()
+            classify_kernel_operation_key(
+                &binding_with_harness(&self.route_root, "pi", "ses").kernel_project,
+                "git:identity",
+                &dreamer_operation_key("ses", command_id),
+            )
+            .unwrap()
         }
 
         fn kernel_tip(&self) -> i64 {
@@ -30417,6 +30438,102 @@ mod tests {
         );
     }
 
+    /// Two authority projects hold the same root in turn and reuse a session and command id. The Dreamer ledger keys receipts by project, so the second project dispatches; its kernel commit must not replay the first project's receipt, which a key built from the route digest alone would. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_keys_the_kernel_write_by_authority_project_on_a_shared_root() {
+        let memory = test_memory_id(1);
+        let producer = Arc::new(ProducerState::default());
+        for _ in 0..2 {
+            producer
+                .await_results
+                .lock()
+                .unwrap()
+                .push_back(Ok(ProducerOutput {
+                    text: classify_manifest(std::slice::from_ref(&memory)),
+                    length_capped: false,
+                }));
+        }
+        let harness = DreamerHarness::start(&producer).await;
+        let payload = classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS);
+        let first = response_of(harness.classify(payload.clone(), "shared").await);
+        assert_eq!(first["classified"], json!(1));
+        let first_tip = harness.kernel_tip();
+
+        // The route now resolves the root to `git:other`; the request is not leased.
+        activate_module_authority(
+            &harness.store,
+            "context",
+            "git:other",
+            &harness.route_root,
+            "memories",
+        );
+        let other = harness
+            .store
+            .authority_status("context", "git:other", "memories")
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.state, "MODULE");
+        let second = response_of(
+            harness
+                .handler
+                .handle_dreamer_run_task(
+                    test_route(7),
+                    &json!({
+                        "v": 1,
+                        "session_id": "ses",
+                        "task": CLASSIFY_TASK,
+                        "command_id": "shared",
+                        "authority_generation": other.generation,
+                        "payload": payload,
+                    }),
+                )
+                .await,
+        );
+        assert_eq!(second["classified"], json!(1), "{second}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
+        assert!(
+            harness.kernel_tip() > first_tip,
+            "the second project's commit is written, not replayed from the first's receipt"
+        );
+        assert_ne!(
+            second["commit_seq"], first["commit_seq"],
+            "the two projects' commits are distinct kernel receipts"
+        );
+        // Both projects write under the root's scope, so the second commit
+        // retires the first's row: one live classification, keyed by the
+        // second project.
+        let written = harness.classifications();
+        let other_key = classify_kernel_operation_key(
+            &binding_with_harness(&harness.route_root, "pi", "ses").kernel_project,
+            "git:other",
+            &dreamer_operation_key("ses", "shared"),
+        )
+        .unwrap();
+        assert_ne!(other_key, harness.kernel_operation_key("shared"));
+        assert_eq!(
+            written
+                .iter()
+                .map(|row| row.object_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![classification_object_id(&other_key, &memory).as_str()],
+            "{written:?}"
+        );
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let first_id = classification_object_id(&harness.kernel_operation_key("shared"), &memory);
+        let (_, states) = kernel
+            .object_states(std::slice::from_ref(&first_id))
+            .unwrap();
+        assert_eq!(
+            states[0]
+                .clone()
+                .unwrap_or_else(|| panic!("{first_id} is in the store"))
+                .object
+                .invalidated_commit_seq,
+            Some(second["commit_seq"].as_i64().unwrap()),
+            "the first project's row is retired by the second commit"
+        );
+    }
+
     /// A scope row with a different project digest rejects classification
     /// writes, and the failure names that reason as `kernel.commit` does.
     #[tokio::test(flavor = "current_thread")]
@@ -30448,6 +30565,7 @@ mod tests {
             .record_classifications(
                 &other,
                 &ClassifyWriteIdentity {
+                    authority_project: "git:identity",
                     operation_key: &dreamer_operation_key("ses", "reserved"),
                     request_digest: &"d".repeat(64),
                     cause: "ses:reserved",
@@ -30638,6 +30756,7 @@ mod tests {
             .record_classifications(
                 &binding,
                 &ClassifyWriteIdentity {
+                    authority_project: "git:identity",
                     operation_key: &dreamer_operation_key("ses", "floor"),
                     request_digest: &"d".repeat(64),
                     cause: "ses:floor",
