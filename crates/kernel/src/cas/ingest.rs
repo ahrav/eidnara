@@ -17,8 +17,8 @@ use sha2::{Digest, Sha256};
 use super::ArtifactIngestFault;
 use super::{
     ArtifactError, ArtifactErrorKind, ArtifactHandle, ArtifactIngestHook, ArtifactIngestRequest,
-    IngestFaults, MAX_PAYLOAD_BYTES, MAX_PAYLOAD_DETECTIONS, MAX_TEXT_FIELD_BYTES, ProviderEgress,
-    is_artifact_digest, read_capped,
+    IngestFaults, MAX_PAYLOAD_BYTES, MAX_PAYLOAD_DETECTIONS, MAX_TEXT_FIELD_BYTES, PayloadFidelity,
+    ProviderEgress, is_artifact_digest, read_capped,
 };
 use crate::current_time_ms;
 use crate::durable_fs::{
@@ -66,7 +66,10 @@ struct PreparedArtifact {
 }
 
 impl PreparedArtifact {
-    fn new(mut request: ArtifactIngestRequest) -> Result<Self, ArtifactError> {
+    fn new(
+        mut request: ArtifactIngestRequest,
+        fidelity: PayloadFidelity,
+    ) -> Result<Self, ArtifactError> {
         if request.payload.len() > MAX_PAYLOAD_BYTES {
             return Err(ArtifactError::new(ArtifactErrorKind::PayloadTooLarge));
         }
@@ -136,10 +139,24 @@ impl PreparedArtifact {
             Ok(text) => {
                 let mut redaction = redact_payload(text, MAX_PAYLOAD_DETECTIONS)
                     .map_err(|error| ArtifactError::new(scan_failure(error)))?;
-                // The redacted text becomes the stored bytes without a copy;
-                // only its detections are needed afterwards.
-                let bytes = std::mem::take(&mut redaction.text).into_bytes();
-                (redaction, bytes, true)
+                match fidelity {
+                    PayloadFidelity::Redacting => {
+                        // The redacted text becomes the stored bytes without a copy;
+                        // only its detections are needed afterwards.
+                        let bytes = std::mem::take(&mut redaction.text).into_bytes();
+                        (redaction, bytes, true)
+                    }
+                    PayloadFidelity::Exact if redaction.detections.is_empty() => {
+                        redaction.text = String::new();
+                        (redaction, std::mem::take(&mut request.payload), true)
+                    }
+                    PayloadFidelity::Exact => {
+                        return Err(ArtifactError::new(ArtifactErrorKind::ExactBytesRewritten));
+                    }
+                }
+            }
+            Err(_) if fidelity == PayloadFidelity::Exact => {
+                return Err(ArtifactError::new(ArtifactErrorKind::UnsupportedShape));
             }
             Err(_) => {
                 // Lossy decoding expands invalid bytes to three-byte U+FFFD sequences;
@@ -240,7 +257,42 @@ impl KernelStore {
         &self,
         request: ArtifactIngestRequest,
     ) -> Result<ArtifactHandle, ArtifactError> {
-        self.ingest_artifact_inner(request, IngestFaults::default(), None, None)
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Redacting,
+            IngestFaults::default(),
+            None,
+            None,
+        )
+    }
+
+    /// Stores the offered UTF-8 text unchanged or refuses before anything is written: a recognized
+    /// secret is `ExactBytesRewritten`, bytes that are not UTF-8 are `UnsupportedShape`, and a scan
+    /// that cannot vouch for the payload is reported as such. The refusal is decided before a
+    /// temporary file exists, so no partial artifact carries the bytes. Everything after admission
+    /// is the shared publication path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactError`] for the refusals above and for every failure `ingest_artifact` reports.
+    pub fn ingest_exact_artifact(
+        &self,
+        request: ArtifactIngestRequest,
+    ) -> Result<ArtifactHandle, ArtifactError> {
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Exact,
+            IngestFaults::default(),
+            None,
+            None,
+        )
+    }
+
+    /// Artifacts that reached the staging step on this store since it opened.
+    #[cfg(feature = "test-support")]
+    pub fn staged_artifacts_for_test(&self) -> usize {
+        self.staged_artifacts
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Runs artifact ingestion with one injected failure point.
@@ -254,7 +306,13 @@ impl KernelStore {
         request: ArtifactIngestRequest,
         fault: ArtifactIngestFault,
     ) -> Result<ArtifactHandle, ArtifactError> {
-        self.ingest_artifact_inner(request, fault.into(), None, None)
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Redacting,
+            fault.into(),
+            None,
+            None,
+        )
     }
 
     /// Runs `hook` after the staged file is synced and before writer acquisition.
@@ -268,7 +326,13 @@ impl KernelStore {
         request: ArtifactIngestRequest,
         mut hook: impl FnMut(&str),
     ) -> Result<ArtifactHandle, ArtifactError> {
-        self.ingest_artifact_inner(request, IngestFaults::default(), Some(&mut hook), None)
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Redacting,
+            IngestFaults::default(),
+            Some(&mut hook),
+            None,
+        )
     }
 
     /// Reports durable protocol boundaries while optionally injecting a failure.
@@ -285,12 +349,19 @@ impl KernelStore {
         mut hook: impl FnMut(ArtifactIngestHook),
     ) -> Result<ArtifactHandle, ArtifactError> {
         let faults = fault.map(IngestFaults::from).unwrap_or_default();
-        self.ingest_artifact_inner(request, faults, None, Some(&mut hook))
+        self.ingest_artifact_inner(
+            request,
+            PayloadFidelity::Redacting,
+            faults,
+            None,
+            Some(&mut hook),
+        )
     }
 
     fn ingest_artifact_inner(
         &self,
         request: ArtifactIngestRequest,
+        fidelity: PayloadFidelity,
         faults: IngestFaults,
         temp_written_hook: Option<&mut dyn FnMut(&str)>,
         mut protocol_hook: Option<&mut dyn FnMut(ArtifactIngestHook)>,
@@ -298,9 +369,12 @@ impl KernelStore {
         if self.cas_is_failed() {
             return Err(ArtifactError::new(ArtifactErrorKind::IngestionFailClosed));
         }
-        let prepared = PreparedArtifact::new(request)?;
+        let prepared = PreparedArtifact::new(request, fidelity)?;
         let byte_length = u64::try_from(prepared.bytes.len())
             .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
+        #[cfg(feature = "test-support")]
+        self.staged_artifacts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let tmp = &self.tmp_directory;
         let objects = &self.objects_directory;
@@ -465,7 +539,7 @@ impl KernelStore {
         if let Some(hook) = protocol_hook.as_mut() {
             hook(ArtifactIngestHook::AfterPublish);
         }
-        if let Err(error) = verify_object(&shard, &prepared.digest[2..], &prepared.digest) {
+        if let Err(error) = verify_object(&shard, &prepared.digest[2..], &prepared, published_new) {
             self.cleanup_failed_reference(
                 &mut writer,
                 &reservation_id,
@@ -1099,7 +1173,15 @@ fn artifact_is_reclaiming(
         .map_err(|_| KernelError::Io)
 }
 
-fn verify_object(shard: &File, name: &str, digest: &str) -> Result<(), ArtifactError> {
+/// Oversized or digest-mismatched content is store corruption whichever attempt wrote it.
+/// A pre-existing object with the expected digest but different bytes is a digest collision.
+fn verify_object(
+    shard: &File,
+    name: &str,
+    prepared: &PreparedArtifact,
+    published_new: bool,
+) -> Result<(), ArtifactError> {
+    let digest = prepared.digest.as_str();
     let object = open_regular_nofollow(shard, name)
         .map_err(|_| ArtifactError::for_digest(ArtifactErrorKind::MissingObject, digest))?;
     let Some(bytes) = read_capped(object)
@@ -1110,13 +1192,15 @@ fn verify_object(shard: &File, name: &str, digest: &str) -> Result<(), ArtifactE
             digest,
         ));
     };
-    if format!("{:x}", Sha256::digest(bytes)) != digest {
-        return Err(ArtifactError::for_digest(
-            ArtifactErrorKind::CorruptObject,
-            digest,
-        ));
+    if bytes == prepared.bytes {
+        return Ok(());
     }
-    Ok(())
+    let kind = if !published_new && format!("{:x}", Sha256::digest(&bytes)) == digest {
+        ArtifactErrorKind::DigestCollision
+    } else {
+        ArtifactErrorKind::CorruptObject
+    };
+    Err(ArtifactError::for_digest(kind, digest))
 }
 
 fn stat_bytes(stat: &rfs::Stat) -> u64 {
@@ -1243,4 +1327,126 @@ fn injected_storage_error() -> StorageError {
 #[cfg(not(feature = "test-support"))]
 fn injected_storage_error() -> StorageError {
     unreachable!("fault injection requires the test-support feature")
+}
+
+#[cfg(test)]
+mod verify_object_tests {
+    use std::fs::{self, File};
+    use std::os::unix::fs::PermissionsExt;
+
+    use sha2::{Digest, Sha256};
+
+    use super::{PreparedArtifact, verify_object};
+    use crate::cas::{
+        ArtifactErrorKind, ArtifactIngestRequest, MAX_PAYLOAD_BYTES, PayloadFidelity,
+    };
+    use crate::{CommitIntent, ProviderEgress, Sensitivity};
+
+    fn prepared(payload: &[u8]) -> PreparedArtifact {
+        let request = ArtifactIngestRequest {
+            intent: CommitIntent {
+                producer: "verify-object-test".to_string(),
+                operation_key: "verify".to_string(),
+                request_digest: format!("{:x}", Sha256::digest(payload)),
+                actor: "test".to_string(),
+                cause: "proof".to_string(),
+            },
+            payload: payload.to_vec(),
+            evidence_id: "evidence".to_string(),
+            object_id: "object".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "tool_output".to_string(),
+            source_id: "native/verify".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        };
+        PreparedArtifact::new(request, PayloadFidelity::Exact).unwrap()
+    }
+
+    /// A shard holding one object that `open_regular_nofollow` accepts.
+    fn shard_with(name: &str, stored: &[u8]) -> (tempfile::TempDir, File) {
+        let shard = tempfile::tempdir().unwrap();
+        fs::set_permissions(shard.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = shard.path().join(name);
+        fs::write(&path, stored).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let directory = File::open(shard.path()).unwrap();
+        (shard, directory)
+    }
+
+    fn kind(
+        prepared: &PreparedArtifact,
+        stored: &[u8],
+        published_new: bool,
+    ) -> Option<ArtifactErrorKind> {
+        let name = prepared.digest[2..].to_string();
+        let (_shard, directory) = shard_with(&name, stored);
+        verify_object(&directory, &name, prepared, published_new)
+            .err()
+            .map(|error| error.kind())
+    }
+
+    #[test]
+    fn identical_bytes_verify_on_both_publication_outcomes() {
+        let prepared = prepared(b"offered");
+        assert_eq!(kind(&prepared, b"offered", true), None);
+        assert_eq!(kind(&prepared, b"offered", false), None);
+    }
+
+    #[test]
+    fn bytes_this_attempt_published_that_differ_are_corruption() {
+        let prepared = prepared(b"offered");
+        assert_eq!(
+            kind(&prepared, b"torn", true),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+    }
+
+    #[test]
+    fn a_pre_existing_object_that_does_not_hash_to_the_digest_is_corruption() {
+        let prepared = prepared(b"offered");
+        assert_eq!(
+            kind(&prepared, b"bit rot", false),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+    }
+
+    #[test]
+    fn an_oversized_object_is_corruption_on_both_publication_outcomes() {
+        let prepared = prepared(b"offered");
+        let oversized = vec![b'z'; MAX_PAYLOAD_BYTES + 1];
+        assert_eq!(
+            kind(&prepared, &oversized, true),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+        assert_eq!(
+            kind(&prepared, &oversized, false),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+    }
+
+    /// No two byte strings with the same SHA-256 are known, so the collision is
+    /// staged by naming the prepared payload with the digest of the stored bytes.
+    #[test]
+    fn a_pre_existing_object_that_hashes_to_the_digest_yet_differs_is_a_collision() {
+        let stored = b"stored under the offered digest";
+        let mut prepared = prepared(b"offered");
+        prepared.digest = format!("{:x}", Sha256::digest(stored));
+        assert_eq!(
+            kind(&prepared, stored, false),
+            Some(ArtifactErrorKind::DigestCollision)
+        );
+        // Bytes this attempt wrote never collide with themselves, so the same
+        // mismatch after a fresh publication is corruption of what was written.
+        assert_eq!(
+            kind(&prepared, stored, true),
+            Some(ArtifactErrorKind::CorruptObject)
+        );
+    }
 }

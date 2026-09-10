@@ -140,6 +140,11 @@ pub struct KernelStore {
     // records that an unrecoverable restore left the family unusable.
     poisoned: AtomicBool,
     pub(super) cas_failed: AtomicBool,
+    /// Artifacts that reached the staging step on this store. A refusal decided before
+    /// admission leaves the count unchanged, which is what a test observes to show that no
+    /// temporary file was ever created for it.
+    #[cfg(feature = "test-support")]
+    pub(super) staged_artifacts: std::sync::atomic::AtomicUsize,
     pub(super) artifact_cap: u64,
     /// The store root and the artifact tree's `objects` and `tmp` children,
     /// opened `NOFOLLOW` when the store opened and held for its lifetime. Every
@@ -379,6 +384,8 @@ impl KernelStore {
             next_reader: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             cas_failed: AtomicBool::new(false),
+            #[cfg(feature = "test-support")]
+            staged_artifacts: std::sync::atomic::AtomicUsize::new(0),
             artifact_cap,
             root_directory,
             objects_directory: artifact_directories.objects,
