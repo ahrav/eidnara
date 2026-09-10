@@ -707,7 +707,7 @@ impl CanonicalScope {
     }
 }
 
-pub(super) fn is_lower_hex_oid(value: &str) -> bool {
+pub(crate) fn is_lower_hex_oid(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64)
         && value
             .bytes()

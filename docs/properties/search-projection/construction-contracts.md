@@ -25,7 +25,7 @@ identity-contract version.
 Contract identifiers are `CC1` through `CC12`. The adoption table at the end
 maps each later ticket to the contracts it consumes. Changing any contract
 changes `identity_contract_version`
-(`search-projection-identity-v1`), which is one of the invalidation identities every hook
+(`search-projection-identity-v2`), which is one of the invalidation identities every hook
 carries (CC10) and one of the five rebuild triggers in the specification's C7.
 
 ## CC1. Source classes and stable identifiers
@@ -85,9 +85,16 @@ Field semantics:
   truncation. Envelopes and harness-removed bytes are not evidence. Output and
   error strings are separate representations.
 
-Revision is a nonempty string: the canonical revision for kernel objects, the
-host record revision for messages, and the descriptor revision for retained
-git evidence. An empty revision is refused.
+Every identity value is a stable identifier, not content: it is nonempty, at
+most 512 bytes, and holds no control character. A value outside those bounds
+is refused, and each class field appears exactly once.
+
+Revision is the canonical decimal spelling of a nonnegative integer that fits
+a signed 64-bit value: the canonical revision for kernel objects, the host
+record revision for messages, and the descriptor revision for retained git
+evidence. An empty revision is refused as missing; any other spelling (a
+leading zero, a sign, letters) is refused as malformed, so one number has one
+identifier.
 
 ## CC3. Representation and span convention
 
@@ -105,11 +112,16 @@ two-element array of unsigned offsets, or any malformed bound refuses before
 identity is minted.
 
 Refusals are checked in a fixed order, and the first failing check names the
-refusal: unknown class; missing or non-string identity field; unknown identity
-field; unknown harness; malformed object identifier; missing revision; unknown
+refusal: unknown class; missing or non-string identity field; unknown or
+repeated identity field; malformed identity value; unknown harness; malformed
+object identifier; missing revision; malformed revision; unknown
 representation; payload not a string; malformed span; reversed span; span past
 the end of the buffer; span bound inside a multibyte sequence. The fixtures
 include multi-fault records that pin this order.
+
+A span that selects every byte of its buffer is the whole-block selection and
+is normalized to it before an identifier is minted, so one occurrence has one
+identifier however the producer spelled the selection.
 
 An empty buffer with a whole-block selection is a valid occurrence. Empty
 output is evidence that a tool produced nothing, and the fixtures keep it.
@@ -121,7 +133,8 @@ representation, span)`. Its byte encoding is length-delimited so no value can
 imitate a field boundary:
 
 ```text
-0x01                                  encoding version
+0x02                                  encoding version
+0x00                                  role: occurrence
 len32(class) class
 count32                               number of identity fields, in CC2 order
   len32(name) name len32(value) value  once per field
@@ -136,6 +149,14 @@ The occurrence identifier is SHA-256 over the encoding. The encoding bytes are
 retained beside the identifier; on a digest collision the full tuple bytes are
 compared, and unequal tuples are refused. No suffix, counter, or rename
 resolves a collision.
+
+The lineage of an occurrence is every revision of one source at one
+representation and span: the same encoding with role byte `0x01` and the
+revision omitted. The lineage identifier is SHA-256 over that encoding. The
+role byte keeps a lineage identifier from ever equalling an occurrence
+identifier. A newer revision supersedes the live descriptor of its lineage;
+two occurrences with different representations or spans are different
+lineages and never supersede each other.
 
 Two identity values that differ only in where a separator character sits, such
 as `session_id = "a|b", message_id = "c"` against `session_id = "a",
