@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use kernel::source_identity::{
-    HARNESSES, Occurrence, OccurrenceClass, OccurrenceRefusal, Span, encode, payload_id, select,
-    validate_span,
+    HARNESSES, Occurrence, OccurrenceClass, OccurrenceRefusal, Span, encode, normalize_span,
+    payload_id, select, validate_span,
 };
 use kernel::{
     ArtifactIngestRequest, CommitIntent, DomainSpec, KernelError, KernelStore, ProviderEgress,
@@ -79,8 +79,9 @@ fn encode_record(record: &Value) -> Result<(String, String, String), &'static st
             record_span(record)
         }
     };
-    let encoded = encode(&Occurrence { span, ..occurrence }).map_err(OccurrenceRefusal::name)?;
     validate_span(span, payload).map_err(OccurrenceRefusal::name)?;
+    let span = normalize_span(span, payload);
+    let encoded = encode(&Occurrence { span, ..occurrence }).map_err(OccurrenceRefusal::name)?;
     Ok((
         encoded.occurrence_id,
         encoded.lineage_id,
@@ -143,6 +144,10 @@ fn the_kernel_encoder_reproduces_every_golden_identifier_and_refusal() {
     for pair in expectations["distinct_occurrences"].as_array().unwrap() {
         let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
         assert_ne!(encoded[a].0, encoded[b].0, "{a}/{b}");
+    }
+    for pair in expectations["equal_occurrences"].as_array().unwrap() {
+        let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+        assert_eq!(encoded[a], encoded[b], "{a}/{b} are one occurrence");
     }
     for pair in expectations["equal_lineages"].as_array().unwrap() {
         let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
@@ -394,6 +399,37 @@ impl Fixture {
         states[0]
             .as_ref()
             .map(|state| state.object.invalidated_commit_seq.is_none())
+    }
+
+    fn publish_batch(
+        &self,
+        key: &str,
+        requests: &[SourceDescriptorRequest<'_>],
+    ) -> Result<Vec<kernel::SourceDescriptorOutcome>, SourceDescriptorError> {
+        let mut outcome = None;
+        let receipt = self.store.commit(intent(key), |envelope| {
+            let published = envelope.publish_source_descriptors(requests);
+            let result = match &published {
+                Ok(_) => Ok(String::new()),
+                Err(SourceDescriptorError::Kernel(error)) => Err(*error),
+                Err(_) => Err(KernelError::InvalidInput),
+            };
+            outcome = Some(published);
+            result
+        });
+        let outcome = outcome.expect("the operation ran");
+        assert_eq!(outcome.is_ok(), receipt.is_ok());
+        outcome
+    }
+
+    fn descriptor_object_ids_at_tip(&self) -> Vec<String> {
+        let snapshot = self.store.slice_as_of(self.store.tip().unwrap()).unwrap();
+        snapshot
+            .observations
+            .iter()
+            .filter(|row| row.observation_kind == SOURCE_DESCRIPTOR_KIND)
+            .map(|row| row.object_id.clone())
+            .collect()
     }
 }
 
@@ -1111,6 +1147,112 @@ fn malformed_requests_fail_closed_before_any_row_is_written() {
             .iter()
             .all(|row| row.observation_kind != SOURCE_DESCRIPTOR_KIND)
     );
+}
+
+#[test]
+fn every_request_in_a_batch_proves_its_buffer_against_the_artifact() {
+    let fixture = Fixture::open();
+    let text = "some text";
+    let evidence = fixture.retain("text", text);
+    // The second request reuses `evidence` but supplies `forged`: the span
+    // fits `forged` but exceeds the retained artifact, and `forged` has a
+    // different digest.
+    let forged = "some text that runs on";
+    let requests = [
+        request(message(MSG_A, "1"), &evidence, text),
+        SourceDescriptorRequest {
+            occurrence: Occurrence {
+                class: "raw_tool_spans",
+                identity: TOOL,
+                revision: "1",
+                representation: "tool_output",
+                span: Some(Span { start: 10, end: 14 }),
+            },
+            ..request(message(MSG_B, "1"), &evidence, forged)
+        },
+    ];
+    let tip = fixture.store.tip().unwrap();
+    let error = fixture.publish_batch("forged", &requests).unwrap_err();
+    assert_eq!(error, SourceDescriptorError::BufferMismatch);
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+}
+
+#[test]
+fn a_swallowed_refusal_still_fails_the_commit() {
+    let fixture = Fixture::open();
+    let evidence = fixture.retain("text", "some text");
+    let good = request(message(MSG_A, "1"), &evidence, "some text");
+    let bad = SourceDescriptorRequest {
+        occurrence: Occurrence {
+            class: "user_memories",
+            ..message(MSG_B, "1")
+        },
+        ..request(message(MSG_B, "1"), &evidence, "some text")
+    };
+    let tip = fixture.store.tip().unwrap();
+    // The closure discards the refusal and asks to commit anyway.
+    let receipt = fixture.store.commit(intent("swallowed"), |envelope| {
+        let _ = envelope.publish_source_descriptors(&[good.clone(), bad.clone()]);
+        Ok(String::new())
+    });
+    assert!(
+        receipt.is_err(),
+        "a refused batch must not commit: {receipt:?}"
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    // The commit rejects a refusal raised before any row is written.
+    let receipt = fixture.store.commit(intent("swallowed-first"), |envelope| {
+        let _ = envelope.publish_source_descriptor(&bad);
+        Ok(String::new())
+    });
+    assert!(receipt.is_err());
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+}
+
+#[test]
+fn an_advancing_revision_that_collides_with_a_retired_row_is_a_conflict() {
+    let fixture = Fixture::open();
+    let v1 = fixture.retain("v1", "first text");
+    let v2 = fixture.retain("v2", "second text");
+    let v3 = fixture.retain("v3", "third text");
+    fixture
+        .publish("rev-1", &request(message(MSG_A, "1"), &v1, "first text"))
+        .unwrap();
+    let (third, _, _) = fixture
+        .publish("rev-3", &request(message(MSG_A, "3"), &v3, "third text"))
+        .unwrap();
+    fixture
+        .store
+        .commit(intent("retire-3"), |envelope| {
+            envelope.retire_observation(&third.object_id)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // With no live head, revision 2 starts a fresh chain.
+    let (second, _, _) = fixture
+        .publish("rev-2", &request(message(MSG_A, "2"), &v2, "second text"))
+        .unwrap();
+    assert!(second.replaced_object_id.is_none());
+    // Revision 3 advances the live head but its object id is already taken
+    // by the retired row: that is a registry conflict, not a stale revision.
+    let error = fixture
+        .publish(
+            "rev-3-again",
+            &request(message(MSG_A, "3"), &v3, "third text"),
+        )
+        .unwrap_err();
+    assert_eq!(error, SourceDescriptorError::Kernel(KernelError::Conflict));
+    assert_eq!(fixture.live(&second.object_id), Some(true));
+    // A revision that does not advance is still named as such.
+    let error = fixture
+        .publish(
+            "rev-2-again",
+            &request(message(MSG_A, "2"), &v2, "second text"),
+        )
+        .unwrap_err();
+    assert_eq!(error, SourceDescriptorError::RevisionNotAdvanced);
 }
 
 #[test]

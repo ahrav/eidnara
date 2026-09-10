@@ -228,10 +228,10 @@ pub fn select(span: Option<Span>, buffer: &str) -> &[u8] {
     }
 }
 
-/// Whether `span` selects every byte of `buffer`, in which case it is the
-/// same occurrence as the whole-buffer selection and is normalized to `None`.
-pub fn covers_whole(span: Option<Span>, buffer: &str) -> bool {
-    span.is_some_and(|span| span.start == 0 && span.end == buffer.len() as u64)
+/// Returns `None` when `span` covers all of `buffer`, so whole-buffer
+/// selections share one identifier however the producer spelled them.
+pub fn normalize_span(span: Option<Span>, buffer: &str) -> Option<Span> {
+    span.filter(|span| !(span.start == 0 && span.end == buffer.len() as u64))
 }
 
 fn well_formed_value(value: &str) -> bool {

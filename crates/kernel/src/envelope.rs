@@ -287,12 +287,20 @@ impl Envelope<'_> {
         &mut self,
         mutation: impl FnOnce(&mut Self) -> Result<T, KernelError>,
     ) -> Result<T, KernelError> {
+        self.guarded_typed(|error| *error, mutation)
+    }
+
+    pub(super) fn guarded_typed<T, E: From<KernelError>>(
+        &mut self,
+        poison: impl FnOnce(&E) -> KernelError,
+        mutation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         if let Some(error) = self.poisoned {
-            return Err(error);
+            return Err(error.into());
         }
         let outcome = mutation(self);
         if let Err(error) = &outcome {
-            self.poisoned = Some(*error);
+            self.poisoned = Some(poison(error));
         }
         outcome
     }

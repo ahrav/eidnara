@@ -1014,7 +1014,8 @@ fn validate<'a>(contracts: &'a Value, record: &'a Value) -> Result<Validated<'a>
             if !payload.is_char_boundary(start) || !payload.is_char_boundary(end) {
                 return Err(Refusal::SpanNotUtf8Aligned);
             }
-            Some((start, end))
+            // A span selecting every byte is the whole-block selection.
+            (start != 0 || end != payload.len()).then_some((start, end))
         }
     };
     Ok(Validated {
@@ -1038,6 +1039,8 @@ struct Encoded {
     tuple: Vec<u8>,
     lineage: Vec<u8>,
     selected: Vec<u8>,
+    /// The span as encoded: `None` for the whole block, however the record spelled it.
+    span: Option<(usize, usize)>,
 }
 
 /// Version byte, role byte, class, identity pairs, then the role's tail and
@@ -1091,6 +1094,7 @@ fn encode(validated: &Validated<'_>) -> Encoded {
         tuple,
         lineage,
         selected,
+        span: validated.span,
     }
 }
 
@@ -1201,13 +1205,14 @@ fn fixture_records_share_a_lineage_only_across_revisions() {
             "{a}/{b} lineages differ"
         );
     }
-    // Every equal-lineage pair differs in revision or is the same record twice.
+    // Every equal-lineage pair differs only in revision or in how it spells
+    // the whole-block selection.
     for (a, b) in pairs(&expectations["equal_lineages"]) {
         let (ra, rb) = (record(&records, a), record(&records, b));
         assert_eq!(ra["class"], rb["class"]);
         assert_eq!(ra["identity"], rb["identity"]);
         assert_eq!(ra["representation"], rb["representation"]);
-        assert_eq!(ra.get("span"), rb.get("span"));
+        assert_eq!(encoded[a].span, encoded[b].span);
     }
 }
 

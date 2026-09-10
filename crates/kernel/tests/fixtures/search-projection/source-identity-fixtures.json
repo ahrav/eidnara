@@ -176,6 +176,29 @@
       "expected_lineage_id": "c81ae4e4d8c8553e7480e722cce0a6c5e2ee293b2e23bfde383bdd01e2d42ba0"
     },
     {
+      "id": "t_whole_span",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "error: line 1\r\nwarning: naïve 日本語 🎉\r\n",
+      "span": [
+        0,
+        47
+      ],
+      "expected_occurrence_id": "564d07e4d1501f640bbea4134b46a4e81c475155be47728aabcb346718ff1fba",
+      "expected_payload_id": "77dd5c73d21e122b86d5cb1d017fa357398e586ef8efc590a9d6fde9be69f52d",
+      "expected_lineage_id": "c81ae4e4d8c8553e7480e722cce0a6c5e2ee293b2e23bfde383bdd01e2d42ba0"
+    },
+    {
       "id": "t_span",
       "class": "raw_tool_spans",
       "identity": {
@@ -438,6 +461,10 @@
       [
         "m1",
         "m1dup"
+      ],
+      [
+        "t_whole",
+        "t_whole_span"
       ]
     ],
     "equal_payloads": [
@@ -508,6 +535,10 @@
       [
         "m1",
         "m1dup"
+      ],
+      [
+        "t_whole",
+        "t_whole_span"
       ]
     ],
     "distinct_lineages": [

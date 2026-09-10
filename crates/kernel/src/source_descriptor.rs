@@ -15,10 +15,10 @@ use super::envelope::{Envelope, Sensitivity};
 use super::redaction::{identity, redact};
 use super::slice::{ObservationPayload, ObservationSpec};
 use super::source_identity::{
-    EncodedOccurrence, Occurrence, OccurrenceRefusal, covers_whole, encode, payload_id, select,
+    EncodedOccurrence, Occurrence, OccurrenceRefusal, encode, normalize_span, payload_id, select,
     validate_span,
 };
-use super::{CachedSql, KernelError, map_sqlite};
+use super::{CachedSql, KernelError, cas::is_exact_retention, map_sqlite};
 
 /// The observation kind every descriptor row carries.
 pub const SOURCE_DESCRIPTOR_KIND: &str = "source_descriptor";
@@ -43,7 +43,7 @@ pub struct SourceDescriptorRequest<'a> {
     /// The digest of the whole buffer; must match the artifact the evidence cites.
     pub artifact_digest: &'a str,
     /// The whole buffer, so the span can be checked against the bytes it
-    /// selects from. One commit verifies each distinct buffer once.
+    /// selects from. Every request's buffer must hash to `artifact_digest`.
     pub buffer: &'a str,
     pub sensitivity: Sensitivity,
     pub observed_at: i64,
@@ -112,6 +112,17 @@ impl From<OccurrenceRefusal> for SourceDescriptorError {
     }
 }
 
+impl SourceDescriptorError {
+    /// The error the envelope records for this refusal: a kernel failure keeps
+    /// its own kind, and every descriptor refusal is invalid input to the commit.
+    fn poison(&self) -> KernelError {
+        match self {
+            Self::Kernel(error) => *error,
+            _ => KernelError::InvalidInput,
+        }
+    }
+}
+
 /// The registry `object_id` of a descriptor row: lineage plus revision, so
 /// each revision is its own object and succession has a predecessor to name.
 pub fn descriptor_object_id(lineage_id: &str, revision: &str) -> String {
@@ -161,9 +172,6 @@ fn same_lineage(stored: &SourceDescriptorDetail, fresh: &SourceDescriptorDetail)
         && stored.span == fresh.span
 }
 
-/// Evidence that was never rewritten stores an empty detection list.
-const NO_DETECTIONS: &[u8] = b"[]";
-
 impl Envelope<'_> {
     /// Publishes one descriptor; see [`Envelope::publish_source_descriptors`].
     pub fn publish_source_descriptor(
@@ -175,38 +183,52 @@ impl Envelope<'_> {
     }
 
     /// Publishes descriptors in request order inside this commit. For each:
-    /// the occurrence is encoded and checked, then the span against the
-    /// buffer (a span covering the whole buffer is normalized to the
-    /// whole-block selection), then the artifact: the evidence row must be
-    /// live, retained exactly, and carry `artifact_digest`, and the buffer
-    /// must hash to it, which is verified once per distinct
-    /// `(evidence, digest)` in the batch. The stored detail must survive the
+    /// the occurrence is encoded and checked; the evidence row must be live,
+    /// retained exactly, and carry `artifact_digest`, which is looked up once
+    /// per distinct `(evidence, digest)` in the batch; the request's own
+    /// buffer must hash to `artifact_digest`; then the span is checked
+    /// against that buffer (a span covering the whole buffer is normalized to
+    /// the whole-block selection). The stored detail must survive the
     /// redactor unchanged, so no identity value can be content. The live
     /// predecessor of the lineage is found under this writer transaction and
     /// invalidated together with the new row; a revision that does not
     /// advance the lineage, a lineage owned by another domain, and a lineage
     /// id whose stored fields differ from the fresh ones are refused without
-    /// touching either row. A refusal anywhere fails the whole commit.
+    /// touching either row. A refusal anywhere poisons the envelope, so the
+    /// commit fails even if the caller discards the error.
     pub fn publish_source_descriptors(
+        &mut self,
+        requests: &[SourceDescriptorRequest<'_>],
+    ) -> Result<Vec<SourceDescriptorOutcome>, SourceDescriptorError> {
+        self.guarded_typed(SourceDescriptorError::poison, |envelope| {
+            envelope.publish_batch(requests)
+        })
+    }
+
+    fn publish_batch(
         &mut self,
         requests: &[SourceDescriptorRequest<'_>],
     ) -> Result<Vec<SourceDescriptorOutcome>, SourceDescriptorError> {
         if requests.len() > MAX_DESCRIPTORS_PER_COMMIT {
             return Err(SourceDescriptorError::BatchTooLarge);
         }
-        let mut verified: HashSet<(&str, &str)> = HashSet::new();
+        let mut checked_evidence: HashSet<(&str, &str)> = HashSet::new();
         let mut outcomes = Vec::with_capacity(requests.len());
         for request in requests {
             let mut encoded = encode(&request.occurrence)?;
+            if checked_evidence.insert((request.evidence_id, request.artifact_digest)) {
+                self.check_evidence(request)?;
+            }
+            if payload_id(request.buffer.as_bytes()) != request.artifact_digest {
+                return Err(SourceDescriptorError::BufferMismatch);
+            }
             validate_span(encoded.span, request.buffer)?;
-            if covers_whole(encoded.span, request.buffer) {
+            let span = normalize_span(encoded.span, request.buffer);
+            if span != encoded.span {
                 encoded = encode(&Occurrence {
-                    span: None,
+                    span,
                     ..request.occurrence.clone()
                 })?;
-            }
-            if verified.insert((request.evidence_id, request.artifact_digest)) {
-                self.check_evidence(request)?;
             }
             outcomes.push(self.publish_verified(request, encoded)?);
         }
@@ -227,7 +249,12 @@ impl Envelope<'_> {
                 return Err(SourceDescriptorError::ContentRefused);
             }
         }
-        let payload_id = payload_id(select(encoded.span, request.buffer));
+        // The buffer already hashed to the artifact digest, so the whole
+        // buffer's payload id is that digest; only a proper sub-span is hashed.
+        let payload_id = match encoded.span {
+            None => request.artifact_digest.to_string(),
+            Some(span) => payload_id(select(Some(span), request.buffer)),
+        };
         let detail = detail_for(request, &encoded, &payload_id);
         let detail_json = serde_json::to_string(&detail).map_err(|_| KernelError::InvalidInput)?;
         if !redact(&detail_json)?.detections.is_empty() {
@@ -235,6 +262,11 @@ impl Envelope<'_> {
         }
         let object_id = descriptor_object_id(&encoded.lineage_id, request.occurrence.revision);
         let predecessor = self.live_lineage(request.domain_id, &detail)?;
+        if let Some((_, live_revision)) = &predecessor
+            && encoded.revision <= *live_revision
+        {
+            return Err(SourceDescriptorError::RevisionNotAdvanced);
+        }
         let spec = ObservationSpec {
             observation_id: object_id.clone(),
             object_id: object_id.clone(),
@@ -260,12 +292,8 @@ impl Envelope<'_> {
             None => {
                 self.insert_observation(spec)?;
             }
-            Some(replaced) => {
-                self.correct_observation(replaced, spec)
-                    .map_err(|error| match error {
-                        KernelError::Conflict => SourceDescriptorError::RevisionNotAdvanced,
-                        other => other.into(),
-                    })?;
+            Some((replaced, _)) => {
+                self.correct_observation(replaced, spec)?;
             }
         }
         Ok(SourceDescriptorOutcome {
@@ -273,7 +301,7 @@ impl Envelope<'_> {
             occurrence_id: encoded.occurrence_id,
             lineage_id: encoded.lineage_id,
             payload_id,
-            replaced_object_id: predecessor,
+            replaced_object_id: predecessor.map(|(object_id, _)| object_id),
         })
     }
 
@@ -295,28 +323,27 @@ impl Envelope<'_> {
         if digest != request.artifact_digest {
             return Err(SourceDescriptorError::ArtifactMismatch);
         }
-        if redactions != NO_DETECTIONS {
+        if !is_exact_retention(&redactions) {
             return Err(SourceDescriptorError::EvidenceNotExact);
-        }
-        if payload_id(request.buffer.as_bytes()) != request.artifact_digest {
-            return Err(SourceDescriptorError::BufferMismatch);
         }
         Ok(())
     }
 
-    /// The live descriptor of this lineage, if any. More than one live row
-    /// for one lineage is corruption; a row in another domain refuses the
-    /// publication; and stored fields that differ from the fresh ones are a
-    /// digest collision, refused rather than folded into the chain.
+    /// The live descriptor of this lineage and its revision, if any. More
+    /// than one live row for one lineage is corruption; a row in another
+    /// domain refuses the publication; and stored fields that differ from the
+    /// fresh ones are a digest collision, refused rather than folded into the
+    /// chain.
     fn live_lineage(
         &self,
         domain_id: &str,
         fresh: &SourceDescriptorDetail,
-    ) -> Result<Option<String>, SourceDescriptorError> {
+    ) -> Result<Option<(String, i64)>, SourceDescriptorError> {
         let mut statement = self
             .tx
             .prepare_cached(
-                "SELECT o.object_id,o.domain_id,b.observation_payload FROM object_registry o
+                "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
+                 FROM object_registry o
                  JOIN observations b ON b.object_id=o.object_id
                  WHERE o.object_kind='observation' AND o.source_kind=?1 AND o.source_id=?2
                    AND b.observation_kind=?3 AND o.invalidated_commit_seq IS NULL
@@ -324,19 +351,19 @@ impl Envelope<'_> {
                  LIMIT 2",
             )
             .map_err(map_sqlite)?;
-        let live: Vec<(String, String, Vec<u8>)> = statement
+        let live: Vec<(String, String, i64, Vec<u8>)> = statement
             .query_map(
                 [
                     fresh.class.as_str(),
                     fresh.lineage_id.as_str(),
                     SOURCE_DESCRIPTOR_KIND,
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(map_sqlite)?
             .collect::<rusqlite::Result<_>>()
             .map_err(map_sqlite)?;
-        let [(object_id, domain, payload)] = live.as_slice() else {
+        let [(object_id, domain, revision, payload)] = live.as_slice() else {
             return match live.len() {
                 0 => Ok(None),
                 _ => Err(KernelError::CorruptCanonicalRow.into()),
@@ -355,6 +382,6 @@ impl Envelope<'_> {
         if domain != domain_id {
             return Err(SourceDescriptorError::DomainMismatch);
         }
-        Ok(Some(object_id.clone()))
+        Ok(Some((object_id.clone(), *revision)))
     }
 }

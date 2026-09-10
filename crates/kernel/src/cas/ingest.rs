@@ -1293,6 +1293,14 @@ fn object_is_present(objects: &File, digest: &str) -> bool {
         .is_ok_and(|stat| rfs::FileType::from_raw_mode(stat.st_mode).is_file())
 }
 
+/// Whether `evidence_meta.redaction_metadata`, as written by
+/// [`detection_metadata`], records no detection: the retained bytes are the
+/// payload the producer handed over, not a rewrite of it.
+pub(crate) fn is_exact_retention(redaction_metadata: &[u8]) -> bool {
+    serde_json::from_slice::<Vec<serde::de::IgnoredAny>>(redaction_metadata)
+        .is_ok_and(|detections| detections.is_empty())
+}
+
 fn detection_metadata(detections: &[Detection]) -> Result<Vec<u8>, ArtifactError> {
     #[derive(Serialize)]
     struct Metadata<'a> {
@@ -1325,4 +1333,25 @@ fn injected_storage_error() -> StorageError {
 #[cfg(not(feature = "test-support"))]
 fn injected_storage_error() -> StorageError {
     unreachable!("fault injection requires the test-support feature")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_retention_is_the_metadata_written_for_no_detections() {
+        assert!(is_exact_retention(&detection_metadata(&[]).unwrap()));
+        let detection = Detection {
+            detector_id: "test",
+            secret_type: "token".to_string(),
+            offset: 0,
+            length: 4,
+        };
+        assert!(!is_exact_retention(
+            &detection_metadata(&[detection]).unwrap()
+        ));
+        assert!(!is_exact_retention(b""));
+        assert!(!is_exact_retention(b"{}"));
+    }
 }
