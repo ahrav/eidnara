@@ -94,7 +94,7 @@ pub use slice::{
 };
 pub use source_descriptor::{
     MAX_DESCRIPTORS_PER_COMMIT, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND,
-    SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome,
+    SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
     SourceDescriptorRequest, descriptor_object_id,
 };
 

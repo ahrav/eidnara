@@ -234,7 +234,7 @@ pub fn normalize_span(span: Option<Span>, buffer: &str) -> Option<Span> {
     span.filter(|span| !(span.start == 0 && span.end == buffer.len() as u64))
 }
 
-fn well_formed_value(value: &str) -> bool {
+pub(crate) fn well_formed_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_IDENTITY_VALUE_BYTES
         && !value.chars().any(char::is_control)

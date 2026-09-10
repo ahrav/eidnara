@@ -477,6 +477,7 @@ fn request<'a>(
 ) -> SourceDescriptorRequest<'a> {
     SourceDescriptorRequest {
         occurrence,
+        source_policy: kernel::SourceDescriptorPolicy::Native,
         domain_id: DOMAIN,
         scope_id: Some(SCOPE),
         evidence_id: &evidence.0,
@@ -1596,21 +1597,34 @@ fn generic_observation_writes_cannot_mint_or_replace_descriptors() {
         })
         .unwrap();
     let tip = fixture.store.tip().unwrap();
-    for (i, (predecessor, kind)) in [
-        (None, SOURCE_DESCRIPTOR_KIND),
-        (Some("generic"), SOURCE_DESCRIPTOR_KIND),
-        (Some(descriptor.object_id.as_str()), "probe"),
+    for (i, (predecessor, kind, reserved_observation_id, reserved_object_id)) in [
+        (None, SOURCE_DESCRIPTOR_KIND, false, false),
+        (Some("generic"), SOURCE_DESCRIPTOR_KIND, false, false),
+        (Some(descriptor.object_id.as_str()), "probe", false, false),
+        (None, "probe", true, false),
+        (Some("generic"), "probe", true, false),
+        (None, "probe", false, true),
+        (Some("generic"), "probe", false, true),
     ]
     .into_iter()
     .enumerate()
     {
         let forged = kernel::ObservationSpec {
-            observation_id: format!("forged-{i}"),
-            object_id: format!("forged-{i}"),
+            observation_id: if reserved_observation_id {
+                format!("srcocc:{i}")
+            } else {
+                format!("forged-{i}")
+            },
+            object_id: if reserved_object_id {
+                format!("srcdesc:{i}")
+            } else {
+                format!("forged-{i}")
+            },
             observation_kind: kind.to_string(),
             source_revision: 2,
             ..generic.clone()
         };
+        let forged_id = forged.object_id.clone();
         let receipt = fixture
             .store
             .commit(intent(&format!("forge-{i}")), |envelope| {
@@ -1625,7 +1639,7 @@ fn generic_observation_writes_cannot_mint_or_replace_descriptors() {
         assert_eq!(fixture.store.tip().unwrap(), tip);
         assert_eq!(fixture.live(&descriptor.object_id), Some(true));
         assert_eq!(fixture.live("generic"), Some(true));
-        assert_eq!(fixture.live(&format!("forged-{i}")), None);
+        assert_eq!(fixture.live(&forged_id), None);
     }
 }
 
@@ -1687,6 +1701,71 @@ fn lineage_collision_checks_include_other_source_classes() {
             None
         );
     }
+}
+
+#[test]
+fn git_descriptors_require_source_policy_provenance() {
+    let fixture = Fixture::open();
+    let text = "commit message";
+    let evidence = fixture.retain("git", text);
+    let occurrence = Occurrence {
+        class: "git_commits",
+        identity: &[
+            ("repository_id", "repo-1"),
+            ("object_format", "sha1"),
+            ("oid", "0123456789abcdef0123456789abcdef01234567"),
+        ],
+        revision: "1",
+        representation: "commit_message",
+        span: None,
+    };
+    let encoded = encode(&occurrence, text).unwrap();
+    let base = request(occurrence, &evidence, text);
+    let tip = fixture.store.tip().unwrap();
+    let result = fixture.publish("missing-policy", &base);
+    assert_eq!(
+        result.err().map(|error| error.to_string()),
+        Some("descriptor source policy is missing or invalid".to_string())
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    for version in [
+        String::new(),
+        "control\ncharacter".to_string(),
+        "x".repeat(kernel::source_identity::MAX_IDENTITY_VALUE_BYTES + 1),
+        "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678".to_string(),
+    ] {
+        let invalid = SourceDescriptorRequest {
+            source_policy: kernel::SourceDescriptorPolicy::Git { version },
+            ..base.clone()
+        };
+        assert_eq!(
+            fixture.publish("invalid-policy", &invalid).err(),
+            Some(SourceDescriptorError::SourcePolicyRefused)
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+    }
+    let policy = kernel::SourceDescriptorPolicy::Git {
+        version: "test-git-policy-v1".to_string(),
+    };
+    let valid = SourceDescriptorRequest {
+        source_policy: policy.clone(),
+        ..base
+    };
+    let (outcome, _, _) = fixture.publish("valid-policy", &valid).unwrap();
+    assert_eq!(outcome.occurrence_id, encoded.occurrence_id);
+    assert_eq!(outcome.lineage_id, encoded.lineage_id);
+    let detail = fixture.detail(&outcome.object_id).unwrap();
+    assert_eq!(detail.source_policy, policy);
+    assert_eq!(detail.occurrence_tuple, encoded.tuple);
+    let wrong_class = SourceDescriptorRequest {
+        source_policy: policy,
+        ..request(message(MSG_A, "1"), &evidence, text)
+    };
+    assert_eq!(
+        fixture.publish("non-git-policy", &wrong_class).err(),
+        Some(SourceDescriptorError::SourcePolicyRefused)
+    );
 }
 
 #[test]

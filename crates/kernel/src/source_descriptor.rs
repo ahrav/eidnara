@@ -15,7 +15,8 @@ use super::envelope::{Envelope, Sensitivity};
 use super::redaction::{identity, redact};
 use super::slice::{ObservationPayload, ObservationSpec};
 use super::source_identity::{
-    EncodedOccurrence, Occurrence, OccurrenceRefusal, encode, payload_id, select,
+    EncodedOccurrence, Occurrence, OccurrenceClass, OccurrenceRefusal, encode, payload_id, select,
+    well_formed_value,
 };
 use super::{CachedSql, KernelError, cas::is_exact_retention, map_sqlite};
 
@@ -27,10 +28,22 @@ pub const SOURCE_DESCRIPTOR_DETAIL_VERSION: u32 = 1;
 /// writes stay bounded under the single writer.
 pub const MAX_DESCRIPTORS_PER_COMMIT: usize = 1024;
 
+const OCCURRENCE_ID_PREFIX: &str = "srcocc:";
+const DESCRIPTOR_OBJECT_ID_PREFIX: &str = "srcdesc:";
+
+/// Git policy versions identify the permitted refs and traversal boundary without changing occurrence identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SourceDescriptorPolicy {
+    Native,
+    Git { version: String },
+}
+
 /// What a producer asks the kernel to publish.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDescriptorRequest<'a> {
     pub occurrence: Occurrence<'a>,
+    pub source_policy: SourceDescriptorPolicy,
     /// Domain the descriptor row belongs to. A lineage lives in one domain;
     /// a later revision from another domain is refused.
     pub domain_id: &'a str,
@@ -52,6 +65,7 @@ pub struct SourceDescriptorRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceDescriptorDetail {
     pub descriptor_version: u32,
+    pub source_policy: SourceDescriptorPolicy,
     pub class: String,
     /// Identity fields in tuple order.
     pub identity: Vec<(String, String)>,
@@ -103,6 +117,8 @@ pub enum SourceDescriptorError {
     OccurrenceCollision,
     #[error("descriptor lineage is published twice in one commit")]
     DuplicateLineage,
+    #[error("descriptor source policy is missing or invalid")]
+    SourcePolicyRefused,
     #[error("descriptor batch exceeds the per-commit bound")]
     BatchTooLarge,
     #[error(transparent)]
@@ -129,7 +145,13 @@ impl SourceDescriptorError {
 /// The registry `object_id` of a descriptor row: lineage plus revision, so
 /// each revision is its own object and succession has a predecessor to name.
 pub fn descriptor_object_id(lineage_id: &str, revision: &str) -> String {
-    format!("srcdesc:{lineage_id}:{revision}")
+    format!("{DESCRIPTOR_OBJECT_ID_PREFIX}{lineage_id}:{revision}")
+}
+
+pub(crate) fn uses_descriptor_namespace(spec: &ObservationSpec) -> bool {
+    spec.observation_kind == SOURCE_DESCRIPTOR_KIND
+        || spec.observation_id.starts_with(OCCURRENCE_ID_PREFIX)
+        || spec.object_id.starts_with(DESCRIPTOR_OBJECT_ID_PREFIX)
 }
 
 fn detail_for(
@@ -139,6 +161,7 @@ fn detail_for(
 ) -> SourceDescriptorDetail {
     SourceDescriptorDetail {
         descriptor_version: SOURCE_DESCRIPTOR_DETAIL_VERSION,
+        source_policy: request.source_policy.clone(),
         class: encoded.class.code().to_string(),
         identity: encoded
             .class
@@ -251,6 +274,12 @@ impl Envelope<'_> {
         request: &SourceDescriptorRequest<'_>,
         encoded: EncodedOccurrence,
     ) -> Result<SourceDescriptorOutcome, SourceDescriptorError> {
+        match (&request.source_policy, encoded.class) {
+            (SourceDescriptorPolicy::Git { version }, OccurrenceClass::GitCommits)
+                if well_formed_value(version) && identity(version).is_ok() => {}
+            (SourceDescriptorPolicy::Native, class) if class != OccurrenceClass::GitCommits => {}
+            _ => return Err(SourceDescriptorError::SourcePolicyRefused),
+        }
         // Each identity value is checked on its own with the non-aliasing
         // identity rule, then the whole detail once more: a value the
         // redactor would rewrite is content, and a rewritten detail would no
@@ -271,7 +300,7 @@ impl Envelope<'_> {
         if !redact(&detail_json)?.detections.is_empty() {
             return Err(SourceDescriptorError::ContentRefused);
         }
-        let observation_id = format!("srcocc:{}", encoded.occurrence_id);
+        let observation_id = format!("{OCCURRENCE_ID_PREFIX}{}", encoded.occurrence_id);
         let existing: Option<Vec<u8>> = self
             .tx
             .query_row_cached(

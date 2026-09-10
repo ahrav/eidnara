@@ -136,7 +136,7 @@ impl Envelope<'_> {
         spec: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
         self.guarded(|envelope| {
-            if spec.observation_kind == crate::SOURCE_DESCRIPTOR_KIND {
+            if crate::source_descriptor::uses_descriptor_namespace(&spec) {
                 return Err(KernelError::InvalidInput);
             }
             envelope.insert_observation_inner(spec)
@@ -367,7 +367,7 @@ impl Envelope<'_> {
         replacement: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
         self.guarded(|envelope| {
-            if replacement.observation_kind == crate::SOURCE_DESCRIPTOR_KIND {
+            if crate::source_descriptor::uses_descriptor_namespace(&replacement) {
                 return Err(KernelError::InvalidInput);
             }
             let descriptor: bool = envelope.tx.query_row_cached(
