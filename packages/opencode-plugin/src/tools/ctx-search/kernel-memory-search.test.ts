@@ -71,7 +71,6 @@ describe("memoryResultFromRow", () => {
         expect(result.saferAlternative).toBe("use SQLite");
         expect(result.score).toBe(0.9);
         expect(result.objectId).toBe(OBJECT_A);
-        expect(result.commitSeq).toBe(7);
         expect(result.matchType).toBe("exact");
         expect(result.policyLabel).toBe("labeled");
         expect(result.contentDigest).toMatch(/^[0-9a-f]{64}$/);
@@ -267,8 +266,8 @@ describe("searchKernelMemoryRows baseline exclusion", () => {
     });
 });
 
-describe("parseObjectIdQuery id@commit round-trip", () => {
-    test("a pasted id@commit token resolves through the exact object-id path", () => {
+describe("parseObjectIdQuery id@commit tolerance", () => {
+    test("an id@commit token rendered by an earlier release resolves through the exact object-id path", () => {
         const row = readRow({
             objectId: OBJECT_A,
             decisionKind: "PROJECT_RULES",
@@ -276,8 +275,8 @@ describe("parseObjectIdQuery id@commit round-trip", () => {
             seq: 7,
         });
         const result = memoryResultFromRow(row, 1, "exact");
-        const locator = `${result.objectId}@${result.commitSeq}`;
-        expect(locator).toBe(`${OBJECT_A}@7`);
+        expect(result).not.toHaveProperty("commitSeq");
+        const locator = `${result.objectId}@7`;
         const hits = searchKernelMemoryRows({ rows: [row], query: locator, limit: 5 });
         expect(hits?.map((hit) => [hit.objectId, hit.matchType])).toEqual([[OBJECT_A, "exact"]]);
     });

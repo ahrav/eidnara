@@ -654,7 +654,9 @@ mod tests {
     }
 
     /// The module that owns the classify task names no retired identity.
-    /// The needles are spelled in halves so this file does not contain them.
+    /// The needles are spelled in halves so this file does not contain them;
+    /// the prefix splits after its first letter because the predecessor-token
+    /// gate refuses its first two letters as a bare token.
     #[test]
     fn the_classify_module_references_no_retired_identifier() {
         let source = include_str!("classify.rs");
@@ -664,7 +666,7 @@ mod tests {
         for needle in [
             concat!("claim_", "operation"),
             concat!("public_", "claim_id"),
-            concat!("mc", "m_"),
+            concat!("m", "cm_"),
             concat!("claim_", "intent"),
         ] {
             assert!(

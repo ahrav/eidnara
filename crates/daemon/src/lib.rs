@@ -29426,11 +29426,11 @@ mod tests {
                 "a host-rendered prompt",
             ),
             (
-                json!({"items": [{concat!("public_", "claim_id"): concat!("mc", "m_0101010101010101010101010101010101")}], "object_ids": [id], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                json!({"items": [{concat!("public_", "claim_id"): concat!("m", "cm_0101010101010101010101010101010101")}], "object_ids": [id], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
                 "retired items",
             ),
             (
-                json!({"object_ids": [concat!("mc", "m_01010101010101010101010101010101")], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
+                json!({"object_ids": [concat!("m", "cm_01010101010101010101010101010101")], "model_chain": ["test/model"], "timeout_ms": TEST_CLASSIFY_TIMEOUT_MS}),
                 "a retired-form id where an object id belongs",
             ),
             (

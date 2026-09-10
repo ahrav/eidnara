@@ -199,6 +199,10 @@ jobs:
         # Identifier spellings (`_`, `-`, `.`, or nothing between the words)
         # need a left boundary only, so a longer identifier that starts with a
         # name is found and a prefix constructor such as a bare `m[c]m_` is too.
+        # `Committe[d]Clai[m]Mirro[r]Row` lacks a left boundary before its name,
+        # so `committe[d]${sep}clai[m]${sep}mirror` is its own entry; the full
+        # compound is listed because `committe[d]${sep}clai[m]` alone matches
+        # `packages/e2e-tests/src/incident-pool/evidence.ts`.
         # Prose spellings (whitespace between the words) need a right boundary
         # as well, so ordinary text that merely starts with one of the words,
         # such as "compatibility readiness", passes.
@@ -211,6 +215,7 @@ jobs:
           IDENT+="|public${sep}clai[m]${sep}id|snapsho[t]${sep}vector"
           IDENT+="|revisio[n]${sep}locator|compat(ibility)?${sep}rea[d]"
           IDENT+="|dua[l]${sep}lane|mirro[r]${sep}row|m[c]m_"
+          IDENT+="|committe[d]${sep}clai[m]${sep}mirror"
           PROSE="clai[m]${ws}(mirror|intent|operation|lane|snapshot)s?${end}"
           PROSE+="|public${ws}clai[m]${ws}ids?${end}|snapsho[t]${ws}vectors?${end}"
           PROSE+="|revisio[n]${ws}locators?${end}|compat(ibility)?${ws}rea[d]s?${end}"

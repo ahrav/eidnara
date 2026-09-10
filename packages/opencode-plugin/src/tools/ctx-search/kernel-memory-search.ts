@@ -31,8 +31,6 @@ export interface MemorySearchResult {
     score: number;
     /** Kernel object id of the memory (`mem_<32hex>`). */
     objectId: string;
-    /** Commit sequence the served row was created at. */
-    commitSeq: number;
     category: string;
     /** `exact` for an object-id lookup, `lexical` for term-overlap ranking. */
     matchType: "exact" | "lexical";
@@ -47,8 +45,6 @@ export interface AntiMemorySearchResult {
     score: number;
     /** Kernel object id of the anti-memory (`mem_<32hex>`). */
     objectId: string;
-    /** Commit sequence the served row was created at. */
-    commitSeq: number;
     contentDigest: string;
     normalizedHash: string;
     trigger: string;
@@ -145,7 +141,7 @@ function objectIdFromToken(token: string): string | null {
     return OBJECT_ID_AT_COMMIT.exec(token)?.[1] ?? null;
 }
 
-/** Object ids when the whole query is a list of ids or `id@commit` tokens; `null` for ordinary text. A pasted `id@commit` token resolves its object's current row: the suffix is the object's creation commit as a result rendered it and is ignored for the lookup, since the store serves one live row per id. commentlint: allow(JUDGE) */
+/** Object ids when the whole query is a list of ids or `id@commit` tokens; `null` for ordinary text. Results render bare ids; the `@commit` suffix is accepted because earlier releases rendered it, and it is ignored for the lookup, since the store serves one live row per id. commentlint: allow(JUDGE) */
 export function parseObjectIdQuery(query: string): string[] | null {
     const tokens = query
         .trim()
@@ -194,7 +190,6 @@ export function memoryResultFromRow(
             source: "anti_memory",
             score,
             objectId: row.object.object_id,
-            commitSeq: row.object.created_commit_seq,
             contentDigest: digest,
             normalizedHash: digest,
             trigger: payload?.trigger ?? "",
@@ -217,7 +212,6 @@ export function memoryResultFromRow(
             : (decision?.payload.summary ?? ""),
         score,
         objectId: row.object.object_id,
-        commitSeq: row.object.created_commit_seq,
         category: decision?.decision_kind ?? row.object.object_kind,
         matchType,
         ...(row.labeled ? { policyLabel: "labeled" } : {}),

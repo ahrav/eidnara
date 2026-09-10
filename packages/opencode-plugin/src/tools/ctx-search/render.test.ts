@@ -20,7 +20,6 @@ function memoryResult(id: number, content: string): MemorySearchResult {
         content,
         score: 0.9,
         objectId: `mem_${String(id).padStart(32, "0")}`,
-        commitSeq: id,
         category: "decision",
         matchType: "exact",
     };
@@ -31,7 +30,6 @@ function antiMemoryResult(rationale?: string): AntiMemorySearchResult {
         source: "anti_memory",
         score: 0.5,
         objectId: `mem_${"c".repeat(32)}`,
-        commitSeq: 1,
         contentDigest: "d".repeat(64),
         normalizedHash: "d".repeat(64),
         trigger: "session caching",
