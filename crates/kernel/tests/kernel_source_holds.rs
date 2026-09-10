@@ -950,6 +950,56 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
 }
 
 #[test]
+fn repeated_purges_preserve_the_first_hold_degradation() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    let descriptors = fixture.held_all(&hold, 64);
+    let first = &descriptors[0];
+    let second = descriptors
+        .iter()
+        .find(|descriptor| descriptor.artifact_digest != first.artifact_digest)
+        .unwrap();
+    let degradation = |fixture: &Fixture| -> (i64, String) {
+        fixture
+            .inspect()
+            .query_row(
+                "SELECT purge_degraded_at,purge_barrier_id FROM capture_pins
+                 WHERE capture_pin_id=?1",
+                [&hold.hold_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+
+    let first_commit = fixture.delete_evidence(&first.evidence_id, ArtifactDeletionKind::Purge, 42);
+    let first_degradation = degradation(&fixture);
+    assert_eq!(first_degradation.0, 42);
+    let second_commit =
+        fixture.delete_evidence(&second.evidence_id, ArtifactDeletionKind::Purge, 43);
+    assert!(second_commit > first_commit);
+    assert_eq!(degradation(&fixture), first_degradation);
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_purge_tombstones"),
+        2
+    );
+    assert_eq!(fixture.pin_refs(&hold.hold_id).len(), hold.references);
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Err(SourceHoldError::Invalid(
+            SourceHoldInvalidity::PurgeDegraded
+        ))
+    );
+
+    let fresh = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    assert_eq!(fresh.references + 2, hold.references);
+    assert_hold_matches_ledger(&fixture, &fresh, 4);
+}
+
+#[test]
 fn purge_expiry_missing_bytes_and_release_invalidate_the_hold_without_moving_the_consumer() {
     let mut fixture = Fixture::open();
     fixture.seed_five_classes();
